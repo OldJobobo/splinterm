@@ -1,4 +1,9 @@
-use std::{env, io::Write, thread, time::Duration};
+use std::{
+    env,
+    io::{self, Write},
+    thread,
+    time::Duration,
+};
 
 use splinterm_terminal::{CellContent, Color, Grid, ScrollDirection, ScrollRegion};
 
@@ -45,12 +50,17 @@ impl Demo {
 
 fn main() {
     let mut demo = Demo::new();
-    circular_history(&mut demo);
-    partial_scroll(&mut demo);
-    erase_and_dirty(&mut demo);
-    logical_reflow(&mut demo);
-    wide_cells(&mut demo);
-    finish();
+    loop {
+        demo.frame = 0;
+        circular_history(&mut demo);
+        partial_scroll(&mut demo);
+        erase_and_dirty(&mut demo);
+        logical_reflow(&mut demo);
+        wide_cells(&mut demo);
+        if !finish_and_prompt() {
+            break;
+        }
+    }
 }
 
 fn circular_history(demo: &mut Demo) {
@@ -168,7 +178,7 @@ fn wide_cells(demo: &mut Demo) {
     );
 }
 
-fn finish() {
+fn finish_and_prompt() -> bool {
     print!("\x1b[2J\x1b[H");
     println!("\n\x1b[1;38;2;126;200;227m  PHASE 2 COMPLETE\x1b[0m\n");
     println!("  Circular storage     \x1b[38;2;140;220;160m✓\x1b[0m");
@@ -176,7 +186,12 @@ fn finish() {
     println!("  Erase + dirty state  \x1b[38;2;140;220;160m✓\x1b[0m");
     println!("  Resize + reflow      \x1b[38;2;140;220;160m✓\x1b[0m");
     println!("  Wide-cell safety     \x1b[38;2;140;220;160m✓\x1b[0m\n");
-    println!("\x1b[2m  This window is held open by Foot. Close it when finished.\x1b[0m");
+    println!("\n\x1b[1m  [R] + Enter  replay     [Q] + Enter  close\x1b[0m");
+    print!("  choice › ");
+    io::stdout().flush().expect("flush replay prompt");
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_ascii_lowercase().as_str(), "r" | "replay")
 }
 
 fn write_row(grid: &mut Grid, row: usize, text: &str, linebreak: bool) {

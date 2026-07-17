@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
         help="Foot executable used as the presentation window",
     )
     parser.add_argument(
+        "--font-size",
+        type=float,
+        default=22.0,
+        help="font size used only by this demo window (default: 22)",
+    )
+    parser.add_argument(
         "--allow-occupied",
         action="store_true",
         help="launch even when the target workspace contains windows",
@@ -61,6 +67,9 @@ def main() -> int:
     args = parse_args()
     if args.workspace <= 0:
         print("Workspace must be a positive integer.", file=sys.stderr)
+        return 2
+    if not 1 <= args.font_size <= 72:
+        print("Font size must be between 1 and 72 points.", file=sys.stderr)
         return 2
     if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         print("A running Hyprland session is required.", file=sys.stderr)
@@ -112,10 +121,10 @@ def main() -> int:
         str(args.foot_binary),
         "--config=/dev/null",
         "--override=pad=12x12",
+        f"--font=monospace:size={args.font_size:g}",
         "--app-id=splinterm-phase3-demo",
         "--title=Splinterm Phase 3 VT Demo",
         "--window-size-chars=96x32",
-        "--hold",
         str(demo),
     ]
     expression = (
@@ -129,7 +138,7 @@ def main() -> int:
 
     print(
         f"Phase 3 demo launched on workspace {args.workspace}. "
-        "It will remain open on the final frame."
+        "Use the final prompt to replay or close it."
     )
     return 0
 

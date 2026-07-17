@@ -1,4 +1,9 @@
-use std::{env, io::Write, thread, time::Duration};
+use std::{
+    env,
+    io::{self, Write},
+    thread,
+    time::Duration,
+};
 
 use splinterm_terminal::{
     ActiveScreen, CellContent, ColorSource, Terminal, TerminalConfig, TerminalEvent,
@@ -45,13 +50,18 @@ impl Demo {
 
 fn main() {
     let mut demo = Demo::new();
-    printable_and_chunking(&mut demo);
-    cursor_erase_and_sgr(&mut demo);
-    unicode_composition(&mut demo);
-    alternate_screen(&mut demo);
-    osc_and_replies(&mut demo);
-    bounded_recovery(&mut demo);
-    finish();
+    loop {
+        demo.frame = 0;
+        printable_and_chunking(&mut demo);
+        cursor_erase_and_sgr(&mut demo);
+        unicode_composition(&mut demo);
+        alternate_screen(&mut demo);
+        osc_and_replies(&mut demo);
+        bounded_recovery(&mut demo);
+        if !finish_and_prompt() {
+            break;
+        }
+    }
 }
 
 fn printable_and_chunking(demo: &mut Demo) {
@@ -154,7 +164,7 @@ fn bounded_recovery(demo: &mut Demo) {
     );
 }
 
-fn finish() {
+fn finish_and_prompt() -> bool {
     print!("\x1b[2J\x1b[H");
     println!("\n\x1b[1;38;2;126;200;227m  PHASE 3 COMPLETE\x1b[0m\n");
     for item in [
@@ -167,9 +177,12 @@ fn finish() {
     ] {
         println!("  {item:<34} \x1b[38;2;140;220;160m✓\x1b[0m");
     }
-    println!(
-        "\n\x1b[2m  This Foot presentation window is held open. Close it when finished.\x1b[0m"
-    );
+    println!("\n\x1b[1m  [R] + Enter  replay     [Q] + Enter  close\x1b[0m");
+    print!("  choice › ");
+    io::stdout().flush().expect("flush replay prompt");
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_ascii_lowercase().as_str(), "r" | "replay")
 }
 
 fn render_terminal(terminal: &Terminal) {
