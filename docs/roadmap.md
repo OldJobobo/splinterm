@@ -1,0 +1,62 @@
+# Roadmap
+
+> This is an early roadmap, not a frozen implementation plan. The research in
+> [`pre-planning-research.md`](pre-planning-research.md) makes Omarchy part of
+> the first usable vertical slice and moves protocol security foundations ahead
+> of terminal streaming.
+
+## Phase 0 — skeleton and research (current)
+
+- Rust workspace and CI
+- Lair/Dojo/window/splint domain model
+- Versioned Unix-socket protocol
+- Runnable daemon and control client
+
+## Phase 1 — secure persistent splint
+
+- PTY spawn, resize, read, write, and child reaping in `splinterd`
+- Minimal VT parser and screen grid
+- Bounded, authenticated local protocol with request IDs and negotiation
+- Per-operation authorization before sensitive terminal access
+- Test-only attach snapshot, ordered deltas, backpressure, and resynchronization
+- Durable metadata with honest relaunch/recovery semantics
+
+## Phase 2 — Omarchy-native terminal MVP
+
+- Native Wayland window and keyboard input under Hyprland
+- Trusted consent UI plus grant, revoke, and control indication
+- Font shaping/fallback, glyph cache, and damage-tracked rendering
+- Clipboard, primary selection, URLs, scaling, and basic IME
+- `xdg-terminal-exec`, stable app ID, desktop entry, and Arch package
+- Omarchy palette inclusion and live theme application
+- Foot-compatible configuration migration strategy
+
+## Phase 3 — multiplexing
+
+- Splint-tree editing and focus navigation
+- Multiple windows per dojo
+- Detach, reattach, rename, kill, and restore workflows
+- Scrollback ownership and search
+- Multiple simultaneous clients with explicit control semantics
+
+## Phase 4 — headless access and supported automation
+
+- Headless `splinterd` service for homelab/server deployments
+- SSH-mediated stdio relay or Unix-socket forwarding
+- Stable JSON/NDJSON CLI and published schemas
+- Supported third-party capability policy and audit inspection
+- Editor/client integrations
+- Optional read-mostly `splinterm-mcp` adapter
+- No network listener in `splinterd` by default
+
+## Phase 5 — Nix and tertiary distribution
+
+- Nix package, flake checks, and Home Manager module
+- Reproducible release artifacts for other distributions
+- Sandboxed formats only after daemon/socket integration is designed
+
+## Deferred decisions
+
+Benchmark before selecting a final renderer, wire encoding, persistence format,
+or VT parser dependency. The scaffold deliberately keeps those choices behind
+crate and protocol boundaries.

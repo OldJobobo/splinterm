@@ -1,0 +1,18 @@
+[package]
+name = "splinterm-protocol"
+description = "Versioned wire protocol shared by splinterm and splinterd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+splinterm-core = { path = "../splinterm-core" }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
