@@ -9,10 +9,9 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
-splinterm-core = { path = "../splinterm-core" }
-
-[dev-dependencies]
 serde_json.workspace = true
+splinterm-core = { path = "../splinterm-core" }
+thiserror.workspace = true
 
 [lints]
 workspace = true

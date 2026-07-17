@@ -34,6 +34,11 @@ impl ProcessIncarnation {
     fn new() -> Self {
         Self(NEXT_INCARNATION.fetch_add(1, Ordering::Relaxed))
     }
+
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,6 +107,13 @@ pub struct Subscription {
     resnapshot: watch::Receiver<bool>,
 }
 
+#[derive(Debug)]
+pub enum SubscriptionReceive {
+    Event(LiveEvent),
+    ResnapshotRequired,
+    Closed,
+}
+
 impl Subscription {
     #[must_use]
     pub fn resnapshot_required(&self) -> bool {
@@ -110,6 +122,22 @@ impl Subscription {
 
     pub async fn changed(&mut self) -> bool {
         self.resnapshot.changed().await.is_ok() && *self.resnapshot.borrow()
+    }
+
+    pub async fn recv(&mut self) -> SubscriptionReceive {
+        tokio::select! {
+            changed = self.resnapshot.changed() => {
+                if changed.is_ok() && *self.resnapshot.borrow() {
+                    SubscriptionReceive::ResnapshotRequired
+                } else {
+                    SubscriptionReceive::Closed
+                }
+            }
+            event = self.events.recv() => event.map_or(
+                SubscriptionReceive::Closed,
+                SubscriptionReceive::Event,
+            ),
+        }
     }
 }
 
@@ -123,6 +151,7 @@ pub struct LiveSplintConfig {
     pub input_byte_limit: usize,
     pub reply_byte_limit: usize,
     pub subscriber_capacity: usize,
+    pub max_subscribers: usize,
     pub max_scrollback_snapshot_rows: usize,
     pub exit_drain_timeout: Duration,
     pub hangup_grace: Duration,
@@ -142,6 +171,7 @@ impl Default for LiveSplintConfig {
             input_byte_limit: 1024 * 1024,
             reply_byte_limit: 64 * 1024,
             subscriber_capacity: 64,
+            max_subscribers: 8,
             max_scrollback_snapshot_rows: 1_000,
             exit_drain_timeout: Duration::from_millis(250),
             hangup_grace: Duration::from_secs(30),
@@ -183,6 +213,7 @@ enum Command {
     Resize(PtySize, Reply<()>),
     Snapshot(usize, Reply<LiveSnapshot>),
     Subscribe(usize, Reply<Subscription>),
+    Attach(usize, usize, Reply<(LiveSnapshot, Subscription)>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -224,6 +255,31 @@ impl LiveSplintHandle {
     ) -> Result<LiveSnapshot, LiveError> {
         self.request(|reply| Command::Snapshot(max_scrollback_rows, reply))
             .await
+    }
+
+    pub async fn attach(&self) -> Result<(LiveSnapshot, Subscription), LiveError> {
+        self.request(|reply| {
+            Command::Attach(
+                self.default_snapshot_rows,
+                self.default_subscriber_capacity,
+                reply,
+            )
+        })
+        .await
+    }
+
+    pub async fn attach_with_scrollback(
+        &self,
+        max_scrollback_rows: usize,
+    ) -> Result<(LiveSnapshot, Subscription), LiveError> {
+        self.request(|reply| {
+            Command::Attach(
+                max_scrollback_rows.min(self.default_snapshot_rows),
+                self.default_subscriber_capacity,
+                reply,
+            )
+        })
+        .await
     }
 
     pub async fn subscribe(&self) -> Result<Subscription, LiveError> {
@@ -639,7 +695,7 @@ fn handle_command(
                 splint_id,
                 incarnation,
                 terminal,
-                max_rows,
+                max_rows.min(config.max_scrollback_snapshot_rows),
                 child_exit,
             )));
         }
@@ -648,7 +704,11 @@ fn handle_command(
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
             }
-            let (event_sender, events) = mpsc::channel(capacity);
+            if subscribers.len() >= config.max_subscribers {
+                let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
+                return;
+            }
+            let (event_sender, events) = mpsc::channel(capacity.min(config.subscriber_capacity));
             let (resnapshot, resnapshot_receiver) = watch::channel(false);
             subscribers.push(Subscriber {
                 events: event_sender,
@@ -658,6 +718,30 @@ fn handle_command(
                 events,
                 resnapshot: resnapshot_receiver,
             }));
+        }
+        Command::Attach(max_rows, capacity, reply) => {
+            if capacity == 0 || subscribers.len() >= config.max_subscribers {
+                let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
+                return;
+            }
+            let snapshot = owned_snapshot(
+                splint_id,
+                incarnation,
+                terminal,
+                max_rows.min(config.max_scrollback_snapshot_rows),
+                child_exit,
+            );
+            let (event_sender, events) = mpsc::channel(capacity.min(config.subscriber_capacity));
+            let (resnapshot, resnapshot_receiver) = watch::channel(false);
+            subscribers.push(Subscriber {
+                events: event_sender,
+                resnapshot,
+            });
+            let subscription = Subscription {
+                events,
+                resnapshot: resnapshot_receiver,
+            };
+            let _ = reply.send(Ok((snapshot, subscription)));
         }
         Command::Shutdown(reply) => {
             shutdown_replies.push(reply);
@@ -917,6 +1001,29 @@ mod tests {
         assert!(snapshot_text(&snapshot).contains("ordered-input"));
         assert!(slow.changed().await);
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn atomic_attach_starts_updates_after_snapshot_revision() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("read value; printf '%s' \"$value\"; sleep 0.2"),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        let (snapshot, mut subscription) = handle.attach().await.unwrap();
+        handle.input(b"after-attach\n".to_vec()).await.unwrap();
+        let event = time::timeout(Duration::from_secs(1), subscription.recv())
+            .await
+            .unwrap();
+        let SubscriptionReceive::Event(LiveEvent::Update { update, .. }) = event else {
+            panic!("expected an ordered terminal update")
+        };
+        assert!(update.revision() > snapshot.revision);
+        runtime.wait().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

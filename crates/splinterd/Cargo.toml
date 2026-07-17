@@ -14,6 +14,7 @@ splinterm-core = { path = "../splinterm-core" }
 splinterm-protocol = { path = "../splinterm-protocol" }
 splinterm-pty = { path = "../splinterm-pty" }
 splinterm-terminal = { path = "../splinterm-terminal" }
+rustix.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true

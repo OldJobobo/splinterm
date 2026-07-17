@@ -437,6 +437,7 @@ name = "splinterd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rustix",
  "serde_json",
  "splinterm-core",
  "splinterm-protocol",
@@ -455,6 +456,7 @@ dependencies = [
  "anyhow",
  "clap",
  "serde_json",
+ "splinterm-core",
  "splinterm-protocol",
  "tokio",
 ]
@@ -475,6 +477,7 @@ dependencies = [
  "serde",
  "serde_json",
  "splinterm-core",
+ "thiserror",
 ]
 
 [[package]]
