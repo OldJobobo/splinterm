@@ -1,6 +1,6 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** Phase 5 complete — Phase 6 next
+- **Status:** Phase 6 complete — Phase 7 next
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -49,6 +49,16 @@
 - [x] Select the rustix plus exec-first helper backend in ADR 0002.
 - [x] Validate controlling-terminal/session/process-group invariants, cwd,
   environment, login argv, resize, bidirectional I/O, exit, and group signals.
+- [x] Add one daemon-owned `LiveSplint` actor with process incarnation,
+  nonblocking PTY consumption, serialized input/resize/snapshot, and exit state.
+- [x] Add byte-bounded input and reply queues plus bounded nonblocking
+  subscribers with explicit resnapshot-on-overflow.
+- [x] Continue consuming without subscribers and add owned daemon snapshots
+  without exposing terminal internals through the protocol.
+- [x] Reap direct children and implement HUP → TERM → KILL shutdown escalation,
+  including actor-drop and daemon-shutdown cleanup.
+- [x] Start exactly one live shell transactionally when the first Dojo is
+  created and reflect running/exit state in the persistent model.
 
 ## Goal
 
@@ -439,6 +449,21 @@ LiveSplint
 Use one logical task/actor to serialize PTY output, input, resize, snapshots,
 and exit. The actor must continue consuming the PTY when there are no clients.
 
+Phase 6 implements this actor in `splinterd::live`. PTY reads are parsed in
+bounded batches so terminal-generated replies are drained promptly. User input
+and replies use separate byte-bounded queues, with replies receiving write
+priority. Internal subscribers never backpressure the PTY; overflow closes that
+subscription and sets an explicit resnapshot flag. Borrowed terminal snapshots
+are converted to owned daemon-only semantic snapshots carrying the process
+incarnation.
+
+The first successful `CreateDojo` starts exactly one shell Splint and updates
+its model state. PTY startup failure rolls the model creation back. Child exit
+and abnormal actor cleanup are observed independently from PTY EOF, and daemon
+shutdown uses the Foot-derived process-group escalation policy. No terminal
+snapshot, input, resize, or subscription operation is exposed through the wire
+protocol in this phase.
+
 Start with one Splint inside one Dojo/window. Do not implement tree mutation yet.
 
 ### Phase 7: secure development attach path
@@ -625,11 +650,11 @@ Do not proceed to the Wayland/rendering milestone until:
 
 ## Immediate next task
 
-Phase 5 is complete. Begin Phase 6:
+Phase 6 is complete. Begin Phase 7:
 
-> Add one daemon-owned `LiveSplint` actor that continuously consumes the
-> nonblocking PTY, feeds `splinterm-terminal`, serializes input/resize/exit, and
-> reaps the child even while no clients are attached.
+> Add the bounded, version-negotiated, peer-UID-verified development attach
+> protocol with request IDs, authorization checks, subscription limits, and
+> explicit revision resynchronization.
 
-Do not expose terminal content through the existing development socket until
-the bounded, peer-verified Phase 7 protocol foundation is in place.
+Do not treat the development socket as a supported automation API or expose it
+beyond the local authenticated boundary.

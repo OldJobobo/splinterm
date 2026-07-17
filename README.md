@@ -39,8 +39,10 @@ The initial daemon uses newline-delimited JSON over a Unix socket.
 `splinterm-terminal` contains the Foot-derived cell/grid model, streaming VT
 kernel, borrowed semantic snapshots, monotonic revisions, and bounded update
 replay. `splinterm-pty` provides the tested Linux PTY/process boundary.
-Daemon-owned live sessions, persistence, protocol conversion, and Wayland
-remain to be connected. The wire format is versioned from the start.
+`splinterd` now owns one live shell actor that continuously consumes its PTY,
+tracks terminal state, and survives client disconnection. Secure terminal
+attach operations, persistence, protocol conversion, and Wayland remain to be
+connected. The wire format is versioned from the start.
 
 ## Try the scaffold
 
