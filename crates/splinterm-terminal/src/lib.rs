@@ -5,8 +5,8 @@
 //! representations are derived from Foot's `terminal.h` at commit
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`. Grid algorithms, parsing, PTY
 //! ownership, rendering, and protocol serialization deliberately live outside
-//! this initial layer. Grid scrolling, viewport, resize, reflow, and damage
-//! algorithms remain deferred.
+//! this initial layer. Grid scrolling, viewport movement commands, resize,
+//! reflow, and damage algorithms remain deferred.
 
 mod cell;
 mod coord;

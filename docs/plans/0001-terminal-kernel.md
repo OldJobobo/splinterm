@@ -20,6 +20,8 @@
 - [x] Record the Phase 1 memory-size baseline and focused representation tests.
 - [x] Review and commit the Phase 1 foundational representations.
 - [x] Port circular row indexing and lazy row allocation.
+- [x] Port screen/scrollback coordinate conversion and viewport-relative row
+  tracking.
 
 ## Goal
 
