@@ -62,9 +62,10 @@ On the current development machine both default to workspace 8. Each launcher
 builds its Rust example, refuses an occupied target workspace, and preserves
 the currently focused workspace. The final frame offers `R` + Enter to replay
 or `Q` + Enter to close. Each demo uses a large 22-point font only for its own
-Foot window; it does not change the user's Foot configuration. Use
-`--workspace N` to select another empty workspace or `--font-size N` to adjust
-the demo-local font.
+Foot window; it does not change the user's Foot configuration. Frames remain
+visible for six seconds by default. Use `--workspace N` to select another empty
+workspace, `--font-size N` to adjust the demo-local font, or
+`--delay-seconds N` to change the reading time per frame.
 
 The default build directories are `/tmp/splinterm-foot-build` and
 `/tmp/splinterm-foot-oracle-build`. The scripts verify the exact reference

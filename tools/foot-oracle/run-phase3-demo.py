@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         help="font size used only by this demo window (default: 22)",
     )
     parser.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=6.0,
+        help="seconds each frame remains visible (default: 6)",
+    )
+    parser.add_argument(
         "--allow-occupied",
         action="store_true",
         help="launch even when the target workspace contains windows",
@@ -70,6 +76,9 @@ def main() -> int:
         return 2
     if not 1 <= args.font_size <= 72:
         print("Font size must be between 1 and 72 points.", file=sys.stderr)
+        return 2
+    if not 0.1 <= args.delay_seconds <= 60:
+        print("Frame delay must be between 0.1 and 60 seconds.", file=sys.stderr)
         return 2
     if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         print("A running Hyprland session is required.", file=sys.stderr)
@@ -117,7 +126,10 @@ def main() -> int:
         return build.returncode
 
     demo = ROOT / "target" / "debug" / "examples" / "phase3-demo"
+    delay_ms = round(args.delay_seconds * 1_000)
     command = [
+        "env",
+        f"SPLINTERM_DEMO_DELAY_MS={delay_ms}",
         str(args.foot_binary),
         "--config=/dev/null",
         "--override=pad=12x12",

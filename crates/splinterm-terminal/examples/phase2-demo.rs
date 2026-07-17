@@ -17,7 +17,7 @@ impl Demo {
         let delay = env::var("SPLINTERM_DEMO_DELAY_MS")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(1_400);
+            .unwrap_or(6_000);
         Self {
             delay: Duration::from_millis(delay),
             frame: 0,
