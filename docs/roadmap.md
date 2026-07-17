@@ -14,6 +14,8 @@
 
 ## Phase 1 — secure persistent splint
 
+Detailed plan: [`plans/0001-terminal-kernel.md`](plans/0001-terminal-kernel.md)
+
 - PTY spawn, resize, read, write, and child reaping in `splinterd`
 - Minimal VT parser and screen grid
 - Bounded, authenticated local protocol with request IDs and negotiation

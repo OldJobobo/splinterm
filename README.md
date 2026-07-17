@@ -25,6 +25,8 @@ crates/
 docs/
 ├── adr/
 │   └── 0001-foot-rust-port.md
+├── plans/
+│   └── 0001-terminal-kernel.md
 ├── architecture.md
 ├── pre-planning-research.md
 └── roadmap.md
@@ -57,7 +59,9 @@ for development with `SPLINTERM_SOCKET=/path/to/socket`.
 records Foot as the authoritative implementation and behavioral foundation for
 the Rust port. [`docs/pre-planning-research.md`](docs/pre-planning-research.md)
 evaluates persistent multiplexing, Omarchy/Arch/Nix priorities, and a secure
-AI-accessible local API before implementation dependencies are frozen.
+AI-accessible local API before implementation dependencies are frozen. The
+[first implementation plan](docs/plans/0001-terminal-kernel.md) defines the
+Foot-derived terminal kernel and detachable one-Splint vertical slice.
 
 ## Development
 
