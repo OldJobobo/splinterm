@@ -1,5 +1,10 @@
 # Architecture
 
+[ADR 0001](adr/0001-foot-rust-port.md) establishes Foot as the authoritative
+implementation and behavioral foundation for Splinterm's Rust terminal port.
+The boundaries below reorganize ownership for persistence; they do not replace
+Foot with another terminal engine.
+
 Splinterm has two lifetimes: the graphical client may come and go, while the
 daemon owns terminal processes and session state.
 

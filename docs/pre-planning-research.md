@@ -6,10 +6,12 @@ persistent multiplexing, platform priorities, and a secure automation surface.
 
 ## Executive recommendation
 
-Do **not** attempt a mechanical, file-for-file rewrite of Foot.
+Splinterm's terminal foundation is a Rust port of Foot. Foot is the
+authoritative implementation and behavioral baseline, as recorded in
+[ADR 0001](adr/0001-foot-rust-port.md).
 
-Build a Rust-native architecture with Foot as the behavioral, performance, and
-Wayland reference. Port algorithms selectively, retain exact provenance, and
+The port should proceed incrementally rather than as an unverified mechanical,
+file-for-file rewrite. Preserve Foot semantics, retain exact provenance, and
 use differential tests against the local Foot 1.27.0 source and binary. The
 fundamental ownership change is that `splinterd`, not the graphical client,
 owns PTYs, child processes, canonical terminal state, scrollback, and layout.
@@ -59,13 +61,14 @@ Splinterm requires tmux/Zellij-style daemon ownership.
 ### Recommended port strategy
 
 1. Establish Foot provenance and a behavioral corpus before adapting code.
-2. Port or replace leaf utilities and configuration parsing.
-3. Implement an owned cell/grid model and resize/reflow invariants.
-4. Put a streaming parser behind a Splinterm-owned terminal-engine interface.
-5. Move PTY/process ownership into `splinterd`.
-6. Build the Wayland frontend and renderer against terminal snapshots/damage.
+2. Port Foot's leaf utilities and configuration semantics.
+3. Port its cell/grid model and resize/reflow invariants into owned Rust types.
+4. Port Foot's streaming VT parser and handlers behind a Splinterm-owned
+   terminal-engine interface.
+5. Port PTY/process behavior into `splinterd` ownership.
+6. Port the Wayland frontend and renderer against terminal snapshots/damage.
 7. Port advanced protocols—sixel, synchronized updates, shell integration—only
-   after the core path is measured and stable.
+   after the foundational path is measured and stable.
 
 Potential temporary FFI boundaries are Foot's fcft/fontconfig and pixman path,
 generated Wayland protocol coverage, and the post-fork PTY child setup. The
@@ -73,24 +76,24 @@ post-fork branch is especially sensitive: adding allocator or async-runtime work
 between `fork` and `exec` is unsafe in a multithreaded process. A small audited
 Unix implementation—or initially a retained helper—is preferable.
 
-### Reuse candidates to evaluate
+### Supporting crates and external references
 
-These are spike candidates, not dependency decisions:
+Rust crates may support the port where they do not replace Foot behavior. The
+specific choices remain subject to parity tests and license review:
 
-- [`vte`](https://github.com/alacritty/vte) for byte parsing.
-- [`alacritty_terminal`](https://github.com/alacritty/alacritty/tree/master/alacritty_terminal)
-  behind a Splinterm-owned adapter for grid/terminal semantics.
-- [`portable-pty`](https://github.com/wez/wezterm/tree/main/pty) for the first
-  PTY vertical slice, benchmarked later against a smaller Linux backend.
+- [`portable-pty`](https://github.com/wez/wezterm/tree/main/pty) may support an
+  initial PTY spike if it can reproduce required Foot process behavior.
 - [`wayland-client`](https://github.com/Smithay/wayland-rs) and
-  [Smithay Client Toolkit](https://github.com/Smithay/client-toolkit) for native
-  Wayland plumbing.
-- Font/shaping libraries rather than custom Unicode shaping; candidate families
-  include Fontconfig/Freetype/fcft or `fontdb` + `rustybuzz`/`swash`.
+  [Smithay Client Toolkit](https://github.com/Smithay/client-toolkit) may provide
+  Rust Wayland plumbing while Foot remains the behavioral authority.
+- Font/shaping libraries may supply low-level facilities, but fallback, sizing,
+  cell placement and rendering policy must preserve Foot-derived behavior.
 
-Study WezTerm, Zellij and tmux, but do not import their product model wholesale.
-Splinterm's Lair/Dojo/Window/Splint semantics, persistence and protocol are
-product-defining and should remain owned by this project.
+`vte`, `alacritty_terminal`, WezTerm, Rio, Zellij and tmux are useful sources of
+Rust patterns, compatibility comparisons, test ideas, benchmarks, and
+multiplexing research. They are not alternative terminal foundations.
+Splinterm's Foot-derived terminal behavior and its Lair/Dojo/Window/Splint
+semantics, persistence and protocol remain owned by this project.
 
 ### Testing requirement
 
@@ -394,13 +397,14 @@ This is a sequencing recommendation, not yet an implementation plan.
 
 - Record Foot provenance and selected compatibility target.
 - Build parser/grid corpus, differential harness and benchmarks.
-- Write ADRs for terminal-core reuse, renderer spike and persistence semantics.
+- Record Foot port boundaries, temporary bridge criteria, renderer strategy and
+  persistence semantics in ADRs.
 - Define XDG paths, app ID, CLI execution contract and threat model.
 
 ### Stage 1 — secure one-Splint daemon vertical slice
 
 - Daemon-owned PTY and child lifecycle.
-- Terminal parser/grid behind a project-owned interface.
+- Rust ports of Foot's terminal parser/grid behind a project-owned interface.
 - Hardened local handshake, framing, IDs, limits and peer checks.
 - Per-operation authorization and a capability bootstrap design before exposing
   terminal content or control.
@@ -447,18 +451,23 @@ surface becomes supported for third-party automation.
 
 ## 7. Decisions that still need spikes
 
-1. Wrap `alacritty_terminal`, port Foot semantics, or build a hybrid engine?
-2. Start with `portable-pty` or a Linux-specific audited PTY layer?
-3. CPU shared-memory rendering, GPU rendering, or both behind one interface?
-4. Which font stack best matches Foot behavior on Omarchy?
-5. Exact initial protocol frame limits and snapshot encoding?
-6. Controller ownership granularity: Dojo, window or Splint?
-7. Scrollback memory/disk policy and privacy defaults?
-8. Stable reverse-DNS app ID and repository identity?
-9. How much Foot configuration compatibility is a release requirement?
-10. What does “persistent” promise across client loss, logout, daemon upgrade,
-    daemon crash and host reboot?
-11. For headless hosts, should the supported SSH path use Unix-socket forwarding,
+The terminal foundation is not an open decision: it is the Rust port of Foot.
+The remaining implementation questions are:
+
+1. Start with a temporary Foot C PTY bridge, `portable-pty`, or a Linux-specific
+   audited Rust PTY layer?
+2. Port Foot's CPU shared-memory renderer first, then evaluate a GPU evolution,
+   or maintain both behind one interface?
+3. Which Rust font stack can reproduce Foot behavior on Omarchy?
+4. Exact initial protocol frame limits and snapshot encoding?
+5. Controller ownership granularity: Dojo, window or Splint?
+6. Scrollback memory/disk policy and privacy defaults?
+7. Stable reverse-DNS app ID and repository identity?
+8. Which Foot configuration features are required in each compatibility
+   milestone?
+9. What does “persistent” promise across client loss, logout, daemon upgrade,
+   daemon crash and host reboot?
+10. For headless hosts, should the supported SSH path use Unix-socket forwarding,
     a stdio relay, or both?
 
 ## 8. Planning gates

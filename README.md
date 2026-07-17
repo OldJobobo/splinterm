@@ -23,6 +23,8 @@ crates/
 ├── splinterm-core/      # Lair/Dojo/window/splint state model
 └── splinterm-protocol/  # versioned client-daemon wire protocol
 docs/
+├── adr/
+│   └── 0001-foot-rust-port.md
 ├── architecture.md
 ├── pre-planning-research.md
 └── roadmap.md
@@ -51,9 +53,11 @@ for development with `SPLINTERM_SOCKET=/path/to/socket`.
 
 ## Research direction
 
-[`docs/pre-planning-research.md`](docs/pre-planning-research.md) evaluates the
-Foot port strategy, persistent multiplexing, Omarchy/Arch/Nix priorities, and a
-secure AI-accessible local API before implementation dependencies are frozen.
+[`docs/adr/0001-foot-rust-port.md`](docs/adr/0001-foot-rust-port.md)
+records Foot as the authoritative implementation and behavioral foundation for
+the Rust port. [`docs/pre-planning-research.md`](docs/pre-planning-research.md)
+evaluates persistent multiplexing, Omarchy/Arch/Nix priorities, and a secure
+AI-accessible local API before implementation dependencies are frozen.
 
 ## Development
 

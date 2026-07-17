@@ -57,6 +57,8 @@
 
 ## Deferred decisions
 
-Benchmark before selecting a final renderer, wire encoding, persistence format,
-or VT parser dependency. The scaffold deliberately keeps those choices behind
-crate and protocol boundaries.
+Foot is the authoritative terminal implementation and behavioral baseline; see
+[ADR 0001](adr/0001-foot-rust-port.md). Benchmark before selecting the final
+Rust renderer/font infrastructure, wire encoding, persistence format, and any
+temporary migration bridges. The scaffold keeps those choices behind crate and
+protocol boundaries.
