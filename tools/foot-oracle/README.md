@@ -47,6 +47,22 @@ window to close before starting the next one. The runner refuses to open test
 windows on the active workspace by default. For deliberate manual debugging
 only, `SPLINTERM_FOOT_ORACLE_ALLOW_LIVE_WAYLAND=1` bypasses that protection.
 
+## Human-viewable Phase 2 demo
+
+The Phase 2 grid implementation has a scripted visual walkthrough rendered as
+text inside the pinned Foot presentation window. It exercises the Rust
+`Grid` directly rather than replaying fixture expectations:
+
+```bash
+tools/foot-oracle/run-phase2-demo.py
+```
+
+On the current development machine it defaults to workspace 8. The launcher
+builds the Rust example, refuses an occupied target workspace, preserves the
+currently focused workspace, and leaves the final frame open for inspection.
+Close the Foot window when finished. Use `--workspace N` to select another
+empty workspace.
+
 The default build directories are `/tmp/splinterm-foot-build` and
 `/tmp/splinterm-foot-oracle-build`. The scripts verify the exact reference
 commit. The minimal builds disable documentation, themes, terminfo, utmp, and
