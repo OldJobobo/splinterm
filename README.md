@@ -21,7 +21,8 @@ crates/
 ├── splinterm/           # interactive client and, later, Wayland frontend
 ├── splinterd/           # persistent session daemon
 ├── splinterm-core/      # Lair/Dojo/window/splint state model
-└── splinterm-protocol/  # versioned client-daemon wire protocol
+├── splinterm-protocol/  # versioned client-daemon wire protocol
+└── splinterm-terminal/  # renderer-independent Foot-derived terminal state
 docs/
 ├── adr/
 │   └── 0001-foot-rust-port.md
@@ -73,11 +74,11 @@ cargo test --workspace
 
 ## Foot lineage
 
-Foot's source architecture is a primary reference for the emulator half of the
-project, particularly its separation of terminal state, grid, renderer,
-Wayland plumbing, and client/server mode. Splinterm does not currently contain
-copied Foot source. Any future ported or adapted code must retain the relevant
-MIT attribution and be recorded in `THIRD_PARTY.md`.
+Foot's source architecture is the authoritative foundation for the emulator
+half of the project. `splinterm-terminal` begins the Rust translation of Foot's
+terminal representations; translated modules record the pinned source file and
+commit in their documentation. Ported or adapted code retains the relevant MIT
+attribution and is recorded in `THIRD_PARTY.md`.
 
 ## License
 

@@ -1,6 +1,6 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** In progress — Phase 0
+- **Status:** In progress — Phase 1 review
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -15,6 +15,9 @@
 - [x] Validate fixture structure in CI.
 - [x] Implement the test-only Foot semantic state-dump adapter.
 - [x] Promote the initial fixtures from `source_reviewed` to `oracle_verified`.
+- [x] Add `splinterm-terminal` foundational color, attribute, cell, coordinate,
+  cursor, scroll-region, and row representations.
+- [x] Record the Phase 1 memory-size baseline and focused representation tests.
 
 ## Goal
 

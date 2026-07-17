@@ -4,6 +4,7 @@ members = [
     "crates/splinterd",
     "crates/splinterm-core",
     "crates/splinterm-protocol",
+    "crates/splinterm-terminal",
 ]
 resolver = "3"
 

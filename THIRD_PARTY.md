@@ -11,6 +11,11 @@ emulator by Daniel Eklöf and contributors.
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - Architectural decision: [`docs/adr/0001-foot-rust-port.md`](docs/adr/0001-foot-rust-port.md)
 
-No Foot source code is included in the initial Splinterm scaffold. If code is
-ported or adapted later, record the affected files and preserve the applicable
-copyright and license notices here.
+Foundational terminal representations in `crates/splinterm-terminal/src/`
+are translated from Foot's `terminal.h` and the row initialization behavior in
+`grid.c` at the revision above. The affected modules record source-level
+provenance in their module documentation.
+
+Foot is Copyright (c) 2019 Daniel Eklöf and is distributed under the MIT
+License. Splinterm's MIT `LICENSE` preserves the applicable permission and
+warranty terms for these translations.
