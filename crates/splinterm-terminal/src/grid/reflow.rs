@@ -287,6 +287,10 @@ impl Grid {
             new_columns,
             new_screen_rows,
         );
+        dimensions.generation = self
+            .generation
+            .checked_add(1)
+            .expect("grid generation exhausted");
 
         *self = dimensions;
     }

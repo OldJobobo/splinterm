@@ -51,6 +51,7 @@ pub struct Grid {
     screen_rows: usize,
     cursor: Cursor,
     saved_cursor: Cursor,
+    generation: u64,
 }
 
 impl Grid {
@@ -84,6 +85,7 @@ impl Grid {
             screen_rows: 1,
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
+            generation: 0,
         }
     }
 
@@ -102,6 +104,10 @@ impl Grid {
             grid.row_or_allocate(i32::try_from(row).expect("screen rows fit in i32"));
         }
         grid
+    }
+
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Returns the number of physical slots in the circular row array.
@@ -135,7 +141,10 @@ impl Grid {
     /// Panics if the cursor is outside the configured screen.
     pub fn set_cursor(&mut self, cursor: Cursor) {
         self.assert_cursor(cursor);
-        self.cursor = cursor;
+        if self.cursor != cursor {
+            self.bump_generation();
+            self.cursor = cursor;
+        }
     }
 
     /// Returns the saved cursor.
@@ -151,7 +160,10 @@ impl Grid {
     /// Panics if the cursor is outside the configured screen.
     pub fn set_saved_cursor(&mut self, cursor: Cursor) {
         self.assert_cursor(cursor);
-        self.saved_cursor = cursor;
+        if self.saved_cursor != cursor {
+            self.bump_generation();
+            self.saved_cursor = cursor;
+        }
     }
 
     /// Maps an offset-relative row to its physical circular slot.
@@ -188,12 +200,16 @@ impl Grid {
     /// Returns an allocated mutable row without allocating it.
     pub fn row_mut(&mut self, relative_row: i32) -> Option<&mut Row> {
         let index = self.absolute_index(relative_row);
+        if self.rows[index].is_some() {
+            self.bump_generation();
+        }
         self.rows[index].as_mut()
     }
 
     /// Returns a row, safely initializing its cells when allocating its slot.
     pub fn row_or_allocate(&mut self, relative_row: i32) -> &mut Row {
         let index = self.absolute_index(relative_row);
+        self.bump_generation();
         self.rows[index].get_or_insert_with(|| Row::new(self.columns))
     }
 
@@ -213,6 +229,9 @@ impl Grid {
     /// Returns an allocated mutable row relative to the current viewport.
     pub fn row_in_view_mut(&mut self, relative_row: i32) -> Option<&mut Row> {
         let index = self.absolute_index_in_view(relative_row);
+        if self.rows[index].is_some() {
+            self.bump_generation();
+        }
         self.rows[index].as_mut()
     }
 
@@ -268,6 +287,7 @@ impl Grid {
 
     /// Removes every allocated row outside the visible screen.
     pub fn clear_scrollback(&mut self) {
+        self.bump_generation();
         let visible: Vec<usize> = (0..self.screen_rows)
             .map(|row| self.absolute_index(Self::signed_row(row)))
             .collect();
@@ -331,6 +351,10 @@ impl Grid {
             new_columns,
             new_screen_rows,
         );
+        resized.generation = self
+            .generation
+            .checked_add(1)
+            .expect("grid generation exhausted");
         *self = resized;
     }
 
@@ -338,7 +362,10 @@ impl Grid {
     pub fn swap_rows(&mut self, first: i32, second: i32) {
         let first = self.absolute_index(first);
         let second = self.absolute_index(second);
-        self.rows.swap(first, second);
+        if first != second {
+            self.bump_generation();
+            self.rows.swap(first, second);
+        }
     }
 
     /// Scrolls a screen region while preserving Foot's circular-history and
@@ -406,17 +433,28 @@ impl Grid {
     /// This primitive does not move the viewport automatically. Call
     /// [`Self::reset_view`] when the viewport should follow the new offset.
     pub fn set_offset(&mut self, offset: usize) {
-        self.offset = offset & (self.rows.len() - 1);
+        let offset = offset & (self.rows.len() - 1);
+        if self.offset != offset {
+            self.bump_generation();
+            self.offset = offset;
+        }
     }
 
     /// Changes which physical slot corresponds to viewport row zero.
     pub fn set_view(&mut self, view: usize) {
-        self.view = view & (self.rows.len() - 1);
+        let view = view & (self.rows.len() - 1);
+        if self.view != view {
+            self.bump_generation();
+            self.view = view;
+        }
     }
 
     /// Returns the viewport to the top of the live screen.
     pub fn reset_view(&mut self) {
-        self.view = self.offset;
+        if self.view != self.offset {
+            self.bump_generation();
+            self.view = self.offset;
+        }
     }
 
     fn scroll_forward_core(
@@ -491,6 +529,44 @@ impl Grid {
         }
     }
 
+    pub(crate) fn snapshot_view_rows(&self) -> Vec<&Row> {
+        (0..self.screen_rows)
+            .filter_map(|row| self.row_in_view(Self::signed_row(row)))
+            .collect()
+    }
+
+    pub(crate) fn snapshot_scrollback_rows(
+        &self,
+        maximum_rows: usize,
+    ) -> (Vec<&Row>, usize, usize) {
+        let history_capacity = self.rows.len() - self.screen_rows;
+        let start = self.scrollback_start(self.screen_rows);
+        let mut rows = (0..history_capacity)
+            .filter_map(|distance| {
+                let index = start.wrapping_add(distance) & (self.rows.len() - 1);
+                self.rows[index].as_ref()
+            })
+            .collect::<Vec<_>>();
+        let available = rows.len();
+        let omitted = available.saturating_sub(maximum_rows);
+        if omitted > 0 {
+            rows.drain(0..omitted);
+        }
+        (rows, available, omitted)
+    }
+
+    pub(crate) fn cursor_in_view(&self) -> Option<Coordinate> {
+        let cursor = self.cursor.position();
+        let absolute = self.absolute_index(cursor.row);
+        let relative = absolute.wrapping_sub(self.view) & (self.rows.len() - 1);
+        (relative < self.screen_rows).then(|| {
+            Coordinate::new(
+                cursor.column,
+                i32::try_from(relative).expect("visible row fits i32"),
+            )
+        })
+    }
+
     fn scrollback_start(&self, screen_rows: usize) -> usize {
         self.offset.wrapping_add(screen_rows) & (self.rows.len() - 1)
     }
@@ -505,6 +581,13 @@ impl Grid {
     fn assert_coordinate_inputs(&self, screen_rows: usize, row: usize) {
         self.assert_screen_rows(screen_rows);
         assert!(row < self.rows.len(), "row index must fit within the grid");
+    }
+
+    fn bump_generation(&mut self) {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("grid generation exhausted");
     }
 
     fn resized_cursor(

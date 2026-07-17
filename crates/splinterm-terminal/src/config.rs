@@ -15,6 +15,8 @@ pub struct TerminalConfig {
     pub composed_limit: usize,
     /// Maximum queued semantic effects awaiting a drain.
     pub event_limit: usize,
+    /// Number of committed updates retained for replay.
+    pub update_history_limit: usize,
 }
 
 impl Default for TerminalConfig {
@@ -26,6 +28,7 @@ impl Default for TerminalConfig {
             dcs_limit: 4_096,
             composed_limit: 4_096,
             event_limit: 1_024,
+            update_history_limit: 256,
         }
     }
 }

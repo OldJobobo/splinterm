@@ -24,4 +24,6 @@ pub enum TerminalEvent {
     UnsupportedSequence(&'static str),
     /// A string exceeded its configured retention limit but remained synced.
     StringTruncated(&'static str),
+    /// The bounded one-shot event queue dropped at least one event.
+    EventQueueOverflow,
 }

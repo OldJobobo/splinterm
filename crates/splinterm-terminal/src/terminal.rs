@@ -4,12 +4,16 @@
 //! `csi.c`, and `osc.c` at commit
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
 
+use std::collections::VecDeque;
+
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    ActiveScreen, Attributes, CellContent, Color, ColorSource, ComposedTable, Coordinate, Cursor,
-    Grid, MouseTracking, ScrollDirection, ScrollRegion, TerminalConfig, TerminalEvent,
-    TerminalModes,
+    ActiveScreen, Attributes, CellContent, ChangeSet, Color, ColorSource, ComposedTable,
+    Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, MouseTracking, ResnapshotRequired,
+    RowSnapshot, ScrollDirection, ScrollRegion, ScrollbackSnapshot, SnapshotRequest,
+    TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision,
+    TerminalSnapshot, TerminalUpdate, UpdateBatch,
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -33,6 +37,66 @@ pub struct Terminal {
     default_colors: [u32; 3],
     initial_default_colors: [u32; 3],
     events: Vec<TerminalEvent>,
+    event_overflowed: bool,
+    revision: TerminalRevision,
+    update_history: VecDeque<TerminalUpdate>,
+    current_change: Option<ChangeSet>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActionBaseline {
+    active: ActiveScreen,
+    normal_generation: u64,
+    alternate_generation: u64,
+    cursor: Cursor,
+    offset: usize,
+    view: usize,
+    modes: TerminalModes,
+    scroll_region: ScrollRegion,
+    title: String,
+    palette: [u32; 256],
+    default_colors: [u32; 3],
+    row_before: Option<(i32, crate::Row)>,
+    visible_before: Option<Vec<crate::Row>>,
+    scrollback_rows: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionHint {
+    Print,
+    Execute(u8),
+    Esc(u8),
+    Csi {
+        private: Option<u8>,
+        final_byte: u8,
+        first_param: u32,
+    },
+    Osc,
+    Dcs,
+    Truncated,
+}
+
+impl ActionHint {
+    fn from_action(action: &Action) -> Self {
+        match action {
+            Action::Print(_) => Self::Print,
+            Action::Execute(byte) => Self::Execute(*byte),
+            Action::Esc { final_byte, .. } => Self::Esc(*final_byte),
+            Action::Csi {
+                private,
+                final_byte,
+                params,
+                ..
+            } => Self::Csi {
+                private: *private,
+                final_byte: *final_byte,
+                first_param: params.get(0).value(0, false),
+            },
+            Action::Osc(..) => Self::Osc,
+            Action::Dcs(..) => Self::Dcs,
+            Action::StringTruncated(..) => Self::Truncated,
+        }
+    }
 }
 
 impl Terminal {
@@ -63,6 +127,11 @@ impl Terminal {
             "alternate grid capacity is too small"
         );
         assert!(config.tab_width > 0, "tab width must be non-zero");
+        assert!(config.event_limit > 0, "event limit must be non-zero");
+        assert!(
+            config.update_history_limit > 0,
+            "update history limit must be non-zero"
+        );
 
         let palette = default_palette();
         let default_colors = [0x00ff_ffff, 0x0000_0000, 0x00ff_ffff];
@@ -83,6 +152,10 @@ impl Terminal {
             default_colors,
             initial_default_colors: default_colors,
             events: Vec::new(),
+            event_overflowed: false,
+            revision: TerminalRevision::default(),
+            update_history: VecDeque::new(),
+            current_change: None,
             config,
         };
         terminal.reset_tab_stops(columns);
@@ -111,6 +184,10 @@ impl Terminal {
     /// Panics if dimensions are zero, exceed Foot's coordinate limits, or
     /// overflow the configured grid capacities.
     pub fn resize(&mut self, columns: usize, rows: usize) {
+        if self.normal.columns() == columns && self.normal.screen_rows() == rows {
+            return;
+        }
+        self.current_change = Some(ChangeSet::default());
         let normal_capacity = self
             .config
             .scrollback_lines
@@ -130,6 +207,15 @@ impl Terminal {
             .resize_without_reflow(alternate_capacity, columns, rows);
         self.scroll_region = ScrollRegion::new(0, i32::try_from(rows).expect("rows fit in i32"));
         self.reset_tab_stops(columns);
+        let change = self
+            .current_change
+            .as_mut()
+            .expect("resize transaction active");
+        change.full();
+        change.push(TerminalDamage::Dimensions);
+        change.push(TerminalDamage::Viewport);
+        change.push(TerminalDamage::Scrollback);
+        self.commit_change();
     }
 
     /// Returns the active grid.
@@ -171,14 +257,103 @@ impl Terminal {
         &self.default_colors
     }
 
-    /// Drains semantic effects in parser order.
+    #[must_use]
+    pub const fn revision(&self) -> TerminalRevision {
+        self.revision
+    }
+
+    /// Creates a borrowed semantic snapshot without consuming updates/events.
+    #[must_use]
+    pub fn snapshot(&self, request: SnapshotRequest) -> TerminalSnapshot<'_> {
+        let grid = self.grid();
+        let visible_rows = grid
+            .snapshot_view_rows()
+            .into_iter()
+            .map(|row| RowSnapshot::new(row, &self.composed))
+            .collect();
+        let (scrollback_rows, available, omitted) = if self.active == ActiveScreen::Normal {
+            self.normal
+                .snapshot_scrollback_rows(request.max_scrollback_rows)
+        } else {
+            (Vec::new(), 0, 0)
+        };
+        let returned_rows = scrollback_rows.len();
+        let scrollback_rows = scrollback_rows
+            .into_iter()
+            .map(|row| RowSnapshot::new(row, &self.composed))
+            .collect();
+        TerminalSnapshot::new(
+            self.revision,
+            Dimensions {
+                columns: grid.columns(),
+                rows: grid.screen_rows(),
+            },
+            self.active,
+            CursorSnapshot {
+                cursor: grid.cursor(),
+                viewport_position: grid.cursor_in_view(),
+            },
+            self.modes,
+            self.scroll_region,
+            grid.view_follows_offset(),
+            &self.title,
+            &self.palette,
+            &self.default_colors,
+            visible_rows,
+            scrollback_rows,
+            ScrollbackSnapshot {
+                available_rows: available,
+                returned_rows,
+                omitted_oldest_rows: omitted,
+            },
+        )
+    }
+
+    /// Returns contiguous retained updates after `base` or requires a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResnapshotRequired`] when `base` is in the future or older
+    /// than the retained update-history window.
+    pub fn updates_since(&self, base: TerminalRevision) -> Result<UpdateBatch, ResnapshotRequired> {
+        if base == self.revision {
+            return Ok(UpdateBatch::new(base, self.revision, Vec::new()));
+        }
+        let oldest_base = self.update_history.front().map_or(self.revision, |update| {
+            TerminalRevision::new(update.revision().value() - 1)
+        });
+        if base > self.revision || base < oldest_base {
+            return Err(ResnapshotRequired::new(base, oldest_base, self.revision));
+        }
+        let updates = self
+            .update_history
+            .iter()
+            .filter(|update| update.revision() > base)
+            .cloned()
+            .collect();
+        Ok(UpdateBatch::new(base, self.revision, updates))
+    }
+
+    /// Drains one-shot semantic effects in parser order.
     pub fn drain_events(&mut self) -> impl Iterator<Item = TerminalEvent> + '_ {
+        self.event_overflowed = false;
         self.events.drain(..)
     }
 
     fn push_event(&mut self, event: TerminalEvent) {
+        if let Some(change) = &mut self.current_change {
+            change.events.push(event.clone());
+        }
         if self.events.len() < self.config.event_limit {
             self.events.push(event);
+        } else if !self.event_overflowed {
+            self.event_overflowed = true;
+            if let Some(last) = self.events.last_mut() {
+                *last = TerminalEvent::EventQueueOverflow;
+            }
+            if let Some(change) = &mut self.current_change {
+                change.events.push(TerminalEvent::EventQueueOverflow);
+            }
         }
     }
 
@@ -190,6 +365,15 @@ impl Terminal {
     }
 
     fn dispatch(&mut self, action: Action) {
+        let hint = ActionHint::from_action(&action);
+        let baseline = self.action_baseline(hint);
+        self.current_change = Some(ChangeSet::default());
+        self.dispatch_inner(action);
+        self.record_action_changes(&baseline, hint);
+        self.commit_change();
+    }
+
+    fn dispatch_inner(&mut self, action: Action) {
         match action {
             Action::Print(character) => self.print(character),
             Action::Execute(byte) => self.execute(byte),
@@ -215,6 +399,217 @@ impl Terminal {
             Action::StringTruncated(kind) => {
                 self.push_event(TerminalEvent::StringTruncated(kind));
             }
+        }
+    }
+
+    fn action_baseline(&self, hint: ActionHint) -> ActionBaseline {
+        let grid = self.grid();
+        let row_before = match hint {
+            ActionHint::Csi {
+                final_byte: b'K' | b'@' | b'P' | b'X',
+                ..
+            } => grid
+                .row(grid.cursor().position().row)
+                .cloned()
+                .map(|row| (grid.cursor().position().row, row)),
+            _ => None,
+        };
+        let visible_before = match hint {
+            ActionHint::Csi {
+                final_byte: b'J',
+                first_param,
+                ..
+            } if first_param != 3 => Some(grid.snapshot_view_rows().into_iter().cloned().collect()),
+            _ => None,
+        };
+        let scrollback_rows = grid.snapshot_scrollback_rows(usize::MAX).1;
+        ActionBaseline {
+            active: self.active,
+            normal_generation: self.normal.generation(),
+            alternate_generation: self.alternate.generation(),
+            cursor: grid.cursor(),
+            offset: grid.offset(),
+            view: grid.view(),
+            modes: self.modes,
+            scroll_region: self.scroll_region,
+            title: self.title.clone(),
+            palette: self.palette,
+            default_colors: self.default_colors,
+            row_before,
+            visible_before,
+            scrollback_rows,
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keeping action-level semantic diffing centralized prevents revision gaps"
+    )]
+    fn record_action_changes(&mut self, before: &ActionBaseline, hint: ActionHint) {
+        let after_cursor = self.grid().cursor();
+        let after_offset = self.grid().offset();
+        let after_view = self.grid().view();
+        let row_capacity = self.grid().row_capacity();
+        let screen_rows = self.grid().screen_rows();
+        let grid_changed = match self.active {
+            ActiveScreen::Normal => self.normal.generation() != before.normal_generation,
+            ActiveScreen::Alternate => self.alternate.generation() != before.alternate_generation,
+        };
+        let offset_changed = after_offset != before.offset;
+        let view_changed = after_view != before.view;
+        let row_changed = before.row_before.as_ref().is_some_and(|(row_number, row)| {
+            self.grid()
+                .row(*row_number)
+                .is_some_and(|after| !rows_semantically_equal(after, row))
+        });
+        let visible_changed = before.visible_before.as_ref().is_some_and(|rows| {
+            let after = self.grid().snapshot_view_rows();
+            after.len() != rows.len()
+                || after
+                    .iter()
+                    .zip(rows)
+                    .any(|(left, right)| !rows_semantically_equal(left, right))
+        });
+        let scrollback_rows = self.grid().snapshot_scrollback_rows(usize::MAX).1;
+
+        let change = self
+            .current_change
+            .as_mut()
+            .expect("change transaction active");
+        if self.active != before.active || matches!(hint, ActionHint::Esc(b'c')) {
+            change.full();
+        } else if grid_changed {
+            match hint {
+                ActionHint::Print => {
+                    let old_row = before.cursor.position().row;
+                    let new_row = after_cursor.position().row;
+                    let first = usize::try_from(old_row.min(new_row)).unwrap();
+                    let last = usize::try_from(old_row.max(new_row)).unwrap() + 1;
+                    change.rows(first, last.min(screen_rows));
+                }
+                ActionHint::Csi {
+                    final_byte: b'K' | b'@' | b'P' | b'X',
+                    ..
+                } => {
+                    if row_changed {
+                        change.row(usize::try_from(before.cursor.position().row).unwrap());
+                    }
+                }
+                ActionHint::Csi {
+                    final_byte: b'J',
+                    first_param: 3,
+                    ..
+                } => {
+                    if scrollback_rows != before.scrollback_rows {
+                        change.push(TerminalDamage::Scrollback);
+                    }
+                }
+                ActionHint::Csi {
+                    final_byte: b'J', ..
+                } => {
+                    if visible_changed {
+                        change.rows(0, screen_rows);
+                    }
+                }
+                ActionHint::Csi {
+                    final_byte: b'L' | b'M',
+                    ..
+                } => {
+                    change.rows(
+                        usize::try_from(before.cursor.position().row).unwrap(),
+                        usize::try_from(self.scroll_region.end()).unwrap(),
+                    );
+                }
+                ActionHint::Csi {
+                    final_byte: b'S' | b'T',
+                    ..
+                }
+                | ActionHint::Execute(0x0a..=0x0c)
+                | ActionHint::Esc(b'D' | b'E' | b'M') => {
+                    change.rows(
+                        usize::try_from(self.scroll_region.start()).unwrap(),
+                        usize::try_from(self.scroll_region.end()).unwrap(),
+                    );
+                }
+                ActionHint::Csi {
+                    private: Some(b'?'),
+                    final_byte: b'h' | b'l',
+                    ..
+                } => {
+                    if self.active != before.active {
+                        change.full();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if offset_changed {
+            let direction = match hint {
+                ActionHint::Esc(b'M')
+                | ActionHint::Csi {
+                    final_byte: b'L' | b'T',
+                    ..
+                } => ScrollDirection::Reverse,
+                _ => ScrollDirection::Forward,
+            };
+            let distance = if direction == ScrollDirection::Forward {
+                after_offset.wrapping_sub(before.offset) & (row_capacity - 1)
+            } else {
+                before.offset.wrapping_sub(after_offset) & (row_capacity - 1)
+            };
+            let region = match hint {
+                ActionHint::Csi {
+                    final_byte: b'L' | b'M',
+                    ..
+                } => ScrollRegion::new(before.cursor.position().row, self.scroll_region.end()),
+                _ => self.scroll_region,
+            };
+            change.push(TerminalDamage::Scroll {
+                direction,
+                region,
+                rows: distance.min(screen_rows),
+            });
+            change.push(TerminalDamage::Scrollback);
+        }
+        if view_changed {
+            change.push(TerminalDamage::Viewport);
+        }
+        if after_cursor != before.cursor {
+            change.push(TerminalDamage::Cursor {
+                old: before.cursor,
+                new: after_cursor,
+            });
+        }
+        if self.modes != before.modes || self.scroll_region != before.scroll_region {
+            change.push(TerminalDamage::Modes);
+        }
+        if self.title != before.title {
+            change.push(TerminalDamage::Title);
+        }
+        if self.palette != before.palette {
+            change.push(TerminalDamage::Palette { index: None });
+        }
+        if self.default_colors != before.default_colors {
+            change.push(TerminalDamage::Palette { index: None });
+        }
+    }
+
+    fn commit_change(&mut self) {
+        let Some(change) = self.current_change.take() else {
+            return;
+        };
+        if change.is_empty() {
+            return;
+        }
+        self.revision = self.revision.next();
+        self.update_history.push_back(TerminalUpdate::new(
+            self.revision,
+            change.damage,
+            change.events,
+        ));
+        while self.update_history.len() > self.config.update_history_limit {
+            self.update_history.pop_front();
         }
     }
 
@@ -1031,8 +1426,16 @@ impl Terminal {
         let rows = self.grid().screen_rows();
         let config = self.config.clone();
         let events = std::mem::take(&mut self.events);
+        let event_overflowed = self.event_overflowed;
+        let revision = self.revision;
+        let update_history = std::mem::take(&mut self.update_history);
+        let current_change = self.current_change.take();
         *self = Self::new(columns, rows, config);
         self.events = events;
+        self.event_overflowed = event_overflowed;
+        self.revision = revision;
+        self.update_history = update_history;
+        self.current_change = current_change;
     }
 
     fn reset_tab_stops(&mut self, columns: usize) {
@@ -1040,6 +1443,26 @@ impl Terminal {
             .map(|column| column > 0 && column % self.config.tab_width == 0)
             .collect();
     }
+}
+
+fn rows_semantically_equal(left: &crate::Row, right: &crate::Row) -> bool {
+    left.has_linebreak() == right.has_linebreak()
+        && left.len() == right.len()
+        && left.cells().iter().zip(right.cells()).all(|(left, right)| {
+            let left_attributes = left.attributes();
+            let right_attributes = right.attributes();
+            left.content() == right.content()
+                && left_attributes.bold() == right_attributes.bold()
+                && left_attributes.dim() == right_attributes.dim()
+                && left_attributes.italic() == right_attributes.italic()
+                && left_attributes.underline() == right_attributes.underline()
+                && left_attributes.strikethrough() == right_attributes.strikethrough()
+                && left_attributes.blink() == right_attributes.blink()
+                && left_attributes.conceal() == right_attributes.conceal()
+                && left_attributes.reverse() == right_attributes.reverse()
+                && left_attributes.foreground() == right_attributes.foreground()
+                && left_attributes.background() == right_attributes.background()
+        })
 }
 
 fn clamp_position(grid: &Grid, position: Coordinate) -> Coordinate {

@@ -5,8 +5,8 @@
 //! representations are derived from Foot's `terminal.h` at commit
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`. Grid algorithms, parsing, PTY
 //! ownership, rendering, and protocol serialization deliberately live outside
-//! this initial layer. Renderer damage events and higher terminal-feature
-//! coordination remain deferred.
+//! this layer. Borrowed semantic snapshots, revisions, and row-oriented damage
+//! remain renderer- and protocol-independent.
 
 mod cell;
 mod composed;
@@ -17,7 +17,9 @@ mod event;
 mod grid;
 mod mode;
 mod row;
+mod snapshot;
 mod terminal;
+mod update;
 mod vt;
 
 pub use cell::{Attributes, Cell, CellContent, Color, ColorSource};
@@ -29,4 +31,12 @@ pub use event::TerminalEvent;
 pub use grid::{Grid, ScrollDirection, ScrollResult};
 pub use mode::{ActiveScreen, MouseTracking, TerminalModes};
 pub use row::Row;
+pub use snapshot::{
+    CellAttributesSnapshot, CellSnapshot, CellSnapshotContent, CursorSnapshot, Dimensions,
+    RowSnapshot, ScrollbackSnapshot, SnapshotRequest, TerminalSnapshot,
+};
 pub use terminal::Terminal;
+pub(crate) use update::ChangeSet;
+pub use update::{
+    ResnapshotRequired, TerminalDamage, TerminalRevision, TerminalUpdate, UpdateBatch,
+};
