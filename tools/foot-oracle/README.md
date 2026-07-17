@@ -27,11 +27,25 @@ Build the patched semantic oracle in a disposable worktree:
 tools/foot-oracle/build-oracle.sh
 ```
 
-Then compare every fixture with Foot:
+Then compare every fixture with Foot. Either use an isolated compositor:
 
 ```bash
-tools/foot-oracle/run-fixtures.py
+FOOT_ORACLE_WAYLAND_DISPLAY=oracle-wayland-1 \
+  tools/foot-oracle/run-fixtures.py
 ```
+
+Or route every test window silently to an unused Hyprland workspace. On the
+current development machine, workspace 8 is reserved on DP-2:
+
+```bash
+FOOT_ORACLE_HYPRLAND_WORKSPACE=8 \
+  tools/foot-oracle/run-fixtures.py
+```
+
+The workspace route preserves the focused workspace and waits for each fixture
+window to close before starting the next one. The runner refuses to open test
+windows on the active workspace by default. For deliberate manual debugging
+only, `SPLINTERM_FOOT_ORACLE_ALLOW_LIVE_WAYLAND=1` bypasses that protection.
 
 The default build directories are `/tmp/splinterm-foot-build` and
 `/tmp/splinterm-foot-oracle-build`. The scripts verify the exact reference
@@ -99,9 +113,12 @@ or other nondeterministic data.
 
 The first five fixtures are `oracle_verified` against the pinned Foot build:
 printable text, soft wrapping, cursor positioning, erase-line, and basic SGR.
-The current adapter requires a running Wayland compositor because it exercises
-the patched Foot executable. A future fully headless C test harness may remove
-that requirement.
+The current adapter requires a Wayland compositor because it exercises the
+patched Foot executable. Use either an isolated compositor or an explicitly
+selected empty Hyprland workspace. Opening fixture windows on an occupied
+workspace can trigger compositor tiling and PTY resize events in existing
+terminals. A future fully headless C test harness should remove this
+requirement.
 
 Validate fixture structure with:
 
