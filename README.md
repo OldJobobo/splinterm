@@ -22,10 +22,12 @@ crates/
 ├── splinterd/           # persistent session daemon
 ├── splinterm-core/      # Lair/Dojo/window/splint state model
 ├── splinterm-protocol/  # versioned client-daemon wire protocol
+├── splinterm-pty/       # Linux PTY and child-process boundary
 └── splinterm-terminal/  # Foot-derived grid and streaming VT kernel
 docs/
 ├── adr/
-│   └── 0001-foot-rust-port.md
+│   ├── 0001-foot-rust-port.md
+│   └── 0002-linux-pty-backend.md
 ├── plans/
 │   └── 0001-terminal-kernel.md
 ├── architecture.md
@@ -33,11 +35,12 @@ docs/
 └── roadmap.md
 ```
 
-The initial daemon uses newline-delimited JSON over a Unix socket. The
-`splinterm-terminal` crate now contains the Foot-derived cell/grid model,
-streaming VT kernel, borrowed semantic snapshots, monotonic revisions, and
-bounded update replay. PTY ownership, persistence, protocol conversion, and
-Wayland remain to be connected. The wire format is versioned from the start.
+The initial daemon uses newline-delimited JSON over a Unix socket.
+`splinterm-terminal` contains the Foot-derived cell/grid model, streaming VT
+kernel, borrowed semantic snapshots, monotonic revisions, and bounded update
+replay. `splinterm-pty` provides the tested Linux PTY/process boundary.
+Daemon-owned live sessions, persistence, protocol conversion, and Wayland
+remain to be connected. The wire format is versioned from the start.
 
 ## Try the scaffold
 

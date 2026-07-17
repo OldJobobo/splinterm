@@ -14,12 +14,22 @@ emulator by Daniel Eklöf and contributors.
 Terminal representations, grid behavior, parser recognition, and command
 semantics in `crates/splinterm-terminal/src/` are translated from Foot's
 `terminal.h`, `grid.h`, `grid.c`, `vt.h`, `vt.c`, `terminal.c`, `commands.c`,
-`csi.c`, `osc.c`, and `dcs.c` at the revision above. The affected modules
+`csi.c`, `osc.c`, `dcs.c`, `slave.c`, `render.c`, and `reaper.c` at the
+revision above. The affected modules
 record source-level provenance in their module documentation.
 
 Foot is Copyright (c) 2019 Daniel Eklöf and is distributed under the MIT
 License. Splinterm's MIT `LICENSE` preserves the applicable permission and
 warranty terms for these translations.
+
+## rustix
+
+Splinterm uses `rustix` for safe Linux PTY, termios, process, signal, and
+owned-file-descriptor operations in `splinterm-pty`.
+
+- Source: <https://github.com/bytecodealliance/rustix>
+- Version: 1.1.4
+- License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 
 ## unicode-width
 

@@ -1,6 +1,6 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** Phase 4 complete — Phase 5 next
+- **Status:** Phase 5 complete — Phase 6 next
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -44,6 +44,11 @@
 - [x] Add bounded contiguous update replay with explicit resnapshot-on-gap.
 - [x] Make one-shot event overflow observable without coupling snapshots to
   PTY, renderer, protocol, or serialization types.
+- [x] Add a project-owned Linux PTY/session interface with safe owned
+  descriptors and a nonblocking master.
+- [x] Select the rustix plus exec-first helper backend in ADR 0002.
+- [x] Validate controlling-terminal/session/process-group invariants, cwd,
+  environment, login argv, resize, bidirectional I/O, exit, and group signals.
 
 ## Goal
 
@@ -408,8 +413,13 @@ Validate:
 - no unsafe allocator/runtime work in a post-fork child;
 - descriptor inheritance and close-on-exec behavior.
 
-Record the chosen implementation in a follow-up ADR before it becomes a public
-crate contract.
+The selected implementation is recorded in
+[ADR 0002](../adr/0002-linux-pty-backend.md). `splinterm-pty` uses rustix for
+safe owned-descriptor PTY operations and executes a small helper before
+performing session and controlling-terminal setup. This avoids a first-party
+post-fork callback after Tokio has started. The PTY master is nonblocking and
+cloneable for future Tokio `AsyncFd` registration without making the PTY crate
+runtime-dependent.
 
 ### Phase 6: one live Splint in `splinterd`
 
@@ -615,11 +625,11 @@ Do not proceed to the Wayland/rendering milestone until:
 
 ## Immediate next task
 
-Phase 0 is complete for the initial corpus. Begin Phase 1:
+Phase 5 is complete. Begin Phase 6:
 
-> Create `splinterm-terminal` and port Foot's color source, attributes, cell,
-> coordinate, range, cursor, scroll-region, and row types with provenance and
-> focused tests.
+> Add one daemon-owned `LiveSplint` actor that continuously consumes the
+> nonblocking PTY, feeds `splinterm-terminal`, serializes input/resize/exit, and
+> reaps the child even while no clients are attached.
 
-Do not begin grid algorithms until the foundational representations and their
-memory-size baseline are reviewed.
+Do not expose terminal content through the existing development socket until
+the bounded, peer-verified Phase 7 protocol foundation is in place.
