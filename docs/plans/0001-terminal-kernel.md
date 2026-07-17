@@ -1,6 +1,6 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** Phase 6 complete — Phase 7 next
+- **Status:** Phase 7 complete — Phase 8 next
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -59,6 +59,19 @@
   including actor-drop and daemon-shutdown cleanup.
 - [x] Start exactly one live shell transactionally when the first Dojo is
   created and reflect running/exit state in the persistent model.
+- [x] Replace newline JSON with bounded length-prefixed frames and a mandatory
+  version-range handshake carrying negotiated server limits.
+- [x] Add nonzero monotonic request IDs, stable error codes, connection caps,
+  handshake/write deadlines, and bounded outbound queues.
+- [x] Harden the Unix endpoint to owner-only directory/socket modes and reject
+  peers whose kernel-reported UID differs from the daemon UID.
+- [x] Gate shell creation and all terminal access behind the explicit
+  `SPLINTERM_ENABLE_DEV_ATTACH=1` development policy.
+- [x] Add separate wire snapshot DTOs, incarnation checks, atomic
+  snapshot-plus-subscribe, bounded subscriptions, ordered stream sequences,
+  explicit detach, and guaranteed resynchronization markers.
+- [x] Add development client operations for snapshot, literal input, resize,
+  and explicit termination without exposing terminal internals as wire types.
 
 ## Goal
 
@@ -482,9 +495,26 @@ foundation already required by the research plan:
 - revision gaps and `ResyncRequired`;
 - explicit detach and cancellation.
 
-Initial terminal access may remain test-only behind an explicit development
-flag until the trusted graphical consent UI exists. Do not accidentally declare
-an unrestricted same-UID socket to be the supported AI API.
+Terminal access is test-only behind `SPLINTERM_ENABLE_DEV_ATTACH=1` until the
+trusted graphical consent UI exists. Without it, shell creation, live identity,
+snapshots, subscriptions, input, resize, and termination return the stable
+`development_feature_disabled` error. Same-UID verification establishes local
+identity but does not itself grant terminal authority.
+
+Phase 7 uses network-order 32-bit length-prefixed JSON frames with an 8 MiB hard
+limit. A version-range hello is mandatory before requests. The socket parent is
+owner-only (`0700`), the socket is `0600`, Linux peer credentials must match the
+daemon effective UID, and simultaneous connections and outbound queues are
+bounded. Request IDs are nonzero and monotonically increasing per connection.
+
+Attach is serialized atomically inside the live actor: it returns revision `R`
+and installs the subscription before later updates. Wire updates use owned
+semantic snapshots, sequence numbers, Splint/process incarnation, and a
+reserved control queue for `resync_required`. Detach or disconnect cancels only
+the subscription; neither terminates the shell. Protocol DTOs remain separate
+from terminal and daemon runtime types.
+
+This development path is not a supported AI or automation authorization API.
 
 Development operations:
 
@@ -650,11 +680,10 @@ Do not proceed to the Wayland/rendering milestone until:
 
 ## Immediate next task
 
-Phase 6 is complete. Begin Phase 7:
+Phase 7 is complete. Begin Phase 8:
 
-> Add the bounded, version-negotiated, peer-UID-verified development attach
-> protocol with request IDs, authorization checks, subscription limits, and
-> explicit revision resynchronization.
+> Automate the complete isolated-daemon scenario: create, input, semantic
+> snapshot, resize, detach, continued output, reattach, subscriber overflow and
+> resynchronization, explicit termination, and cleanup.
 
-Do not treat the development socket as a supported automation API or expose it
-beyond the local authenticated boundary.
+Keep the development attach policy explicit and disabled by default.

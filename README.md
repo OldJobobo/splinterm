@@ -40,22 +40,25 @@ The initial daemon uses newline-delimited JSON over a Unix socket.
 kernel, borrowed semantic snapshots, monotonic revisions, and bounded update
 replay. `splinterm-pty` provides the tested Linux PTY/process boundary.
 `splinterd` now owns one live shell actor that continuously consumes its PTY,
-tracks terminal state, and survives client disconnection. Secure terminal
-attach operations, persistence, protocol conversion, and Wayland remain to be
-connected. The wire format is versioned from the start.
+tracks terminal state, and survives client disconnection. The local protocol
+uses bounded framed messages, version negotiation, request IDs, peer-UID
+verification, owner-only socket permissions, and explicit resynchronization.
+Persistence and Wayland remain to be connected.
 
 ## Try the scaffold
 
 ```bash
 cargo build
 
-# Terminal 1
-cargo run -p splinterd
+# Terminal 1 — terminal access is deliberately opt-in during development
+SPLINTERM_ENABLE_DEV_ATTACH=1 cargo run -p splinterd
 
 # Terminal 2
 cargo run -p splinterm -- ping
 cargo run -p splinterm -- new main
 cargo run -p splinterm -- list
+cargo run -p splinterm -- send $'printf "hello from the PTY\\n"\n'
+cargo run -p splinterm -- snapshot
 ```
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
