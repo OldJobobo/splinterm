@@ -1,0 +1,18 @@
+[package]
+name = "splinterm-pty"
+description = "Linux PTY and child-process boundary for Splinterm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true
