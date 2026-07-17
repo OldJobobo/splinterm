@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::Window;
+use crate::{SplintId, SplintState, Window};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DojoId(Uuid);
@@ -80,6 +80,22 @@ impl Lair {
         Ok(&self.dojos[&id])
     }
 
+    pub fn remove_dojo(&mut self, id: DojoId) -> Option<Dojo> {
+        self.dojos.remove(&id)
+    }
+
+    pub fn set_splint_state(&mut self, id: SplintId, state: SplintState) -> bool {
+        for dojo in self.dojos.values_mut() {
+            for window in &mut dojo.windows {
+                if let Some(splint) = window.root.find_splint_mut(id) {
+                    splint.state = state;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     #[must_use]
     pub fn dojos(&self) -> impl ExactSizeIterator<Item = &Dojo> {
         self.dojos.values()
@@ -97,6 +113,22 @@ pub enum LairError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_state_can_transition_and_failed_creation_can_roll_back() {
+        let mut lair = Lair::new();
+        let dojo = lair
+            .create_dojo("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .clone();
+        let splint_id = match &dojo.windows[0].root {
+            crate::LayoutNode::Leaf(splint) => splint.id,
+            crate::LayoutNode::Branch { .. } => unreachable!(),
+        };
+        assert!(lair.set_splint_state(splint_id, SplintState::Running));
+        assert_eq!(lair.remove_dojo(dojo.id).unwrap().id, dojo.id);
+        assert_eq!(lair.dojos().count(), 0);
+    }
 
     #[test]
     fn rejects_duplicate_dojo_names() {

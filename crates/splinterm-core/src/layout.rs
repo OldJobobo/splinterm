@@ -94,6 +94,25 @@ impl LayoutNode {
             Self::Branch { first, second, .. } => first.splint_count() + second.splint_count(),
         }
     }
+
+    #[must_use]
+    pub fn find_splint(&self, id: SplintId) -> Option<&Splint> {
+        match self {
+            Self::Leaf(splint) => (splint.id == id).then_some(splint),
+            Self::Branch { first, second, .. } => {
+                first.find_splint(id).or_else(|| second.find_splint(id))
+            }
+        }
+    }
+
+    pub fn find_splint_mut(&mut self, id: SplintId) -> Option<&mut Splint> {
+        match self {
+            Self::Leaf(splint) => (splint.id == id).then_some(splint),
+            Self::Branch { first, second, .. } => first
+                .find_splint_mut(id)
+                .or_else(|| second.find_splint_mut(id)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
