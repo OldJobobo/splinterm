@@ -109,6 +109,7 @@ impl Row {
     /// Panics if the range is reversed or extends past the row.
     pub fn erase(&mut self, range: Range<usize>, background: Color) {
         self.assert_range(&range);
+        self.clear_wide_intersections(range.clone());
         let mut attributes = Attributes::default();
         attributes.set_background(background);
         for cell in &mut self.cells[range] {
@@ -131,12 +132,102 @@ impl Row {
     /// Panics if the range is reversed or extends past the row.
     pub fn fill(&mut self, range: Range<usize>, content: CellContent, attributes: Attributes) {
         self.assert_range(&range);
+        self.clear_wide_intersections(range.clone());
         for cell in &mut self.cells[range] {
             cell.set_content(content);
             cell.set_attributes(attributes);
             cell.attributes_mut().set_clean(false);
         }
         self.dirty = true;
+    }
+
+    /// Inserts blank cells, shifting existing content right and dropping the
+    /// rightmost cells.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `column` is outside the row.
+    pub fn insert_cells(&mut self, column: usize, count: usize, background: Color) {
+        assert!(
+            column < self.cells.len(),
+            "insert column must fit within the row"
+        );
+        let count = count.min(self.cells.len() - column);
+        if count == 0 {
+            return;
+        }
+        self.clear_wide_intersections(column..column + 1);
+        let truncation = self.cells.len() - count;
+        if truncation < self.cells.len() {
+            self.clear_wide_intersections(truncation..truncation + 1);
+        }
+        let end = self.cells.len() - count;
+        self.cells.copy_within(column..end, column + count);
+        self.erase(column..column + count, background);
+        self.repair_wide_cells();
+    }
+
+    /// Deletes cells, shifting following content left and erasing the tail.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `column` is outside the row.
+    pub fn delete_cells(&mut self, column: usize, count: usize, background: Color) {
+        assert!(
+            column < self.cells.len(),
+            "delete column must fit within the row"
+        );
+        let count = count.min(self.cells.len() - column);
+        if count == 0 {
+            return;
+        }
+        self.clear_wide_intersections(column..column + count);
+        if column + count < self.cells.len() {
+            self.clear_wide_intersections(column + count..column + count + 1);
+        }
+        self.cells.copy_within(column + count.., column);
+        self.erase(self.cells.len() - count..self.cells.len(), background);
+        self.repair_wide_cells();
+    }
+
+    /// Clears any complete wide-cell sequence intersecting a half-open range.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range does not fit within the row.
+    pub fn clear_wide_intersections(&mut self, range: Range<usize>) {
+        self.assert_range(&range);
+        let mut column = 0;
+        while column < self.cells.len() {
+            let width = if column + 1 < self.cells.len() {
+                match self.cells[column + 1].content() {
+                    CellContent::Spacer(remaining) if remaining > 0 => usize::try_from(remaining)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1),
+                    _ => 1,
+                }
+            } else {
+                1
+            };
+            let end = column.saturating_add(width).min(self.cells.len());
+            let valid = width > 1
+                && end - column == width
+                && (1..width).all(|offset| {
+                    self.cells[column + offset].content()
+                        == CellContent::Spacer(u32::try_from(width - offset).unwrap())
+                });
+            if valid {
+                if column < range.end && range.start < end {
+                    for cell in &mut self.cells[column..end] {
+                        *cell = Cell::default();
+                    }
+                    self.dirty = true;
+                }
+                column = end;
+            } else {
+                column += 1;
+            }
+        }
     }
 
     /// Returns whether positive spacer payloads form complete, descending
@@ -225,6 +316,41 @@ impl Row {
     fn mark_cells_clean(&mut self) {
         for cell in &mut self.cells {
             cell.attributes_mut().set_clean(true);
+        }
+    }
+
+    fn repair_wide_cells(&mut self) {
+        let mut column = 0;
+        while column < self.cells.len() {
+            let CellContent::Spacer(remaining) = self.cells[column].content() else {
+                column += 1;
+                continue;
+            };
+            if remaining == 0 {
+                column += 1;
+                continue;
+            }
+            let mut leader = column;
+            while leader > 0
+                && matches!(self.cells[leader].content(), CellContent::Spacer(value) if value > 0)
+            {
+                leader -= 1;
+            }
+            let expected_width = usize::try_from(remaining)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1);
+            let valid = leader < column
+                && leader + expected_width <= self.cells.len()
+                && (1..expected_width).all(|offset| {
+                    self.cells[leader + offset].content()
+                        == CellContent::Spacer(u32::try_from(expected_width - offset).unwrap())
+                });
+            if valid {
+                column = leader + expected_width;
+            } else {
+                self.cells[column].set_content(CellContent::Empty);
+                column += 1;
+            }
         }
     }
 

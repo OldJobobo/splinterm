@@ -1,0 +1,1519 @@
+//! Foot-derived terminal coordinator and command semantics.
+//!
+//! Printing and controls follow Foot 1.27.0 `terminal.c`, `commands.c`,
+//! `csi.c`, and `osc.c` at commit
+//! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
+
+use unicode_width::UnicodeWidthChar;
+
+use crate::{
+    ActiveScreen, Attributes, CellContent, Color, ColorSource, ComposedTable, Coordinate, Cursor,
+    Grid, MouseTracking, ScrollDirection, ScrollRegion, TerminalConfig, TerminalEvent,
+    TerminalModes,
+    vt::{Action, Param, Params, Parser, StringTerminator},
+};
+
+/// Renderer-independent terminal state and streaming VT parser.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Terminal {
+    normal: Grid,
+    alternate: Grid,
+    active: ActiveScreen,
+    parser: Parser,
+    config: TerminalConfig,
+    attributes: Attributes,
+    saved_attributes: Attributes,
+    scroll_region: ScrollRegion,
+    modes: TerminalModes,
+    tab_stops: Vec<bool>,
+    composed: ComposedTable,
+    title: String,
+    palette: [u32; 256],
+    initial_palette: [u32; 256],
+    default_colors: [u32; 3],
+    initial_default_colors: [u32; 3],
+    events: Vec<TerminalEvent>,
+}
+
+impl Terminal {
+    /// Constructs a terminal with normal and alternate screen buffers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either dimension is zero or outside Foot's signed coordinate
+    /// space, or if configured grid capacity overflows Foot's limit.
+    #[must_use]
+    pub fn new(columns: usize, rows: usize, config: TerminalConfig) -> Self {
+        assert!(
+            columns > 0 && rows > 0,
+            "terminal dimensions must be non-zero"
+        );
+        let requested = config.scrollback_lines.saturating_add(rows).max(rows);
+        let normal_capacity = requested
+            .checked_next_power_of_two()
+            .expect("normal grid capacity overflow")
+            .min(1_usize << 30);
+        assert!(normal_capacity >= rows, "normal grid capacity is too small");
+        let alternate_capacity = rows
+            .checked_next_power_of_two()
+            .expect("alternate grid capacity overflow")
+            .min(1_usize << 30);
+        assert!(
+            alternate_capacity >= rows,
+            "alternate grid capacity is too small"
+        );
+        assert!(config.tab_width > 0, "tab width must be non-zero");
+
+        let palette = default_palette();
+        let default_colors = [0x00ff_ffff, 0x0000_0000, 0x00ff_ffff];
+        let mut terminal = Self {
+            normal: Grid::with_screen_size(normal_capacity, columns, rows),
+            alternate: Grid::with_screen_size(alternate_capacity, columns, rows),
+            active: ActiveScreen::Normal,
+            parser: Parser::new(config.osc_limit, config.dcs_limit),
+            attributes: Attributes::default(),
+            saved_attributes: Attributes::default(),
+            scroll_region: ScrollRegion::new(0, i32::try_from(rows).expect("rows fit in i32")),
+            modes: TerminalModes::default(),
+            tab_stops: Vec::new(),
+            composed: ComposedTable::new(config.composed_limit),
+            title: String::new(),
+            palette,
+            initial_palette: palette,
+            default_colors,
+            initial_default_colors: default_colors,
+            events: Vec::new(),
+            config,
+        };
+        terminal.reset_tab_stops(columns);
+        terminal
+    }
+
+    /// Feeds arbitrary bytes into the persistent parser state.
+    pub fn advance(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            let mut reprocess = true;
+            while reprocess {
+                let (action, again) = self.parser.feed(byte);
+                if let Some(action) = action {
+                    self.dispatch(action);
+                }
+                reprocess = again;
+            }
+        }
+    }
+
+    /// Reflows the normal screen and resizes the alternate screen without
+    /// scrollback reflow.
+    ///
+    /// # Panics
+    ///
+    /// Panics if dimensions are zero, exceed Foot's coordinate limits, or
+    /// overflow the configured grid capacities.
+    pub fn resize(&mut self, columns: usize, rows: usize) {
+        let normal_capacity = self
+            .config
+            .scrollback_lines
+            .saturating_add(rows)
+            .max(rows)
+            .checked_next_power_of_two()
+            .expect("normal grid capacity overflow")
+            .min(1_usize << 30);
+        let alternate_capacity = rows
+            .checked_next_power_of_two()
+            .expect("alternate grid capacity overflow")
+            .min(1_usize << 30);
+        let composed = &self.composed;
+        self.normal
+            .resize_with_reflow(normal_capacity, columns, rows, |key| composed.width(key));
+        self.alternate
+            .resize_without_reflow(alternate_capacity, columns, rows);
+        self.scroll_region = ScrollRegion::new(0, i32::try_from(rows).expect("rows fit in i32"));
+        self.reset_tab_stops(columns);
+    }
+
+    /// Returns the active grid.
+    #[must_use]
+    pub fn grid(&self) -> &Grid {
+        match self.active {
+            ActiveScreen::Normal => &self.normal,
+            ActiveScreen::Alternate => &self.alternate,
+        }
+    }
+
+    /// Returns the selected screen buffer.
+    #[must_use]
+    pub const fn active_screen(&self) -> ActiveScreen {
+        self.active
+    }
+
+    /// Returns core mode state.
+    #[must_use]
+    pub const fn modes(&self) -> TerminalModes {
+        self.modes
+    }
+
+    /// Returns the current title.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Returns the current 256-color palette.
+    #[must_use]
+    pub const fn palette(&self) -> &[u32; 256] {
+        &self.palette
+    }
+
+    /// Returns default foreground, background, and cursor colors.
+    #[must_use]
+    pub const fn default_colors(&self) -> &[u32; 3] {
+        &self.default_colors
+    }
+
+    /// Drains semantic effects in parser order.
+    pub fn drain_events(&mut self) -> impl Iterator<Item = TerminalEvent> + '_ {
+        self.events.drain(..)
+    }
+
+    fn push_event(&mut self, event: TerminalEvent) {
+        if self.events.len() < self.config.event_limit {
+            self.events.push(event);
+        }
+    }
+
+    fn grid_mut(&mut self) -> &mut Grid {
+        match self.active {
+            ActiveScreen::Normal => &mut self.normal,
+            ActiveScreen::Alternate => &mut self.alternate,
+        }
+    }
+
+    fn dispatch(&mut self, action: Action) {
+        match action {
+            Action::Print(character) => self.print(character),
+            Action::Execute(byte) => self.execute(byte),
+            Action::Esc {
+                intermediates,
+                intermediate_count,
+                final_byte,
+            } => self.esc(&intermediates[..intermediate_count], final_byte),
+            Action::Csi {
+                private,
+                intermediates,
+                intermediate_count,
+                params,
+                final_byte,
+            } => self.csi(
+                private,
+                &intermediates[..intermediate_count],
+                &params,
+                final_byte,
+            ),
+            Action::Osc(payload, terminator) => self.osc(&payload, terminator),
+            Action::Dcs(_) => self.push_event(TerminalEvent::UnsupportedSequence("DCS")),
+            Action::StringTruncated(kind) => {
+                self.push_event(TerminalEvent::StringTruncated(kind));
+            }
+        }
+    }
+
+    fn print(&mut self, character: char) {
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width == 0 {
+            self.combine(character);
+            return;
+        }
+        let columns = self.grid().columns();
+        if width > columns {
+            return;
+        }
+
+        let mut cursor = self.grid().cursor();
+        if cursor.deferred_wrap() {
+            if self.modes.auto_margin {
+                let row = usize::try_from(cursor.position().row).expect("cursor row is valid");
+                self.grid_mut()
+                    .row_mut(cursor.position().row)
+                    .expect("visible row")
+                    .set_linebreak(false);
+                cursor.set_deferred_wrap(false);
+                cursor.set_position(Coordinate::new(0, i32::try_from(row).unwrap()));
+                self.grid_mut().set_cursor(cursor);
+                self.line_feed();
+                cursor = self.grid().cursor();
+            } else {
+                cursor.set_deferred_wrap(false);
+            }
+        }
+
+        let mut column = usize::try_from(cursor.position().column).expect("cursor column is valid");
+        let mut write_width = width;
+        if column + width > columns && self.modes.auto_margin {
+            let row_number = cursor.position().row;
+            for pad in column..columns {
+                self.grid_mut().row_mut(row_number).expect("visible row")[pad]
+                    .set_content(CellContent::Spacer(0));
+            }
+            self.grid_mut()
+                .row_mut(row_number)
+                .expect("visible row")
+                .set_linebreak(false);
+            cursor.set_position(Coordinate::new(0, cursor.position().row));
+            cursor.set_deferred_wrap(false);
+            self.grid_mut().set_cursor(cursor);
+            self.line_feed();
+            cursor = self.grid().cursor();
+            column = 0;
+        } else if column + width > columns {
+            // Foot clips a wide glyph at the margin when autowrap is disabled;
+            // no continuation cell can be stored beyond the row.
+            write_width = 1;
+        }
+
+        let row_number = cursor.position().row;
+        if self.modes.insert {
+            let background = self.attributes.background();
+            self.grid_mut()
+                .row_mut(row_number)
+                .expect("visible row")
+                .insert_cells(column, write_width, background);
+        }
+        let attributes = self.attributes;
+        let row = self.grid_mut().row_mut(row_number).expect("visible row");
+        row.clear_wide_intersections(column..column + write_width);
+        row[column].set_content(CellContent::Scalar(character));
+        row[column].set_attributes(attributes);
+        row[column].attributes_mut().set_clean(false);
+        for offset in 1..write_width {
+            row[column + offset].set_content(CellContent::Spacer(
+                u32::try_from(write_width - offset).expect("character width fits in u32"),
+            ));
+            row[column + offset].set_attributes(Attributes::default());
+        }
+        row.set_linebreak(true);
+
+        if column + write_width >= columns {
+            cursor.set_position(Coordinate::new(
+                i32::try_from(columns - 1).unwrap(),
+                cursor.position().row,
+            ));
+            cursor.set_deferred_wrap(self.modes.auto_margin);
+        } else {
+            cursor.set_position(Coordinate::new(
+                i32::try_from(column + write_width).unwrap(),
+                cursor.position().row,
+            ));
+        }
+        self.grid_mut().set_cursor(cursor);
+    }
+
+    fn combine(&mut self, character: char) {
+        let cursor = self.grid().cursor();
+        let column = usize::try_from(cursor.position().column).expect("cursor column is valid");
+        let mut base_column = if cursor.deferred_wrap() {
+            column
+        } else if column > 0 {
+            column - 1
+        } else {
+            return;
+        };
+        let row_number = cursor.position().row;
+        while base_column > 0
+            && matches!(
+                self.grid().row(row_number).expect("visible row")[base_column].content(),
+                CellContent::Spacer(remaining) if remaining > 0
+            )
+        {
+            base_column -= 1;
+        }
+        let content = self.grid().row(row_number).expect("visible row")[base_column].content();
+        let mut sequence = match content {
+            CellContent::Scalar(base) => vec![base],
+            CellContent::Composed(key) => self
+                .composed
+                .chars(key)
+                .map_or_else(Vec::new, ToOwned::to_owned),
+            _ => return,
+        };
+        if sequence.len() >= 64 {
+            return;
+        }
+        sequence.push(character);
+        if let Some(key) = self.composed.intern(sequence) {
+            self.grid_mut().row_mut(row_number).expect("visible row")[base_column]
+                .set_content(CellContent::Composed(key));
+        }
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            0x07 => self.push_event(TerminalEvent::Bell),
+            0x08 => self.backspace(),
+            0x09 => self.tab(1, true),
+            0x0a..=0x0c => self.line_feed(),
+            0x0d => self.carriage_return(),
+            _ => {}
+        }
+    }
+
+    fn clear_deferred_wrap(&mut self, home_column: bool) {
+        let mut cursor = self.grid().cursor();
+        cursor.set_deferred_wrap(false);
+        if home_column {
+            cursor.set_position(Coordinate::new(0, cursor.position().row));
+        }
+        self.grid_mut().set_cursor(cursor);
+    }
+
+    fn carriage_return(&mut self) {
+        let mut cursor = self.grid().cursor();
+        cursor.set_position(Coordinate::new(0, cursor.position().row));
+        cursor.set_deferred_wrap(false);
+        self.grid_mut().set_cursor(cursor);
+    }
+
+    fn line_feed(&mut self) {
+        let mut cursor = self.grid().cursor();
+        cursor.set_deferred_wrap(false);
+        let row = cursor.position().row;
+        if row == self.scroll_region.end() - 1 {
+            let background = self.attributes.background();
+            let region = self.scroll_region;
+            self.grid_mut()
+                .scroll(ScrollDirection::Forward, region, 1, background);
+        } else {
+            let bottom = i32::try_from(self.grid().screen_rows() - 1).unwrap();
+            cursor.set_position(Coordinate::new(
+                cursor.position().column,
+                (row + 1).min(bottom),
+            ));
+            self.grid_mut().set_cursor(cursor);
+        }
+    }
+
+    fn reverse_index(&mut self) {
+        let mut cursor = self.grid().cursor();
+        cursor.set_deferred_wrap(false);
+        if cursor.position().row == self.scroll_region.start() {
+            let background = self.attributes.background();
+            let region = self.scroll_region;
+            self.grid_mut()
+                .scroll(ScrollDirection::Reverse, region, 1, background);
+        } else {
+            cursor.set_position(Coordinate::new(
+                cursor.position().column,
+                (cursor.position().row - 1).max(0),
+            ));
+            self.grid_mut().set_cursor(cursor);
+        }
+    }
+
+    fn backspace(&mut self) {
+        let mut cursor = self.grid().cursor();
+        if cursor.deferred_wrap() {
+            cursor.set_deferred_wrap(false);
+        } else if cursor.position().column > 0 {
+            cursor.set_position(Coordinate::new(
+                cursor.position().column - 1,
+                cursor.position().row,
+            ));
+        } else if self.modes.reverse_wrap && cursor.position().row > 0 {
+            cursor.set_position(Coordinate::new(
+                i32::try_from(self.grid().columns() - 1).unwrap(),
+                cursor.position().row - 1,
+            ));
+        }
+        self.grid_mut().set_cursor(cursor);
+    }
+
+    fn tab(&mut self, count: usize, forward: bool) {
+        let mut cursor = self.grid().cursor();
+        let mut column = usize::try_from(cursor.position().column).unwrap();
+        for _ in 0..count {
+            if forward {
+                column = ((column + 1)..self.tab_stops.len())
+                    .find(|&candidate| self.tab_stops[candidate])
+                    .unwrap_or(self.tab_stops.len() - 1);
+            } else {
+                column = (0..column)
+                    .rev()
+                    .find(|&candidate| self.tab_stops[candidate])
+                    .unwrap_or(0);
+            }
+        }
+        cursor.set_position(Coordinate::new(
+            i32::try_from(column).unwrap(),
+            cursor.position().row,
+        ));
+        cursor.set_deferred_wrap(false);
+        self.grid_mut().set_cursor(cursor);
+    }
+
+    fn esc(&mut self, intermediates: &[u8], final_byte: u8) {
+        if !intermediates.is_empty() {
+            return;
+        }
+        match final_byte {
+            b'7' => self.save_cursor(),
+            b'8' => self.restore_cursor(),
+            b'D' => self.line_feed(),
+            b'E' => {
+                self.carriage_return();
+                self.line_feed();
+            }
+            b'H' => {
+                let column = usize::try_from(self.grid().cursor().position().column).unwrap();
+                self.tab_stops[column] = true;
+            }
+            b'M' => self.reverse_index(),
+            b'c' => self.reset(),
+            b'=' => self.modes.application_keypad = true,
+            b'>' => self.modes.application_keypad = false,
+            _ => {}
+        }
+    }
+
+    fn csi(&mut self, private: Option<u8>, intermediates: &[u8], params: &Params, final_byte: u8) {
+        if !intermediates.is_empty() {
+            self.push_event(TerminalEvent::UnsupportedSequence("CSI intermediate"));
+            return;
+        }
+        if private == Some(b'?') && matches!(final_byte, b'h' | b'l') {
+            self.set_private_modes(params, final_byte == b'h');
+            return;
+        }
+        if private.is_some()
+            && !(final_byte == b'c' || (private == Some(b'?') && final_byte == b'n'))
+        {
+            return;
+        }
+        match final_byte {
+            b'A' => self.move_cursor(0, -param_count(params.get(0))),
+            b'B' | b'e' => self.move_cursor(0, param_count(params.get(0))),
+            b'C' | b'a' => self.move_cursor(param_count(params.get(0)), 0),
+            b'D' => self.move_cursor(-param_count(params.get(0)), 0),
+            b'E' => {
+                self.move_cursor(0, param_count(params.get(0)));
+                self.carriage_return();
+            }
+            b'F' => {
+                self.move_cursor(0, -param_count(params.get(0)));
+                self.carriage_return();
+            }
+            b'G' | b'`' => self.set_column(params.get(0).value(1, true).saturating_sub(1)),
+            b'd' => self.set_row(params.get(0).value(1, true).saturating_sub(1)),
+            b'H' | b'f' => self.set_position(params),
+            b'J' => self.erase_display(params.get(0).value(0, false)),
+            b'K' => self.erase_line(params.get(0).value(0, false)),
+            b'@' => self.insert_characters(params.get(0)),
+            b'P' => self.delete_characters(params.get(0)),
+            b'X' => self.erase_characters(params.get(0)),
+            b'L' => self.insert_lines(params.get(0)),
+            b'M' => self.delete_lines(params.get(0)),
+            b'S' => self.scroll_lines(ScrollDirection::Forward, params.get(0)),
+            b'T' => self.scroll_lines(ScrollDirection::Reverse, params.get(0)),
+            b'I' => self.tab(param_usize(params.get(0)), true),
+            b'Z' => self.tab(param_usize(params.get(0)), false),
+            b'g' => self.clear_tabs(params.get(0).value(0, false)),
+            b'h' | b'l' if params.get(0).value(0, false) == 4 => {
+                self.modes.insert = final_byte == b'h';
+            }
+            b'm' => self.sgr(params),
+            b'r' => self.set_scroll_region(params),
+            b's' => self.save_cursor(),
+            b'u' => self.restore_cursor(),
+            b'n' => self.device_status(private, params.get(0).value(0, false)),
+            b'c' => self.device_attributes(private),
+            _ => {}
+        }
+    }
+
+    fn move_cursor(&mut self, column_delta: i32, row_delta: i32) {
+        let mut cursor = self.grid().cursor();
+        let position = cursor.position();
+        let max_column = i32::try_from(self.grid().columns() - 1).unwrap();
+        let (min_row, max_row) = if self.modes.origin {
+            (self.scroll_region.start(), self.scroll_region.end() - 1)
+        } else {
+            (0, i32::try_from(self.grid().screen_rows() - 1).unwrap())
+        };
+        cursor.set_position(Coordinate::new(
+            position
+                .column
+                .saturating_add(column_delta)
+                .clamp(0, max_column),
+            position
+                .row
+                .saturating_add(row_delta)
+                .clamp(min_row, max_row),
+        ));
+        cursor.set_deferred_wrap(false);
+        self.grid_mut().set_cursor(cursor);
+    }
+
+    fn set_column(&mut self, column: u32) {
+        let mut cursor = self.grid().cursor();
+        cursor.set_position(Coordinate::new(
+            i32::try_from(column)
+                .unwrap_or(i32::MAX)
+                .min(i32::try_from(self.grid().columns() - 1).unwrap()),
+            cursor.position().row,
+        ));
+        cursor.set_deferred_wrap(false);
+        self.grid_mut().set_cursor(cursor);
+    }
+
+    fn set_row(&mut self, row: u32) {
+        let mut cursor = self.grid().cursor();
+        let base = if self.modes.origin {
+            self.scroll_region.start()
+        } else {
+            0
+        };
+        let max = if self.modes.origin {
+            self.scroll_region.end() - 1
+        } else {
+            i32::try_from(self.grid().screen_rows() - 1).unwrap()
+        };
+        cursor.set_position(Coordinate::new(
+            cursor.position().column,
+            base.saturating_add(i32::try_from(row).unwrap_or(i32::MAX))
+                .min(max),
+        ));
+        cursor.set_deferred_wrap(false);
+        self.grid_mut().set_cursor(cursor);
+    }
+
+    fn set_position(&mut self, params: &Params) {
+        self.set_row(params.get(0).value(1, true).saturating_sub(1));
+        self.set_column(params.get(1).value(1, true).saturating_sub(1));
+    }
+
+    fn erase_line(&mut self, mode: u32) {
+        self.clear_deferred_wrap(false);
+        let cursor = self.grid().cursor().position();
+        let column = usize::try_from(cursor.column).unwrap();
+        let columns = self.grid().columns();
+        let background = self.attributes.background();
+        let range = match mode {
+            0 => column..columns,
+            1 => 0..column + 1,
+            2 => 0..columns,
+            _ => return,
+        };
+        self.grid_mut()
+            .row_mut(cursor.row)
+            .expect("visible row")
+            .erase(range, background);
+    }
+
+    fn erase_display(&mut self, mode: u32) {
+        self.clear_deferred_wrap(false);
+        let cursor = self.grid().cursor().position();
+        let row = usize::try_from(cursor.row).unwrap();
+        let column = usize::try_from(cursor.column).unwrap();
+        let columns = self.grid().columns();
+        let rows = self.grid().screen_rows();
+        let background = self.attributes.background();
+        match mode {
+            0 => {
+                self.grid_mut()
+                    .row_mut(cursor.row)
+                    .unwrap()
+                    .erase(column..columns, background);
+                for current in row + 1..rows {
+                    self.grid_mut()
+                        .row_mut(i32::try_from(current).unwrap())
+                        .unwrap()
+                        .erase_all(background);
+                }
+            }
+            1 => {
+                for current in 0..row {
+                    self.grid_mut()
+                        .row_mut(i32::try_from(current).unwrap())
+                        .unwrap()
+                        .erase_all(background);
+                }
+                self.grid_mut()
+                    .row_mut(cursor.row)
+                    .unwrap()
+                    .erase(0..column + 1, background);
+            }
+            2 => {
+                for current in 0..rows {
+                    self.grid_mut()
+                        .row_mut(i32::try_from(current).unwrap())
+                        .unwrap()
+                        .erase_all(background);
+                }
+            }
+            3 => self.grid_mut().clear_scrollback(),
+            _ => {}
+        }
+    }
+
+    fn insert_characters(&mut self, param: Param) {
+        self.clear_deferred_wrap(false);
+        let cursor = self.grid().cursor().position();
+        let background = self.attributes.background();
+        self.grid_mut().row_mut(cursor.row).unwrap().insert_cells(
+            usize::try_from(cursor.column).unwrap(),
+            param_usize(param),
+            background,
+        );
+    }
+
+    fn delete_characters(&mut self, param: Param) {
+        self.clear_deferred_wrap(false);
+        let cursor = self.grid().cursor().position();
+        let background = self.attributes.background();
+        self.grid_mut().row_mut(cursor.row).unwrap().delete_cells(
+            usize::try_from(cursor.column).unwrap(),
+            param_usize(param),
+            background,
+        );
+    }
+
+    fn erase_characters(&mut self, param: Param) {
+        self.clear_deferred_wrap(false);
+        let cursor = self.grid().cursor().position();
+        let start = usize::try_from(cursor.column).unwrap();
+        let end = start
+            .saturating_add(param_usize(param))
+            .min(self.grid().columns());
+        let background = self.attributes.background();
+        self.grid_mut()
+            .row_mut(cursor.row)
+            .unwrap()
+            .erase(start..end, background);
+    }
+
+    fn insert_lines(&mut self, param: Param) {
+        self.clear_deferred_wrap(true);
+        let row = self.grid().cursor().position().row;
+        if row >= self.scroll_region.start() && row < self.scroll_region.end() {
+            let region = ScrollRegion::new(row, self.scroll_region.end());
+            let count =
+                param_usize(param).min(usize::try_from(region.end() - region.start()).unwrap());
+            let background = self.attributes.background();
+            self.grid_mut()
+                .scroll(ScrollDirection::Reverse, region, count, background);
+        }
+    }
+
+    fn delete_lines(&mut self, param: Param) {
+        self.clear_deferred_wrap(true);
+        let row = self.grid().cursor().position().row;
+        if row >= self.scroll_region.start() && row < self.scroll_region.end() {
+            let region = ScrollRegion::new(row, self.scroll_region.end());
+            let count =
+                param_usize(param).min(usize::try_from(region.end() - region.start()).unwrap());
+            let background = self.attributes.background();
+            self.grid_mut()
+                .scroll(ScrollDirection::Forward, region, count, background);
+        }
+    }
+
+    fn scroll_lines(&mut self, direction: ScrollDirection, param: Param) {
+        let height =
+            usize::try_from(self.scroll_region.end() - self.scroll_region.start()).unwrap();
+        let count = param_usize(param).min(height);
+        let background = self.attributes.background();
+        let region = self.scroll_region;
+        self.grid_mut().scroll(direction, region, count, background);
+    }
+
+    fn set_scroll_region(&mut self, params: &Params) {
+        let rows = u32::try_from(self.grid().screen_rows()).unwrap();
+        let start = params.get(0).value(1, true).saturating_sub(1).min(rows - 1);
+        let end = params.get(1).value(rows, true).min(rows);
+        if end > start + 1 {
+            self.scroll_region =
+                ScrollRegion::new(i32::try_from(start).unwrap(), i32::try_from(end).unwrap());
+            let home = if self.modes.origin {
+                self.scroll_region.start()
+            } else {
+                0
+            };
+            self.grid_mut()
+                .set_cursor(Cursor::new(Coordinate::new(0, home)));
+        }
+    }
+
+    fn save_cursor(&mut self) {
+        let cursor = self.grid().cursor();
+        self.grid_mut().set_saved_cursor(cursor);
+        self.saved_attributes = self.attributes;
+    }
+
+    fn restore_cursor(&mut self) {
+        let cursor = self.grid().saved_cursor();
+        self.grid_mut().set_cursor(cursor);
+        self.attributes = self.saved_attributes;
+    }
+
+    fn set_private_modes(&mut self, params: &Params, enabled: bool) {
+        for index in 0..params.count().max(1) {
+            match params.get(index).value(0, false) {
+                1 => self.modes.application_cursor = enabled,
+                5 => self.modes.reverse_video = enabled,
+                6 => {
+                    self.modes.origin = enabled;
+                    let row = if enabled {
+                        self.scroll_region.start()
+                    } else {
+                        0
+                    };
+                    self.grid_mut()
+                        .set_cursor(Cursor::new(Coordinate::new(0, row)));
+                }
+                7 => {
+                    self.modes.auto_margin = enabled;
+                    let mut cursor = self.grid().cursor();
+                    cursor.set_deferred_wrap(false);
+                    self.grid_mut().set_cursor(cursor);
+                }
+                12 => self.modes.cursor_blink = enabled,
+                25 => self.modes.cursor_visible = enabled,
+                45 => self.modes.reverse_wrap = enabled,
+                47 | 1047 => self.select_alternate(enabled, false),
+                66 => self.modes.application_keypad = enabled,
+                1000 => {
+                    self.modes.mouse_tracking = if enabled {
+                        MouseTracking::Normal
+                    } else {
+                        MouseTracking::None
+                    };
+                }
+                1002 => {
+                    self.modes.mouse_tracking = if enabled {
+                        MouseTracking::Button
+                    } else {
+                        MouseTracking::None
+                    };
+                }
+                1003 => {
+                    self.modes.mouse_tracking = if enabled {
+                        MouseTracking::Any
+                    } else {
+                        MouseTracking::None
+                    };
+                }
+                1006 => self.modes.sgr_mouse = enabled,
+                1048 => {
+                    if enabled {
+                        self.save_cursor();
+                    } else {
+                        self.restore_cursor();
+                    }
+                }
+                1049 => self.select_alternate(enabled, true),
+                1004 => self.modes.focus_reporting = enabled,
+                2004 => self.modes.bracketed_paste = enabled,
+                _ => {}
+            }
+        }
+    }
+
+    fn select_alternate(&mut self, enabled: bool, save_restore: bool) {
+        if enabled && self.active == ActiveScreen::Normal {
+            if save_restore {
+                self.save_cursor();
+            }
+            let normal_cursor = self.normal.cursor().position();
+            let background = self.attributes.background();
+            self.alternate.reset_visible(background);
+            let alternate_position = clamp_position(&self.alternate, normal_cursor);
+            self.alternate.set_cursor(Cursor::new(alternate_position));
+            self.active = ActiveScreen::Alternate;
+        } else if !enabled && self.active == ActiveScreen::Alternate {
+            let alternate_cursor = self.alternate.cursor().position();
+            self.active = ActiveScreen::Normal;
+            let normal_position = clamp_position(&self.normal, alternate_cursor);
+            self.normal.set_cursor(Cursor::new(normal_position));
+            if save_restore {
+                self.restore_cursor();
+            }
+        }
+    }
+
+    fn sgr(&mut self, params: &Params) {
+        if params.count() == 0 {
+            self.attributes = Attributes::default();
+            return;
+        }
+        let mut index = 0;
+        while index < params.count() {
+            let code = params.get(index).value(0, false);
+            match code {
+                0 => self.attributes = Attributes::default(),
+                1 => self.attributes.set_bold(true),
+                2 => self.attributes.set_dim(true),
+                3 => self.attributes.set_italic(true),
+                4 | 21 => self.attributes.set_underline(true),
+                5 => self.attributes.set_blink(true),
+                7 => self.attributes.set_reverse(true),
+                8 => self.attributes.set_conceal(true),
+                9 => self.attributes.set_strikethrough(true),
+                22 => {
+                    self.attributes.set_bold(false);
+                    self.attributes.set_dim(false);
+                }
+                23 => self.attributes.set_italic(false),
+                24 => self.attributes.set_underline(false),
+                25 => self.attributes.set_blink(false),
+                27 => self.attributes.set_reverse(false),
+                28 => self.attributes.set_conceal(false),
+                29 => self.attributes.set_strikethrough(false),
+                30..=37 => self
+                    .attributes
+                    .set_foreground(Color::new(ColorSource::Base16, code - 30)),
+                39 => self.attributes.set_foreground(Color::default()),
+                40..=47 => self
+                    .attributes
+                    .set_background(Color::new(ColorSource::Base16, code - 40)),
+                49 => self.attributes.set_background(Color::default()),
+                90..=97 => self
+                    .attributes
+                    .set_foreground(Color::new(ColorSource::Base16, code - 90 + 8)),
+                100..=107 => self
+                    .attributes
+                    .set_background(Color::new(ColorSource::Base16, code - 100 + 8)),
+                38 | 48 => {
+                    if let Some((color, consumed)) = extended_color(params, index) {
+                        if code == 38 {
+                            self.attributes.set_foreground(color);
+                        } else {
+                            self.attributes.set_background(color);
+                        }
+                        index += consumed;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+
+    fn device_status(&mut self, private: Option<u8>, code: u32) {
+        match (private, code) {
+            (None, 5) => self.push_event(TerminalEvent::PtyWrite(b"\x1b[0n".to_vec())),
+            (None | Some(b'?'), 6) => {
+                let position = self.grid().cursor().position();
+                let row = if self.modes.origin {
+                    position.row - self.scroll_region.start()
+                } else {
+                    position.row
+                } + 1;
+                let prefix = if private == Some(b'?') { "?" } else { "" };
+                self.push_event(TerminalEvent::PtyWrite(
+                    format!("\x1b[{prefix}{row};{}R", position.column + 1).into_bytes(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    fn device_attributes(&mut self, private: Option<u8>) {
+        let reply = match private {
+            None => Some(b"\x1b[?62;22c".to_vec()),
+            Some(b'>') => Some(b"\x1b[>0;1;0c".to_vec()),
+            _ => None,
+        };
+        if let Some(reply) = reply {
+            self.push_event(TerminalEvent::PtyWrite(reply));
+        }
+    }
+
+    fn clear_tabs(&mut self, mode: u32) {
+        match mode {
+            0 => {
+                let column = usize::try_from(self.grid().cursor().position().column).unwrap();
+                self.tab_stops[column] = false;
+            }
+            3 => self.tab_stops.fill(false),
+            _ => {}
+        }
+    }
+
+    fn osc(&mut self, payload: &[u8], terminator: StringTerminator) {
+        let Ok(text) = std::str::from_utf8(payload) else {
+            return;
+        };
+        let (command, data) = text.split_once(';').unwrap_or((text, ""));
+        match command {
+            "0" | "2" => {
+                data.clone_into(&mut self.title);
+                self.push_event(TerminalEvent::TitleChanged(self.title.clone()));
+            }
+            "4" => self.osc_palette(data, terminator),
+            "10" | "11" | "12" => {
+                let slot = command.parse::<usize>().unwrap() - 10;
+                if data == "?" {
+                    let reply = osc_color_reply(command, self.default_colors[slot], terminator);
+                    self.push_event(TerminalEvent::PtyWrite(reply));
+                } else if let Some(color) = parse_rgb(data) {
+                    self.default_colors[slot] = color;
+                    self.push_event(TerminalEvent::PaletteChanged {
+                        index: u16::try_from(256 + slot).unwrap(),
+                        color,
+                    });
+                }
+            }
+            "104" => {
+                if data.is_empty() {
+                    self.palette = self.initial_palette;
+                } else {
+                    for index in data
+                        .split(';')
+                        .filter_map(|value| value.parse::<usize>().ok())
+                    {
+                        if index < 256 {
+                            self.palette[index] = self.initial_palette[index];
+                            self.push_event(TerminalEvent::PaletteChanged {
+                                index: u16::try_from(index).unwrap(),
+                                color: self.palette[index],
+                            });
+                        }
+                    }
+                }
+            }
+            "110" | "111" | "112" => {
+                let slot = command.parse::<usize>().unwrap() - 110;
+                self.default_colors[slot] = self.initial_default_colors[slot];
+                self.push_event(TerminalEvent::PaletteChanged {
+                    index: u16::try_from(256 + slot).unwrap(),
+                    color: self.default_colors[slot],
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn osc_palette(&mut self, data: &str, terminator: StringTerminator) {
+        let mut fields = data.split(';');
+        while let (Some(index), Some(spec)) = (fields.next(), fields.next()) {
+            let Ok(index) = index.parse::<usize>() else {
+                continue;
+            };
+            if index >= 256 {
+                continue;
+            }
+            if spec == "?" {
+                let color = self.palette[index];
+                let suffix = match terminator {
+                    StringTerminator::Bell => "\x07",
+                    StringTerminator::StringTerminator => "\x1b\\",
+                };
+                let red = (color >> 16) & 0xff;
+                let green = (color >> 8) & 0xff;
+                let blue = color & 0xff;
+                self.push_event(TerminalEvent::PtyWrite(
+                    format!(
+                        "\x1b]4;{index};rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}{suffix}"
+                    )
+                    .into_bytes(),
+                ));
+            } else if let Some(color) = parse_rgb(spec) {
+                self.palette[index] = color;
+                self.push_event(TerminalEvent::PaletteChanged {
+                    index: u16::try_from(index).unwrap(),
+                    color,
+                });
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        let columns = self.grid().columns();
+        let rows = self.grid().screen_rows();
+        let config = self.config.clone();
+        let events = std::mem::take(&mut self.events);
+        *self = Self::new(columns, rows, config);
+        self.events = events;
+    }
+
+    fn reset_tab_stops(&mut self, columns: usize) {
+        self.tab_stops = (0..columns)
+            .map(|column| column > 0 && column % self.config.tab_width == 0)
+            .collect();
+    }
+}
+
+fn clamp_position(grid: &Grid, position: Coordinate) -> Coordinate {
+    Coordinate::new(
+        position
+            .column
+            .clamp(0, i32::try_from(grid.columns() - 1).unwrap()),
+        position
+            .row
+            .clamp(0, i32::try_from(grid.screen_rows() - 1).unwrap()),
+    )
+}
+
+fn param_count(param: Param) -> i32 {
+    i32::try_from(param.value(1, true)).unwrap_or(i32::MAX)
+}
+
+fn param_usize(param: Param) -> usize {
+    usize::try_from(param.value(1, true)).unwrap_or(usize::MAX)
+}
+
+fn extended_color(params: &Params, index: usize) -> Option<(Color, usize)> {
+    let parameter = params.get(index);
+    if parameter.subparam_count() > 0 {
+        return match parameter.subparam(0)? {
+            5 => Some((
+                Color::new(ColorSource::Base256, parameter.subparam(1)?.min(255)),
+                0,
+            )),
+            2 => {
+                let red = parameter.subparam(2)?.min(255);
+                let green = parameter.subparam(3)?.min(255);
+                let blue = parameter.subparam(4)?.min(255);
+                Some((Color::rgb((red << 16) | (green << 8) | blue), 0))
+            }
+            _ => None,
+        };
+    }
+    match params.get(index + 1).value(0, false) {
+        5 if index + 2 < params.count() => Some((
+            Color::new(
+                ColorSource::Base256,
+                params.get(index + 2).value(0, false).min(255),
+            ),
+            2,
+        )),
+        2 if index + 4 < params.count() => {
+            let red = params.get(index + 2).value(0, false).min(255);
+            let green = params.get(index + 3).value(0, false).min(255);
+            let blue = params.get(index + 4).value(0, false).min(255);
+            Some((Color::rgb((red << 16) | (green << 8) | blue), 4))
+        }
+        _ => None,
+    }
+}
+
+fn osc_color_reply(command: &str, color: u32, terminator: StringTerminator) -> Vec<u8> {
+    let suffix = match terminator {
+        StringTerminator::Bell => "\x07",
+        StringTerminator::StringTerminator => "\x1b\\",
+    };
+    let red = (color >> 16) & 0xff;
+    let green = (color >> 8) & 0xff;
+    let blue = color & 0xff;
+    format!(
+        "\x1b]{command};rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}{suffix}"
+    )
+    .into_bytes()
+}
+
+fn parse_rgb(spec: &str) -> Option<u32> {
+    if let Some(hex) = spec.strip_prefix('#') {
+        return match hex.len() {
+            3 => {
+                let value = u32::from_str_radix(hex, 16).ok()?;
+                Some(
+                    ((value & 0xf00) << 12)
+                        | ((value & 0x0f0) << 8)
+                        | ((value & 0x00f) << 4)
+                        | ((value & 0xf00) << 8)
+                        | ((value & 0x0f0) << 4)
+                        | (value & 0x00f),
+                )
+            }
+            6 => u32::from_str_radix(hex, 16).ok(),
+            _ => None,
+        };
+    }
+    let rgb = spec.strip_prefix("rgb:")?;
+    let mut components = rgb.split('/');
+    let component = |value: &str| -> Option<u32> {
+        if value.is_empty() || value.len() > 4 {
+            return None;
+        }
+        let raw = u32::from_str_radix(value, 16).ok()?;
+        let max = (1_u32 << (value.len() * 4)) - 1;
+        Some((raw * 255 + max / 2) / max)
+    };
+    let red = component(components.next()?)?;
+    let green = component(components.next()?)?;
+    let blue = component(components.next()?)?;
+    Some((red << 16) | (green << 8) | blue)
+}
+
+fn default_palette() -> [u32; 256] {
+    let mut palette = [0; 256];
+    let base = [
+        0x0000_0000,
+        0x0080_0000,
+        0x0000_8000,
+        0x0080_8000,
+        0x0000_0080,
+        0x0080_0080,
+        0x0000_8080,
+        0x00c0_c0c0,
+        0x0080_8080,
+        0x00ff_0000,
+        0x0000_ff00,
+        0x00ff_ff00,
+        0x0000_00ff,
+        0x00ff_00ff,
+        0x0000_ffff,
+        0x00ff_ffff,
+    ];
+    palette[..16].copy_from_slice(&base);
+    for (index, color) in palette.iter_mut().enumerate().take(232).skip(16) {
+        let value = index - 16;
+        let component = |part: usize| if part == 0 { 0 } else { 55 + part * 40 };
+        let red = component(value / 36);
+        let green = component((value / 6) % 6);
+        let blue = component(value % 6);
+        *color = u32::try_from((red << 16) | (green << 8) | blue).unwrap();
+    }
+    for (offset, color) in palette[232..].iter_mut().enumerate() {
+        let value = 8 + offset * 10;
+        *color = u32::try_from((value << 16) | (value << 8) | value).unwrap();
+    }
+    palette
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn terminal(columns: usize, rows: usize) -> Terminal {
+        Terminal::new(columns, rows, TerminalConfig::default())
+    }
+
+    fn row_text(terminal: &Terminal, row: i32) -> String {
+        terminal
+            .grid()
+            .row(row)
+            .unwrap()
+            .cells()
+            .iter()
+            .map(|cell| match cell.content() {
+                CellContent::Empty | CellContent::Spacer(_) => ' ',
+                CellContent::Scalar(character) => character,
+                CellContent::Composed(_) => '◌',
+            })
+            .collect()
+    }
+
+    #[test]
+    fn existing_oracle_print_and_wrap_semantics_match() {
+        let mut terminal = terminal(5, 3);
+        terminal.advance(b"abcdef");
+
+        assert_eq!(row_text(&terminal, 0), "abcde");
+        assert_eq!(row_text(&terminal, 1), "f    ");
+        assert!(!terminal.grid().row(0).unwrap().has_linebreak());
+        assert_eq!(terminal.grid().cursor().position(), Coordinate::new(1, 1));
+    }
+
+    #[test]
+    fn csi_cursor_erase_and_basic_sgr_match_initial_fixtures() {
+        let mut terminal = terminal(8, 3);
+        terminal.advance(b"abcdef\x1b[3D\x1b[K");
+        assert_eq!(row_text(&terminal, 0), "abc     ");
+        assert_eq!(terminal.grid().cursor().position(), Coordinate::new(3, 0));
+
+        terminal.advance(b"\r\x1b[1;31mR\x1b[0mN");
+        let row = terminal.grid().row(0).unwrap();
+        assert!(row[0].attributes().bold());
+        assert_eq!(
+            row[0].attributes().foreground(),
+            Color::new(ColorSource::Base16, 1)
+        );
+        assert_eq!(row[1].attributes(), Attributes::default());
+    }
+
+    #[test]
+    fn utf8_wide_and_combining_input_remains_valid() {
+        let mut terminal = terminal(6, 2);
+        terminal.advance("界e\u{301}".as_bytes());
+
+        let row = terminal.grid().row(0).unwrap();
+        assert_eq!(row[0].content(), CellContent::Scalar('界'));
+        assert_eq!(row[1].content(), CellContent::Spacer(1));
+        assert!(matches!(row[2].content(), CellContent::Composed(_)));
+        assert!(row.has_valid_wide_cells());
+    }
+
+    #[test]
+    fn c0_controls_and_bell_update_state_in_order() {
+        let mut terminal = terminal(10, 3);
+        terminal.advance(b"ab\x08Z\rQ\n\tX\x07");
+
+        assert_eq!(row_text(&terminal, 0), "QZ        ");
+        assert_eq!(row_text(&terminal, 1), "        X ");
+        assert_eq!(
+            terminal.drain_events().collect::<Vec<_>>(),
+            vec![TerminalEvent::Bell]
+        );
+    }
+
+    #[test]
+    fn every_single_split_matches_whole_buffer() {
+        let input = b"abc\x1b[2;3HZ\x1b[38;2;12;34;56mR\x1b]2;title\x07";
+        let mut expected = terminal(10, 4);
+        expected.advance(input);
+
+        for split in 0..=input.len() {
+            let mut actual = terminal(10, 4);
+            actual.advance(&input[..split]);
+            actual.advance(&input[split..]);
+            assert_eq!(actual, expected, "split at {split}");
+        }
+
+        let mut bytewise = terminal(10, 4);
+        for byte in input {
+            bytewise.advance(std::slice::from_ref(byte));
+        }
+        assert_eq!(bytewise, expected);
+    }
+
+    #[test]
+    fn scroll_region_and_line_feed_preserve_outside_rows() {
+        let mut terminal = terminal(4, 4);
+        terminal.advance(b"top\r\n111\r\n222\r\nend");
+        terminal.advance(b"\x1b[2;3r\x1b[3;1HX\n");
+
+        assert!(row_text(&terminal, 0).starts_with("top"));
+        assert!(row_text(&terminal, 3).starts_with("end"));
+    }
+
+    #[test]
+    fn extended_sgr_colors_support_indexed_rgb_and_colon_forms() {
+        let mut terminal = terminal(6, 1);
+        terminal.advance(b"\x1b[38;5;200mA\x1b[48;2;1;2;3mB\x1b[38:2::4:5:6mC");
+        let row = terminal.grid().row(0).unwrap();
+        assert_eq!(
+            row[0].attributes().foreground(),
+            Color::new(ColorSource::Base256, 200)
+        );
+        assert_eq!(row[1].attributes().background(), Color::rgb(0x01_02_03));
+        assert_eq!(row[2].attributes().foreground(), Color::rgb(0x04_05_06));
+    }
+
+    #[test]
+    fn queries_emit_ordered_pty_replies() {
+        let mut terminal = terminal(6, 3);
+        terminal.advance(b"\x1b[2;3H\x1b[5n\x1b[6n\x1b[c");
+        assert_eq!(
+            terminal.drain_events().collect::<Vec<_>>(),
+            vec![
+                TerminalEvent::PtyWrite(b"\x1b[0n".to_vec()),
+                TerminalEvent::PtyWrite(b"\x1b[2;3R".to_vec()),
+                TerminalEvent::PtyWrite(b"\x1b[?62;22c".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn alternate_screen_restores_normal_content_and_cursor() {
+        let mut terminal = terminal(6, 2);
+        terminal.advance(b"normal\x1b[?1049halt\x1b[?1049l");
+
+        assert_eq!(terminal.active_screen(), ActiveScreen::Normal);
+        assert_eq!(row_text(&terminal, 0), "normal");
+        assert_eq!(terminal.grid().cursor().position(), Coordinate::new(5, 0));
+    }
+
+    #[test]
+    fn osc_title_palette_query_and_limits_are_observable() {
+        let config = TerminalConfig {
+            osc_limit: 12,
+            ..TerminalConfig::default()
+        };
+        let mut terminal = Terminal::new(8, 2, config);
+        terminal.advance(b"\x1b]2;demo\x07\x1b]4;1;#abc\x07\x1b]4;1;?\x07");
+        assert_eq!(terminal.title(), "demo");
+        assert_eq!(terminal.palette()[1], 0xaa_bb_cc);
+        let events = terminal.drain_events().collect::<Vec<_>>();
+        assert!(
+            events.iter().any(
+                |event| matches!(event, TerminalEvent::TitleChanged(title) if title == "demo")
+            )
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TerminalEvent::PtyWrite(_)))
+        );
+
+        terminal.advance(b"\x1b]2;this-is-too-long\x07Z");
+        assert!(matches!(
+            terminal.drain_events().next(),
+            Some(TerminalEvent::StringTruncated("OSC"))
+        ));
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[0].content(),
+            CellContent::Scalar('Z')
+        );
+    }
+
+    #[test]
+    fn overwriting_either_half_of_wide_cell_clears_the_other_half() {
+        let mut leader = terminal(4, 1);
+        leader.advance("界\rX".as_bytes());
+        assert_eq!(
+            leader.grid().row(0).unwrap()[0].content(),
+            CellContent::Scalar('X')
+        );
+        assert_eq!(
+            leader.grid().row(0).unwrap()[1].content(),
+            CellContent::Empty
+        );
+
+        let mut continuation = terminal(4, 1);
+        continuation.advance("界\x1b[2GX".as_bytes());
+        assert_eq!(
+            continuation.grid().row(0).unwrap()[0].content(),
+            CellContent::Empty
+        );
+        assert_eq!(
+            continuation.grid().row(0).unwrap()[1].content(),
+            CellContent::Scalar('X')
+        );
+    }
+
+    #[test]
+    fn wide_character_at_margin_without_autowrap_is_clipped_safely() {
+        let mut terminal = terminal(2, 1);
+        terminal.advance("a\x1b[?7l界".as_bytes());
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[1].content(),
+            CellContent::Scalar('界')
+        );
+        assert!(terminal.grid().row(0).unwrap().has_valid_wide_cells());
+    }
+
+    #[test]
+    fn combining_mark_walks_back_to_a_wide_leader() {
+        let mut terminal = terminal(4, 1);
+        terminal.advance("界\u{301}".as_bytes());
+        assert!(matches!(
+            terminal.grid().row(0).unwrap()[0].content(),
+            CellContent::Composed(_)
+        ));
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[1].content(),
+            CellContent::Spacer(1)
+        );
+    }
+
+    #[test]
+    fn editing_commands_clear_deferred_wrap() {
+        for command in [b"\x1b[K".as_slice(), b"\x1b[X", b"\x1b[P", b"\x1b[@"] {
+            let mut terminal = terminal(3, 2);
+            terminal.advance(b"abc");
+            assert!(terminal.grid().cursor().deferred_wrap());
+            terminal.advance(command);
+            assert!(!terminal.grid().cursor().deferred_wrap());
+        }
+    }
+
+    #[test]
+    fn private_cursor_query_and_ris_event_order_are_preserved() {
+        let mut terminal = terminal(4, 2);
+        terminal.advance(b"\x1b[?6n\x07\x1bc");
+        assert_eq!(
+            terminal.drain_events().collect::<Vec<_>>(),
+            vec![
+                TerminalEvent::PtyWrite(b"\x1b[?1;1R".to_vec()),
+                TerminalEvent::Bell,
+            ]
+        );
+    }
+
+    #[test]
+    fn event_queue_and_composed_sequences_are_bounded() {
+        let config = TerminalConfig {
+            event_limit: 2,
+            ..TerminalConfig::default()
+        };
+        let mut terminal = Terminal::new(4, 1, config);
+        terminal.advance(b"\x07\x07\x07");
+        assert_eq!(terminal.drain_events().count(), 2);
+
+        let mut input = String::from("a");
+        input.extend(std::iter::repeat_n('\u{301}', 100));
+        terminal.advance(input.as_bytes());
+    }
+
+    #[test]
+    fn malformed_colors_and_excess_parameters_are_ignored() {
+        let mut terminal = terminal(4, 1);
+        terminal.advance(b"\x1b[1mA\x1b[38;2mB\x1b]4;1;rgb:00000000/0/0\x07");
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[1].attributes().foreground(),
+            Color::default()
+        );
+        assert_ne!(terminal.palette()[1], 0);
+
+        terminal.advance(b"\x1b[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;31mC");
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[2].attributes().foreground(),
+            Color::default()
+        );
+    }
+
+    #[test]
+    fn osc_controls_are_ignored_and_escape_dispatches_before_next_sequence() {
+        let mut terminal = terminal(4, 2);
+        terminal.advance(b"\x1b]2;de\x01mo\x1b[2;2HZ");
+        assert_eq!(terminal.title(), "demo");
+        assert_eq!(terminal.grid().cursor().position(), Coordinate::new(2, 1));
+    }
+
+    #[test]
+    fn default_color_osc_set_query_and_reset_are_bounded() {
+        let mut terminal = terminal(4, 1);
+        let initial = terminal.default_colors()[0];
+        terminal.advance(b"\x1b]10;#123456\x07\x1b]10;?\x07\x1b]110\x1b\\");
+        assert_eq!(terminal.default_colors()[0], initial);
+        assert!(terminal.drain_events().any(|event| {
+            matches!(event, TerminalEvent::PtyWrite(bytes) if String::from_utf8_lossy(&bytes).contains("rgb:1212/3434/5656"))
+        }));
+    }
+
+    #[test]
+    fn sgr_21_preserves_bold_and_palette_queries_use_16_bit_components() {
+        let mut terminal = terminal(4, 1);
+        terminal.advance(b"\x1b[1;21mA\x1b]4;1;?\x07");
+        let attributes = terminal.grid().row(0).unwrap()[0].attributes();
+        assert!(attributes.bold());
+        assert!(attributes.underline());
+        let replies = terminal.drain_events().collect::<Vec<_>>();
+        assert!(replies.iter().any(|event| {
+            matches!(event, TerminalEvent::PtyWrite(bytes) if String::from_utf8_lossy(bytes).contains("rgb:8080/0000/0000"))
+        }));
+    }
+
+    #[test]
+    fn unsupported_dcs_and_malformed_bytes_recover_without_panicking() {
+        let mut terminal = terminal(8, 2);
+        terminal.advance(b"\x1bPqpayload\x1b\\A\xf0(\x8c(B");
+        assert!(
+            terminal
+                .drain_events()
+                .any(|event| event == TerminalEvent::UnsupportedSequence("DCS"))
+        );
+        assert!(row_text(&terminal, 0).contains('A'));
+
+        let mut state = 0x1234_5678_u64;
+        for _ in 0..2_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            terminal.advance(&[state.to_le_bytes()[3]]);
+            let cursor = terminal.grid().cursor().position();
+            assert!(cursor.column >= 0 && usize::try_from(cursor.column).unwrap() < 8);
+            assert!(cursor.row >= 0 && usize::try_from(cursor.row).unwrap() < 2);
+        }
+    }
+}

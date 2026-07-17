@@ -9,13 +9,24 @@
 //! coordination remain deferred.
 
 mod cell;
+mod composed;
+mod config;
 mod coord;
 mod cursor;
+mod event;
 mod grid;
+mod mode;
 mod row;
+mod terminal;
+mod vt;
 
 pub use cell::{Attributes, Cell, CellContent, Color, ColorSource};
+pub(crate) use composed::ComposedTable;
+pub use config::TerminalConfig;
 pub use coord::{Coordinate, CoordinateRange, ScrollRegion};
 pub use cursor::Cursor;
+pub use event::TerminalEvent;
 pub use grid::{Grid, ScrollDirection, ScrollResult};
+pub use mode::{ActiveScreen, MouseTracking, TerminalModes};
 pub use row::Row;
+pub use terminal::Terminal;

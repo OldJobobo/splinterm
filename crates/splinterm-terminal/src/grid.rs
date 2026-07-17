@@ -266,6 +266,30 @@ impl Grid {
             .find(|&index| self.rows[index].is_some())
     }
 
+    /// Removes every allocated row outside the visible screen.
+    pub fn clear_scrollback(&mut self) {
+        let visible: Vec<usize> = (0..self.screen_rows)
+            .map(|row| self.absolute_index(Self::signed_row(row)))
+            .collect();
+        for (index, row) in self.rows.iter_mut().enumerate() {
+            if !visible.contains(&index) {
+                *row = None;
+            }
+        }
+        self.view = self.offset;
+    }
+
+    /// Clears every visible row and homes both cursors.
+    pub fn reset_visible(&mut self, background: Color) {
+        for row in 0..self.screen_rows {
+            self.row_or_allocate(Self::signed_row(row))
+                .erase_all(background);
+        }
+        self.cursor = Cursor::default();
+        self.saved_cursor = Cursor::default();
+        self.view = self.offset;
+    }
+
     /// Resizes the visible grid while deliberately discarding scrollback and
     /// not reflowing logical lines.
     ///
