@@ -1,0 +1,236 @@
+diff --git a/vt.c b/vt.c
+index 1d8297be..9856206f 100644
+--- a/vt.c
++++ b/vt.c
+@@ -1,5 +1,7 @@
+ #include "vt.h"
+ 
++#include <limits.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+@@ -16,7 +18,9 @@
+ #include "csi.h"
+ #include "dcs.h"
+ #include "debug.h"
++#include "grid.h"
+ #include "osc.h"
++#include "render.h"
+ #include "sixel.h"
+ #include "util.h"
+ #include "xmalloc.h"
+@@ -1097,9 +1101,206 @@ state_utf8_43_switch(struct terminal *term, uint8_t data)
+ 
+ UNIGNORE_WARNINGS
+ 
++static const char *
++oracle_color_source(enum color_source source)
++{
++    switch (source) {
++    case COLOR_DEFAULT: return "default";
++    case COLOR_BASE16: return "base16";
++    case COLOR_BASE256: return "base256";
++    case COLOR_RGB: return "rgb";
++    }
++    return "unknown";
++}
++
++static bool
++oracle_attrs_equal(const struct attributes *a, const struct attributes *b)
++{
++    return a->bold == b->bold &&
++        a->dim == b->dim &&
++        a->italic == b->italic &&
++        a->underline == b->underline &&
++        a->strikethrough == b->strikethrough &&
++        a->blink == b->blink &&
++        a->conceal == b->conceal &&
++        a->reverse == b->reverse &&
++        a->fg == b->fg &&
++        a->fg_src == b->fg_src &&
++        a->bg == b->bg &&
++        a->bg_src == b->bg_src &&
++        a->url == b->url;
++}
++
++static bool
++oracle_attrs_default(const struct attributes *attrs)
++{
++    const struct attributes defaults = {0};
++    return oracle_attrs_equal(attrs, &defaults);
++}
++
++static void
++oracle_dump_codepoint(FILE *f, char32_t wc)
++{
++    if (wc == 0 || wc >= CELL_COMB_CHARS_LO) {
++        fputc(' ', f);
++        return;
++    }
++
++    switch (wc) {
++    case '"': fputs("\\\"", f); return;
++    case '\\': fputs("\\\\", f); return;
++    case '\b': fputs("\\b", f); return;
++    case '\f': fputs("\\f", f); return;
++    case '\n': fputs("\\n", f); return;
++    case '\r': fputs("\\r", f); return;
++    case '\t': fputs("\\t", f); return;
++    default: break;
++    }
++
++    if (wc < 0x20) {
++        fprintf(f, "\\u%04x", (unsigned)wc);
++        return;
++    }
++
++    char mb[MB_LEN_MAX];
++    mbstate_t state = {0};
++    size_t len = c32rtomb(mb, wc, &state);
++    if (len == (size_t)-1)
++        fputs("\\ufffd", f);
++    else
++        fwrite(mb, 1, len, f);
++}
++
++static void
++oracle_dump_attributes(FILE *f, const struct attributes *attrs)
++{
++    bool comma = false;
++#define BOOL_ATTR(name) do {                                             \
++    if (attrs->name) {                                                    \
++        fprintf(f, "%s\"%s\":true", comma ? "," : "", #name);       \
++        comma = true;                                                     \
++    }                                                                    \
++} while (0)
++
++    fputc('{', f);
++    BOOL_ATTR(bold);
++    BOOL_ATTR(dim);
++    BOOL_ATTR(italic);
++    BOOL_ATTR(underline);
++    BOOL_ATTR(strikethrough);
++    BOOL_ATTR(blink);
++    BOOL_ATTR(conceal);
++    BOOL_ATTR(reverse);
++    BOOL_ATTR(url);
++
++    if (attrs->fg_src != COLOR_DEFAULT) {
++        fprintf(f, "%s\"foreground\":{\"source\":\"%s\",\"value\":%u}",
++                comma ? "," : "", oracle_color_source(attrs->fg_src), attrs->fg);
++        comma = true;
++    }
++    if (attrs->bg_src != COLOR_DEFAULT) {
++        fprintf(f, "%s\"background\":{\"source\":\"%s\",\"value\":%u}",
++                comma ? "," : "", oracle_color_source(attrs->bg_src), attrs->bg);
++    }
++    fputc('}', f);
++#undef BOOL_ATTR
++}
++
++static void
++oracle_force_size(struct terminal *term)
++{
++    static bool applied = false;
++    if (applied)
++        return;
++
++    const char *size = getenv("SPLINTERM_FOOT_ORACLE_SIZE");
++    if (size == NULL)
++        return;
++
++    int columns;
++    int rows;
++    char extra;
++    if (sscanf(size, "%dx%d%c", &columns, &rows, &extra) != 2 ||
++        columns <= 0 || rows <= 0)
++        return;
++
++    applied = true;
++    render_resize(
++        term,
++        columns * term->cell_width,
++        rows * term->cell_height,
++        RESIZE_FORCE);
++}
++
++static void
++oracle_dump_state(const struct terminal *term)
++{
++    const char *path = getenv("SPLINTERM_FOOT_STATE_DUMP");
++    if (path == NULL || path[0] == '\0')
++        return;
++
++    char temporary[PATH_MAX];
++    int n = snprintf(temporary, sizeof(temporary), "%s.tmp", path);
++    if (n < 0 || (size_t)n >= sizeof(temporary))
++        return;
++
++    FILE *f = fopen(temporary, "w");
++    if (f == NULL)
++        return;
++
++    fprintf(f,
++            "{\"cursor\":{\"column\":%d,\"row\":%d,\"last_column_flag\":%s},\"rows\":[",
++            term->grid->cursor.point.col,
++            term->grid->cursor.point.row,
++            term->grid->cursor.lcf ? "true" : "false");
++
++    for (int row_idx = 0; row_idx < term->rows; row_idx++) {
++        const struct row *row = grid_row(term->grid, row_idx);
++        fprintf(f, "%s{\"text\":\"", row_idx > 0 ? "," : "");
++        for (int col = 0; col < term->cols; col++)
++            oracle_dump_codepoint(f, row->cells[col].wc);
++        fprintf(f, "\",\"linebreak\":%s}", row->linebreak ? "true" : "false");
++    }
++
++    fputs("],\"attribute_runs\":[", f);
++    bool first_run = true;
++    for (int row_idx = 0; row_idx < term->rows; row_idx++) {
++        const struct row *row = grid_row(term->grid, row_idx);
++        for (int start = 0; start < term->cols;) {
++            const struct attributes *attrs = &row->cells[start].attrs;
++            if (oracle_attrs_default(attrs)) {
++                start++;
++                continue;
++            }
++
++            int end = start + 1;
++            while (end < term->cols &&
++                   oracle_attrs_equal(attrs, &row->cells[end].attrs))
++                end++;
++
++            fprintf(f, "%s{\"row\":%d,\"start\":%d,\"end\":%d,\"attributes\":",
++                    first_run ? "" : ",", row_idx, start, end);
++            oracle_dump_attributes(f, attrs);
++            fputc('}', f);
++            first_run = false;
++            start = end;
++        }
++    }
++    fputs("],\"events\":[]}\n", f);
++
++    bool ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
++    ok = fclose(f) == 0 && ok;
++    if (ok)
++        rename(temporary, path);
++    else
++        unlink(temporary);
++}
++
+ void
+ vt_from_slave(struct terminal *term, const uint8_t *data, size_t len)
+ {
++    oracle_force_size(term);
++
+     enum state current_state = term->vt.state;
+ 
+     const uint8_t *p = data;
+@@ -1130,4 +1331,6 @@ vt_from_slave(struct terminal *term, const uint8_t *data, size_t len)
+ 
+         term->vt.state = current_state;
+     }
++
++    oracle_dump_state(term);
+ }

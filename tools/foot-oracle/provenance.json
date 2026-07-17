@@ -21,5 +21,11 @@
       "-Dtests=true"
     ]
   },
+  "oracle": {
+    "build_script": "tools/foot-oracle/build-oracle.sh",
+    "runner": "tools/foot-oracle/run-fixtures.py",
+    "patch": "tools/foot-oracle/patches/0001-semantic-state-dump.patch",
+    "requires_wayland_compositor": true
+  },
   "fixture_schema": "fixtures/terminal/v1/schema.md"
 }

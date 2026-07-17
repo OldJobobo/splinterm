@@ -15,19 +15,28 @@ See `provenance.json` and the repository's `THIRD_PARTY.md`.
 
 ## Build
 
-Build the reference outside the source checkout:
+Build the unmodified reference outside the source checkout:
 
 ```bash
 tools/foot-oracle/build-reference.sh
 ```
 
-The default build directory is `/tmp/splinterm-foot-build`. Override it with
-`FOOT_BUILD=/path`. The script verifies the exact reference commit unless
-`ALLOW_FOOT_REVISION_MISMATCH=1` is set deliberately.
+Build the patched semantic oracle in a disposable worktree:
 
-The minimal reference build disables documentation, themes, terminfo, utmp, and
-grapheme clustering. It still builds Foot's normal test target and terminal
-libraries.
+```bash
+tools/foot-oracle/build-oracle.sh
+```
+
+Then compare every fixture with Foot:
+
+```bash
+tools/foot-oracle/run-fixtures.py
+```
+
+The default build directories are `/tmp/splinterm-foot-build` and
+`/tmp/splinterm-foot-oracle-build`. The scripts verify the exact reference
+commit. The minimal builds disable documentation, themes, terminfo, utmp, and
+grapheme clustering while retaining Foot's normal tests and terminal code.
 
 ## Why an oracle adapter is needed
 
@@ -42,21 +51,21 @@ engines can display the same text while disagreeing about:
 - replies written back to the PTY;
 - row metadata used during resize and reflow.
 
-Foot does not currently ship a machine-readable semantic state dumper. Before
-Splinterm claims parity, a test-only adapter must expose normalized state from
-the pinned Foot implementation.
+Foot does not currently ship a machine-readable semantic state dumper. The
+maintained test-only patch in `patches/0001-semantic-state-dump.patch` adds one
+to the pinned reference build without changing the canonical Foot checkout.
 
 ## Adapter design
 
-The preferred approach is a maintained patch applied only to a disposable Foot
-worktree or build copy:
+The oracle uses a maintained patch applied only to a disposable Foot worktree:
 
 1. create a detached worktree at the pinned commit;
-2. apply patches from `tools/foot-oracle/patches/`;
-3. build a `foot-state-dump` test executable;
-4. feed it a fixture's dimensions, configuration, and input bytes;
-5. emit canonical JSON matching `fixtures/terminal/v1/schema.md`;
-6. compare that JSON with the Rust terminal snapshot.
+2. apply `patches/0001-semantic-state-dump.patch`;
+3. build the patched Foot executable;
+4. launch it with an exact fixture payload and oracle-only logical grid size;
+5. dump normalized JSON matching `fixtures/terminal/v1/schema.md` after parser
+   input is consumed;
+6. compare that JSON with the fixture and, later, the Rust terminal snapshot.
 
 The adapter may add test-only constructors or accessors, but it must not change
 terminal behavior. Its patch must never be applied to the canonical
@@ -88,10 +97,11 @@ or other nondeterministic data.
 
 ## Initial fixture status
 
-The first five fixtures are source-reviewed expectations derived from the pinned
-Foot implementation. They validate corpus structure today, but are marked
-`source_reviewed`, not `oracle_verified`. Their status may be promoted only
-after `foot-state-dump` produces matching semantic output.
+The first five fixtures are `oracle_verified` against the pinned Foot build:
+printable text, soft wrapping, cursor positioning, erase-line, and basic SGR.
+The current adapter requires a running Wayland compositor because it exercises
+the patched Foot executable. A future fully headless C test harness may remove
+that requirement.
 
 Validate fixture structure with:
 

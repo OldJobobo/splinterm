@@ -13,8 +13,8 @@
 - [x] Add five source-reviewed fixtures: printable text, soft wrapping, cursor
   positioning, erase-line, and basic SGR.
 - [x] Validate fixture structure in CI.
-- [ ] Implement the test-only Foot semantic state-dump adapter.
-- [ ] Promote fixtures from `source_reviewed` to `oracle_verified`.
+- [x] Implement the test-only Foot semantic state-dump adapter.
+- [x] Promote the initial fixtures from `source_reviewed` to `oracle_verified`.
 
 ## Goal
 
@@ -562,11 +562,11 @@ Do not proceed to the Wayland/rendering milestone until:
 
 ## Immediate next task
 
-Start with Phase 0 only:
+Phase 0 is complete for the initial corpus. Begin Phase 1:
 
-> Create the Foot oracle design, provenance manifest, and the first five
-> semantic fixtures for printable text, wrapping, cursor movement, erase, and
-> SGR.
+> Create `splinterm-terminal` and port Foot's color source, attributes, cell,
+> coordinate, range, cursor, scroll-region, and row types with provenance and
+> focused tests.
 
-Do not port production parser code until the comparison method can detect more
-than plain-text equality.
+Do not begin grid algorithms until the foundational representations and their
+memory-size baseline are reviewed.

@@ -6,7 +6,7 @@
     "name": "foot",
     "version": "1.27.0",
     "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
-    "verification": "source_reviewed"
+    "verification": "oracle_verified"
   },
   "initial": {
     "columns": 5,

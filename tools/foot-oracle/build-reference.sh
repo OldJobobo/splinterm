@@ -4,6 +4,16 @@ set -euo pipefail
 readonly expected_commit="3c5b584b0eafa772eb4376fb6eaf6643399e190e"
 readonly source_dir="${FOOT_SOURCE:-$HOME/Playground/foot}"
 readonly build_dir="${FOOT_BUILD:-/tmp/splinterm-foot-build}"
+readonly wraplock="$source_dir/subprojects/.wraplock"
+wraplock_preexisting=0
+[[ -e "$wraplock" ]] && wraplock_preexisting=1
+
+cleanup() {
+  if [[ "$wraplock_preexisting" == "0" ]]; then
+    rm -f -- "$wraplock"
+  fi
+}
+trap cleanup EXIT
 
 if [[ ! -d "$source_dir/.git" ]]; then
   printf 'Foot source is not a Git checkout: %s\n' "$source_dir" >&2
