@@ -1,6 +1,6 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** Phase 3 complete — Phase 4 next
+- **Status:** Phase 4 complete — Phase 5 next
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -37,6 +37,13 @@
 - [x] Verify whole-buffer, bytewise, every-single-split, malformed-input, and
   deterministic randomized parser invariants.
 - [x] Add a `cargo-fuzz` target for arbitrary terminal input.
+- [x] Add borrowed semantic terminal, row, cell, cursor, mode, title, palette,
+  viewport, and bounded-scrollback snapshots.
+- [x] Add monotonic action-level revisions and semantic row/scroll/cursor/full
+  damage independent of parser chunking.
+- [x] Add bounded contiguous update replay with explicit resnapshot-on-gap.
+- [x] Make one-shot event overflow observable without coupling snapshots to
+  PTY, renderer, protocol, or serialization types.
 
 ## Goal
 
@@ -366,6 +373,13 @@ Glyphs, shaped runs, textures, and Wayland buffers never belong here.
 
 Add a monotonically increasing terminal revision. A future client that misses
 updates must request a new snapshot rather than guessing.
+
+Phase 4 uses borrowed in-process snapshots. They resolve composed-character
+keys and exclude renderer bookkeeping such as dirty/clean flags. Future daemon
+and protocol layers must explicitly convert these views into owned wire DTOs.
+Updates are retained in a bounded history; callers requesting an evicted or
+future base revision receive `ResnapshotRequired`. One-shot PTY effects remain
+a separate drainable queue and overflow is explicit.
 
 ### Phase 5: PTY/process spike
 

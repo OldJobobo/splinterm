@@ -34,9 +34,10 @@ docs/
 ```
 
 The initial daemon uses newline-delimited JSON over a Unix socket. The
-`splinterm-terminal` crate now contains the Foot-derived cell/grid model and a
-streaming VT kernel; PTY ownership, persistence, snapshots, and Wayland remain
-to be connected. The wire format is versioned from the start.
+`splinterm-terminal` crate now contains the Foot-derived cell/grid model,
+streaming VT kernel, borrowed semantic snapshots, monotonic revisions, and
+bounded update replay. PTY ownership, persistence, protocol conversion, and
+Wayland remain to be connected. The wire format is versioned from the start.
 
 ## Try the scaffold
 
