@@ -1,9 +1,20 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** Proposed
+- **Status:** In progress — Phase 0
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
+
+## Execution progress
+
+- [x] Pin and build Foot 1.27.0 at the accepted reference commit.
+- [x] Record a reproducible minimal Foot build command and provenance manifest.
+- [x] Define the semantic oracle adapter and normalized fixture format.
+- [x] Add five source-reviewed fixtures: printable text, soft wrapping, cursor
+  positioning, erase-line, and basic SGR.
+- [x] Validate fixture structure in CI.
+- [ ] Implement the test-only Foot semantic state-dump adapter.
+- [ ] Promote fixtures from `source_reviewed` to `oracle_verified`.
 
 ## Goal
 

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "cursor-position",
+  "description": "CSI H uses one-based parameters and positions the next printable cell.",
+  "reference": {
+    "name": "foot",
+    "version": "1.27.0",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+    "verification": "source_reviewed"
+  },
+  "initial": {
+    "columns": 6,
+    "rows": 3
+  },
+  "input_hex": "6162631b5b323b33485a",
+  "expected": {
+    "cursor": {
+      "column": 3,
+      "row": 1,
+      "last_column_flag": false
+    },
+    "rows": [
+      { "text": "abc   ", "linebreak": true },
+      { "text": "  Z   ", "linebreak": true },
+      { "text": "      ", "linebreak": true }
+    ],
+    "attribute_runs": [],
+    "events": []
+  },
+  "intentional_divergences": []
+}

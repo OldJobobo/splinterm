@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "printable-text",
+  "description": "Printable ASCII advances the cursor and preserves untouched cells.",
+  "reference": {
+    "name": "foot",
+    "version": "1.27.0",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+    "verification": "source_reviewed"
+  },
+  "initial": {
+    "columns": 8,
+    "rows": 3
+  },
+  "input_hex": "68656c6c6f",
+  "expected": {
+    "cursor": {
+      "column": 5,
+      "row": 0,
+      "last_column_flag": false
+    },
+    "rows": [
+      { "text": "hello   ", "linebreak": true },
+      { "text": "        ", "linebreak": true },
+      { "text": "        ", "linebreak": true }
+    ],
+    "attribute_runs": [],
+    "events": []
+  },
+  "intentional_divergences": []
+}

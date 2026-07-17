@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "reference": {
+    "name": "foot",
+    "version": "1.27.0",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+    "source_url": "https://codeberg.org/dnkl/foot",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2019 Daniel Eklöf"
+  },
+  "local_source_default": "~/Playground/foot",
+  "build": {
+    "script": "tools/foot-oracle/build-reference.sh",
+    "default_directory": "/tmp/splinterm-foot-build",
+    "meson_options": [
+      "-Ddocs=disabled",
+      "-Dthemes=false",
+      "-Dterminfo=disabled",
+      "-Dutmp-backend=none",
+      "-Dgrapheme-clustering=disabled",
+      "-Dtests=true"
+    ]
+  },
+  "fixture_schema": "fixtures/terminal/v1/schema.md"
+}

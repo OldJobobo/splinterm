@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "id": "sgr-basic",
+  "description": "SGR applies bold red to one cell and reset restores defaults.",
+  "reference": {
+    "name": "foot",
+    "version": "1.27.0",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+    "verification": "source_reviewed"
+  },
+  "initial": {
+    "columns": 4,
+    "rows": 2
+  },
+  "input_hex": "1b5b313b33316d521b5b306d4e",
+  "expected": {
+    "cursor": {
+      "column": 2,
+      "row": 0,
+      "last_column_flag": false
+    },
+    "rows": [
+      { "text": "RN  ", "linebreak": true },
+      { "text": "    ", "linebreak": true }
+    ],
+    "attribute_runs": [
+      {
+        "row": 0,
+        "start": 0,
+        "end": 1,
+        "attributes": {
+          "bold": true,
+          "foreground": {
+            "source": "base16",
+            "value": 1
+          }
+        }
+      }
+    ],
+    "events": []
+  },
+  "intentional_divergences": []
+}

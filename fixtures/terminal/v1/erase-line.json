@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "erase-line",
+  "description": "CSI K with no parameter erases from the cursor through the row end.",
+  "reference": {
+    "name": "foot",
+    "version": "1.27.0",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+    "verification": "source_reviewed"
+  },
+  "initial": {
+    "columns": 8,
+    "rows": 3
+  },
+  "input_hex": "6162636465661b5b33441b5b4b",
+  "expected": {
+    "cursor": {
+      "column": 3,
+      "row": 0,
+      "last_column_flag": false
+    },
+    "rows": [
+      { "text": "abc     ", "linebreak": true },
+      { "text": "        ", "linebreak": true },
+      { "text": "        ", "linebreak": true }
+    ],
+    "attribute_runs": [],
+    "events": []
+  },
+  "intentional_divergences": []
+}
