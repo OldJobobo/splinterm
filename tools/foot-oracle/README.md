@@ -49,16 +49,17 @@ only, `SPLINTERM_FOOT_ORACLE_ALLOW_LIVE_WAYLAND=1` bypasses that protection.
 
 ## Human-viewable Phase 2 demo
 
-The Phase 2 grid implementation has a scripted visual walkthrough rendered as
-text inside the pinned Foot presentation window. It exercises the Rust
-`Grid` directly rather than replaying fixture expectations:
+The Phase 2 grid and Phase 3 VT implementations have scripted visual
+walkthroughs rendered as text inside the pinned Foot presentation window. They
+exercise the Rust kernel directly rather than replaying fixture expectations:
 
 ```bash
 tools/foot-oracle/run-phase2-demo.py
+tools/foot-oracle/run-phase3-demo.py
 ```
 
-On the current development machine it defaults to workspace 8. The launcher
-builds the Rust example, refuses an occupied target workspace, preserves the
+On the current development machine both default to workspace 8. Each launcher
+builds its Rust example, refuses an occupied target workspace, preserves the
 currently focused workspace, and leaves the final frame open for inspection.
 Close the Foot window when finished. Use `--workspace N` to select another
 empty workspace.
