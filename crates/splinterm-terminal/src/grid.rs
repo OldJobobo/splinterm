@@ -5,23 +5,52 @@
 //! `grid.offset`, `grid.view`, row-coordinate conversion,
 //! `grid_row_absolute`, and `_grid_row_maybe_alloc`.
 //!
-//! This module intentionally contains storage and coordinate spaces only.
-//! Scrolling commands, resizing, reflow, cursor coordination, and damage
-//! tracking remain deferred until these representations are reviewed.
+//! This module contains circular storage, coordinate spaces, scrolling,
+//! cursor-preserving resize, and logical-line reflow. Renderer damage and
+//! higher terminal-feature coordination remain deferred.
 
-use crate::Row;
+mod reflow;
+
+use crate::{Color, Coordinate, Cursor, Row, ScrollRegion};
+
+/// Direction of a grid scroll operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollDirection {
+    /// Content moves toward the top; new rows appear at the bottom.
+    Forward,
+    /// Content moves toward the bottom; new rows appear at the top.
+    Reverse,
+}
+
+/// State transition produced by a grid scroll.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrollResult {
+    /// Direction of content movement.
+    pub direction: ScrollDirection,
+    /// Affected half-open screen region.
+    pub region: ScrollRegion,
+    /// Number of rows moved.
+    pub rows: usize,
+    /// Whether the viewport followed the live-screen offset before scrolling.
+    pub view_was_following: bool,
+    /// Whether viewport position changed.
+    pub view_changed: bool,
+}
 
 /// Power-of-two circular row storage for terminal screen and scrollback rows.
 ///
-/// This grid surface currently exposes row storage, coordinate conversion, and
-/// viewport-relative lookup. Cursor coordination, viewport movement commands,
-/// scrolling, resize, reflow, and damage remain deferred.
+/// The grid owns row storage, cursor and viewport coordinates, scrolling, and
+/// resize/reflow behavior. It remains independent of renderer damage, PTYs,
+/// protocols, and higher terminal features.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Grid {
     rows: Vec<Option<Row>>,
     columns: usize,
     offset: usize,
     view: usize,
+    screen_rows: usize,
+    cursor: Cursor,
+    saved_cursor: Cursor,
 }
 
 impl Grid {
@@ -38,13 +67,41 @@ impl Grid {
             "grid row capacity must be a non-zero power of two"
         );
         assert!(columns > 0, "grid must have at least one column");
+        assert!(
+            columns <= usize::try_from(i32::MAX).expect("usize represents i32::MAX"),
+            "grid columns must fit in Foot's signed coordinate space"
+        );
+        assert!(
+            row_capacity <= (1_usize << 30),
+            "grid row capacity exceeds Foot's signed coordinate limit"
+        );
 
         Self {
             rows: vec![None; row_capacity],
             columns,
             offset: 0,
             view: 0,
+            screen_rows: 1,
+            cursor: Cursor::default(),
+            saved_cursor: Cursor::default(),
         }
+    }
+
+    /// Creates a grid with every visible row safely initialized.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Self::new`], or when
+    /// `screen_rows` is zero or exceeds `row_capacity`.
+    #[must_use]
+    pub fn with_screen_size(row_capacity: usize, columns: usize, screen_rows: usize) -> Self {
+        let mut grid = Self::new(row_capacity, columns);
+        grid.assert_screen_rows(screen_rows);
+        grid.screen_rows = screen_rows;
+        for row in 0..screen_rows {
+            grid.row_or_allocate(i32::try_from(row).expect("screen rows fit in i32"));
+        }
+        grid
     }
 
     /// Returns the number of physical slots in the circular row array.
@@ -57,6 +114,44 @@ impl Grid {
     #[must_use]
     pub fn columns(&self) -> usize {
         self.columns
+    }
+
+    /// Returns the visible screen height.
+    #[must_use]
+    pub fn screen_rows(&self) -> usize {
+        self.screen_rows
+    }
+
+    /// Returns the active cursor.
+    #[must_use]
+    pub const fn cursor(&self) -> Cursor {
+        self.cursor
+    }
+
+    /// Replaces the active cursor after validating it against the screen.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cursor is outside the configured screen.
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        self.assert_cursor(cursor);
+        self.cursor = cursor;
+    }
+
+    /// Returns the saved cursor.
+    #[must_use]
+    pub const fn saved_cursor(&self) -> Cursor {
+        self.saved_cursor
+    }
+
+    /// Replaces the saved cursor after validating it against the screen.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cursor is outside the configured screen.
+    pub fn set_saved_cursor(&mut self, cursor: Cursor) {
+        self.assert_cursor(cursor);
+        self.saved_cursor = cursor;
     }
 
     /// Maps an offset-relative row to its physical circular slot.
@@ -171,6 +266,117 @@ impl Grid {
             .find(|&index| self.rows[index].is_some())
     }
 
+    /// Resizes the visible grid while deliberately discarding scrollback and
+    /// not reflowing logical lines.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new dimensions violate [`Self::new`] or
+    /// [`Self::with_screen_size`] constraints.
+    pub fn resize_without_reflow(
+        &mut self,
+        new_row_capacity: usize,
+        new_columns: usize,
+        new_screen_rows: usize,
+    ) {
+        let mut resized = Self::new(new_row_capacity, new_columns);
+        resized.assert_screen_rows(new_screen_rows);
+        resized.screen_rows = new_screen_rows;
+
+        let copied_rows = self.screen_rows.min(new_screen_rows);
+        for row_number in 0..copied_rows {
+            let old_index = self.absolute_index(Self::signed_row(row_number));
+            let mut row = self.rows[old_index]
+                .take()
+                .unwrap_or_else(|| Row::new_dirty(self.columns));
+            row.resize_without_reflow(new_columns);
+            // Foot's no-reflow path allocates a new row whose default is a hard
+            // linebreak rather than carrying soft-wrap metadata across resize.
+            row.set_linebreak(true);
+            resized.rows[row_number] = Some(row);
+        }
+        for row in copied_rows..new_screen_rows {
+            resized.rows[row] = Some(Row::new_dirty(new_columns));
+        }
+
+        resized.cursor =
+            Self::resized_cursor(self.cursor, self.screen_rows, new_columns, new_screen_rows);
+        resized.saved_cursor = Self::resized_cursor(
+            self.saved_cursor,
+            self.screen_rows,
+            new_columns,
+            new_screen_rows,
+        );
+        *self = resized;
+    }
+
+    /// Swaps two rows addressed relative to the live-screen offset.
+    pub fn swap_rows(&mut self, first: i32, second: i32) {
+        let first = self.absolute_index(first);
+        let second = self.absolute_index(second);
+        self.rows.swap(first, second);
+    }
+
+    /// Scrolls a screen region while preserving Foot's circular-history and
+    /// viewport behavior.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the region is outside the visible screen or `rows` exceeds
+    /// the region height.
+    pub fn scroll(
+        &mut self,
+        direction: ScrollDirection,
+        region: ScrollRegion,
+        rows: usize,
+        erase_background: Color,
+    ) -> ScrollResult {
+        let start = usize::try_from(region.start()).expect("scroll region starts on screen");
+        let end = usize::try_from(region.end()).expect("scroll region ends on screen");
+        assert!(
+            start < end && end <= self.screen_rows,
+            "scroll region must fit within the screen"
+        );
+        assert!(
+            rows <= end - start,
+            "scroll amount must fit within the region"
+        );
+
+        let old_view = self.view;
+        let view_was_following = self.view_follows_offset();
+        if rows > 0 {
+            match direction {
+                ScrollDirection::Forward => {
+                    self.scroll_forward_core(
+                        start,
+                        end,
+                        rows,
+                        erase_background,
+                        view_was_following,
+                    );
+                }
+                ScrollDirection::Reverse => {
+                    self.scroll_reverse_core(
+                        start,
+                        end,
+                        rows,
+                        erase_background,
+                        view_was_following,
+                    );
+                }
+            }
+        }
+
+        debug_assert!((0..self.screen_rows).all(|row| self.row(Self::signed_row(row)).is_some()));
+        ScrollResult {
+            direction,
+            region,
+            rows,
+            view_was_following,
+            view_changed: self.view != old_view,
+        }
+    }
+
     /// Changes which physical slot corresponds to live-screen row zero.
     ///
     /// This primitive does not move the viewport automatically. Call
@@ -189,6 +395,78 @@ impl Grid {
         self.view = self.offset;
     }
 
+    fn scroll_forward_core(
+        &mut self,
+        start: usize,
+        end: usize,
+        rows: usize,
+        erase_background: Color,
+        view_was_following: bool,
+    ) {
+        let view_distance = self.absolute_to_scrollback(self.screen_rows, self.view);
+        self.offset = self.offset.wrapping_add(rows) & (self.rows.len() - 1);
+
+        if view_was_following {
+            self.view = self.offset;
+        } else if rows > view_distance {
+            self.view = self.scrollback_to_absolute(self.screen_rows, 0);
+            let distance_to_live = self.offset.wrapping_sub(self.view) & (self.rows.len() - 1);
+            self.view = self
+                .view
+                .wrapping_add((rows - view_distance).min(distance_to_live))
+                & (self.rows.len() - 1);
+        }
+
+        let amount = Self::signed_row(rows);
+        for row in (0..start).rev() {
+            let row = Self::signed_row(row);
+            self.swap_rows(row - amount, row);
+        }
+        for row in (end..self.screen_rows).rev() {
+            let row = Self::signed_row(row);
+            self.swap_rows(row - amount, row);
+        }
+        for row in end - rows..end {
+            self.row_or_allocate(Self::signed_row(row))
+                .erase_all(erase_background);
+        }
+    }
+
+    fn scroll_reverse_core(
+        &mut self,
+        start: usize,
+        end: usize,
+        rows: usize,
+        erase_background: Color,
+        view_was_following: bool,
+    ) {
+        for row in end - rows..end {
+            let index = self.absolute_index(Self::signed_row(row));
+            self.rows[index] = None;
+        }
+
+        self.offset = self.offset.wrapping_sub(rows) & (self.rows.len() - 1);
+        let view_distance = self.absolute_to_scrollback(self.screen_rows, self.view);
+        let offset_distance = self.absolute_to_scrollback(self.screen_rows, self.offset);
+        if view_was_following || view_distance > offset_distance {
+            self.view = self.offset;
+        }
+
+        let amount = Self::signed_row(rows);
+        for row in end + rows..self.screen_rows + rows {
+            let row = Self::signed_row(row);
+            self.swap_rows(row, row - amount);
+        }
+        for row in rows..start + rows {
+            let row = Self::signed_row(row);
+            self.swap_rows(row, row - amount);
+        }
+        for row in start..start + rows {
+            self.row_or_allocate(Self::signed_row(row))
+                .erase_all(erase_background);
+        }
+    }
+
     fn scrollback_start(&self, screen_rows: usize) -> usize {
         self.offset.wrapping_add(screen_rows) & (self.rows.len() - 1)
     }
@@ -204,12 +482,64 @@ impl Grid {
         self.assert_screen_rows(screen_rows);
         assert!(row < self.rows.len(), "row index must fit within the grid");
     }
+
+    fn resized_cursor(
+        mut cursor: Cursor,
+        old_screen_rows: usize,
+        new_columns: usize,
+        new_screen_rows: usize,
+    ) -> Cursor {
+        let position = cursor.position();
+        let old_row = usize::try_from(position.row).expect("cursor row is non-negative");
+        let old_column = usize::try_from(position.column).expect("cursor column is non-negative");
+        let row = if old_row == old_screen_rows - 1 {
+            new_screen_rows - 1
+        } else {
+            old_row.min(new_screen_rows - 1)
+        };
+        cursor.set_position(Coordinate::new(
+            Self::signed_row(old_column.min(new_columns - 1)),
+            Self::signed_row(row),
+        ));
+        cursor.set_deferred_wrap(false);
+        cursor
+    }
+
+    fn signed_row(row: usize) -> i32 {
+        i32::try_from(row).expect("grid dimensions fit in Foot's signed coordinate space")
+    }
+
+    fn assert_cursor(&self, cursor: Cursor) {
+        let position = cursor.position();
+        assert!(
+            position.column >= 0
+                && usize::try_from(position.column).is_ok_and(|column| column < self.columns)
+                && position.row >= 0
+                && usize::try_from(position.row).is_ok_and(|row| row < self.screen_rows),
+            "cursor must fit within the screen"
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::CellContent;
+
+    fn grid_with_labels(labels: &[char]) -> Grid {
+        let mut grid = Grid::with_screen_size(8, 1, labels.len());
+        for (row, &label) in labels.iter().enumerate() {
+            grid.row_mut(i32::try_from(row).unwrap()).unwrap()[0]
+                .set_content(CellContent::Scalar(label));
+        }
+        grid
+    }
+
+    fn visible_content(grid: &Grid) -> Vec<CellContent> {
+        (0..grid.screen_rows())
+            .map(|row| grid.row(i32::try_from(row).unwrap()).unwrap()[0].content())
+            .collect()
+    }
 
     #[test]
     #[should_panic(expected = "non-zero power of two")]
@@ -301,6 +631,216 @@ mod tests {
         assert_eq!(
             storage.row(-1).unwrap()[0].content(),
             CellContent::Scalar('y')
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_copies_visible_rows_and_drops_history() {
+        let mut grid = Grid::with_screen_size(8, 3, 2);
+        grid.row_mut(0).unwrap()[0].set_content(CellContent::Scalar('a'));
+        grid.row_mut(1).unwrap()[0].set_content(CellContent::Scalar('b'));
+        grid.scroll(
+            ScrollDirection::Forward,
+            ScrollRegion::new(0, 2),
+            1,
+            Color::default(),
+        );
+        grid.row_mut(1).unwrap()[0].set_content(CellContent::Scalar('c'));
+
+        let mut cursor = Cursor::new(Coordinate::new(2, 1));
+        cursor.set_deferred_wrap(true);
+        grid.set_cursor(cursor);
+        grid.set_saved_cursor(cursor);
+        grid.resize_without_reflow(4, 2, 3);
+
+        assert_eq!(grid.row_capacity(), 4);
+        assert_eq!(grid.columns(), 2);
+        assert_eq!(grid.screen_rows(), 3);
+        assert_eq!(grid.offset(), 0);
+        assert!(grid.view_follows_offset());
+        assert_eq!(grid.row(0).unwrap()[0].content(), CellContent::Scalar('b'));
+        assert_eq!(grid.row(1).unwrap()[0].content(), CellContent::Scalar('c'));
+        assert_eq!(grid.row(2).unwrap()[0].content(), CellContent::Empty);
+        assert!(grid.row(-1).is_none());
+        assert_eq!(grid.cursor().position(), Coordinate::new(1, 2));
+        assert_eq!(grid.saved_cursor().position(), Coordinate::new(1, 2));
+        assert!(!grid.cursor().deferred_wrap());
+        assert!(!grid.saved_cursor().deferred_wrap());
+    }
+
+    #[test]
+    fn resize_without_reflow_drops_wide_character_cut_by_new_width() {
+        let mut grid = Grid::with_screen_size(4, 4, 1);
+        let row = grid.row_mut(0).unwrap();
+        row[0].set_content(CellContent::Scalar('界'));
+        row[1].set_content(CellContent::Spacer(2));
+        row[2].set_content(CellContent::Spacer(1));
+        row[3].set_content(CellContent::Scalar('x'));
+
+        grid.resize_without_reflow(4, 2, 1);
+
+        assert!(
+            grid.row(0)
+                .unwrap()
+                .cells()
+                .iter()
+                .all(|cell| cell.content() == CellContent::Empty)
+        );
+        assert!(grid.row(0).unwrap().has_valid_wide_cells());
+    }
+
+    #[test]
+    fn resize_without_reflow_growth_adds_dirty_empty_cells() {
+        let mut grid = Grid::with_screen_size(4, 1, 1);
+        grid.row_mut(0).unwrap()[0].set_content(CellContent::Scalar('x'));
+        grid.row_mut(0).unwrap().set_dirty(false);
+
+        grid.resize_without_reflow(4, 3, 1);
+
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[0].content(), CellContent::Scalar('x'));
+        assert!(
+            row.cells()[1..]
+                .iter()
+                .all(|cell| cell.content() == CellContent::Empty && !cell.attributes().clean())
+        );
+        assert!(row.is_dirty());
+    }
+
+    #[test]
+    fn row_swapping_uses_offset_relative_coordinates() {
+        let mut grid = grid_with_labels(&['a', 'b', 'c']);
+        grid.set_offset(7);
+        grid.swap_rows(1, 2);
+        grid.swap_rows(1, 2);
+        assert_eq!(grid.absolute_index(0), 7);
+    }
+
+    #[test]
+    fn full_forward_scroll_preserves_history_and_exposes_dirty_row() {
+        let mut grid = grid_with_labels(&['a', 'b', 'c']);
+        let result = grid.scroll(
+            ScrollDirection::Forward,
+            ScrollRegion::new(0, 3),
+            1,
+            Color::default(),
+        );
+
+        assert_eq!(
+            visible_content(&grid),
+            vec![
+                CellContent::Scalar('b'),
+                CellContent::Scalar('c'),
+                CellContent::Empty,
+            ]
+        );
+        assert_eq!(grid.row(-1).unwrap()[0].content(), CellContent::Scalar('a'));
+        assert!(grid.row(2).unwrap().is_dirty());
+        assert_eq!(grid.offset(), 1);
+        assert_eq!(grid.view(), 1);
+        assert!(result.view_was_following);
+        assert!(result.view_changed);
+    }
+
+    #[test]
+    fn full_forward_scroll_by_screen_height_moves_every_row_to_history() {
+        let mut grid = grid_with_labels(&['a', 'b', 'c']);
+        grid.scroll(
+            ScrollDirection::Forward,
+            ScrollRegion::new(0, 3),
+            3,
+            Color::default(),
+        );
+
+        assert!(
+            visible_content(&grid)
+                .iter()
+                .all(|content| *content == CellContent::Empty)
+        );
+        assert_eq!(grid.row(-3).unwrap()[0].content(), CellContent::Scalar('a'));
+        assert_eq!(grid.row(-2).unwrap()[0].content(), CellContent::Scalar('b'));
+        assert_eq!(grid.row(-1).unwrap()[0].content(), CellContent::Scalar('c'));
+    }
+
+    #[test]
+    fn overwritten_detached_viewport_advances_like_foot() {
+        let mut grid = grid_with_labels(&['a', 'b', 'c']);
+        grid.row_or_allocate(3);
+        grid.set_view(3);
+
+        grid.scroll(
+            ScrollDirection::Forward,
+            ScrollRegion::new(0, 3),
+            1,
+            Color::default(),
+        );
+
+        // Foot first moves to the new scrollback start (4), then scrolls down
+        // by the overwritten distance (1).
+        assert_eq!(grid.view(), 5);
+        assert!(!grid.view_follows_offset());
+    }
+
+    #[test]
+    fn partial_forward_scroll_preserves_non_scrolling_top_rows() {
+        let mut grid = grid_with_labels(&['a', 'b', 'c']);
+        grid.scroll(
+            ScrollDirection::Forward,
+            ScrollRegion::new(1, 3),
+            1,
+            Color::default(),
+        );
+
+        assert_eq!(
+            visible_content(&grid),
+            vec![
+                CellContent::Scalar('a'),
+                CellContent::Scalar('c'),
+                CellContent::Empty,
+            ]
+        );
+    }
+
+    #[test]
+    fn full_reverse_scroll_drops_bottom_and_exposes_top_row() {
+        let mut grid = grid_with_labels(&['a', 'b', 'c']);
+        grid.scroll(
+            ScrollDirection::Reverse,
+            ScrollRegion::new(0, 3),
+            1,
+            Color::default(),
+        );
+
+        assert_eq!(
+            visible_content(&grid),
+            vec![
+                CellContent::Empty,
+                CellContent::Scalar('a'),
+                CellContent::Scalar('b'),
+            ]
+        );
+        assert_eq!(grid.offset(), 7);
+        assert_eq!(grid.view(), 7);
+        assert!(grid.row(0).unwrap().is_dirty());
+    }
+
+    #[test]
+    fn partial_reverse_scroll_preserves_non_scrolling_bottom_rows() {
+        let mut grid = grid_with_labels(&['a', 'b', 'c']);
+        grid.scroll(
+            ScrollDirection::Reverse,
+            ScrollRegion::new(0, 2),
+            1,
+            Color::default(),
+        );
+
+        assert_eq!(
+            visible_content(&grid),
+            vec![
+                CellContent::Empty,
+                CellContent::Scalar('a'),
+                CellContent::Scalar('c'),
+            ]
         );
     }
 

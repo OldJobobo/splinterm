@@ -12,8 +12,8 @@ emulator by Daniel Eklöf and contributors.
 - Architectural decision: [`docs/adr/0001-foot-rust-port.md`](docs/adr/0001-foot-rust-port.md)
 
 Foundational terminal representations in `crates/splinterm-terminal/src/`
-are translated from Foot's `terminal.h`, `grid.h`, and row storage behavior in
-`grid.c` at the revision above. The affected modules record source-level
+are translated from Foot's `terminal.h`, `grid.h`, `grid.c`, and terminal
+scroll/erase behavior in `terminal.c` at the revision above. The affected modules record source-level
 provenance in their module documentation.
 
 Foot is Copyright (c) 2019 Daniel Eklöf and is distributed under the MIT

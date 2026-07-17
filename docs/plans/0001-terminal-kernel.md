@@ -1,6 +1,6 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** In progress — Phase 2 row storage
+- **Status:** Phase 2 complete — Phase 3 next
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -22,6 +22,12 @@
 - [x] Port circular row indexing and lazy row allocation.
 - [x] Port screen/scrollback coordinate conversion and viewport-relative row
   tracking.
+- [x] Port row erase/fill operations and dirty-state transitions.
+- [x] Port full and partial forward/reverse scrolling.
+- [x] Port resize without reflow, including cursor clamping and wide-cell cuts.
+- [x] Port logical-line reflow with linebreak, wide-cell, composed-width,
+  cursor, saved-cursor, and viewport tracking.
+- [x] Add deterministic randomized grid-operation invariant coverage.
 
 ## Goal
 
@@ -276,6 +282,12 @@ Port Foot's circular grid and screen operations:
 - resize with reflow after the basic grid is stable.
 
 Preserve Foot's wrap and linebreak semantics. Do not flatten history to strings.
+
+The Phase 2 kernel scope excludes URI/extended-underline ranges,
+shell-integration markers, selections, and sixels. Those states belong to
+features explicitly deferred by this milestone and must be translated alongside
+their owning features. Cell content, attributes, hard/soft linebreaks, cursors,
+viewport position, and scrollback ordering are preserved here.
 
 **Tests**
 
