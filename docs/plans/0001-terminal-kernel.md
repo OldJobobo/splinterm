@@ -1,6 +1,6 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** Phase 2 complete — Phase 3 next
+- **Status:** Phase 3 complete — Phase 4 next
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -28,6 +28,15 @@
 - [x] Port logical-line reflow with linebreak, wide-cell, composed-width,
   cursor, saved-cursor, and viewport tracking.
 - [x] Add deterministic randomized grid-operation invariant coverage.
+- [x] Port the streaming Foot VT recognizer with fixed CSI storage.
+- [x] Add bounded OSC/DCS collection and ordered semantic effects.
+- [x] Port printable UTF-8, composed characters, C0/ESC controls, wrapping,
+  scrolling, cursor movement, erase/edit commands, and SGR colors.
+- [x] Port cursor save/restore, scroll regions, core DEC modes, alternate screen,
+  DSR/DA replies, and OSC title/palette/default-color operations.
+- [x] Verify whole-buffer, bytewise, every-single-split, malformed-input, and
+  deterministic randomized parser invariants.
+- [x] Add a `cargo-fuzz` target for arbitrary terminal input.
 
 ## Goal
 
@@ -321,6 +330,17 @@ The parser itself should recognize Foot's complete state transitions early even
 when some semantic handlers intentionally report `Unsupported` during this
 milestone. Unsupported sequences must terminate safely and preserve parser
 synchronization.
+
+Splinterm intentionally hardens Foot's dynamically growing string handling with
+configurable OSC/DCS limits (4 KiB by default), a bounded semantic-event queue,
+and a bounded composed-character table. Unicode display width uses the safe
+`unicode-width` 0.2.2 data tables rather than Foot's host `wcwidth(3)` call;
+remaining width differences must be captured as oracle fixtures before broader
+parity claims.
+
+Semantic DCS handlers, extended underline metadata, charset translation, OSC
+clipboard/URL/notification families, sixel, and window manipulation remain
+recognized-but-deferred features outside this milestone's foundational path.
 
 **Tests**
 

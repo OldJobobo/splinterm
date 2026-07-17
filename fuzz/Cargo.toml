@@ -1,0 +1,21 @@
+[package]
+name = "splinterm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+splinterm-terminal = { path = "../crates/splinterm-terminal" }
+
+[[bin]]
+name = "terminal-advance"
+path = "fuzz_targets/terminal_advance.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

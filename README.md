@@ -22,7 +22,7 @@ crates/
 ├── splinterd/           # persistent session daemon
 ├── splinterm-core/      # Lair/Dojo/window/splint state model
 ├── splinterm-protocol/  # versioned client-daemon wire protocol
-└── splinterm-terminal/  # renderer-independent Foot-derived terminal state
+└── splinterm-terminal/  # Foot-derived grid and streaming VT kernel
 docs/
 ├── adr/
 │   └── 0001-foot-rust-port.md
@@ -33,9 +33,10 @@ docs/
 └── roadmap.md
 ```
 
-The initial daemon uses newline-delimited JSON over a Unix socket. That keeps
-protocol development inspectable while terminal, PTY, persistence, and Wayland
-work is brought online. The wire format is versioned from the start.
+The initial daemon uses newline-delimited JSON over a Unix socket. The
+`splinterm-terminal` crate now contains the Foot-derived cell/grid model and a
+streaming VT kernel; PTY ownership, persistence, snapshots, and Wayland remain
+to be connected. The wire format is versioned from the start.
 
 ## Try the scaffold
 
@@ -70,6 +71,9 @@ Foot-derived terminal kernel and detachable one-Splint vertical slice.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+# Optional parser fuzzing (requires cargo-fuzz)
+cargo fuzz run terminal-advance
 ```
 
 ## Foot lineage

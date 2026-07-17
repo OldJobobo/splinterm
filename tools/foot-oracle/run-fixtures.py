@@ -71,6 +71,24 @@ def run_on_hyprland_workspace(
     return int(done.read_text(encoding="utf-8").strip()), stderr.read_text(encoding="utf-8")
 
 
+def workspace_clients(workspace: int) -> list[dict[str, Any]]:
+    result = subprocess.run(
+        ["hyprctl", "clients", "-j"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "hyprctl clients failed")
+    clients = json.loads(result.stdout)
+    return [
+        client
+        for client in clients
+        if client.get("workspace", {}).get("id") == workspace
+    ]
+
+
 def run_fixture(
     binary: Path,
     fixture_path: Path,
@@ -171,6 +189,18 @@ def main() -> int:
             return 2
         if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
             print("A Hyprland instance is required for workspace-routed oracle runs.", file=sys.stderr)
+            return 2
+        try:
+            occupied = workspace_clients(hyprland_workspace)
+        except (RuntimeError, json.JSONDecodeError) as error:
+            print(f"Cannot inspect workspace {hyprland_workspace}: {error}", file=sys.stderr)
+            return 2
+        if occupied and os.environ.get("FOOT_ORACLE_ALLOW_OCCUPIED_WORKSPACE") != "1":
+            print(
+                f"Refusing to run: workspace {hyprland_workspace} contains "
+                f"{len(occupied)} window(s).",
+                file=sys.stderr,
+            )
             return 2
     elif not allow_live:
         print(
