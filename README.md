@@ -94,6 +94,10 @@ tools/run-phase1-demo.py
 # Roadmap Phase 2 native Wayland/SHM mechanism spike
 cargo run -p splinterm --example wayland-window-spike
 
+# Initial renderer and font-stack evidence
+cargo run --release -p splinterm --example cpu-shm-benchmark
+cargo run -p splinterm --example font-stack-spike
+
 # Optional parser fuzzing (requires cargo-fuzz)
 cargo fuzz run terminal-advance
 ```

@@ -31,6 +31,24 @@ owned-file-descriptor operations in `splinterm-pty`.
 - Version: 1.1.4
 - License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 
+## fontdb
+
+Splinterm's Roadmap Phase 2 font discovery spike uses `fontdb` to inventory and
+query installed font faces.
+
+- Source: <https://github.com/RazrFalcon/fontdb>
+- Version: 0.23.0
+- License: MIT
+
+## swash
+
+The font-stack spike uses Swash to inspect OpenType metrics and character-map
+coverage. Shaping and raster suitability remain under evaluation.
+
+- Source: <https://github.com/dfrg/swash>
+- Version: 0.2.10
+- License: Apache-2.0 OR MIT
+
 ## smithay-client-toolkit
 
 Splinterm's Roadmap Phase 2 native Wayland mechanism spike uses

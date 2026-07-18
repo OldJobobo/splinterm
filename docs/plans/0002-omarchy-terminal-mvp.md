@@ -16,8 +16,13 @@
   scale, seat, keyboard, and clean-close mechanisms in the spike.
 - [x] Record initial evidence in
   [Spike 0001](../spikes/0001-native-wayland-window.md).
-- [ ] Benchmark SHM allocation/reuse and resize churn at representative grids.
-- [ ] Complete the font discovery/shaping/raster bake-off against Foot/fcft.
+- [x] Record the initial allocate-vs-reuse CPU canvas baseline at 80×24,
+  120×40, and 240×80 equivalents in
+  [Spike 0002](../spikes/0002-cpu-shm-paint-baseline.md).
+- [ ] Benchmark actual Wayland SHM slot release and resize churn.
+- [x] Record initial `fontdb`/Swash discovery, metrics, and fallback coverage
+  evidence in [Spike 0003](../spikes/0003-font-stack-inventory.md).
+- [ ] Complete shaping/raster visual comparisons against Foot/fcft.
 - [ ] Add deterministic Foot text-row renderer references.
 - [ ] Accept Wayland/event-loop and font/renderer ADRs.
 - [ ] Promote the native window shell into the graphical `splinterm` client.
