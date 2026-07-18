@@ -25,6 +25,8 @@ Detailed plan: [`plans/0001-terminal-kernel.md`](plans/0001-terminal-kernel.md)
 
 ## Phase 2 — Omarchy-native terminal MVP (next)
 
+Detailed plan: [`plans/0002-omarchy-terminal-mvp.md`](plans/0002-omarchy-terminal-mvp.md)
+
 - Native Wayland window and keyboard input under Hyprland
 - Trusted consent UI plus grant, revoke, and control indication
 - Font shaping/fallback, glyph cache, and damage-tracked rendering

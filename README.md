@@ -44,8 +44,9 @@ tracks terminal state, and survives client disconnection. The local protocol
 uses bounded framed messages, version negotiation, request IDs, peer-UID
 verification, owner-only socket permissions, and explicit resynchronization.
 The complete headless lifecycle is covered by an isolated real-daemon test;
-Roadmap Phase 1 is complete. Persistence and the native Wayland client remain
-to be connected.
+Roadmap Phase 1 is complete. The
+[Omarchy-native terminal MVP plan](docs/plans/0002-omarchy-terminal-mvp.md)
+defines the native Wayland client milestone. Persistence remains later work.
 
 ## Try the scaffold
 

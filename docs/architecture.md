@@ -33,9 +33,11 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 
 ### `splinterm-protocol`
 
-Request/response types shared by both processes. The scaffold uses
-newline-delimited JSON so early protocol changes are easy to inspect. Framing
-and encoding may change later, but protocol versions must remain explicit.
+Request/response types shared by both processes. The current development
+protocol uses bounded length-prefixed JSON frames, version-range negotiation,
+request IDs, peer-UID verification, stable errors, and explicit subscription
+resynchronization. Protocol DTOs remain separate from terminal and daemon
+runtime structs.
 
 ### `splinterd`
 
