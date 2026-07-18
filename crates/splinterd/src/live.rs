@@ -420,6 +420,9 @@ impl LiveSplintRuntime {
     pub async fn shutdown(self) -> Result<ProcessExit, LiveError> {
         let request = self.handle.shutdown().await;
         let task = self.task.await?;
+        if task.is_ok() {
+            return task;
+        }
         request?;
         task
     }
