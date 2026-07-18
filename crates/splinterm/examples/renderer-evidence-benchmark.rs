@@ -1,0 +1,13 @@
+//! Release-mode timing evidence for the candidate deterministic renderer.
+
+use anyhow::{Context, Result};
+
+fn main() -> Result<()> {
+    let samples = std::env::args()
+        .nth(1)
+        .map_or(Ok(100), |value| value.parse::<usize>())
+        .context("sample count must be a positive integer")?;
+    let report = splinterm::renderer::benchmark_json(samples)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
