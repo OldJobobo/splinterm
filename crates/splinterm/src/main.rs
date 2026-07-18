@@ -1,12 +1,21 @@
-use std::{env, io::ErrorKind, path::PathBuf};
+use std::{
+    env,
+    io::{self, ErrorKind, Read, Write},
+    path::PathBuf,
+    sync::mpsc as std_mpsc,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use splinterm::{WindowCommand, WindowOptions, WindowUpdate, run_window};
+use splinterm::{
+    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowUpdate, run_window,
+};
 use splinterm_core::SplintId;
 use splinterm_protocol::{
-    ClientFrame, ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ServerFrame,
-    SubscriptionEvent, TerminalSnapshot, TerminalUpdate, encode_frame,
+    AccessGrant, AccessScope, ActiveScreen, CellAttributes, ClientFrame, ColorSource,
+    ConsentPrompt, ConsentReply, ErrorCode, MAX_CONSENT_FRAME_BYTES, MAX_FRAME_BYTES,
+    PROTOCOL_VERSION, Request, Response, ServerFrame, SubscriptionEvent, TerminalCell,
+    TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -48,6 +57,9 @@ enum Command {
     },
     /// Terminate the live shell (development mode only).
     Terminate,
+    /// Private daemon-launched trusted consent surface.
+    #[command(hide = true)]
+    Consent,
 }
 
 #[tokio::main]
@@ -56,10 +68,17 @@ async fn main() -> Result<()> {
     if matches!(command, Command::Window) {
         return run_live_window().await;
     }
+    if matches!(command, Command::Consent) {
+        return tokio::task::spawn_blocking(run_consent_client)
+            .await
+            .context("trusted consent task failed")?;
+    }
 
     let mut connection = Connection::connect().await?;
     match command {
-        Command::Window => unreachable!("window command returned before daemon connection"),
+        Command::Window | Command::Consent => {
+            unreachable!("graphical command returned before daemon connection")
+        }
         Command::Ping => print_response(connection.request(Request::Ping).await?),
         Command::List => print_response(connection.request(Request::ListDojos).await?),
         Command::New { name, cwd } => print_response(
@@ -128,6 +147,154 @@ async fn main() -> Result<()> {
     }
 }
 
+fn read_private_frame<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
+    let mut length = [0_u8; 4];
+    reader.read_exact(&mut length)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length == 0 || length > MAX_CONSENT_FRAME_BYTES {
+        bail!("invalid private consent frame length");
+    }
+    let mut body = vec![0_u8; length];
+    reader.read_exact(&mut body)?;
+    serde_json::from_slice(&body).context("invalid private consent frame")
+}
+
+fn write_private_frame<T: serde::Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
+    let body = serde_json::to_vec(value).context("encode private consent frame")?;
+    if body.is_empty() || body.len() > MAX_CONSENT_FRAME_BYTES {
+        bail!("private consent frame exceeds limit");
+    }
+    writer.write_all(&u32::try_from(body.len())?.to_be_bytes())?;
+    writer.write_all(&body)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
+    let mut lines = vec![
+        "TRUSTED SPLINTERM ACCESS REQUEST".to_owned(),
+        String::new(),
+        format!("Requester: {}", prompt.requester),
+        format!(
+            "Process: PID {} · UID {}",
+            prompt.requester_pid, prompt.requester_uid
+        ),
+        format!(
+            "Splint: {:?} · incarnation {}",
+            prompt.splint_id, prompt.incarnation
+        ),
+        String::new(),
+        "Requested one-time capabilities:".to_owned(),
+    ];
+    lines.extend(
+        prompt
+            .scopes
+            .iter()
+            .map(|scope| format!("  • {}", scope.label())),
+    );
+    lines.extend([
+        String::new(),
+        "This grant expires automatically and is not persisted.".to_owned(),
+        "D / Escape: DENY          G / Enter: GRANT ONCE".to_owned(),
+        "Click the red left or green right action area below.".to_owned(),
+    ]);
+    let columns = lines
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(1)
+        .clamp(64, 120);
+    let rows = lines.len().max(18);
+    let blank_attributes = CellAttributes {
+        bold: false,
+        dim: false,
+        italic: false,
+        underline: false,
+        strikethrough: false,
+        blink: false,
+        conceal: false,
+        reverse: false,
+        foreground_source: ColorSource::Default,
+        foreground: 0,
+        background_source: ColorSource::Default,
+        background: 0,
+    };
+    let mut visible_rows: Vec<_> = lines
+        .into_iter()
+        .map(|line| TerminalRow {
+            linebreak: false,
+            cells: line
+                .chars()
+                .take(columns)
+                .map(|character| TerminalCell {
+                    content: character.to_string(),
+                    spacer_remaining: None,
+                    attributes: blank_attributes,
+                })
+                .collect(),
+        })
+        .collect();
+    visible_rows.resize_with(rows, || TerminalRow {
+        linebreak: false,
+        cells: Vec::new(),
+    });
+    TerminalSnapshot {
+        splint_id: prompt.splint_id,
+        incarnation: prompt.incarnation,
+        revision: 1,
+        columns,
+        rows,
+        cursor_column: -1,
+        cursor_row: -1,
+        cursor_deferred_wrap: false,
+        active_screen: ActiveScreen::Normal,
+        input_modes: TerminalInputModes {
+            application_cursor: false,
+            application_keypad: false,
+            focus_reporting: false,
+            bracketed_paste: false,
+            cursor_visible: false,
+            cursor_blink: false,
+            mouse_tracking: splinterm_protocol::MouseTracking::None,
+            sgr_mouse: false,
+        },
+        palette: vec![0; 256],
+        default_colors: [0x00f4_f0e8, 0x0014_1820, 0x00e0_a030],
+        title: "Trusted access request".to_owned(),
+        visible_rows,
+        scrollback_rows: Vec::new(),
+        available_scrollback_rows: 0,
+        omitted_oldest_scrollback_rows: 0,
+        exited_code: None,
+        exited_signal: None,
+    }
+}
+
+fn run_consent_client() -> Result<()> {
+    let prompt: ConsentPrompt = read_private_frame(&mut io::stdin().lock())?;
+    if prompt.capability.len() != splinterm_protocol::CONSENT_CAPABILITY_BYTES
+        || prompt.scopes.is_empty()
+        || prompt.scopes.len() > splinterm_protocol::MAX_ACCESS_SCOPES
+        || prompt.requester.chars().count() > 1024
+    {
+        bail!("invalid trusted consent prompt");
+    }
+    let (decision, receiver) = std_mpsc::channel();
+    run_window(WindowOptions {
+        snapshot: Some(consent_snapshot(&prompt)),
+        trusted_consent: Some(TrustedConsentUi { decision }),
+        ..WindowOptions::default()
+    })?;
+    let granted = receiver.try_recv().unwrap_or(false);
+    write_private_frame(
+        &mut io::stdout().lock(),
+        &ConsentReply {
+            capability: prompt.capability,
+            granted,
+        },
+    )
+}
+
 struct Attachment {
     subscription_id: u64,
     snapshot: TerminalSnapshot,
@@ -169,7 +336,9 @@ fn classify_subscription_event(
         SubscriptionEvent::Snapshot { snapshot } => EventAction::Snapshot { sequence, snapshot },
         SubscriptionEvent::Update { update } => EventAction::Update { sequence, update },
         SubscriptionEvent::ResyncRequired { .. } => EventAction::Resynchronize,
-        SubscriptionEvent::Exited { .. } => EventAction::Shutdown,
+        SubscriptionEvent::AccessRevoked { .. } | SubscriptionEvent::Exited { .. } => {
+            EventAction::Shutdown
+        }
     }
 }
 
@@ -211,6 +380,45 @@ async fn resynchronize(
     attach(connection, splint_id, incarnation).await
 }
 
+fn authority_status(grants: Vec<AccessGrant>, development_bypass: bool) -> AuthorityStatus {
+    AuthorityStatus {
+        grants: grants
+            .into_iter()
+            .filter(|grant| grant.grant_id != 0)
+            .map(|grant| {
+                let scopes = grant
+                    .scopes
+                    .iter()
+                    .map(|scope| scope.label())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (grant.grant_id, format!("{}: {scopes}", grant.requester))
+            })
+            .collect(),
+        development_bypass,
+    }
+}
+
+async fn load_authority_status(
+    connection: &mut Connection,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<AuthorityStatus> {
+    match connection
+        .request(Request::AuthorizationStatus {
+            splint_id,
+            incarnation,
+        })
+        .await?
+    {
+        Response::AuthorizationStatus {
+            grants,
+            development_bypass,
+        } => Ok(authority_status(grants, development_bypass)),
+        _ => bail!("splinterd did not return authorization status"),
+    }
+}
+
 async fn run_controller(
     mut control: Connection,
     mut commands: mpsc::Receiver<WindowCommand>,
@@ -218,29 +426,47 @@ async fn run_controller(
     splint_id: SplintId,
     incarnation: u64,
 ) -> Result<()> {
+    let mut active_controller = Some(controller_id);
     let result = async {
         while let Some(command) = commands.recv().await {
             let request = match command {
-                WindowCommand::Input(bytes) => Request::Input {
-                    controller_id,
-                    splint_id,
-                    incarnation,
-                    bytes,
-                },
+                WindowCommand::Input(bytes) => {
+                    let Some(controller_id) = active_controller else {
+                        continue;
+                    };
+                    Request::Input {
+                        controller_id,
+                        splint_id,
+                        incarnation,
+                        bytes,
+                    }
+                }
                 WindowCommand::Resize {
                     columns,
                     rows,
                     pixel_width,
                     pixel_height,
-                } => Request::Resize {
-                    controller_id,
-                    splint_id,
-                    incarnation,
-                    columns,
-                    rows,
-                    pixel_width,
-                    pixel_height,
-                },
+                } => {
+                    let Some(controller_id) = active_controller else {
+                        continue;
+                    };
+                    Request::Resize {
+                        controller_id,
+                        splint_id,
+                        incarnation,
+                        columns,
+                        rows,
+                        pixel_width,
+                        pixel_height,
+                    }
+                }
+                WindowCommand::RevokeAccess(grant_id) => Request::RevokeAccess { grant_id },
+                WindowCommand::ReleaseControl => {
+                    let Some(controller_id) = active_controller.take() else {
+                        continue;
+                    };
+                    Request::ReleaseControl { controller_id }
+                }
             };
             if !matches!(control.request(request).await?, Response::Acknowledged) {
                 bail!("splinterd did not acknowledge a window control command");
@@ -249,7 +475,9 @@ async fn run_controller(
         Ok(())
     }
     .await;
-    let _ = control.release_control(controller_id).await;
+    if let Some(controller_id) = active_controller {
+        let _ = control.release_control(controller_id).await;
+    }
     result
 }
 
@@ -260,6 +488,24 @@ async fn run_controller(
 async fn run_live_window() -> Result<()> {
     let mut connection = Connection::connect().await?;
     let (splint_id, incarnation) = connection.live_identity().await?;
+    let requested_scopes = vec![
+        AccessScope::Observe,
+        AccessScope::Input,
+        AccessScope::Resize,
+    ];
+    if !matches!(
+        connection
+            .request(Request::RequestAccess {
+                splint_id,
+                incarnation,
+                scopes: requested_scopes,
+            })
+            .await?,
+        Response::AccessGranted { .. }
+    ) {
+        bail!("splinterd did not grant requested terminal access");
+    }
+    let authority = load_authority_status(&mut connection, splint_id, incarnation).await?;
     let mut attachment = attach(&mut connection, splint_id, incarnation).await?;
     let mut control = Connection::connect().await?;
     let control_identity = control.live_identity().await?;
@@ -284,6 +530,7 @@ async fn run_live_window() -> Result<()> {
             snapshot: Some(initial_snapshot),
             updates: Some(receiver),
             commands: Some(command_sender),
+            authority,
             ..WindowOptions::default()
         })
     });
@@ -528,6 +775,18 @@ fn print_response(response: Response) -> Result<()> {
         }
         Response::DojoCreated { dojo } => println!("Created dojo '{}'.", dojo.name),
         Response::Attached { snapshot, .. } => print_snapshot(&snapshot),
+        Response::AccessGranted { grant } => {
+            println!("Access grant {} issued.", grant.grant_id);
+        }
+        Response::AuthorizationStatus {
+            grants,
+            development_bypass,
+        } => {
+            println!(
+                "{} active grant(s); development bypass={development_bypass}",
+                grants.len()
+            );
+        }
         Response::ControlGranted { controller_id } => {
             println!("Controller lease {controller_id} granted.");
         }

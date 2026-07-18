@@ -36,8 +36,9 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 Request/response types shared by both processes. The current development
 protocol uses bounded length-prefixed JSON frames, version-range negotiation,
 request IDs, peer-UID verification, stable errors, and explicit subscription
-resynchronization. Protocol DTOs remain separate from terminal and daemon
-runtime structs.
+resynchronization. Protocol v7 also carries closed access scopes, grant status,
+revocation, and revocation events. Protocol DTOs remain separate from terminal
+and daemon runtime structs.
 
 ### `splinterd`
 
@@ -46,11 +47,21 @@ processes, scrollback, and durable snapshots. Clients should be disposable
 without ending sessions. The daemon must not depend on Wayland and should run
 on headless Linux hosts such as `neuromancer`.
 
+For ungranted terminal access, the daemon launches a disposable sibling
+`splinterm consent` process over a private inherited Unix socket. Random
+one-use capability material and the bounded grant-once/deny exchange stay on
+that channel. In-memory grants bind peer UID/PID/executable identity,
+Splint/incarnation, and explicit scopes. Revocation releases tied controllers
+and subscriptions; bounded audit metadata excludes terminal, clipboard, and
+input bodies. See [ADR 0005](adr/0005-trusted-consent-broker.md).
+
 ### `splinterm`
 
-Today this is a small control client. It will become the Wayland terminal UI,
-responsible for presentation, local input handling, clipboard/IME integration,
-and rendering state received from the daemon.
+This is the disposable Wayland terminal UI, responsible for presentation,
+local input, clipboard/IME integration, and rendering state received from the
+daemon. Its private consent mode renders fixed trusted application chrome and
+never accepts requester-supplied terminal content. Normal windows keep active
+authority, development bypass, and controller state visibly indicated.
 
 ## Foot reference map
 

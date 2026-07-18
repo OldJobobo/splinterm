@@ -249,6 +249,7 @@ impl Drop for ClipboardWorkerPermit<'_> {
 pub enum WindowUpdate {
     Snapshot(TerminalSnapshot),
     Update(TerminalUpdate),
+    Authority(AuthorityStatus),
     Shutdown,
 }
 
@@ -262,6 +263,18 @@ pub enum WindowCommand {
         pixel_width: u16,
         pixel_height: u16,
     },
+    RevokeAccess(u64),
+    ReleaseControl,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuthorityStatus {
+    pub grants: Vec<(u64, String)>,
+    pub development_bypass: bool,
+}
+
+pub struct TrustedConsentUi {
+    pub decision: StdSender<bool>,
 }
 
 #[derive(Default)]
@@ -277,6 +290,10 @@ pub struct WindowOptions {
     pub evidence_close_shortcuts: bool,
     /// Delay capture until this integer output scale is active.
     pub capture_scale: Option<u32>,
+    /// Trusted application-owned consent mode. Terminal content cannot enable it.
+    pub trusted_consent: Option<TrustedConsentUi>,
+    /// Trusted authority state rendered in persistent application chrome.
+    pub authority: AuthorityStatus,
 }
 
 /// Opens the native window and runs until compositor close or an explicit shutdown.
@@ -345,13 +362,19 @@ pub fn run(options: WindowOptions) -> Result<()> {
         viewport.set_destination(width, height);
     }
     let controller_active = options.commands.is_some();
-    let title = window_title(
-        options
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.title.as_str()),
-        controller_active,
-    );
+    let trusted_consent = options.trusted_consent;
+    let title = if trusted_consent.is_some() {
+        "Splinterm — Trusted Access Request".to_owned()
+    } else {
+        window_title(
+            options
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.title.as_str()),
+            controller_active,
+            &options.authority,
+        )
+    };
     window.set_title(title);
     window.set_app_id(APP_ID);
     window.set_min_size(Some((480, 300)));
@@ -386,6 +409,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
         updates: options.updates,
         commands: options.commands,
         controller_active,
+        trusted_consent,
+        authority: options.authority,
         evidence_close_shortcuts: options.evidence_close_shortcuts,
         modifiers: Modifiers::default(),
         last_resize: None,
@@ -448,6 +473,63 @@ pub fn run(options: WindowOptions) -> Result<()> {
     Ok(())
 }
 
+fn paint_trusted_consent_chrome(canvas: &mut [u8], width: u32, height: u32) {
+    fn fill(canvas: &mut [u8], width: u32, x0: u32, y0: u32, x1: u32, y1: u32, rgb: u32) {
+        let [_, red, green, blue] = rgb.to_be_bytes();
+        for y in y0.min(y1)..y1 {
+            for x in x0.min(x1)..x1 {
+                let Ok(index) = usize::try_from((y * width + x) * 4) else {
+                    continue;
+                };
+                if let Some(pixel) = canvas.get_mut(index..index + 4) {
+                    pixel.copy_from_slice(&[blue, green, red, 0xff]);
+                }
+            }
+        }
+    }
+    let border = width.min(height).div_ceil(80).max(4);
+    fill(canvas, width, 0, 0, width, border, 0x00e0_a030);
+    fill(
+        canvas,
+        width,
+        0,
+        height.saturating_sub(border),
+        width,
+        height,
+        0x00e0_a030,
+    );
+    fill(canvas, width, 0, 0, border, height, 0x00e0_a030);
+    fill(
+        canvas,
+        width,
+        width.saturating_sub(border),
+        0,
+        width,
+        height,
+        0x00e0_a030,
+    );
+    let button_top = height.saturating_mul(78) / 100;
+    let middle = width / 2;
+    fill(
+        canvas,
+        width,
+        border,
+        button_top,
+        middle.saturating_sub(2),
+        height.saturating_sub(border),
+        0x0070_2020,
+    );
+    fill(
+        canvas,
+        width,
+        middle.saturating_add(2),
+        button_top,
+        width.saturating_sub(border),
+        height.saturating_sub(border),
+        0x0020_7040,
+    );
+}
+
 fn viewport_destination(width: u32, height: u32) -> Result<(i32, i32)> {
     Ok((
         i32::try_from(width).context("viewport width fits i32")?,
@@ -507,6 +589,8 @@ struct App {
     updates: Option<Receiver<WindowUpdate>>,
     commands: Option<Sender<WindowCommand>>,
     controller_active: bool,
+    trusted_consent: Option<TrustedConsentUi>,
+    authority: AuthorityStatus,
     evidence_close_shortcuts: bool,
     modifiers: Modifiers,
     last_resize: Option<(u16, u16, u16, u16)>,
@@ -1155,15 +1239,28 @@ fn reduced_motion_requested() -> bool {
         .is_some_and(|value| matches!(value.to_str(), Some("1" | "true" | "yes")))
 }
 
-fn window_title(snapshot_title: Option<&str>, controller_active: bool) -> String {
+fn window_title(
+    snapshot_title: Option<&str>,
+    controller_active: bool,
+    authority: &AuthorityStatus,
+) -> String {
     let base = snapshot_title
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .unwrap_or("Splinterm");
-    if controller_active {
-        format!("{base} — local controller")
+    let controller = controller_active.then_some("local controller");
+    let authority_label = if authority.development_bypass {
+        Some("DEVELOPMENT BYPASS")
+    } else if authority.grants.is_empty() {
+        None
     } else {
-        base.to_owned()
+        Some("EXTERNAL ACCESS ACTIVE")
+    };
+    match (controller, authority_label) {
+        (Some(controller), Some(authority)) => format!("{base} — {controller} — {authority}"),
+        (Some(controller), None) => format!("{base} — {controller}"),
+        (None, Some(authority)) => format!("{base} — {authority}"),
+        (None, None) => base.to_owned(),
     }
 }
 
@@ -1579,7 +1676,57 @@ impl App {
         )
     }
 
+    fn decide_consent(&mut self, granted: bool) {
+        if let Some(consent) = self.trusted_consent.take() {
+            let _ = consent.decision.send(granted);
+        }
+        self.exit = true;
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) {
+        if self.trusted_consent.is_some() {
+            match event.keysym {
+                Keysym::g | Keysym::G | Keysym::Return | Keysym::KP_Enter => {
+                    self.decide_consent(true);
+                }
+                Keysym::d | Keysym::D | Keysym::Escape => self.decide_consent(false),
+                _ => {}
+            }
+            return;
+        }
+        if self.modifiers.ctrl
+            && self.modifiers.shift
+            && matches!(event.keysym, Keysym::r | Keysym::R)
+        {
+            let ids: Vec<_> = self.authority.grants.iter().map(|(id, _)| *id).collect();
+            for id in ids {
+                self.send_command(WindowCommand::RevokeAccess(id));
+            }
+            self.authority.grants.clear();
+            if let Some(snapshot) = &self.snapshot {
+                self.window.set_title(window_title(
+                    Some(&snapshot.title),
+                    self.controller_active,
+                    &self.authority,
+                ));
+            }
+            return;
+        }
+        if self.modifiers.ctrl
+            && self.modifiers.shift
+            && matches!(event.keysym, Keysym::l | Keysym::L)
+        {
+            self.send_command(WindowCommand::ReleaseControl);
+            self.controller_active = false;
+            if let Some(snapshot) = &self.snapshot {
+                self.window.set_title(window_title(
+                    Some(&snapshot.title),
+                    self.controller_active,
+                    &self.authority,
+                ));
+            }
+            return;
+        }
         if self.evidence_close_shortcuts
             && matches!(event.keysym, Keysym::Escape | Keysym::q | Keysym::Q)
         {
@@ -1745,6 +1892,12 @@ impl App {
                     visual_changed |=
                         full || cursor_changed || self.raster_dirty_rows.iter().any(|dirty| *dirty);
                 }
+                WindowUpdate::Authority(authority) => {
+                    self.authority = authority;
+                    title_changed = true;
+                    visual_changed = true;
+                    self.full_redraw = true;
+                }
                 WindowUpdate::Shutdown => {
                     self.exit = true;
                     return Ok(());
@@ -1771,8 +1924,11 @@ impl App {
         }
         if title_changed {
             let snapshot = self.snapshot.as_ref().context("updated snapshot exists")?;
-            self.window
-                .set_title(window_title(Some(&snapshot.title), self.controller_active));
+            self.window.set_title(window_title(
+                Some(&snapshot.title),
+                self.controller_active,
+                &self.authority,
+            ));
         }
         Ok(())
     }
@@ -1898,7 +2054,7 @@ impl App {
             canvas
         };
 
-        println!(
+        eprintln!(
             "Presenting logical={}x{} buffer={}x{} scale={}x stride={stride}",
             self.logical_width,
             self.logical_height,
@@ -1961,6 +2117,9 @@ impl App {
                     focused: self.keyboard_focused,
                 },
             );
+            if self.trusted_consent.is_some() {
+                paint_trusted_consent_chrome(canvas, width, height);
+            }
         } else if let Some(row) = &self.text_row {
             paint(canvas, width, height, row);
         } else {
@@ -1973,7 +2132,7 @@ impl App {
             if let Some(path) = self.capture.take() {
                 write_ppm(&path, canvas, width, height)
                     .with_context(|| format!("write {}", path.display()))?;
-                println!(
+                eprintln!(
                     "Wrote deterministic row capture at {}x scale to {}",
                     f64::from(self.scale_120) / 120.0,
                     path.display()
@@ -2098,7 +2257,11 @@ impl WindowHandler for App {
         _queue_handle: &QueueHandle<Self>,
         _window: &Window,
     ) {
-        self.exit = true;
+        if self.trusted_consent.is_some() {
+            self.decide_consent(false);
+        } else {
+            self.exit = true;
+        }
     }
 
     fn configure(
@@ -2441,6 +2604,13 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Press { button, serial, .. } => {
                     self.last_pointer_serial = Some(serial);
+                    if self.trusted_consent.is_some() && button == 0x110 {
+                        let (x, y) = event.position;
+                        if y >= f64::from(self.logical_height) * 0.78 {
+                            self.decide_consent(x >= f64::from(self.logical_width) / 2.0);
+                        }
+                        continue;
+                    }
                     self.pointer_cell = cell;
                     self.recompute_hovered_url();
                     let owner = classify_press(

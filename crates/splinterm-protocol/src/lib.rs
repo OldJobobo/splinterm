@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use splinterm_core::{Dojo, SplintId};
 
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -18,6 +18,9 @@ pub const MAX_OUTSTANDING_REQUESTS: usize = 1;
 pub const MAX_SUBSCRIPTIONS: usize = 4;
 pub const MAX_UPDATE_ROW_PATCHES: usize = MAX_ROWS as usize;
 pub const MAX_UPDATE_SCROLLS: usize = MAX_ROWS as usize;
+pub const MAX_CONSENT_FRAME_BYTES: usize = 16 * 1024;
+pub const CONSENT_CAPABILITY_BYTES: usize = 32;
+pub const MAX_ACCESS_SCOPES: usize = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -89,6 +92,18 @@ pub enum Request {
     Ping,
     ListDojos,
     InspectLiveSplint,
+    RequestAccess {
+        splint_id: SplintId,
+        incarnation: u64,
+        scopes: Vec<AccessScope>,
+    },
+    AuthorizationStatus {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+    RevokeAccess {
+        grant_id: u64,
+    },
     CreateDojo {
         name: String,
         cwd: PathBuf,
@@ -143,6 +158,13 @@ pub enum Response {
         splint_id: SplintId,
         incarnation: u64,
     },
+    AccessGranted {
+        grant: AccessGrant,
+    },
+    AuthorizationStatus {
+        grants: Vec<AccessGrant>,
+        development_bypass: bool,
+    },
     Attached {
         subscription_id: u64,
         snapshot: TerminalSnapshot,
@@ -169,6 +191,9 @@ pub enum SubscriptionEvent {
     ResyncRequired {
         current_revision: u64,
     },
+    AccessRevoked {
+        grant_id: u64,
+    },
     Exited {
         code: Option<i32>,
         signal: Option<i32>,
@@ -191,6 +216,60 @@ impl ProtocolError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessScope {
+    Observe,
+    Scrollback,
+    Input,
+    Resize,
+    ClipboardRead,
+    ClipboardWrite,
+    Terminate,
+}
+
+impl AccessScope {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Observe => "observe visible terminal",
+            Self::Scrollback => "read scrollback",
+            Self::Input => "send input",
+            Self::Resize => "resize terminal",
+            Self::ClipboardRead => "read clipboard metadata",
+            Self::ClipboardWrite => "write clipboard metadata",
+            Self::Terminate => "terminate process",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentPrompt {
+    pub capability: Vec<u8>,
+    pub requester: String,
+    pub requester_pid: u32,
+    pub requester_uid: u32,
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub scopes: Vec<AccessScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentReply {
+    pub capability: Vec<u8>,
+    pub granted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessGrant {
+    pub grant_id: u64,
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub scopes: Vec<AccessScope>,
+    pub requester: String,
+    pub expires_at_unix_seconds: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -203,6 +282,8 @@ pub enum ErrorCode {
     DuplicateRequestId,
     TooManyOutstandingRequests,
     DevelopmentFeatureDisabled,
+    ConsentUnavailable,
+    ConsentDenied,
     Unauthorized,
     ControllerUnavailable,
     NotFound,

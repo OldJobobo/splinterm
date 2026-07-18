@@ -1,7 +1,7 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Phase 6 implementation complete — live scale/IME matrix constrained by current setup
-- **Roadmap:** Phase 6 validation
+- **Status:** Phase 7 implementation complete — trusted consent validation recorded
+- **Roadmap:** Phase 7 validation
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -68,6 +68,11 @@
 - [x] Validate Phase 4 mechanisms on workspace 8 with idle CPU sampling,
   `btop`, finite plain/ANSI output bursts, rapid resize, and detach/reattach in
   [Spike 0011](../spikes/0011-damage-driven-rendering.md).
+- [x] Replace normal graphical development grants with the daemon-launched,
+  private-FD trusted consent broker, scoped grant-once authority, revocation,
+  controller release, active authority indication, and bounded metadata audit
+  described in [ADR 0005](../adr/0005-trusted-consent-broker.md) and
+  [Spike 0014](../spikes/0014-trusted-consent-and-control.md).
 - [ ] Record the full Phase 4 baseline matrix with host/software context,
   including continuous `yes`, large colored-file `cat`, measured resize and
   detach/reattach costs, and total renderer-memory metrics.

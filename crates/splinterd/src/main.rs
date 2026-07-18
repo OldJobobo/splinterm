@@ -1,3 +1,5 @@
+mod consent;
+
 use std::{
     collections::HashMap,
     env,
@@ -11,23 +13,24 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
+use consent::{GrantStore, PeerIdentity};
 use splinterd::{
     LiveEvent, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, Subscription,
     SubscriptionReceive,
 };
 use splinterm_core::{Lair, LayoutNode, SplintId, SplintState};
 use splinterm_protocol::{
-    ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame, ColorSource, ErrorCode,
-    MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS, MAX_SNAPSHOT_SCROLLBACK_ROWS,
-    MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking, PROTOCOL_VERSION, ProtocolError,
-    Request, Response, ScrollDirection as WireScrollDirection, ServerFrame, ServerLimits,
-    SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalRow,
-    TerminalRowPatch, TerminalScroll, TerminalSnapshot, TerminalUpdate as WireTerminalUpdate,
-    encode_frame,
+    AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
+    ColorSource, ErrorCode, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS,
+    MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking,
+    PROTOCOL_VERSION, ProtocolError, Request, Response, ScrollDirection as WireScrollDirection,
+    ServerFrame, ServerLimits, SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes,
+    TerminalRow, TerminalRowPatch, TerminalScroll, TerminalSnapshot,
+    TerminalUpdate as WireTerminalUpdate, encode_frame,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
@@ -42,7 +45,7 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
     signal,
-    sync::{Mutex, RwLock, Semaphore, mpsc},
+    sync::{Mutex, RwLock, Semaphore, broadcast, mpsc},
     task::JoinHandle,
     time,
 };
@@ -61,6 +64,7 @@ struct ControllerLease {
     id: u64,
     splint_id: SplintId,
     incarnation: u64,
+    grant_id: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -83,6 +87,7 @@ impl ControllerState {
         &mut self,
         splint_id: SplintId,
         incarnation: u64,
+        grant_id: Option<u64>,
     ) -> Result<ControllerLease, ProtocolError> {
         if self.active.is_some() {
             return Err(ProtocolError::new(
@@ -98,6 +103,7 @@ impl ControllerState {
             id,
             splint_id,
             incarnation,
+            grant_id,
         };
         self.active = Some(lease);
         Ok(lease)
@@ -133,6 +139,15 @@ impl ControllerState {
         }
     }
 
+    fn release_grant(&mut self, grant_id: u64) {
+        if self
+            .active
+            .is_some_and(|lease| lease.grant_id == Some(grant_id))
+        {
+            self.active = None;
+        }
+    }
+
     fn release_identity(&mut self, splint_id: SplintId, incarnation: u64) {
         if self
             .active
@@ -143,10 +158,17 @@ impl ControllerState {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Revocation {
+    grant_id: u64,
+}
+
 struct DaemonState {
     lair: RwLock<Lair>,
     live_splint: Mutex<Option<LiveSplintRuntime>>,
     controller: Mutex<ControllerState>,
+    grants: Mutex<GrantStore>,
+    revocations: broadcast::Sender<Revocation>,
     pty_backend: LinuxPtyBackend,
     development_terminal_access: bool,
 }
@@ -165,10 +187,13 @@ async fn main() -> Result<()> {
     fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).await?;
     verify_socket(&socket).await?;
 
+    let (revocations, _) = broadcast::channel(32);
     let state = Arc::new(DaemonState {
         lair: RwLock::new(Lair::new()),
         live_splint: Mutex::new(None),
         controller: Mutex::new(ControllerState::default()),
+        grants: Mutex::new(GrantStore::default()),
+        revocations,
         pty_backend: LinuxPtyBackend::installed()?,
         development_terminal_access: env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").as_deref()
             == Some(std::ffi::OsStr::new("1")),
@@ -209,12 +234,12 @@ async fn main() -> Result<()> {
 }
 
 async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
-    verify_peer(&stream)?;
+    let peer = verify_peer(&stream)?;
     let (reader, writer) = stream.into_split();
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE);
     let writer_task = tokio::spawn(write_frames(writer, outbound_rx, control_rx));
-    let result = serve_authenticated(reader, &state, &outbound_tx, &control_tx).await;
+    let result = serve_authenticated(reader, &state, &peer, &outbound_tx, &control_tx).await;
     drop(outbound_tx);
     drop(control_tx);
     let _ = writer_task.await;
@@ -228,6 +253,7 @@ async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()>
 async fn serve_authenticated(
     mut reader: OwnedReadHalf,
     state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
     outbound: &mpsc::Sender<ServerFrame>,
     control: &mpsc::Sender<ServerFrame>,
 ) -> Result<()> {
@@ -328,13 +354,13 @@ async fn serve_authenticated(
                     send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
-                let handled = handle_request(request, state, &mut owned_controller).await;
+                let handled = handle_request(request, state, peer, &mut owned_controller).await;
                 match handled {
                     Ok(Handled {
                         response,
                         subscription,
                     }) => {
-                        if let Some((id, stream, handle)) = subscription {
+                        if let Some((id, stream, handle, grant_id)) = subscription {
                             if subscriptions.len() >= MAX_SUBSCRIPTIONS {
                                 send_response(
                                     outbound,
@@ -354,6 +380,8 @@ async fn serve_authenticated(
                                 handle,
                                 outbound.clone(),
                                 control.clone(),
+                                state.revocations.subscribe(),
+                                grant_id,
                             );
                             subscriptions.insert(id, task);
                         } else {
@@ -377,7 +405,7 @@ async fn serve_authenticated(
 #[derive(Debug)]
 struct Handled {
     response: Response,
-    subscription: Option<(u64, Subscription, LiveSplintHandle)>,
+    subscription: Option<(u64, Subscription, LiveSplintHandle, Option<u64>)>,
 }
 
 async fn controlled_handle(
@@ -409,13 +437,52 @@ async fn controlled_handle(
     Ok(handle)
 }
 
+async fn authorize_scope(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    splint_id: SplintId,
+    incarnation: u64,
+    scopes: &[AccessScope],
+) -> Result<Option<u64>, ProtocolError> {
+    if state.development_terminal_access {
+        return Ok(None);
+    }
+    state
+        .grants
+        .lock()
+        .await
+        .authorize(peer, splint_id, incarnation, scopes)
+        .map(Some)
+        .ok_or_else(|| ProtocolError::new(ErrorCode::Unauthorized, "trusted consent is required"))
+}
+
+fn development_grant(
+    peer: &PeerIdentity,
+    splint_id: SplintId,
+    incarnation: u64,
+    scopes: Vec<AccessScope>,
+) -> AccessGrant {
+    AccessGrant {
+        grant_id: 0,
+        splint_id,
+        incarnation,
+        scopes,
+        requester: format!("DEVELOPMENT BYPASS — {}", peer.requester_label()),
+        expires_at_unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "authorization remains adjacent to every development operation"
+    reason = "authorization remains adjacent to every sensitive operation"
 )]
 async fn handle_request(
     request: Request,
     state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
     owned_controller: &mut Option<u64>,
 ) -> Result<Handled, ProtocolError> {
     let response = match request {
@@ -424,7 +491,6 @@ async fn handle_request(
             dojos: state.lair.read().await.dojos().cloned().collect(),
         },
         Request::InspectLiveSplint => {
-            require_dev(state)?;
             let live = state.live_splint.lock().await;
             let handle = live.as_ref().ok_or_else(not_found)?.handle();
             Response::LiveSplint {
@@ -432,8 +498,107 @@ async fn handle_request(
                 incarnation: handle.incarnation.value(),
             }
         }
+        Request::RequestAccess {
+            splint_id,
+            incarnation,
+            scopes,
+        } => {
+            let _ = current_handle(state, splint_id, incarnation).await?;
+            let canonical: std::collections::BTreeSet<_> = scopes.into_iter().collect();
+            if canonical.is_empty() || canonical.len() > splinterm_protocol::MAX_ACCESS_SCOPES {
+                return Err(invalid("access scopes are empty or exceed limits"));
+            }
+            let scopes: Vec<_> = canonical.into_iter().collect();
+            if state.development_terminal_access {
+                Response::AccessGranted {
+                    grant: development_grant(peer, splint_id, incarnation, scopes),
+                }
+            } else if let Some(grant_id) =
+                state
+                    .grants
+                    .lock()
+                    .await
+                    .authorize(peer, splint_id, incarnation, &scopes)
+            {
+                let grant = state
+                    .grants
+                    .lock()
+                    .await
+                    .status(splint_id, incarnation)
+                    .into_iter()
+                    .find(|grant| grant.grant_id == grant_id)
+                    .ok_or_else(internal)?;
+                Response::AccessGranted { grant }
+            } else {
+                let granted =
+                    match consent::prompt(peer, splint_id, incarnation, scopes.clone()).await {
+                        Ok(granted) => granted,
+                        Err(error) => {
+                            warn!(%error, "trusted consent client failed closed");
+                            false
+                        }
+                    };
+                if !granted {
+                    state.grants.lock().await.deny(
+                        peer,
+                        splint_id,
+                        incarnation,
+                        &scopes,
+                        "denied or consent client unavailable",
+                    );
+                    return Err(ProtocolError::new(
+                        ErrorCode::ConsentDenied,
+                        "access was denied",
+                    ));
+                }
+                let grant = state
+                    .grants
+                    .lock()
+                    .await
+                    .grant(peer, splint_id, incarnation, scopes);
+                Response::AccessGranted { grant }
+            }
+        }
+        Request::AuthorizationStatus {
+            splint_id,
+            incarnation,
+        } => {
+            if !state.development_terminal_access && !peer.is_matching_splinterm() {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unauthorized,
+                    "authorization status is available only to trusted Splinterm UI",
+                ));
+            }
+            let grants = state.grants.lock().await.status(splint_id, incarnation);
+            Response::AuthorizationStatus {
+                grants,
+                development_bypass: state.development_terminal_access,
+            }
+        }
+        Request::RevokeAccess { grant_id } => {
+            if !state.development_terminal_access && !peer.is_matching_splinterm() {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unauthorized,
+                    "revocation is available only to trusted Splinterm UI",
+                ));
+            }
+            let revoked = state
+                .grants
+                .lock()
+                .await
+                .revoke(grant_id)
+                .ok_or_else(not_found)?;
+            state.controller.lock().await.release_grant(grant_id);
+            let _ = state.revocations.send(Revocation { grant_id });
+            info!(
+                grant_id,
+                splint_id = ?revoked.splint_id,
+                incarnation = revoked.incarnation,
+                "terminal access grant revoked"
+            );
+            Response::Acknowledged
+        }
         Request::CreateDojo { name, cwd } => {
-            require_dev(state)?;
             if name.len() > 128 || cwd.as_os_str().as_bytes().len() > 4096 {
                 return Err(invalid("dojo name or working directory exceeds limit"));
             }
@@ -485,6 +650,14 @@ async fn handle_request(
                         .lock()
                         .await
                         .release_identity(splint_id, process_incarnation);
+                    let revoked = lair.grants.lock().await.revoke_identity(
+                        splint_id,
+                        process_incarnation,
+                        "process exited",
+                    );
+                    for grant_id in revoked {
+                        let _ = lair.revocations.send(Revocation { grant_id });
+                    }
                     let code = status
                         .code
                         .or_else(|| status.signal.map(|signal| 128 + signal))
@@ -503,7 +676,12 @@ async fn handle_request(
             incarnation,
             scrollback_rows,
         } => {
-            require_dev(state)?;
+            let required = if scrollback_rows == 0 {
+                vec![AccessScope::Observe]
+            } else {
+                vec![AccessScope::Observe, AccessScope::Scrollback]
+            };
+            let grant_id = authorize_scope(state, peer, splint_id, incarnation, &required).await?;
             let handle = current_handle(state, splint_id, incarnation).await?;
             let (snapshot, subscription) = handle
                 .attach_with_scrollback(scrollback_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS))
@@ -515,14 +693,30 @@ async fn handle_request(
                     subscription_id: id,
                     snapshot: wire_snapshot(snapshot),
                 },
-                subscription: Some((id, subscription, handle)),
+                subscription: Some((id, subscription, handle, grant_id)),
             });
         }
         Request::AcquireControl {
             splint_id,
             incarnation,
         } => {
-            require_dev(state)?;
+            let grant_id = if state.development_terminal_access {
+                None
+            } else {
+                let mut grants = state.grants.lock().await;
+                grants
+                    .authorize(peer, splint_id, incarnation, &[AccessScope::Input])
+                    .or_else(|| {
+                        grants.authorize(peer, splint_id, incarnation, &[AccessScope::Resize])
+                    })
+                    .map(Some)
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::Unauthorized,
+                            "input or resize consent is required",
+                        )
+                    })?
+            };
             let _ = current_handle(state, splint_id, incarnation).await?;
             if owned_controller.is_some() {
                 return Err(ProtocolError::new(
@@ -534,14 +728,13 @@ async fn handle_request(
                 .controller
                 .lock()
                 .await
-                .acquire(splint_id, incarnation)?;
+                .acquire(splint_id, incarnation, grant_id)?;
             *owned_controller = Some(lease.id);
             Response::ControlGranted {
                 controller_id: lease.id,
             }
         }
         Request::ReleaseControl { controller_id } => {
-            require_dev(state)?;
             if *owned_controller != Some(controller_id)
                 || !state.controller.lock().await.release(controller_id)
             {
@@ -559,7 +752,8 @@ async fn handle_request(
             incarnation,
             bytes,
         } => {
-            require_dev(state)?;
+            let _ =
+                authorize_scope(state, peer, splint_id, incarnation, &[AccessScope::Input]).await?;
             if bytes.len() > MAX_INPUT_BYTES {
                 return Err(invalid("input exceeds limit"));
             }
@@ -585,7 +779,8 @@ async fn handle_request(
             pixel_width,
             pixel_height,
         } => {
-            require_dev(state)?;
+            let _ = authorize_scope(state, peer, splint_id, incarnation, &[AccessScope::Resize])
+                .await?;
             if columns == 0 || rows == 0 || columns > MAX_COLUMNS || rows > MAX_ROWS {
                 return Err(invalid("terminal dimensions exceed limits"));
             }
@@ -612,7 +807,14 @@ async fn handle_request(
             splint_id,
             incarnation,
         } => {
-            require_dev(state)?;
+            let _ = authorize_scope(
+                state,
+                peer,
+                splint_id,
+                incarnation,
+                &[AccessScope::Terminate],
+            )
+            .await?;
             let mut live = state.live_splint.lock().await;
             let runtime = live.take().ok_or_else(not_found)?;
             let handle = runtime.handle();
@@ -632,6 +834,14 @@ async fn handle_request(
                 .lock()
                 .await
                 .release_identity(splint_id, incarnation);
+            let revoked = state.grants.lock().await.revoke_identity(
+                splint_id,
+                incarnation,
+                "process terminated",
+            );
+            for grant_id in revoked {
+                let _ = state.revocations.send(Revocation { grant_id });
+            }
             *owned_controller = None;
             let status = runtime.shutdown().await.map_err(|_| internal())?;
             Response::Terminated {
@@ -671,11 +881,44 @@ fn spawn_subscription(
     handle: LiveSplintHandle,
     outbound: mpsc::Sender<ServerFrame>,
     control: mpsc::Sender<ServerFrame>,
+    mut revocations: broadcast::Receiver<Revocation>,
+    grant_id: Option<u64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut sequence = 1_u64;
+        let expiry = time::sleep(consent::GRANT_LIFETIME);
+        tokio::pin!(expiry);
         loop {
-            match subscription.recv().await {
+            let received = tokio::select! {
+                value = subscription.recv() => value,
+                revoked = revocations.recv(), if grant_id.is_some() => {
+                    match revoked {
+                        Ok(revocation) if Some(revocation.grant_id) == grant_id => {
+                            let _ = control.send(ServerFrame::Event {
+                                subscription_id: id,
+                                sequence,
+                                event: SubscriptionEvent::AccessRevoked {
+                                    grant_id: revocation.grant_id,
+                                },
+                            }).await;
+                            break;
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                () = &mut expiry, if grant_id.is_some() => {
+                    if let Some(grant_id) = grant_id {
+                        let _ = control.send(ServerFrame::Event {
+                            subscription_id: id,
+                            sequence,
+                            event: SubscriptionEvent::AccessRevoked { grant_id },
+                        }).await;
+                    }
+                    break;
+                }
+            };
+            match received {
                 SubscriptionReceive::ResnapshotRequired => {
                     let revision = handle
                         .snapshot()
@@ -821,16 +1064,6 @@ fn protocol_error(request_id: Option<u64>, code: ErrorCode, message: &str) -> Se
     ServerFrame::Error {
         request_id,
         error: ProtocolError::new(code, message),
-    }
-}
-fn require_dev(state: &DaemonState) -> Result<(), ProtocolError> {
-    if state.development_terminal_access {
-        Ok(())
-    } else {
-        Err(ProtocolError::new(
-            ErrorCode::DevelopmentFeatureDisabled,
-            "development terminal access is disabled",
-        ))
     }
 }
 fn invalid(message: &str) -> ProtocolError {
@@ -1018,12 +1251,12 @@ fn wire_color_source(source: TerminalColorSource) -> ColorSource {
     }
 }
 
-fn verify_peer(stream: &UnixStream) -> Result<()> {
-    let credentials = stream.peer_cred().context("cannot read peer credentials")?;
-    if credentials.uid() != rustix::process::geteuid().as_raw() {
+fn verify_peer(stream: &UnixStream) -> Result<PeerIdentity> {
+    let identity = PeerIdentity::from_stream(stream)?;
+    if identity.uid != rustix::process::geteuid().as_raw() {
         bail!("peer uid mismatch");
     }
-    Ok(())
+    Ok(identity)
 }
 
 async fn prepare_socket_parent(path: &Path) -> Result<()> {
@@ -1077,6 +1310,20 @@ fn socket_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_state(development_terminal_access: bool) -> Arc<DaemonState> {
+        let (revocations, _) = broadcast::channel(32);
+        Arc::new(DaemonState {
+            lair: RwLock::new(Lair::new()),
+            live_splint: Mutex::new(None),
+            controller: Mutex::new(ControllerState::default()),
+            grants: Mutex::new(GrantStore::default()),
+            revocations,
+            pty_backend: LinuxPtyBackend::new("/missing/helper"),
+            development_terminal_access,
+        })
+    }
+
     fn temp_dir() -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1118,13 +1365,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_before_hello_is_rejected_without_side_effects() {
-        let state = Arc::new(DaemonState {
-            lair: RwLock::new(Lair::new()),
-            live_splint: Mutex::new(None),
-            controller: Mutex::new(ControllerState::default()),
-            pty_backend: LinuxPtyBackend::new("/missing/helper"),
-            development_terminal_access: false,
-        });
+        let state = test_state(false);
         let (mut client, server) = UnixStream::pair().unwrap();
         let task = tokio::spawn(serve_client(server, state));
         client
@@ -1157,14 +1398,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn development_terminal_operations_are_disabled_by_default() {
-        let state = Arc::new(DaemonState {
-            lair: RwLock::new(Lair::new()),
-            live_splint: Mutex::new(None),
-            controller: Mutex::new(ControllerState::default()),
-            pty_backend: LinuxPtyBackend::new("/missing/helper"),
-            development_terminal_access: false,
-        });
+    async fn terminal_operations_require_consent_by_default() {
+        let state = test_state(false);
+        let peer = PeerIdentity::for_test();
         let mut owned_controller = None;
         let error = handle_request(
             Request::Attach {
@@ -1173,22 +1409,18 @@ mod tests {
                 scrollback_rows: 0,
             },
             &state,
+            &peer,
             &mut owned_controller,
         )
         .await
         .unwrap_err();
-        assert_eq!(error.code, ErrorCode::DevelopmentFeatureDisabled);
+        assert_eq!(error.code, ErrorCode::Unauthorized);
     }
 
     #[tokio::test]
     async fn resize_limits_are_checked_before_runtime_access() {
-        let state = Arc::new(DaemonState {
-            lair: RwLock::new(Lair::new()),
-            live_splint: Mutex::new(None),
-            controller: Mutex::new(ControllerState::default()),
-            pty_backend: LinuxPtyBackend::new("/missing/helper"),
-            development_terminal_access: true,
-        });
+        let state = test_state(true);
+        let peer = PeerIdentity::for_test();
         let mut owned_controller = None;
         let error = handle_request(
             Request::Resize {
@@ -1201,6 +1433,7 @@ mod tests {
                 pixel_height: 0,
             },
             &state,
+            &peer,
             &mut owned_controller,
         )
         .await
@@ -1219,9 +1452,11 @@ mod tests {
     fn controller_state_is_exclusive_authorized_and_releasable() {
         let splint_id = SplintId::new();
         let mut controllers = ControllerState::default();
-        let lease = controllers.acquire(splint_id, 7).expect("first controller");
+        let lease = controllers
+            .acquire(splint_id, 7, Some(4))
+            .expect("first controller");
         assert_eq!(
-            controllers.acquire(splint_id, 7).unwrap_err().code,
+            controllers.acquire(splint_id, 7, Some(4)).unwrap_err().code,
             ErrorCode::ControllerUnavailable
         );
         assert!(controllers.authorize(lease.id, splint_id, 7).is_ok());
@@ -1236,7 +1471,7 @@ mod tests {
         assert_eq!(controllers.active, Some(lease));
         controllers.release_identity(splint_id, 7);
         assert_eq!(controllers.active, None);
-        assert!(controllers.acquire(splint_id, 8).is_ok());
+        assert!(controllers.acquire(splint_id, 8, None).is_ok());
     }
 
     #[test]

@@ -205,13 +205,13 @@ impl TextRow {
             resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")?,
             resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")?,
         ];
-        println!(
+        eprintln!(
             "Resolved and loaded explicit font set in {:.3} ms (before Wayland connection)",
             started.elapsed().as_secs_f64() * 1_000.0
         );
 
         let (cell_width, cell_height, baseline, mono_advance) = cell_metrics(&faces[0], font_size)?;
-        println!(
+        eprintln!(
             "Text row metrics: scale={integer_scale} size={font_size:.1}px cell={cell_width}x{cell_height}px baseline={baseline}px primary-M-advance={mono_advance:.3}px"
         );
         verify_style_advances(&faces[0], mono_advance, font_size)?;
@@ -251,7 +251,7 @@ impl TextRow {
                         glyph_id,
                         font_size,
                     )?;
-                    println!(
+                    eprintln!(
                         "  Combining face={} glyph={glyph_id} advance={cluster_advance:.3}px layout-cell={} shaped-offset=({x_offset:.3},{y_offset:.3})",
                         faces[face_index].family, next_cell
                     );
@@ -294,7 +294,7 @@ impl TextRow {
                         height: mask.height,
                         data: mask.data,
                     });
-                    println!(
+                    eprintln!(
                         "  BoxDrawing U+{:04X} source=Foot-custom layout-cell={next_cell}",
                         u32::from(character)
                     );
@@ -326,7 +326,7 @@ impl TextRow {
                     glyph_id,
                     font_size,
                 )?;
-                println!(
+                eprintln!(
                     "  {:?} U+{:04X} face={} glyph={} advance={advance:.3}px layout-cell={} raster/cache={:.3} ms",
                     kind,
                     u32::from(character),
@@ -349,7 +349,7 @@ impl TextRow {
                 next_cell += cells;
             }
         }
-        println!(
+        eprintln!(
             "Rasterized {} unique glyph images for {} layout cells",
             cache.len(),
             next_cell
@@ -406,7 +406,7 @@ fn cache_glyph(
         height: image.placement.height,
         data: image.data,
     };
-    println!(
+    eprintln!(
         "    raster ink={:?} placement=({}, {}) image={}x{}",
         glyph.ink_bounds(),
         glyph.left,
@@ -593,7 +593,7 @@ fn resolve_face(
         data,
     };
     let _ = font_ref(&face)?;
-    println!(
+    eprintln!(
         "Selected {label}: {} {} (face {}, {})",
         face.family,
         face.style,
@@ -631,7 +631,7 @@ fn verify_style_advances(regular: &FontFace, regular_advance: f32, font_size: f3
         if !advance.is_finite() || (advance - regular_advance).abs() > 0.01 {
             bail!("{label} advance {advance:.3}px differs from regular {regular_advance:.3}px");
         }
-        println!(
+        eprintln!(
             "Style evidence: {} path={} M-advance={advance:.3}px",
             face.style,
             face.path.display()

@@ -53,8 +53,8 @@ defines the native Wayland client milestone. Persistence remains later work.
 ```bash
 cargo build
 
-# Terminal 1 — terminal access is deliberately opt-in during development
-SPLINTERM_ENABLE_DEV_ATTACH=1 cargo run -p splinterd
+# Terminal 1 — normal access is granted through trusted graphical consent
+cargo run -p splinterd
 
 # Terminal 2
 cargo run -p splinterm -- ping
@@ -63,7 +63,7 @@ cargo run -p splinterm -- list
 cargo run -p splinterm -- send $'printf "hello from the PTY\\n"\n'
 cargo run -p splinterm -- snapshot
 
-# Native live snapshot window (development terminal access must be enabled)
+# Native live window (opens a trusted grant-once/deny prompt)
 cargo run -p splinterm -- window
 ```
 
@@ -81,8 +81,13 @@ bounded scale-specific glyph cache. Pointer selection, regular and primary
 clipboard, bounded safe bracketed paste, application mouse reporting, and
 user-gesture-only HTTP(S) opening are supported. Paired fractional-scale/
 viewport rendering, `text-input-v3` preedit and commit, inactive-IME compose
-fallback, focus indication, and reduced-motion cursor behavior are implemented.
-Trusted consent UI remains follow-up work.
+fallback, focus indication, and reduced-motion cursor behavior are implemented. Protocol v7 replaces the
+normal development grant with a daemon-launched trusted Wayland consent client,
+scoped five-minute grant-once authority, explicit revocation, and visible
+active-authority/controller indication. Ctrl+Shift+R revokes active grants and
+Ctrl+Shift+L releases the local controller. The
+`SPLINTERM_ENABLE_DEV_ATTACH=1` bypass remains available only for isolated
+development and is prominently labeled in the window title.
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
 for development with `SPLINTERM_SOCKET=/path/to/socket`.

@@ -10,4 +10,7 @@ mod box_drawing;
 pub mod renderer;
 pub mod wayland;
 
-pub use wayland::{WindowCommand, WindowOptions, WindowUpdate, run as run_window};
+pub use wayland::{
+    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowUpdate,
+    run as run_window,
+};

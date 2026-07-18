@@ -12,6 +12,7 @@ anyhow.workspace = true
 clap.workspace = true
 fontdb.workspace = true
 rustix.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 splinterm-core = { path = "../splinterm-core" }
 splinterm-protocol = { path = "../splinterm-protocol" }

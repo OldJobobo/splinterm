@@ -39,5 +39,6 @@ fn main() -> Result<()> {
         commands: None,
         evidence_close_shortcuts: true,
         capture_scale,
+        ..splinterm::WindowOptions::default()
     })
 }

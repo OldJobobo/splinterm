@@ -689,6 +689,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rustix",
+ "serde",
  "serde_json",
  "splinterm-core",
  "splinterm-protocol",
@@ -708,6 +709,7 @@ dependencies = [
  "clap",
  "fontdb",
  "rustix",
+ "serde",
  "serde_json",
  "smithay-client-toolkit",
  "splinterm-core",
