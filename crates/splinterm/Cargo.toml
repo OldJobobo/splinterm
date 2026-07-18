@@ -13,7 +13,9 @@ clap.workspace = true
 serde_json.workspace = true
 splinterm-core = { path = "../splinterm-core" }
 splinterm-protocol = { path = "../splinterm-protocol" }
+smithay-client-toolkit.workspace = true
 tokio.workspace = true
+wayland-client.workspace = true
 
 [lints]
 workspace = true
