@@ -63,12 +63,22 @@ cargo run -p splinterm -- list
 cargo run -p splinterm -- send $'printf "hello from the PTY\\n"\n'
 cargo run -p splinterm -- snapshot
 
-# Native renderer preview; terminal snapshots are not attached yet
+# Native live snapshot window (development terminal access must be enabled)
 cargo run -p splinterm -- window
 ```
 
-The `window` command exercises the accepted Wayland/font/CPU-renderer boundary.
-It is still a renderer preview, not a usable terminal.
+The `window` command keeps an ordered daemon subscription, renders current
+terminal snapshots, sends UTF-8 and essential terminal keys, and owns the
+configure-derived PTY/grid size through a separate authenticated control
+connection. Input and resize require one exclusive connection-owned controller
+lease, released when the window disconnects. Function/navigation/keypad keys,
+xterm modifiers, application cursor/keypad modes, xkb compose, focus reporting,
+and exact snapshot colors are supported. Protocol v5 streams bounded semantic
+row, scroll, cursor, mode, palette, dimension, and title updates. The client
+coalesces damage to Wayland frame callbacks, incrementally prepares changed
+rows, scroll-copies reusable backing pixels, submits row damage, and uses a
+bounded scale-specific glyph cache. Direct `text-input-v3` IME, trusted consent
+UI, and clipboard remain follow-up work.
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
 for development with `SPLINTERM_SOCKET=/path/to/socket`.

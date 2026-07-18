@@ -19,8 +19,9 @@ revision above. The affected modules
 record source-level provenance in their module documentation.
 
 `crates/splinterm/src/box_drawing.rs` is a narrow safe-Rust translation of
-Foot's `box-drawing.c` at the same revision. It currently covers only U+2500,
-U+250C, U+2510, and U+253C for the deterministic renderer evidence corpus.
+Foot's `box-drawing.c` at the same revision. It currently covers U+2500,
+U+250C, U+2510, U+253C, and the U+2800–U+28FF Braille range used by the
+renderer evidence and full-screen TUI path.
 
 Foot is Copyright (c) 2019 Daniel Eklöf and is distributed under the MIT
 License. Splinterm's MIT `LICENSE` preserves the applicable permission and

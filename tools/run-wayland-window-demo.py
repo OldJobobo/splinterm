@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="write the first rendered frame as a binary PPM",
     )
+    parser.add_argument(
+        "--socket",
+        type=Path,
+        help="daemon socket for the production live window",
+    )
     return parser.parse_args()
 
 
@@ -76,7 +81,10 @@ def main() -> int:
         return build.returncode
 
     if args.capture is None:
-        command = [str(ROOT / "target" / "debug" / "splinterm"), "window"]
+        command = []
+        if args.socket is not None:
+            command.extend(["env", f"SPLINTERM_SOCKET={args.socket.resolve()}"])
+        command.extend([str(ROOT / "target" / "debug" / "splinterm"), "window"])
     else:
         command = [
             str(ROOT / "target" / "debug" / "examples" / "wayland-window-spike"),

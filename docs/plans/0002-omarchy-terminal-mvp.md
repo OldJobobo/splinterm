@@ -1,7 +1,7 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Phase 0 in progress — native Wayland/SHM spike successful
-- **Roadmap:** Phase 2
+- **Status:** Phase 4 implementation complete — full baseline matrix pending
+- **Roadmap:** Phase 4
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -32,7 +32,35 @@
   [ADR 0003](../adr/0003-wayland-client-and-event-loop.md) and
   [ADR 0004](../adr/0004-font-and-cpu-renderer.md).
 - [x] Expose the accepted native renderer shell through `splinterm window`.
-  Terminal snapshots remain deliberately unattached.
+- [x] Render one owned daemon `TerminalSnapshot` in the native window and prove
+  that closing it leaves the daemon-owned shell alive in
+  [Spike 0006](../spikes/0006-static-daemon-snapshot-window.md).
+- [x] Consume ordered full-snapshot subscription updates and resynchronize after
+  sequence gaps or `ResyncRequired` in
+  [Spike 0007](../spikes/0007-live-snapshot-subscription.md).
+- [x] Add the first interactive keyboard/resize slice with a bounded command
+  bridge, essential keys, repeat, and duplicate-suppressed grid resizing in
+  [Spike 0008](../spikes/0008-essential-input-and-resize.md).
+- [x] Add one exclusive connection-owned controller/size lease per live Splint
+  with stale-incarnation checks and automatic release in
+  [Spike 0009](../spikes/0009-controller-lease.md).
+- [x] Add mode-aware xterm/Foot key encoding, xkb compose UTF-8, focus
+  reporting, exact snapshot palette/default colors, and bracketed-paste
+  framing in [Spike 0010](../spikes/0010-terminal-input-modes.md).
+- [x] Validate the Phase 3 exit gate by launching `btop`, closing the graphical
+  client, reopening the same daemon-owned process, and continuing input.
+- [ ] Add direct `text-input-v3` IME handling and clipboard in Phase 5, and
+  trusted consent UI in Phase 7.
+- [x] Replace full-snapshot/full-frame updates with protocol v5 semantic damage,
+  incremental row preparation, scroll-copy, row damage submission, frame
+  callback coalescing, local cursor blink, and bounded scale-specific glyph
+  caching in [Spike 0011](../spikes/0011-damage-driven-rendering.md).
+- [x] Validate Phase 4 mechanisms on workspace 8 with idle CPU sampling,
+  `btop`, finite plain/ANSI output bursts, rapid resize, and detach/reattach in
+  [Spike 0011](../spikes/0011-damage-driven-rendering.md).
+- [ ] Record the full Phase 4 baseline matrix with host/software context,
+  including continuous `yes`, large colored-file `cat`, measured resize and
+  detach/reattach costs, and total renderer-memory metrics.
 
 ## Goal
 
