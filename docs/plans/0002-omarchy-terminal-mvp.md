@@ -28,8 +28,11 @@
 - [x] Complete the initial shaping/raster comparison against Foot/fcft,
   including box-drawing geometry and measured same-pipeline fallback ink bounds.
 - [x] Add deterministic Foot text-row renderer references.
-- [ ] Accept Wayland/event-loop and font/renderer ADRs.
-- [ ] Promote the native window shell into the graphical `splinterm` client.
+- [x] Accept the Wayland/event-loop and font/renderer decisions in
+  [ADR 0003](../adr/0003-wayland-client-and-event-loop.md) and
+  [ADR 0004](../adr/0004-font-and-cpu-renderer.md).
+- [x] Expose the accepted native renderer shell through `splinterm window`.
+  Terminal snapshots remain deliberately unattached.
 
 ## Goal
 

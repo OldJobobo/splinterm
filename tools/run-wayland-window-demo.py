@@ -68,26 +68,21 @@ def main() -> int:
             )
         return 2
 
-    build = run(
-        [
-            "cargo",
-            "build",
-            "--quiet",
-            "-p",
-            "splinterm",
-            "--example",
-            "wayland-window-spike",
-        ],
-        cwd=ROOT,
-    )
+    build_command = ["cargo", "build", "--quiet", "-p", "splinterm"]
+    if args.capture is not None:
+        build_command.extend(["--example", "wayland-window-spike"])
+    build = run(build_command, cwd=ROOT)
     if build.returncode != 0:
         return build.returncode
 
-    command = [
-        str(ROOT / "target" / "debug" / "examples" / "wayland-window-spike")
-    ]
-    if args.capture is not None:
-        command.extend(["--capture", str(args.capture.resolve())])
+    if args.capture is None:
+        command = [str(ROOT / "target" / "debug" / "splinterm"), "window"]
+    else:
+        command = [
+            str(ROOT / "target" / "debug" / "examples" / "wayland-window-spike"),
+            "--capture",
+            str(args.capture.resolve()),
+        ]
     expression = (
         f"hl.exec_cmd({json.dumps(shlex.join(command))}, "
         f"{{ workspace = {args.workspace} }})"

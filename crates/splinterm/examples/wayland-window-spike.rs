@@ -5,21 +5,35 @@
 
 use std::{env, path::PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 fn main() -> Result<()> {
+    let mut capture = None;
+    let mut capture_scale = None;
     let mut arguments = env::args_os().skip(1);
-    let capture = match arguments.next() {
-        None => None,
-        Some(flag) if flag == "--capture" => {
-            Some(PathBuf::from(arguments.next().ok_or_else(|| {
-                anyhow::anyhow!("--capture requires a path")
-            })?))
+    while let Some(argument) = arguments.next() {
+        if argument == "--capture" {
+            capture = Some(PathBuf::from(
+                arguments.next().context("--capture requires a path")?,
+            ));
+        } else if argument == "--capture-scale" {
+            capture_scale = Some(
+                arguments
+                    .next()
+                    .context("--capture-scale requires an integer")?
+                    .to_string_lossy()
+                    .parse::<u32>()
+                    .context("--capture-scale must be a positive integer")?,
+            );
+            if capture_scale == Some(0) {
+                bail!("--capture-scale must be positive");
+            }
+        } else {
+            bail!("unknown argument: {}", argument.to_string_lossy());
         }
-        Some(argument) => bail!("unknown argument: {}", argument.to_string_lossy()),
-    };
-    if let Some(argument) = arguments.next() {
-        bail!("unexpected argument: {}", argument.to_string_lossy());
     }
-    splinterm::run_window(splinterm::WindowOptions { capture })
+    splinterm::run_window(splinterm::WindowOptions {
+        capture,
+        capture_scale,
+    })
 }

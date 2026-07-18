@@ -18,7 +18,7 @@ persistent multiplexing built in.
 
 ```text
 crates/
-├── splinterm/           # interactive client and, later, Wayland frontend
+├── splinterm/           # interactive client and native Wayland frontend
 ├── splinterd/           # persistent session daemon
 ├── splinterm-core/      # Lair/Dojo/window/splint state model
 ├── splinterm-protocol/  # versioned client-daemon wire protocol
@@ -62,7 +62,13 @@ cargo run -p splinterm -- new main
 cargo run -p splinterm -- list
 cargo run -p splinterm -- send $'printf "hello from the PTY\\n"\n'
 cargo run -p splinterm -- snapshot
+
+# Native renderer preview; terminal snapshots are not attached yet
+cargo run -p splinterm -- window
 ```
+
+The `window` command exercises the accepted Wayland/font/CPU-renderer boundary.
+It is still a renderer preview, not a usable terminal.
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
 for development with `SPLINTERM_SOCKET=/path/to/socket`.
@@ -91,8 +97,11 @@ cargo test -p splinterd --test end_to_end -- --test-threads=1
 # (Foot is only the presenter for this headless milestone.)
 tools/run-phase1-demo.py
 
-# Roadmap Phase 2 native Wayland/SHM mechanism spike
-cargo run -p splinterm --example wayland-window-spike
+# Roadmap Phase 2 native Wayland renderer preview
+cargo run -p splinterm -- window
+
+# Workspace-8-safe human review launcher
+tools/run-wayland-window-demo.py
 
 # Initial renderer and font-stack evidence
 cargo run --release -p splinterm --example cpu-shm-benchmark

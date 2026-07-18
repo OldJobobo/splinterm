@@ -44,11 +44,13 @@ use crate::renderer::{TextRow, paint, write_ppm};
 
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 600;
-const APP_ID: &str = "com.oldjobobo.splinterm.Spike";
+const APP_ID: &str = "com.oldjobobo.splinterm";
 
 #[derive(Clone, Debug, Default)]
 pub struct WindowOptions {
     pub capture: Option<PathBuf>,
+    /// Delay capture until this integer output scale is active.
+    pub capture_scale: Option<u32>,
 }
 
 /// Opens the 1x deterministic evidence window and runs until compositor close or Q/Escape.
@@ -75,7 +77,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let shm = Shm::bind(&globals, &queue_handle).context("compositor does not provide wl_shm")?;
     let surface = compositor.create_surface(&queue_handle);
     let window = shell.create_window(surface, WindowDecorations::RequestServer, &queue_handle);
-    window.set_title("Splinterm - Native Wayland Spike");
+    window.set_title("Splinterm — Renderer Preview");
     window.set_app_id(APP_ID);
     window.set_min_size(Some((480, 300)));
     window
@@ -95,6 +97,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
         pool,
         text_row,
         capture: options.capture,
+        capture_scale: options.capture_scale,
         buffer: None,
         keyboard: None,
         keyboard_seat: None,
@@ -151,6 +154,7 @@ struct App {
     pool: SlotPool,
     text_row: TextRow,
     capture: Option<PathBuf>,
+    capture_scale: Option<u32>,
     buffer: Option<Buffer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     keyboard_seat: Option<wl_seat::WlSeat>,
@@ -201,11 +205,24 @@ impl App {
             canvas
         };
 
+        println!(
+            "Presenting logical={}x{} buffer={}x{} scale={}x stride={stride}",
+            self.logical_width, self.logical_height, width, height, self.integer_scale
+        );
         paint(canvas, width, height, &self.text_row);
-        if let Some(path) = self.capture.take() {
-            write_ppm(&path, canvas, width, height)
-                .with_context(|| format!("write {}", path.display()))?;
-            println!("Wrote deterministic row capture to {}", path.display());
+        let capture_ready = self
+            .capture_scale
+            .is_none_or(|expected| expected == self.integer_scale);
+        if capture_ready {
+            if let Some(path) = self.capture.take() {
+                write_ppm(&path, canvas, width, height)
+                    .with_context(|| format!("write {}", path.display()))?;
+                println!(
+                    "Wrote deterministic row capture at {}x scale to {}",
+                    self.integer_scale,
+                    path.display()
+                );
+            }
         }
         self.window
             .wl_surface()

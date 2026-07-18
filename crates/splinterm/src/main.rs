@@ -2,6 +2,7 @@ use std::{env, io::ErrorKind, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use splinterm::{WindowOptions, run_window};
 use splinterm_core::SplintId;
 use splinterm_protocol::{
     ClientFrame, ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ServerFrame,
@@ -21,6 +22,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Open the native renderer window without attaching terminal state yet.
+    Window,
     Ping,
     List,
     New {
@@ -46,8 +49,14 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let command = Cli::parse().command;
+    if matches!(command, Command::Window) {
+        run_window(WindowOptions::default())?;
+        return Ok(());
+    }
+
     let mut connection = Connection::connect().await?;
     match command {
+        Command::Window => unreachable!("window command returned before daemon connection"),
         Command::Ping => print_response(connection.request(Request::Ping).await?),
         Command::List => print_response(connection.request(Request::ListDojos).await?),
         Command::New { name, cwd } => print_response(
