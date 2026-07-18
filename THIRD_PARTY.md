@@ -31,6 +31,25 @@ owned-file-descriptor operations in `splinterm-pty`.
 - Version: 1.1.4
 - License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 
+## smithay-client-toolkit
+
+Splinterm's Roadmap Phase 2 native Wayland mechanism spike uses
+`smithay-client-toolkit` for registry dispatch, xdg-shell lifecycle, seat/output
+state, keyboard integration, SHM slot pooling, and calloop integration.
+
+- Source: <https://github.com/smithay/client-toolkit>
+- Version: 0.20.0
+- License: MIT
+
+## wayland-client
+
+The native Wayland mechanism spike uses the Rust `wayland-client` bindings for
+Wayland connections and protocol objects.
+
+- Source: <https://github.com/Smithay/wayland-rs>
+- Version: 0.31.14
+- License: MIT
+
 ## unicode-width
 
 Splinterm uses `unicode-width` for safe, deterministic Unicode display-width

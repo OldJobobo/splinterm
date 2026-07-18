@@ -1,10 +1,26 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Planned — renderer/font spikes first
+- **Status:** Phase 0 in progress — native Wayland/SHM spike successful
 - **Roadmap:** Phase 2
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
+
+## Execution progress
+
+- [x] Audit the installed Wayland, xkbcommon, fontconfig, and FreeType baseline.
+- [x] Add a safe Rust native xdg-shell/SHM mechanism spike.
+- [x] Validate the first genuine Splinterm Wayland window under Hyprland on
+  workspace 8 with a stable provisional app ID.
+- [x] Exercise configure, frame callback, SHM buffer reuse, resize, output,
+  scale, seat, keyboard, and clean-close mechanisms in the spike.
+- [x] Record initial evidence in
+  [Spike 0001](../spikes/0001-native-wayland-window.md).
+- [ ] Benchmark SHM allocation/reuse and resize churn at representative grids.
+- [ ] Complete the font discovery/shaping/raster bake-off against Foot/fcft.
+- [ ] Add deterministic Foot text-row renderer references.
+- [ ] Accept Wayland/event-loop and font/renderer ADRs.
+- [ ] Promote the native window shell into the graphical `splinterm` client.
 
 ## Goal
 

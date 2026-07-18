@@ -87,9 +87,12 @@ cargo test --workspace
 # Complete isolated daemon/PTY detach/reattach/resync lifecycle
 cargo test -p splinterd --test end_to_end -- --test-threads=1
 
-# Human-paced visual walkthrough on an empty Hyprland workspace 8
-# (Foot is only the presenter; this is not the future native Splinterm window.)
+# Human-paced Phase 1 persistence walkthrough
+# (Foot is only the presenter for this headless milestone.)
 tools/run-phase1-demo.py
+
+# Roadmap Phase 2 native Wayland/SHM mechanism spike
+cargo run -p splinterm --example wayland-window-spike
 
 # Optional parser fuzzing (requires cargo-fuzz)
 cargo fuzz run terminal-advance
