@@ -1,6 +1,6 @@
 # Plan 0001: Foot terminal kernel and one-Splint vertical slice
 
-- **Status:** Phase 7 complete — Phase 8 next
+- **Status:** Complete — Roadmap Phase 1 validated
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -72,6 +72,12 @@
   explicit detach, and guaranteed resynchronization markers.
 - [x] Add development client operations for snapshot, literal input, resize,
   and explicit termination without exposing terminal internals as wire types.
+- [x] Add an isolated real-daemon Phase 8 scenario covering shell creation,
+  input, color attributes, cwd, resize, detach, continued output, and reattach.
+- [x] Force a slow subscription through overflow and `resync_required` while a
+  separate client verifies uninterrupted PTY consumption and current state.
+- [x] Explicitly terminate the shell, stop the daemon, verify socket cleanup,
+  and bound the complete scenario with a hard timeout.
 
 ## Goal
 
@@ -542,6 +548,14 @@ Automate a headless scenario:
 9. verify the daemon continues reading and forces that client to resynchronize;
 10. terminate the Splint and verify child cleanup and exit reporting.
 
+Implemented by `crates/splinterd/tests/end_to_end.rs`. The test launches the
+real daemon and PTY helper in an isolated owner-only runtime directory, speaks
+the framed protocol directly, and exercises the complete lifecycle under a
+hard timeout. It checks Foot-derived color state and cwd, terminal dimensions,
+revision growth across detach/reattach, slow-subscriber resynchronization,
+uninterrupted output after overflow, explicit process termination, daemon exit,
+and socket removal.
+
 ## Test strategy
 
 ### Unit tests
@@ -680,10 +694,12 @@ Do not proceed to the Wayland/rendering milestone until:
 
 ## Immediate next task
 
-Phase 7 is complete. Begin Phase 8:
+The terminal-kernel and one-Splint vertical slice is complete. Roadmap Phase 1
+has met its headless review gate. Begin Roadmap Phase 2 with a dedicated plan:
 
-> Automate the complete isolated-daemon scenario: create, input, semantic
-> snapshot, resize, detach, continued output, reattach, subscriber overflow and
-> resynchronization, explicit termination, and cleanup.
+> Port the first Foot-derived client rendering slice: one native Wayland window
+> under Hyprland, one attached Splint, semantic snapshot rendering, keyboard
+> input, resize ownership, and damage-driven redraw.
 
-Keep the development attach policy explicit and disabled by default.
+Keep `splinterd` headless and preserve the secure attach boundary while the
+first disposable graphical client is introduced.

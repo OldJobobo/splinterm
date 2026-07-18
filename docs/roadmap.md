@@ -5,14 +5,14 @@
 > the first usable vertical slice and moves protocol security foundations ahead
 > of terminal streaming.
 
-## Phase 0 — skeleton and research (current)
+## Phase 0 — skeleton and research (complete)
 
 - Rust workspace and CI
 - Lair/Dojo/window/splint domain model
 - Versioned Unix-socket protocol
 - Runnable daemon and control client
 
-## Phase 1 — secure persistent splint
+## Phase 1 — secure persistent splint (complete)
 
 Detailed plan: [`plans/0001-terminal-kernel.md`](plans/0001-terminal-kernel.md)
 
@@ -23,7 +23,7 @@ Detailed plan: [`plans/0001-terminal-kernel.md`](plans/0001-terminal-kernel.md)
 - Test-only attach snapshot, ordered deltas, backpressure, and resynchronization
 - Durable metadata with honest relaunch/recovery semantics
 
-## Phase 2 — Omarchy-native terminal MVP
+## Phase 2 — Omarchy-native terminal MVP (next)
 
 - Native Wayland window and keyboard input under Hyprland
 - Trusted consent UI plus grant, revoke, and control indication

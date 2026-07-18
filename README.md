@@ -43,7 +43,9 @@ replay. `splinterm-pty` provides the tested Linux PTY/process boundary.
 tracks terminal state, and survives client disconnection. The local protocol
 uses bounded framed messages, version negotiation, request IDs, peer-UID
 verification, owner-only socket permissions, and explicit resynchronization.
-Persistence and Wayland remain to be connected.
+The complete headless lifecycle is covered by an isolated real-daemon test;
+Roadmap Phase 1 is complete. Persistence and the native Wayland client remain
+to be connected.
 
 ## Try the scaffold
 
@@ -80,6 +82,9 @@ Foot-derived terminal kernel and detachable one-Splint vertical slice.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+# Complete isolated daemon/PTY detach/reattach/resync lifecycle
+cargo test -p splinterd --test end_to_end -- --test-threads=1
 
 # Optional parser fuzzing (requires cargo-fuzz)
 cargo fuzz run terminal-advance
