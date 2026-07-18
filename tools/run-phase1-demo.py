@@ -241,7 +241,7 @@ def main() -> int:
         "--override=pad=16x16",
         f"--font=monospace:size={args.font_size:g}",
         "--app-id=splinterm-phase1-simple-demo",
-        "--title=Splinterm Phase 1 — The Shell Remembers",
+        "--title=Splinterm Phase 1 - The Shell Remembers",
         "--window-size-chars=96x28",
         str(Path(__file__).resolve()),
         "--present",
