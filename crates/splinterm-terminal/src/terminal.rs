@@ -1176,25 +1176,25 @@ impl Terminal {
                 47 | 1047 => self.select_alternate(enabled, false),
                 66 => self.modes.application_keypad = enabled,
                 1000 => {
-                    self.modes.mouse_tracking = if enabled {
-                        MouseTracking::Normal
-                    } else {
-                        MouseTracking::None
-                    };
+                    if enabled {
+                        self.modes.mouse_tracking = MouseTracking::Normal;
+                    } else if self.modes.mouse_tracking == MouseTracking::Normal {
+                        self.modes.mouse_tracking = MouseTracking::None;
+                    }
                 }
                 1002 => {
-                    self.modes.mouse_tracking = if enabled {
-                        MouseTracking::Button
-                    } else {
-                        MouseTracking::None
-                    };
+                    if enabled {
+                        self.modes.mouse_tracking = MouseTracking::Button;
+                    } else if self.modes.mouse_tracking == MouseTracking::Button {
+                        self.modes.mouse_tracking = MouseTracking::None;
+                    }
                 }
                 1003 => {
-                    self.modes.mouse_tracking = if enabled {
-                        MouseTracking::Any
-                    } else {
-                        MouseTracking::None
-                    };
+                    if enabled {
+                        self.modes.mouse_tracking = MouseTracking::Any;
+                    } else if self.modes.mouse_tracking == MouseTracking::Any {
+                        self.modes.mouse_tracking = MouseTracking::None;
+                    }
                 }
                 1006 => self.modes.sgr_mouse = enabled,
                 1048 => {
@@ -1652,6 +1652,19 @@ mod tests {
             Color::new(ColorSource::Base16, 1)
         );
         assert_eq!(row[1].attributes(), Attributes::default());
+    }
+
+    #[test]
+    fn mouse_tracking_reset_only_clears_the_matching_active_mode() {
+        let mut terminal = terminal(6, 2);
+        terminal.advance(b"\x1b[?1002h\x1b[?1000l");
+        assert_eq!(terminal.modes.mouse_tracking, MouseTracking::Button);
+        terminal.advance(b"\x1b[?1003h\x1b[?1002l");
+        assert_eq!(terminal.modes.mouse_tracking, MouseTracking::Any);
+        terminal.advance(b"\x1b[?1003l");
+        assert_eq!(terminal.modes.mouse_tracking, MouseTracking::None);
+        terminal.advance(b"\x1b[?1000h\x1b[?1000l");
+        assert_eq!(terminal.modes.mouse_tracking, MouseTracking::None);
     }
 
     #[test]

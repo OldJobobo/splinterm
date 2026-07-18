@@ -601,6 +601,8 @@ mod tests {
                 bracketed_paste: false,
                 cursor_visible: true,
                 cursor_blink: true,
+                mouse_tracking: splinterm_protocol::MouseTracking::None,
+                sgr_mouse: false,
             },
             palette: vec![0; 256],
             default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],

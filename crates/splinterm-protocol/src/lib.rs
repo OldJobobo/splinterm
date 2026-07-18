@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use splinterm_core::{Dojo, SplintId};
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -385,6 +385,17 @@ pub struct TerminalInputModes {
     pub bracketed_paste: bool,
     pub cursor_visible: bool,
     pub cursor_blink: bool,
+    pub mouse_tracking: MouseTracking,
+    pub sgr_mouse: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseTracking {
+    None,
+    Normal,
+    Button,
+    Any,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

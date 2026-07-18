@@ -755,6 +755,28 @@ fn fill_rect(
     }
 }
 
+fn blend_rect(
+    canvas: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    rect: (i32, i32, u32, u32),
+    color: [u8; 4],
+) {
+    let (x, y, width, height) = rect;
+    for dy in 0..height {
+        for dx in 0..width {
+            blend_pixel(
+                canvas,
+                canvas_width,
+                canvas_height,
+                x + i32::try_from(dx).expect("rectangle x fits i32"),
+                y + i32::try_from(dy).expect("rectangle y fits i32"),
+                color,
+            );
+        }
+    }
+}
+
 fn blend_glyph(
     canvas: &mut [u8],
     canvas_width: u32,
@@ -886,6 +908,30 @@ pub(crate) struct SnapshotFrame {
 }
 
 impl SnapshotFrame {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "finite nonnegative coordinates are divided and bounds-checked before use"
+    )]
+    pub(crate) fn cell_at(
+        &self,
+        logical_x: f64,
+        logical_y: f64,
+        integer_scale: u32,
+    ) -> Option<(usize, usize)> {
+        if !logical_x.is_finite() || !logical_y.is_finite() || integer_scale == 0 {
+            return None;
+        }
+        let x = logical_x * f64::from(integer_scale) - f64::from(self.origin_x);
+        let y = logical_y * f64::from(integer_scale) - f64::from(self.origin_y);
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let column = (x / f64::from(self.cell_width)) as usize;
+        let row = (y / f64::from(self.cell_height)) as usize;
+        (column < self.columns as usize && row < self.rows as usize).then_some((row, column))
+    }
+
     pub(crate) fn terminal_size(
         &self,
         logical_width: u32,
@@ -1286,6 +1332,79 @@ fn rendition_colors(
         std::mem::swap(&mut foreground, &mut background);
     }
     (foreground, background)
+}
+
+fn grid_pixel_offset(index: usize, cell_size: u32) -> Option<i32> {
+    u32::try_from(index)
+        .ok()?
+        .checked_mul(cell_size)
+        .and_then(|offset| i32::try_from(offset).ok())
+}
+
+pub(crate) fn paint_snapshot_overlays(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    selection: Option<((usize, usize), (usize, usize))>,
+    hovered_url: Option<((usize, usize), (usize, usize))>,
+    dirty_rows: Option<&[bool]>,
+) {
+    let row_is_dirty =
+        |row: usize| dirty_rows.is_none_or(|dirty| dirty.get(row).copied().unwrap_or(false));
+    if let Some((start, end)) = selection {
+        for row in start.0..=end.0.min(frame.rows.saturating_sub(1) as usize) {
+            if !row_is_dirty(row) {
+                continue;
+            }
+            let first = if row == start.0 { start.1 } else { 0 };
+            let last = if row == end.0 {
+                end.1
+            } else {
+                frame.columns.saturating_sub(1) as usize
+            };
+            for column in first..=last.min(frame.columns.saturating_sub(1) as usize) {
+                let (Some(x_offset), Some(y_offset)) = (
+                    grid_pixel_offset(column, frame.cell_width),
+                    grid_pixel_offset(row, frame.cell_height),
+                ) else {
+                    continue;
+                };
+                let x = frame.origin_x + x_offset;
+                let y = frame.origin_y + y_offset;
+                blend_rect(
+                    canvas,
+                    width,
+                    height,
+                    (x, y, frame.cell_width, frame.cell_height),
+                    [53, 74, 96, 112],
+                );
+            }
+        }
+    }
+    if let Some((start, end)) = hovered_url {
+        if start.0 == end.0 && row_is_dirty(start.0) {
+            for column in start.1..=end.1.min(frame.columns.saturating_sub(1) as usize) {
+                let (Some(x_offset), Some(row_offset)) = (
+                    grid_pixel_offset(column, frame.cell_width),
+                    grid_pixel_offset(start.0, frame.cell_height),
+                ) else {
+                    continue;
+                };
+                let x = frame.origin_x + x_offset;
+                let y = frame.origin_y
+                    + row_offset
+                    + i32::try_from(frame.cell_height.saturating_sub(2)).unwrap_or(0);
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (x, y, frame.cell_width, 2),
+                    [120, 190, 255, 255],
+                );
+            }
+        }
+    }
 }
 
 pub(crate) fn paint_snapshot(
@@ -1690,6 +1809,8 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
                 bracketed_paste: false,
                 cursor_visible: true,
                 cursor_blink: true,
+                mouse_tracking: splinterm_protocol::MouseTracking::None,
+                sgr_mouse: false,
             },
             palette: vec![0; 256],
             default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
@@ -2012,6 +2133,8 @@ mod tests {
                 bracketed_paste: false,
                 cursor_visible: true,
                 cursor_blink: false,
+                mouse_tracking: splinterm_protocol::MouseTracking::None,
+                sgr_mouse: false,
             },
             palette: vec![0; 256],
             default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],

@@ -5,18 +5,41 @@
 //! The client owns these objects; the daemon remains headless.
 
 use std::{
+    collections::HashMap,
+    io,
+    os::fd::{AsFd, OwnedFd},
     path::PathBuf,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self as std_mpsc, Receiver as StdReceiver, Sender as StdSender},
+    },
     time::{Duration, Instant},
 };
 
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use tokio::sync::mpsc::{Receiver, Sender, error::TryRecvError, error::TrySendError};
 
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_output, delegate_registry, delegate_seat,
-    delegate_shm, delegate_xdg_shell, delegate_xdg_window,
+    data_device_manager::{
+        DataDeviceManagerState, WritePipe,
+        data_device::{DataDevice, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer, SelectionOffer},
+        data_source::{CopyPasteSource, DataSourceHandler},
+    },
+    delegate_compositor, delegate_data_device, delegate_keyboard, delegate_output,
+    delegate_pointer, delegate_primary_selection, delegate_registry, delegate_seat, delegate_shm,
+    delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
+    primary_selection::{
+        PrimarySelectionManagerState,
+        device::{PrimarySelectionDevice, PrimarySelectionDeviceHandler},
+        offer::PrimarySelectionOffer,
+        selection::{PrimarySelectionSource, PrimarySelectionSourceHandler},
+    },
     reexports::{
         calloop::{EventLoop, LoopHandle},
         calloop_wayland_source::WaylandSource,
@@ -26,6 +49,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
+        pointer::{BTN_LEFT, BTN_MIDDLE, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::{
         WaylandSurface,
@@ -42,22 +66,100 @@ use smithay_client_toolkit::{
 use wayland_client::{
     Connection, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{
+        wl_data_device, wl_data_device_manager::DndAction, wl_data_source, wl_keyboard, wl_output,
+        wl_pointer, wl_seat, wl_shm, wl_surface,
+    },
 };
 
 use splinterm_protocol::{
-    CellAttributes, ColorSource, TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot,
-    TerminalUpdate,
+    CellAttributes, ColorSource, MouseTracking, TerminalCell, TerminalInputModes, TerminalRow,
+    TerminalSnapshot, TerminalUpdate,
+};
+
+use smithay_client_toolkit::reexports::protocols::wp::primary_selection::zv1::client::{
+    zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
+    zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
 };
 
 use crate::renderer::{
-    SnapshotFrame, TextRow, paint, paint_snapshot, paint_snapshot_rows, scroll_snapshot_pixels,
-    snapshot_row_rect, write_ppm,
+    SnapshotFrame, TextRow, paint, paint_snapshot, paint_snapshot_overlays, paint_snapshot_rows,
+    scroll_snapshot_pixels, snapshot_row_rect, write_ppm,
 };
 
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 600;
 const APP_ID: &str = "com.oldjobobo.splinterm";
+const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
+const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+const MAX_CLIPBOARD_WORKERS: usize = 4;
+const CLIPBOARD_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_WHEEL_STEPS_PER_FRAME: usize = 8;
+const MAX_BUFFERED_WHEEL_STEPS: f64 = 64.0;
+const WHEEL_VALUE120_STEP: f64 = 120.0;
+const WHEEL_PIXEL_STEP: f64 = 10.0;
+const BTN_RIGHT: u32 = 0x111;
+static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct CellPosition {
+    pub(crate) row: usize,
+    pub(crate) column: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Selection {
+    anchor: CellPosition,
+    end: CellPosition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteTarget {
+    Clipboard,
+    Primary,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PressOwner {
+    Application {
+        code: u8,
+        tracking: MouseTracking,
+        sgr: bool,
+        modifiers: Modifiers,
+    },
+    Selection,
+    PrimaryPaste,
+    Url,
+    Ignored,
+}
+
+struct ClipboardRead {
+    target: PasteTarget,
+    bytes: io::Result<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WheelUnit {
+    Value120,
+    Discrete,
+    Pixel,
+}
+
+#[derive(Debug, Default)]
+struct WheelAccumulator {
+    unit: Option<WheelUnit>,
+    remainder: f64,
+}
+
+struct ClipboardWorkerPermit<'a> {
+    active: &'a AtomicUsize,
+}
+
+impl Drop for ClipboardWorkerPermit<'_> {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// Bounded protocol-to-Wayland messages for the live snapshot viewer.
 #[allow(
@@ -106,6 +208,10 @@ pub struct WindowOptions {
 ///
 /// Returns an error when font setup, required Wayland globals, shared-memory buffers,
 /// keyboard state, capture output, or event dispatch cannot be initialized.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Wayland global binding and application state initialization form one startup transaction"
+)]
 pub fn run(options: WindowOptions) -> Result<()> {
     let text_row = options
         .snapshot
@@ -131,6 +237,11 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let shell =
         XdgShell::bind(&globals, &queue_handle).context("compositor does not provide xdg-shell")?;
     let shm = Shm::bind(&globals, &queue_handle).context("compositor does not provide wl_shm")?;
+    let data_device_manager = DataDeviceManagerState::bind(&globals, &queue_handle)
+        .context("compositor does not provide wl_data_device_manager")?;
+    let primary_selection_manager =
+        PrimarySelectionManagerState::bind(&globals, &queue_handle).ok();
+    let (clipboard_tx, clipboard_rx) = std_mpsc::channel();
     let surface = compositor.create_surface(&queue_handle);
     let window = shell.create_window(surface, WindowDecorations::RequestServer, &queue_handle);
     let controller_active = options.commands.is_some();
@@ -156,6 +267,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &queue_handle),
         output_state: OutputState::new(&globals, &queue_handle),
+        data_device_manager,
+        primary_selection_manager,
         shm,
         window,
         pool,
@@ -179,6 +292,24 @@ pub fn run(options: WindowOptions) -> Result<()> {
         full_redraw: true,
         keyboard: None,
         keyboard_seat: None,
+        pointer: None,
+        pointer_seat: None,
+        data_device: None,
+        primary_device: None,
+        clipboard_offer: None,
+        primary_offer: None,
+        clipboard_sources: Vec::new(),
+        primary_sources: Vec::new(),
+        clipboard_tx,
+        clipboard_rx,
+        selected_text: None,
+        selection: None,
+        selecting: false,
+        pointer_cell: None,
+        hovered_url: None,
+        last_pointer_serial: None,
+        pressed_buttons: HashMap::new(),
+        vertical_wheel: WheelAccumulator::default(),
         loop_handle: event_loop.handle(),
         logical_width: INITIAL_WIDTH,
         logical_height: INITIAL_HEIGHT,
@@ -196,6 +327,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
 
     while !app.exit {
         app.apply_updates(&queue_handle)?;
+        app.apply_clipboard_reads()?;
         app.tick_cursor_blink(&queue_handle)?;
         event_loop
             .dispatch(Duration::from_millis(16), &mut app)
@@ -236,6 +368,8 @@ struct App {
     registry_state: RegistryState,
     seat_state: SeatState,
     output_state: OutputState,
+    data_device_manager: DataDeviceManagerState,
+    primary_selection_manager: Option<PrimarySelectionManagerState>,
     shm: Shm,
     window: Window,
     pool: SlotPool,
@@ -259,6 +393,24 @@ struct App {
     full_redraw: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     keyboard_seat: Option<wl_seat::WlSeat>,
+    pointer: Option<wl_pointer::WlPointer>,
+    pointer_seat: Option<wl_seat::WlSeat>,
+    data_device: Option<DataDevice>,
+    primary_device: Option<PrimarySelectionDevice>,
+    clipboard_offer: Option<SelectionOffer>,
+    primary_offer: Option<PrimarySelectionOffer>,
+    clipboard_sources: Vec<(CopyPasteSource, Arc<[u8]>)>,
+    primary_sources: Vec<(PrimarySelectionSource, Arc<[u8]>)>,
+    clipboard_tx: StdSender<ClipboardRead>,
+    clipboard_rx: StdReceiver<ClipboardRead>,
+    selected_text: Option<Vec<u8>>,
+    selection: Option<Selection>,
+    selecting: bool,
+    pointer_cell: Option<CellPosition>,
+    hovered_url: Option<(CellPosition, CellPosition, String)>,
+    last_pointer_serial: Option<u32>,
+    pressed_buttons: HashMap<u32, PressOwner>,
+    vertical_wheel: WheelAccumulator,
     loop_handle: LoopHandle<'static, App>,
     logical_width: u32,
     logical_height: u32,
@@ -330,6 +482,16 @@ fn blank_row(columns: usize) -> TerminalRow {
             columns
         ],
     }
+}
+
+fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
+    !update.rows.is_empty()
+        || !update.scrolls.is_empty()
+        || update.columns.is_some()
+        || update.row_count.is_some()
+        || update.palette.is_some()
+        || update.default_colors.is_some()
+        || update.active_screen.is_some()
 }
 
 fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate) -> Result<()> {
@@ -568,6 +730,282 @@ pub fn encode_bracketed_paste(bytes: &[u8], enabled: bool) -> Vec<u8> {
     encoded
 }
 
+fn accepted_text_mime(mimes: &[String]) -> Option<String> {
+    TEXT_MIMES.iter().find_map(|supported| {
+        mimes
+            .iter()
+            .find(|mime| mime.as_str() == *supported)
+            .cloned()
+    })
+}
+
+fn safe_paste(bytes: &[u8]) -> Result<&[u8]> {
+    if bytes.len() > MAX_CLIPBOARD_BYTES {
+        anyhow::bail!("clipboard offer exceeds the 1 MiB limit");
+    }
+    std::str::from_utf8(bytes).context("clipboard text is not UTF-8")?;
+    if bytes
+        .iter()
+        .any(|byte| matches!(*byte, 0..=8 | 11..=12 | 14..=31 | 127))
+    {
+        anyhow::bail!("clipboard text contains unsafe control characters");
+    }
+    Ok(bytes)
+}
+
+fn selection_bounds(selection: Selection) -> (CellPosition, CellPosition) {
+    if selection.anchor <= selection.end {
+        (selection.anchor, selection.end)
+    } else {
+        (selection.end, selection.anchor)
+    }
+}
+
+fn selection_text(snapshot: &TerminalSnapshot, selection: Selection) -> String {
+    let (start, end) = selection_bounds(selection);
+    let mut output = String::new();
+    for row_index in start.row..=end.row.min(snapshot.rows.saturating_sub(1)) {
+        let Some(row) = snapshot.visible_rows.get(row_index) else {
+            continue;
+        };
+        let first = if row_index == start.row {
+            start.column
+        } else {
+            0
+        };
+        let last = if row_index == end.row {
+            end.column
+        } else {
+            snapshot.columns.saturating_sub(1)
+        };
+        let mut line = String::new();
+        for cell in row.cells.iter().take(last.saturating_add(1)).skip(first) {
+            if cell.spacer_remaining.is_none() {
+                line.push_str(&cell.content);
+            }
+        }
+        output.push_str(line.trim_end_matches(' '));
+        if row_index != end.row {
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn url_at(
+    snapshot: &TerminalSnapshot,
+    position: CellPosition,
+) -> Option<(CellPosition, CellPosition, String)> {
+    let row = snapshot.visible_rows.get(position.row)?;
+    let mut text = String::new();
+    let mut columns = Vec::new();
+    for (column, cell) in row.cells.iter().take(snapshot.columns).enumerate() {
+        if cell.spacer_remaining.is_some() {
+            continue;
+        }
+        for character in cell.content.chars() {
+            columns.push(column);
+            text.push(character);
+        }
+    }
+    let byte_at = text
+        .char_indices()
+        .zip(columns.iter().copied())
+        .find_map(|((byte, _), column)| (column == position.column).then_some(byte))?;
+    let is_url_char = |character: char| {
+        !character.is_whitespace() && !matches!(character, '<' | '>' | '"' | '\'')
+    };
+    let start = text[..byte_at]
+        .char_indices()
+        .rev()
+        .find_map(|(index, character)| {
+            (!is_url_char(character)).then_some(index + character.len_utf8())
+        })
+        .unwrap_or(0);
+    let end = text[byte_at..]
+        .char_indices()
+        .find_map(|(index, character)| (!is_url_char(character)).then_some(byte_at + index))
+        .unwrap_or(text.len());
+    let candidate = text[start..end].trim_end_matches(['.', ',', ')', ']', '}', ';', ':']);
+    if !(candidate.starts_with("https://") || candidate.starts_with("http://")) {
+        return None;
+    }
+    let start_char = text[..start].chars().count();
+    let end_char = start_char + candidate.chars().count().saturating_sub(1);
+    Some((
+        CellPosition {
+            row: position.row,
+            column: *columns.get(start_char)?,
+        },
+        CellPosition {
+            row: position.row,
+            column: *columns.get(end_char)?,
+        },
+        candidate.to_owned(),
+    ))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MouseAction {
+    Press(u8),
+    Release(u8),
+    Motion(u8),
+    WheelUp,
+    WheelDown,
+}
+
+fn mouse_button_code(button: u32) -> Option<u8> {
+    match button {
+        BTN_LEFT => Some(0),
+        BTN_MIDDLE => Some(1),
+        BTN_RIGHT => Some(2),
+        _ => None,
+    }
+}
+
+fn classify_press(
+    button: u32,
+    has_position: bool,
+    modifiers: Modifiers,
+    modes: TerminalInputModes,
+    has_hovered_url: bool,
+) -> PressOwner {
+    if button == BTN_MIDDLE {
+        return PressOwner::PrimaryPaste;
+    }
+    if button == BTN_LEFT && modifiers.ctrl && has_hovered_url {
+        return PressOwner::Url;
+    }
+    if has_position && modes.mouse_tracking != MouseTracking::None && !modifiers.shift {
+        return mouse_button_code(button).map_or(PressOwner::Ignored, |code| {
+            PressOwner::Application {
+                code,
+                tracking: modes.mouse_tracking,
+                sgr: modes.sgr_mouse,
+                modifiers,
+            }
+        });
+    }
+    if button == BTN_LEFT && has_position {
+        PressOwner::Selection
+    } else {
+        PressOwner::Ignored
+    }
+}
+
+fn take_press_owner(pressed: &mut HashMap<u32, PressOwner>, button: u32) -> PressOwner {
+    pressed.remove(&button).unwrap_or(PressOwner::Ignored)
+}
+
+fn application_motion(owner: &PressOwner) -> Option<(u8, bool, Modifiers)> {
+    if let PressOwner::Application {
+        code,
+        tracking: MouseTracking::Button | MouseTracking::Any,
+        sgr,
+        modifiers,
+    } = owner
+    {
+        Some((*code, *sgr, *modifiers))
+    } else {
+        None
+    }
+}
+
+impl WheelAccumulator {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "the finite accumulated value and emitted count are clamped to eight wheel steps"
+    )]
+    fn push(
+        &mut self,
+        absolute: f64,
+        discrete: i32,
+        value120: i32,
+    ) -> Option<(MouseAction, usize)> {
+        let (unit, delta, threshold) = if value120 != 0 {
+            (
+                WheelUnit::Value120,
+                f64::from(value120),
+                WHEEL_VALUE120_STEP,
+            )
+        } else if discrete != 0 {
+            (WheelUnit::Discrete, f64::from(discrete), 1.0)
+        } else if absolute != 0.0 && absolute.is_finite() {
+            (WheelUnit::Pixel, absolute, WHEEL_PIXEL_STEP)
+        } else {
+            return None;
+        };
+        if self.unit != Some(unit) {
+            self.unit = Some(unit);
+            self.remainder = 0.0;
+        }
+        let limit = threshold * MAX_BUFFERED_WHEEL_STEPS;
+        self.remainder = (self.remainder + delta).clamp(-limit, limit);
+        let available = (self.remainder.abs() / threshold).floor() as usize;
+        let count = available.min(MAX_WHEEL_STEPS_PER_FRAME);
+        if count == 0 {
+            return None;
+        }
+        let direction = self.remainder.signum();
+        self.remainder -= direction * threshold * count as f64;
+        Some((
+            if direction.is_sign_negative() {
+                MouseAction::WheelUp
+            } else {
+                MouseAction::WheelDown
+            },
+            count,
+        ))
+    }
+}
+
+fn mouse_report(
+    action: MouseAction,
+    position: CellPosition,
+    modifiers: Modifiers,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    let modifier =
+        4 * u8::from(modifiers.shift) + 8 * u8::from(modifiers.alt) + 16 * u8::from(modifiers.ctrl);
+    let (base, release) = match action {
+        MouseAction::Press(button) => (button, false),
+        MouseAction::Release(button) => (button, true),
+        MouseAction::Motion(button) => (button.saturating_add(32), false),
+        MouseAction::WheelUp => (64, false),
+        MouseAction::WheelDown => (65, false),
+    };
+    let code = base.saturating_add(modifier);
+    let column = position.column.saturating_add(1);
+    let row = position.row.saturating_add(1);
+    if sgr {
+        Some(
+            format!(
+                "\x1b[<{code};{column};{row}{}",
+                if release { 'm' } else { 'M' }
+            )
+            .into_bytes(),
+        )
+    } else {
+        let legacy_code = if release {
+            3_u8.saturating_add(modifier)
+        } else {
+            code
+        };
+        let column = u8::try_from(column.saturating_add(32)).ok()?;
+        let row = u8::try_from(row.saturating_add(32)).ok()?;
+        Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            legacy_code.saturating_add(32),
+            column,
+            row,
+        ])
+    }
+}
+
 fn try_window_command(commands: &Sender<WindowCommand>, command: WindowCommand) -> Result<()> {
     commands.try_send(command).map_err(|error| match error {
         TrySendError::Full(_) => anyhow::anyhow!("Wayland command queue overflow"),
@@ -591,7 +1029,262 @@ fn window_title(snapshot_title: Option<&str>, controller_active: bool) -> String
     }
 }
 
+fn try_clipboard_worker(active: &AtomicUsize) -> Option<ClipboardWorkerPermit<'_>> {
+    active
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < MAX_CLIPBOARD_WORKERS).then_some(count + 1)
+        })
+        .ok()
+        .map(|_| ClipboardWorkerPermit { active })
+}
+
+fn poll_timeout(deadline: Instant) -> Option<Timespec> {
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    Some(Timespec {
+        tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(remaining.subsec_nanos()),
+    })
+}
+
+fn wait_for_fd(fd: &impl AsFd, events: PollFlags, deadline: Instant) -> io::Result<bool> {
+    let Some(timeout) = poll_timeout(deadline) else {
+        return Ok(false);
+    };
+    let mut descriptor = [PollFd::new(fd, events)];
+    let ready = poll(&mut descriptor, Some(&timeout)).map_err(io::Error::from)?;
+    if ready == 0 {
+        return Ok(false);
+    }
+    let returned = descriptor[0].revents();
+    if returned.intersects(PollFlags::ERR | PollFlags::NVAL) {
+        return Err(io::Error::other("clipboard pipe reported an I/O error"));
+    }
+    Ok(returned.intersects(events | PollFlags::HUP))
+}
+
+fn read_clipboard_with_deadline(fd: &OwnedFd, timeout: Duration) -> io::Result<Vec<u8>> {
+    let deadline = Instant::now() + timeout;
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        if !wait_for_fd(fd, PollFlags::IN, deadline)? {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "clipboard read timed out",
+            ));
+        }
+        let remaining = MAX_CLIPBOARD_BYTES
+            .saturating_add(1)
+            .saturating_sub(bytes.len());
+        if remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "clipboard offer exceeds byte limit",
+            ));
+        }
+        let chunk_len = remaining.min(chunk.len());
+        let read = rustix::io::read(fd, &mut chunk[..chunk_len]).map_err(io::Error::from)?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes.len() > MAX_CLIPBOARD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "clipboard offer exceeds byte limit",
+            ));
+        }
+    }
+}
+
+fn write_clipboard_with_deadline(
+    fd: &OwnedFd,
+    payload: &[u8],
+    timeout: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut written = 0;
+    while written < payload.len() {
+        if !wait_for_fd(fd, PollFlags::OUT, deadline)? {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "clipboard write timed out",
+            ));
+        }
+        let end = (written + 4096).min(payload.len());
+        let count = rustix::io::write(fd, &payload[written..end]).map_err(io::Error::from)?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "clipboard pipe accepted no bytes",
+            ));
+        }
+        written += count;
+    }
+    Ok(())
+}
+
+fn spawn_clipboard_read(fd: OwnedFd, target: PasteTarget, tx: StdSender<ClipboardRead>) {
+    let Some(permit) = try_clipboard_worker(&ACTIVE_CLIPBOARD_WORKERS) else {
+        let _ = tx.send(ClipboardRead {
+            target,
+            bytes: Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "clipboard worker limit reached",
+            )),
+        });
+        return;
+    };
+    std::thread::spawn(move || {
+        let _permit = permit;
+        let bytes = read_clipboard_with_deadline(&fd, CLIPBOARD_IO_TIMEOUT);
+        let _ = tx.send(ClipboardRead { target, bytes });
+    });
+}
+
 impl App {
+    fn send_input(&mut self, bytes: Vec<u8>) -> Result<()> {
+        if let Some(commands) = &self.commands {
+            try_window_command(commands, WindowCommand::Input(bytes))?;
+        }
+        Ok(())
+    }
+
+    fn pointer_cell_at(&self, position: (f64, f64)) -> Option<CellPosition> {
+        let (row, column) =
+            self.snapshot_frame
+                .as_ref()?
+                .cell_at(position.0, position.1, self.integer_scale)?;
+        Some(CellPosition { row, column })
+    }
+
+    fn dirty_row(&mut self, row: usize) {
+        let rows = self.snapshot.as_ref().map_or(0, |snapshot| snapshot.rows);
+        self.raster_dirty_rows.resize(rows, false);
+        self.surface_dirty_rows.resize(rows, false);
+        if row < rows {
+            self.raster_dirty_rows[row] = true;
+            self.surface_dirty_rows[row] = true;
+        }
+    }
+
+    fn dirty_selection(&mut self, selection: Option<Selection>) {
+        if let Some(selection) = selection {
+            let (start, end) = selection_bounds(selection);
+            for row in start.row..=end.row {
+                self.dirty_row(row);
+            }
+        }
+    }
+
+    fn invalidate_local_content_state(&mut self) {
+        self.dirty_selection(self.selection);
+        if let Some((start, _, _)) = &self.hovered_url {
+            self.dirty_row(start.row);
+        }
+        self.selection = None;
+        self.selected_text = None;
+        self.selecting = false;
+        self.hovered_url = None;
+        self.pressed_buttons
+            .retain(|_, owner| matches!(owner, PressOwner::Application { .. }));
+    }
+
+    fn recompute_hovered_url(&mut self) {
+        let previous = self.hovered_url.take();
+        self.hovered_url = self.pointer_cell.and_then(|position| {
+            self.snapshot
+                .as_ref()
+                .and_then(|snapshot| url_at(snapshot, position))
+        });
+        if previous != self.hovered_url {
+            if let Some((start, _, _)) = previous {
+                self.dirty_row(start.row);
+            }
+            if let Some((start, _, _)) = &self.hovered_url {
+                self.dirty_row(start.row);
+            }
+        }
+    }
+
+    fn begin_clipboard_read(&mut self, target: PasteTarget) {
+        let tx = self.clipboard_tx.clone();
+        match target {
+            PasteTarget::Clipboard => {
+                let Some(offer) = self.clipboard_offer.clone() else {
+                    return;
+                };
+                let mime = offer.with_mime_types(accepted_text_mime);
+                let Some(mime) = mime else { return };
+                if let Ok(pipe) = offer.receive(mime) {
+                    spawn_clipboard_read(pipe.into(), target, tx);
+                }
+            }
+            PasteTarget::Primary => {
+                let Some(offer) = self.primary_offer.clone() else {
+                    return;
+                };
+                let mime = offer.with_mime_types(accepted_text_mime);
+                let Some(mime) = mime else { return };
+                if let Ok(pipe) = offer.receive(mime) {
+                    spawn_clipboard_read(pipe.into(), target, tx);
+                }
+            }
+        }
+    }
+
+    fn apply_clipboard_reads(&mut self) -> Result<()> {
+        while let Ok(read) = self.clipboard_rx.try_recv() {
+            let Ok(bytes) = read.bytes else {
+                continue;
+            };
+            let Ok(bytes) = safe_paste(&bytes) else {
+                continue;
+            };
+            let bracketed = self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.input_modes.bracketed_paste);
+            self.send_input(encode_bracketed_paste(bytes, bracketed))?;
+            let _ = read.target;
+        }
+        Ok(())
+    }
+
+    fn publish_clipboard(&mut self, qh: &QueueHandle<Self>, serial: u32, primary: bool) {
+        let Some(text) = self.selected_text.as_ref() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let payload = Arc::<[u8]>::from(text.clone());
+        let mimes: Vec<_> = TEXT_MIMES.iter().map(|mime| (*mime).to_owned()).collect();
+        if primary {
+            if let (Some(manager), Some(device)) = (
+                self.primary_selection_manager.as_ref(),
+                self.primary_device.as_ref(),
+            ) {
+                let source = manager.create_selection_source(qh, mimes);
+                source.set_selection(device, serial);
+                self.primary_sources.clear();
+                self.primary_sources.push((source, payload));
+            }
+        } else if let Some(device) = self.data_device.as_ref() {
+            let source = self.data_device_manager.create_copy_paste_source(qh, mimes);
+            source.set_selection(device, serial);
+            self.clipboard_sources.clear();
+            self.clipboard_sources.push((source, payload));
+        }
+    }
+
+    fn open_hovered_url(&self) {
+        let Some((_, _, url)) = &self.hovered_url else {
+            return;
+        };
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+
     fn fail(&mut self, error: anyhow::Error) {
         eprintln!("Wayland client failure: {error:#}");
         self.failure = Some(error);
@@ -607,6 +1300,18 @@ impl App {
         }
     }
 
+    fn send_coalescible_input(&mut self, bytes: Vec<u8>) {
+        let Some(commands) = &self.commands else {
+            return;
+        };
+        match commands.try_send(WindowCommand::Input(bytes)) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Closed(_)) => {
+                self.fail(anyhow::anyhow!("Wayland command receiver disconnected"));
+            }
+        }
+    }
+
     fn input_modes(&self) -> TerminalInputModes {
         self.snapshot.as_ref().map_or(
             TerminalInputModes {
@@ -616,6 +1321,8 @@ impl App {
                 bracketed_paste: false,
                 cursor_visible: true,
                 cursor_blink: true,
+                mouse_tracking: MouseTracking::None,
+                sgr_mouse: false,
             },
             |snapshot| snapshot.input_modes,
         )
@@ -693,6 +1400,7 @@ impl App {
                         .as_ref()
                         .is_none_or(|current| snapshot_is_newer(current, &snapshot).unwrap_or(true))
                     {
+                        self.invalidate_local_content_state();
                         self.snapshot = Some(snapshot);
                         self.full_redraw = true;
                         full_frame_reload = true;
@@ -714,6 +1422,7 @@ impl App {
                         || update.palette.is_some()
                         || update.default_colors.is_some()
                         || update.active_screen.is_some();
+                    let content_changed = terminal_update_changes_visible_content(&update);
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
                     let snapshot = self
@@ -721,6 +1430,13 @@ impl App {
                         .as_mut()
                         .context("terminal update arrived before initial snapshot")?;
                     apply_terminal_update(snapshot, update)?;
+                    if content_changed {
+                        self.invalidate_local_content_state();
+                    }
+                    let snapshot = self
+                        .snapshot
+                        .as_ref()
+                        .context("updated terminal snapshot exists")?;
                     let rows = snapshot.rows;
                     self.prepare_dirty_rows.resize(rows, false);
                     self.raster_dirty_rows.resize(rows, false);
@@ -915,7 +1631,16 @@ impl App {
                     self.cursor_blink_visible,
                 );
             }
+            let selection = self
+                .selection
+                .map(selection_bounds)
+                .map(|(start, end)| ((start.row, start.column), (end.row, end.column)));
+            let hovered_url = self
+                .hovered_url
+                .as_ref()
+                .map(|(start, end, _)| ((start.row, start.column), (end.row, end.column)));
             canvas.copy_from_slice(&self.backing);
+            paint_snapshot_overlays(canvas, width, height, frame, selection, hovered_url, None);
         } else if let Some(row) = &self.text_row {
             paint(canvas, width, height, row);
         } else {
@@ -1130,6 +1855,16 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
+        if self.data_device.is_none() {
+            self.data_device = Some(
+                self.data_device_manager
+                    .get_data_device(queue_handle, &seat),
+            );
+            self.primary_device = self
+                .primary_selection_manager
+                .as_ref()
+                .map(|manager| manager.get_selection_device(queue_handle, &seat));
+        }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             match self.seat_state.get_keyboard_with_repeat(
                 queue_handle,
@@ -1140,9 +1875,18 @@ impl SeatHandler for App {
             ) {
                 Ok(keyboard) => {
                     self.keyboard = Some(keyboard);
-                    self.keyboard_seat = Some(seat);
+                    self.keyboard_seat = Some(seat.clone());
                 }
                 Err(error) => self.fail(anyhow::anyhow!("create keyboard: {error}")),
+            }
+        }
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            match self.seat_state.get_pointer(queue_handle, &seat) {
+                Ok(pointer) => {
+                    self.pointer = Some(pointer);
+                    self.pointer_seat = Some(seat);
+                }
+                Err(error) => self.fail(anyhow::anyhow!("create pointer: {error}")),
             }
         }
     }
@@ -1160,6 +1904,13 @@ impl SeatHandler for App {
             }
             self.keyboard_seat = None;
         }
+        if capability == Capability::Pointer && self.pointer_seat.as_ref() == Some(&seat) {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+            }
+            self.pointer_seat = None;
+            self.pointer_cell = None;
+        }
     }
 
     fn remove_seat(
@@ -1174,6 +1925,14 @@ impl SeatHandler for App {
             }
             self.keyboard_seat = None;
         }
+        if self.pointer_seat.as_ref() == Some(&seat) {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+            }
+            self.pointer_seat = None;
+        }
+        self.data_device = None;
+        self.primary_device = None;
         self.seat_count = self.seat_count.saturating_sub(1);
     }
 }
@@ -1210,12 +1969,24 @@ impl KeyboardHandler for App {
     fn press_key(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
+        queue_handle: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
+        serial: u32,
         event: KeyEvent,
     ) {
-        self.handle_key(&event);
+        if self.modifiers.ctrl
+            && self.modifiers.shift
+            && matches!(event.keysym, Keysym::c | Keysym::C)
+        {
+            self.publish_clipboard(queue_handle, serial, false);
+        } else if self.modifiers.ctrl
+            && self.modifiers.shift
+            && matches!(event.keysym, Keysym::v | Keysym::V)
+        {
+            self.begin_clipboard_read(PasteTarget::Clipboard);
+        } else {
+            self.handle_key(&event);
+        }
     }
 
     fn repeat_key(
@@ -1250,6 +2021,409 @@ impl KeyboardHandler for App {
         _layout: u32,
     ) {
         self.modifiers = modifiers;
+    }
+}
+
+impl PointerHandler for App {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Wayland pointer frame preserves event order across selection, mouse reporting, paste, and URL gestures"
+    )]
+    fn pointer_frame(
+        &mut self,
+        _connection: &Connection,
+        queue_handle: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            if &event.surface != self.window.wl_surface() {
+                continue;
+            }
+            let previous_hover = self.hovered_url.clone();
+            let cell = self.pointer_cell_at(event.position);
+            match event.kind {
+                PointerEventKind::Enter { serial } => {
+                    self.last_pointer_serial = Some(serial);
+                    self.pointer_cell = cell;
+                }
+                PointerEventKind::Leave { .. } => {
+                    self.pointer_cell = None;
+                    self.hovered_url = None;
+                }
+                PointerEventKind::Motion { .. } => {
+                    self.pointer_cell = cell;
+                    self.hovered_url = cell.and_then(|position| {
+                        self.snapshot
+                            .as_ref()
+                            .and_then(|snapshot| url_at(snapshot, position))
+                    });
+                    if self.selecting {
+                        if let (Some(mut selection), Some(position)) = (self.selection, cell) {
+                            self.dirty_selection(Some(selection));
+                            selection.end = position;
+                            self.selection = Some(selection);
+                            self.dirty_selection(Some(selection));
+                        }
+                    } else if let Some(position) = cell {
+                        let active_press =
+                            self.pressed_buttons.values().find_map(application_motion);
+                        let report = if let Some((code, sgr, modifiers)) = active_press {
+                            mouse_report(MouseAction::Motion(code), position, modifiers, sgr)
+                        } else {
+                            let modes = self.input_modes();
+                            (modes.mouse_tracking == MouseTracking::Any)
+                                .then(|| {
+                                    mouse_report(
+                                        MouseAction::Motion(3),
+                                        position,
+                                        self.modifiers,
+                                        modes.sgr_mouse,
+                                    )
+                                })
+                                .flatten()
+                        };
+                        if let Some(report) = report {
+                            self.send_coalescible_input(report);
+                        }
+                    }
+                }
+                PointerEventKind::Press { button, serial, .. } => {
+                    self.last_pointer_serial = Some(serial);
+                    self.pointer_cell = cell;
+                    self.recompute_hovered_url();
+                    let owner = classify_press(
+                        button,
+                        cell.is_some(),
+                        self.modifiers,
+                        self.input_modes(),
+                        self.hovered_url.is_some(),
+                    );
+                    self.pressed_buttons.insert(button, owner);
+                    match owner {
+                        PressOwner::Application {
+                            code,
+                            tracking: _,
+                            sgr,
+                            modifiers,
+                        } => {
+                            if let Some(position) = cell {
+                                if let Some(report) =
+                                    mouse_report(MouseAction::Press(code), position, modifiers, sgr)
+                                {
+                                    self.send_command(WindowCommand::Input(report));
+                                }
+                            }
+                        }
+                        PressOwner::Selection => {
+                            if let Some(position) = cell {
+                                self.dirty_selection(self.selection);
+                                let selection = Selection {
+                                    anchor: position,
+                                    end: position,
+                                };
+                                self.selection = Some(selection);
+                                self.selecting = true;
+                                self.dirty_selection(Some(selection));
+                            }
+                        }
+                        PressOwner::PrimaryPaste => {
+                            self.begin_clipboard_read(PasteTarget::Primary);
+                        }
+                        PressOwner::Url => self.open_hovered_url(),
+                        PressOwner::Ignored => {}
+                    }
+                }
+                PointerEventKind::Release { button, serial, .. } => {
+                    self.last_pointer_serial = Some(serial);
+                    match take_press_owner(&mut self.pressed_buttons, button) {
+                        PressOwner::Application {
+                            code,
+                            tracking: _,
+                            sgr,
+                            modifiers,
+                        } => {
+                            if let Some(position) = cell.or(self.pointer_cell) {
+                                if let Some(report) = mouse_report(
+                                    MouseAction::Release(code),
+                                    position,
+                                    modifiers,
+                                    sgr,
+                                ) {
+                                    self.send_command(WindowCommand::Input(report));
+                                }
+                            }
+                        }
+                        PressOwner::Selection => {
+                            self.selecting = false;
+                            self.selected_text = self.selection.and_then(|selection| {
+                                self.snapshot.as_ref().map(|snapshot| {
+                                    selection_text(snapshot, selection).into_bytes()
+                                })
+                            });
+                            self.publish_clipboard(queue_handle, serial, true);
+                        }
+                        PressOwner::PrimaryPaste | PressOwner::Url | PressOwner::Ignored => {}
+                    }
+                }
+                PointerEventKind::Axis {
+                    horizontal: _,
+                    vertical,
+                    ..
+                } => {
+                    // Xterm's mouse protocol has only vertical wheel button codes 4/5;
+                    // Foot does not synthesize horizontal wheel reports into unrelated buttons.
+                    let Some(position) = cell else { continue };
+                    let modes = self.input_modes();
+                    if modes.mouse_tracking == MouseTracking::None {
+                        self.vertical_wheel = WheelAccumulator::default();
+                        continue;
+                    }
+                    if vertical.is_none() {
+                        continue;
+                    }
+                    if let Some((action, count)) = self.vertical_wheel.push(
+                        vertical.absolute,
+                        vertical.discrete,
+                        vertical.value120,
+                    ) {
+                        if let Some(report) =
+                            mouse_report(action, position, self.modifiers, modes.sgr_mouse)
+                        {
+                            let mut batch = Vec::with_capacity(report.len().saturating_mul(count));
+                            for _ in 0..count {
+                                batch.extend_from_slice(&report);
+                            }
+                            self.send_command(WindowCommand::Input(batch));
+                        }
+                    }
+                }
+            }
+            if previous_hover != self.hovered_url {
+                if let Some((start, _, _)) = previous_hover {
+                    self.dirty_row(start.row);
+                }
+                if let Some((start, _, _)) = &self.hovered_url {
+                    self.dirty_row(start.row);
+                }
+            }
+        }
+        if self.configured
+            && (self.raster_dirty_rows.iter().any(|dirty| *dirty)
+                || self.surface_dirty_rows.iter().any(|dirty| *dirty))
+        {
+            if let Err(error) = self.schedule_draw(queue_handle) {
+                self.fail(error);
+            }
+        }
+    }
+}
+
+impl DataDeviceHandler for App {
+    fn enter(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        data_device: &wl_data_device::WlDataDevice,
+        _x: f64,
+        _y: f64,
+        _surface: &wl_surface::WlSurface,
+    ) {
+        if let Some(offer) = self
+            .data_device
+            .as_ref()
+            .filter(|device| device.inner() == data_device)
+            .and_then(|device| device.data().drag_offer())
+        {
+            offer.accept_mime_type(0, None);
+            offer.set_actions(DndAction::empty(), DndAction::empty());
+        }
+    }
+
+    fn leave(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        _data_device: &wl_data_device::WlDataDevice,
+    ) {
+    }
+
+    fn motion(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        _data_device: &wl_data_device::WlDataDevice,
+        _x: f64,
+        _y: f64,
+    ) {
+    }
+
+    fn selection(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        data_device: &wl_data_device::WlDataDevice,
+    ) {
+        self.clipboard_offer = self
+            .data_device
+            .as_ref()
+            .filter(|device| device.inner() == data_device)
+            .and_then(|device| device.data().selection_offer())
+            .filter(|offer| offer.with_mime_types(accepted_text_mime).is_some());
+    }
+
+    fn drop_performed(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        _data_device: &wl_data_device::WlDataDevice,
+    ) {
+    }
+}
+
+impl DataOfferHandler for App {
+    fn source_actions(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        offer: &mut DragOffer,
+        _actions: DndAction,
+    ) {
+        offer.set_actions(DndAction::empty(), DndAction::empty());
+    }
+
+    fn selected_action(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        _offer: &mut DragOffer,
+        _actions: DndAction,
+    ) {
+    }
+}
+
+fn write_selection_payload(write_pipe: WritePipe, payload: Arc<[u8]>) {
+    let Some(permit) = try_clipboard_worker(&ACTIVE_CLIPBOARD_WORKERS) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let _permit = permit;
+        let fd = OwnedFd::from(write_pipe);
+        let _ = write_clipboard_with_deadline(&fd, &payload, CLIPBOARD_IO_TIMEOUT);
+    });
+}
+
+impl DataSourceHandler for App {
+    fn accept_mime(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        _source: &wl_data_source::WlDataSource,
+        _mime: Option<String>,
+    ) {
+    }
+
+    fn send_request(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        source: &wl_data_source::WlDataSource,
+        mime: String,
+        write_pipe: WritePipe,
+    ) {
+        if accepted_text_mime(std::slice::from_ref(&mime)).is_none() {
+            return;
+        }
+        if let Some((_, payload)) = self
+            .clipboard_sources
+            .iter()
+            .find(|(candidate, _)| candidate.inner() == source)
+        {
+            write_selection_payload(write_pipe, Arc::clone(payload));
+        }
+    }
+
+    fn cancelled(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        source: &wl_data_source::WlDataSource,
+    ) {
+        self.clipboard_sources
+            .retain(|(candidate, _)| candidate.inner() != source);
+    }
+
+    fn dnd_dropped(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        _source: &wl_data_source::WlDataSource,
+    ) {
+    }
+
+    fn dnd_finished(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        _source: &wl_data_source::WlDataSource,
+    ) {
+    }
+
+    fn action(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        _source: &wl_data_source::WlDataSource,
+        _action: DndAction,
+    ) {
+    }
+}
+
+impl PrimarySelectionDeviceHandler for App {
+    fn selection(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        device: &ZwpPrimarySelectionDeviceV1,
+    ) {
+        self.primary_offer = self
+            .primary_device
+            .as_ref()
+            .filter(|candidate| candidate.inner() == device)
+            .and_then(|candidate| candidate.data().selection_offer())
+            .filter(|offer| offer.with_mime_types(accepted_text_mime).is_some());
+    }
+}
+
+impl PrimarySelectionSourceHandler for App {
+    fn send_request(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        source: &ZwpPrimarySelectionSourceV1,
+        mime: String,
+        write_pipe: WritePipe,
+    ) {
+        if accepted_text_mime(std::slice::from_ref(&mime)).is_none() {
+            return;
+        }
+        if let Some((_, payload)) = self
+            .primary_sources
+            .iter()
+            .find(|(candidate, _)| candidate.inner() == source)
+        {
+            write_selection_payload(write_pipe, Arc::clone(payload));
+        }
+    }
+
+    fn cancelled(
+        &mut self,
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+        source: &ZwpPrimarySelectionSourceV1,
+    ) {
+        self.primary_sources
+            .retain(|(candidate, _)| candidate.inner() != source);
     }
 }
 
@@ -1311,6 +2485,8 @@ mod tests {
                 bracketed_paste: false,
                 cursor_visible: true,
                 cursor_blink: true,
+                mouse_tracking: MouseTracking::None,
+                sgr_mouse: false,
             },
             palette: vec![0; 256],
             default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
@@ -1407,6 +2583,25 @@ mod tests {
             bracketed_paste: false,
             cursor_visible: true,
             cursor_blink: true,
+            mouse_tracking: MouseTracking::None,
+            sgr_mouse: false,
+        }
+    }
+
+    fn empty_update() -> TerminalUpdate {
+        TerminalUpdate {
+            base_revision: 1,
+            revision: 2,
+            rows: Vec::new(),
+            scrolls: Vec::new(),
+            cursor: None,
+            title: None,
+            input_modes: None,
+            active_screen: None,
+            palette: None,
+            default_colors: None,
+            columns: None,
+            row_count: None,
         }
     }
 
@@ -1506,6 +2701,248 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_policy_filters_mime_size_utf8_and_controls() {
+        assert_eq!(
+            accepted_text_mime(&[
+                "image/png".to_owned(),
+                "text/plain".to_owned(),
+                "text/plain;charset=utf-8".to_owned(),
+            ]),
+            Some("text/plain;charset=utf-8".to_owned())
+        );
+        assert_eq!(accepted_text_mime(&["image/png".to_owned()]), None);
+        assert_eq!(
+            safe_paste(b"line one\nline two\t").expect("safe text"),
+            b"line one\nline two\t"
+        );
+        assert!(safe_paste(b"unsafe\x1bsequence").is_err());
+        assert!(safe_paste(&[0xff]).is_err());
+        assert!(safe_paste(&vec![b'x'; MAX_CLIPBOARD_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn selection_text_orders_endpoints_and_skips_wide_spacers() {
+        let mut view = snapshot(SplintId::new(), 1, 1);
+        view.columns = 4;
+        view.rows = 2;
+        view.visible_rows = vec![blank_row(4), blank_row(4)];
+        view.visible_rows[0].cells[0].content = "A".to_owned();
+        view.visible_rows[0].cells[1].content = "界".to_owned();
+        view.visible_rows[0].cells[2].spacer_remaining = Some(0);
+        view.visible_rows[0].cells[3].content = " ".to_owned();
+        view.visible_rows[1].cells[0].content = "B".to_owned();
+        view.visible_rows[1].cells[1].content = "C".to_owned();
+        let selection = Selection {
+            anchor: CellPosition { row: 1, column: 1 },
+            end: CellPosition { row: 0, column: 0 },
+        };
+        assert_eq!(selection_text(&view, selection), "A界\nBC");
+    }
+
+    #[test]
+    fn url_detection_is_visible_http_only_and_trims_punctuation() {
+        let mut view = snapshot(SplintId::new(), 1, 1);
+        let text = "see https://example.com/path). now";
+        view.columns = text.chars().count();
+        view.rows = 1;
+        let mut row = blank_row(view.columns);
+        for (cell, character) in row.cells.iter_mut().zip(text.chars()) {
+            cell.content = character.to_string();
+        }
+        view.visible_rows = vec![row];
+        let column = text.find("example").expect("URL column");
+        let (_, _, url) = url_at(&view, CellPosition { row: 0, column }).expect("visible URL");
+        assert_eq!(url, "https://example.com/path");
+        assert!(url_at(&view, CellPosition { row: 0, column: 0 }).is_none());
+    }
+
+    #[test]
+    fn visible_content_updates_invalidate_local_overlays_but_metadata_does_not() {
+        let mut cursor_only = empty_update();
+        cursor_only.cursor = Some(splinterm_protocol::TerminalCursor {
+            column: 1,
+            row: 1,
+            deferred_wrap: false,
+        });
+        assert!(!terminal_update_changes_visible_content(&cursor_only));
+
+        let mut row = empty_update();
+        row.rows.push(splinterm_protocol::TerminalRowPatch {
+            index: 0,
+            row: blank_row(1),
+        });
+        assert!(terminal_update_changes_visible_content(&row));
+        let mut scroll = empty_update();
+        scroll.scrolls.push(splinterm_protocol::TerminalScroll {
+            direction: splinterm_protocol::ScrollDirection::Forward,
+            start_row: 0,
+            end_row: 2,
+            rows: 1,
+        });
+        assert!(terminal_update_changes_visible_content(&scroll));
+        let mut colors = empty_update();
+        colors.default_colors = Some([1, 2, 3]);
+        assert!(terminal_update_changes_visible_content(&colors));
+    }
+
+    #[test]
+    fn stale_url_disappears_when_visible_row_is_replaced() {
+        let mut view = snapshot(SplintId::new(), 1, 1);
+        let text = "https://example.com";
+        view.columns = text.len();
+        view.rows = 1;
+        let mut row = blank_row(view.columns);
+        for (cell, character) in row.cells.iter_mut().zip(text.chars()) {
+            cell.content = character.to_string();
+        }
+        view.visible_rows = vec![row];
+        let position = CellPosition { row: 0, column: 10 };
+        assert!(url_at(&view, position).is_some());
+        view.visible_rows[0] = blank_row(view.columns);
+        assert!(url_at(&view, position).is_none());
+    }
+
+    #[test]
+    fn press_ownership_pairs_application_and_local_releases() {
+        let position_present = true;
+        let mut modes = normal_modes();
+        modes.mouse_tracking = MouseTracking::Normal;
+        let app = classify_press(
+            BTN_LEFT,
+            position_present,
+            Modifiers::default(),
+            modes,
+            false,
+        );
+        assert!(matches!(
+            app,
+            PressOwner::Application {
+                code: 0,
+                tracking: MouseTracking::Normal,
+                ..
+            }
+        ));
+        assert!(application_motion(&app).is_none());
+        modes.mouse_tracking = MouseTracking::Button;
+        let button_motion = classify_press(
+            BTN_LEFT,
+            position_present,
+            Modifiers::default(),
+            modes,
+            false,
+        );
+        assert!(application_motion(&button_motion).is_some());
+        let primary = classify_press(
+            BTN_MIDDLE,
+            position_present,
+            Modifiers::default(),
+            modes,
+            false,
+        );
+        assert!(matches!(primary, PressOwner::PrimaryPaste));
+        let url = classify_press(
+            BTN_LEFT,
+            position_present,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            modes,
+            true,
+        );
+        assert!(matches!(url, PressOwner::Url));
+
+        let mut pressed = HashMap::from([(BTN_MIDDLE, primary), (BTN_LEFT, url)]);
+        assert!(matches!(
+            take_press_owner(&mut pressed, BTN_MIDDLE),
+            PressOwner::PrimaryPaste
+        ));
+        assert!(matches!(
+            take_press_owner(&mut pressed, BTN_LEFT),
+            PressOwner::Url
+        ));
+        assert!(matches!(
+            take_press_owner(&mut pressed, BTN_RIGHT),
+            PressOwner::Ignored
+        ));
+    }
+
+    #[test]
+    fn axis_accumulates_partial_steps_preserves_remainder_and_caps_frames() {
+        let mut wheel = WheelAccumulator::default();
+        assert_eq!(wheel.push(0.0, 0, -60), None);
+        assert_eq!(wheel.push(0.0, 0, -59), None);
+        assert_eq!(wheel.push(0.0, 0, -1), Some((MouseAction::WheelUp, 1)));
+        assert_eq!(wheel.push(0.0, 0, 119), None);
+        assert_eq!(wheel.push(0.0, 0, 1), Some((MouseAction::WheelDown, 1)));
+
+        assert_eq!(
+            wheel.push(0.0, 20, 0),
+            Some((MouseAction::WheelDown, MAX_WHEEL_STEPS_PER_FRAME))
+        );
+        assert_eq!(
+            wheel.push(0.0, 0, 0),
+            None,
+            "zero frames do not flush a different source implicitly"
+        );
+        assert_eq!(
+            wheel.push(0.0, 1, 0),
+            Some((MouseAction::WheelDown, MAX_WHEEL_STEPS_PER_FRAME))
+        );
+
+        assert_eq!(wheel.push(-4.0, 0, 0), None);
+        assert_eq!(wheel.push(-6.0, 0, 0), Some((MouseAction::WheelUp, 1)));
+    }
+
+    #[test]
+    fn mouse_reports_cover_sgr_legacy_modifiers_motion_and_wheel() {
+        let position = CellPosition { row: 4, column: 9 };
+        assert_eq!(
+            mouse_report(MouseAction::Press(0), position, Modifiers::default(), true,),
+            Some(b"\x1b[<0;10;5M".to_vec())
+        );
+        assert_eq!(
+            mouse_report(
+                MouseAction::Release(0),
+                position,
+                Modifiers::default(),
+                true,
+            ),
+            Some(b"\x1b[<0;10;5m".to_vec())
+        );
+        let modifiers = Modifiers {
+            shift: true,
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            mouse_report(MouseAction::Motion(0), position, modifiers, true),
+            Some(b"\x1b[<52;10;5M".to_vec())
+        );
+        assert_eq!(
+            mouse_report(
+                MouseAction::WheelUp,
+                CellPosition { row: 0, column: 0 },
+                Modifiers::default(),
+                false,
+            ),
+            Some(vec![0x1b, b'[', b'M', 96, 33, 33])
+        );
+        assert!(
+            mouse_report(
+                MouseAction::WheelDown,
+                CellPosition {
+                    row: 500,
+                    column: 500
+                },
+                Modifiers::default(),
+                false,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn bracketed_paste_wraps_only_when_mode_is_enabled() {
         assert_eq!(encode_bracketed_paste(b"hello", false), b"hello");
         assert_eq!(
@@ -1534,6 +2971,29 @@ mod tests {
         let error = try_window_command(&sender, WindowCommand::Input(vec![3]))
             .expect_err("disconnected receiver");
         assert!(error.to_string().contains("disconnected"));
+    }
+
+    #[test]
+    fn clipboard_worker_budget_is_strict_and_released() {
+        let active = AtomicUsize::new(0);
+        let permits: Vec<_> = (0..MAX_CLIPBOARD_WORKERS)
+            .map(|_| try_clipboard_worker(&active).expect("worker slot"))
+            .collect();
+        assert!(try_clipboard_worker(&active).is_none());
+        drop(permits);
+        assert_eq!(active.load(Ordering::Acquire), 0);
+        assert!(try_clipboard_worker(&active).is_some());
+    }
+
+    #[test]
+    fn clipboard_read_deadline_expires_without_a_writer() {
+        use std::os::unix::net::UnixStream;
+
+        let (reader, _writer) = UnixStream::pair().expect("socket pair");
+        let fd = OwnedFd::from(reader);
+        let error = read_clipboard_with_deadline(&fd, Duration::from_millis(5))
+            .expect_err("idle peer times out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]
@@ -1570,6 +3030,9 @@ delegate_output!(App);
 delegate_shm!(App);
 delegate_seat!(App);
 delegate_keyboard!(App);
+delegate_pointer!(App);
+delegate_data_device!(App);
+delegate_primary_selection!(App);
 delegate_xdg_shell!(App);
 delegate_xdg_window!(App);
 delegate_registry!(App);

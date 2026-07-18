@@ -1,7 +1,7 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Phase 4 implementation complete — full baseline matrix pending
-- **Roadmap:** Phase 4
+- **Status:** Phase 5 complete
+- **Roadmap:** Phase 6
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -49,8 +49,14 @@
   framing in [Spike 0010](../spikes/0010-terminal-input-modes.md).
 - [x] Validate the Phase 3 exit gate by launching `btop`, closing the graphical
   client, reopening the same daemon-owned process, and continuing input.
-- [ ] Add direct `text-input-v3` IME handling and clipboard in Phase 5, and
-  trusted consent UI in Phase 7.
+- [x] Add pointer selection, mouse reporting, regular/primary clipboard,
+  bounded safe paste, URL hover, and gesture-only URL opening in
+  [Spike 0012](../spikes/0012-pointer-selection-clipboard-urls.md).
+- [x] Validate pointer lifecycle, local selection/primary publication, regular
+  and primary paste, unsafe-control rejection, bracketed paste, mouse reports,
+  and URL hover on workspace 8.
+- [ ] Add direct `text-input-v3` IME handling in Phase 6 and trusted consent UI
+  in Phase 7.
 - [x] Replace full-snapshot/full-frame updates with protocol v5 semantic damage,
   incremental row preparation, scroll-copy, row damage submission, frame
   callback coalescing, local cursor blink, and bounded scale-specific glyph

@@ -23,10 +23,11 @@ use splinterm_core::{Lair, LayoutNode, SplintId, SplintState};
 use splinterm_protocol::{
     ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame, ColorSource, ErrorCode,
     MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS, MAX_SNAPSHOT_SCROLLBACK_ROWS,
-    MAX_SUBSCRIPTIONS, PROTOCOL_VERSION, ProtocolError, Request, Response,
-    ScrollDirection as WireScrollDirection, ServerFrame, ServerLimits, SubscriptionEvent,
-    TerminalCell, TerminalCursor, TerminalInputModes, TerminalRow, TerminalRowPatch,
-    TerminalScroll, TerminalSnapshot, TerminalUpdate as WireTerminalUpdate, encode_frame,
+    MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking, PROTOCOL_VERSION, ProtocolError,
+    Request, Response, ScrollDirection as WireScrollDirection, ServerFrame, ServerLimits,
+    SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalRow,
+    TerminalRowPatch, TerminalScroll, TerminalSnapshot, TerminalUpdate as WireTerminalUpdate,
+    encode_frame,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
@@ -971,6 +972,13 @@ fn wire_modes(modes: splinterm_terminal::TerminalModes) -> TerminalInputModes {
         bracketed_paste: modes.bracketed_paste,
         cursor_visible: modes.cursor_visible,
         cursor_blink: modes.cursor_blink,
+        mouse_tracking: match modes.mouse_tracking {
+            splinterm_terminal::MouseTracking::None => WireMouseTracking::None,
+            splinterm_terminal::MouseTracking::Normal => WireMouseTracking::Normal,
+            splinterm_terminal::MouseTracking::Button => WireMouseTracking::Button,
+            splinterm_terminal::MouseTracking::Any => WireMouseTracking::Any,
+        },
+        sgr_mouse: modes.sgr_mouse,
     }
 }
 

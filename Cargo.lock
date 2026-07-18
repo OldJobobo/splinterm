@@ -707,6 +707,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fontdb",
+ "rustix",
  "serde_json",
  "smithay-client-toolkit",
  "splinterm-core",

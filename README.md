@@ -73,12 +73,14 @@ configure-derived PTY/grid size through a separate authenticated control
 connection. Input and resize require one exclusive connection-owned controller
 lease, released when the window disconnects. Function/navigation/keypad keys,
 xterm modifiers, application cursor/keypad modes, xkb compose, focus reporting,
-and exact snapshot colors are supported. Protocol v5 streams bounded semantic
+and exact snapshot colors are supported. Protocol v6 streams bounded semantic
 row, scroll, cursor, mode, palette, dimension, and title updates. The client
 coalesces damage to Wayland frame callbacks, incrementally prepares changed
 rows, scroll-copies reusable backing pixels, submits row damage, and uses a
-bounded scale-specific glyph cache. Direct `text-input-v3` IME, trusted consent
-UI, and clipboard remain follow-up work.
+bounded scale-specific glyph cache. Pointer selection, regular and primary
+clipboard, bounded safe bracketed paste, application mouse reporting, and
+user-gesture-only HTTP(S) opening are supported. Direct `text-input-v3` IME and
+trusted consent UI remain follow-up work.
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
 for development with `SPLINTERM_SOCKET=/path/to/socket`.
