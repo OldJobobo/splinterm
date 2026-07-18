@@ -25,8 +25,8 @@
 - [x] Render, shape, cache, capture, and compare the first deterministic corpus
   against pinned Foot/fcft in
   [Spike 0004](../spikes/0004-deterministic-text-row-comparison.md).
-- [ ] Complete shaping/raster visual comparisons against Foot/fcft, including
-  box-drawing geometry and measured fallback ink bounds.
+- [x] Complete the initial shaping/raster comparison against Foot/fcft,
+  including box-drawing geometry and measured same-pipeline fallback ink bounds.
 - [x] Add deterministic Foot text-row renderer references.
 - [ ] Accept Wayland/event-loop and font/renderer ADRs.
 - [ ] Promote the native window shell into the graphical `splinterm` client.

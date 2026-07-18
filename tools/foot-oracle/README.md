@@ -146,6 +146,20 @@ Validate fixture structure with:
 python tools/foot-oracle/validate-fixtures.py
 ```
 
+## fcft raster evidence probe
+
+The test-only probe reports raw fcft glyph placement, image dimensions,
+advances, and half-open nonzero-alpha ink bounds without opening a window:
+
+```bash
+tools/foot-oracle/run-fcft-mask-probe.sh
+```
+
+It compiles `fcft-mask-probe.c` against the fcft 3.3.3 static library produced
+by the pinned Foot reference build. It validates the Foot revision first and
+builds the reference when necessary. This compares the raster stage directly;
+it does not substitute compositor screenshots for glyph-mask evidence.
+
 ## Rules
 
 - Never silently update expected output to match Rust.

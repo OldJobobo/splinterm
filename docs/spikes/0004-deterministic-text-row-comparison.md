@@ -9,8 +9,8 @@
   - `tools/run-wayland-window-demo.py`
   - `tools/foot-oracle/run-text-row-reference.py`
   - `docs/spikes/artifacts/0004/`
-    (`renderer-benchmark.json` SHA-256
-    `1a53665b84f677fa55870a6f41c16c7affa20d2536c979891fe0bf79d5fc98d3`)
+    (`renderer-benchmark.json`, `fcft-mask-probe.jsonl`, and
+    `raster-evidence-comparison.json`)
 
 ## Question
 
@@ -94,9 +94,11 @@ provenance markers, not an equality assertion; the capture stages differ.
    centered line geometry instead of font glyphs. Odd/even cell tests assert
    continuous joins, and the refreshed crop visually matches Foot's one-pixel
    geometry at 1×.
-5. CJK and emoji fallback placement is broadly aligned but still differs in
-   apparent scale and vertical ink bounds. The renderer now records per-raster
-   half-open ink bounds, placement, and image dimensions for measured follow-up.
+5. The direct fcft mask probe and Swash evidence agree exactly for ASCII,
+   combining, and CJK placement/image/ink bounds. Emoji placement and image
+   dimensions agree; Swash includes a one-pixel transparent-edge fringe at the
+   left and top compared with fcft. The evidence tolerance is one pixel for
+   color emoji and zero pixels for the grayscale cases.
 6. Explicit Regular, Bold, Italic, and Bold Italic JetBrains faces resolve to
    distinct files and preserve the 13.2-pixel `M` advance within 0.01 pixels.
 7. Integer scaling now uses `wl_surface.set_buffer_scale`, checked physical SHM
@@ -130,6 +132,24 @@ cold-path aggregate observation, not a median or per-glyph latency. The three
 warm phases contain 100 samples with min/median/p95/max values. The committed
 `artifacts/0004/renderer-benchmark.json` preserves the emitted report.
 
+## Same-pipeline raster comparison
+
+`tools/foot-oracle/run-fcft-mask-probe.sh` builds a test-only C probe against
+the fcft 3.3.3 static library from the pinned Foot build. It emits placement,
+image dimensions, advances, and half-open nonzero-alpha bounds without a
+compositor. `raster-evidence-comparison.json` records the corresponding Swash
+values.
+
+| Case | Placement/image | Ink bounds | Advance |
+| --- | --- | --- | --- |
+| ASCII `A` | exact | exact | fcft 13, Swash 13.2 |
+| composed `é` | exact | exact | fcft 13, Swash 13.2 |
+| CJK `界` | exact | exact | 22 |
+| emoji `🙂` | exact | 1 px left/top fringe | fcft 27, Swash 27.393 |
+
+The fractional Swash advances are centered inside fixed integer terminal spans;
+they do not change logical cell placement.
+
 ## Decision
 
 Do not accept the permanent font/renderer ADR yet and do not attach terminal
@@ -142,12 +162,10 @@ shell lifetime.
 
 ## Next work
 
-1. Define and review numeric tolerances for primary, CJK, and emoji ink bounds
-   against a capture at the same pipeline stage.
-2. Exercise the integer-scale path on a real 2× output or nested compositor;
+1. Exercise the integer-scale path on a real 2× output or nested compositor;
    current DP-2 evidence is 1×.
-3. Evaluate fractional scale and viewport support.
-4. Accept the Wayland/event-loop ADR and font/renderer ADR only after those
+2. Evaluate fractional scale and viewport support.
+3. Accept the Wayland/event-loop ADR and font/renderer ADR only after those
    results are reviewed.
-5. Expose the graphical production command only after ADR acceptance; terminal
+4. Expose the graphical production command only after ADR acceptance; terminal
    snapshot attachment remains later work.
