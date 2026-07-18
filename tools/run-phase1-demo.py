@@ -19,7 +19,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FOOT = Path("/tmp/splinterm-foot-oracle-build/foot")
 DEFAULT_WORKSPACE = 8
-DEFAULT_DELAY = 8.0
+DEFAULT_DELAY = 6.0
 WIDTH = 108
 
 CYAN = "\033[1;36m"
