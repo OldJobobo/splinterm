@@ -18,6 +18,7 @@ splinterm-protocol = { path = "../splinterm-protocol" }
 smithay-client-toolkit.workspace = true
 swash.workspace = true
 tokio.workspace = true
+unicode-width.workspace = true
 wayland-client.workspace = true
 
 [lints]

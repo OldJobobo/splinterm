@@ -79,8 +79,10 @@ coalesces damage to Wayland frame callbacks, incrementally prepares changed
 rows, scroll-copies reusable backing pixels, submits row damage, and uses a
 bounded scale-specific glyph cache. Pointer selection, regular and primary
 clipboard, bounded safe bracketed paste, application mouse reporting, and
-user-gesture-only HTTP(S) opening are supported. Direct `text-input-v3` IME and
-trusted consent UI remain follow-up work.
+user-gesture-only HTTP(S) opening are supported. Paired fractional-scale/
+viewport rendering, `text-input-v3` preedit and commit, inactive-IME compose
+fallback, focus indication, and reduced-motion cursor behavior are implemented.
+Trusted consent UI remains follow-up work.
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
 for development with `SPLINTERM_SOCKET=/path/to/socket`.

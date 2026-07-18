@@ -20,6 +20,7 @@ use std::{
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use tokio::sync::mpsc::{Receiver, Sender, error::TryRecvError, error::TrySendError};
+use unicode_width::UnicodeWidthChar;
 
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
@@ -64,7 +65,7 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    Connection, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{
         wl_data_device, wl_data_device_manager::DndAction, wl_data_source, wl_keyboard, wl_output,
@@ -77,14 +78,25 @@ use splinterm_protocol::{
     TerminalSnapshot, TerminalUpdate,
 };
 
-use smithay_client_toolkit::reexports::protocols::wp::primary_selection::zv1::client::{
-    zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
-    zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
+use smithay_client_toolkit::reexports::protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    primary_selection::zv1::client::{
+        zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
+        zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
+    },
+    text_input::zv3::client::{
+        zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+        zwp_text_input_v3::{self, ZwpTextInputV3},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
 use crate::renderer::{
-    SnapshotFrame, TextRow, paint, paint_snapshot, paint_snapshot_overlays, paint_snapshot_rows,
-    scroll_snapshot_pixels, snapshot_row_rect, write_ppm,
+    SnapshotFrame, SnapshotOverlays, TextRow, paint, paint_snapshot, paint_snapshot_overlays,
+    paint_snapshot_rows, scroll_snapshot_pixels, snapshot_row_rect, write_ppm,
 };
 
 const INITIAL_WIDTH: u32 = 960;
@@ -98,6 +110,10 @@ const MAX_WHEEL_STEPS_PER_FRAME: usize = 8;
 const MAX_BUFFERED_WHEEL_STEPS: f64 = 64.0;
 const WHEEL_VALUE120_STEP: f64 = 120.0;
 const WHEEL_PIXEL_STEP: f64 = 10.0;
+const SCALE_DENOMINATOR: u32 = 120;
+const MIN_SCALE_120: u32 = 120;
+const MAX_SCALE_120: u32 = 960;
+const MAX_PREEDIT_BYTES: usize = 4 * 1024;
 const BTN_RIGHT: u32 = 0x111;
 static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -136,6 +152,69 @@ enum PressOwner {
 struct ClipboardRead {
     target: PasteTarget,
     bytes: io::Result<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum PendingPreedit {
+    #[default]
+    Unchanged,
+    Clear,
+    Set(String),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ImeBatch {
+    preedit: PendingPreedit,
+    commit: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ImeState {
+    entered: bool,
+    focused: bool,
+    sent_commit_serial: u32,
+    visible_preedit: Option<String>,
+    pending: ImeBatch,
+}
+
+impl ImeState {
+    fn set_preedit(&mut self, text: Option<String>) {
+        self.pending.preedit = match text {
+            Some(text) if text.len() <= MAX_PREEDIT_BYTES => PendingPreedit::Set(text),
+            Some(_) => PendingPreedit::Unchanged,
+            None => PendingPreedit::Clear,
+        };
+    }
+
+    fn set_commit(&mut self, text: Option<String>) {
+        self.pending.commit = text.filter(|text| text.len() <= MAX_PREEDIT_BYTES);
+    }
+
+    fn note_client_commit(&mut self) {
+        self.sent_commit_serial = self.sent_commit_serial.wrapping_add(1);
+    }
+
+    fn finish(&mut self, serial: u32) -> (bool, Option<String>, Option<String>) {
+        let serial_matches = serial == self.sent_commit_serial;
+        let commit = self.pending.commit.take();
+        match std::mem::take(&mut self.pending.preedit) {
+            PendingPreedit::Unchanged if commit.is_some() => self.visible_preedit = None,
+            PendingPreedit::Unchanged => {}
+            PendingPreedit::Clear => self.visible_preedit = None,
+            PendingPreedit::Set(preedit) => self.visible_preedit = Some(preedit),
+        }
+        (serial_matches, self.visible_preedit.clone(), commit)
+    }
+
+    fn composing(&self) -> bool {
+        self.visible_preedit.is_some() || matches!(self.pending.preedit, PendingPreedit::Set(_))
+    }
+
+    fn clear(&mut self) {
+        self.entered = false;
+        self.visible_preedit = None;
+        self.pending = ImeBatch::default();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,9 +320,30 @@ pub fn run(options: WindowOptions) -> Result<()> {
         .context("compositor does not provide wl_data_device_manager")?;
     let primary_selection_manager =
         PrimarySelectionManagerState::bind(&globals, &queue_handle).ok();
+    let fractional_scale_manager = globals
+        .bind::<WpFractionalScaleManagerV1, _, _>(&queue_handle, 1..=1, ())
+        .ok();
+    let viewporter = globals
+        .bind::<WpViewporter, _, _>(&queue_handle, 1..=1, ())
+        .ok();
+    let text_input_manager = globals
+        .bind::<ZwpTextInputManagerV3, _, _>(&queue_handle, 1..=1, ())
+        .ok();
     let (clipboard_tx, clipboard_rx) = std_mpsc::channel();
     let surface = compositor.create_surface(&queue_handle);
     let window = shell.create_window(surface, WindowDecorations::RequestServer, &queue_handle);
+    let fractional_scale = fractional_scale_manager
+        .as_ref()
+        .zip(viewporter.as_ref())
+        .map(|(manager, _)| manager.get_fractional_scale(window.wl_surface(), &queue_handle, ()));
+    let viewport = fractional_scale_manager
+        .as_ref()
+        .zip(viewporter.as_ref())
+        .map(|(_, manager)| manager.get_viewport(window.wl_surface(), &queue_handle, ()));
+    if let Some(viewport) = &viewport {
+        let (width, height) = viewport_destination(INITIAL_WIDTH, INITIAL_HEIGHT)?;
+        viewport.set_destination(width, height);
+    }
     let controller_active = options.commands.is_some();
     let title = window_title(
         options
@@ -269,6 +369,14 @@ pub fn run(options: WindowOptions) -> Result<()> {
         output_state: OutputState::new(&globals, &queue_handle),
         data_device_manager,
         primary_selection_manager,
+        fractional_scale,
+        viewport,
+        text_input_manager,
+        text_input: None,
+        text_input_seat: None,
+        ime: ImeState::default(),
+        reduced_motion: reduced_motion_requested(),
+        keyboard_focused: false,
         shm,
         window,
         pool,
@@ -320,7 +428,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
         redraw_pending: false,
         cursor_blink_visible: true,
         last_cursor_blink: Instant::now(),
-        integer_scale: 1,
+        scale_120: SCALE_DENOMINATOR,
+        integer_fallback_scale: 1,
         output_count: 0,
         seat_count: 0,
     };
@@ -339,20 +448,31 @@ pub fn run(options: WindowOptions) -> Result<()> {
     Ok(())
 }
 
+fn viewport_destination(width: u32, height: u32) -> Result<(i32, i32)> {
+    Ok((
+        i32::try_from(width).context("viewport width fits i32")?,
+        i32::try_from(height).context("viewport height fits i32")?,
+    ))
+}
+
+fn scaled_dimension(logical: u32, scale_120: u32) -> Result<u32> {
+    if !(MIN_SCALE_120..=MAX_SCALE_120).contains(&scale_120) {
+        anyhow::bail!("scale must be between 1x and 8x");
+    }
+    logical
+        .checked_mul(scale_120)
+        .and_then(|value| value.checked_add(SCALE_DENOMINATOR - 1))
+        .map(|value| value / SCALE_DENOMINATOR)
+        .context("scaled dimension overflow")
+}
+
 fn buffer_dimensions(
     logical_width: u32,
     logical_height: u32,
-    integer_scale: u32,
+    scale_120: u32,
 ) -> Result<(u32, u32, i32)> {
-    if integer_scale == 0 {
-        anyhow::bail!("integer scale must be positive");
-    }
-    let width = logical_width
-        .checked_mul(integer_scale)
-        .context("scaled buffer width overflow")?;
-    let height = logical_height
-        .checked_mul(integer_scale)
-        .context("scaled buffer height overflow")?;
+    let width = scaled_dimension(logical_width, scale_120)?;
+    let height = scaled_dimension(logical_height, scale_120)?;
     let stride = i32::try_from(width.checked_mul(4).context("buffer stride overflow")?)
         .context("buffer stride fits i32")?;
     i32::try_from(width).context("buffer width fits i32")?;
@@ -370,6 +490,14 @@ struct App {
     output_state: OutputState,
     data_device_manager: DataDeviceManagerState,
     primary_selection_manager: Option<PrimarySelectionManagerState>,
+    fractional_scale: Option<WpFractionalScaleV1>,
+    viewport: Option<WpViewport>,
+    text_input_manager: Option<ZwpTextInputManagerV3>,
+    text_input: Option<ZwpTextInputV3>,
+    text_input_seat: Option<wl_seat::WlSeat>,
+    ime: ImeState,
+    reduced_motion: bool,
+    keyboard_focused: bool,
     shm: Shm,
     window: Window,
     pool: SlotPool,
@@ -421,7 +549,8 @@ struct App {
     redraw_pending: bool,
     cursor_blink_visible: bool,
     last_cursor_blink: Instant,
-    integer_scale: u32,
+    scale_120: u32,
+    integer_fallback_scale: u32,
     output_count: usize,
     seat_count: usize,
 }
@@ -1013,8 +1142,17 @@ fn try_window_command(commands: &Sender<WindowCommand>, command: WindowCommand) 
     })
 }
 
+fn cursor_blink_enabled(reduced_motion: bool, focused: bool, modes: TerminalInputModes) -> bool {
+    !reduced_motion && focused && modes.cursor_visible && modes.cursor_blink
+}
+
 fn resize_changed(previous: Option<(u16, u16, u16, u16)>, candidate: (u16, u16, u16, u16)) -> bool {
     previous != Some(candidate)
+}
+
+fn reduced_motion_requested() -> bool {
+    std::env::var_os("SPLINTERM_REDUCED_MOTION")
+        .is_some_and(|value| matches!(value.to_str(), Some("1" | "true" | "yes")))
 }
 
 fn window_title(snapshot_title: Option<&str>, controller_active: bool) -> String {
@@ -1023,7 +1161,7 @@ fn window_title(snapshot_title: Option<&str>, controller_active: bool) -> String
         .filter(|title| !title.is_empty())
         .unwrap_or("Splinterm");
     if controller_active {
-        format!("{base} — controller")
+        format!("{base} — local controller")
     } else {
         base.to_owned()
     }
@@ -1154,7 +1292,7 @@ impl App {
         let (row, column) =
             self.snapshot_frame
                 .as_ref()?
-                .cell_at(position.0, position.1, self.integer_scale)?;
+                .cell_at(position.0, position.1, self.scale_120)?;
         Some(CellPosition { row, column })
     }
 
@@ -1312,6 +1450,119 @@ impl App {
         }
     }
 
+    fn commit_text_input(&mut self) {
+        if let Some(text_input) = &self.text_input {
+            text_input.commit();
+            self.ime.note_client_commit();
+        }
+    }
+
+    fn update_ime_cursor_rectangle(&mut self) {
+        if !self.ime.entered || !self.ime.focused {
+            return;
+        }
+        let (Some(text_input), Some(frame)) = (&self.text_input, &self.snapshot_frame) else {
+            return;
+        };
+        if let Some((x, y, width, height)) = frame.cursor_rectangle(self.scale_120) {
+            text_input.set_cursor_rectangle(x, y, width, height);
+            self.commit_text_input();
+        }
+    }
+
+    fn set_ime_focus(&mut self, focused: bool) {
+        self.keyboard_focused = focused;
+        self.ime.focused = focused;
+        if !focused && self.ime.entered {
+            if let Some(text_input) = &self.text_input {
+                text_input.disable();
+            }
+            self.commit_text_input();
+            self.clear_ime_preedit();
+        } else if focused && self.ime.entered {
+            self.enable_text_input();
+        }
+    }
+
+    fn enable_text_input(&mut self) {
+        let Some(text_input) = &self.text_input else {
+            return;
+        };
+        text_input.enable();
+        text_input.set_content_type(
+            zwp_text_input_v3::ContentHint::None,
+            zwp_text_input_v3::ContentPurpose::Terminal,
+        );
+        if let Some(frame) = &self.snapshot_frame {
+            if let Some((x, y, width, height)) = frame.cursor_rectangle(self.scale_120) {
+                text_input.set_cursor_rectangle(x, y, width, height);
+            }
+        }
+        self.commit_text_input();
+    }
+
+    fn clear_ime_preedit(&mut self) {
+        let had_preedit = self.ime.visible_preedit.is_some();
+        self.ime.clear();
+        if had_preedit {
+            let _ = self.refresh_ime_preedit();
+        }
+    }
+
+    fn refresh_ime_preedit(&mut self) -> Result<()> {
+        let (Some(snapshot), Some(frame)) = (&self.snapshot, &mut self.snapshot_frame) else {
+            return Ok(());
+        };
+        let Ok(row) = usize::try_from(snapshot.cursor_row) else {
+            return Ok(());
+        };
+        if row >= snapshot.rows {
+            return Ok(());
+        }
+        let mut render_snapshot = snapshot.clone();
+        if let Some(text) = self.ime.visible_preedit.as_deref() {
+            let mut column = usize::try_from(snapshot.cursor_column.max(0)).unwrap_or(0);
+            let mut leader: Option<usize> = None;
+            for character in text.chars() {
+                let width = UnicodeWidthChar::width(character).unwrap_or(1).min(2);
+                if width == 0 {
+                    if let Some(leader) = leader {
+                        if let Some(cell) = render_snapshot.visible_rows[row].cells.get_mut(leader)
+                        {
+                            cell.content.push(character);
+                        }
+                    }
+                    continue;
+                }
+                if column >= render_snapshot.columns || column + width > render_snapshot.columns {
+                    break;
+                }
+                if let Some(cell) = render_snapshot.visible_rows[row].cells.get_mut(column) {
+                    cell.content = character.to_string();
+                    cell.spacer_remaining = None;
+                }
+                leader = Some(column);
+                if width == 2 {
+                    if let Some(spacer) =
+                        render_snapshot.visible_rows[row].cells.get_mut(column + 1)
+                    {
+                        spacer.content.clear();
+                        spacer.spacer_remaining = Some(1);
+                    }
+                }
+                column += width;
+            }
+        }
+        let mut dirty = vec![false; snapshot.rows];
+        dirty[row] = true;
+        frame.refresh_rows(&render_snapshot, &dirty)?;
+        self.raster_dirty_rows.resize(snapshot.rows, false);
+        self.surface_dirty_rows.resize(snapshot.rows, false);
+        self.raster_dirty_rows[row] = true;
+        self.surface_dirty_rows[row] = true;
+        Ok(())
+    }
+
     fn input_modes(&self) -> TerminalInputModes {
         self.snapshot.as_ref().map_or(
             TerminalInputModes {
@@ -1335,12 +1586,12 @@ impl App {
             self.exit = true;
             return;
         }
-        if let Some(bytes) = key_input(
-            event.keysym,
-            event.utf8.as_deref(),
-            self.modifiers,
-            self.input_modes(),
-        ) {
+        let utf8 = if self.ime.composing() && !self.modifiers.ctrl && !self.modifiers.alt {
+            None
+        } else {
+            event.utf8.as_deref()
+        };
+        if let Some(bytes) = key_input(event.keysym, utf8, self.modifiers, self.input_modes()) {
             self.send_command(WindowCommand::Input(bytes));
         }
     }
@@ -1350,7 +1601,7 @@ impl App {
             return Ok(());
         };
         let resize =
-            frame.terminal_size(self.logical_width, self.logical_height, self.integer_scale)?;
+            frame.terminal_size(self.logical_width, self.logical_height, self.scale_120)?;
         if !resize_changed(self.last_resize, resize) {
             return Ok(());
         }
@@ -1505,12 +1756,14 @@ impl App {
             self.last_cursor_blink = Instant::now();
             let snapshot = self.snapshot.as_ref().context("updated snapshot exists")?;
             if full_frame_reload || self.snapshot_frame.is_none() {
-                self.snapshot_frame = Some(SnapshotFrame::load(snapshot, self.integer_scale)?);
+                self.snapshot_frame = Some(SnapshotFrame::load_scaled(snapshot, self.scale_120)?);
             } else if let Some(frame) = &mut self.snapshot_frame {
                 frame.refresh_rows(snapshot, &self.prepare_dirty_rows)?;
                 frame.refresh_cursor(snapshot);
             }
             self.prepare_dirty_rows.fill(false);
+            self.refresh_ime_preedit()?;
+            self.update_ime_cursor_rectangle();
             self.emit_resize()?;
             if self.configured {
                 self.schedule_draw(queue_handle)?;
@@ -1524,9 +1777,48 @@ impl App {
         Ok(())
     }
 
+    fn apply_scale(&mut self, scale_120: u32, queue_handle: &QueueHandle<Self>) -> Result<()> {
+        if !(MIN_SCALE_120..=MAX_SCALE_120).contains(&scale_120) || scale_120 == self.scale_120 {
+            return Ok(());
+        }
+        if self.viewport.is_none() && scale_120 % SCALE_DENOMINATOR != 0 {
+            return Ok(());
+        }
+        if self.viewport.is_none() {
+            self.window
+                .set_buffer_scale(scale_120 / SCALE_DENOMINATOR)
+                .map_err(|_| anyhow::anyhow!("compositor rejected integer buffer scale"))?;
+        } else {
+            self.window
+                .set_buffer_scale(1)
+                .map_err(|_| anyhow::anyhow!("compositor rejected unit buffer scale"))?;
+        }
+        if let Some(snapshot) = &self.snapshot {
+            self.snapshot_frame = Some(SnapshotFrame::load_scaled(snapshot, scale_120)?);
+        } else {
+            self.text_row = Some(TextRow::load(scale_120.div_ceil(SCALE_DENOMINATOR))?);
+        }
+        self.scale_120 = scale_120;
+        self.buffer = None;
+        self.backing.clear();
+        self.full_redraw = true;
+        self.last_resize = None;
+        self.refresh_ime_preedit()?;
+        self.emit_resize()?;
+        self.update_ime_cursor_rectangle();
+        if self.configured {
+            self.schedule_draw(queue_handle)?;
+        }
+        Ok(())
+    }
+
     fn tick_cursor_blink(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         let blinking = self.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.input_modes.cursor_visible && snapshot.input_modes.cursor_blink
+            cursor_blink_enabled(
+                self.reduced_motion,
+                self.keyboard_focused,
+                snapshot.input_modes,
+            )
         });
         if blinking && self.last_cursor_blink.elapsed() >= Duration::from_millis(500) {
             self.cursor_blink_visible = !self.cursor_blink_visible;
@@ -1544,8 +1836,21 @@ impl App {
             if self.configured {
                 self.schedule_draw(queue_handle)?;
             }
-        } else if !blinking {
+        } else if !blinking && !self.cursor_blink_visible {
             self.cursor_blink_visible = true;
+            if let Some(snapshot) = &self.snapshot {
+                if let Ok(row) = usize::try_from(snapshot.cursor_row) {
+                    if row < snapshot.rows {
+                        self.raster_dirty_rows.resize(snapshot.rows, false);
+                        self.surface_dirty_rows.resize(snapshot.rows, false);
+                        self.raster_dirty_rows[row] = true;
+                        self.surface_dirty_rows[row] = true;
+                    }
+                }
+            }
+            if self.configured {
+                self.schedule_draw(queue_handle)?;
+            }
         }
         Ok(())
     }
@@ -1568,7 +1873,7 @@ impl App {
         let (width, height, stride) = buffer_dimensions(
             self.logical_width.max(1),
             self.logical_height.max(1),
-            self.integer_scale,
+            self.scale_120,
         )?;
         let width_i32 = i32::try_from(width).context("buffer width fits i32")?;
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
@@ -1595,7 +1900,11 @@ impl App {
 
         println!(
             "Presenting logical={}x{} buffer={}x{} scale={}x stride={stride}",
-            self.logical_width, self.logical_height, width, height, self.integer_scale
+            self.logical_width,
+            self.logical_height,
+            width,
+            height,
+            f64::from(self.scale_120) / 120.0
         );
         let backing_len = usize::try_from(
             width
@@ -1640,7 +1949,18 @@ impl App {
                 .as_ref()
                 .map(|(start, end, _)| ((start.row, start.column), (end.row, end.column)));
             canvas.copy_from_slice(&self.backing);
-            paint_snapshot_overlays(canvas, width, height, frame, selection, hovered_url, None);
+            paint_snapshot_overlays(
+                canvas,
+                width,
+                height,
+                frame,
+                SnapshotOverlays {
+                    selection,
+                    hovered_url,
+                    dirty_rows: None,
+                    focused: self.keyboard_focused,
+                },
+            );
         } else if let Some(row) = &self.text_row {
             paint(canvas, width, height, row);
         } else {
@@ -1648,14 +1968,14 @@ impl App {
         }
         let capture_ready = self
             .capture_scale
-            .is_none_or(|expected| expected == self.integer_scale);
+            .is_none_or(|expected| expected.saturating_mul(120) == self.scale_120);
         if capture_ready {
             if let Some(path) = self.capture.take() {
                 write_ppm(&path, canvas, width, height)
                     .with_context(|| format!("write {}", path.display()))?;
                 println!(
                     "Wrote deterministic row capture at {}x scale to {}",
-                    self.integer_scale,
+                    f64::from(self.scale_120) / 120.0,
                     path.display()
                 );
             }
@@ -1711,29 +2031,12 @@ impl CompositorHandler for App {
             ));
             return;
         };
-        if integer_scale == self.integer_scale {
-            return;
-        }
-        let result = (|| -> Result<()> {
-            self.window
-                .set_buffer_scale(integer_scale)
-                .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
-            if let Some(snapshot) = &self.snapshot {
-                self.snapshot_frame = Some(SnapshotFrame::load(snapshot, integer_scale)?);
-            } else {
-                self.text_row = Some(TextRow::load(integer_scale)?);
+        self.integer_fallback_scale = integer_scale;
+        if self.fractional_scale.is_none() {
+            let scale_120 = integer_scale.saturating_mul(SCALE_DENOMINATOR);
+            if let Err(error) = self.apply_scale(scale_120, queue_handle) {
+                self.fail(error);
             }
-            self.integer_scale = integer_scale;
-            self.buffer = None;
-            self.full_redraw = true;
-            self.emit_resize()?;
-            if self.configured {
-                self.schedule_draw(queue_handle)?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            self.fail(error);
         }
     }
 
@@ -1818,8 +2121,18 @@ impl WindowHandler for App {
         if resized {
             self.logical_width = width;
             self.logical_height = height;
+            if let Some(viewport) = &self.viewport {
+                match viewport_destination(width, height) {
+                    Ok((width, height)) => viewport.set_destination(width, height),
+                    Err(error) => {
+                        self.fail(error);
+                        return;
+                    }
+                }
+            }
             self.buffer = None;
             self.full_redraw = true;
+            self.update_ime_cursor_rectangle();
         }
         let initial_configure = !self.configured;
         self.configured = true;
@@ -1876,6 +2189,12 @@ impl SeatHandler for App {
                 Ok(keyboard) => {
                     self.keyboard = Some(keyboard);
                     self.keyboard_seat = Some(seat.clone());
+                    if self.text_input.is_none() {
+                        if let Some(manager) = &self.text_input_manager {
+                            self.text_input = Some(manager.get_text_input(&seat, queue_handle, ()));
+                            self.text_input_seat = Some(seat.clone());
+                        }
+                    }
                 }
                 Err(error) => self.fail(anyhow::anyhow!("create keyboard: {error}")),
             }
@@ -1903,6 +2222,15 @@ impl SeatHandler for App {
                 keyboard.release();
             }
             self.keyboard_seat = None;
+            if self.text_input_seat.as_ref() == Some(&seat) {
+                self.clear_ime_preedit();
+                if let Some(text_input) = self.text_input.take() {
+                    text_input.disable();
+                    text_input.commit();
+                    text_input.destroy();
+                }
+                self.text_input_seat = None;
+            }
         }
         if capability == Capability::Pointer && self.pointer_seat.as_ref() == Some(&seat) {
             if let Some(pointer) = self.pointer.take() {
@@ -1924,6 +2252,15 @@ impl SeatHandler for App {
                 keyboard.release();
             }
             self.keyboard_seat = None;
+            if self.text_input_seat.as_ref() == Some(&seat) {
+                self.clear_ime_preedit();
+                if let Some(text_input) = self.text_input.take() {
+                    text_input.disable();
+                    text_input.commit();
+                    text_input.destroy();
+                }
+                self.text_input_seat = None;
+            }
         }
         if self.pointer_seat.as_ref() == Some(&seat) {
             if let Some(pointer) = self.pointer.take() {
@@ -1941,28 +2278,42 @@ impl KeyboardHandler for App {
     fn enter(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
+        queue_handle: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         surface: &wl_surface::WlSurface,
         _serial: u32,
         _raw: &[u32],
         _keysyms: &[Keysym],
     ) {
-        if surface == self.window.wl_surface() && self.input_modes().focus_reporting {
-            self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
+        if surface == self.window.wl_surface() {
+            self.set_ime_focus(true);
+            self.full_redraw = true;
+            if self.input_modes().focus_reporting {
+                self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
+            }
+            if let Err(error) = self.schedule_draw(queue_handle) {
+                self.fail(error);
+            }
         }
     }
 
     fn leave(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
+        queue_handle: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
-        if surface == self.window.wl_surface() && self.input_modes().focus_reporting {
-            self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
+        if surface == self.window.wl_surface() {
+            self.set_ime_focus(false);
+            self.full_redraw = true;
+            if self.input_modes().focus_reporting {
+                self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
+            }
+            if let Err(error) = self.schedule_draw(queue_handle) {
+                self.fail(error);
+            }
         }
     }
 
@@ -2458,6 +2809,125 @@ impl OutputHandler for App {
 impl ShmHandler for App {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for App {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpFractionalScaleManagerV1,
+        _event: <WpFractionalScaleManagerV1 as Proxy>::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpViewporter, ()> for App {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpViewporter,
+        _event: <WpViewporter as Proxy>::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpViewport, ()> for App {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpViewport,
+        _event: <WpViewport as Proxy>::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwpTextInputManagerV3, ()> for App {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpTextInputManagerV3,
+        _event: <ZwpTextInputManagerV3 as Proxy>::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpFractionalScaleV1, ()> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue_handle: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            if let Err(error) = state.apply_scale(scale, queue_handle) {
+                state.fail(error);
+            }
+        }
+    }
+}
+
+impl Dispatch<ZwpTextInputV3, ()> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwpTextInputV3,
+        event: zwp_text_input_v3::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue_handle: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_text_input_v3::Event::Enter { surface } => {
+                if surface == *state.window.wl_surface() {
+                    state.ime.entered = true;
+                    if state.keyboard_focused {
+                        state.enable_text_input();
+                    }
+                }
+            }
+            zwp_text_input_v3::Event::Leave { surface } => {
+                if surface == *state.window.wl_surface() {
+                    state.clear_ime_preedit();
+                    if state.configured {
+                        if let Err(error) = state.schedule_draw(queue_handle) {
+                            state.fail(error);
+                        }
+                    }
+                }
+            }
+            zwp_text_input_v3::Event::PreeditString { text, .. } => {
+                state.ime.set_preedit(text);
+            }
+            zwp_text_input_v3::Event::CommitString { text } => {
+                state.ime.set_commit(text);
+            }
+            zwp_text_input_v3::Event::Done { serial } => {
+                let (_serial_matches, _, commit) = state.ime.finish(serial);
+                if let Some(commit) = commit {
+                    state.send_command(WindowCommand::Input(commit.into_bytes()));
+                }
+                if let Err(error) = state.refresh_ime_preedit() {
+                    state.fail(error);
+                    return;
+                }
+                if state.configured {
+                    if let Err(error) = state.schedule_draw(queue_handle) {
+                        state.fail(error);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -3007,21 +3477,82 @@ mod tests {
     #[test]
     fn buffer_dimensions_scale_logical_size_and_stride() {
         assert_eq!(
-            buffer_dimensions(960, 600, 1).expect("1x"),
+            buffer_dimensions(960, 600, 120).expect("1x"),
             (960, 600, 3_840)
         );
         assert_eq!(
-            buffer_dimensions(960, 600, 2).expect("2x"),
+            buffer_dimensions(960, 600, 240).expect("2x"),
             (1_920, 1_200, 7_680)
         );
     }
 
     #[test]
+    fn fractional_buffer_dimensions_cover_phase_six_scale_matrix() {
+        assert_eq!(buffer_dimensions(801, 601, 120).unwrap(), (801, 601, 3_204));
+        assert_eq!(
+            buffer_dimensions(801, 601, 150).unwrap(),
+            (1_002, 752, 4_008)
+        );
+        assert_eq!(
+            buffer_dimensions(801, 601, 180).unwrap(),
+            (1_202, 902, 4_808)
+        );
+        assert_eq!(
+            buffer_dimensions(801, 601, 240).unwrap(),
+            (1_602, 1_202, 6_408)
+        );
+    }
+
+    #[test]
+    fn ime_batches_are_bounded_replace_commits_and_clear_committed_preedit() {
+        let mut ime = ImeState {
+            entered: true,
+            focused: true,
+            ..ImeState::default()
+        };
+        assert!(!ime.composing());
+        let decomposed = format!("e{}", '\u{301}');
+        ime.set_preedit(Some(decomposed.clone()));
+        assert!(ime.composing());
+        ime.note_client_commit();
+        let (_, visible, commit) = ime.finish(1);
+        assert_eq!(visible.as_deref(), Some(decomposed.as_str()));
+        assert!(commit.is_none());
+
+        ime.set_commit(Some("first".into()));
+        ime.set_commit(Some("final".into()));
+        let (serial_matches, visible, commit) = ime.finish(1);
+        assert!(serial_matches);
+        assert_eq!(visible, None);
+        assert_eq!(commit.as_deref(), Some("final"));
+
+        ime.set_preedit(Some("x".repeat(MAX_PREEDIT_BYTES + 1)));
+        assert!(!ime.composing());
+    }
+
+    #[test]
+    fn reduced_motion_and_focus_suppress_cursor_blink() {
+        let modes = normal_modes();
+        assert!(cursor_blink_enabled(false, true, modes));
+        assert!(!cursor_blink_enabled(true, true, modes));
+        assert!(!cursor_blink_enabled(false, false, modes));
+    }
+
+    #[test]
+    fn ime_done_applies_events_even_when_client_state_serial_is_stale() {
+        let mut ime = ImeState::default();
+        ime.set_commit(Some("界".into()));
+        let (serial_matches, _, commit) = ime.finish(9);
+        assert!(!serial_matches);
+        assert_eq!(commit.as_deref(), Some("界"));
+    }
+
+    #[test]
     fn buffer_dimensions_reject_zero_scale_and_overflow() {
         assert!(buffer_dimensions(960, 600, 0).is_err());
-        assert!(buffer_dimensions(u32::MAX, 1, 2).is_err());
-        assert!(buffer_dimensions(1, u32::MAX, 2).is_err());
-        assert!(buffer_dimensions(i32::MAX as u32 / 4 + 1, 1, 1).is_err());
+        assert!(buffer_dimensions(u32::MAX, 1, 240).is_err());
+        assert!(buffer_dimensions(1, u32::MAX, 240).is_err());
+        assert!(buffer_dimensions(i32::MAX as u32 / 4 + 1, 1, 120).is_err());
     }
 }
 

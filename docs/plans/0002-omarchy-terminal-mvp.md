@@ -1,7 +1,7 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Phase 5 complete
-- **Roadmap:** Phase 6
+- **Status:** Phase 6 implementation complete — live scale/IME matrix constrained by current setup
+- **Roadmap:** Phase 6 validation
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -55,8 +55,12 @@
 - [x] Validate pointer lifecycle, local selection/primary publication, regular
   and primary paste, unsafe-control rejection, bracketed paste, mouse reports,
   and URL hover on workspace 8.
-- [ ] Add direct `text-input-v3` IME handling in Phase 6 and trusted consent UI
-  in Phase 7.
+- [x] Add paired fractional-scale/viewport rendering, direct `text-input-v3`
+  preedit/commit, inactive-IME compose fallback, focus indication, and reduced
+  motion behavior in
+  [Spike 0013](../spikes/0013-fractional-scale-ime-accessibility.md).
+- [ ] Validate active IME and live 1.25×/1.5×/2× output transitions when the
+  compositor setup exposes those states; trusted consent UI remains Phase 7.
 - [x] Replace full-snapshot/full-frame updates with protocol v5 semantic damage,
   incremental row preparation, scroll-copy, row damage submission, frame
   callback coalescing, local cursor blink, and bounded scale-specific glyph

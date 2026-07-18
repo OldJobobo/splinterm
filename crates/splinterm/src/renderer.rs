@@ -904,7 +904,7 @@ pub(crate) struct SnapshotFrame {
     cursor: Option<(u32, u32)>,
     canvas_background: [u8; 3],
     cursor_color: [u8; 3],
-    scale: u16,
+    scale_120: u16,
 }
 
 impl SnapshotFrame {
@@ -917,13 +917,14 @@ impl SnapshotFrame {
         &self,
         logical_x: f64,
         logical_y: f64,
-        integer_scale: u32,
+        scale_120: u32,
     ) -> Option<(usize, usize)> {
-        if !logical_x.is_finite() || !logical_y.is_finite() || integer_scale == 0 {
+        if !logical_x.is_finite() || !logical_y.is_finite() || scale_120 == 0 {
             return None;
         }
-        let x = logical_x * f64::from(integer_scale) - f64::from(self.origin_x);
-        let y = logical_y * f64::from(integer_scale) - f64::from(self.origin_y);
+        let scale = f64::from(scale_120) / 120.0;
+        let x = logical_x * scale - f64::from(self.origin_x);
+        let y = logical_y * scale - f64::from(self.origin_y);
         if x < 0.0 || y < 0.0 {
             return None;
         }
@@ -932,18 +933,31 @@ impl SnapshotFrame {
         (column < self.columns as usize && row < self.rows as usize).then_some((row, column))
     }
 
+    pub(crate) fn cursor_rectangle(&self, scale_120: u32) -> Option<(i32, i32, i32, i32)> {
+        let (column, row) = self.cursor?;
+        if scale_120 == 0 {
+            return None;
+        }
+        let scale = f64::from(scale_120) / 120.0;
+        let physical_x =
+            self.origin_x + i32::try_from(column.checked_mul(self.cell_width)?).ok()?;
+        let physical_y = self.origin_y + i32::try_from(row.checked_mul(self.cell_height)?).ok()?;
+        Some((
+            checked_floor_i32(f64::from(physical_x) / scale)?,
+            checked_floor_i32(f64::from(physical_y) / scale)?,
+            checked_ceil_i32(f64::from(self.cell_width) / scale)?,
+            checked_ceil_i32(f64::from(self.cell_height) / scale)?,
+        ))
+    }
+
     pub(crate) fn terminal_size(
         &self,
         logical_width: u32,
         logical_height: u32,
-        integer_scale: u32,
+        scale_120: u32,
     ) -> Result<(u16, u16, u16, u16)> {
-        let physical_width = logical_width
-            .checked_mul(integer_scale)
-            .context("terminal physical width overflow")?;
-        let physical_height = logical_height
-            .checked_mul(integer_scale)
-            .context("terminal physical height overflow")?;
+        let physical_width = scaled_dimension(logical_width, scale_120)?;
+        let physical_height = scaled_dimension(logical_height, scale_120)?;
         let horizontal_padding = u32::try_from(self.origin_x.max(0))
             .context("terminal x padding")?
             .checked_mul(2)
@@ -975,6 +989,13 @@ impl SnapshotFrame {
         reason = "static snapshot preparation keeps bounded font, shaping, cache, cell-span, and color conversion together"
     )]
     pub(crate) fn load(snapshot: &TerminalSnapshot, integer_scale: u32) -> Result<Self> {
+        let scale_120 = integer_scale
+            .checked_mul(120)
+            .context("integer scale overflow")?;
+        Self::load_scaled(snapshot, scale_120)
+    }
+
+    pub(crate) fn load_scaled(snapshot: &TerminalSnapshot, scale_120: u32) -> Result<Self> {
         if snapshot.columns > usize::from(MAX_COLUMNS) || snapshot.rows > usize::from(MAX_ROWS) {
             bail!(
                 "snapshot dimensions {}x{} exceed protocol limits {}x{}",
@@ -984,20 +1005,22 @@ impl SnapshotFrame {
                 MAX_ROWS
             );
         }
-        if integer_scale == 0 || integer_scale > 8 {
-            bail!("integer scale must be between 1 and 8");
+        if !(120..=960).contains(&scale_120) {
+            bail!("scale must be between 1x and 8x");
         }
-        let scale = u16::try_from(integer_scale).context("integer scale fits u16")?;
-        let font_size = BASE_FONT_SIZE * f32::from(scale);
+        let scale_120 = u16::try_from(scale_120).context("scale fits u16")?;
+        let scale_factor = f32::from(scale_120) / 120.0;
+        let font_size = BASE_FONT_SIZE * scale_factor;
         let faces = snapshot_faces()?;
         let (cell_width, cell_height, baseline, _) = cell_metrics(&faces[0], font_size)?;
-        let scale_i32 = i32::try_from(integer_scale).context("scale fits i32")?;
-        let origin_x = 12_i32
-            .checked_mul(scale_i32)
-            .context("snapshot x overflow")?;
-        let origin_y = 12_i32
-            .checked_mul(scale_i32)
-            .context("snapshot y overflow")?;
+        let origin = u32::from(scale_120)
+            .checked_mul(12)
+            .and_then(|value| value.checked_add(60))
+            .map(|value| value / 120)
+            .and_then(|value| i32::try_from(value).ok())
+            .context("scaled snapshot origin fits i32")?;
+        let origin_x = origin;
+        let origin_y = origin;
         let columns = u32::try_from(snapshot.columns).context("snapshot columns fit u32")?;
         let rows = u32::try_from(snapshot.rows).context("snapshot rows fit u32")?;
         let background_len = usize::try_from(columns)
@@ -1024,7 +1047,7 @@ impl SnapshotFrame {
                 snapshot,
                 row_index,
                 faces,
-                scale,
+                scale_120,
                 font_size,
                 cell_width,
                 cell_height,
@@ -1052,7 +1075,7 @@ impl SnapshotFrame {
             cursor,
             canvas_background: default_background,
             cursor_color,
-            scale,
+            scale_120,
         };
         frame.prune_unreferenced_glyphs();
         Ok(frame)
@@ -1071,7 +1094,7 @@ impl SnapshotFrame {
             bail!("snapshot palette must contain exactly 256 colors");
         }
         let faces = snapshot_faces()?;
-        let font_size = BASE_FONT_SIZE * f32::from(self.scale);
+        let font_size = BASE_FONT_SIZE * f32::from(self.scale_120) / 120.0;
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
         let mut shape_context = ShapeContext::new();
@@ -1092,7 +1115,7 @@ impl SnapshotFrame {
                 snapshot,
                 row_index,
                 faces,
-                self.scale,
+                self.scale_120,
                 font_size,
                 self.cell_width,
                 self.cell_height,
@@ -1177,8 +1200,8 @@ fn prepare_snapshot_row(
         let row_number = u32::try_from(row_index).context("row fits u32")?;
         if cell.content.chars().count() == 1 {
             let character = cell.content.chars().next().context("cell has content")?;
-            if let Some(mask) =
-                box_drawing::generate(character, cell_width, cell_height, u32::from(scale))
+            let thickness = u32::from(scale).div_ceil(120).max(1);
+            if let Some(mask) = box_drawing::generate(character, cell_width, cell_height, thickness)
             {
                 let key = GlyphKey {
                     face: BOX_DRAWING_FACE,
@@ -1334,6 +1357,37 @@ fn rendition_colors(
     (foreground, background)
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the explicit finite i32 bounds make the float-to-int conversion checked"
+)]
+fn checked_floor_i32(value: f64) -> Option<i32> {
+    let value = value.floor();
+    (value.is_finite() && value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
+        .then_some(value as i32)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the explicit finite i32 bounds make the float-to-int conversion checked"
+)]
+fn checked_ceil_i32(value: f64) -> Option<i32> {
+    let value = value.ceil();
+    (value.is_finite() && value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
+        .then_some(value as i32)
+}
+
+fn scaled_dimension(logical: u32, scale_120: u32) -> Result<u32> {
+    if scale_120 == 0 {
+        bail!("scale must be positive");
+    }
+    logical
+        .checked_mul(scale_120)
+        .and_then(|value| value.checked_add(119))
+        .map(|value| value / 120)
+        .context("scaled dimension overflow")
+}
+
 fn grid_pixel_offset(index: usize, cell_size: u32) -> Option<i32> {
     u32::try_from(index)
         .ok()?
@@ -1341,15 +1395,58 @@ fn grid_pixel_offset(index: usize, cell_size: u32) -> Option<i32> {
         .and_then(|offset| i32::try_from(offset).ok())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct SnapshotOverlays<'a> {
+    pub(crate) selection: Option<((usize, usize), (usize, usize))>,
+    pub(crate) hovered_url: Option<((usize, usize), (usize, usize))>,
+    pub(crate) dirty_rows: Option<&'a [bool]>,
+    pub(crate) focused: bool,
+}
+
 pub(crate) fn paint_snapshot_overlays(
     canvas: &mut [u8],
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
-    selection: Option<((usize, usize), (usize, usize))>,
-    hovered_url: Option<((usize, usize), (usize, usize))>,
-    dirty_rows: Option<&[bool]>,
+    overlays: SnapshotOverlays<'_>,
 ) {
+    let SnapshotOverlays {
+        selection,
+        hovered_url,
+        dirty_rows,
+        focused,
+    } = overlays;
+    let focus_color = if focused {
+        [120, 210, 255, 255]
+    } else {
+        [90, 90, 90, 255]
+    };
+    fill_rect(canvas, width, height, (0, 0, width, 2), focus_color);
+    fill_rect(canvas, width, height, (0, 0, 2, height), focus_color);
+    fill_rect(
+        canvas,
+        width,
+        height,
+        (
+            0,
+            i32::try_from(height.saturating_sub(2)).unwrap_or(0),
+            width,
+            2,
+        ),
+        focus_color,
+    );
+    fill_rect(
+        canvas,
+        width,
+        height,
+        (
+            i32::try_from(width.saturating_sub(2)).unwrap_or(0),
+            0,
+            2,
+            height,
+        ),
+        focus_color,
+    );
     let row_is_dirty =
         |row: usize| dirty_rows.is_none_or(|dirty| dirty.get(row).copied().unwrap_or(false));
     if let Some((start, end)) = selection {
@@ -2162,6 +2259,71 @@ mod tests {
     }
 
     #[test]
+    fn fractional_scale_frames_map_cells_and_cursor_rectangles() {
+        let snapshot = incremental_snapshot();
+        for scale_120 in [120_u32, 150, 180, 240] {
+            let frame = SnapshotFrame::load_scaled(&snapshot, scale_120).expect("scaled frame");
+            assert_eq!(u32::from(frame.scale_120), scale_120);
+            let scale = f64::from(scale_120) / 120.0;
+            let logical_x = (f64::from(frame.origin_x) + f64::from(frame.cell_width) / 2.0) / scale;
+            let logical_y =
+                (f64::from(frame.origin_y) + f64::from(frame.cell_height) / 2.0) / scale;
+            assert_eq!(frame.cell_at(logical_x, logical_y, scale_120), Some((0, 0)));
+            let (_, _, width, height) = frame
+                .cursor_rectangle(scale_120)
+                .expect("visible cursor rectangle");
+            assert!(width > 0 && height > 0);
+        }
+    }
+
+    #[test]
+    fn glyph_cache_entries_are_scale_specific() {
+        let snapshot = incremental_snapshot();
+        let one = SnapshotFrame::load_scaled(&snapshot, 120).expect("1x frame");
+        let fractional = SnapshotFrame::load_scaled(&snapshot, 150).expect("1.25x frame");
+        let key = one
+            .cache
+            .keys()
+            .find(|key| fractional.cache.contains_key(key))
+            .copied()
+            .expect("common glyph key");
+        assert!(!Arc::ptr_eq(&one.cache[&key], &fractional.cache[&key]));
+    }
+
+    #[test]
+    fn focus_overlay_visibly_distinguishes_focused_and_unfocused_windows() {
+        let snapshot = incremental_snapshot();
+        let frame = SnapshotFrame::load_scaled(&snapshot, 120).expect("frame");
+        let mut focused = vec![0_u8; 200 * 200 * 4];
+        let mut unfocused = focused.clone();
+        paint_snapshot_overlays(
+            &mut focused,
+            200,
+            200,
+            &frame,
+            SnapshotOverlays {
+                selection: None,
+                hovered_url: None,
+                dirty_rows: None,
+                focused: true,
+            },
+        );
+        paint_snapshot_overlays(
+            &mut unfocused,
+            200,
+            200,
+            &frame,
+            SnapshotOverlays {
+                selection: None,
+                hovered_url: None,
+                dirty_rows: None,
+                focused: false,
+            },
+        );
+        assert_ne!(&focused[..4], &unfocused[..4]);
+    }
+
+    #[test]
     fn incremental_refresh_preserves_unchanged_prepared_rows() {
         let mut snapshot = incremental_snapshot();
         let mut frame = SnapshotFrame::load(&snapshot, 1).expect("initial frame");
@@ -2354,7 +2516,7 @@ mod tests {
             cursor: Some((1, 0)),
             canvas_background: [14, 18, 22],
             cursor_color: [0xeb, 0xeb, 0xeb],
-            scale: 1,
+            scale_120: 120,
         };
         let mut canvas = vec![0; 12 * 8 * 4];
         paint_snapshot(&mut canvas, 12, 8, &frame, true);
@@ -2380,7 +2542,7 @@ mod tests {
             cursor: None,
             canvas_background: [0, 0, 0],
             cursor_color: [255, 255, 255],
-            scale: 1,
+            scale_120: 120,
         }
     }
 
@@ -2453,19 +2615,19 @@ mod tests {
             cursor: None,
             canvas_background: [14, 18, 22],
             cursor_color: [0xeb, 0xeb, 0xeb],
-            scale: 1,
+            scale_120: 120,
         };
         assert_eq!(
-            frame.terminal_size(1_020, 620, 1).expect("normal grid"),
+            frame.terminal_size(1_020, 620, 120).expect("normal grid"),
             (100, 30, 1_000, 600)
         );
         assert_eq!(
-            frame.terminal_size(1, 1, 1).expect("minimum grid"),
+            frame.terminal_size(1, 1, 120).expect("minimum grid"),
             (2, 2, 20, 40)
         );
         assert_eq!(
             frame
-                .terminal_size(20_000, 20_000, 1)
+                .terminal_size(20_000, 20_000, 120)
                 .expect("bounded grid"),
             (MAX_COLUMNS, MAX_ROWS, 2_400, 1_600)
         );
