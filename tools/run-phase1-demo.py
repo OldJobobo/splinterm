@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Human-paced visual walkthrough of Splinterm Roadmap Phase 1."""
+"""A slow, simple visual proof that a Splinterm shell survives reconnecting."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 from pathlib import Path
 from typing import Any
@@ -19,13 +18,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FOOT = Path("/tmp/splinterm-foot-oracle-build/foot")
 DEFAULT_WORKSPACE = 8
-DEFAULT_DELAY = 6.0
-WIDTH = 108
+DEFAULT_DELAY = 5.0
+WIDTH = 94
 
 CYAN = "\033[1;36m"
 GREEN = "\033[1;32m"
 YELLOW = "\033[1;33m"
-RED = "\033[1;31m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 
@@ -45,53 +43,20 @@ def workspace_clients(workspace: int) -> list[dict[str, Any]]:
     ]
 
 
-def visible(text: str, width: int) -> list[str]:
-    lines: list[str] = []
-    for line in text.splitlines() or [""]:
-        lines.extend(textwrap.wrap(line, width=width, replace_whitespace=False) or [""])
-    return lines
-
-
-def panel(title: str, body: str, width: int, height: int) -> list[str]:
-    inner = width - 2
-    content = visible(body, inner - 2)[: height - 2]
-    content += [""] * (height - 2 - len(content))
-    top = f"┌─ {title} " + "─" * max(0, inner - len(title) - 3) + "┐"
-    rows = [top[:width]]
-    rows.extend(f"│ {line:<{inner - 1}}│" for line in content)
-    rows.append("└" + "─" * inner + "┘")
-    return rows
-
-
-def dashboard(
-    step: str,
-    terminal: str,
-    process: str,
-    clients: str,
-    state: str,
-    footer: str,
-) -> None:
+def screen(number: str, title: str, message: str, footer: str) -> None:
     os.write(sys.stdout.fileno(), b"\033[2J\033[H")
-    print(f"{CYAN}SPLINTERM — ROADMAP PHASE 1 VISUAL WALKTHROUGH{RESET}")
-    print(f"{YELLOW}{step}{RESET}")
-    print("─" * WIDTH)
-    left_width = 66
-    right_width = WIDTH - left_width - 1
-    left = panel("TERMINAL SNAPSHOT", terminal, left_width, 14)
-    right = panel("PROCESS OWNERSHIP", process, right_width, 14)
-    for lhs, rhs in zip(left, right, strict=True):
-        print(f"{lhs} {rhs}")
-    left = panel("CLIENT CONNECTIONS", clients, left_width, 10)
-    right = panel("PROTOCOL / STATE", state, right_width, 10)
-    for lhs, rhs in zip(left, right, strict=True):
-        print(f"{lhs} {rhs}")
+    print(f"{CYAN}SPLINTERM PHASE 1 — ONE SIMPLE IDEA{RESET}")
+    print(f"{DIM}{number}{RESET}")
+    print("═" * WIDTH)
+    print()
+    print(f"{YELLOW}{title}{RESET}")
+    print()
+    for line in message.splitlines():
+        print(f"  {line}")
+    print()
     print("─" * WIDTH)
     print(f"{DIM}{footer}{RESET}")
     sys.stdout.flush()
-
-
-def pause(delay: float) -> None:
-    time.sleep(delay)
 
 
 def cli(socket: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -104,19 +69,31 @@ def cli(socket: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def snapshot(socket: Path) -> str:
-    result = cli(socket, "snapshot")
-    return result.stdout.strip() if result.returncode == 0 else result.stderr.strip()
+def wait_for_text(socket: Path, marker: str, timeout: float = 8.0) -> str:
+    deadline = time.monotonic() + timeout
+    latest = ""
+    while time.monotonic() < deadline:
+        result = cli(socket, "snapshot")
+        latest = result.stdout if result.returncode == 0 else result.stderr
+        if marker in latest:
+            return latest
+        time.sleep(0.1)
+    raise RuntimeError(f"The shell never produced {marker!r}. Last snapshot:\n{latest}")
 
 
-def process_tree(pid: int) -> str:
-    result = run(["pstree", "-ap", str(pid)], capture_output=True)
-    return result.stdout.strip() or f"splinterd({pid})"
+def important_lines(snapshot: str) -> str:
+    prefixes = ("SAVED VALUE:", "SHELL PID:", "CHANGED VALUE", "SAME SHELL PID:")
+    selected = [
+        line.strip()
+        for line in snapshot.splitlines()
+        if line.strip().startswith(prefixes)
+    ]
+    return "\n".join(selected) or snapshot
 
 
 def present(delay: float) -> int:
     while True:
-        with tempfile.TemporaryDirectory(prefix="splinterm-phase1-demo-") as runtime:
+        with tempfile.TemporaryDirectory(prefix="splinterm-simple-demo-") as runtime:
             runtime_path = Path(runtime)
             socket = runtime_path / "splinterd.sock"
             environment = os.environ.copy()
@@ -126,15 +103,13 @@ def present(delay: float) -> int:
             )
             daemon: subprocess.Popen[str] | None = None
             try:
-                dashboard(
-                    "01 / 10 — THE SYSTEM BEFORE A SESSION EXISTS",
-                    "No terminal state yet.",
-                    "splinterd  ○ stopped\nshell       ○ absent\nPTY         ○ absent",
-                    "Client A   ○ disconnected\nClient B   ○ disconnected",
-                    "revision       0\nsocket         absent\naccess policy  explicit dev opt-in",
-                    "We begin empty. Every green state shown next is created by the real daemon.",
+                screen(
+                    "1 of 5",
+                    "We are going to remember one number: 41",
+                    "There is no shell yet.\nThere is no saved number yet.",
+                    "First we start one real shell owned by splinterd.",
                 )
-                pause(delay)
+                time.sleep(delay)
 
                 daemon = subprocess.Popen(
                     [str(ROOT / "target/debug/splinterd")],
@@ -148,151 +123,75 @@ def present(delay: float) -> int:
                 while not socket.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 if not socket.exists():
-                    raise RuntimeError("splinterd socket did not appear")
-                directory_mode = runtime_path.stat().st_mode & 0o777
-                socket_mode = socket.stat().st_mode & 0o777
-                dashboard(
-                    "02 / 10 — SECURE DAEMON STARTUP",
-                    "Waiting for the first shell…",
-                    f"{GREEN}splinterd  ● running{RESET}\npid         {daemon.pid}\nshell       ○ absent",
-                    "Client A   ● handshake complete\n           UID accepted",
-                    f"protocol       v2\nruntime mode   {directory_mode:o}\nsocket mode    {socket_mode:o}\npeer UID       ✓ verified",
-                    "The endpoint is private before any terminal content is accepted.",
-                )
-                pause(delay)
-
-                created = cli(socket, "new", "phase1-visual")
+                    raise RuntimeError("splinterd did not start")
+                created = cli(socket, "new", "remember-this")
                 if created.returncode != 0:
                     raise RuntimeError(created.stderr.strip())
-                pause(1.0)
-                dashboard(
-                    "03 / 10 — DAEMON-OWNED SHELL AND PTY",
-                    "$ shell is starting…",
-                    process_tree(daemon.pid),
-                    "Client A   ○ command completed\n           disconnected\n\nShell       ● still running",
-                    "ownership      splinterd\nTERM           foot\nPTY master     nonblocking\nincarnation    1",
-                    "The client is already gone. The shell belongs to splinterd, not to this presentation window.",
-                )
-                pause(delay)
 
-                cli(socket, "resize", "72", "18")
-                cli(
-                    socket,
-                    "send",
-                    "clear\nprintf '\\033[31mRED\\033[0m  \\033[32mGREEN\\033[0m  \\033[34mBLUE\\033[0m\\n'\npwd\nprintf 'phase1-live-state\\n'\n",
+                command = (
+                    "clear\n"
+                    "DEMO_VALUE=41\n"
+                    "printf 'SAVED VALUE: %s\\n' \"$DEMO_VALUE\"\n"
+                    "printf 'SHELL PID: %s\\n' \"$$\"\n"
+                    "sleep 9\n"
+                    "DEMO_VALUE=42\n"
+                    "printf 'CHANGED VALUE WHILE VIEWER WAS GONE: %s\\n' \"$DEMO_VALUE\"\n"
+                    "printf 'SAME SHELL PID: %s\\n' \"$$\"\n"
                 )
-                pause(1.5)
-                first_snapshot = snapshot(socket)
-                dashboard(
-                    "04 / 10 — FOOT-DERIVED SEMANTIC TERMINAL STATE",
-                    first_snapshot,
-                    process_tree(daemon.pid),
-                    "Snapshot client ● attached briefly\n                ○ detached again",
-                    "dimensions     72 × 18\ncolors         semantic attributes\ncursor         tracked\nrevision       increasing",
-                    "These characters, colors, dimensions, and cursor state were parsed by Splinterm—not scraped from Foot.",
+                sent = cli(socket, "send", command)
+                if sent.returncode != 0:
+                    raise RuntimeError(sent.stderr.strip())
+                before = wait_for_text(socket, "SAVED VALUE: 41")
+                screen(
+                    "2 of 5",
+                    "The shell saves 41",
+                    f"{GREEN}{important_lines(before)}{RESET}\n\nThe client that asked for this snapshot now closes.",
+                    "Watch the PID. It identifies this exact running shell.",
                 )
-                pause(delay)
+                time.sleep(delay)
 
-                dashboard(
-                    "05 / 10 — DETACH",
-                    f"{DIM}NO CLIENT ATTACHED\n\nThe terminal view is intentionally dimmed.\nThe daemon continues reading the PTY.{RESET}",
-                    process_tree(daemon.pid),
-                    "Client A   ○ detached\nClient B   ○ not started\n\nShell      ● alive",
-                    "PTY reader     ● healthy\nterminal       ● mutable\nrenderer       none\nWayland        none",
-                    "Closing a client does not close the PTY or terminate the shell.",
-                )
-                pause(delay)
+                for remaining in range(8, 0, -1):
+                    screen(
+                        "3 of 5",
+                        "No viewer is attached — but the shell is still alive",
+                        (
+                            "CLIENT:  disconnected  ○\n"
+                            f"SHELL:   running       {GREEN}●{RESET}\n"
+                            "VALUE:   still 41\n\n"
+                            f"The shell will change the value itself in {remaining}…"
+                        ),
+                        "Nothing on screen is keeping the shell alive. splinterd owns it.",
+                    )
+                    time.sleep(1)
 
-                cli(
-                    socket,
-                    "send",
-                    "printf 'output-produced-while-no-client-was-attached\\n'\nprintf 'detached-counter: 1 2 3 4 5\\n'\n",
+                after = wait_for_text(socket, "CHANGED VALUE WHILE VIEWER WAS GONE: 42")
+                screen(
+                    "4 of 5",
+                    "A new viewer reconnects",
+                    f"{GREEN}{important_lines(after)}{RESET}",
+                    "The value is now 42, and the PID is unchanged: this is the same persistent shell.",
                 )
-                pause(1.0)
-                dashboard(
-                    "06 / 10 — WORK CONTINUES WHILE DETACHED",
-                    "No viewer is subscribed.\n\nrevision  →  →  →  increasing\nscrollback →  →  →  retained",
-                    process_tree(daemon.pid),
-                    "Client A   ○ detached\nClient B   ○ disconnected\n\nShell      ● producing output",
-                    "backpressure   bounded\nPTY reads       uninterrupted\nupdates         retained",
-                    "This is the central Phase 1 result: terminal truth continues without a window.",
-                )
-                pause(delay)
+                time.sleep(delay)
 
-                detached_snapshot = snapshot(socket)
-                dashboard(
-                    "07 / 10 — REATTACH TO CURRENT STATE",
-                    detached_snapshot,
-                    process_tree(daemon.pid),
-                    "Client A   ○ detached\nClient B   ● new attachment\n           receives current snapshot",
-                    "snapshot       current\nincarnation    checked\nrevision       newer\ngaps           none",
-                    "A new client sees output that was generated while every client was disconnected.",
-                )
-                pause(delay)
-
-                dashboard(
-                    "08 / 10 — SLOW CLIENT / RESYNCHRONIZATION",
-                    "Fast client: current\n\nSlow client queue:\n[████████████████] FULL\n\nAction: RESYNC REQUIRED",
-                    process_tree(daemon.pid),
-                    "Fast client  ● receiving\nSlow client  ⚠ detached from deltas\nShell        ● unaffected",
-                    "subscriber queue  bounded\nPTY consumption    healthy\nrecovery           resnapshot",
-                    "A stalled viewer loses its uncertain deltas—not the shell and not the canonical terminal state.",
-                )
-                validation = run(
-                    [
-                        "cargo",
-                        "test",
-                        "-q",
-                        "-p",
-                        "splinterd",
-                        "--test",
-                        "end_to_end",
-                        "--",
-                        "--test-threads=1",
-                    ],
-                    cwd=ROOT,
-                    capture_output=True,
-                )
-                pause(delay)
-
-                dashboard(
-                    "09 / 10 — AUTOMATED HEADLESS REVIEW GATE",
+                screen(
+                    "5 of 5",
+                    "That is what Roadmap Phase 1 proves",
                     (
-                        f"{GREEN}phase8_detach_reattach_overflow_resync_and_cleanup  ✓ PASS{RESET}"
-                        if validation.returncode == 0
-                        else f"{RED}Phase 8 validation failed{RESET}\n{validation.stderr[-800:]}"
+                        f"{GREEN}✓{RESET} A real shell remembered VALUE=41\n"
+                        f"{GREEN}✓{RESET} The viewer disconnected\n"
+                        f"{GREEN}✓{RESET} The shell kept running without a viewer\n"
+                        f"{GREEN}✓{RESET} It changed the value to 42 while nobody watched\n"
+                        f"{GREEN}✓{RESET} A new viewer reconnected to the same shell PID\n\n"
+                        "Closing a future Splinterm window will not destroy your terminal session."
                     ),
-                    process_tree(daemon.pid),
-                    "Real isolated daemon test\nReal shell and PTY\nReal overflow and resync",
-                    "hard timeout    ✓\ncleanup         ✓\nFoot fixtures   ✓\nworkspace tests ✓",
-                    "The dashboard explanation and the automated lifecycle test agree on the same ownership model.",
+                    "Next: build the real native Splinterm window that displays this persistent shell.",
                 )
-                pause(delay)
-
-                terminated = cli(socket, "terminate")
-                if daemon.poll() is None:
-                    daemon.send_signal(signal.SIGINT)
-                    daemon.wait(timeout=10)
-                daemon = None
-                dashboard(
-                    "10 / 10 — ROADMAP PHASE 1 COMPLETE",
-                    f"{GREEN}✓ Real shell and PTY\n✓ Semantic terminal state\n✓ Detach and reattach\n✓ Ordered revisions\n✓ Bounded backpressure\n✓ Secure local protocol\n✓ Complete cleanup{RESET}",
-                    "splinterd  ○ stopped\nshell       ○ exited\nPTY         ○ closed",
-                    "All clients ○ detached\nNo session leaked",
-                    f"terminate      {terminated.stdout.strip()}\nsocket         removed\nnext           native Wayland client",
-                    "Next milestone: draw this already-working state in the first genuine Splinterm window.",
-                )
-                pause(delay)
+                time.sleep(delay)
             except Exception as error:
-                dashboard(
-                    "DEMO STOPPED",
-                    f"{RED}{error}{RESET}",
-                    "Cleanup is running.",
-                    "No client retained.",
-                    "See the invoking terminal for details.",
-                    "Press Q to close or R to replay after correcting the problem.",
-                )
+                screen("STOPPED", "The demonstration hit an error", str(error), "Cleanup is running.")
             finally:
+                if socket.exists():
+                    cli(socket, "terminate")
                 if daemon is not None and daemon.poll() is None:
                     daemon.send_signal(signal.SIGINT)
                     try:
@@ -301,8 +200,7 @@ def present(delay: float) -> int:
                         daemon.kill()
                         daemon.wait()
 
-        print()
-        choice = input("[R] Replay the complete walkthrough   [Q] Close: ").strip().lower()
+        choice = input("\n[R] Replay   [Q] Close: ").strip().lower()
         if choice != "r":
             return 0
 
@@ -311,7 +209,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=int, default=DEFAULT_WORKSPACE)
     parser.add_argument("--foot-binary", type=Path, default=DEFAULT_FOOT)
-    parser.add_argument("--font-size", type=float, default=18.0)
+    parser.add_argument("--font-size", type=float, default=20.0)
     parser.add_argument("--delay-seconds", type=float, default=DEFAULT_DELAY)
     parser.add_argument("--present", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
@@ -340,11 +238,11 @@ def main() -> int:
         "env",
         str(args.foot_binary),
         "--config=/dev/null",
-        "--override=pad=10x10",
+        "--override=pad=16x16",
         f"--font=monospace:size={args.font_size:g}",
-        "--app-id=splinterm-phase1-visual-demo",
-        "--title=Splinterm Roadmap Phase 1 Visual Walkthrough",
-        "--window-size-chars=110x38",
+        "--app-id=splinterm-phase1-simple-demo",
+        "--title=Splinterm Phase 1 — The Shell Remembers",
+        "--window-size-chars=96x28",
         str(Path(__file__).resolve()),
         "--present",
         f"--delay-seconds={args.delay_seconds:g}",
@@ -354,10 +252,7 @@ def main() -> int:
     if dispatched.returncode != 0:
         print(dispatched.stderr or dispatched.stdout, file=sys.stderr)
         return dispatched.returncode
-    print(
-        f"Phase 1 visual walkthrough launched on workspace {args.workspace}. "
-        f"Each scene lasts {args.delay_seconds:g} seconds."
-    )
+    print(f"Simple persistence demo launched on workspace {args.workspace}.")
     return 0
 
 
