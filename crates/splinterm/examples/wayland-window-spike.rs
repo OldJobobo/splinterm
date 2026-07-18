@@ -34,6 +34,10 @@ fn main() -> Result<()> {
     }
     splinterm::run_window(splinterm::WindowOptions {
         capture,
+        snapshot: None,
+        updates: None,
+        commands: None,
+        evidence_close_shortcuts: true,
         capture_scale,
     })
 }

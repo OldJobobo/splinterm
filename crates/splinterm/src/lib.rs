@@ -3,11 +3,11 @@
 //! Graphical client mechanisms for Splinterm.
 //!
 //! Wayland objects, shared-memory canvases, font data, and glyph caches remain
-//! client-owned. No terminal snapshot is attached to the deterministic evidence
-//! renderer yet.
+//! client-owned. Live protocol snapshots are replaceable derived renderer state;
+//! the daemon remains the terminal-state and shell-lifetime authority.
 
 mod box_drawing;
 pub mod renderer;
 pub mod wayland;
 
-pub use wayland::{WindowOptions, run as run_window};
+pub use wayland::{WindowCommand, WindowOptions, WindowUpdate, run as run_window};

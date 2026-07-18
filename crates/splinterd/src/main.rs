@@ -19,15 +19,20 @@ use splinterd::{
     LiveEvent, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, Subscription,
     SubscriptionReceive,
 };
-use splinterm_core::{Lair, LayoutNode, SplintState};
+use splinterm_core::{Lair, LayoutNode, SplintId, SplintState};
 use splinterm_protocol::{
-    CellAttributes, ClientFrame, ColorSource, ErrorCode, MAX_COLUMNS, MAX_FRAME_BYTES,
-    MAX_INPUT_BYTES, MAX_ROWS, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, PROTOCOL_VERSION,
-    ProtocolError, Request, Response, ServerFrame, ServerLimits, SubscriptionEvent, TerminalCell,
-    TerminalRow, TerminalSnapshot, encode_frame,
+    ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame, ColorSource, ErrorCode,
+    MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS, MAX_SNAPSHOT_SCROLLBACK_ROWS,
+    MAX_SUBSCRIPTIONS, PROTOCOL_VERSION, ProtocolError, Request, Response,
+    ScrollDirection as WireScrollDirection, ServerFrame, ServerLimits, SubscriptionEvent,
+    TerminalCell, TerminalCursor, TerminalInputModes, TerminalRow, TerminalRowPatch,
+    TerminalScroll, TerminalSnapshot, TerminalUpdate as WireTerminalUpdate, encode_frame,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
-use splinterm_terminal::ColorSource as TerminalColorSource;
+use splinterm_terminal::{
+    ActiveScreen, ColorSource as TerminalColorSource, ScrollDirection, TerminalDamage,
+    TerminalUpdate,
+};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -50,9 +55,97 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 static NEXT_SUBSCRIPTION: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ControllerLease {
+    id: u64,
+    splint_id: SplintId,
+    incarnation: u64,
+}
+
+#[derive(Debug)]
+struct ControllerState {
+    next_id: u64,
+    active: Option<ControllerLease>,
+}
+
+impl Default for ControllerState {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            active: None,
+        }
+    }
+}
+
+impl ControllerState {
+    fn acquire(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> Result<ControllerLease, ProtocolError> {
+        if self.active.is_some() {
+            return Err(ProtocolError::new(
+                ErrorCode::ControllerUnavailable,
+                "live Splint already has a controller",
+            ));
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(1).ok_or_else(|| {
+            ProtocolError::new(ErrorCode::ResourceLimit, "controller ID space exhausted")
+        })?;
+        let lease = ControllerLease {
+            id,
+            splint_id,
+            incarnation,
+        };
+        self.active = Some(lease);
+        Ok(lease)
+    }
+
+    fn authorize(
+        &self,
+        controller_id: u64,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> Result<(), ProtocolError> {
+        match self.active {
+            Some(lease)
+                if lease.id == controller_id
+                    && lease.splint_id == splint_id
+                    && lease.incarnation == incarnation =>
+            {
+                Ok(())
+            }
+            _ => Err(ProtocolError::new(
+                ErrorCode::Unauthorized,
+                "controller lease is not owned by this connection",
+            )),
+        }
+    }
+
+    fn release(&mut self, controller_id: u64) -> bool {
+        if self.active.is_some_and(|lease| lease.id == controller_id) {
+            self.active = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn release_identity(&mut self, splint_id: SplintId, incarnation: u64) {
+        if self
+            .active
+            .is_some_and(|lease| lease.splint_id == splint_id && lease.incarnation == incarnation)
+        {
+            self.active = None;
+        }
+    }
+}
+
 struct DaemonState {
     lair: RwLock<Lair>,
     live_splint: Mutex<Option<LiveSplintRuntime>>,
+    controller: Mutex<ControllerState>,
     pty_backend: LinuxPtyBackend,
     development_terminal_access: bool,
 }
@@ -74,6 +167,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(DaemonState {
         lair: RwLock::new(Lair::new()),
         live_splint: Mutex::new(None),
+        controller: Mutex::new(ControllerState::default()),
         pty_backend: LinuxPtyBackend::installed()?,
         development_terminal_access: env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").as_deref()
             == Some(std::ffi::OsStr::new("1")),
@@ -174,6 +268,7 @@ async fn serve_authenticated(
     .await?;
 
     let mut subscriptions = HashMap::<u64, JoinHandle<()>>::new();
+    let mut owned_controller = None;
     let mut last_request_id = 0_u64;
     while let Some(frame) = read_optional_frame(&mut reader).await? {
         match frame {
@@ -232,7 +327,7 @@ async fn serve_authenticated(
                     send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
-                let handled = handle_request(request, state).await;
+                let handled = handle_request(request, state, &mut owned_controller).await;
                 match handled {
                     Ok(Handled {
                         response,
@@ -272,6 +367,9 @@ async fn serve_authenticated(
     for (_, task) in subscriptions {
         task.abort();
     }
+    if let Some(controller_id) = owned_controller {
+        state.controller.lock().await.release(controller_id);
+    }
     Ok(())
 }
 
@@ -281,6 +379,35 @@ struct Handled {
     subscription: Option<(u64, Subscription, LiveSplintHandle)>,
 }
 
+async fn controlled_handle(
+    state: &Arc<DaemonState>,
+    owned_controller: &mut Option<u64>,
+    controller_id: u64,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<LiveSplintHandle, ProtocolError> {
+    if *owned_controller != Some(controller_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "controller lease is not owned by this connection",
+        ));
+    }
+    let handle = match current_handle(state, splint_id, incarnation).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            state.controller.lock().await.release(controller_id);
+            *owned_controller = None;
+            return Err(error);
+        }
+    };
+    state
+        .controller
+        .lock()
+        .await
+        .authorize(controller_id, splint_id, incarnation)?;
+    Ok(handle)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "authorization remains adjacent to every development operation"
@@ -288,6 +415,7 @@ struct Handled {
 async fn handle_request(
     request: Request,
     state: &Arc<DaemonState>,
+    owned_controller: &mut Option<u64>,
 ) -> Result<Handled, ProtocolError> {
     let response = match request {
         Request::Ping => Response::Pong,
@@ -335,6 +463,7 @@ async fn handle_request(
                 return Err(internal());
             };
             let handle = runtime.handle();
+            let process_incarnation = handle.incarnation.value();
             state
                 .lair
                 .write()
@@ -351,6 +480,10 @@ async fn handle_request(
             let lair = Arc::clone(state);
             tokio::spawn(async move {
                 if let Some(status) = handle.wait_for_exit().await {
+                    lair.controller
+                        .lock()
+                        .await
+                        .release_identity(splint_id, process_incarnation);
                     let code = status
                         .code
                         .or_else(|| status.signal.map(|signal| 128 + signal))
@@ -384,7 +517,43 @@ async fn handle_request(
                 subscription: Some((id, subscription, handle)),
             });
         }
+        Request::AcquireControl {
+            splint_id,
+            incarnation,
+        } => {
+            require_dev(state)?;
+            let _ = current_handle(state, splint_id, incarnation).await?;
+            if owned_controller.is_some() {
+                return Err(ProtocolError::new(
+                    ErrorCode::ControllerUnavailable,
+                    "connection already owns a controller lease",
+                ));
+            }
+            let lease = state
+                .controller
+                .lock()
+                .await
+                .acquire(splint_id, incarnation)?;
+            *owned_controller = Some(lease.id);
+            Response::ControlGranted {
+                controller_id: lease.id,
+            }
+        }
+        Request::ReleaseControl { controller_id } => {
+            require_dev(state)?;
+            if *owned_controller != Some(controller_id)
+                || !state.controller.lock().await.release(controller_id)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unauthorized,
+                    "controller lease is not owned by this connection",
+                ));
+            }
+            *owned_controller = None;
+            Response::Acknowledged
+        }
         Request::Input {
+            controller_id,
             splint_id,
             incarnation,
             bytes,
@@ -393,14 +562,21 @@ async fn handle_request(
             if bytes.len() > MAX_INPUT_BYTES {
                 return Err(invalid("input exceeds limit"));
             }
-            current_handle(state, splint_id, incarnation)
-                .await?
-                .input(bytes)
-                .await
-                .map_err(|_| internal())?;
+            controlled_handle(
+                state,
+                owned_controller,
+                controller_id,
+                splint_id,
+                incarnation,
+            )
+            .await?
+            .input(bytes)
+            .await
+            .map_err(|_| internal())?;
             Response::Acknowledged
         }
         Request::Resize {
+            controller_id,
             splint_id,
             incarnation,
             columns,
@@ -412,16 +588,22 @@ async fn handle_request(
             if columns == 0 || rows == 0 || columns > MAX_COLUMNS || rows > MAX_ROWS {
                 return Err(invalid("terminal dimensions exceed limits"));
             }
-            current_handle(state, splint_id, incarnation)
-                .await?
-                .resize(PtySize {
-                    columns,
-                    rows,
-                    pixel_width,
-                    pixel_height,
-                })
-                .await
-                .map_err(|_| invalid("resize rejected"))?;
+            controlled_handle(
+                state,
+                owned_controller,
+                controller_id,
+                splint_id,
+                incarnation,
+            )
+            .await?
+            .resize(PtySize {
+                columns,
+                rows,
+                pixel_width,
+                pixel_height,
+            })
+            .await
+            .map_err(|_| invalid("resize rejected"))?;
             Response::Acknowledged
         }
         Request::Detach { .. } => Response::Acknowledged,
@@ -444,6 +626,12 @@ async fn handle_request(
                     "process incarnation is stale",
                 ));
             }
+            state
+                .controller
+                .lock()
+                .await
+                .release_identity(splint_id, incarnation);
+            *owned_controller = None;
             let status = runtime.shutdown().await.map_err(|_| internal())?;
             Response::Terminated {
                 code: status.code,
@@ -459,7 +647,7 @@ async fn handle_request(
 
 async fn current_handle(
     state: &DaemonState,
-    splint_id: splinterm_core::SplintId,
+    splint_id: SplintId,
     incarnation: u64,
 ) -> Result<LiveSplintHandle, ProtocolError> {
     let live = state.live_splint.lock().await;
@@ -514,17 +702,17 @@ fn spawn_subscription(
                     });
                     break;
                 }
-                SubscriptionReceive::Event(LiveEvent::Update { .. }) => {
+                SubscriptionReceive::Event(LiveEvent::Update { update, .. }) => {
                     let Ok(snapshot) = handle.snapshot().await else {
                         break;
                     };
+                    let event = subscription_update_event(&update, snapshot);
+
                     if outbound
                         .try_send(ServerFrame::Event {
                             subscription_id: id,
                             sequence,
-                            event: SubscriptionEvent::Snapshot {
-                                snapshot: wire_snapshot(snapshot),
-                            },
+                            event,
                         })
                         .is_err()
                     {
@@ -549,6 +737,24 @@ fn spawn_subscription(
             }
         }
     })
+}
+
+fn revisions_match(update_revision: u64, snapshot_revision: u64) -> bool {
+    update_revision == snapshot_revision
+}
+
+fn subscription_update_event(update: &TerminalUpdate, snapshot: LiveSnapshot) -> SubscriptionEvent {
+    if !revisions_match(update.revision().value(), snapshot.revision.value()) {
+        return SubscriptionEvent::Snapshot {
+            snapshot: wire_snapshot(snapshot),
+        };
+    }
+    match wire_update(update, &snapshot) {
+        Ok(update) => SubscriptionEvent::Update { update },
+        Err(_) => SubscriptionEvent::ResyncRequired {
+            current_revision: snapshot.revision.value(),
+        },
+    }
 }
 
 async fn write_frames(
@@ -636,6 +842,94 @@ fn not_found() -> ProtocolError {
     ProtocolError::new(ErrorCode::NotFound, "resource not found")
 }
 
+fn wire_update(
+    update: &TerminalUpdate,
+    snapshot: &LiveSnapshot,
+) -> Result<WireTerminalUpdate, ProtocolError> {
+    let mut damaged = vec![false; snapshot.visible_rows.len()];
+    let mut scrolls = Vec::new();
+    let mut cursor = false;
+    let mut title = false;
+    let mut modes = false;
+    let mut palette = false;
+    let mut dimensions = false;
+    for damage in update.damage() {
+        match damage {
+            TerminalDamage::FullSnapshot => {
+                damaged.fill(true);
+                cursor = true;
+                title = true;
+                modes = true;
+                palette = true;
+                dimensions = true;
+            }
+            TerminalDamage::Viewport => damaged.fill(true),
+            TerminalDamage::Rows { start, end } => {
+                for item in damaged.iter_mut().take(*end).skip(*start) {
+                    *item = true;
+                }
+            }
+            TerminalDamage::Scroll {
+                direction,
+                region,
+                rows,
+            } => {
+                let start = usize::try_from(region.start()).map_err(|_| internal())?;
+                let end = usize::try_from(region.end()).map_err(|_| internal())?;
+                for item in damaged.iter_mut().take(end).skip(start) {
+                    *item = true;
+                }
+                scrolls.push(TerminalScroll {
+                    direction: match direction {
+                        ScrollDirection::Forward => WireScrollDirection::Forward,
+                        ScrollDirection::Reverse => WireScrollDirection::Reverse,
+                    },
+                    start_row: start,
+                    end_row: end,
+                    rows: *rows,
+                });
+            }
+            TerminalDamage::Cursor { .. } => cursor = true,
+            TerminalDamage::Modes => modes = true,
+            TerminalDamage::Dimensions => {
+                dimensions = true;
+                damaged.fill(true);
+            }
+            TerminalDamage::Title => title = true,
+            TerminalDamage::Palette { .. } => palette = true,
+            TerminalDamage::Scrollback => {}
+        }
+    }
+    let position = snapshot.cursor.cursor.position();
+    let rows = damaged
+        .into_iter()
+        .enumerate()
+        .filter(|(_, changed)| *changed)
+        .map(|(index, _)| TerminalRowPatch {
+            index,
+            row: wire_row(snapshot.visible_rows[index].clone()),
+        })
+        .collect();
+    Ok(WireTerminalUpdate {
+        base_revision: update.revision().value().saturating_sub(1),
+        revision: update.revision().value(),
+        rows,
+        scrolls,
+        cursor: cursor.then_some(TerminalCursor {
+            column: position.column,
+            row: position.row,
+            deferred_wrap: snapshot.cursor.cursor.deferred_wrap(),
+        }),
+        title: title.then(|| snapshot.title.clone()),
+        input_modes: modes.then_some(wire_modes(snapshot.modes)),
+        active_screen: modes.then_some(wire_active_screen(snapshot.active_screen)),
+        palette: palette.then(|| snapshot.palette.to_vec()),
+        default_colors: palette.then_some(snapshot.default_colors),
+        columns: dimensions.then_some(snapshot.dimensions.columns),
+        row_count: dimensions.then_some(snapshot.dimensions.rows),
+    })
+}
+
 fn wire_snapshot(snapshot: LiveSnapshot) -> TerminalSnapshot {
     let position = snapshot.cursor.cursor.position();
     let exited_code = snapshot.exited.and_then(|status| status.code);
@@ -649,6 +943,10 @@ fn wire_snapshot(snapshot: LiveSnapshot) -> TerminalSnapshot {
         cursor_column: position.column,
         cursor_row: position.row,
         cursor_deferred_wrap: snapshot.cursor.cursor.deferred_wrap(),
+        active_screen: wire_active_screen(snapshot.active_screen),
+        input_modes: wire_modes(snapshot.modes),
+        palette: snapshot.palette.to_vec(),
+        default_colors: snapshot.default_colors,
         title: snapshot.title,
         visible_rows: snapshot.visible_rows.into_iter().map(wire_row).collect(),
         scrollback_rows: snapshot.scrollback_rows.into_iter().map(wire_row).collect(),
@@ -658,6 +956,24 @@ fn wire_snapshot(snapshot: LiveSnapshot) -> TerminalSnapshot {
         exited_signal,
     }
 }
+fn wire_active_screen(screen: ActiveScreen) -> WireActiveScreen {
+    match screen {
+        ActiveScreen::Normal => WireActiveScreen::Normal,
+        ActiveScreen::Alternate => WireActiveScreen::Alternate,
+    }
+}
+
+fn wire_modes(modes: splinterm_terminal::TerminalModes) -> TerminalInputModes {
+    TerminalInputModes {
+        application_cursor: modes.application_cursor,
+        application_keypad: modes.application_keypad,
+        focus_reporting: modes.focus_reporting,
+        bracketed_paste: modes.bracketed_paste,
+        cursor_visible: modes.cursor_visible,
+        cursor_blink: modes.cursor_blink,
+    }
+}
+
 fn wire_row(row: splinterd::LiveRow) -> TerminalRow {
     TerminalRow {
         linebreak: row.linebreak,
@@ -797,6 +1113,7 @@ mod tests {
         let state = Arc::new(DaemonState {
             lair: RwLock::new(Lair::new()),
             live_splint: Mutex::new(None),
+            controller: Mutex::new(ControllerState::default()),
             pty_backend: LinuxPtyBackend::new("/missing/helper"),
             development_terminal_access: false,
         });
@@ -836,16 +1153,19 @@ mod tests {
         let state = Arc::new(DaemonState {
             lair: RwLock::new(Lair::new()),
             live_splint: Mutex::new(None),
+            controller: Mutex::new(ControllerState::default()),
             pty_backend: LinuxPtyBackend::new("/missing/helper"),
             development_terminal_access: false,
         });
+        let mut owned_controller = None;
         let error = handle_request(
             Request::Attach {
-                splint_id: splinterm_core::SplintId::new(),
+                splint_id: SplintId::new(),
                 incarnation: 1,
                 scrollback_rows: 0,
             },
             &state,
+            &mut owned_controller,
         )
         .await
         .unwrap_err();
@@ -857,12 +1177,15 @@ mod tests {
         let state = Arc::new(DaemonState {
             lair: RwLock::new(Lair::new()),
             live_splint: Mutex::new(None),
+            controller: Mutex::new(ControllerState::default()),
             pty_backend: LinuxPtyBackend::new("/missing/helper"),
             development_terminal_access: true,
         });
+        let mut owned_controller = None;
         let error = handle_request(
             Request::Resize {
-                splint_id: splinterm_core::SplintId::new(),
+                controller_id: 1,
+                splint_id: SplintId::new(),
                 incarnation: 1,
                 columns: MAX_COLUMNS + 1,
                 rows: 24,
@@ -870,10 +1193,42 @@ mod tests {
                 pixel_height: 0,
             },
             &state,
+            &mut owned_controller,
         )
         .await
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn queued_update_uses_delta_only_for_its_exact_snapshot_revision() {
+        assert!(revisions_match(41, 41));
+        assert!(!revisions_match(41, 42));
+        assert!(!revisions_match(42, 41));
+    }
+
+    #[test]
+    fn controller_state_is_exclusive_authorized_and_releasable() {
+        let splint_id = SplintId::new();
+        let mut controllers = ControllerState::default();
+        let lease = controllers.acquire(splint_id, 7).expect("first controller");
+        assert_eq!(
+            controllers.acquire(splint_id, 7).unwrap_err().code,
+            ErrorCode::ControllerUnavailable
+        );
+        assert!(controllers.authorize(lease.id, splint_id, 7).is_ok());
+        assert_eq!(
+            controllers
+                .authorize(lease.id + 1, splint_id, 7)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unauthorized
+        );
+        controllers.release_identity(splint_id, 8);
+        assert_eq!(controllers.active, Some(lease));
+        controllers.release_identity(splint_id, 7);
+        assert_eq!(controllers.active, None);
+        assert!(controllers.acquire(splint_id, 8).is_ok());
     }
 
     #[test]

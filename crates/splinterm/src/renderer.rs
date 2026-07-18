@@ -2,21 +2,28 @@
 //!
 //! Font selection, cell placement, fallback, and CPU blending are compared against
 //! Foot 1.27.0 `fonts.c` and `render.c` at commit
-//! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`. This module renders only the
-//! fixed evidence corpus; terminal snapshot rendering is intentionally not attached.
+//! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`. It also owns the persistent,
+//! scale-keyed glyph cache and damage-oriented terminal snapshot painter.
 
 use std::{
-    collections::HashMap,
+    cell::RefCell,
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
 use crate::box_drawing;
 use anyhow::{Context, Result, bail};
 
+use splinterm_core::SplintId;
+use splinterm_protocol::{
+    ActiveScreen, CellAttributes, ColorSource, MAX_COLUMNS, MAX_ROWS, ScrollDirection,
+    TerminalCell, TerminalInputModes, TerminalRow, TerminalScroll, TerminalSnapshot,
+};
 use swash::{
     FontRef,
     scale::{Render, ScaleContext, Source, StrikeWith, image::Content},
@@ -33,6 +40,36 @@ const PRIMARY_ITALIC_FONT: &str = "JetBrains Mono Nerd Font:style=Italic";
 const PRIMARY_BOLD_ITALIC_FONT: &str = "JetBrains Mono Nerd Font:style=Bold Italic";
 const CJK_FONT: &str = "Noto Sans CJK JP:style=Regular";
 const EMOJI_FONT: &str = "Noto Color Emoji";
+const SNAPSHOT_GLYPH_CACHE_BUDGET: usize = 2_048;
+
+static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 3], String>> = OnceLock::new();
+
+struct PersistentGlyphCache {
+    context: ScaleContext,
+    glyphs: HashMap<(u16, GlyphKey), Arc<CachedGlyph>>,
+    order: VecDeque<(u16, GlyphKey)>,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+}
+
+impl Default for PersistentGlyphCache {
+    fn default() -> Self {
+        Self {
+            context: ScaleContext::new(),
+            glyphs: HashMap::new(),
+            order: VecDeque::new(),
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+        }
+    }
+}
+
+thread_local! {
+    static SNAPSHOT_GLYPH_CACHE: RefCell<PersistentGlyphCache> =
+        RefCell::new(PersistentGlyphCache::default());
+}
 
 const CORPUS: &[(CorpusKind, &str)] = &[
     (CorpusKind::Ascii, "ASCII"),
@@ -381,6 +418,93 @@ fn cache_glyph(
     Ok(())
 }
 
+fn snapshot_faces() -> Result<&'static [FontFace; 3]> {
+    SNAPSHOT_FACES
+        .get_or_init(|| {
+            Ok([
+                resolve_face("primary", PRIMARY_FONT, "jetbrains mono")
+                    .map_err(|error| error.to_string())?,
+                resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")
+                    .map_err(|error| error.to_string())?,
+                resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")
+                    .map_err(|error| error.to_string())?,
+            ])
+        })
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
+fn snapshot_glyph(
+    faces: &[FontFace; 3],
+    scale: u16,
+    face_index: usize,
+    glyph_id: u16,
+    font_size: f32,
+) -> Result<Arc<CachedGlyph>> {
+    let key = GlyphKey {
+        face: face_index,
+        glyph: glyph_id,
+    };
+    SNAPSHOT_GLYPH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(glyph) = cache.glyphs.get(&(scale, key)).cloned() {
+            cache.hits = cache.hits.saturating_add(1);
+            return Ok(glyph);
+        }
+        cache.misses = cache.misses.saturating_add(1);
+        let font = font_ref(&faces[face_index])?;
+        let mut scaler = cache
+            .context
+            .builder(font)
+            .size(font_size)
+            .hint(true)
+            .build();
+        let image = Render::new(&[
+            Source::ColorOutline(0),
+            Source::ColorBitmap(StrikeWith::BestFit),
+            Source::Outline,
+        ])
+        .format(Format::Alpha)
+        .render(&mut scaler, glyph_id)
+        .with_context(|| format!("rasterize snapshot glyph {glyph_id}"))?;
+        let glyph = Arc::new(CachedGlyph {
+            content: image.content,
+            left: image.placement.left,
+            top: image.placement.top,
+            width: image.placement.width,
+            height: image.placement.height,
+            data: image.data,
+        });
+        while cache.glyphs.len() >= SNAPSHOT_GLYPH_CACHE_BUDGET {
+            let Some(oldest) = cache.order.pop_front() else {
+                break;
+            };
+            if cache.glyphs.remove(&oldest).is_some() {
+                cache.evictions = cache.evictions.saturating_add(1);
+            }
+        }
+        cache.order.push_back((scale, key));
+        cache.glyphs.insert((scale, key), Arc::clone(&glyph));
+        Ok(glyph)
+    })
+}
+
+/// Returns bounded persistent snapshot-glyph-cache metrics.
+#[must_use]
+pub fn snapshot_cache_metrics() -> serde_json::Value {
+    SNAPSHOT_GLYPH_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        serde_json::json!({
+            "entries": cache.glyphs.len(),
+            "budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
+            "hits": cache.hits,
+            "misses": cache.misses,
+            "evictions": cache.evictions,
+            "approximate_bytes": cache.glyphs.values().map(|glyph| glyph.data.len()).sum::<usize>(),
+        })
+    })
+}
+
 fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<(u32, u32, i32, f32)> {
     let primary = font_ref(primary_face)?;
     let metrics = primary.metrics(&[]).scale(font_size);
@@ -581,7 +705,7 @@ pub(crate) fn paint(canvas: &mut [u8], width: u32, height: u32, row: &TextRow) {
         let span = row.cell_width.saturating_mul(placed.cells);
         let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
         let (x, y) = glyph_origin(row, placed, glyph, centered_pen);
-        blend_glyph(canvas, width, height, x, y, glyph);
+        blend_glyph(canvas, width, height, x, y, glyph, [235, 235, 235]);
     }
 }
 
@@ -638,6 +762,7 @@ fn blend_glyph(
     x: i32,
     y: i32,
     glyph: &CachedGlyph,
+    foreground: [u8; 3],
 ) {
     let pixel_count = usize::try_from(glyph.width)
         .expect("glyph width fits usize")
@@ -656,7 +781,12 @@ fn blend_glyph(
             let pixel_index = usize::try_from(gy.saturating_mul(glyph.width) + gx)
                 .expect("glyph pixel index fits usize");
             let source = match glyph.content {
-                Content::Mask => [235, 235, 235, glyph.data[pixel_index]],
+                Content::Mask => [
+                    foreground[0],
+                    foreground[1],
+                    foreground[2],
+                    glyph.data[pixel_index],
+                ],
                 Content::Color => {
                     let offset = pixel_index * 4;
                     [
@@ -673,7 +803,7 @@ fn blend_glyph(
                         .copied()
                         .max()
                         .unwrap_or(0);
-                    [235, 235, 235, alpha]
+                    [foreground[0], foreground[1], foreground[2], alpha]
                 }
             };
             blend_pixel(
@@ -723,6 +853,735 @@ fn blend_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba:
         .expect("blended channel fits u8");
     }
     canvas[index + 3] = 0xff;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SnapshotGlyph {
+    key: GlyphKey,
+    column: u32,
+    row: u32,
+    cells: u32,
+    cluster_advance: f32,
+    x_offset: f32,
+    y_offset: f32,
+    foreground: [u8; 3],
+}
+
+/// One immutable, scale-dependent rendering of an owned daemon snapshot.
+pub(crate) struct SnapshotFrame {
+    glyphs: Vec<SnapshotGlyph>,
+    cache: HashMap<GlyphKey, Arc<CachedGlyph>>,
+    backgrounds: Vec<[u8; 3]>,
+    columns: u32,
+    rows: u32,
+    cell_width: u32,
+    cell_height: u32,
+    baseline: i32,
+    origin_x: i32,
+    origin_y: i32,
+    cursor: Option<(u32, u32)>,
+    canvas_background: [u8; 3],
+    cursor_color: [u8; 3],
+    scale: u16,
+}
+
+impl SnapshotFrame {
+    pub(crate) fn terminal_size(
+        &self,
+        logical_width: u32,
+        logical_height: u32,
+        integer_scale: u32,
+    ) -> Result<(u16, u16, u16, u16)> {
+        let physical_width = logical_width
+            .checked_mul(integer_scale)
+            .context("terminal physical width overflow")?;
+        let physical_height = logical_height
+            .checked_mul(integer_scale)
+            .context("terminal physical height overflow")?;
+        let horizontal_padding = u32::try_from(self.origin_x.max(0))
+            .context("terminal x padding")?
+            .checked_mul(2)
+            .context("terminal horizontal padding overflow")?;
+        let vertical_padding = u32::try_from(self.origin_y.max(0))
+            .context("terminal y padding")?
+            .checked_mul(2)
+            .context("terminal vertical padding overflow")?;
+        let drawable_width = physical_width.saturating_sub(horizontal_padding);
+        let drawable_height = physical_height.saturating_sub(vertical_padding);
+        let columns = (drawable_width / self.cell_width).clamp(2, u32::from(MAX_COLUMNS));
+        let rows = (drawable_height / self.cell_height).clamp(2, u32::from(MAX_ROWS));
+        let pixel_width = columns
+            .checked_mul(self.cell_width)
+            .context("terminal pixel width overflow")?;
+        let pixel_height = rows
+            .checked_mul(self.cell_height)
+            .context("terminal pixel height overflow")?;
+        Ok((
+            u16::try_from(columns).context("terminal columns fit u16")?,
+            u16::try_from(rows).context("terminal rows fit u16")?,
+            u16::try_from(pixel_width).context("terminal pixel width fits u16")?,
+            u16::try_from(pixel_height).context("terminal pixel height fits u16")?,
+        ))
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "static snapshot preparation keeps bounded font, shaping, cache, cell-span, and color conversion together"
+    )]
+    pub(crate) fn load(snapshot: &TerminalSnapshot, integer_scale: u32) -> Result<Self> {
+        if snapshot.columns > usize::from(MAX_COLUMNS) || snapshot.rows > usize::from(MAX_ROWS) {
+            bail!(
+                "snapshot dimensions {}x{} exceed protocol limits {}x{}",
+                snapshot.columns,
+                snapshot.rows,
+                MAX_COLUMNS,
+                MAX_ROWS
+            );
+        }
+        if integer_scale == 0 || integer_scale > 8 {
+            bail!("integer scale must be between 1 and 8");
+        }
+        let scale = u16::try_from(integer_scale).context("integer scale fits u16")?;
+        let font_size = BASE_FONT_SIZE * f32::from(scale);
+        let faces = snapshot_faces()?;
+        let (cell_width, cell_height, baseline, _) = cell_metrics(&faces[0], font_size)?;
+        let scale_i32 = i32::try_from(integer_scale).context("scale fits i32")?;
+        let origin_x = 12_i32
+            .checked_mul(scale_i32)
+            .context("snapshot x overflow")?;
+        let origin_y = 12_i32
+            .checked_mul(scale_i32)
+            .context("snapshot y overflow")?;
+        let columns = u32::try_from(snapshot.columns).context("snapshot columns fit u32")?;
+        let rows = u32::try_from(snapshot.rows).context("snapshot rows fit u32")?;
+        let background_len = usize::try_from(columns)
+            .ok()
+            .and_then(|columns| {
+                usize::try_from(rows)
+                    .ok()
+                    .and_then(|rows| columns.checked_mul(rows))
+            })
+            .context("snapshot background size overflow")?;
+        if snapshot.palette.len() != 256 {
+            bail!("snapshot palette must contain exactly 256 colors");
+        }
+        let default_foreground = packed_rgb(snapshot.default_colors[0]);
+        let default_background = packed_rgb(snapshot.default_colors[1]);
+        let cursor_color = packed_rgb(snapshot.default_colors[2]);
+        let mut backgrounds = vec![default_background; background_len];
+        let mut glyphs = Vec::new();
+        let mut cache = HashMap::new();
+        let mut shape_context = ShapeContext::new();
+
+        for row_index in 0..snapshot.rows {
+            prepare_snapshot_row(
+                snapshot,
+                row_index,
+                faces,
+                scale,
+                font_size,
+                cell_width,
+                cell_height,
+                baseline,
+                default_foreground,
+                default_background,
+                &mut shape_context,
+                &mut backgrounds,
+                &mut glyphs,
+                &mut cache,
+            )?;
+        }
+        let cursor = snapshot_cursor(snapshot, columns, rows);
+        let mut frame = Self {
+            glyphs,
+            cache,
+            backgrounds,
+            columns,
+            rows,
+            cell_width,
+            cell_height,
+            baseline,
+            origin_x,
+            origin_y,
+            cursor,
+            canvas_background: default_background,
+            cursor_color,
+            scale,
+        };
+        frame.prune_unreferenced_glyphs();
+        Ok(frame)
+    }
+
+    /// Rebuilds only rows whose semantic cell content changed.
+    pub(crate) fn refresh_rows(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        dirty_rows: &[bool],
+    ) -> Result<()> {
+        if snapshot.columns != self.columns as usize || snapshot.rows != self.rows as usize {
+            bail!("incremental frame dimensions changed");
+        }
+        if snapshot.palette.len() != 256 {
+            bail!("snapshot palette must contain exactly 256 colors");
+        }
+        let faces = snapshot_faces()?;
+        let font_size = BASE_FONT_SIZE * f32::from(self.scale);
+        let default_foreground = packed_rgb(snapshot.default_colors[0]);
+        let default_background = packed_rgb(snapshot.default_colors[1]);
+        let mut shape_context = ShapeContext::new();
+        for (row_index, dirty) in dirty_rows.iter().copied().enumerate().take(snapshot.rows) {
+            if !dirty {
+                continue;
+            }
+            let row_number = u32::try_from(row_index).context("row fits u32")?;
+            self.glyphs.retain(|glyph| glyph.row != row_number);
+            let start = row_index
+                .checked_mul(snapshot.columns)
+                .context("snapshot row start overflow")?;
+            let end = start
+                .checked_add(snapshot.columns)
+                .context("snapshot row end overflow")?;
+            self.backgrounds[start..end].fill(default_background);
+            prepare_snapshot_row(
+                snapshot,
+                row_index,
+                faces,
+                self.scale,
+                font_size,
+                self.cell_width,
+                self.cell_height,
+                self.baseline,
+                default_foreground,
+                default_background,
+                &mut shape_context,
+                &mut self.backgrounds,
+                &mut self.glyphs,
+                &mut self.cache,
+            )?;
+        }
+        self.prune_unreferenced_glyphs();
+        Ok(())
+    }
+
+    fn prune_unreferenced_glyphs(&mut self) {
+        let referenced: HashSet<_> = self.glyphs.iter().map(|glyph| glyph.key).collect();
+        self.cache.retain(|key, _| referenced.contains(key));
+    }
+
+    /// Updates cursor presentation without reshaping any terminal row.
+    pub(crate) fn refresh_cursor(&mut self, snapshot: &TerminalSnapshot) {
+        self.cursor = snapshot_cursor(snapshot, self.columns, self.rows);
+    }
+}
+
+fn snapshot_cursor(snapshot: &TerminalSnapshot, columns: u32, rows: u32) -> Option<(u32, u32)> {
+    if !snapshot.input_modes.cursor_visible {
+        return None;
+    }
+    match (
+        u32::try_from(snapshot.cursor_column),
+        u32::try_from(snapshot.cursor_row),
+    ) {
+        (Ok(column), Ok(row)) if column < columns && row < rows => Some((column, row)),
+        _ => None,
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "row preparation keeps one bounded shaping transaction explicit"
+)]
+fn prepare_snapshot_row(
+    snapshot: &TerminalSnapshot,
+    row_index: usize,
+    faces: &[FontFace; 3],
+    scale: u16,
+    font_size: f32,
+    cell_width: u32,
+    cell_height: u32,
+    baseline: i32,
+    default_foreground: [u8; 3],
+    default_background: [u8; 3],
+    shape_context: &mut ShapeContext,
+    backgrounds: &mut [[u8; 3]],
+    glyphs: &mut Vec<SnapshotGlyph>,
+    cache: &mut HashMap<GlyphKey, Arc<CachedGlyph>>,
+) -> Result<()> {
+    let Some(row) = snapshot.visible_rows.get(row_index) else {
+        return Ok(());
+    };
+    for (column_index, cell) in row.cells.iter().take(snapshot.columns).enumerate() {
+        let (foreground, background) = rendition_colors(
+            &cell.attributes,
+            &snapshot.palette,
+            default_foreground,
+            default_background,
+        );
+        let background_index = row_index
+            .checked_mul(snapshot.columns)
+            .and_then(|index| index.checked_add(column_index))
+            .context("snapshot cell index overflow")?;
+        backgrounds[background_index] = background;
+        if !cell_is_renderable(cell) {
+            continue;
+        }
+        let cells = leader_span(&row.cells, column_index);
+        let column = u32::try_from(column_index).context("column fits u32")?;
+        let row_number = u32::try_from(row_index).context("row fits u32")?;
+        if cell.content.chars().count() == 1 {
+            let character = cell.content.chars().next().context("cell has content")?;
+            if let Some(mask) =
+                box_drawing::generate(character, cell_width, cell_height, u32::from(scale))
+            {
+                let key = GlyphKey {
+                    face: BOX_DRAWING_FACE,
+                    glyph: u16::try_from(u32::from(character)).context("box codepoint fits u16")?,
+                };
+                cache.entry(key).or_insert_with(|| {
+                    Arc::new(CachedGlyph {
+                        content: Content::Mask,
+                        left: 0,
+                        top: baseline,
+                        width: mask.width,
+                        height: mask.height,
+                        data: mask.data,
+                    })
+                });
+                glyphs.push(SnapshotGlyph {
+                    key,
+                    column,
+                    row: row_number,
+                    cells,
+                    cluster_advance: u32_to_f32(cell_width),
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    foreground,
+                });
+                continue;
+            }
+        }
+        let (face_index, content) = match select_face_for_text(faces, &cell.content) {
+            Ok(face_index) => (face_index, cell.content.as_str()),
+            Err(_) => (0, "\u{fffd}"),
+        };
+        let font = font_ref(&faces[face_index])?;
+        let mut shaped_glyphs = Vec::new();
+        let mut shaper = shape_context.builder(font).size(font_size).build();
+        shaper.add_str(content);
+        shaper.shape_with(|cluster| {
+            let advance = cluster.advance();
+            let mut pen = 0.0;
+            for glyph in cluster.glyphs {
+                shaped_glyphs.push((glyph.id, advance, pen + glyph.x, glyph.y));
+                pen += glyph.advance;
+            }
+        });
+        for (glyph_id, cluster_advance, x_offset, y_offset) in shaped_glyphs {
+            let key = GlyphKey {
+                face: face_index,
+                glyph: glyph_id,
+            };
+            cache.entry(key).or_insert(snapshot_glyph(
+                faces, scale, face_index, glyph_id, font_size,
+            )?);
+            glyphs.push(SnapshotGlyph {
+                key,
+                column,
+                row: row_number,
+                cells,
+                cluster_advance,
+                x_offset,
+                y_offset,
+                foreground,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn cell_is_renderable(cell: &splinterm_protocol::TerminalCell) -> bool {
+    !cell.content.is_empty() && cell.spacer_remaining.is_none() && !cell.attributes.conceal
+}
+
+fn leader_span(cells: &[splinterm_protocol::TerminalCell], leader: usize) -> u32 {
+    let mut span = 1_u32;
+    for following in cells.iter().skip(leader + 1) {
+        if following
+            .spacer_remaining
+            .is_none_or(|remaining| remaining == 0)
+        {
+            break;
+        }
+        span = span.saturating_add(1);
+    }
+    span
+}
+
+fn select_face_for_text(faces: &[FontFace; 3], text: &str) -> Result<usize> {
+    [0_usize, 1, 2]
+        .into_iter()
+        .find(|index| {
+            font_ref(&faces[*index]).is_ok_and(|font| {
+                text.chars()
+                    .all(|character| font.charmap().map(character) != 0)
+            })
+        })
+        .with_context(|| format!("no explicit font covers snapshot cell {text:?}"))
+}
+
+fn packed_rgb(value: u32) -> [u8; 3] {
+    [
+        u8::try_from((value >> 16) & 0xff).expect("red fits"),
+        u8::try_from((value >> 8) & 0xff).expect("green fits"),
+        u8::try_from(value & 0xff).expect("blue fits"),
+    ]
+}
+
+#[cfg(test)]
+fn default_foreground() -> [u8; 3] {
+    [0xeb, 0xeb, 0xeb]
+}
+#[cfg(test)]
+fn default_background() -> [u8; 3] {
+    [0x0e, 0x12, 0x16]
+}
+
+fn wire_color(source: ColorSource, value: u32, palette: &[u32], default: [u8; 3]) -> [u8; 3] {
+    match source {
+        ColorSource::Default => default,
+        ColorSource::Base16 | ColorSource::Base256 => usize::try_from(value)
+            .ok()
+            .and_then(|index| palette.get(index))
+            .copied()
+            .map_or(default, packed_rgb),
+        ColorSource::Rgb => packed_rgb(value),
+    }
+}
+
+fn rendition_colors(
+    attributes: &CellAttributes,
+    palette: &[u32],
+    default_foreground: [u8; 3],
+    default_background: [u8; 3],
+) -> ([u8; 3], [u8; 3]) {
+    let mut foreground = wire_color(
+        attributes.foreground_source,
+        attributes.foreground,
+        palette,
+        default_foreground,
+    );
+    let mut background = wire_color(
+        attributes.background_source,
+        attributes.background,
+        palette,
+        default_background,
+    );
+    if attributes.dim {
+        for component in &mut foreground {
+            *component /= 2;
+        }
+    }
+    if attributes.reverse {
+        std::mem::swap(&mut foreground, &mut background);
+    }
+    (foreground, background)
+}
+
+pub(crate) fn paint_snapshot(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    cursor_visible: bool,
+) {
+    for pixel in canvas.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[
+            frame.canvas_background[2],
+            frame.canvas_background[1],
+            frame.canvas_background[0],
+            0xff,
+        ]);
+    }
+    for row in 0..frame.rows {
+        for column in 0..frame.columns {
+            let index = usize::try_from(row * frame.columns + column).expect("background index");
+            let color = frame.backgrounds[index];
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    frame.origin_x + i32::try_from(column * frame.cell_width).expect("cell x"),
+                    frame.origin_y + i32::try_from(row * frame.cell_height).expect("cell y"),
+                    frame.cell_width,
+                    frame.cell_height,
+                ),
+                [color[0], color[1], color[2], 0xff],
+            );
+        }
+    }
+    for placed in &frame.glyphs {
+        let glyph = &frame.cache[&placed.key];
+        let span = frame.cell_width.saturating_mul(placed.cells);
+        let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
+        let pen_x = frame.origin_x
+            + i32::try_from(placed.column * frame.cell_width).expect("glyph x")
+            + round_to_i32(centered_pen + placed.x_offset);
+        let baseline = frame.origin_y
+            + i32::try_from(placed.row * frame.cell_height).expect("glyph y")
+            + frame.baseline
+            - round_to_i32(placed.y_offset);
+        blend_glyph(
+            canvas,
+            width,
+            height,
+            pen_x + glyph.left,
+            baseline - glyph.top,
+            glyph,
+            placed.foreground,
+        );
+    }
+    if cursor_visible {
+        let Some((column, row)) = frame.cursor else {
+            return;
+        };
+        let x = frame.origin_x + i32::try_from(column * frame.cell_width).expect("cursor x");
+        let y = frame.origin_y + i32::try_from(row * frame.cell_height).expect("cursor y");
+        let color = [
+            frame.cursor_color[0],
+            frame.cursor_color[1],
+            frame.cursor_color[2],
+            0xff,
+        ];
+        fill_rect(canvas, width, height, (x, y, frame.cell_width, 2), color);
+        fill_rect(
+            canvas,
+            width,
+            height,
+            (
+                x,
+                y + i32::try_from(frame.cell_height.saturating_sub(2)).expect("cursor bottom"),
+                frame.cell_width,
+                2,
+            ),
+            color,
+        );
+        fill_rect(canvas, width, height, (x, y, 2, frame.cell_height), color);
+        fill_rect(
+            canvas,
+            width,
+            height,
+            (
+                x + i32::try_from(frame.cell_width.saturating_sub(2)).expect("cursor right"),
+                y,
+                2,
+                frame.cell_height,
+            ),
+            color,
+        );
+    }
+}
+
+pub(crate) fn paint_snapshot_rows(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    dirty_rows: &[bool],
+    cursor_visible: bool,
+) {
+    for row in 0..frame.rows {
+        if !dirty_rows
+            .get(usize::try_from(row).expect("row fits usize"))
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        for column in 0..frame.columns {
+            let index = usize::try_from(row * frame.columns + column).expect("background index");
+            let color = frame.backgrounds[index];
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    frame.origin_x + i32::try_from(column * frame.cell_width).expect("cell x"),
+                    frame.origin_y + i32::try_from(row * frame.cell_height).expect("cell y"),
+                    frame.cell_width,
+                    frame.cell_height,
+                ),
+                [color[0], color[1], color[2], 0xff],
+            );
+        }
+    }
+    for placed in &frame.glyphs {
+        if !dirty_rows
+            .get(usize::try_from(placed.row).expect("row fits usize"))
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let glyph = &frame.cache[&placed.key];
+        let span = frame.cell_width.saturating_mul(placed.cells);
+        let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
+        let pen_x = frame.origin_x
+            + i32::try_from(placed.column * frame.cell_width).expect("glyph x")
+            + round_to_i32(centered_pen + placed.x_offset);
+        let baseline = frame.origin_y
+            + i32::try_from(placed.row * frame.cell_height).expect("glyph y")
+            + frame.baseline
+            - round_to_i32(placed.y_offset);
+        blend_glyph(
+            canvas,
+            width,
+            height,
+            pen_x + glyph.left,
+            baseline - glyph.top,
+            glyph,
+            placed.foreground,
+        );
+    }
+    if cursor_visible {
+        if let Some((column, row)) = frame.cursor.filter(|(_, row)| {
+            dirty_rows
+                .get(usize::try_from(*row).expect("row fits usize"))
+                .copied()
+                .unwrap_or(false)
+        }) {
+            let x = frame.origin_x + i32::try_from(column * frame.cell_width).expect("cursor x");
+            let y = frame.origin_y + i32::try_from(row * frame.cell_height).expect("cursor y");
+            let color = [
+                frame.cursor_color[0],
+                frame.cursor_color[1],
+                frame.cursor_color[2],
+                0xff,
+            ];
+            fill_rect(canvas, width, height, (x, y, frame.cell_width, 2), color);
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    x,
+                    y + i32::try_from(frame.cell_height.saturating_sub(2)).expect("cursor bottom"),
+                    frame.cell_width,
+                    2,
+                ),
+                color,
+            );
+            fill_rect(canvas, width, height, (x, y, 2, frame.cell_height), color);
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    x + i32::try_from(frame.cell_width.saturating_sub(2)).expect("cursor right"),
+                    y,
+                    2,
+                    frame.cell_height,
+                ),
+                color,
+            );
+        }
+    }
+}
+
+pub(crate) fn scroll_snapshot_pixels(
+    canvas: &mut [u8],
+    width: u32,
+    frame: &SnapshotFrame,
+    scroll: TerminalScroll,
+) {
+    if scroll.rows == 0
+        || scroll.start_row >= scroll.end_row
+        || scroll.end_row > frame.rows as usize
+    {
+        return;
+    }
+    let Some(stride) = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .filter(|stride| *stride != 0)
+    else {
+        return;
+    };
+    let canvas_height = canvas.len() / stride;
+    let Some(x) = usize::try_from(frame.origin_x.max(0))
+        .ok()
+        .and_then(|origin| origin.checked_mul(4))
+        .filter(|x| *x < stride)
+    else {
+        return;
+    };
+    let Some(grid_width) = frame.columns.checked_mul(frame.cell_width) else {
+        return;
+    };
+    let copy_width = usize::try_from(grid_width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .map_or(0, |width| width.min(stride - x));
+    if copy_width == 0 {
+        return;
+    }
+    let cell_height = usize::try_from(frame.cell_height).expect("cell height");
+    let origin_y = usize::try_from(frame.origin_y.max(0)).expect("origin fits usize");
+    let Some(start_y) = scroll
+        .start_row
+        .checked_mul(cell_height)
+        .and_then(|offset| origin_y.checked_add(offset))
+    else {
+        return;
+    };
+    let Some(end_y) = scroll
+        .end_row
+        .checked_mul(cell_height)
+        .and_then(|offset| origin_y.checked_add(offset))
+        .map(|end| end.min(canvas_height))
+    else {
+        return;
+    };
+    let Some(shift) = scroll
+        .rows
+        .min(scroll.end_row - scroll.start_row)
+        .checked_mul(cell_height)
+    else {
+        return;
+    };
+    if start_y >= end_y || shift >= end_y - start_y {
+        return;
+    }
+    match scroll.direction {
+        ScrollDirection::Forward => {
+            for y in start_y..end_y - shift {
+                let source = (y + shift) * stride + x;
+                let destination = y * stride + x;
+                canvas.copy_within(source..source + copy_width, destination);
+            }
+        }
+        ScrollDirection::Reverse => {
+            for y in (start_y + shift..end_y).rev() {
+                let source = (y - shift) * stride + x;
+                let destination = y * stride + x;
+                canvas.copy_within(source..source + copy_width, destination);
+            }
+        }
+    }
+}
+
+pub(crate) fn snapshot_row_rect(frame: &SnapshotFrame, row: usize) -> Option<(i32, i32, i32, i32)> {
+    if row >= frame.rows as usize {
+        return None;
+    }
+    Some((
+        frame.origin_x,
+        frame.origin_y
+            + i32::try_from(u32::try_from(row).ok()?.checked_mul(frame.cell_height)?).ok()?,
+        i32::try_from(frame.columns * frame.cell_width).ok()?,
+        i32::try_from(frame.cell_height).ok()?,
+    ))
 }
 
 /// Runs the deterministic renderer evidence benchmark and returns a JSON report.
@@ -778,6 +1637,142 @@ pub fn benchmark_json(samples: usize) -> Result<serde_json::Value> {
         "box_generation_ns": timing_summary(&mut boxes),
         "cell": { "width": row.cell_width, "height": row.cell_height, "baseline": row.baseline },
         "canvas": { "width": 960, "height": 600 }
+    }))
+}
+
+/// Benchmarks the Phase 4 full-grid and one-row damage paths.
+///
+/// # Errors
+///
+/// Returns an error for zero samples or when snapshot rendering cannot initialize.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the benchmark keeps all measured scenarios adjacent for comparable output"
+)]
+pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
+    if samples == 0 {
+        bail!("benchmark sample count must be positive");
+    }
+    let mut grids = Vec::new();
+    for (columns, rows) in [(80_usize, 24_usize), (240, 80)] {
+        let cell = TerminalCell {
+            content: "x".into(),
+            spacer_remaining: None,
+            attributes: CellAttributes {
+                bold: false,
+                dim: false,
+                italic: false,
+                underline: false,
+                strikethrough: false,
+                blink: false,
+                conceal: false,
+                reverse: false,
+                foreground_source: ColorSource::Default,
+                foreground: 0,
+                background_source: ColorSource::Default,
+                background: 0,
+            },
+        };
+        let snapshot = TerminalSnapshot {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            revision: 1,
+            columns,
+            rows,
+            cursor_column: 0,
+            cursor_row: 0,
+            cursor_deferred_wrap: false,
+            active_screen: ActiveScreen::Normal,
+            input_modes: TerminalInputModes {
+                application_cursor: false,
+                application_keypad: false,
+                focus_reporting: false,
+                bracketed_paste: false,
+                cursor_visible: true,
+                cursor_blink: true,
+            },
+            palette: vec![0; 256],
+            default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
+            title: "phase4 benchmark".into(),
+            visible_rows: vec![
+                TerminalRow {
+                    linebreak: false,
+                    cells: vec![cell; columns],
+                };
+                rows
+            ],
+            scrollback_rows: Vec::new(),
+            available_scrollback_rows: 0,
+            omitted_oldest_scrollback_rows: 0,
+            exited_code: None,
+            exited_signal: None,
+        };
+        let cold_started = Instant::now();
+        let mut frame = SnapshotFrame::load(&snapshot, 1)?;
+        let cold_ns = u64::try_from(cold_started.elapsed().as_nanos())
+            .context("cold frame duration fits u64")?;
+        let width = frame
+            .columns
+            .checked_mul(frame.cell_width)
+            .and_then(|width| width.checked_add(24))
+            .context("benchmark width overflow")?;
+        let height = frame
+            .rows
+            .checked_mul(frame.cell_height)
+            .and_then(|height| height.checked_add(24))
+            .context("benchmark height overflow")?;
+        let canvas_len = usize::try_from(
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .context("benchmark canvas overflow")?,
+        )
+        .context("benchmark canvas fits usize")?;
+        let mut canvas = vec![0; canvas_len];
+        let mut warm = Vec::with_capacity(samples);
+        let mut full = Vec::with_capacity(samples);
+        let mut row_prepare = Vec::with_capacity(samples);
+        let mut row_damage = Vec::with_capacity(samples);
+        let mut dirty = vec![false; rows];
+        dirty[rows / 2] = true;
+        for _ in 0..samples {
+            let started = Instant::now();
+            std::hint::black_box(SnapshotFrame::load(&snapshot, 1)?);
+            warm.push(u64::try_from(started.elapsed().as_nanos()).context("warm frame duration")?);
+
+            let started = Instant::now();
+            frame.refresh_rows(&snapshot, &dirty)?;
+            row_prepare.push(
+                u64::try_from(started.elapsed().as_nanos()).context("row preparation duration")?,
+            );
+
+            let started = Instant::now();
+            paint_snapshot(&mut canvas, width, height, &frame, true);
+            std::hint::black_box(&canvas);
+            full.push(u64::try_from(started.elapsed().as_nanos()).context("full paint duration")?);
+
+            let started = Instant::now();
+            paint_snapshot_rows(&mut canvas, width, height, &frame, &dirty, true);
+            std::hint::black_box(&canvas);
+            row_damage
+                .push(u64::try_from(started.elapsed().as_nanos()).context("row paint duration")?);
+        }
+        grids.push(serde_json::json!({
+            "columns": columns,
+            "rows": rows,
+            "canvas": { "width": width, "height": height },
+            "cold_frame_ns": cold_ns,
+            "warm_full_prepare_ns": timing_summary(&mut warm),
+            "one_row_prepare_ns": timing_summary(&mut row_prepare),
+            "full_paint_ns": timing_summary(&mut full),
+            "one_row_paint_ns": timing_summary(&mut row_damage),
+        }));
+    }
+    Ok(serde_json::json!({
+        "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "samples": samples,
+        "grids": grids,
+        "glyph_cache": snapshot_cache_metrics(),
     }))
 }
 
@@ -978,6 +1973,378 @@ mod tests {
                 right: 2,
                 bottom: 1,
             })
+        );
+    }
+
+    fn default_attributes() -> CellAttributes {
+        CellAttributes {
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
+            blink: false,
+            conceal: false,
+            reverse: false,
+            foreground_source: ColorSource::Default,
+            foreground: 0,
+            background_source: ColorSource::Default,
+            background: 0,
+        }
+    }
+
+    fn incremental_snapshot() -> TerminalSnapshot {
+        let attributes = default_attributes();
+        TerminalSnapshot {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            revision: 1,
+            columns: 2,
+            rows: 2,
+            cursor_column: 0,
+            cursor_row: 0,
+            cursor_deferred_wrap: false,
+            active_screen: ActiveScreen::Normal,
+            input_modes: TerminalInputModes {
+                application_cursor: false,
+                application_keypad: false,
+                focus_reporting: false,
+                bracketed_paste: false,
+                cursor_visible: true,
+                cursor_blink: false,
+            },
+            palette: vec![0; 256],
+            default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
+            title: "incremental".into(),
+            visible_rows: ["ab", "cd"]
+                .into_iter()
+                .map(|text| TerminalRow {
+                    linebreak: false,
+                    cells: text
+                        .chars()
+                        .map(|character| TerminalCell {
+                            content: character.to_string(),
+                            spacer_remaining: None,
+                            attributes,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            scrollback_rows: Vec::new(),
+            available_scrollback_rows: 0,
+            omitted_oldest_scrollback_rows: 0,
+            exited_code: None,
+            exited_signal: None,
+        }
+    }
+
+    #[test]
+    fn incremental_refresh_preserves_unchanged_prepared_rows() {
+        let mut snapshot = incremental_snapshot();
+        let mut frame = SnapshotFrame::load(&snapshot, 1).expect("initial frame");
+        let row_zero_glyphs: Vec<_> = frame
+            .glyphs
+            .iter()
+            .copied()
+            .filter(|glyph| glyph.row == 0)
+            .collect();
+        let row_zero_backgrounds = frame.backgrounds[..snapshot.columns].to_vec();
+
+        snapshot.visible_rows[1].cells[0].content = "z".into();
+        snapshot.visible_rows[1].cells[0].attributes.reverse = true;
+        frame
+            .refresh_rows(&snapshot, &[false, true])
+            .expect("refresh damaged row");
+
+        assert_eq!(
+            frame
+                .glyphs
+                .iter()
+                .copied()
+                .filter(|glyph| glyph.row == 0)
+                .collect::<Vec<_>>(),
+            row_zero_glyphs
+        );
+        assert_eq!(
+            &frame.backgrounds[..snapshot.columns],
+            row_zero_backgrounds.as_slice()
+        );
+    }
+
+    #[test]
+    fn incremental_refresh_prunes_stale_frame_glyphs() {
+        let mut snapshot = incremental_snapshot();
+        let mut frame = SnapshotFrame::load(&snapshot, 1).expect("initial frame");
+        let old_keys: HashSet<_> = frame.cache.keys().copied().collect();
+        for row in &mut snapshot.visible_rows {
+            for cell in &mut row.cells {
+                cell.content = "z".into();
+            }
+        }
+        frame
+            .refresh_rows(&snapshot, &[true, true])
+            .expect("refresh every row");
+        let referenced: HashSet<_> = frame.glyphs.iter().map(|glyph| glyph.key).collect();
+        assert_eq!(
+            frame.cache.keys().copied().collect::<HashSet<_>>(),
+            referenced
+        );
+        assert!(old_keys.iter().any(|key| !frame.cache.contains_key(key)));
+    }
+
+    #[test]
+    fn cursor_and_title_changes_do_not_reshape_rows() {
+        let mut snapshot = incremental_snapshot();
+        let mut frame = SnapshotFrame::load(&snapshot, 1).expect("initial frame");
+        let glyphs = frame.glyphs.clone();
+        let backgrounds = frame.backgrounds.clone();
+
+        snapshot.cursor_column = 1;
+        snapshot.cursor_row = 1;
+        snapshot.title = "new title".into();
+        frame.refresh_cursor(&snapshot);
+
+        assert_eq!(frame.cursor, Some((1, 1)));
+        assert_eq!(frame.glyphs, glyphs);
+        assert_eq!(frame.backgrounds, backgrounds);
+    }
+
+    #[test]
+    fn snapshot_empty_spacer_and_concealed_cells_do_not_render() {
+        let attributes = default_attributes();
+        let mut cell = splinterm_protocol::TerminalCell {
+            content: String::new(),
+            spacer_remaining: None,
+            attributes,
+        };
+        assert!(!cell_is_renderable(&cell));
+        cell.content = "x".into();
+        cell.spacer_remaining = Some(1);
+        assert!(!cell_is_renderable(&cell));
+        cell.spacer_remaining = None;
+        cell.attributes.conceal = true;
+        assert!(!cell_is_renderable(&cell));
+        cell.attributes.conceal = false;
+        assert!(cell_is_renderable(&cell));
+    }
+
+    #[test]
+    fn snapshot_spacer_run_defines_wide_leader_span() {
+        let attributes = default_attributes();
+        let cells = vec![
+            splinterm_protocol::TerminalCell {
+                content: "界".into(),
+                spacer_remaining: None,
+                attributes,
+            },
+            splinterm_protocol::TerminalCell {
+                content: String::new(),
+                spacer_remaining: Some(1),
+                attributes,
+            },
+            splinterm_protocol::TerminalCell {
+                content: "x".into(),
+                spacer_remaining: None,
+                attributes,
+            },
+        ];
+        assert_eq!(leader_span(&cells, 0), 2);
+        assert_eq!(leader_span(&cells, 2), 1);
+    }
+
+    #[test]
+    fn snapshot_colors_cover_rgb_palette_dim_and_reverse() {
+        let mut attributes = default_attributes();
+        attributes.foreground_source = ColorSource::Rgb;
+        attributes.foreground = 0x80_40_20;
+        attributes.background_source = ColorSource::Base256;
+        attributes.background = 196;
+        attributes.dim = true;
+        let mut palette = vec![0; 256];
+        palette[196] = 0xff_00_00;
+        assert_eq!(
+            rendition_colors(
+                &attributes,
+                &palette,
+                default_foreground(),
+                default_background()
+            ),
+            ([0x40, 0x20, 0x10], [0xff, 0, 0])
+        );
+        attributes.reverse = true;
+        assert_eq!(
+            rendition_colors(
+                &attributes,
+                &palette,
+                default_foreground(),
+                default_background()
+            ),
+            ([0xff, 0, 0], [0x40, 0x20, 0x10])
+        );
+    }
+
+    #[test]
+    fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
+        let key = GlyphKey { face: 0, glyph: 1 };
+        let frame = SnapshotFrame {
+            glyphs: vec![
+                SnapshotGlyph {
+                    key,
+                    column: 0,
+                    row: 0,
+                    cells: 2,
+                    cluster_advance: 2.0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    foreground: [200, 100, 50],
+                },
+                SnapshotGlyph {
+                    key,
+                    column: 0,
+                    row: 0,
+                    cells: 2,
+                    cluster_advance: 2.0,
+                    x_offset: -1.0,
+                    y_offset: 0.0,
+                    foreground: [200, 100, 50],
+                },
+            ],
+            cache: HashMap::from([(
+                key,
+                Arc::new(CachedGlyph {
+                    content: Content::Mask,
+                    left: 0,
+                    top: 1,
+                    width: 1,
+                    height: 1,
+                    data: vec![0xff],
+                }),
+            )]),
+            backgrounds: vec![[1, 2, 3], [4, 5, 6]],
+            columns: 2,
+            rows: 1,
+            cell_width: 4,
+            cell_height: 4,
+            baseline: 2,
+            origin_x: 2,
+            origin_y: 2,
+            cursor: Some((1, 0)),
+            canvas_background: [14, 18, 22],
+            cursor_color: [0xeb, 0xeb, 0xeb],
+            scale: 1,
+        };
+        let mut canvas = vec![0; 12 * 8 * 4];
+        paint_snapshot(&mut canvas, 12, 8, &frame, true);
+        let pixel = |x: usize, y: usize| &canvas[(y * 12 + x) * 4..(y * 12 + x + 1) * 4];
+        assert_eq!(pixel(2, 2), [3, 2, 1, 0xff]);
+        assert_eq!(pixel(4, 3), [50, 100, 200, 0xff]);
+        assert_eq!(pixel(5, 3), [50, 100, 200, 0xff]);
+        assert_eq!(pixel(6, 2), [0xeb, 0xeb, 0xeb, 0xff]);
+    }
+
+    fn damage_test_frame() -> SnapshotFrame {
+        SnapshotFrame {
+            glyphs: Vec::new(),
+            cache: HashMap::new(),
+            backgrounds: vec![[1, 0, 0], [2, 0, 0], [3, 0, 0]],
+            columns: 1,
+            rows: 3,
+            cell_width: 2,
+            cell_height: 2,
+            baseline: 1,
+            origin_x: 0,
+            origin_y: 0,
+            cursor: None,
+            canvas_background: [0, 0, 0],
+            cursor_color: [255, 255, 255],
+            scale: 1,
+        }
+    }
+
+    #[test]
+    fn row_damage_paints_only_selected_rows() {
+        let frame = damage_test_frame();
+        let mut canvas = vec![0; 2 * 6 * 4];
+        paint_snapshot_rows(&mut canvas, 2, 6, &frame, &[false, true, false], false);
+        assert_eq!(&canvas[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&canvas[2 * 2 * 4..2 * 2 * 4 + 4], &[0, 0, 2, 0xff]);
+        assert_eq!(&canvas[4 * 2 * 4..4 * 2 * 4 + 4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn scroll_damage_copies_existing_grid_pixels() {
+        let frame = damage_test_frame();
+        let mut canvas = vec![0; 2 * 6 * 4];
+        paint_snapshot(&mut canvas, 2, 6, &frame, false);
+        scroll_snapshot_pixels(
+            &mut canvas,
+            2,
+            &frame,
+            TerminalScroll {
+                direction: ScrollDirection::Forward,
+                start_row: 0,
+                end_row: 3,
+                rows: 1,
+            },
+        );
+        assert_eq!(&canvas[0..4], &[0, 0, 2, 0xff]);
+        assert_eq!(&canvas[2 * 2 * 4..2 * 2 * 4 + 4], &[0, 0, 3, 0xff]);
+    }
+
+    #[test]
+    fn scroll_copy_clips_to_undersized_framebuffers() {
+        let frame = damage_test_frame();
+        let scroll = TerminalScroll {
+            direction: ScrollDirection::Forward,
+            start_row: 0,
+            end_row: 3,
+            rows: 1,
+        };
+        let mut narrow = vec![0_u8; 12];
+        narrow[8..12].copy_from_slice(&[1, 2, 3, 4]);
+        scroll_snapshot_pixels(&mut narrow, 1, &frame, scroll);
+        assert_eq!(&narrow[..4], &[1, 2, 3, 4]);
+
+        let mut short = vec![0_u8; 8];
+        let unchanged = short.clone();
+        scroll_snapshot_pixels(&mut short, 2, &frame, scroll);
+        assert_eq!(short, unchanged);
+
+        let mut partial_scanline = vec![0_u8; 7];
+        scroll_snapshot_pixels(&mut partial_scanline, 2, &frame, scroll);
+    }
+
+    #[test]
+    fn terminal_size_calculation_clamps_minimum_and_protocol_limits() {
+        let frame = SnapshotFrame {
+            glyphs: Vec::new(),
+            cache: HashMap::new(),
+            backgrounds: Vec::new(),
+            columns: 0,
+            rows: 0,
+            cell_width: 10,
+            cell_height: 20,
+            baseline: 15,
+            origin_x: 10,
+            origin_y: 10,
+            cursor: None,
+            canvas_background: [14, 18, 22],
+            cursor_color: [0xeb, 0xeb, 0xeb],
+            scale: 1,
+        };
+        assert_eq!(
+            frame.terminal_size(1_020, 620, 1).expect("normal grid"),
+            (100, 30, 1_000, 600)
+        );
+        assert_eq!(
+            frame.terminal_size(1, 1, 1).expect("minimum grid"),
+            (2, 2, 20, 40)
+        );
+        assert_eq!(
+            frame
+                .terminal_size(20_000, 20_000, 1)
+                .expect("bounded grid"),
+            (MAX_COLUMNS, MAX_ROWS, 2_400, 1_600)
         );
     }
 

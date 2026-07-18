@@ -82,6 +82,7 @@ impl Drop for Daemon {
 struct Connection {
     stream: UnixStream,
     request_id: u64,
+    controller_id: Option<u64>,
 }
 
 impl Connection {
@@ -106,6 +107,7 @@ impl Connection {
         Self {
             stream,
             request_id: 1,
+            controller_id: None,
         }
     }
 
@@ -148,9 +150,37 @@ impl Connection {
         }
     }
 
+    async fn acquire_control(&mut self, splint_id: SplintId, incarnation: u64) -> u64 {
+        if let Some(controller_id) = self.controller_id {
+            return controller_id;
+        }
+        let Response::ControlGranted { controller_id } = self
+            .request(Request::AcquireControl {
+                splint_id,
+                incarnation,
+            })
+            .await
+        else {
+            panic!("control was not granted");
+        };
+        self.controller_id = Some(controller_id);
+        controller_id
+    }
+
+    async fn release_control(&mut self) {
+        let controller_id = self.controller_id.take().expect("controller owned");
+        assert_eq!(
+            self.request(Request::ReleaseControl { controller_id })
+                .await,
+            Response::Acknowledged
+        );
+    }
+
     async fn input(&mut self, splint_id: SplintId, incarnation: u64, bytes: &[u8]) {
+        let controller_id = self.acquire_control(splint_id, incarnation).await;
         assert_eq!(
             self.request(Request::Input {
+                controller_id,
                 splint_id,
                 incarnation,
                 bytes: bytes.to_vec(),
@@ -290,9 +320,11 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     && cell.attributes.foreground_source != ColorSource::Default
             }));
 
+        let creator_controller = creator.acquire_control(splint_id, incarnation).await;
         assert_eq!(
             creator
                 .request(Request::Resize {
+                    controller_id: creator_controller,
                     splint_id,
                     incarnation,
                     columns: 100,
@@ -322,9 +354,11 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         let detached = snapshot_until(&mut reattached, splint_id, incarnation, "while-detached").await;
         assert!(detached.revision > resized.revision);
 
+        let reattached_controller = reattached.acquire_control(splint_id, incarnation).await;
         assert_eq!(
             reattached
                 .request(Request::Resize {
+                    controller_id: reattached_controller,
                     splint_id,
                     incarnation,
                     columns: 40,
@@ -335,6 +369,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 .await,
             Response::Acknowledged
         );
+        reattached.release_control().await;
         let mut slow = daemon.connect().await;
         let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
         let mut producer = daemon.connect().await;

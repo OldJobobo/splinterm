@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use splinterm_core::{Dojo, SplintId};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -16,6 +16,8 @@ pub const MAX_COLUMNS: u16 = 240;
 pub const MAX_ROWS: u16 = 80;
 pub const MAX_OUTSTANDING_REQUESTS: usize = 1;
 pub const MAX_SUBSCRIPTIONS: usize = 4;
+pub const MAX_UPDATE_ROW_PATCHES: usize = MAX_ROWS as usize;
+pub const MAX_UPDATE_SCROLLS: usize = MAX_ROWS as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -96,12 +98,21 @@ pub enum Request {
         incarnation: u64,
         scrollback_rows: usize,
     },
+    AcquireControl {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+    ReleaseControl {
+        controller_id: u64,
+    },
     Input {
+        controller_id: u64,
         splint_id: SplintId,
         incarnation: u64,
         bytes: Vec<u8>,
     },
     Resize {
+        controller_id: u64,
         splint_id: SplintId,
         incarnation: u64,
         columns: u16,
@@ -136,6 +147,9 @@ pub enum Response {
         subscription_id: u64,
         snapshot: TerminalSnapshot,
     },
+    ControlGranted {
+        controller_id: u64,
+    },
     Acknowledged,
     Terminated {
         code: Option<i32>,
@@ -148,6 +162,9 @@ pub enum Response {
 pub enum SubscriptionEvent {
     Snapshot {
         snapshot: TerminalSnapshot,
+    },
+    Update {
+        update: TerminalUpdate,
     },
     ResyncRequired {
         current_revision: u64,
@@ -187,6 +204,7 @@ pub enum ErrorCode {
     TooManyOutstandingRequests,
     DevelopmentFeatureDisabled,
     Unauthorized,
+    ControllerUnavailable,
     NotFound,
     StaleIncarnation,
     InvalidArgument,
@@ -194,6 +212,135 @@ pub enum ErrorCode {
     Cancelled,
     RequestNotFound,
     Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalUpdate {
+    pub base_revision: u64,
+    pub revision: u64,
+    pub rows: Vec<TerminalRowPatch>,
+    pub scrolls: Vec<TerminalScroll>,
+    pub cursor: Option<TerminalCursor>,
+    pub title: Option<String>,
+    pub input_modes: Option<TerminalInputModes>,
+    pub active_screen: Option<ActiveScreen>,
+    pub palette: Option<Vec<u32>>,
+    pub default_colors: Option<[u32; 3]>,
+    pub columns: Option<usize>,
+    pub row_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalRowPatch {
+    pub index: usize,
+    pub row: TerminalRow,
+}
+
+impl TerminalUpdate {
+    /// Validates revision continuity and every collection/index bound against
+    /// the client's current semantic view.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when the update cannot be applied without an
+    /// allocation or index exceeding negotiated protocol limits.
+    pub fn validate_against(
+        &self,
+        current_revision: u64,
+        current_columns: usize,
+        current_rows: usize,
+    ) -> Result<(), ProtocolError> {
+        if self.base_revision != current_revision
+            || self.revision != current_revision.saturating_add(1)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal update revision is not contiguous",
+            ));
+        }
+        let columns = self.columns.unwrap_or(current_columns);
+        let rows = self.row_count.unwrap_or(current_rows);
+        if columns == 0 || columns > usize::from(MAX_COLUMNS) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal update columns exceed limits",
+            ));
+        }
+        if rows == 0 || rows > usize::from(MAX_ROWS) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal update rows exceed limits",
+            ));
+        }
+        if self.rows.len() > MAX_UPDATE_ROW_PATCHES {
+            return Err(ProtocolError::new(
+                ErrorCode::ResourceLimit,
+                "terminal update contains too many row patches",
+            ));
+        }
+        if self.scrolls.len() > MAX_UPDATE_SCROLLS {
+            return Err(ProtocolError::new(
+                ErrorCode::ResourceLimit,
+                "terminal update contains too many scroll operations",
+            ));
+        }
+        let mut seen = vec![false; rows];
+        for patch in &self.rows {
+            if patch.index >= rows || patch.row.cells.len() > columns || seen[patch.index] {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal row patch is duplicate or exceeds dimensions",
+                ));
+            }
+            seen[patch.index] = true;
+        }
+        for scroll in &self.scrolls {
+            let region_rows = scroll.end_row.saturating_sub(scroll.start_row);
+            if scroll.start_row >= scroll.end_row
+                || scroll.end_row > rows
+                || scroll.rows == 0
+                || scroll.rows > region_rows
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal scroll exceeds dimensions",
+                ));
+            }
+        }
+        if self
+            .palette
+            .as_ref()
+            .is_some_and(|palette| palette.len() != 256)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal update palette must contain 256 colors",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCursor {
+    pub column: i32,
+    pub row: i32,
+    pub deferred_wrap: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalScroll {
+    pub direction: ScrollDirection,
+    pub start_row: usize,
+    pub end_row: usize,
+    pub rows: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollDirection {
+    Forward,
+    Reverse,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,6 +353,10 @@ pub struct TerminalSnapshot {
     pub cursor_column: i32,
     pub cursor_row: i32,
     pub cursor_deferred_wrap: bool,
+    pub active_screen: ActiveScreen,
+    pub input_modes: TerminalInputModes,
+    pub palette: Vec<u32>,
+    pub default_colors: [u32; 3],
     pub title: String,
     pub visible_rows: Vec<TerminalRow>,
     pub scrollback_rows: Vec<TerminalRow>,
@@ -213,6 +364,27 @@ pub struct TerminalSnapshot {
     pub omitted_oldest_scrollback_rows: usize,
     pub exited_code: Option<i32>,
     pub exited_signal: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveScreen {
+    Normal,
+    Alternate,
+}
+
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "wire input modes are independent terminal semantics"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInputModes {
+    pub application_cursor: bool,
+    pub application_keypad: bool,
+    pub focus_reporting: bool,
+    pub bracketed_paste: bool,
+    pub cursor_visible: bool,
+    pub cursor_blink: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,5 +481,58 @@ mod tests {
         assert!(limits.maximum_input_bytes < limits.maximum_frame_bytes);
         assert!(limits.maximum_outstanding_requests > 0);
         assert!(limits.maximum_subscriptions > 0);
+    }
+
+    fn update() -> TerminalUpdate {
+        TerminalUpdate {
+            base_revision: 4,
+            revision: 5,
+            rows: vec![TerminalRowPatch {
+                index: 1,
+                row: TerminalRow {
+                    linebreak: false,
+                    cells: Vec::new(),
+                },
+            }],
+            scrolls: Vec::new(),
+            cursor: None,
+            title: None,
+            input_modes: None,
+            active_screen: None,
+            palette: None,
+            default_colors: None,
+            columns: None,
+            row_count: None,
+        }
+    }
+
+    #[test]
+    fn terminal_update_validation_bounds_revisions_rows_scrolls_and_palette() {
+        assert!(update().validate_against(4, 80, 24).is_ok());
+
+        let mut invalid = update();
+        invalid.revision = 6;
+        assert!(invalid.validate_against(4, 80, 24).is_err());
+
+        let mut invalid = update();
+        invalid.rows[0].index = 24;
+        assert!(invalid.validate_against(4, 80, 24).is_err());
+
+        let mut invalid = update();
+        invalid.rows.push(invalid.rows[0].clone());
+        assert!(invalid.validate_against(4, 80, 24).is_err());
+
+        let mut invalid = update();
+        invalid.scrolls.push(TerminalScroll {
+            direction: ScrollDirection::Forward,
+            start_row: 2,
+            end_row: 25,
+            rows: 1,
+        });
+        assert!(invalid.validate_against(4, 80, 24).is_err());
+
+        let mut invalid = update();
+        invalid.palette = Some(vec![0; 255]);
+        assert!(invalid.validate_against(4, 80, 24).is_err());
     }
 }
