@@ -700,6 +700,7 @@ fn handle_command(
             )));
         }
         Command::Subscribe(capacity, reply) => {
+            subscribers.retain(|subscriber| !subscriber.events.is_closed());
             if capacity == 0 {
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
@@ -720,6 +721,7 @@ fn handle_command(
             }));
         }
         Command::Attach(max_rows, capacity, reply) => {
+            subscribers.retain(|subscriber| !subscriber.events.is_closed());
             if capacity == 0 || subscribers.len() >= config.max_subscribers {
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
