@@ -1,0 +1,32 @@
+{
+  "box_generation_ns": {
+    "max": 681,
+    "median": 311,
+    "min": 291,
+    "p95": 461
+  },
+  "canvas": {
+    "height": 600,
+    "width": 960
+  },
+  "cell": {
+    "baseline": 23,
+    "height": 30,
+    "width": 14
+  },
+  "full_canvas_blend_ns": {
+    "max": 84280,
+    "median": 65725,
+    "min": 63881,
+    "p95": 74301
+  },
+  "profile": "release",
+  "samples": 100,
+  "setup_ns": 90935317,
+  "warm_cache_lookup_ns": {
+    "max": 491,
+    "median": 220,
+    "min": 200,
+    "p95": 340
+  }
+}

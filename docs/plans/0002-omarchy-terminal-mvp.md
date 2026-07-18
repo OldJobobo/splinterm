@@ -22,8 +22,12 @@
 - [ ] Benchmark actual Wayland SHM slot release and resize churn.
 - [x] Record initial `fontdb`/Swash discovery, metrics, and fallback coverage
   evidence in [Spike 0003](../spikes/0003-font-stack-inventory.md).
-- [ ] Complete shaping/raster visual comparisons against Foot/fcft.
-- [ ] Add deterministic Foot text-row renderer references.
+- [x] Render, shape, cache, capture, and compare the first deterministic corpus
+  against pinned Foot/fcft in
+  [Spike 0004](../spikes/0004-deterministic-text-row-comparison.md).
+- [ ] Complete shaping/raster visual comparisons against Foot/fcft, including
+  box-drawing geometry and measured fallback ink bounds.
+- [x] Add deterministic Foot text-row renderer references.
 - [ ] Accept Wayland/event-loop and font/renderer ADRs.
 - [ ] Promote the native window shell into the graphical `splinterm` client.
 
