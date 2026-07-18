@@ -86,6 +86,10 @@ cargo test --workspace
 # Complete isolated daemon/PTY detach/reattach/resync lifecycle
 cargo test -p splinterd --test end_to_end -- --test-threads=1
 
+# Human-paced visual walkthrough on an empty Hyprland workspace 8
+# (Foot is only the presenter; this is not the future native Splinterm window.)
+tools/run-phase1-demo.py
+
 # Optional parser fuzzing (requires cargo-fuzz)
 cargo fuzz run terminal-advance
 ```
