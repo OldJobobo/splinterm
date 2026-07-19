@@ -23,7 +23,7 @@ Detailed plan: [`plans/0001-terminal-kernel.md`](plans/0001-terminal-kernel.md)
 - Test-only attach snapshot, ordered deltas, backpressure, and resynchronization
 - Durable metadata with honest relaunch/recovery semantics
 
-## Phase 2 — Omarchy-native terminal MVP (next)
+## Phase 2 — Omarchy-native terminal MVP (in progress: Part 8.1 parity gate)
 
 Detailed plan: [`plans/0002-omarchy-terminal-mvp.md`](plans/0002-omarchy-terminal-mvp.md)
 
@@ -34,6 +34,14 @@ Detailed plan: [`plans/0002-omarchy-terminal-mvp.md`](plans/0002-omarchy-termina
 - `xdg-terminal-exec`, stable app ID, desktop entry, and Arch package
 - Omarchy palette inclusion and live theme application
 - Foot-compatible configuration migration strategy
+- Release-blocking Foot differential gate for all printable ASCII: final pixels,
+  cell placement, four-sided ink clearance, padding, styles, and scales
+- Bounded graphical scrollback viewport with Foot-compatible navigation,
+  anchoring, follow-live, selection, resize, resync, and reattach behavior
+
+Part 8 integration is implemented, but Phase 2 remains open. Continue with the
+[Part 8.1 parity and scrollback plan](plans/0002-omarchy-terminal-mvp.md#phase-81-foot-visual-parity-and-graphical-scrollback-completion)
+before packaging or claiming MVP completion.
 
 ## Phase 3 — multiplexing
 

@@ -1,7 +1,7 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Phase 8 implementation complete — Omarchy integration validation recorded
-- **Roadmap:** Phase 8 validation
+- **Status:** Phase 8.1 reopened — Foot visual parity and graphical scrollback block Phase 2 completion
+- **Roadmap:** Phase 8.1 renderer-parity and scrollback completion
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -80,6 +80,17 @@
 - [ ] Record the full Phase 4 baseline matrix with host/software context,
   including continuous `yes`, large colored-file `cat`, measured resize and
   detach/reattach costs, and total renderer-memory metrics.
+- [ ] Build a reproducible pre-compositor Foot/fcft oracle for all 95 printable
+  ASCII characters, with exact face, metrics, bitmap, placement, and environment
+  provenance.
+- [ ] Replace approximate font/cell placement with an explicit Foot-derived cell
+  geometry contract and verify ink clearance and terminal padding on all sides.
+- [ ] Make full-frame, row-damage, scroll-copy, cold-cache, and warm-cache paths
+  produce equivalent final pixels for equivalent terminal state.
+- [ ] Implement a bounded graphical scrollback viewport, navigation, follow-live,
+  unseen-output, selection, resize, clear-history, resync, and reattach behavior.
+- [ ] Amend ADR 0004 with measured tolerances, renderer-stack consequences, and
+  every intentional Foot divergence before resuming packaging/release work.
 
 ## Goal
 
@@ -553,6 +564,539 @@ Define an explicit compatibility subset for this MVP:
 Do not claim arbitrary `foot.ini` compatibility. Provide diagnostics for
 unsupported keys and a migration document referencing the pinned Foot baseline.
 
+## Phase 8.1: Foot visual parity and graphical scrollback completion
+
+Phase 8 integration exposed a release-blocking quality gap: the current renderer
+is not yet close enough to Foot in final glyph pixels, cell placement, or
+spacing, and the graphical client does not provide usable scrollback. Reopen
+Phase 2 here. Do not hide the gap behind whole-row screenshots, permissive image
+tolerances, or subjective review. Packaging may be prepared in parallel, but
+Phase 2 cannot be declared complete until this subphase passes.
+
+### 8.1.1 Establish a reproducible Foot render oracle
+
+Extend `tools/foot-oracle/` so one command renders equivalent Foot and
+Splinterm fixtures and emits machine-readable evidence. Pin and record:
+
+- Foot commit, fcft version, fontconfig version/configuration, selected font
+  file/index/hash, fallback chain, and relevant environment variables;
+- font family/style/size, DPI, logical scale, buffer scale, fractional-scale
+  rounding, hinting, antialiasing, subpixel mode, palette, grid, and padding;
+- capture stage and pixel format, preferring pre-compositor ARGB buffers on both
+  sides so compositor color management and decorations cannot affect results;
+- glyph ID, selected face, advance, horizontal/vertical bearings, bitmap size,
+  ascent, descent, line height, baseline, pen origin, cell origin, and logical
+  and physical cell rectangles; and
+- the pinned transcript, expected result, tolerance policy, and tool versions.
+
+The oracle must fail loudly on unrecorded environment drift. It must generate a
+summary, structured metrics, actual/reference crops, and mismatch heatmaps. Raw
+hashes remain provenance only; they are not a parity assertion.
+
+### 8.1.2 Cover every printable ASCII character
+
+The required baseline is U+0020 through U+007E—all 95 printable ASCII
+characters—not just `A` or the word `ASCII`. Exercise each character alone and
+in rows that reveal placement and cumulative drift:
+
+- the complete printable set in code-point order;
+- repeated narrow and wide-looking forms such as `iiii`, `WWWW`, `....`,
+  `____`, `||||`, and spaces;
+- adjacency-sensitive punctuation, quotes, brackets, braces, slashes,
+  backslashes, pipes, accents, and underscore;
+- alternating pairs and every adjacent pair in the canonical ASCII row;
+- 80- and 240-column repeated rows to detect cumulative pen drift; and
+- leading/trailing spaces and glyphs touching each expected ink extreme.
+
+Run the matrix for regular, bold, italic, and bold-italic at the supported
+production font sizes, including the current default, and at 1×, 1.25×, 1.5×,
+and 2×. Add dim, underline, double underline where supported, strike, undercurl,
+reverse, conceal, cursor overlap, and neighboring wide/fallback glyph cases as
+separate decoration/interaction fixtures. ASCII parity is the first hard gate;
+Unicode, box drawing, Nerd Font glyphs, emoji, CJK, and combining sequences
+retain their existing differential coverage and must not regress.
+
+For every rendered cell record:
+
+- final absolute ink bounds and bitmap dimensions;
+- left, right, top, and bottom cell-to-ink clearance;
+- baseline and decoration coordinates;
+- alpha/RGB mismatch count, maximum channel error, mismatch bounding box, and
+  structural/edge error; and
+- selected face, glyph ID, cache key, and fallback decision.
+
+### 8.1.3 Make cell and window geometry explicit
+
+Introduce one reviewed `CellGeometry`/`CellMetrics` contract used by sizing,
+hit-testing, cursor/IME rectangles, glyph placement, damage, and rendering. It
+must define cell width/height, ascent/descent, baseline, letter spacing, line
+height adjustment, pen rounding, and logical-to-buffer conversion. Replace
+implicit centering or rounded-`M` assumptions unless the Foot oracle proves that
+they are equivalent.
+
+Model left, right, top, and bottom terminal padding independently. Specify how
+odd residual pixels are distributed when a configured window is not an exact
+multiple of the cell dimensions. Differentially test `cell_metrics`,
+`SnapshotFrame::load_scaled`, initial sizing, `terminal_size`, `cell_at`, cursor
+and IME rectangles, selection bounds, and damage rectangles. Matching raw glyph
+masks is insufficient: the glyph's final absolute location inside the cell and
+the cell's location inside the window must match.
+
+Implementation must follow evidence:
+
+1. determine whether mismatch originates in font selection, shaping, raster
+   mask, metrics, pen placement, scaling, composition, or color conversion;
+2. correct fontconfig/fallback and metric derivation before adding offsets;
+3. remove unconditional cluster centering if it differs from Foot's pen model;
+4. centralize integer/fractional rounding and prohibit independent call-site
+   rounding; and
+5. if Swash cannot meet the accepted mask gate, re-open ADR 0004 and evaluate a
+   maintained fcft bridge or another rasterizer rather than accumulating
+   per-glyph hacks.
+
+No character-specific placement adjustment is acceptable. A character-specific
+pixel tolerance is allowed only when documented with a reproducible cause and
+approved in ADR 0004.
+
+### 8.1.4 Add automated pixel and spacing gates
+
+The comparator must align by explicit cell origins, never by best-fit image
+translation. For each fixture it produces exact-match count, mismatch count,
+maximum channel delta, mismatch bounds, edge-clearance deltas, and a heatmap.
+Required gates on the pinned reference host are:
+
+- exact cell, baseline, pen, padding, cursor, and decoration geometry;
+- zero cumulative horizontal or vertical drift across long rows;
+- no ink crossing an unintended cell edge and no clipping at any window edge;
+- zero mismatched grayscale mask pixels for printable ASCII where Foot and
+  Splinterm use the same face and raster contract;
+- any nonzero color tolerance is explicit, minimal, fixture-specific, and
+  justified by a documented color/pixel-format conversion;
+- byte-identical output for equivalent full-frame and incremental-row paints;
+- equivalent results with cold/warm glyph caches, after eviction, after scale
+  changes, and after theme reload; and
+- deterministic repeated runs on the same pinned environment.
+
+Portable CI runs geometry, fixture-schema, comparison-tool, viewport, and
+renderer-path tests. Host-sensitive raster tests run in a documented pinned
+container/VM or on the reference Omarchy host and publish artifacts. CI must
+report an explicit unsupported-environment skip; it must never silently update
+references. Oracle reference updates require review of old/new metrics,
+heatmaps, provenance, and an ADR/tolerance change when behavior changes.
+
+### 8.1.5 Implement graphical scrollback as a viewport
+
+The daemon remains the owner of canonical bounded history; the client owns only
+viewport state. Replace the graphical client's zero-row attach request with a
+configured bounded request and design paging if the current protocol snapshot
+limit is too small for practical use. Do not increase a wire bound without
+measuring frame size, authorization, resync, and memory consequences.
+
+The client viewport must track:
+
+- live-bottom versus history mode and offset from the newest logical row;
+- available, returned, and omitted history counts;
+- a stable top-row anchor while new output arrives;
+- unseen-output state and an explicit return-to-live action; and
+- clamping after history truncation, clear-history, resize/reflow, alternate
+  screen transitions, process-incarnation changes, and resync.
+
+When terminal mouse tracking is disabled, wheel input scrolls local history.
+When tracking is enabled, preserve Foot-compatible mouse reports. Add and
+document Foot-compatible keyboard navigation, including Shift+PageUp,
+Shift+PageDown, and return-to-bottom behavior. Define precise behavior for the
+alternate screen, `CSI 3 J`, application output while scrolled up, selection
+and copy across the history/visible-grid boundary, URL hover, resize/reflow,
+detach/reattach, history omission, and a history capacity of zero.
+
+Rendering a historical viewport must not mutate daemon terminal state, PTY
+size, cursor state, or the live semantic snapshot. Cursor and IME presentation
+must be suppressed or transformed consistently while viewing history. New
+output must continue to be consumed without forcing the viewport to jump.
+
+### 8.1.6 Testing ladder and development sequence
+
+Implement in reviewable vertical slices:
+
+1. **Oracle inventory:** freeze provenance and make current mismatches visible
+   without changing rendering.
+2. **ASCII extraction:** add all-character metric/mask fixtures and comparator
+   reports.
+3. **Geometry contract:** centralize metrics, padding, scaling, and coordinate
+   conversion with unit/property tests.
+4. **Placement/raster correction:** fix one classified mismatch source at a
+   time; regenerate reports but not references.
+5. **Path equivalence:** compare full paint, semantic row damage, scroll-copy,
+   cursor-only damage, cold/warm cache, eviction, and theme/scale invalidation.
+6. **Viewport model:** implement pure scrollback arithmetic and state-machine
+   tests before binding wheel/keyboard input.
+7. **Protocol/render integration:** attach, page/resync if required, compose
+   history plus live rows, then add selection and URL behavior.
+8. **Wayland and end-to-end validation:** inject wheel/keyboard events and run
+   real Foot/Splinterm scenarios on the reference host.
+9. **Decision review:** amend ADR 0004, record intentional divergences, and
+   obtain visual sign-off only after automated gates pass.
+
+Required automated coverage:
+
+- unit/property tests for metric rounding, residual padding, edge clearance,
+  viewport offsets, anchors, clamping, trimming, and follow-live transitions;
+- oracle differential tests for the complete ASCII/style/size/scale matrix;
+- renderer integration tests proving all paint/cache/damage paths equivalent;
+- protocol tests for zero, one, maximum, omitted, trimmed, cleared, stale, and
+  resynchronized scrollback results;
+- Wayland tests distinguishing local scrolling from application mouse reports;
+- end-to-end tests that exceed history capacity, navigate and copy history,
+  receive output while scrolled up, return live, clear history, resize/reflow,
+  enter/leave alternate screen, detach, reattach, and force resync; and
+- fuzz/property coverage for viewport arithmetic and bounded oracle image/metric
+  parsing.
+
+Every failure report must classify the first divergent layer: environment/font
+selection, shaping, raster mask, metrics, placement/rounding, composition/color,
+cache/damage, protocol history, viewport state, or input routing. Preserve the
+smallest failing fixture and its artifacts. Do not tune a later layer to conceal
+an earlier-layer mismatch.
+
+### 8.1.7 Closure execution plan
+
+The remaining work is organized as six dependency-ordered workstreams. Do not
+run the final Hyprland sign-off until the deterministic renderer, history
+identity, and CI gates are green. Each numbered item below closes one of the
+known Phase 8.1 blockers.
+
+#### Workstream A — authoritative final-buffer parity
+
+##### A1. Final composited Foot-buffer comparison
+
+**Purpose:** move from matching isolated glyph masks to matching the pixels that
+are actually submitted for a terminal grid.
+
+**Implementation:**
+
+1. Extend the disposable pinned Foot patch with a test-only pre-submit dump at
+   the completed render-target boundary. Emit width, height, stride, ARGB format,
+   logical/buffer scale, grid dimensions, cell metrics, padding, cursor state,
+   and frame identity beside the raw bytes.
+2. Add a Splinterm exporter that renders the identical `TerminalSnapshot`
+   through `SnapshotFrame` and `paint_snapshot` into a pre-Wayland ARGB buffer.
+3. Define fixtures for the 95-character ASCII row, repeated narrow/wide forms,
+   punctuation, leading/trailing spaces, cursor shapes, reverse video, dim, and
+   edge cells. Include 80- and 240-column drift rows.
+4. Add a strict ARGB comparator aligned by declared window and cell origins. It
+   must report mismatch count, maximum channel delta, mismatch bounds, per-cell
+   mismatch counts, edge-clearance deltas, and PNG/PPM heatmaps.
+5. Compare the whole grid and independently crop every cell so a global failure
+   can be reduced to the first divergent cell/layer.
+
+**Acceptance:** default regular ASCII has exact cell/window geometry, no
+cumulative drift, no clipped ink, and zero pixel mismatch except explicitly
+recorded color-format conversions. Full-frame reference generation and
+comparison run from one command without compositor screenshots.
+
+**Files:** `tools/foot-oracle/patches/`, `tools/foot-oracle/`,
+`crates/splinterm/src/renderer.rs`, a new final-buffer exporter, Spike 0016, and
+ADR 0004.
+
+##### A2. Bold/italic/bold-italic size and scale matrix
+
+**Matrix:**
+
+- faces: regular, bold, italic, bold italic;
+- logical font sizes: 6, 12, current default 22, 32, 48, and 96 px;
+- scales: 1×, 1.25×, 1.5×, and 2×;
+- corpora: all printable ASCII, long drift rows, punctuation, combining text,
+  box drawing, CJK, and fallback cases.
+
+**Implementation:** parameterize fcft, isolated FreeType, production-cache, and
+final-buffer exporters by face pattern, logical size, and scale. Resolve styles
+from the configured primary family rather than hard-coded JetBrains patterns.
+Record face file/index/hash for every matrix cell. Run cheap geometry/property
+tests for the continuous supported size range while keeping the pinned visual
+matrix finite.
+
+**Acceptance:** every matrix cell passes exact face identity, metrics, advance,
+cell placement, and grayscale alpha. Color/fallback tolerances are explicit.
+No style changes the terminal advance contract or causes cache identity reuse.
+
+##### A3. Decorations
+
+**Implementation sequence:**
+
+1. Extend `splinterm-freetype` with safe owned decoration metrics matching
+   fcft's baseline-relative underline and strike calculations.
+2. Represent decoration spans separately from glyphs in `SnapshotFrame`, keyed
+   by row, column range, color, style, position, and thickness.
+3. Render single underline, double underline, strike, and undercurl through one
+   shared row compositor used by full and incremental paths.
+4. Clip decorations to their intended cell spans, including wide leaders,
+   spacers, italic overhang, reverse/dim colors, and adjacent styled runs.
+5. Add Foot final-buffer fixtures at every required scale and style.
+
+If the current wire attributes cannot distinguish single/double/curly
+underline, extend terminal semantics and protocol explicitly; do not collapse
+styles into one boolean while claiming parity.
+
+**Acceptance:** baseline-relative coordinates and thickness match Foot;
+decorations do not leave gaps between adjacent equal runs, cross unrelated
+cells, or differ between full and damaged-row paints.
+
+##### A4. Independent four-sided geometry
+
+Replace symmetric `origin_x/origin_y` policy with reviewed types:
+
+```text
+CellGeometry { width, height, baseline, advance_rounding }
+TerminalPadding { left, right, top, bottom }
+WindowGeometry { cells, padding, residual_distribution, scale }
+```
+
+Use this contract for initial size, resize/grid calculations, hit-testing,
+cursor and IME rectangles, selection, URL ranges, damage, final composition,
+and captures. Define where odd residual pixels go instead of silently splitting
+them symmetrically.
+
+**Tests:** all four cell-to-ink clearances; all four window padding edges; zero,
+asymmetric, odd, and oversized padding; edge glyphs; fractional scaling;
+round-trip cell↔pixel conversion; 80/240-column drift.
+
+**Acceptance:** no geometry call site independently rounds scale or derives
+padding, and Foot differential reports zero unexplained edge delta.
+
+#### Workstream B — renderer path invariants
+
+##### B1. Scroll-copy, eviction, theme-reload, and cursor-only equivalence
+
+Build a common test harness that starts from semantic state `S`, renders a clean
+reference frame, then reaches the same state through each optimized path:
+
+- full repaint;
+- dirty-row repaint;
+- forward/reverse scroll-copy plus exposed-row repaint;
+- cursor-only movement/blink/style damage;
+- glyph-cache cold, warm, forced eviction, and repopulation;
+- scale invalidation and return to the original scale; and
+- theme reload and return to the original palette.
+
+Compare complete ARGB buffers byte-for-byte after each path. Add an explicit
+raster-face budget/eviction policy or prove the finite face×scale bound and
+report its memory separately.
+
+**Acceptance:** equivalent semantic state always produces equivalent bytes;
+optimized paths never retain stale cursor, decoration, theme, or copied pixels.
+Cache metrics remain bounded and eviction cannot alter output.
+
+#### Workstream C — durable scrollback identity and paging
+
+##### C1. Stable daemon row identities
+
+Content equality is not an identity. Replace overlap inference with daemon-owned
+monotonic logical row IDs that survive ring movement but are invalidated when
+resize/reflow creates new logical segmentation.
+
+Add to snapshots/updates:
+
+- history generation;
+- oldest/newest available row ID;
+- IDs on returned history rows; and
+- explicit append, trim, clear, and reflow-generation transitions.
+
+IDs must be scoped to Splint ID, process incarnation, and history generation.
+Repeated identical rows must remain distinguishable. Clearing history or
+incompatible reflow advances the generation and forces viewport/page reset.
+
+**Acceptance:** property tests cover duplicate rows, wraparound, trimming,
+clear, alternate screen, resize/reflow, stale incarnation, and revision gaps
+without content-based anchor inference.
+
+##### C2. Revision-bound paging beyond 16 rows
+
+Add bounded protocol messages conceptually equivalent to:
+
+```text
+ScrollbackPageRequest {
+  splint_id, incarnation, terminal_revision, history_generation,
+  before_row_id, max_rows
+}
+ScrollbackPage {
+  history_generation, oldest_available, newest_available,
+  rows, has_older
+}
+```
+
+Keep a small transfer bound per page and the existing frame-size limit. Reject
+stale revision/generation/incarnation requests with an explicit resync response.
+Authorize every page with `Observe + Scrollback`. The client page cache must be
+row- and byte-bounded, deduplicate by row ID, and evict pages farthest from the
+viewport without losing the anchor.
+
+**Tests:** empty history; one row; exact page; multiple pages; repeated content;
+concurrent append; ring trim between request/response; clear; stale generation;
+malformed/oversized pages; cancellation; disconnect; resync; detach/reattach.
+
+**Acceptance:** a user can navigate the configured history capacity rather than
+only the newest 16 rows, while every request, response, cache, and allocation
+remains bounded.
+
+#### Workstream D — complete graphical history UX
+
+##### D1. Visible unseen-output and return-to-live UI
+
+Render a trusted, non-terminal-controlled overlay while detached showing:
+
+- position/history status;
+- bounded unseen-row count; and
+- a clear return-to-live action.
+
+Provide keyboard (`Shift+End`), mouse, and accessible action paths. Terminal
+content must not be able to imitate the trusted indicator. Reduced-motion mode
+must avoid attention-seeking animation.
+
+**Acceptance:** new output does not jump a detached viewport; the indicator
+updates without mutating daemon state; activation returns to live bottom,
+clears unseen count, restores cursor/IME, and damages only required regions.
+
+##### D2. Resize/reflow and page-boundary selection
+
+Define policy before implementation:
+
+- live resize follows daemon reflow and remains at bottom;
+- detached resize anchors by stable logical row ID plus intra-row position;
+- generation-changing reflow resets or remaps with an explicit user-visible
+  outcome, never a silent wrong row;
+- selection endpoints use row IDs and columns, not viewport array indices; and
+- page eviction pins pages containing selection endpoints until copy completes
+  or cancels selection explicitly.
+
+Selection/copy and URL detection must work across loaded page boundaries without
+logging terminal text. Alternate screen, clear-history, resync, and incarnation
+change cancel or remap state according to documented rules.
+
+**Acceptance:** deterministic tests cover grow/shrink, soft-wrap reflow, wide
+cells, selection spanning three pages, output during selection, trim of an
+endpoint, clear, resync, and reattach.
+
+#### Workstream E — reproducibility, CI, and performance
+
+##### E1. Pinned provenance and CI oracle
+
+Create a machine-readable environment manifest containing:
+
+- Foot/fcft commits and build options;
+- FreeType/fontconfig versions and effective hinting/render policy;
+- every font file/index/SHA-256 and fallback chain;
+- logical size, DPI, scales, cell/padding policy, palette, and pixel format;
+- Rust dependency versions; and
+- relevant environment/configuration files.
+
+The oracle must compare the live environment to the manifest and fail on drift.
+CI must install or fetch checksum-pinned fonts, build the pinned oracle, run the
+portable matrix subset, and upload summaries/heatmaps on failure. Jobs unable
+to provide the pinned environment must emit an explicit named skip; they may not
+silently pass or rewrite references.
+
+**Acceptance:** a clean CI worker reproduces the required default parity result,
+and reference updates require reviewed provenance plus old/new artifacts.
+
+##### E2. Performance and memory baselines
+
+Extend the Phase 4 benchmark to record, with host/software context:
+
+- idle CPU and wakeups;
+- 80×24 and 240×80 full and damaged frames;
+- cold/warm/evicted glyph-cache latency;
+- FreeType face creation and retained memory;
+- continuous `yes` and large colored-file `cat`;
+- output while detached deep in history;
+- page fetch/cache/eviction latency and bytes;
+- rapid resize/reflow;
+- theme and scale invalidation; and
+- detach/reattach snapshot/page restoration.
+
+Define numeric regression budgets from the first accepted baseline. Measure
+resident memory, SHM buffers, glyph bytes, raster faces, history pages, queue
+high-water marks, and frame latency percentiles. A slow renderer must never
+block daemon PTY consumption.
+
+**Acceptance:** all stores have explicit bounds, no workload shows unbounded
+growth, idle does not continuously redraw, and baseline artifacts are committed
+or linked from the spike report.
+
+#### Workstream F — real compositor validation
+
+##### F1. Hyprland end-to-end sign-off
+
+After A–E pass, run an isolated workspace-8 validation on the pinned Omarchy
+host:
+
+1. launch through `xdg-terminal-exec` and verify app ID/title;
+2. render the final ASCII/style/scale fixtures and capture pre-submit evidence;
+3. generate more history than one page and configured client cache capacity;
+4. navigate with wheel and keyboard while mouse reporting is off;
+5. enable application mouse tracking and verify wheel reports reach the app;
+6. select/copy across pages, receive output while detached, and return live;
+7. resize/reflow at 1×, 1.25×, 1.5×, and 2× where available;
+8. clear history, enter/leave alternate screen, force resync, detach, and
+   reattach;
+9. run continuous output while sampling CPU, memory, frame pacing, and PTY
+   responsiveness; and
+10. close/reopen the client and confirm daemon-owned process continuity and
+    resource cleanup.
+
+Automate input/capture through a nested compositor where practical. Record the
+exact commands, host manifest, logs without terminal bodies, benchmark output,
+and reviewed screenshots/crops.
+
+**Acceptance:** every scenario passes, no authority/privacy invariant regresses,
+no unexplained visual differential remains, and the evidence is linked from the
+Phase 8.1 exit record.
+
+### Dependency order and review slices
+
+Execute as buildable commits:
+
+1. `Add final Foot buffer capture and comparator` (A1 foundation)
+2. `Centralize cell and four-sided padding geometry` (A4)
+3. `Render Foot-compatible terminal decorations` (A3)
+4. `Run style size scale and drift matrix` (A2 + A1)
+5. `Prove optimized renderer path equivalence` (B1)
+6. `Add stable scrollback row identities` (C1)
+7. `Add bounded revision-bound history paging` (C2)
+8. `Add trusted detached-history status controls` (D1)
+9. `Anchor reflow and selection across pages` (D2)
+10. `Pin oracle environment and enable CI artifacts` (E1)
+11. `Record renderer and history performance baselines` (E2)
+12. `Validate Phase 8.1 under Hyprland` (F1)
+
+A1/A4 and C1 can proceed in parallel. A2 depends on A1, A3, and A4. B1 depends
+on the final compositor. C2 depends on C1. D1 depends on C2's viewport/cache
+contract; D2 depends on C1 and C2. E1 begins with A1 and becomes required for
+A2. E2 runs after B1 and C2. F1 is last.
+
+For every slice, require formatting, strict Clippy, workspace tests, focused
+property/differential tests, bounded malformed-input tests, updated provenance,
+and no silent fixture regeneration.
+
+### 8.1 exit gate
+
+Phase 2 may resume packaging/release validation only when:
+
+- all 95 printable ASCII characters pass final-buffer pixel and placement gates
+  at the pinned default configuration;
+- the required style, size, and scale matrix passes its documented tolerances;
+- all four cell-to-ink edges and all four terminal padding edges are measured;
+- 80- and 240-column fixtures show no cumulative spacing drift;
+- full and incremental renderer paths are equivalent and cache state does not
+  alter final pixels;
+- graphical scrollback navigation, anchoring, follow-live, selection, clearing,
+  resize, alternate-screen, resync, and reattach behavior pass automated tests;
+- oracle generation and mismatch reporting are reproducible with one documented
+  command and publish reviewable artifacts;
+- performance and memory remain bounded under continuous output while scrolled
+  up and while generating the full parity matrix; and
+- ADR 0004 names exact tolerances, environment constraints, renderer-stack
+  consequences, and all intentional divergences from pinned Foot.
+
 ## Phase 9: packaging and release validation
 
 Deliver:
@@ -709,18 +1253,23 @@ Do not call Roadmap Phase 2 complete until:
 - Omarchy theme changes apply live;
 - `xdg-terminal-exec` command/cwd launch contracts pass;
 - Arch packaging installs coherent desktop metadata and helper binaries;
-- unsupported Foot/config behavior is listed explicitly; and
+- unsupported Foot/config behavior is listed explicitly;
+- Phase 8.1 ASCII pixel/placement, edge-spacing, renderer-path, and graphical
+  scrollback gates pass against the pinned Foot oracle; and
 - workspace formatting, strict Clippy, tests, visual fixtures, and package
   checks pass.
 
 ## Immediate next task
 
-Begin Phase 0 with three parallel evidence spikes:
+Continue Phase 8.1 from the exact 95/95 default-ASCII production raster gate:
 
-1. open a native xdg-shell window and cycle SHM buffers under Hyprland;
-2. render a deterministic monospace text row through candidate font stacks and
-   compare it with pinned Foot; and
-3. draft the Wayland/event-loop and font/renderer ADRs from measured results.
+1. add pinned style/size/scale matrices and final cell-composited Foot buffer
+   comparisons, including decoration and four-sided spacing geometry;
+2. complete scroll-copy/cache-eviction/theme-reload renderer-path equivalence;
+3. add revision-bound history paging or stable row identities plus scrollback
+   append/trim/clear update metadata; and
+4. wire the tested client viewport into Wayland wheel/keyboard input, rendering,
+   selection, unseen-output indication, resize, resync, and reattach behavior.
 
-Do not begin broad keyboard, clipboard, or configuration work until the first
-native window and font/renderer choices have passed review.
+Do not resume packaging or declare Roadmap Phase 2 complete until the Phase 8.1
+exit gate passes.
