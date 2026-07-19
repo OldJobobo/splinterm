@@ -25,8 +25,19 @@ pub struct CursorSnapshot {
     pub viewport_position: Option<Coordinate>,
 }
 
+#[derive(Debug)]
+pub struct ScrollbackPage<'a> {
+    pub history_generation: u64,
+    pub terminal_revision: TerminalRevision,
+    pub rows: Vec<RowSnapshot<'a>>,
+    pub has_older: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScrollbackSnapshot {
+    pub history_generation: u64,
+    pub oldest_available_row_id: Option<u64>,
+    pub newest_available_row_id: Option<u64>,
     pub available_rows: usize,
     pub returned_rows: usize,
     pub omitted_oldest_rows: usize,
@@ -105,13 +116,31 @@ impl<'a> CellSnapshot<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RowSnapshot<'a> {
+    id: Option<u64>,
     row: &'a Row,
     composed: &'a ComposedTable,
 }
 
 impl<'a> RowSnapshot<'a> {
     pub(crate) const fn new(row: &'a Row, composed: &'a ComposedTable) -> Self {
-        Self { row, composed }
+        Self {
+            id: None,
+            row,
+            composed,
+        }
+    }
+
+    pub(crate) const fn scrollback(id: u64, row: &'a Row, composed: &'a ComposedTable) -> Self {
+        Self {
+            id: Some(id),
+            row,
+            composed,
+        }
+    }
+
+    #[must_use]
+    pub const fn id(self) -> Option<u64> {
+        self.id
     }
 
     #[must_use]

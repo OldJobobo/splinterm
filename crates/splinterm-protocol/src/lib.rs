@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use splinterm_core::{Dojo, SplintId};
 
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
+pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_COLUMNS: u16 = 240;
 pub const MAX_ROWS: u16 = 80;
@@ -118,6 +119,14 @@ pub enum Request {
         incarnation: u64,
         scrollback_rows: usize,
     },
+    ScrollbackPage {
+        splint_id: SplintId,
+        incarnation: u64,
+        terminal_revision: u64,
+        history_generation: u64,
+        before_row_id: u64,
+        max_rows: usize,
+    },
     AcquireControl {
         splint_id: SplintId,
         incarnation: u64,
@@ -173,6 +182,13 @@ pub enum Response {
     Attached {
         subscription_id: u64,
         snapshot: TerminalSnapshot,
+    },
+    ScrollbackPage {
+        page: ScrollbackPage,
+    },
+    ScrollbackResyncRequired {
+        current_revision: u64,
+        history_generation: u64,
     },
     ControlGranted {
         controller_id: u64,
@@ -301,6 +317,61 @@ pub enum ErrorCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScrollbackPage {
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub terminal_revision: u64,
+    pub history_generation: u64,
+    pub oldest_available_row_id: Option<u64>,
+    pub newest_available_row_id: Option<u64>,
+    pub rows: Vec<TerminalRow>,
+    pub has_older: bool,
+}
+
+impl ScrollbackPage {
+    /// Validates one bounded history page.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for malformed identity metadata or bounds.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let ids = self
+            .rows
+            .iter()
+            .map(|row| row.row_id)
+            .collect::<Option<Vec<_>>>();
+        let valid_bounds = match (self.oldest_available_row_id, self.newest_available_row_id) {
+            (None, None) => self.rows.is_empty() && !self.has_older,
+            (Some(oldest), Some(newest)) if oldest > 0 && oldest <= newest => {
+                ids.as_ref().is_some_and(|ids| {
+                    ids.iter().all(|id| *id > 0)
+                        && ids.windows(2).all(|pair| pair[0] < pair[1])
+                        && ids.first().is_none_or(|id| *id >= oldest)
+                        && ids.last().is_none_or(|id| *id <= newest)
+                        && (!self.has_older || ids.first().is_some_and(|first| *first > oldest))
+                })
+            }
+            _ => false,
+        };
+        if self.incarnation == 0
+            || self.terminal_revision == 0
+            || self.history_generation == 0
+            || self.rows.len() > MAX_SCROLLBACK_PAGE_ROWS
+            || self
+                .rows
+                .iter()
+                .any(|row| row.cells.len() > usize::from(MAX_COLUMNS))
+            || !valid_bounds
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "scrollback page metadata is inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalUpdate {
     pub base_revision: u64,
     pub revision: u64,
@@ -319,9 +390,25 @@ pub struct TerminalUpdate {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalScrollbackUpdate {
+    pub transition: HistoryTransition,
+    pub history_generation: u64,
+    pub oldest_available_row_id: Option<u64>,
+    pub newest_available_row_id: Option<u64>,
     pub rows: Vec<TerminalRow>,
     pub available_rows: usize,
     pub omitted_oldest_rows: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryTransition {
+    Append {
+        appended_rows: usize,
+        trimmed_rows: usize,
+    },
+    Clear,
+    Reflow,
+    Replace,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -345,6 +432,7 @@ impl TerminalUpdate {
     pub fn validate_against(
         &self,
         current_revision: u64,
+        current_history_generation: u64,
         current_columns: usize,
         current_rows: usize,
     ) -> Result<(), ProtocolError> {
@@ -383,6 +471,51 @@ impl TerminalUpdate {
             ));
         }
         if let Some(scrollback) = &self.scrollback {
+            let generation_valid = match scrollback.transition {
+                HistoryTransition::Append { .. } => {
+                    scrollback.history_generation == current_history_generation
+                }
+                HistoryTransition::Clear | HistoryTransition::Reflow => {
+                    scrollback.history_generation > current_history_generation
+                }
+                HistoryTransition::Replace => {
+                    scrollback.history_generation >= current_history_generation
+                }
+            };
+            if !generation_valid {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal update history generation transition is invalid",
+                ));
+            }
+            if matches!(
+                scrollback.transition,
+                HistoryTransition::Append {
+                    appended_rows,
+                    trimmed_rows,
+                } if appended_rows == 0
+                    || appended_rows > usize::from(MAX_ROWS)
+                    || trimmed_rows > appended_rows
+            ) {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal update history transition is invalid",
+                ));
+            }
+            if matches!(scrollback.transition, HistoryTransition::Clear)
+                && scrollback.available_rows != 0
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal update clear transition retains history",
+                ));
+            }
+            if scrollback.history_generation == 0 {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal update history generation must be non-zero",
+                ));
+            }
             if scrollback.rows.len() > MAX_SNAPSHOT_SCROLLBACK_ROWS {
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
@@ -405,6 +538,18 @@ impl TerminalUpdate {
                     "terminal update returns more scrollback rows than available",
                 ));
             }
+            if !valid_scrollback_identity(
+                &scrollback.rows,
+                scrollback.available_rows,
+                scrollback.omitted_oldest_rows,
+                scrollback.oldest_available_row_id,
+                scrollback.newest_available_row_id,
+            ) {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal update scrollback identity metadata is inconsistent",
+                ));
+            }
             if scrollback.omitted_oldest_rows
                 != scrollback
                     .available_rows
@@ -418,7 +563,11 @@ impl TerminalUpdate {
         }
         let mut seen = vec![false; rows];
         for patch in &self.rows {
-            if patch.index >= rows || patch.row.cells.len() > columns || seen[patch.index] {
+            if patch.index >= rows
+                || patch.row.row_id.is_some()
+                || patch.row.cells.len() > columns
+                || seen[patch.index]
+            {
                 return Err(ProtocolError::new(
                     ErrorCode::InvalidArgument,
                     "terminal row patch is duplicate or exceeds dimensions",
@@ -491,11 +640,65 @@ pub struct TerminalSnapshot {
     pub default_colors: [u32; 3],
     pub title: String,
     pub visible_rows: Vec<TerminalRow>,
+    pub history_generation: u64,
+    pub oldest_available_scrollback_row_id: Option<u64>,
+    pub newest_available_scrollback_row_id: Option<u64>,
     pub scrollback_rows: Vec<TerminalRow>,
     pub available_scrollback_rows: usize,
     pub omitted_oldest_scrollback_rows: usize,
     pub exited_code: Option<i32>,
     pub exited_signal: Option<i32>,
+}
+
+impl TerminalSnapshot {
+    /// Validates all snapshot dimensions and bounded scrollback identity metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when the snapshot is inconsistent or exceeds
+    /// negotiated protocol limits.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.columns == 0
+            || self.columns > usize::from(MAX_COLUMNS)
+            || self.rows == 0
+            || self.rows > usize::from(MAX_ROWS)
+            || self.visible_rows.len() != self.rows
+            || self.palette.len() != 256
+            || self.history_generation == 0
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal snapshot dimensions or metadata are invalid",
+            ));
+        }
+        if self
+            .visible_rows
+            .iter()
+            .any(|row| row.row_id.is_some() || row.cells.len() > self.columns)
+            || self.scrollback_rows.len() > MAX_SNAPSHOT_SCROLLBACK_ROWS
+            || self
+                .scrollback_rows
+                .iter()
+                .any(|row| row.cells.len() > self.columns)
+            || self.omitted_oldest_scrollback_rows
+                != self
+                    .available_scrollback_rows
+                    .saturating_sub(self.scrollback_rows.len())
+            || !valid_scrollback_identity(
+                &self.scrollback_rows,
+                self.available_scrollback_rows,
+                self.omitted_oldest_scrollback_rows,
+                self.oldest_available_scrollback_row_id,
+                self.newest_available_scrollback_row_id,
+            )
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal snapshot scrollback metadata is inconsistent",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,8 +735,41 @@ pub enum MouseTracking {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalRow {
+    pub row_id: Option<u64>,
     pub linebreak: bool,
     pub cells: Vec<TerminalCell>,
+}
+
+fn valid_scrollback_identity(
+    rows: &[TerminalRow],
+    available_rows: usize,
+    omitted_oldest_rows: usize,
+    oldest: Option<u64>,
+    newest: Option<u64>,
+) -> bool {
+    if available_rows == 0 {
+        return rows.is_empty() && oldest.is_none() && newest.is_none();
+    }
+    if rows.is_empty() {
+        return oldest.is_none() && newest.is_none();
+    }
+    let (Some(oldest), Some(newest)) = (oldest, newest) else {
+        return false;
+    };
+    let ids = rows
+        .iter()
+        .map(|row| row.row_id)
+        .collect::<Option<Vec<_>>>();
+    let Some(ids) = ids else {
+        return false;
+    };
+    oldest > 0
+        && newest > 0
+        && ids.iter().all(|id| *id > 0)
+        && ids.windows(2).all(|pair| pair[0] < pair[1])
+        && ids.last().copied() == Some(newest)
+        && (omitted_oldest_rows > 0 && ids.first().is_some_and(|first| oldest < *first)
+            || omitted_oldest_rows == 0 && ids.first().copied() == Some(oldest))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -675,6 +911,7 @@ mod tests {
             rows: vec![TerminalRowPatch {
                 index: 1,
                 row: TerminalRow {
+                    row_id: None,
                     linebreak: false,
                     cells: Vec::new(),
                 },
@@ -692,21 +929,166 @@ mod tests {
         }
     }
 
+    fn snapshot() -> TerminalSnapshot {
+        TerminalSnapshot {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            revision: 1,
+            columns: 1,
+            rows: 1,
+            cursor_column: 0,
+            cursor_row: 0,
+            cursor_deferred_wrap: false,
+            active_screen: ActiveScreen::Normal,
+            input_modes: TerminalInputModes {
+                application_cursor: false,
+                application_keypad: false,
+                focus_reporting: false,
+                bracketed_paste: false,
+                cursor_visible: true,
+                cursor_blink: false,
+                mouse_tracking: MouseTracking::None,
+                sgr_mouse: false,
+            },
+            palette: vec![0; 256],
+            default_colors: [0; 3],
+            title: String::new(),
+            visible_rows: vec![TerminalRow {
+                row_id: None,
+                linebreak: true,
+                cells: Vec::new(),
+            }],
+            history_generation: 1,
+            oldest_available_scrollback_row_id: Some(4),
+            newest_available_scrollback_row_id: Some(5),
+            scrollback_rows: vec![
+                TerminalRow {
+                    row_id: Some(4),
+                    linebreak: true,
+                    cells: Vec::new(),
+                },
+                TerminalRow {
+                    row_id: Some(5),
+                    linebreak: true,
+                    cells: Vec::new(),
+                },
+            ],
+            available_scrollback_rows: 2,
+            omitted_oldest_scrollback_rows: 0,
+            exited_code: None,
+            exited_signal: None,
+        }
+    }
+
+    #[test]
+    fn terminal_snapshot_validation_enforces_row_identity_scope_and_bounds() {
+        assert!(snapshot().validate().is_ok());
+        let mut invalid = snapshot();
+        invalid.visible_rows[0].row_id = Some(4);
+        assert!(invalid.validate().is_err());
+        let mut invalid = snapshot();
+        invalid.scrollback_rows[1].row_id = Some(4);
+        assert!(invalid.validate().is_err());
+        let mut invalid = snapshot();
+        invalid.scrollback_rows[0].row_id = Some(0);
+        assert!(invalid.validate().is_err());
+        let mut invalid = snapshot();
+        invalid.scrollback_rows.swap(0, 1);
+        assert!(invalid.validate().is_err());
+        let mut invalid = snapshot();
+        invalid.history_generation = 0;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn scrollback_page_validation_enforces_identity_order_and_bounds() {
+        let page = ScrollbackPage {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            terminal_revision: 4,
+            history_generation: 2,
+            oldest_available_row_id: Some(1),
+            newest_available_row_id: Some(9),
+            rows: vec![
+                TerminalRow {
+                    row_id: Some(3),
+                    linebreak: false,
+                    cells: Vec::new(),
+                },
+                TerminalRow {
+                    row_id: Some(4),
+                    linebreak: false,
+                    cells: Vec::new(),
+                },
+            ],
+            has_older: true,
+        };
+        assert!(page.validate().is_ok());
+
+        let mut invalid = page.clone();
+        invalid.incarnation = 0;
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.terminal_revision = 0;
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.history_generation = 0;
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.rows[0].row_id = Some(0);
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.rows[0].row_id = Some(4);
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.rows[0].row_id = None;
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.oldest_available_row_id = Some(10);
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.newest_available_row_id = Some(2);
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.rows[1].row_id = Some(10);
+        assert!(invalid.validate().is_err());
+        let mut invalid = page.clone();
+        invalid.rows = vec![invalid.rows[0].clone(); MAX_SCROLLBACK_PAGE_ROWS + 1];
+        assert!(invalid.validate().is_err());
+
+        let empty_history = ScrollbackPage {
+            oldest_available_row_id: None,
+            newest_available_row_id: None,
+            rows: Vec::new(),
+            has_older: false,
+            ..page.clone()
+        };
+        assert!(empty_history.validate().is_ok());
+        let mut invalid = empty_history;
+        invalid.has_older = true;
+        assert!(invalid.validate().is_err());
+
+        let mut empty_before_oldest = page;
+        empty_before_oldest.rows.clear();
+        empty_before_oldest.has_older = false;
+        assert!(empty_before_oldest.validate().is_ok());
+    }
+
     #[test]
     fn terminal_update_validation_bounds_revisions_rows_scrolls_and_palette() {
-        assert!(update().validate_against(4, 80, 24).is_ok());
+        assert!(update().validate_against(4, 1, 80, 24).is_ok());
 
         let mut invalid = update();
         invalid.revision = 6;
-        assert!(invalid.validate_against(4, 80, 24).is_err());
+        assert!(invalid.validate_against(4, 1, 80, 24).is_err());
 
         let mut invalid = update();
         invalid.rows[0].index = 24;
-        assert!(invalid.validate_against(4, 80, 24).is_err());
+        assert!(invalid.validate_against(4, 1, 80, 24).is_err());
 
         let mut invalid = update();
         invalid.rows.push(invalid.rows[0].clone());
-        assert!(invalid.validate_against(4, 80, 24).is_err());
+        assert!(invalid.validate_against(4, 1, 80, 24).is_err());
 
         let mut invalid = update();
         invalid.scrolls.push(TerminalScroll {
@@ -715,21 +1097,84 @@ mod tests {
             end_row: 25,
             rows: 1,
         });
-        assert!(invalid.validate_against(4, 80, 24).is_err());
+        assert!(invalid.validate_against(4, 1, 80, 24).is_err());
 
         let mut invalid = update();
         invalid.palette = Some(vec![0; 255]);
-        assert!(invalid.validate_against(4, 80, 24).is_err());
+        assert!(invalid.validate_against(4, 1, 80, 24).is_err());
 
         let mut invalid = update();
         invalid.scrollback = Some(TerminalScrollbackUpdate {
+            transition: HistoryTransition::Replace,
+            history_generation: 1,
+            oldest_available_row_id: None,
+            newest_available_row_id: None,
             rows: vec![TerminalRow {
+                row_id: None,
                 linebreak: false,
                 cells: Vec::new(),
             }],
             available_rows: 0,
             omitted_oldest_rows: 0,
         });
-        assert!(invalid.validate_against(4, 80, 24).is_err());
+        assert!(invalid.validate_against(4, 1, 80, 24).is_err());
+
+        let mut valid = update();
+        valid.scrollback = Some(TerminalScrollbackUpdate {
+            transition: HistoryTransition::Append {
+                appended_rows: 1,
+                trimmed_rows: 0,
+            },
+            history_generation: 2,
+            oldest_available_row_id: Some(7),
+            newest_available_row_id: Some(9),
+            rows: vec![
+                TerminalRow {
+                    row_id: Some(7),
+                    linebreak: false,
+                    cells: Vec::new(),
+                },
+                TerminalRow {
+                    row_id: Some(9),
+                    linebreak: false,
+                    cells: Vec::new(),
+                },
+            ],
+            available_rows: 2,
+            omitted_oldest_rows: 0,
+        });
+        assert!(valid.validate_against(4, 2, 80, 24).is_ok());
+
+        let mut invalid_ids = valid.clone();
+        invalid_ids.scrollback.as_mut().unwrap().rows[0].row_id = Some(0);
+        assert!(invalid_ids.validate_against(4, 2, 80, 24).is_err());
+        let mut reversed_ids = valid.clone();
+        reversed_ids.scrollback.as_mut().unwrap().rows.swap(0, 1);
+        assert!(reversed_ids.validate_against(4, 2, 80, 24).is_err());
+        let mut duplicate_ids = valid.clone();
+        duplicate_ids.scrollback.as_mut().unwrap().rows[1].row_id = Some(7);
+        assert!(duplicate_ids.validate_against(4, 2, 80, 24).is_err());
+
+        let mut stale_reset = valid;
+        let scrollback = stale_reset.scrollback.as_mut().unwrap();
+        scrollback.transition = HistoryTransition::Reflow;
+        scrollback.history_generation = 2;
+        assert!(stale_reset.validate_against(4, 2, 80, 24).is_err());
+        stale_reset.scrollback.as_mut().unwrap().history_generation = 3;
+        assert!(stale_reset.validate_against(4, 2, 80, 24).is_ok());
+
+        let mut stale_clear = update();
+        stale_clear.scrollback = Some(TerminalScrollbackUpdate {
+            transition: HistoryTransition::Clear,
+            history_generation: 2,
+            oldest_available_row_id: None,
+            newest_available_row_id: None,
+            rows: Vec::new(),
+            available_rows: 0,
+            omitted_oldest_rows: 0,
+        });
+        assert!(stale_clear.validate_against(4, 2, 80, 24).is_err());
+        stale_clear.scrollback.as_mut().unwrap().history_generation = 3;
+        assert!(stale_clear.validate_against(4, 2, 80, 24).is_ok());
     }
 }

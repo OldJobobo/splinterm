@@ -271,16 +271,22 @@ impl Terminal {
             .into_iter()
             .map(|row| RowSnapshot::new(row, &self.composed))
             .collect();
-        let (scrollback_rows, available, omitted) = if self.active == ActiveScreen::Normal {
-            self.normal
-                .snapshot_scrollback_rows(request.max_scrollback_rows)
-        } else {
-            (Vec::new(), 0, 0)
-        };
+        let (scrollback_rows, available, omitted, oldest, newest) =
+            if self.active == ActiveScreen::Normal {
+                self.normal
+                    .snapshot_scrollback_rows(request.max_scrollback_rows)
+            } else {
+                (Vec::new(), 0, 0, None, None)
+            };
         let returned_rows = scrollback_rows.len();
+        let (oldest, newest) = if returned_rows == 0 {
+            (None, None)
+        } else {
+            (oldest, newest)
+        };
         let scrollback_rows = scrollback_rows
             .into_iter()
-            .map(|row| RowSnapshot::new(row, &self.composed))
+            .map(|(id, row)| RowSnapshot::scrollback(id, row, &self.composed))
             .collect();
         TerminalSnapshot::new(
             self.revision,
@@ -302,11 +308,38 @@ impl Terminal {
             visible_rows,
             scrollback_rows,
             ScrollbackSnapshot {
+                history_generation: self.normal.history_generation(),
+                oldest_available_row_id: oldest,
+                newest_available_row_id: newest,
                 available_rows: available,
                 returned_rows,
                 omitted_oldest_rows: omitted,
             },
         )
+    }
+
+    /// Returns a bounded history page immediately before `before_row_id`.
+    #[must_use]
+    pub fn scrollback_page(
+        &self,
+        before_row_id: u64,
+        maximum_rows: usize,
+    ) -> crate::ScrollbackPage<'_> {
+        let (rows, has_older) = if self.active == ActiveScreen::Normal {
+            self.normal
+                .snapshot_scrollback_page(before_row_id, maximum_rows)
+        } else {
+            (Vec::new(), false)
+        };
+        crate::ScrollbackPage {
+            history_generation: self.normal.history_generation(),
+            terminal_revision: self.revision,
+            rows: rows
+                .into_iter()
+                .map(|(id, row)| RowSnapshot::scrollback(id, row, &self.composed))
+                .collect(),
+            has_older,
+        }
     }
 
     /// Returns contiguous retained updates after `base` or requires a snapshot.
@@ -1438,12 +1471,18 @@ impl Terminal {
         let columns = self.grid().columns();
         let rows = self.grid().screen_rows();
         let config = self.config.clone();
+        let normal_history_namespace = self.normal.history_namespace();
+        let alternate_history_namespace = self.alternate.history_namespace();
         let events = std::mem::take(&mut self.events);
         let event_overflowed = self.event_overflowed;
         let revision = self.revision;
         let update_history = std::mem::take(&mut self.update_history);
         let current_change = self.current_change.take();
         *self = Self::new(columns, rows, config);
+        self.normal
+            .continue_history_namespace(normal_history_namespace);
+        self.alternate
+            .continue_history_namespace(alternate_history_namespace);
         self.events = events;
         self.event_overflowed = event_overflowed;
         self.revision = revision;

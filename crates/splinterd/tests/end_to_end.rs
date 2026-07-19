@@ -314,6 +314,9 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         )
         .await;
         assert!(snapshot_text(&with_pwd).contains(cwd.to_str().unwrap()));
+        with_pwd.validate().expect("daemon snapshot identity is valid");
+        assert!(with_pwd.visible_rows.iter().all(|row| row.row_id.is_none()));
+        assert!(with_pwd.scrollback_rows.iter().all(|row| row.row_id.is_some()));
         assert!(with_pwd
             .visible_rows
             .iter()
@@ -341,6 +344,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         );
         let resized = snapshot_until(&mut creator, splint_id, incarnation, "phase8-initial").await;
         assert_eq!((resized.columns, resized.rows), (100, 30));
+        assert!(resized.history_generation > with_pwd.history_generation);
 
         drop(creator);
         let mut detached_writer = daemon.connect().await;
@@ -397,6 +401,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             }
         }
         assert!(saw_resync, "slow subscriber was not forced to resynchronize");
+        drop(producer);
 
         let final_snapshot = snapshot_until(
             &mut reattached,
@@ -406,6 +411,90 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         )
         .await;
         assert!(final_snapshot.revision > detached.revision);
+
+        let mut before_row_id = final_snapshot
+            .scrollback_rows
+            .first()
+            .and_then(|row| row.row_id)
+            .expect("overflow produced paged history");
+        let mut paged_ids = std::collections::BTreeSet::new();
+        for _ in 0..4 {
+            let Response::ScrollbackPage { page } = reattached
+                .request(Request::ScrollbackPage {
+                    splint_id,
+                    incarnation,
+                    terminal_revision: final_snapshot.revision,
+                    history_generation: final_snapshot.history_generation,
+                    before_row_id,
+                    max_rows: splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS,
+                })
+                .await
+            else {
+                panic!("daemon did not return a scrollback page");
+            };
+            page.validate().expect("daemon page is valid");
+            assert_eq!(page.rows.len(), splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS);
+            assert!(page.rows.iter().all(|row| row.row_id.unwrap() < before_row_id));
+            for row_id in page.rows.iter().filter_map(|row| row.row_id) {
+                assert!(paged_ids.insert(row_id), "pages must not overlap");
+            }
+            before_row_id = page.rows.first().and_then(|row| row.row_id).unwrap();
+        }
+        assert_eq!(paged_ids.len(), 4 * splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS);
+
+        for (revision, generation) in [
+            (
+                final_snapshot.revision.saturating_sub(1).max(1),
+                final_snapshot.history_generation,
+            ),
+            (
+                final_snapshot.revision,
+                final_snapshot.history_generation.saturating_add(1),
+            ),
+        ] {
+            assert!(matches!(
+                reattached
+                    .request(Request::ScrollbackPage {
+                        splint_id,
+                        incarnation,
+                        terminal_revision: revision,
+                        history_generation: generation,
+                        before_row_id,
+                        max_rows: 1,
+                    })
+                    .await,
+                Response::ScrollbackResyncRequired { .. }
+            ));
+        }
+
+        reattached
+            .input(
+                splint_id,
+                incarnation,
+                b"printf 'paging-binding-changed\\n'\n",
+            )
+            .await;
+        let changed = snapshot_until(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "paging-binding-changed",
+        )
+        .await;
+        assert!(changed.revision > final_snapshot.revision);
+        assert!(matches!(
+            reattached
+                .request(Request::ScrollbackPage {
+                    splint_id,
+                    incarnation,
+                    terminal_revision: final_snapshot.revision,
+                    history_generation: final_snapshot.history_generation,
+                    before_row_id,
+                    max_rows: 1,
+                })
+                .await,
+            Response::ScrollbackResyncRequired { .. }
+        ));
 
         match reattached
             .request(Request::Terminate {

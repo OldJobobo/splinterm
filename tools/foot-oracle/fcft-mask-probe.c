@@ -120,11 +120,17 @@ main(void)
     if (!fcft_init(FCFT_LOG_COLORIZE_NEVER, false, FCFT_LOG_CLASS_ERROR))
         return EXIT_FAILURE;
 
-    const char *names[] = {
-        "JetBrains Mono Nerd Font:pixelsize=22",
-        "Noto Sans CJK JP:pixelsize=22",
-        "Noto Color Emoji:pixelsize=22",
-    };
+    const char *size = getenv("SPLINTERM_EVIDENCE_FONT_SIZE");
+    if (size == NULL || size[0] == '\0')
+        size = "22";
+    char primary[128];
+    char cjk[128];
+    char emoji[128];
+    if (snprintf(primary, sizeof(primary), "JetBrains Mono Nerd Font:pixelsize=%s", size) >= sizeof(primary) ||
+        snprintf(cjk, sizeof(cjk), "Noto Sans CJK JP:pixelsize=%s", size) >= sizeof(cjk) ||
+        snprintf(emoji, sizeof(emoji), "Noto Color Emoji:pixelsize=%s", size) >= sizeof(emoji))
+        return EXIT_FAILURE;
+    const char *names[] = {primary, cjk, emoji};
     struct fcft_font *font = fcft_from_name(3, names, NULL);
     if (font == NULL)
         return EXIT_FAILURE;

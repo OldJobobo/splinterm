@@ -291,6 +291,12 @@ impl Grid {
             .generation
             .checked_add(1)
             .expect("grid generation exhausted");
+        dimensions.next_row_id = self.next_row_id;
+        dimensions.history_generation = self
+            .history_generation
+            .checked_add(1)
+            .expect("history generation exhausted");
+        dimensions.reidentify_allocated_rows_chronologically();
 
         *self = dimensions;
     }

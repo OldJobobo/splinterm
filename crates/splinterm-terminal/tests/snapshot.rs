@@ -48,6 +48,14 @@ fn bounded_scrollback_returns_newest_rows_in_chronological_order() {
     assert_eq!(rows, vec!["a   ", "b   "]);
     assert_eq!(snapshot.scrollback().available_rows, 2);
     assert_eq!(snapshot.scrollback().returned_rows, 2);
+    let ids = snapshot
+        .scrollback_rows()
+        .map(|row| row.id().expect("history rows carry identities"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(snapshot.scrollback().oldest_available_row_id, Some(ids[0]));
+    assert_eq!(snapshot.scrollback().newest_available_row_id, Some(ids[1]));
 
     let bounded = terminal.snapshot(SnapshotRequest {
         max_scrollback_rows: 1,
@@ -57,6 +65,157 @@ fn bounded_scrollback_returns_newest_rows_in_chronological_order() {
         vec!["b   "]
     );
     assert_eq!(bounded.scrollback().omitted_oldest_rows, 1);
+
+    let metadata_only = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(metadata_only.scrollback().available_rows, 2);
+    assert_eq!(metadata_only.scrollback().returned_rows, 0);
+    assert_eq!(metadata_only.scrollback().oldest_available_row_id, None);
+    assert_eq!(metadata_only.scrollback().newest_available_row_id, None);
+}
+
+#[test]
+fn scrollback_pages_walk_older_rows_without_overlap() {
+    let mut terminal = terminal(4, 2);
+    terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+    let newest = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 2,
+    });
+    let before = newest
+        .scrollback_rows()
+        .next()
+        .and_then(splinterm_terminal::RowSnapshot::id)
+        .unwrap();
+    let page = terminal.scrollback_page(before, 2);
+    assert_eq!(page.terminal_revision, terminal.revision());
+    assert_eq!(
+        page.rows.iter().copied().map(row_text).collect::<Vec<_>>(),
+        vec!["a   ", "b   "]
+    );
+    assert!(!page.has_older);
+    assert!(page.rows.iter().all(|row| row.id().unwrap() < before));
+}
+
+#[test]
+fn stable_history_ids_survive_ring_movement_and_generation_changes_reset_them() {
+    let config = TerminalConfig {
+        scrollback_lines: 1,
+        ..TerminalConfig::default()
+    };
+    let mut terminal = Terminal::new(2, 2, config);
+    terminal.advance(b"x\r\nx\r\nx\r\nx\r\n");
+    let first = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 2,
+    });
+    let first_ids = first
+        .scrollback_rows()
+        .map(|row| row.id().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(first_ids.len(), 2);
+    assert_ne!(first_ids[0], first_ids[1], "equal content is not identity");
+    let generation = first.scrollback().history_generation;
+
+    terminal.advance(b"x\r\n");
+    let rolled = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 2,
+    });
+    let rolled_ids = rolled
+        .scrollback_rows()
+        .map(|row| row.id().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rolled.scrollback().history_generation, generation);
+    assert_eq!(rolled_ids[0], first_ids[1]);
+    assert_ne!(rolled_ids[1], first_ids[1]);
+    assert_eq!(
+        rolled.scrollback().oldest_available_row_id,
+        Some(rolled_ids[0])
+    );
+    assert_eq!(
+        rolled.scrollback().newest_available_row_id,
+        Some(rolled_ids[1])
+    );
+
+    terminal.advance(b"\x1b[3J");
+    let cleared = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 2,
+    });
+    assert!(cleared.scrollback().history_generation > generation);
+    assert_eq!(cleared.scrollback().available_rows, 0);
+    let cleared_generation = cleared.scrollback().history_generation;
+
+    terminal.resize(3, 2);
+    let resized = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 2,
+    });
+    assert!(resized.scrollback().history_generation > cleared_generation);
+}
+
+#[test]
+fn ris_advances_history_namespace_without_reusing_generation_or_row_ids() {
+    let mut terminal = terminal(2, 2);
+    terminal.advance(b"a\r\nb\r\nc\r\n");
+    let before = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 16,
+    });
+    let generation = before.scrollback().history_generation;
+    let newest = before
+        .scrollback()
+        .newest_available_row_id
+        .expect("history exists before RIS");
+
+    terminal.advance(b"\x1bc");
+    let reset = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 16,
+    });
+    assert!(reset.scrollback().history_generation > generation);
+    assert_eq!(reset.scrollback().available_rows, 0);
+    let reset_generation = reset.scrollback().history_generation;
+
+    terminal.advance(b"x\r\ny\r\nz");
+    let after = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 16,
+    });
+    assert_eq!(after.scrollback().history_generation, reset_generation);
+    assert!(
+        after
+            .scrollback_rows()
+            .all(|row| row.id().expect("history identity") > newest)
+    );
+}
+
+#[test]
+fn sparse_wrapped_reflow_assigns_ids_in_chronological_order() {
+    let config = TerminalConfig {
+        scrollback_lines: 5,
+        ..TerminalConfig::default()
+    };
+    let mut terminal = Terminal::new(4, 3, config);
+    terminal.advance(b"a\r\nb\r\nc\r\nd\r\ne");
+    let before = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 16,
+    });
+    let previous_newest = before.scrollback().newest_available_row_id.unwrap();
+    let previous_generation = before.scrollback().history_generation;
+
+    terminal.resize(3, 3);
+    let after = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: 16,
+    });
+    let ids = after
+        .scrollback_rows()
+        .map(|row| row.id().expect("reflowed history identity"))
+        .collect::<Vec<_>>();
+    assert!(after.scrollback().history_generation > previous_generation);
+    assert!(!ids.is_empty());
+    assert!(ids.iter().all(|id| *id > previous_newest));
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        after.scrollback().oldest_available_row_id,
+        ids.first().copied()
+    );
+    assert_eq!(
+        after.scrollback().newest_available_row_id,
+        ids.last().copied()
+    );
 }
 
 #[test]

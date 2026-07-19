@@ -1,0 +1,126 @@
+diff --git a/render.c b/render.c
+index cf5f969a..496b31e3 100644
+--- a/render.c
++++ b/render.c
+@@ -3,0 +4,2 @@
++#include <stdio.h>
++#include <stdlib.h>
+@@ -3322,0 +3325,115 @@ dirty_cursor(struct terminal *term)
++static bool
++oracle_safe_identifier(const char *value)
++{
++    if (value == NULL || value[0] == '\0')
++        return false;
++    for (const char *it = value; *it != '\0'; it++) {
++        if ((*it >= 'a' && *it <= 'z') || (*it >= 'A' && *it <= 'Z') ||
++            (*it >= '0' && *it <= '9') || *it == '-' || *it == '_' || *it == '.')
++            continue;
++        return false;
++    }
++    return true;
++}
++
++static void
++oracle_dump_final_buffer(struct terminal *term, const struct buffer *buf)
++{
++    const char *prefix = getenv("FOOT_ORACLE_BUFFER_PREFIX");
++    const char *fixture = getenv("FOOT_ORACLE_FIXTURE");
++    const char *frame_id = getenv("FOOT_ORACLE_FRAME_ID");
++    if (prefix == NULL || prefix[0] == '\0')
++        return;
++    if (!oracle_safe_identifier(fixture) || !oracle_safe_identifier(frame_id)) {
++        LOG_ERR("invalid final-buffer oracle fixture or frame ID");
++        return;
++    }
++
++    char capture_marker[PATH_MAX];
++    if (snprintf(capture_marker, sizeof(capture_marker), "%s.capture", prefix) >= sizeof(capture_marker) ||
++        access(capture_marker, F_OK) < 0)
++        return;
++
++    static size_t best_ink = 0;
++    const uint32_t bg = term->colors.bg;
++    const uint32_t opaque_bg = 0xff000000 | bg;
++    size_t ink = 0;
++    for (int y = 0; y < buf->height; y++) {
++        const uint32_t *row = (const uint32_t *)((const uint8_t *)buf->data +
++                                                  (size_t)y * (size_t)buf->stride);
++        for (int x = 0; x < buf->width; x++)
++            ink += row[x] != opaque_bg;
++    }
++    if (ink == 0 || ink < best_ink)
++        return;
++
++    char raw_tmp[PATH_MAX];
++    char raw_path[PATH_MAX];
++    char metadata_tmp[PATH_MAX];
++    char metadata_path[PATH_MAX];
++    if (snprintf(raw_tmp, sizeof(raw_tmp), "%s.argb.tmp", prefix) >= sizeof(raw_tmp) ||
++        snprintf(raw_path, sizeof(raw_path), "%s.argb", prefix) >= sizeof(raw_path) ||
++        snprintf(metadata_tmp, sizeof(metadata_tmp), "%s.json.tmp", prefix) >= sizeof(metadata_tmp) ||
++        snprintf(metadata_path, sizeof(metadata_path), "%s.json", prefix) >= sizeof(metadata_path))
++    {
++        LOG_ERR("final-buffer oracle output path is too long");
++        return;
++    }
++
++    FILE *raw = fopen(raw_tmp, "wb");
++    if (raw == NULL)
++        return;
++    const size_t bytes = (size_t)buf->stride * (size_t)buf->height;
++    const bool raw_ok = fwrite(buf->data, 1, bytes, raw) == bytes && fclose(raw) == 0;
++    if (!raw_ok) {
++        unlink(raw_tmp);
++        return;
++    }
++
++    const char *cursor_shape =
++        term->cursor_style == CURSOR_BEAM ? "beam" :
++        term->cursor_style == CURSOR_UNDERLINE ? "underline" : "block";
++    int cursor_row = term->grid->cursor.point.row + term->grid->offset - term->grid->view;
++    cursor_row &= term->grid->num_rows - 1;
++    FILE *metadata = fopen(metadata_tmp, "w");
++    if (metadata == NULL) {
++        unlink(raw_tmp);
++        return;
++    }
++    const int scale_120 = (int)(term->scale * 120.f + .5f);
++    fprintf(metadata,
++            "{\n"
++            "  \"schema\": \"splinterm.final-buffer.v1\",\n"
++            "  \"width\": %d, \"height\": %d, \"stride\": %d,\n"
++            "  \"format\": \"argb8888\", \"byte_order\": \"bgra\", \"endianness\": \"little\",\n"
++            "  \"scale_120\": %d,\n"
++            "  \"grid\": {\"columns\": %d, \"rows\": %d},\n"
++            "  \"cell\": {\"width\": %d, \"height\": %d, \"baseline\": %d},\n"
++            "  \"padding\": {\"left\": %d, \"right\": %d, \"top\": %d, \"bottom\": %d},\n"
++            "  \"origin\": {\"x\": %d, \"y\": %d},\n",
++            buf->width, buf->height, buf->stride, scale_120,
++            term->cols, term->rows, term->cell_width, term->cell_height,
++            term->font_baseline, term->margins.left, term->margins.right,
++            term->margins.top, term->margins.bottom, term->margins.left,
++            term->margins.top);
++    if (term->hide_cursor)
++        fprintf(metadata, "  \"cursor\": null,\n");
++    else
++        fprintf(metadata,
++                "  \"cursor\": {\"column\": %d, \"row\": %d, \"shape\": \"%s\"},\n",
++                term->grid->cursor.point.col, cursor_row, cursor_shape);
++    fprintf(metadata,
++            "  \"fixture\": \"%s\", \"frame_id\": \"%s\",\n"
++            "  \"background_bgra\": [%u, %u, %u, 255],\n"
++            "  \"composition\": [\"terminal-backgrounds\", \"glyphs\", \"decorations\", \"cursor\"],\n"
++            "  \"provenance\": {\"implementation\": \"foot\", \"commit\": \"3c5b584b0eafa772eb4376fb6eaf6643399e190e\"}\n"
++            "}\n",
++            fixture, frame_id, bg & 0xff, (bg >> 8) & 0xff, (bg >> 16) & 0xff);
++    const bool metadata_ok = fclose(metadata) == 0;
++    if (!metadata_ok || rename(raw_tmp, raw_path) < 0 || rename(metadata_tmp, metadata_path) < 0) {
++        unlink(raw_tmp);
++        unlink(metadata_tmp);
++    } else
++        best_ink = ink;
++}
++
+@@ -3714,0 +3832,2 @@ grid_render(struct terminal *term)
++    oracle_dump_final_buffer(term, buf);
++

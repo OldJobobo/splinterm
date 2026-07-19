@@ -804,47 +804,35 @@ struct CellMetrics {
     strike_thickness: u32,
 }
 
-impl CellMetrics {
-    fn from_scaled_font_metrics(
-        mono_advance: f32,
-        ascent: f32,
-        descent: f32,
-        leading: f32,
-    ) -> Self {
-        // Foot/fcft exposes integer pixel extents. Round the complete line
-        // extent once; independently ceiling fractional components widened the
-        // accepted 22 px fixture from Foot's 29 px to 30 px.
-        Self {
-            width: positive_round_to_u32(mono_advance),
-            height: positive_round_to_u32(ascent + descent + leading.max(0.0)),
-            baseline: ceil_to_i32(ascent),
-            mono_advance,
-            underline_position: 0,
-            underline_thickness: 1,
-            strike_position: 0,
-            strike_thickness: 1,
-        }
-    }
-}
-
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the protocol-bounded integer terminal advance is exactly representable in f32"
+)]
 fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<CellMetrics> {
-    let primary = font_ref(primary_face)?;
-    let metrics = primary.metrics(&[]).scale(font_size);
-    let mono_advance = primary
-        .glyph_metrics(&[])
-        .scale(font_size)
-        .advance_width(primary.charmap().map('M'));
-    let mut cell = CellMetrics::from_scaled_font_metrics(
-        mono_advance,
-        metrics.ascent,
-        metrics.descent,
-        metrics.leading,
-    );
-    cell.underline_position = trunc_to_i32(metrics.underline_offset);
-    cell.underline_thickness = positive_round_to_u32(metrics.stroke_size);
-    cell.strike_position = trunc_to_i32(metrics.strikeout_offset);
-    cell.strike_thickness = positive_round_to_u32(metrics.stroke_size);
-    Ok(cell)
+    let mut face = RasterFace::open(
+        &primary_face.path,
+        u32::try_from(primary_face.index).context("primary face index")?,
+        pixel_size_26_6(font_size)?,
+    )
+    .context("open primary FreeType face for cell metrics")?;
+    let metrics = face.metrics().context("read primary FreeType metrics")?;
+    let glyph = face
+        .rasterize_gray(face.glyph_index('M'))
+        .context("rasterize primary M advance")?;
+    let swash_metrics = font_ref(primary_face)?.metrics(&[]).scale(font_size);
+    let width = u32::try_from(glyph.advance_x.max(1)).context("cell width")?;
+    let height = u32::try_from(metrics.height.max(metrics.ascent + metrics.descent).max(1))
+        .context("cell height")?;
+    Ok(CellMetrics {
+        width,
+        height,
+        baseline: i32::try_from(height).context("cell baseline height")? - metrics.descent,
+        mono_advance: glyph.advance_x as f32,
+        underline_position: trunc_to_i32(swash_metrics.underline_offset),
+        underline_thickness: positive_round_to_u32(swash_metrics.stroke_size),
+        strike_position: trunc_to_i32(swash_metrics.strikeout_offset),
+        strike_thickness: positive_round_to_u32(swash_metrics.stroke_size),
+    })
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1192,6 +1180,11 @@ fn put_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba: [
     canvas[index..index + 4].copy_from_slice(&[rgba[2], rgba[1], rgba[0], rgba[3]]);
 }
 
+fn pixman_multiply_unorm8(value: u8, alpha: u32) -> u32 {
+    let product = u32::from(value) * alpha + 0x80;
+    ((product >> 8) + product) >> 8
+}
+
 fn blend_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba: [u8; 4]) {
     let Some(index) = pixel_index(width, height, x, y) else {
         return;
@@ -1203,8 +1196,9 @@ fn blend_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba:
         .zip([rgba[2], rgba[1], rgba[0]])
     {
         *destination_channel = u8::try_from(
-            (u32::from(source_channel) * alpha + u32::from(*destination_channel) * inverse + 127)
-                / 255,
+            pixman_multiply_unorm8(source_channel, alpha)
+                .saturating_add(pixman_multiply_unorm8(*destination_channel, inverse))
+                .min(255),
         )
         .expect("blended channel fits u8");
     }
@@ -1258,6 +1252,10 @@ pub(crate) struct SnapshotFrame {
 }
 
 impl SnapshotFrame {
+    pub(crate) const fn cell_height(&self) -> u32 {
+        self.cell_height
+    }
+
     pub(crate) fn initial_logical_size(
         &self,
         columns: u16,
@@ -1469,7 +1467,7 @@ impl SnapshotFrame {
             cursor_color,
             scale_120,
         };
-        frame.prune_unreferenced_glyphs();
+        frame.enforce_cache_budget();
         Ok(frame)
     }
 
@@ -1522,7 +1520,9 @@ impl SnapshotFrame {
                 &mut self.cache,
             )?;
         }
-        self.prune_unreferenced_glyphs();
+        self.glyphs.sort_by_key(|glyph| (glyph.row, glyph.column));
+        self.decorations.sort_by_key(|span| (span.row, span.column));
+        self.enforce_cache_budget();
         Ok(())
     }
 
@@ -1594,7 +1594,11 @@ impl SnapshotFrame {
         }))
     }
 
-    fn prune_unreferenced_glyphs(&mut self) {
+    fn enforce_cache_budget(&mut self) {
+        const MAX_FRAME_GLYPH_CACHE_ENTRIES: usize = 4096;
+        if self.cache.len() <= MAX_FRAME_GLYPH_CACHE_ENTRIES {
+            return;
+        }
         let referenced: HashSet<_> = self.glyphs.iter().map(|glyph| glyph.key).collect();
         self.cache.retain(|key, _| referenced.contains(key));
     }
@@ -1603,6 +1607,96 @@ impl SnapshotFrame {
     pub(crate) fn refresh_cursor(&mut self, snapshot: &TerminalSnapshot) {
         self.cursor = snapshot_cursor(snapshot, self.columns, self.rows);
     }
+}
+
+/// Exact output of the production snapshot painter before Wayland submission.
+#[derive(Clone, Debug)]
+pub struct FinalBufferCapture {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub columns: u32,
+    pub rows: u32,
+    pub cell_width: u32,
+    pub cell_height: u32,
+    pub baseline: i32,
+    pub padding_left: u32,
+    pub padding_right: u32,
+    pub padding_top: u32,
+    pub padding_bottom: u32,
+    pub origin_x: u32,
+    pub origin_y: u32,
+    pub cursor: Option<(u32, u32)>,
+    pub background_bgra: [u8; 4],
+}
+
+/// Paints an owned terminal snapshot through `SnapshotFrame` and the production
+/// full-frame compositor into a tightly packed little-endian ARGB8888 buffer.
+///
+/// # Errors
+/// Returns an error for invalid snapshot geometry, scale, font state, or buffer
+/// size overflow.
+pub fn capture_final_buffer(
+    snapshot: &TerminalSnapshot,
+    scale_120: u32,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+) -> Result<FinalBufferCapture> {
+    snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let frame = SnapshotFrame::load_scaled(snapshot, scale_120)?;
+    let origin_x = u32::try_from(frame.origin_x).context("capture origin x")?;
+    let origin_y = u32::try_from(frame.origin_y).context("capture origin y")?;
+    let width = frame
+        .columns
+        .checked_mul(frame.cell_width)
+        .and_then(|value| value.checked_add(origin_x.checked_mul(2)?))
+        .context("capture width overflow")?;
+    let height = frame
+        .rows
+        .checked_mul(frame.cell_height)
+        .and_then(|value| value.checked_add(origin_y.checked_mul(2)?))
+        .context("capture height overflow")?;
+    let stride = width.checked_mul(4).context("capture stride overflow")?;
+    let length = usize::try_from(stride)
+        .ok()
+        .and_then(|stride| usize::try_from(height).ok()?.checked_mul(stride))
+        .context("capture allocation overflow")?;
+    let mut pixels = vec![0_u8; length];
+    paint_snapshot(
+        &mut pixels,
+        width,
+        height,
+        &frame,
+        show_cursor,
+        cursor_style,
+    );
+    Ok(FinalBufferCapture {
+        pixels,
+        width,
+        height,
+        stride,
+        columns: frame.columns,
+        rows: frame.rows,
+        cell_width: frame.cell_width,
+        cell_height: frame.cell_height,
+        baseline: frame.baseline,
+        padding_left: origin_x,
+        padding_right: origin_x,
+        padding_top: origin_y,
+        padding_bottom: origin_y,
+        origin_x,
+        origin_y,
+        cursor: show_cursor.then_some(frame.cursor).flatten(),
+        background_bgra: [
+            frame.canvas_background[2],
+            frame.canvas_background[1],
+            frame.canvas_background[0],
+            u8::MAX,
+        ],
+    })
 }
 
 fn snapshot_cursor(snapshot: &TerminalSnapshot, columns: u32, rows: u32) -> Option<(u32, u32)> {
@@ -2142,6 +2236,51 @@ fn paint_decorations(
     }
 }
 
+fn paint_glyphs(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    dirty_rows: Option<&[bool]>,
+) {
+    for row in 0..frame.rows {
+        if dirty_rows.is_some_and(|rows| {
+            !rows
+                .get(usize::try_from(row).expect("row fits usize"))
+                .copied()
+                .unwrap_or(false)
+        }) {
+            continue;
+        }
+        let start = frame.glyphs.partition_point(|glyph| glyph.row < row);
+        let end = frame.glyphs.partition_point(|glyph| glyph.row <= row);
+        // Foot renders each row from right to left. This order is observable
+        // when a glyph overhangs into its neighbor and both masks touch the
+        // same antialiased pixel.
+        for placed in frame.glyphs[start..end].iter().rev() {
+            let glyph = &frame.cache[&placed.key];
+            let span = frame.cell_width.saturating_mul(placed.cells);
+            let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
+            let pen_x = frame.origin_x
+                + i32::try_from(placed.column * frame.cell_width).expect("glyph x")
+                + round_to_i32(centered_pen + placed.x_offset);
+            let baseline = frame.origin_y
+                + i32::try_from(placed.row * frame.cell_height).expect("glyph y")
+                + frame.baseline
+                - round_to_i32(placed.y_offset);
+            blend_glyph(
+                canvas,
+                width,
+                height,
+                pen_x + glyph.left,
+                baseline - glyph.top,
+                glyph,
+                placed.foreground,
+            );
+        }
+    }
+}
+
 pub(crate) fn paint_snapshot(
     canvas: &mut [u8],
     width: u32,
@@ -2176,27 +2315,7 @@ pub(crate) fn paint_snapshot(
             );
         }
     }
-    for placed in &frame.glyphs {
-        let glyph = &frame.cache[&placed.key];
-        let span = frame.cell_width.saturating_mul(placed.cells);
-        let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
-        let pen_x = frame.origin_x
-            + i32::try_from(placed.column * frame.cell_width).expect("glyph x")
-            + round_to_i32(centered_pen + placed.x_offset);
-        let baseline = frame.origin_y
-            + i32::try_from(placed.row * frame.cell_height).expect("glyph y")
-            + frame.baseline
-            - round_to_i32(placed.y_offset);
-        blend_glyph(
-            canvas,
-            width,
-            height,
-            pen_x + glyph.left,
-            baseline - glyph.top,
-            glyph,
-            placed.foreground,
-        );
-    }
+    paint_glyphs(canvas, width, height, frame, None);
     paint_decorations(canvas, width, height, frame, None);
     if cursor_visible {
         let Some((column, row)) = frame.cursor else {
@@ -2258,34 +2377,7 @@ pub(crate) fn paint_snapshot_rows(
             );
         }
     }
-    for placed in &frame.glyphs {
-        if !dirty_rows
-            .get(usize::try_from(placed.row).expect("row fits usize"))
-            .copied()
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let glyph = &frame.cache[&placed.key];
-        let span = frame.cell_width.saturating_mul(placed.cells);
-        let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
-        let pen_x = frame.origin_x
-            + i32::try_from(placed.column * frame.cell_width).expect("glyph x")
-            + round_to_i32(centered_pen + placed.x_offset);
-        let baseline = frame.origin_y
-            + i32::try_from(placed.row * frame.cell_height).expect("glyph y")
-            + frame.baseline
-            - round_to_i32(placed.y_offset);
-        blend_glyph(
-            canvas,
-            width,
-            height,
-            pen_x + glyph.left,
-            baseline - glyph.top,
-            glyph,
-            placed.foreground,
-        );
-    }
+    paint_glyphs(canvas, width, height, frame, Some(dirty_rows));
     paint_decorations(canvas, width, height, frame, Some(dirty_rows));
     if cursor_visible {
         if let Some((column, row)) = frame.cursor.filter(|(_, row)| {
@@ -2567,11 +2659,15 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             title: "phase4 benchmark".into(),
             visible_rows: vec![
                 TerminalRow {
+                    row_id: None,
                     linebreak: false,
                     cells: vec![cell; columns],
                 };
                 rows
             ],
+            history_generation: 1,
+            oldest_available_scrollback_row_id: None,
+            newest_available_scrollback_row_id: None,
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
@@ -2832,12 +2928,13 @@ mod tests {
     }
 
     #[test]
-    fn cell_metrics_round_the_complete_foot_line_extent_once() {
-        let metrics = CellMetrics::from_scaled_font_metrics(13.2, 22.7, 6.2, 0.0);
+    fn cell_metrics_use_the_foot_freetype_integer_extents() {
+        let faces = snapshot_faces().unwrap();
+        let metrics = cell_metrics(&faces[0], 22.0).unwrap();
         assert_eq!(metrics.width, 13);
-        assert_eq!(metrics.height, 29);
+        assert_eq!(metrics.height, 30);
         assert_eq!(metrics.baseline, 23);
-        assert!((metrics.mono_advance - 13.2).abs() < f32::EPSILON);
+        assert!((metrics.mono_advance - 13.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -2959,6 +3056,7 @@ mod tests {
             visible_rows: ["ab", "cd"]
                 .into_iter()
                 .map(|text| TerminalRow {
+                    row_id: None,
                     linebreak: false,
                     cells: text
                         .chars()
@@ -2970,6 +3068,9 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
+            history_generation: 1,
+            oldest_available_scrollback_row_id: None,
+            newest_available_scrollback_row_id: None,
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
@@ -2997,6 +3098,24 @@ mod tests {
     }
 
     #[test]
+    fn final_buffer_capture_uses_declared_production_geometry_and_argb_bytes() {
+        let snapshot = incremental_snapshot();
+        let capture = capture_final_buffer(&snapshot, 120, true, CursorStyle::Block).unwrap();
+        assert_eq!((capture.columns, capture.rows), (2, 2));
+        assert_eq!(capture.origin_x, capture.padding_left);
+        assert_eq!(capture.origin_y, capture.padding_top);
+        assert_eq!(capture.padding_left, capture.padding_right);
+        assert_eq!(capture.padding_top, capture.padding_bottom);
+        assert_eq!(capture.stride, capture.width * 4);
+        assert_eq!(
+            capture.pixels.len(),
+            usize::try_from(capture.stride * capture.height).unwrap()
+        );
+        assert_eq!(capture.cursor, Some((0, 0)));
+        assert_eq!(capture.background_bgra[3], u8::MAX);
+    }
+
+    #[test]
     fn underline_styles_render_distinct_bounded_patterns() {
         let styles = [
             UnderlineStyle::Single,
@@ -3017,6 +3136,70 @@ mod tests {
                 assert_ne!(outputs[left], outputs[right]);
             }
         }
+    }
+
+    #[test]
+    fn overlapping_glyphs_compose_in_foot_right_to_left_order() {
+        let snapshot = incremental_snapshot();
+        let mut frame = SnapshotFrame::load_scaled(&snapshot, 120).unwrap();
+        let left_key = GlyphKey { face: 0, glyph: 1 };
+        let right_key = GlyphKey { face: 0, glyph: 2 };
+        frame.cache.clear();
+        frame.cache.insert(
+            left_key,
+            Arc::new(CachedGlyph {
+                content: Content::Mask,
+                left: i32::try_from(frame.cell_width).unwrap(),
+                top: frame.baseline,
+                width: 1,
+                height: 1,
+                data: vec![1],
+            }),
+        );
+        frame.cache.insert(
+            right_key,
+            Arc::new(CachedGlyph {
+                content: Content::Mask,
+                left: 0,
+                top: frame.baseline,
+                width: 1,
+                height: 1,
+                data: vec![178],
+            }),
+        );
+        frame.glyphs = vec![
+            SnapshotGlyph {
+                key: left_key,
+                column: 0,
+                row: 0,
+                cells: 1,
+                cluster_advance: u32_to_f32(frame.cell_width),
+                x_offset: 0.0,
+                y_offset: 0.0,
+                foreground: [235; 3],
+            },
+            SnapshotGlyph {
+                key: right_key,
+                column: 1,
+                row: 0,
+                cells: 1,
+                cluster_advance: u32_to_f32(frame.cell_width),
+                x_offset: 0.0,
+                y_offset: 0.0,
+                foreground: [235; 3],
+            },
+        ];
+        let width = u32::try_from(frame.origin_x).unwrap() * 2 + frame.cell_width * 2;
+        let height = u32::try_from(frame.origin_y).unwrap() * 2 + frame.cell_height;
+        let mut canvas = vec![0; usize::try_from(width * height * 4).unwrap()];
+        for pixel in canvas.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[22, 18, 14, 255]);
+        }
+        paint_glyphs(&mut canvas, width, height, &frame, None);
+        let x = u32::try_from(frame.origin_x).unwrap() + frame.cell_width;
+        let y = u32::try_from(frame.origin_y).unwrap();
+        let index = usize::try_from((y * width + x) * 4).unwrap();
+        assert_eq!(&canvas[index..index + 4], &[171, 169, 168, 255]);
     }
 
     #[test]
@@ -3042,7 +3225,8 @@ mod tests {
         let mut full = vec![0; usize::try_from(width * height * 4).unwrap()];
         paint_snapshot(&mut full, width, height, &frame, false, CursorStyle::Block);
         let underline_y = usize::try_from(frame.origin_y + frame.baseline + 3).unwrap();
-        let strike_y = usize::try_from(frame.origin_y + frame.baseline - 7).unwrap();
+        let strike_y =
+            usize::try_from(frame.origin_y + frame.baseline - frame.strike_position).unwrap();
         let underline_x = usize::try_from(frame.origin_x).unwrap();
         let strike_x =
             usize::try_from(frame.origin_x).unwrap() + usize::try_from(frame.cell_width).unwrap();
@@ -3141,6 +3325,7 @@ mod tests {
         shifted.visible_rows = ["xy", "ab"]
             .into_iter()
             .map(|text| TerminalRow {
+                row_id: None,
                 linebreak: false,
                 cells: text
                     .chars()
@@ -3281,7 +3466,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_refresh_prunes_stale_frame_glyphs() {
+    fn incremental_refresh_retains_warm_glyphs_below_budget() {
         let mut snapshot = incremental_snapshot();
         let mut frame = SnapshotFrame::load(&snapshot, 1).expect("initial frame");
         let old_keys: HashSet<_> = frame.cache.keys().copied().collect();
@@ -3294,11 +3479,8 @@ mod tests {
             .refresh_rows(&snapshot, &[true, true])
             .expect("refresh every row");
         let referenced: HashSet<_> = frame.glyphs.iter().map(|glyph| glyph.key).collect();
-        assert_eq!(
-            frame.cache.keys().copied().collect::<HashSet<_>>(),
-            referenced
-        );
-        assert!(old_keys.iter().any(|key| !frame.cache.contains_key(key)));
+        assert!(referenced.iter().all(|key| frame.cache.contains_key(key)));
+        assert!(old_keys.iter().all(|key| frame.cache.contains_key(key)));
     }
 
     #[test]

@@ -566,6 +566,8 @@ unsupported keys and a migration document referencing the pinned Foot baseline.
 
 ## Phase 8.1: Foot visual parity and graphical scrollback completion
 
+Active closure runbook: [Plan 0003](0003-phase8.1-closure-execution.md).
+
 Phase 8 integration exposed a release-blocking quality gap: the current renderer
 is not yet close enough to Foot in final glyph pixels, cell placement, or
 spacing, and the graphical client does not provide usable scrollback. Reopen

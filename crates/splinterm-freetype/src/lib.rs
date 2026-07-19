@@ -183,7 +183,9 @@ impl RasterFace {
         Ok(FontMetrics {
             ascent: ceil_26_6(metrics.ascender)?,
             descent: ceil_26_6(-metrics.descender)?,
-            height: ceil_26_6(metrics.height)?,
+            // fcft rounds the complete hinted face height once. Independently
+            // ceiling ascent/descent adds one pixel for common terminal faces.
+            height: round_26_6(metrics.height)?,
             underline_position: float_to_i32(underline_top)?,
             underline_thickness: float_to_i32(underline_width)?,
             strike_position: float_to_i32((strike_position + strike_thickness / 2.0).trunc())?,
@@ -207,6 +209,14 @@ fn float_to_i32(value: f64) -> Result<i32, RasterError> {
 
 fn ceil_26_6(value: i64) -> Result<i32, RasterError> {
     let pixels = value.div_euclid(64) + i64::from(value.rem_euclid(64) != 0);
+    i32::try_from(pixels).map_err(|_| RasterError::InvalidBitmapGeometry)
+}
+
+fn round_26_6(value: i64) -> Result<i32, RasterError> {
+    let pixels = value
+        .checked_add(32)
+        .ok_or(RasterError::InvalidBitmapGeometry)?
+        .div_euclid(64);
     i32::try_from(pixels).map_err(|_| RasterError::InvalidBitmapGeometry)
 }
 

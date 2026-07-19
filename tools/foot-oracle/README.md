@@ -187,6 +187,70 @@ production snapshot cache separately. Review `swash-diff/`, `freetype-diff/`,
 and `production-diff/`; never replace the fcft reference with any generated
 output. Both pinned FreeType gates must remain 95/95 exact.
 
+## Final-buffer oracle (in progress)
+
+The versioned raw-buffer contract is documented in
+`final-buffer-schema.md`. Splinterm can already export the exact production
+`TerminalSnapshot` → `SnapshotFrame` → `paint_snapshot` buffer without opening
+a Wayland window:
+
+```bash
+cargo run -q -p splinterm --bin final-buffer-capture -- \
+  --output-prefix /tmp/splinterm-final/ascii \
+  --fixture ascii --font-size 12 --scale-120 120 \
+  --columns 95 --rows 1 --hide-cursor
+```
+
+The exporter writes atomic `.json` metadata and `.argb` raw little-endian BGRA
+bytes. It currently exposes `ascii`, `spacing`, and long `drift` fixtures plus
+font, logical size, scale, grid, and cursor controls. Four-sided padding is
+reported explicitly but remains symmetric until Slice 2 owns that geometry.
+
+Compare two captures without translation or best-fit alignment:
+
+```bash
+python tools/foot-oracle/compare-final-buffers.py \
+  --reference-metadata /tmp/foot/ascii.json \
+  --actual-metadata /tmp/splinterm-final/ascii.json \
+  --output-dir /tmp/final-buffer-diff
+```
+
+The comparator rejects incompatible declared origins/geometry and unsafe input,
+then writes exact mismatch count, maximum channel delta, bounds, per-cell
+counts, edge-clearance deltas, first divergent cell, a PPM heatmap, and a
+mismatch crop. Its parser/comparator tests run with:
+
+```bash
+python -m pytest -q tools/foot-oracle/test_compare_final_buffers.py
+```
+
+The matching disposable Foot pre-submit capture is implemented by
+`patches/0002-final-buffer-dump.patch`. It writes only the most complete
+non-blank frame, preventing a later shutdown repaint from replacing evidence.
+`build-oracle.sh` applies all numbered patches in lexical order and never
+changes the canonical Foot checkout.
+
+Run the default end-to-end capture on an empty Hyprland workspace:
+
+```bash
+tools/foot-oracle/run-final-buffer-comparison.py \
+  /tmp/splinterm-final-buffer --workspace 8
+```
+
+The command builds and tests patched Foot, launches it floating at the declared
+buffer size, exports the matching Splinterm production buffer, and compares the
+pair. Current default evidence has exact 95×1 grid, 7×17 cell, 13 px baseline,
+four-edge padding, origins, ink bounds, zero drift/clipping, and zero ARGB
+mismatches.
+
+The final two mismatches were not FreeType differences: 12 px fcft, isolated
+FreeType, and the production cache had identical masks. Foot paints each row
+right-to-left, so the one-alpha overhang pixel from `%` is composed after the
+left edge of `&`; Splinterm had painted glyphs left-to-right. The compositor now
+uses Foot's observable order for full and dirty-row paths, with a focused
+overhang regression test. Slice 1 remains open only for the remaining fixture
+and parameter matrix automation.
+
 ## Rules
 
 - Never silently update expected output to match Rust.

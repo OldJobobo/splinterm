@@ -8,6 +8,13 @@ pid_file="$runtime/splinterd.pid"
 log_file="$runtime/daemon.log"
 working_directory=$PWD
 action=${1:-launch}
+profile=${SPLINTERM_TEST_PROFILE:-release}
+case "$profile" in
+  release) build_flag=--release ;;
+  debug) build_flag= ;;
+  *) printf 'splinterm-test: SPLINTERM_TEST_PROFILE must be release or debug\n' >&2; exit 2 ;;
+esac
+bin_dir="target/$profile"
 
 mkdir -p "$runtime"
 chmod 700 "$runtime"
@@ -23,18 +30,10 @@ stop_daemon() {
       pid=${process##*/}
       command=$(tr '\0' ' ' <"$process/cmdline" 2>/dev/null || true)
       case "$command" in
-        *target/debug/splinterd*) kill "$pid" 2>/dev/null || true ;;
+        *target/debug/splinterd*|*target/release/splinterd*) kill "$pid" 2>/dev/null || true ;;
       esac
     fi
   done
-
-  if [ -f "$pid_file" ]; then
-    pid=$(cat "$pid_file")
-    case "$pid" in
-      ''|*[!0-9]*) ;;
-      *) kill "$pid" 2>/dev/null || true ;;
-    esac
-  fi
 
   attempt=0
   while :; do
@@ -43,14 +42,43 @@ stop_daemon() {
       [ -r "$process/environ" ] || continue
       if cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
         | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
-        alive=true
-        break
+        command=$(tr '\0' ' ' <"$process/cmdline" 2>/dev/null || true)
+        case "$command" in
+          *target/debug/splinterd*|*target/release/splinterd*) alive=true; break ;;
+        esac
       fi
     done
     [ "$alive" = false ] && break
     attempt=$((attempt + 1))
-    [ "$attempt" -ge 100 ] && break
+    if [ "$attempt" -ge 100 ]; then
+      for process in /proc/[0-9]*; do
+        [ -r "$process/environ" ] || continue
+        if cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
+          | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
+          command=$(tr '\0' ' ' <"$process/cmdline" 2>/dev/null || true)
+          case "$command" in
+            *target/debug/splinterd*|*target/release/splinterd*) kill -KILL "${process##*/}" 2>/dev/null || true ;;
+          esac
+        fi
+      done
+      sleep 0.05
+      break
+    fi
     sleep 0.05
+  done
+
+  for process in /proc/[0-9]*; do
+    [ -r "$process/environ" ] || continue
+    if cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
+      | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
+      command=$(tr '\0' ' ' <"$process/cmdline" 2>/dev/null || true)
+      case "$command" in
+        *target/debug/splinterd*|*target/release/splinterd*)
+          printf 'splinterm-test: daemon %s did not stop\n' "${process##*/}" >&2
+          return 1
+          ;;
+      esac
+    fi
   done
   rm -f "$pid_file" "$socket"
 }
@@ -79,20 +107,21 @@ if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists freetype2; t
   exit 1
 fi
 
-cargo build -q -p splinterd -p splinterm
+# Interaction/performance checks must not use unoptimized renderer binaries.
+cargo build -q $build_flag -p splinterd -p splinterm
 
 # A failed ping usually means a stale daemon from an older protocol build.
-if ! SPLINTERM_SOCKET="$socket" target/debug/splinterm ping >/dev/null 2>&1; then
+if ! SPLINTERM_SOCKET="$socket" "$bin_dir/splinterm" ping >/dev/null 2>&1; then
   stop_daemon
   : >"$log_file"
   SPLINTERM_SOCKET="$socket" \
   SPLINTERM_ENABLE_DEV_ATTACH=1 \
-    target/debug/splinterd >>"$log_file" 2>&1 &
+    "$bin_dir/splinterd" >>"$log_file" 2>&1 &
   daemon_pid=$!
   printf '%s\n' "$daemon_pid" >"$pid_file"
 
   attempt=0
-  while ! SPLINTERM_SOCKET="$socket" target/debug/splinterm ping >/dev/null 2>&1; do
+  while ! SPLINTERM_SOCKET="$socket" "$bin_dir/splinterm" ping >/dev/null 2>&1; do
     if ! kill -0 "$daemon_pid" 2>/dev/null; then
       printf 'splinterm-test: daemon exited; see %s\n' "$log_file" >&2
       exit 1
@@ -108,10 +137,10 @@ if ! SPLINTERM_SOCKET="$socket" target/debug/splinterm ping >/dev/null 2>&1; the
 fi
 
 if [ "$action" = ping ]; then
-  SPLINTERM_SOCKET="$socket" target/debug/splinterm ping
+  SPLINTERM_SOCKET="$socket" "$bin_dir/splinterm" ping
   exit 0
 fi
 
 SPLINTERM_SOCKET="$socket" \
 SPLINTERM_ENABLE_DEV_ATTACH=1 \
-  target/debug/splinterm launch --working-directory "$working_directory"
+  "$bin_dir/splinterm" launch --working-directory "$working_directory"

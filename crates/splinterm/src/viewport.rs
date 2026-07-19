@@ -6,6 +6,7 @@ use splinterm_protocol::{ActiveScreen, TerminalRow, TerminalSnapshot};
 pub struct ScrollbackViewport {
     offset_from_bottom: usize,
     unseen_rows: usize,
+    anchor_row_id: Option<u64>,
 }
 
 impl ScrollbackViewport {
@@ -20,6 +21,11 @@ impl ScrollbackViewport {
     }
 
     #[must_use]
+    pub fn anchor_row_id(&self) -> Option<u64> {
+        self.anchor_row_id
+    }
+
+    #[must_use]
     pub fn is_live(&self) -> bool {
         self.offset_from_bottom == 0
     }
@@ -27,6 +33,7 @@ impl ScrollbackViewport {
     pub fn return_to_live(&mut self) {
         self.offset_from_bottom = 0;
         self.unseen_rows = 0;
+        self.anchor_row_id = None;
     }
 
     pub fn scroll_up(&mut self, lines: usize, snapshot: &TerminalSnapshot) {
@@ -37,12 +44,15 @@ impl ScrollbackViewport {
             .offset_from_bottom
             .saturating_add(lines)
             .min(snapshot.scrollback_rows.len());
+        self.update_anchor(snapshot);
     }
 
-    pub fn scroll_down(&mut self, lines: usize) {
+    pub fn scroll_down(&mut self, lines: usize, snapshot: &TerminalSnapshot) {
         self.offset_from_bottom = self.offset_from_bottom.saturating_sub(lines);
         if self.offset_from_bottom == 0 {
-            self.unseen_rows = 0;
+            self.return_to_live();
+        } else {
+            self.update_anchor(snapshot);
         }
     }
 
@@ -50,34 +60,69 @@ impl ScrollbackViewport {
     /// bounded daemon snapshot trims or clears rows.
     pub fn observe_history_change(
         &mut self,
-        previous_available: usize,
+        previous_generation: u64,
         previous_rows: &[TerminalRow],
         snapshot: &TerminalSnapshot,
     ) {
-        if snapshot.active_screen == ActiveScreen::Alternate {
+        if snapshot.active_screen == ActiveScreen::Alternate
+            || snapshot.history_generation != previous_generation
+            || snapshot.available_scrollback_rows == 0
+        {
             self.return_to_live();
             return;
         }
         if self.is_live() {
             return;
         }
-        let count_growth = snapshot
-            .available_scrollback_rows
-            .saturating_sub(previous_available);
-        let overlap = (0..=previous_rows.len().min(snapshot.scrollback_rows.len()))
-            .rev()
-            .find(|count| {
-                previous_rows[previous_rows.len() - *count..] == snapshot.scrollback_rows[..*count]
-            })
-            .unwrap_or(0);
-        let window_growth = snapshot.scrollback_rows.len().saturating_sub(overlap);
-        let appended = count_growth.max(window_growth);
-        self.offset_from_bottom = self
-            .offset_from_bottom
-            .saturating_add(appended)
+        let Some(anchor_row_id) = self.anchor_row_id else {
+            self.return_to_live();
+            return;
+        };
+        let Some(anchor_index) = snapshot
+            .scrollback_rows
+            .iter()
+            .position(|row| row.row_id == Some(anchor_row_id))
+        else {
+            self.return_to_live();
+            return;
+        };
+        let previous_ids = previous_rows
+            .iter()
+            .filter_map(|row| row.row_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let appended = snapshot
+            .scrollback_rows
+            .iter()
+            .filter(|row| row.row_id.is_some_and(|id| !previous_ids.contains(&id)))
+            .count();
+        let total_rows = snapshot
+            .scrollback_rows
+            .len()
+            .saturating_add(snapshot.visible_rows.len());
+        let viewport_height = snapshot.rows.min(total_rows);
+        self.offset_from_bottom = total_rows
+            .saturating_sub(anchor_index.saturating_add(viewport_height))
             .min(snapshot.scrollback_rows.len());
         self.unseen_rows = self.unseen_rows.saturating_add(appended);
-        if snapshot.available_scrollback_rows == 0 {
+    }
+
+    fn update_anchor(&mut self, snapshot: &TerminalSnapshot) {
+        if self.is_live() {
+            self.anchor_row_id = None;
+            return;
+        }
+        let total_rows = snapshot
+            .scrollback_rows
+            .len()
+            .saturating_add(snapshot.visible_rows.len());
+        let viewport_height = snapshot.rows.min(total_rows);
+        let end = total_rows.saturating_sub(self.offset_from_bottom);
+        let start = end.saturating_sub(viewport_height);
+        self.anchor_row_id = snapshot
+            .scrollback_rows
+            .get(start)
+            .and_then(|row| row.row_id);
+        if self.anchor_row_id.is_none() {
             self.return_to_live();
         }
     }
@@ -110,7 +155,13 @@ mod tests {
     use super::*;
 
     fn snapshot(history: &[&str], visible: &[&str]) -> TerminalSnapshot {
-        let row = |text: &&str| TerminalRow {
+        let visible_row = |text: &&str| TerminalRow {
+            row_id: None,
+            linebreak: text.starts_with('h'),
+            cells: Vec::new(),
+        };
+        let history_row = |(index, text): (usize, &&str)| TerminalRow {
+            row_id: Some(u64::try_from(index + 1).unwrap()),
             linebreak: text.starts_with('h'),
             cells: Vec::new(),
         };
@@ -137,8 +188,12 @@ mod tests {
             palette: vec![0; 256],
             default_colors: [0; 3],
             title: String::new(),
-            visible_rows: visible.iter().map(row).collect(),
-            scrollback_rows: history.iter().map(row).collect(),
+            visible_rows: visible.iter().map(visible_row).collect(),
+            history_generation: 1,
+            oldest_available_scrollback_row_id: (!history.is_empty()).then_some(1),
+            newest_available_scrollback_row_id: (!history.is_empty())
+                .then(|| u64::try_from(history.len()).unwrap()),
+            scrollback_rows: history.iter().enumerate().map(history_row).collect(),
             available_scrollback_rows: history.len(),
             omitted_oldest_scrollback_rows: 0,
             exited_code: None,
@@ -152,9 +207,9 @@ mod tests {
         let mut viewport = ScrollbackViewport::default();
         viewport.scroll_up(20, &snapshot);
         assert_eq!(viewport.offset_from_bottom(), 3);
-        viewport.scroll_down(2);
+        viewport.scroll_down(2, &snapshot);
         assert_eq!(viewport.offset_from_bottom(), 1);
-        viewport.scroll_down(1);
+        viewport.scroll_down(1, &snapshot);
         assert!(viewport.is_live());
     }
 
@@ -177,9 +232,10 @@ mod tests {
         let initial = snapshot(&["h1", "h2"], &["v1", "v2"]);
         let mut viewport = ScrollbackViewport::default();
         viewport.scroll_up(1, &initial);
+        assert_eq!(viewport.anchor_row_id(), Some(2));
         let next = snapshot(&["h1", "h2", "v1"], &["v2", "v3"]);
         viewport.observe_history_change(
-            initial.available_scrollback_rows,
+            initial.history_generation,
             &initial.scrollback_rows,
             &next,
         );
@@ -194,10 +250,14 @@ mod tests {
         let mut viewport = ScrollbackViewport::default();
         viewport.scroll_up(1, &initial);
         let mut next = snapshot(&["h2", "h3"], &["v2"]);
+        next.scrollback_rows[0].row_id = Some(2);
+        next.scrollback_rows[1].row_id = Some(3);
+        next.oldest_available_scrollback_row_id = Some(2);
+        next.newest_available_scrollback_row_id = Some(3);
         next.scrollback_rows[0].linebreak = false;
         next.scrollback_rows[1].linebreak = true;
         viewport.observe_history_change(
-            initial.available_scrollback_rows,
+            initial.history_generation,
             &initial.scrollback_rows,
             &next,
         );
@@ -212,12 +272,69 @@ mod tests {
         viewport.scroll_up(1, &initial);
         let mut alternate = initial.clone();
         alternate.active_screen = ActiveScreen::Alternate;
-        viewport.observe_history_change(1, &initial.scrollback_rows, &alternate);
+        viewport.observe_history_change(
+            initial.history_generation,
+            &initial.scrollback_rows,
+            &alternate,
+        );
         assert!(viewport.is_live());
 
         viewport.scroll_up(1, &initial);
-        let cleared = snapshot(&[], &["v1"]);
-        viewport.observe_history_change(1, &initial.scrollback_rows, &cleared);
+        let mut cleared = snapshot(&[], &["v1"]);
+        cleared.history_generation += 1;
+        viewport.observe_history_change(
+            initial.history_generation,
+            &initial.scrollback_rows,
+            &cleared,
+        );
+        assert!(viewport.is_live());
+    }
+
+    #[test]
+    fn exact_anchor_trim_returns_live_even_when_other_rows_overlap() {
+        let initial = snapshot(&["h1", "h2", "h3"], &["v1", "v2"]);
+        let mut viewport = ScrollbackViewport::default();
+        viewport.scroll_up(1, &initial);
+        assert_eq!(viewport.anchor_row_id(), Some(3));
+
+        let mut next = snapshot(&["h2", "h4"], &["v2", "v3"]);
+        next.scrollback_rows[0].row_id = Some(2);
+        next.scrollback_rows[1].row_id = Some(4);
+        next.oldest_available_scrollback_row_id = Some(2);
+        next.newest_available_scrollback_row_id = Some(4);
+        viewport.observe_history_change(
+            initial.history_generation,
+            &initial.scrollback_rows,
+            &next,
+        );
+        assert!(viewport.is_live());
+        assert_eq!(viewport.anchor_row_id(), None);
+    }
+
+    #[test]
+    fn duplicate_content_anchors_by_id_and_missing_anchor_returns_live() {
+        let initial = snapshot(&["h", "h"], &["v"]);
+        let mut viewport = ScrollbackViewport::default();
+        viewport.scroll_up(1, &initial);
+        let mut next = snapshot(&["h", "h"], &["v"]);
+        next.scrollback_rows[0].row_id = Some(2);
+        next.scrollback_rows[1].row_id = Some(3);
+        next.oldest_available_scrollback_row_id = Some(2);
+        next.newest_available_scrollback_row_id = Some(3);
+        viewport.observe_history_change(
+            initial.history_generation,
+            &initial.scrollback_rows,
+            &next,
+        );
+        assert_eq!(viewport.offset_from_bottom(), 2);
+        assert_eq!(viewport.unseen_rows(), 1);
+
+        let mut lost = snapshot(&["h", "h"], &["v"]);
+        lost.scrollback_rows[0].row_id = Some(8);
+        lost.scrollback_rows[1].row_id = Some(9);
+        lost.oldest_available_scrollback_row_id = Some(8);
+        lost.newest_available_scrollback_row_id = Some(9);
+        viewport.observe_history_change(next.history_generation, &next.scrollback_rows, &lost);
         assert!(viewport.is_live());
     }
 }

@@ -26,11 +26,12 @@ use splinterd::{
 use splinterm_core::{Lair, LayoutNode, SplintId, SplintState};
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
-    ColorSource, ErrorCode, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS,
-    MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking,
-    PROTOCOL_VERSION, ProtocolError, Request, Response, ScrollDirection as WireScrollDirection,
-    ServerFrame, ServerLimits, SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes,
-    TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
+    ColorSource, ErrorCode, HistoryTransition, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES,
+    MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
+    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, ProtocolError, Request, Response,
+    ScrollDirection as WireScrollDirection, ScrollbackPage as WireScrollbackPage, ServerFrame,
+    ServerLimits, SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalRow,
+    TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
     TerminalUpdate as WireTerminalUpdate, UnderlineStyle as WireUnderlineStyle, encode_frame,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
@@ -361,7 +362,7 @@ async fn serve_authenticated(
                         response,
                         subscription,
                     }) => {
-                        if let Some((id, stream, handle, grant_id)) = subscription {
+                        if let Some((id, stream, handle, access)) = subscription {
                             if subscriptions.len() >= MAX_SUBSCRIPTIONS {
                                 send_response(
                                     outbound,
@@ -382,7 +383,7 @@ async fn serve_authenticated(
                                 outbound.clone(),
                                 control.clone(),
                                 state.revocations.subscribe(),
-                                grant_id,
+                                access,
                             );
                             subscriptions.insert(id, task);
                         } else {
@@ -406,7 +407,20 @@ async fn serve_authenticated(
 #[derive(Debug)]
 struct Handled {
     response: Response,
-    subscription: Option<(u64, Subscription, LiveSplintHandle, Option<u64>)>,
+    subscription: Option<(u64, Subscription, LiveSplintHandle, SubscriptionAccess)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SubscriptionAccess {
+    grant_id: Option<u64>,
+    scrollback_rows: usize,
+    history: HistoryState,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HistoryState {
+    generation: u64,
+    available_rows: usize,
 }
 
 async fn controlled_handle(
@@ -746,18 +760,95 @@ async fn handle_request(
             };
             let grant_id = authorize_scope(state, peer, splint_id, incarnation, &required).await?;
             let handle = current_handle(state, splint_id, incarnation).await?;
+            let scrollback_rows = scrollback_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS);
             let (snapshot, subscription) = handle
-                .attach_with_scrollback(scrollback_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS))
+                .attach_with_scrollback(scrollback_rows)
                 .await
                 .map_err(|_| internal())?;
             let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
+            let history = history_state(&snapshot);
             return Ok(Handled {
                 response: Response::Attached {
                     subscription_id: id,
                     snapshot: wire_snapshot(snapshot),
                 },
-                subscription: Some((id, subscription, handle, grant_id)),
+                subscription: Some((
+                    id,
+                    subscription,
+                    handle,
+                    SubscriptionAccess {
+                        grant_id,
+                        scrollback_rows,
+                        history,
+                    },
+                )),
             });
+        }
+        Request::ScrollbackPage {
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+            before_row_id,
+            max_rows,
+        } => {
+            if before_row_id == 0 || max_rows == 0 || max_rows > MAX_SCROLLBACK_PAGE_ROWS {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "scrollback page request exceeds protocol bounds",
+                ));
+            }
+            let _ = authorize_scope(
+                state,
+                peer,
+                splint_id,
+                incarnation,
+                &[AccessScope::Observe, AccessScope::Scrollback],
+            )
+            .await?;
+            let handle = current_handle(state, splint_id, incarnation).await?;
+            let current = handle
+                .snapshot_with_scrollback(1)
+                .await
+                .map_err(|_| internal())?;
+            if current.revision.value() != terminal_revision
+                || current.scrollback.history_generation != history_generation
+            {
+                return Ok(Handled {
+                    response: Response::ScrollbackResyncRequired {
+                        current_revision: current.revision.value(),
+                        history_generation: current.scrollback.history_generation,
+                    },
+                    subscription: None,
+                });
+            }
+            let page = handle
+                .scrollback_page(before_row_id, max_rows)
+                .await
+                .map_err(|_| internal())?;
+            if page.terminal_revision.value() != terminal_revision
+                || page.history_generation != history_generation
+            {
+                return Ok(Handled {
+                    response: Response::ScrollbackResyncRequired {
+                        current_revision: page.terminal_revision.value(),
+                        history_generation: page.history_generation,
+                    },
+                    subscription: None,
+                });
+            }
+            Response::ScrollbackPage {
+                page: WireScrollbackPage {
+                    splint_id,
+                    incarnation,
+                    terminal_revision,
+                    history_generation,
+                    oldest_available_row_id: current.scrollback.oldest_available_row_id,
+                    newest_available_row_id: current.scrollback.newest_available_row_id,
+                    rows: page.rows.into_iter().map(wire_row).collect(),
+                    has_older: page.has_older,
+                },
+            }
         }
         Request::AcquireControl {
             splint_id,
@@ -947,18 +1038,19 @@ fn spawn_subscription(
     outbound: mpsc::Sender<ServerFrame>,
     control: mpsc::Sender<ServerFrame>,
     mut revocations: broadcast::Receiver<Revocation>,
-    grant_id: Option<u64>,
+    access: SubscriptionAccess,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut sequence = 1_u64;
+        let mut previous_history = access.history;
         let expiry = time::sleep(consent::GRANT_LIFETIME);
         tokio::pin!(expiry);
         loop {
             let received = tokio::select! {
                 value = subscription.recv() => value,
-                revoked = revocations.recv(), if grant_id.is_some() => {
+                revoked = revocations.recv(), if access.grant_id.is_some() => {
                     match revoked {
-                        Ok(revocation) if Some(revocation.grant_id) == grant_id => {
+                        Ok(revocation) if Some(revocation.grant_id) == access.grant_id => {
                             let _ = control.send(ServerFrame::Event {
                                 subscription_id: id,
                                 sequence,
@@ -972,8 +1064,8 @@ fn spawn_subscription(
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                () = &mut expiry, if grant_id.is_some() => {
-                    if let Some(grant_id) = grant_id {
+                () = &mut expiry, if access.grant_id.is_some() => {
+                    if let Some(grant_id) = access.grant_id {
                         let _ = control.send(ServerFrame::Event {
                             subscription_id: id,
                             sequence,
@@ -985,10 +1077,7 @@ fn spawn_subscription(
             };
             match received {
                 SubscriptionReceive::ResnapshotRequired => {
-                    let revision = handle
-                        .snapshot()
-                        .await
-                        .map_or(0, |snapshot| snapshot.revision.value());
+                    let revision = current_revision(&handle, access.scrollback_rows).await;
                     let _ = control
                         .send(ServerFrame::Event {
                             subscription_id: id,
@@ -1012,10 +1101,15 @@ fn spawn_subscription(
                     break;
                 }
                 SubscriptionReceive::Event(LiveEvent::Update { update, .. }) => {
-                    let Ok(snapshot) = handle.snapshot().await else {
+                    let Ok(snapshot) = handle
+                        .snapshot_with_scrollback(access.scrollback_rows)
+                        .await
+                    else {
                         break;
                     };
-                    let event = subscription_update_event(&update, snapshot);
+                    let current_history = history_state(&snapshot);
+                    let event = subscription_update_event(&update, snapshot, previous_history);
+                    previous_history = current_history;
 
                     if outbound
                         .try_send(ServerFrame::Event {
@@ -1025,10 +1119,7 @@ fn spawn_subscription(
                         })
                         .is_err()
                     {
-                        let revision = handle
-                            .snapshot()
-                            .await
-                            .map_or(0, |snapshot| snapshot.revision.value());
+                        let revision = current_revision(&handle, access.scrollback_rows).await;
                         let _ = control
                             .send(ServerFrame::Event {
                                 subscription_id: id,
@@ -1048,17 +1139,35 @@ fn spawn_subscription(
     })
 }
 
+async fn current_revision(handle: &LiveSplintHandle, scrollback_rows: usize) -> u64 {
+    handle
+        .snapshot_with_scrollback(scrollback_rows)
+        .await
+        .map_or(0, |snapshot| snapshot.revision.value())
+}
+
+fn history_state(snapshot: &LiveSnapshot) -> HistoryState {
+    HistoryState {
+        generation: snapshot.scrollback.history_generation,
+        available_rows: snapshot.scrollback.available_rows,
+    }
+}
+
 fn revisions_match(update_revision: u64, snapshot_revision: u64) -> bool {
     update_revision == snapshot_revision
 }
 
-fn subscription_update_event(update: &TerminalUpdate, snapshot: LiveSnapshot) -> SubscriptionEvent {
+fn subscription_update_event(
+    update: &TerminalUpdate,
+    snapshot: LiveSnapshot,
+    previous_history: HistoryState,
+) -> SubscriptionEvent {
     if !revisions_match(update.revision().value(), snapshot.revision.value()) {
         return SubscriptionEvent::Snapshot {
             snapshot: wire_snapshot(snapshot),
         };
     }
-    match wire_update(update, &snapshot) {
+    match wire_update(update, &snapshot, previous_history) {
         Ok(update) => SubscriptionEvent::Update { update },
         Err(_) => SubscriptionEvent::ResyncRequired {
             current_revision: snapshot.revision.value(),
@@ -1148,6 +1257,7 @@ fn not_found() -> ProtocolError {
 fn wire_update(
     update: &TerminalUpdate,
     snapshot: &LiveSnapshot,
+    previous_history: HistoryState,
 ) -> Result<WireTerminalUpdate, ProtocolError> {
     let mut damaged = vec![false; snapshot.visible_rows.len()];
     let mut scrolls = Vec::new();
@@ -1157,6 +1267,8 @@ fn wire_update(
     let mut palette = false;
     let mut dimensions = false;
     let mut scrollback = false;
+    let mut reflow = false;
+    let mut appended_rows = 0_usize;
     for damage in update.damage() {
         match damage {
             TerminalDamage::FullSnapshot => {
@@ -1181,6 +1293,13 @@ fn wire_update(
             } => {
                 let start = usize::try_from(region.start()).map_err(|_| internal())?;
                 let end = usize::try_from(region.end()).map_err(|_| internal())?;
+                if *direction == ScrollDirection::Forward
+                    && start == 0
+                    && end == snapshot.dimensions.rows
+                    && snapshot.active_screen == ActiveScreen::Normal
+                {
+                    appended_rows = appended_rows.saturating_add(*rows);
+                }
                 for item in damaged.iter_mut().take(end).skip(start) {
                     *item = true;
                 }
@@ -1198,6 +1317,7 @@ fn wire_update(
             TerminalDamage::Modes => modes = true,
             TerminalDamage::Dimensions => {
                 dimensions = true;
+                reflow = true;
                 damaged.fill(true);
             }
             TerminalDamage::Title => title = true,
@@ -1242,7 +1362,31 @@ fn wire_update(
                 .cloned()
                 .map(wire_row)
                 .collect();
+            let transition =
+                if snapshot.scrollback.history_generation != previous_history.generation {
+                    if reflow {
+                        HistoryTransition::Reflow
+                    } else if snapshot.scrollback.available_rows == 0 {
+                        HistoryTransition::Clear
+                    } else {
+                        HistoryTransition::Replace
+                    }
+                } else if appended_rows > 0 {
+                    HistoryTransition::Append {
+                        appended_rows,
+                        trimmed_rows: previous_history
+                            .available_rows
+                            .saturating_add(appended_rows)
+                            .saturating_sub(snapshot.scrollback.available_rows),
+                    }
+                } else {
+                    HistoryTransition::Replace
+                };
             TerminalScrollbackUpdate {
+                transition,
+                history_generation: snapshot.scrollback.history_generation,
+                oldest_available_row_id: snapshot.scrollback.oldest_available_row_id,
+                newest_available_row_id: snapshot.scrollback.newest_available_row_id,
                 omitted_oldest_rows: snapshot
                     .scrollback
                     .available_rows
@@ -1273,6 +1417,9 @@ fn wire_snapshot(snapshot: LiveSnapshot) -> TerminalSnapshot {
         default_colors: snapshot.default_colors,
         title: snapshot.title,
         visible_rows: snapshot.visible_rows.into_iter().map(wire_row).collect(),
+        history_generation: snapshot.scrollback.history_generation,
+        oldest_available_scrollback_row_id: snapshot.scrollback.oldest_available_row_id,
+        newest_available_scrollback_row_id: snapshot.scrollback.newest_available_row_id,
         scrollback_rows: snapshot.scrollback_rows.into_iter().map(wire_row).collect(),
         available_scrollback_rows: snapshot.scrollback.available_rows,
         omitted_oldest_scrollback_rows: snapshot.scrollback.omitted_oldest_rows,
@@ -1307,6 +1454,7 @@ fn wire_modes(modes: splinterm_terminal::TerminalModes) -> TerminalInputModes {
 
 fn wire_row(row: splinterd::LiveRow) -> TerminalRow {
     TerminalRow {
+        row_id: row.row_id,
         linebreak: row.linebreak,
         cells: row
             .cells

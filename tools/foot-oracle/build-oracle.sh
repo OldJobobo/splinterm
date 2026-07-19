@@ -6,7 +6,7 @@ readonly source_dir="${FOOT_SOURCE:-$HOME/Playground/foot}"
 readonly worktree_dir="${FOOT_ORACLE_WORKTREE:-/tmp/splinterm-foot-oracle-worktree}"
 readonly build_dir="${FOOT_ORACLE_BUILD:-/tmp/splinterm-foot-oracle-build}"
 readonly project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-readonly patch_file="$project_root/tools/foot-oracle/patches/0001-semantic-state-dump.patch"
+readonly patch_dir="$project_root/tools/foot-oracle/patches"
 
 if [[ ! -d "$source_dir/.git" ]]; then
   printf 'Foot source is not a Git checkout: %s\n' "$source_dir" >&2
@@ -20,8 +20,9 @@ if [[ "$actual_commit" != "$expected_commit" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$patch_file" ]]; then
-  printf 'Oracle patch is missing: %s\n' "$patch_file" >&2
+mapfile -t patch_files < <(find "$patch_dir" -maxdepth 1 -type f -name '*.patch' -print | sort)
+if (( ${#patch_files[@]} == 0 )); then
+  printf 'Oracle patches are missing from: %s\n' "$patch_dir" >&2
   exit 1
 fi
 
@@ -31,8 +32,10 @@ if [[ -e "$worktree_dir" ]]; then
 fi
 git -C "$source_dir" worktree prune
 git -C "$source_dir" worktree add --detach "$worktree_dir" "$expected_commit"
-git -C "$worktree_dir" apply --check "$patch_file"
-git -C "$worktree_dir" apply "$patch_file"
+for patch_file in "${patch_files[@]}"; do
+  git -C "$worktree_dir" apply --check "$patch_file"
+  git -C "$worktree_dir" apply "$patch_file"
+done
 
 rm -rf -- "$build_dir"
 meson setup "$build_dir" "$worktree_dir" \

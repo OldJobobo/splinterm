@@ -37,6 +37,8 @@ pub struct ScrollResult {
     pub view_changed: bool,
 }
 
+pub(crate) type ScrollbackRows<'a> = (Vec<(u64, &'a Row)>, usize, usize, Option<u64>, Option<u64>);
+
 /// Power-of-two circular row storage for terminal screen and scrollback rows.
 ///
 /// The grid owns row storage, cursor and viewport coordinates, scrolling, and
@@ -52,6 +54,9 @@ pub struct Grid {
     cursor: Cursor,
     saved_cursor: Cursor,
     generation: u64,
+    row_ids: Vec<u64>,
+    next_row_id: u64,
+    history_generation: u64,
 }
 
 impl Grid {
@@ -86,6 +91,9 @@ impl Grid {
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             generation: 0,
+            row_ids: vec![0; row_capacity],
+            next_row_id: 1,
+            history_generation: 1,
         }
     }
 
@@ -108,6 +116,23 @@ impl Grid {
 
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) const fn history_generation(&self) -> u64 {
+        self.history_generation
+    }
+
+    pub(crate) const fn history_namespace(&self) -> (u64, u64) {
+        (self.next_row_id, self.history_generation)
+    }
+
+    pub(crate) fn continue_history_namespace(&mut self, namespace: (u64, u64)) {
+        self.next_row_id = namespace.0;
+        self.history_generation = namespace
+            .1
+            .checked_add(1)
+            .expect("history generation exhausted");
+        self.reidentify_allocated_rows_chronologically();
     }
 
     /// Returns the number of physical slots in the circular row array.
@@ -207,10 +232,18 @@ impl Grid {
     }
 
     /// Returns a row, safely initializing its cells when allocating its slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the monotonic grid generation or row identity is exhausted.
     pub fn row_or_allocate(&mut self, relative_row: i32) -> &mut Row {
         let index = self.absolute_index(relative_row);
         self.bump_generation();
-        self.rows[index].get_or_insert_with(|| Row::new(self.columns))
+        if self.rows[index].is_none() {
+            self.rows[index] = Some(Row::new(self.columns));
+            self.assign_new_row_id(index);
+        }
+        self.rows[index].as_mut().expect("row was allocated")
     }
 
     /// Maps a viewport-relative row to its physical circular slot.
@@ -287,13 +320,23 @@ impl Grid {
 
     /// Removes every allocated row outside the visible screen.
     pub fn clear_scrollback(&mut self) {
-        self.bump_generation();
         let visible: Vec<usize> = (0..self.screen_rows)
             .map(|row| self.absolute_index(Self::signed_row(row)))
             .collect();
+        let had_history = self
+            .rows
+            .iter()
+            .enumerate()
+            .any(|(index, row)| row.is_some() && !visible.contains(&index));
+        if !had_history {
+            return;
+        }
+        self.bump_generation();
+        self.bump_history_generation();
         for (index, row) in self.rows.iter_mut().enumerate() {
             if !visible.contains(&index) {
                 *row = None;
+                self.row_ids[index] = 0;
             }
         }
         self.view = self.offset;
@@ -355,6 +398,12 @@ impl Grid {
             .generation
             .checked_add(1)
             .expect("grid generation exhausted");
+        resized.next_row_id = self.next_row_id;
+        resized.history_generation = self
+            .history_generation
+            .checked_add(1)
+            .expect("history generation exhausted");
+        resized.reidentify_allocated_rows_chronologically();
         *self = resized;
     }
 
@@ -365,6 +414,7 @@ impl Grid {
         if first != second {
             self.bump_generation();
             self.rows.swap(first, second);
+            self.row_ids.swap(first, second);
         }
     }
 
@@ -489,9 +539,9 @@ impl Grid {
             self.swap_rows(row - amount, row);
         }
         for row in end - rows..end {
-            self.row_or_allocate(Self::signed_row(row))
-                .erase_all(erase_background);
+            self.recycle_row(Self::signed_row(row), erase_background);
         }
+        self.reidentify_newest_history_rows(rows);
     }
 
     fn scroll_reverse_core(
@@ -505,6 +555,7 @@ impl Grid {
         for row in end - rows..end {
             let index = self.absolute_index(Self::signed_row(row));
             self.rows[index] = None;
+            self.row_ids[index] = 0;
         }
 
         self.offset = self.offset.wrapping_sub(rows) & (self.rows.len() - 1);
@@ -535,24 +586,62 @@ impl Grid {
             .collect()
     }
 
-    pub(crate) fn snapshot_scrollback_rows(
-        &self,
-        maximum_rows: usize,
-    ) -> (Vec<&Row>, usize, usize) {
-        let history_capacity = self.rows.len() - self.screen_rows;
-        let start = self.scrollback_start(self.screen_rows);
-        let mut rows = (0..history_capacity)
-            .filter_map(|distance| {
-                let index = start.wrapping_add(distance) & (self.rows.len() - 1);
-                self.rows[index].as_ref()
-            })
-            .collect::<Vec<_>>();
+    pub(crate) fn snapshot_scrollback_rows(&self, maximum_rows: usize) -> ScrollbackRows<'_> {
+        let mut rows = self.scrollback_rows_chronological();
         let available = rows.len();
+        let oldest = rows.first().map(|(id, _)| *id);
+        let newest = rows.last().map(|(id, _)| *id);
         let omitted = available.saturating_sub(maximum_rows);
         if omitted > 0 {
             rows.drain(0..omitted);
         }
-        (rows, available, omitted)
+        (rows, available, omitted, oldest, newest)
+    }
+
+    pub(crate) fn snapshot_scrollback_page(
+        &self,
+        before_row_id: u64,
+        maximum_rows: usize,
+    ) -> (Vec<(u64, &Row)>, bool) {
+        if maximum_rows == 0 {
+            return (Vec::new(), false);
+        }
+        let history_capacity = self.rows.len() - self.screen_rows;
+        let start = self.scrollback_start(self.screen_rows);
+        let mut rows = std::collections::VecDeque::with_capacity(maximum_rows);
+        let mut has_older = false;
+        for distance in 0..history_capacity {
+            let index = start.wrapping_add(distance) & (self.rows.len() - 1);
+            let Some(row) = self.rows[index].as_ref() else {
+                continue;
+            };
+            let id = self.row_ids[index];
+            assert_ne!(id, 0, "allocated row has stable identity");
+            if id >= before_row_id {
+                continue;
+            }
+            if rows.len() == maximum_rows {
+                rows.pop_front();
+                has_older = true;
+            }
+            rows.push_back((id, row));
+        }
+        (rows.into(), has_older)
+    }
+
+    fn scrollback_rows_chronological(&self) -> Vec<(u64, &Row)> {
+        let history_capacity = self.rows.len() - self.screen_rows;
+        let start = self.scrollback_start(self.screen_rows);
+        (0..history_capacity)
+            .filter_map(|distance| {
+                let index = start.wrapping_add(distance) & (self.rows.len() - 1);
+                self.rows[index].as_ref().map(|row| {
+                    let id = self.row_ids[index];
+                    assert_ne!(id, 0, "allocated row has stable identity");
+                    (id, row)
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn cursor_in_view(&self) -> Option<Coordinate> {
@@ -588,6 +677,59 @@ impl Grid {
             .generation
             .checked_add(1)
             .expect("grid generation exhausted");
+    }
+
+    fn bump_history_generation(&mut self) {
+        self.history_generation = self
+            .history_generation
+            .checked_add(1)
+            .expect("history generation exhausted");
+    }
+
+    fn assign_new_row_id(&mut self, index: usize) {
+        let id = self.next_row_id;
+        self.next_row_id = self.next_row_id.checked_add(1).expect("row ID exhausted");
+        self.row_ids[index] = id;
+    }
+
+    fn recycle_row(&mut self, relative_row: i32, background: Color) {
+        let index = self.absolute_index(relative_row);
+        self.bump_generation();
+        if let Some(row) = self.rows[index].as_mut() {
+            row.erase_all(background);
+        } else {
+            self.rows[index] = Some(Row::new(self.columns));
+            self.rows[index]
+                .as_mut()
+                .expect("row was allocated")
+                .erase_all(background);
+        }
+        self.assign_new_row_id(index);
+    }
+
+    fn reidentify_allocated_rows_chronologically(&mut self) {
+        let start = self.scrollback_start(self.screen_rows);
+        for distance in 0..self.rows.len() {
+            let index = start.wrapping_add(distance) & (self.rows.len() - 1);
+            if self.rows[index].is_some() {
+                self.assign_new_row_id(index);
+            }
+        }
+    }
+
+    fn reidentify_newest_history_rows(&mut self, count: usize) {
+        let history_capacity = self.rows.len() - self.screen_rows;
+        let start = self.scrollback_start(self.screen_rows);
+        let mut indices = (0..history_capacity)
+            .filter_map(|distance| {
+                let index = start.wrapping_add(distance) & (self.rows.len() - 1);
+                self.rows[index].is_some().then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let first = indices.len().saturating_sub(count);
+        for index in indices.drain(first..) {
+            self.assign_new_row_id(index);
+        }
     }
 
     fn resized_cursor(
@@ -906,6 +1048,32 @@ mod tests {
                 CellContent::Empty,
             ]
         );
+    }
+
+    #[test]
+    fn partial_then_full_scroll_keeps_history_ids_chronological() {
+        let mut grid = grid_with_labels(&['a', 'b', 'c']);
+        grid.scroll(
+            ScrollDirection::Forward,
+            ScrollRegion::new(1, 3),
+            1,
+            Color::default(),
+        );
+        grid.scroll(
+            ScrollDirection::Forward,
+            ScrollRegion::new(0, 3),
+            1,
+            Color::default(),
+        );
+
+        let ids = grid
+            .snapshot_scrollback_rows(usize::MAX)
+            .0
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

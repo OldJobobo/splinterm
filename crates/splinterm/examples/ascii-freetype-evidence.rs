@@ -13,13 +13,14 @@ use splinterm_freetype::{RasterFace, RasterizedGlyph};
 use swash::FontRef;
 
 fn main() -> Result<()> {
-    let (path, index, family) = resolve_primary()?;
-    let mut face = RasterFace::open(&path, index, 22 * 64)?;
+    let font_size = evidence_font_size()?;
+    let (path, index, family) = resolve_primary(font_size)?;
+    let mut face = RasterFace::open(&path, index, pixel_size_26_6(font_size))?;
     let metrics = face.metrics()?;
     let font_data = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let font = FontRef::from_index(&font_data, usize::try_from(index).context("face index")?)
         .context("parse selected font")?;
-    let style_metrics = font.metrics(&[]).scale(22.0);
+    let style_metrics = font.metrics(&[]).scale(font_size);
     let stdout = io::stdout();
     let mut output = stdout.lock();
 
@@ -61,13 +62,27 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn resolve_primary() -> Result<(PathBuf, u32, String)> {
+fn evidence_font_size() -> Result<f32> {
+    let value = std::env::var("SPLINTERM_EVIDENCE_FONT_SIZE").unwrap_or_else(|_| "22".into());
+    let size: f32 = value.parse().context("parse evidence font size")?;
+    if !size.is_finite() || !(6.0..=96.0).contains(&size) {
+        bail!("evidence font size must be between 6 and 96 pixels");
+    }
+    Ok(size)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "validated evidence sizes fit the FreeType 26.6 policy"
+)]
+fn pixel_size_26_6(font_size: f32) -> isize {
+    (font_size * 64.0).round() as isize
+}
+
+fn resolve_primary(font_size: f32) -> Result<(PathBuf, u32, String)> {
+    let pattern = format!("JetBrains Mono Nerd Font:style=Regular:pixelsize={font_size}");
     let output = Command::new("fc-match")
-        .args([
-            "-f",
-            "%{file}\n%{index}\n%{family}\n",
-            "JetBrains Mono Nerd Font:style=Regular:pixelsize=22",
-        ])
+        .args(["-f", "%{file}\n%{index}\n%{family}\n", &pattern])
         .output()
         .context("run fc-match")?;
     if !output.status.success() {

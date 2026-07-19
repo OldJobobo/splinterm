@@ -25,7 +25,7 @@ Detailed plan: [`plans/0001-terminal-kernel.md`](plans/0001-terminal-kernel.md)
 
 ## Phase 2 — Omarchy-native terminal MVP (in progress: Part 8.1 parity gate)
 
-Detailed plan: [`plans/0002-omarchy-terminal-mvp.md`](plans/0002-omarchy-terminal-mvp.md)
+Detailed plans: [`plans/0002-omarchy-terminal-mvp.md`](plans/0002-omarchy-terminal-mvp.md) and the active [`Phase 8.1 closure execution plan`](plans/0003-phase8.1-closure-execution.md)
 
 - Native Wayland window and keyboard input under Hyprland
 - Trusted consent UI plus grant, revoke, and control indication

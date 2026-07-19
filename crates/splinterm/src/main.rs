@@ -237,6 +237,19 @@ fn write_private_frame<T: serde::Serialize>(writer: &mut impl Write, value: &T) 
     Ok(())
 }
 
+fn consent_input_modes() -> TerminalInputModes {
+    TerminalInputModes {
+        application_cursor: false,
+        application_keypad: false,
+        focus_reporting: false,
+        bracketed_paste: false,
+        cursor_visible: false,
+        cursor_blink: false,
+        mouse_tracking: splinterm_protocol::MouseTracking::None,
+        sgr_mouse: false,
+    }
+}
+
 fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
     let mut lines = vec![
         "TRUSTED SPLINTERM ACCESS REQUEST".to_owned(),
@@ -291,6 +304,7 @@ fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
     let mut visible_rows: Vec<_> = lines
         .into_iter()
         .map(|line| TerminalRow {
+            row_id: None,
             linebreak: false,
             cells: line
                 .chars()
@@ -304,6 +318,7 @@ fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
         })
         .collect();
     visible_rows.resize_with(rows, || TerminalRow {
+        row_id: None,
         linebreak: false,
         cells: Vec::new(),
     });
@@ -317,20 +332,14 @@ fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
         cursor_row: -1,
         cursor_deferred_wrap: false,
         active_screen: ActiveScreen::Normal,
-        input_modes: TerminalInputModes {
-            application_cursor: false,
-            application_keypad: false,
-            focus_reporting: false,
-            bracketed_paste: false,
-            cursor_visible: false,
-            cursor_blink: false,
-            mouse_tracking: splinterm_protocol::MouseTracking::None,
-            sgr_mouse: false,
-        },
+        input_modes: consent_input_modes(),
         palette: vec![0; 256],
         default_colors: [0x00f4_f0e8, 0x0014_1820, 0x00e0_a030],
         title: "Trusted access request".to_owned(),
         visible_rows,
+        history_generation: 1,
+        oldest_available_scrollback_row_id: None,
+        newest_available_scrollback_row_id: None,
         scrollback_rows: Vec::new(),
         available_scrollback_rows: 0,
         omitted_oldest_scrollback_rows: 0,
@@ -411,6 +420,20 @@ fn classify_subscription_event(
     }
 }
 
+fn validate_attached_snapshot(
+    snapshot: &TerminalSnapshot,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<()> {
+    snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message.clone()))?;
+    if snapshot.splint_id != splint_id || snapshot.incarnation != incarnation {
+        bail!("splinterd returned a snapshot for a different live Splint identity");
+    }
+    Ok(())
+}
+
 async fn attach(
     connection: &mut Connection,
     splint_id: SplintId,
@@ -429,6 +452,7 @@ async fn attach(
     else {
         bail!("splinterd did not return an attached terminal snapshot");
     };
+    validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
     Ok(Attachment {
         subscription_id,
         snapshot,
@@ -488,9 +512,100 @@ async fn load_authority_status(
     }
 }
 
+fn validate_scrollback_page_response(
+    page: &splinterm_protocol::ScrollbackPage,
+    splint_id: SplintId,
+    incarnation: u64,
+    terminal_revision: u64,
+    history_generation: u64,
+    before_row_id: u64,
+) -> Result<()> {
+    page.validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if page.splint_id != splint_id
+        || page.incarnation != incarnation
+        || page.terminal_revision != terminal_revision
+        || page.history_generation != history_generation
+        || page
+            .rows
+            .iter()
+            .filter_map(|row| row.row_id)
+            .any(|row_id| row_id >= before_row_id)
+    {
+        bail!("splinterd returned a scrollback page outside the requested bounds");
+    }
+    Ok(())
+}
+
+async fn fetch_scrollback_pages(
+    connection: &mut Connection,
+    splint_id: SplintId,
+    incarnation: u64,
+    terminal_revision: u64,
+    history_generation: u64,
+    mut before_row_id: u64,
+) -> Result<Option<Vec<splinterm_protocol::ScrollbackPage>>> {
+    const PREFETCH_PAGE_COUNT: usize = 4;
+    let started = std::time::Instant::now();
+    let mut pages = Vec::with_capacity(PREFETCH_PAGE_COUNT);
+    for _ in 0..PREFETCH_PAGE_COUNT {
+        let response = connection
+            .request(Request::ScrollbackPage {
+                splint_id,
+                incarnation,
+                terminal_revision,
+                history_generation,
+                before_row_id,
+                max_rows: splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS,
+            })
+            .await?;
+        let page = match response {
+            Response::ScrollbackPage { page } => page,
+            Response::ScrollbackResyncRequired { .. } => return Ok(None),
+            _ => bail!("splinterd did not return a scrollback page"),
+        };
+        validate_scrollback_page_response(
+            &page,
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+            before_row_id,
+        )?;
+        let next_before = page.rows.first().and_then(|row| row.row_id);
+        let has_older = page.has_older;
+        if page.rows.is_empty() {
+            break;
+        }
+        pages.push(page);
+        if !has_older {
+            break;
+        }
+        let Some(next_before) = next_before else {
+            break;
+        };
+        before_row_id = next_before;
+    }
+    if std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some() {
+        eprintln!(
+            "scroll-trace page_batch_us={} pages={} rows={}",
+            started.elapsed().as_micros(),
+            pages.len(),
+            pages.iter().map(|page| page.rows.len()).sum::<usize>(),
+        );
+    }
+    Ok(Some(pages))
+}
+
+struct ControllerOutputs {
+    updates: mpsc::Sender<WindowUpdate>,
+    resyncs: mpsc::Sender<()>,
+}
+
 async fn run_controller(
     mut control: Connection,
     mut commands: mpsc::Receiver<WindowCommand>,
+    outputs: ControllerOutputs,
     controller_id: u64,
     splint_id: SplintId,
     incarnation: u64,
@@ -532,6 +647,46 @@ async fn run_controller(
                         pixel_width,
                         pixel_height,
                     }
+                }
+                WindowCommand::FetchScrollback {
+                    splint_id,
+                    incarnation,
+                    terminal_revision,
+                    history_generation,
+                    before_row_id,
+                } => {
+                    match fetch_scrollback_pages(
+                        &mut control,
+                        splint_id,
+                        incarnation,
+                        terminal_revision,
+                        history_generation,
+                        before_row_id,
+                    )
+                    .await?
+                    {
+                        Some(pages) if !pages.is_empty() => {
+                            if outputs
+                                .updates
+                                .send(WindowUpdate::ScrollbackPages(pages))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Some(_) => {}
+                        None => {
+                            let _ = outputs
+                                .updates
+                                .send(WindowUpdate::ScrollbackResyncRequired)
+                                .await;
+                            if outputs.resyncs.send(()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    continue;
                 }
                 WindowCommand::RevokeAccess(grant_id) => Request::RevokeAccess { grant_id },
                 WindowCommand::ReleaseControl => {
@@ -593,6 +748,7 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
     let (splint_id, incarnation) = connection.live_identity().await?;
     let requested_scopes = vec![
         AccessScope::Observe,
+        AccessScope::Scrollback,
         AccessScope::Input,
         AccessScope::Resize,
     ];
@@ -624,9 +780,14 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
         updates.clone(),
     ));
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
+    let (resync_sender, mut resyncs) = mpsc::channel(1);
     let mut controller = tokio::spawn(run_controller(
         control,
         commands,
+        ControllerOutputs {
+            updates: updates.clone(),
+            resyncs: resync_sender,
+        },
         controller_id,
         splint_id,
         incarnation,
@@ -672,6 +833,25 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
                 controller_result?;
                 return window_result;
             }
+            Some(()) = resyncs.recv() => {
+                attachment = resynchronize(
+                    &mut connection,
+                    attachment.subscription_id,
+                    splint_id,
+                    incarnation,
+                ).await?;
+                if updates
+                    .send(WindowUpdate::Snapshot(attachment.snapshot.clone()))
+                    .await
+                    .is_err()
+                {
+                    let window_result = window.await.context("Wayland window task failed")?;
+                    controller.await.context("window controller task failed")??;
+                    return window_result;
+                }
+                last_revision = attachment.snapshot.revision;
+                last_sequence = 0;
+            }
             frame = connection.next_server_frame() => {
                 match frame? {
                     ServerFrame::Event {
@@ -687,6 +867,7 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
                     ) {
                         EventAction::Ignore => {}
                         EventAction::Snapshot { sequence, snapshot } => {
+                            validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
                             last_revision = snapshot.revision;
                             if updates.send(WindowUpdate::Snapshot(snapshot)).await.is_err() {
                                 let window_result = window.await.context("Wayland window task failed")?;
@@ -900,6 +1081,17 @@ fn print_response(response: Response) -> Result<()> {
         }
         Response::DojoCreated { dojo } => println!("Created dojo '{}'.", dojo.name),
         Response::Attached { snapshot, .. } => print_snapshot(&snapshot),
+        Response::ScrollbackPage { page } => println!(
+            "Scrollback page: {} row(s), has_older={}",
+            page.rows.len(),
+            page.has_older
+        ),
+        Response::ScrollbackResyncRequired {
+            current_revision,
+            history_generation,
+        } => println!(
+            "Scrollback resync required at revision {current_revision}, generation {history_generation}"
+        ),
         Response::AccessGranted { grant } => {
             println!("Access grant {} issued.", grant.grant_id);
         }
@@ -972,8 +1164,8 @@ mod tests {
             splint_id: SplintId::new(),
             incarnation: 1,
             revision,
-            columns: 0,
-            rows: 0,
+            columns: 1,
+            rows: 1,
             cursor_column: 0,
             cursor_row: 0,
             cursor_deferred_wrap: false,
@@ -991,7 +1183,14 @@ mod tests {
             palette: vec![0; 256],
             default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
             title: String::new(),
-            visible_rows: Vec::new(),
+            visible_rows: vec![TerminalRow {
+                row_id: None,
+                linebreak: true,
+                cells: Vec::new(),
+            }],
+            history_generation: 1,
+            oldest_available_scrollback_row_id: None,
+            newest_available_scrollback_row_id: None,
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
@@ -1054,6 +1253,84 @@ mod tests {
                 },
             ),
             EventAction::Resynchronize
+        );
+    }
+
+    #[test]
+    fn scrollback_page_response_validation_enforces_request_identity_and_cursor() {
+        let page = splinterm_protocol::ScrollbackPage {
+            splint_id: SplintId::new(),
+            incarnation: 2,
+            terminal_revision: 4,
+            history_generation: 3,
+            oldest_available_row_id: Some(1),
+            newest_available_row_id: Some(12),
+            rows: vec![TerminalRow {
+                row_id: Some(8),
+                linebreak: false,
+                cells: Vec::new(),
+            }],
+            has_older: true,
+        };
+        assert!(
+            validate_scrollback_page_response(
+                &page,
+                page.splint_id,
+                page.incarnation,
+                page.terminal_revision,
+                page.history_generation,
+                9,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_scrollback_page_response(
+                &page,
+                SplintId::new(),
+                page.incarnation,
+                page.terminal_revision,
+                page.history_generation,
+                9,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_scrollback_page_response(
+                &page,
+                page.splint_id,
+                page.incarnation,
+                page.terminal_revision + 1,
+                page.history_generation,
+                9,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_scrollback_page_response(
+                &page,
+                page.splint_id,
+                page.incarnation,
+                page.terminal_revision,
+                page.history_generation,
+                8,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn initial_attachment_validation_rejects_malformed_and_wrong_identity_snapshots() {
+        let valid = snapshot(1);
+        assert!(validate_attached_snapshot(&valid, valid.splint_id, valid.incarnation).is_ok());
+
+        let mut malformed = valid.clone();
+        malformed.history_generation = 0;
+        assert!(
+            validate_attached_snapshot(&malformed, valid.splint_id, valid.incarnation).is_err()
+        );
+        assert!(validate_attached_snapshot(&valid, SplintId::new(), valid.incarnation).is_err());
+        assert!(
+            validate_attached_snapshot(&valid, valid.splint_id, valid.incarnation + 1).is_err()
         );
     }
 

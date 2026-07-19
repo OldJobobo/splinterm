@@ -73,9 +73,10 @@ use wayland_client::{
     },
 };
 
+use splinterm_core::SplintId;
 use splinterm_protocol::{
-    CellAttributes, ColorSource, MouseTracking, TerminalCell, TerminalInputModes, TerminalRow,
-    TerminalSnapshot, TerminalUpdate, UnderlineStyle,
+    CellAttributes, ColorSource, HistoryTransition, MouseTracking, TerminalCell,
+    TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
 };
 
 use smithay_client_toolkit::reexports::protocols::wp::{
@@ -106,15 +107,14 @@ const INITIAL_HEIGHT: u32 = 600;
 const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
 const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 const MAX_CLIPBOARD_WORKERS: usize = 4;
+const MAX_CACHED_HISTORY_ROWS: usize = 4096;
+const MAX_CACHED_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 const CLIPBOARD_IO_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_WHEEL_STEPS_PER_FRAME: usize = 8;
-// Foot's default `[scrollback].multiplier` is 3. Keep terminal mouse reports
-// at one report per wheel step, but translate local history navigation at the
-// same three-lines-per-step rate.
+// Keep application mouse reports at one report per wheel step. Local history
+// follows Foot's default three-lines-per-step semantic distance; visual motion
+// must be smoothed in pixels rather than by increasing this row multiplier.
 const SCROLLBACK_WHEEL_MULTIPLIER: f64 = 3.0;
-const MAX_BUFFERED_WHEEL_STEPS: f64 = 64.0;
 const WHEEL_VALUE120_STEP: f64 = 120.0;
-const WHEEL_PIXEL_STEP: f64 = 10.0;
 const SCALE_DENOMINATOR: u32 = 120;
 const MIN_SCALE_120: u32 = 120;
 const MAX_SCALE_120: u32 = 960;
@@ -254,6 +254,8 @@ impl Drop for ClipboardWorkerPermit<'_> {
 pub enum WindowUpdate {
     Snapshot(TerminalSnapshot),
     Update(TerminalUpdate),
+    ScrollbackPages(Vec<splinterm_protocol::ScrollbackPage>),
+    ScrollbackResyncRequired,
     Authority(AuthorityStatus),
     Theme(ResolvedTheme),
     Shutdown,
@@ -268,6 +270,13 @@ pub enum WindowCommand {
         rows: u16,
         pixel_width: u16,
         pixel_height: u16,
+    },
+    FetchScrollback {
+        splint_id: SplintId,
+        incarnation: u64,
+        terminal_revision: u64,
+        history_generation: u64,
+        before_row_id: u64,
     },
     RevokeAccess(u64),
     ReleaseControl,
@@ -349,6 +358,9 @@ impl Default for WindowOptions {
 )]
 pub fn run(mut options: WindowOptions) -> Result<()> {
     if let Some(snapshot) = options.snapshot.as_mut() {
+        snapshot
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.message))?;
         apply_theme(snapshot, options.theme);
     }
     let text_row = options
@@ -461,6 +473,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         snapshot: options.snapshot,
         snapshot_frame,
         scrollback_viewport: ScrollbackViewport::default(),
+        history_page_pending: false,
+        scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
+        scroll_started_at: None,
         rendered_viewport_offset: 0,
         viewport_dirty: false,
         updates: options.updates,
@@ -657,6 +672,9 @@ struct App {
     snapshot: Option<TerminalSnapshot>,
     snapshot_frame: Option<SnapshotFrame>,
     scrollback_viewport: ScrollbackViewport,
+    history_page_pending: bool,
+    scroll_trace: bool,
+    scroll_started_at: Option<Instant>,
     rendered_viewport_offset: usize,
     viewport_dirty: bool,
     updates: Option<Receiver<WindowUpdate>>,
@@ -751,6 +769,7 @@ fn coalesce_snapshots(
 
 fn blank_row(columns: usize) -> TerminalRow {
     TerminalRow {
+        row_id: None,
         linebreak: false,
         cells: vec![
             TerminalCell {
@@ -778,6 +797,31 @@ fn blank_row(columns: usize) -> TerminalRow {
     }
 }
 
+fn terminal_row_cache_bytes(row: &TerminalRow) -> usize {
+    row.cells.iter().fold(32_usize, |total, cell| {
+        total.saturating_add(64).saturating_add(cell.content.len())
+    })
+}
+
+fn history_cache_bytes(rows: &[TerminalRow]) -> usize {
+    rows.iter().map(terminal_row_cache_bytes).sum()
+}
+
+fn bound_history_cache(rows: &mut Vec<TerminalRow>, keep_oldest: bool) {
+    while rows.len() > MAX_CACHED_HISTORY_ROWS
+        || history_cache_bytes(rows) > MAX_CACHED_HISTORY_BYTES
+    {
+        if rows.is_empty() {
+            break;
+        }
+        if keep_oldest {
+            rows.pop();
+        } else {
+            rows.remove(0);
+        }
+    }
+}
+
 fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
     !update.rows.is_empty()
         || !update.scrolls.is_empty()
@@ -789,9 +833,69 @@ fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
         || update.scrollback.is_some()
 }
 
+fn apply_scrollback_update(
+    snapshot: &mut TerminalSnapshot,
+    scrollback: splinterm_protocol::TerminalScrollbackUpdate,
+) -> Result<()> {
+    match scrollback.transition {
+        HistoryTransition::Append { .. }
+            if scrollback.history_generation != snapshot.history_generation =>
+        {
+            anyhow::bail!("history append changed generation");
+        }
+        HistoryTransition::Clear | HistoryTransition::Reflow
+            if scrollback.history_generation <= snapshot.history_generation =>
+        {
+            anyhow::bail!("history reset did not change generation");
+        }
+        _ => {}
+    }
+    let preserve_cached = scrollback.history_generation == snapshot.history_generation
+        && matches!(
+            scrollback.transition,
+            HistoryTransition::Append { .. } | HistoryTransition::Replace
+        );
+    let first_returned = scrollback.rows.first().and_then(|row| row.row_id);
+    let oldest_available = scrollback.oldest_available_row_id;
+    let mut rows = if preserve_cached {
+        snapshot
+            .scrollback_rows
+            .iter()
+            .filter(|row| {
+                row.row_id
+                    .zip(oldest_available)
+                    .is_some_and(|(id, oldest)| id >= oldest)
+                    && row
+                        .row_id
+                        .zip(first_returned)
+                        .is_some_and(|(id, first)| id < first)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    rows.extend(scrollback.rows);
+    bound_history_cache(&mut rows, false);
+    snapshot.history_generation = scrollback.history_generation;
+    snapshot.oldest_available_scrollback_row_id = scrollback.oldest_available_row_id;
+    snapshot.newest_available_scrollback_row_id = scrollback.newest_available_row_id;
+    snapshot.scrollback_rows = rows;
+    snapshot.available_scrollback_rows = scrollback.available_rows;
+    snapshot.omitted_oldest_scrollback_rows = snapshot
+        .available_scrollback_rows
+        .saturating_sub(snapshot.scrollback_rows.len());
+    Ok(())
+}
+
 fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate) -> Result<()> {
     update
-        .validate_against(snapshot.revision, snapshot.columns, snapshot.rows)
+        .validate_against(
+            snapshot.revision,
+            snapshot.history_generation,
+            snapshot.columns,
+            snapshot.rows,
+        )
         .map_err(|error| anyhow::anyhow!(error.message))?;
     if let Some(columns) = update.columns {
         if columns == 0 || columns > usize::from(splinterm_protocol::MAX_COLUMNS) {
@@ -839,9 +943,7 @@ fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate
         snapshot.default_colors = colors;
     }
     if let Some(scrollback) = update.scrollback {
-        snapshot.scrollback_rows = scrollback.rows;
-        snapshot.available_scrollback_rows = scrollback.available_rows;
-        snapshot.omitted_oldest_scrollback_rows = scrollback.omitted_oldest_rows;
+        apply_scrollback_update(snapshot, scrollback)?;
     }
     snapshot.revision = update.revision;
     Ok(())
@@ -1235,22 +1337,23 @@ impl WheelAccumulator {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss,
-        reason = "the finite accumulated value and emitted count are clamped to eight wheel steps"
+        reason = "Wayland axis values are finite and converted to a whole-line count"
     )]
     fn push(
         &mut self,
         absolute: f64,
         discrete: i32,
         value120: i32,
+        cell_height: u32,
     ) -> Option<(MouseAction, usize)> {
-        self.push_scaled(absolute, discrete, value120, 1.0)
+        self.push_scaled(absolute, discrete, value120, 1.0, cell_height)
     }
 
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss,
-        reason = "the finite accumulated value and emitted count are clamped to eight wheel steps"
+        reason = "Wayland axis values are finite and converted to a whole-line count"
     )]
     fn push_scaled(
         &mut self,
@@ -1258,6 +1361,7 @@ impl WheelAccumulator {
         discrete: i32,
         value120: i32,
         multiplier: f64,
+        cell_height: u32,
     ) -> Option<(MouseAction, usize)> {
         let multiplier = if multiplier.is_finite() && multiplier > 0.0 {
             multiplier
@@ -1272,8 +1376,12 @@ impl WheelAccumulator {
             )
         } else if discrete != 0 {
             (WheelUnit::Discrete, f64::from(discrete) * multiplier, 1.0)
-        } else if absolute != 0.0 && absolute.is_finite() {
-            (WheelUnit::Pixel, absolute, WHEEL_PIXEL_STEP / multiplier)
+        } else if absolute != 0.0 && absolute.is_finite() && cell_height > 0 {
+            (
+                WheelUnit::Pixel,
+                absolute,
+                f64::from(cell_height) / multiplier,
+            )
         } else {
             return None;
         };
@@ -1281,10 +1389,8 @@ impl WheelAccumulator {
             self.unit = Some(unit);
             self.remainder = 0.0;
         }
-        let limit = threshold * MAX_BUFFERED_WHEEL_STEPS;
-        self.remainder = (self.remainder + delta).clamp(-limit, limit);
-        let available = (self.remainder.abs() / threshold).floor() as usize;
-        let count = available.min(MAX_WHEEL_STEPS_PER_FRAME);
+        self.remainder += delta;
+        let count = (self.remainder.abs() / threshold).floor() as usize;
         if count == 0 {
             return None;
         }
@@ -1549,12 +1655,49 @@ impl App {
                 .into_iter()
                 .cloned()
                 .collect(),
+            history_generation: snapshot.history_generation,
+            oldest_available_scrollback_row_id: None,
+            newest_available_scrollback_row_id: None,
             scrollback_rows: Vec::new(),
             available_scrollback_rows: snapshot.available_scrollback_rows,
-            omitted_oldest_scrollback_rows: snapshot.omitted_oldest_scrollback_rows,
+            omitted_oldest_scrollback_rows: snapshot.available_scrollback_rows,
             exited_code: snapshot.exited_code,
             exited_signal: snapshot.exited_signal,
         })
+    }
+
+    fn request_older_history(&mut self) -> Result<()> {
+        if self.history_page_pending {
+            return Ok(());
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Ok(());
+        };
+        if snapshot.omitted_oldest_scrollback_rows == 0
+            || snapshot.scrollback_rows.len() >= MAX_CACHED_HISTORY_ROWS
+            || history_cache_bytes(&snapshot.scrollback_rows) >= MAX_CACHED_HISTORY_BYTES
+        {
+            return Ok(());
+        }
+        let Some(before_row_id) = snapshot.scrollback_rows.first().and_then(|row| row.row_id)
+        else {
+            return Ok(());
+        };
+        let Some(commands) = self.commands.as_ref() else {
+            return Ok(());
+        };
+        try_window_command(
+            commands,
+            WindowCommand::FetchScrollback {
+                splint_id: snapshot.splint_id,
+                incarnation: snapshot.incarnation,
+                terminal_revision: snapshot.revision,
+                history_generation: snapshot.history_generation,
+                before_row_id,
+            },
+        )?;
+        self.history_page_pending = true;
+        Ok(())
     }
 
     fn scroll_history(&mut self, action: MouseAction, lines: usize) -> Result<bool> {
@@ -1562,12 +1705,22 @@ impl App {
         let previous_offset = self.scrollback_viewport.offset_from_bottom();
         match action {
             MouseAction::WheelUp => self.scrollback_viewport.scroll_up(lines, snapshot),
-            MouseAction::WheelDown => self.scrollback_viewport.scroll_down(lines),
+            MouseAction::WheelDown => self.scrollback_viewport.scroll_down(lines, snapshot),
             _ => return Ok(false),
         }
-        if self.scrollback_viewport.offset_from_bottom() == previous_offset {
+        let moved = self.scrollback_viewport.offset_from_bottom() != previous_offset;
+        if action == MouseAction::WheelUp {
+            let loaded = snapshot.scrollback_rows.len();
+            let remaining = loaded.saturating_sub(self.scrollback_viewport.offset_from_bottom());
+            let prefetch_distance = snapshot.rows.saturating_mul(2).max(32);
+            if remaining <= prefetch_distance {
+                self.request_older_history()?;
+            }
+        }
+        if !moved {
             return Ok(false);
         }
+        self.scroll_started_at.get_or_insert_with(Instant::now);
         self.invalidate_local_content_state();
         // Coalesce high-resolution wheel events until the next compositor frame.
         // Re-shaping the entire viewport synchronously for every axis event made
@@ -2028,22 +2181,28 @@ impl App {
         for update in pending {
             match update {
                 WindowUpdate::Snapshot(mut snapshot) => {
+                    self.history_page_pending = false;
+                    snapshot
+                        .validate()
+                        .map_err(|error| anyhow::anyhow!(error.message))?;
                     apply_theme(&mut snapshot, self.theme);
-                    if self
-                        .snapshot
-                        .as_ref()
-                        .is_none_or(|current| snapshot_is_newer(current, &snapshot).unwrap_or(true))
-                    {
-                        let previous_available = self
+                    let accept = match self.snapshot.as_ref() {
+                        Some(current) => snapshot_is_newer(current, &snapshot)?,
+                        None => true,
+                    };
+                    if accept {
+                        let previous_generation = self
                             .snapshot
                             .as_ref()
-                            .map_or(0, |current| current.available_scrollback_rows);
+                            .map_or(snapshot.history_generation, |current| {
+                                current.history_generation
+                            });
                         let previous_rows = self
                             .snapshot
                             .as_ref()
                             .map_or_else(Vec::new, |current| current.scrollback_rows.clone());
                         self.scrollback_viewport.observe_history_change(
-                            previous_available,
+                            previous_generation,
                             &previous_rows,
                             &snapshot,
                         );
@@ -2073,10 +2232,10 @@ impl App {
                     let content_changed = terminal_update_changes_visible_content(&update);
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
-                    let previous_available = self
+                    let previous_generation = self
                         .snapshot
                         .as_ref()
-                        .map_or(0, |snapshot| snapshot.available_scrollback_rows);
+                        .map_or(1, |snapshot| snapshot.history_generation);
                     let previous_rows = self
                         .snapshot
                         .as_ref()
@@ -2088,7 +2247,7 @@ impl App {
                     apply_terminal_update(snapshot, update)?;
                     apply_theme(snapshot, self.theme);
                     self.scrollback_viewport.observe_history_change(
-                        previous_available,
+                        previous_generation,
                         &previous_rows,
                         snapshot,
                     );
@@ -2158,6 +2317,60 @@ impl App {
                     }
                     visual_changed |=
                         full || cursor_changed || self.raster_dirty_rows.iter().any(|dirty| *dirty);
+                }
+                WindowUpdate::ScrollbackPages(pages) => {
+                    self.history_page_pending = false;
+                    let snapshot = self
+                        .snapshot
+                        .as_mut()
+                        .context("scrollback pages arrived before initial snapshot")?;
+                    if pages.iter().any(|page| {
+                        page.splint_id != snapshot.splint_id
+                            || page.incarnation != snapshot.incarnation
+                            || page.terminal_revision != snapshot.revision
+                            || page.history_generation != snapshot.history_generation
+                    }) {
+                        continue;
+                    }
+                    let first_loaded = snapshot
+                        .scrollback_rows
+                        .first()
+                        .and_then(|row| row.row_id)
+                        .unwrap_or(u64::MAX);
+                    let existing = snapshot
+                        .scrollback_rows
+                        .iter()
+                        .filter_map(|row| row.row_id)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let metadata = pages
+                        .first()
+                        .map(|page| (page.oldest_available_row_id, page.newest_available_row_id));
+                    let mut older = pages
+                        .into_iter()
+                        .rev()
+                        .flat_map(|page| page.rows)
+                        .filter(|row| {
+                            row.row_id
+                                .is_some_and(|id| id < first_loaded && !existing.contains(&id))
+                        })
+                        .collect::<Vec<_>>();
+                    if !older.is_empty() {
+                        older.append(&mut snapshot.scrollback_rows);
+                        snapshot.scrollback_rows = older;
+                        // Keep one contiguous newest history window. Evicting from the
+                        // newest edge would create a gap that cannot be paged forward.
+                        bound_history_cache(&mut snapshot.scrollback_rows, false);
+                        snapshot.omitted_oldest_scrollback_rows = snapshot
+                            .available_scrollback_rows
+                            .saturating_sub(snapshot.scrollback_rows.len());
+                        if let Some((oldest, newest)) = metadata {
+                            snapshot.oldest_available_scrollback_row_id = oldest;
+                            snapshot.newest_available_scrollback_row_id = newest;
+                        }
+                    }
+                }
+                WindowUpdate::ScrollbackResyncRequired => {
+                    self.history_page_pending = false;
                 }
                 WindowUpdate::Authority(authority) => {
                     self.authority = authority;
@@ -2320,6 +2533,8 @@ impl App {
     )]
     fn draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         self.redraw_pending = false;
+        let draw_started = Instant::now();
+        let scroll_started = self.scroll_started_at.take();
         if self.viewport_dirty {
             let display = self.display_snapshot().context("scroll display snapshot")?;
             let current_offset = self.scrollback_viewport.offset_from_bottom();
@@ -2501,6 +2716,20 @@ impl App {
             .attach_to(self.window.wl_surface())
             .context("attach SHM buffer")?;
         self.window.commit();
+        if self.scroll_trace {
+            if let Some(scroll_started) = scroll_started {
+                eprintln!(
+                    "scroll-trace input_to_commit_us={} draw_us={} viewport_offset={} cached_rows={} page_pending={}",
+                    scroll_started.elapsed().as_micros(),
+                    draw_started.elapsed().as_micros(),
+                    self.scrollback_viewport.offset_from_bottom(),
+                    self.snapshot
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.scrollback_rows.len()),
+                    self.history_page_pending,
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -3039,12 +3268,17 @@ impl PointerHandler for App {
                     if vertical.is_none() {
                         continue;
                     }
+                    let cell_height = self
+                        .snapshot_frame
+                        .as_ref()
+                        .map_or(1, SnapshotFrame::cell_height);
                     if modes.mouse_tracking == MouseTracking::None {
                         if let Some((action, count)) = self.scrollback_wheel.push_scaled(
                             vertical.absolute,
                             vertical.discrete,
                             vertical.value120,
                             SCROLLBACK_WHEEL_MULTIPLIER,
+                            cell_height,
                         ) {
                             if let Err(error) = self.scroll_history(action, count) {
                                 self.fail(error);
@@ -3056,6 +3290,7 @@ impl PointerHandler for App {
                         vertical.absolute,
                         vertical.discrete,
                         vertical.value120,
+                        cell_height,
                     ) {
                         let Some(position) = cell else { continue };
                         if let Some(report) =
@@ -3483,12 +3718,89 @@ mod tests {
             default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
             title: String::new(),
             visible_rows: Vec::new(),
+            history_generation: 1,
+            oldest_available_scrollback_row_id: None,
+            newest_available_scrollback_row_id: None,
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
             exited_code: None,
             exited_signal: None,
         }
+    }
+
+    fn history_row(id: u64, content_bytes: usize) -> TerminalRow {
+        let mut row = blank_row(1);
+        row.row_id = Some(id);
+        row.cells[0].content = "x".repeat(content_bytes);
+        row
+    }
+
+    #[test]
+    fn history_cache_enforces_row_budget_from_either_edge() {
+        let mut newest = (1..=u64::try_from(MAX_CACHED_HISTORY_ROWS + 4).unwrap())
+            .map(|id| history_row(id, 0))
+            .collect::<Vec<_>>();
+        bound_history_cache(&mut newest, false);
+        assert_eq!(newest.len(), MAX_CACHED_HISTORY_ROWS);
+        assert_eq!(newest.first().and_then(|row| row.row_id), Some(5));
+
+        let mut oldest = (1..=u64::try_from(MAX_CACHED_HISTORY_ROWS + 4).unwrap())
+            .map(|id| history_row(id, 0))
+            .collect::<Vec<_>>();
+        bound_history_cache(&mut oldest, true);
+        assert_eq!(oldest.len(), MAX_CACHED_HISTORY_ROWS);
+        assert_eq!(oldest.last().and_then(|row| row.row_id), Some(4096));
+    }
+
+    #[test]
+    fn history_cache_enforces_byte_budget_and_preserves_order() {
+        let mut rows = (1..=20)
+            .map(|id| history_row(id, 1024 * 1024))
+            .collect::<Vec<_>>();
+        bound_history_cache(&mut rows, false);
+        assert!(history_cache_bytes(&rows) <= MAX_CACHED_HISTORY_BYTES);
+        assert!(rows.windows(2).all(|pair| pair[0].row_id < pair[1].row_id));
+        assert_eq!(rows.last().and_then(|row| row.row_id), Some(20));
+    }
+
+    #[test]
+    fn same_generation_trim_discards_cached_rows_before_daemon_oldest() {
+        let mut current = snapshot(SplintId::new(), 1, 10);
+        current.columns = 1;
+        current.rows = 1;
+        current.visible_rows = vec![blank_row(1)];
+        current.scrollback_rows = (1..=4).map(|id| history_row(id, 0)).collect();
+        current.available_scrollback_rows = 4;
+        current.oldest_available_scrollback_row_id = Some(1);
+        current.newest_available_scrollback_row_id = Some(4);
+
+        apply_scrollback_update(
+            &mut current,
+            splinterm_protocol::TerminalScrollbackUpdate {
+                transition: HistoryTransition::Append {
+                    appended_rows: 2,
+                    trimmed_rows: 2,
+                },
+                history_generation: 1,
+                oldest_available_row_id: Some(3),
+                newest_available_row_id: Some(6),
+                rows: vec![history_row(5, 0), history_row(6, 0)],
+                available_rows: 4,
+                omitted_oldest_rows: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|row| row.row_id)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5, 6]
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 0);
     }
 
     #[test]
@@ -3498,6 +3810,7 @@ mod tests {
         current.rows = 1;
         current.visible_rows = vec![blank_row(2)];
         let row = TerminalRow {
+            row_id: None,
             linebreak: true,
             cells: vec![TerminalCell {
                 content: "x".into(),
@@ -3528,7 +3841,12 @@ mod tests {
                 columns: None,
                 row_count: None,
                 scrollback: Some(splinterm_protocol::TerminalScrollbackUpdate {
+                    transition: splinterm_protocol::HistoryTransition::Reflow,
+                    history_generation: 2,
+                    oldest_available_row_id: Some(7),
+                    newest_available_row_id: Some(7),
                     rows: vec![TerminalRow {
+                        row_id: Some(7),
                         linebreak: true,
                         cells: Vec::new(),
                     }],
@@ -3543,8 +3861,11 @@ mod tests {
         assert_eq!((current.cursor_column, current.cursor_row), (1, 0));
         assert!(current.cursor_deferred_wrap);
         assert_eq!(current.title, "revision eleven");
+        assert_eq!(current.history_generation, 2);
+        assert_eq!(current.oldest_available_scrollback_row_id, Some(7));
+        assert_eq!(current.newest_available_scrollback_row_id, Some(7));
         assert_eq!(current.available_scrollback_rows, 1);
-        assert_eq!(current.scrollback_rows.len(), 1);
+        assert_eq!(current.scrollback_rows[0].row_id, Some(7));
     }
 
     #[test]
@@ -3623,11 +3944,11 @@ mod tests {
     fn local_scrollback_uses_foot_default_wheel_multiplier() {
         let mut wheel = WheelAccumulator::default();
         assert_eq!(
-            wheel.push_scaled(0.0, 0, -40, SCROLLBACK_WHEEL_MULTIPLIER),
+            wheel.push_scaled(0.0, 0, -40, SCROLLBACK_WHEEL_MULTIPLIER, 29),
             Some((MouseAction::WheelUp, 1))
         );
         assert_eq!(
-            wheel.push_scaled(0.0, 1, 0, SCROLLBACK_WHEEL_MULTIPLIER),
+            wheel.push_scaled(0.0, 1, 0, SCROLLBACK_WHEEL_MULTIPLIER, 29),
             Some((MouseAction::WheelDown, 3))
         );
     }
@@ -3909,30 +4230,27 @@ mod tests {
     }
 
     #[test]
-    fn axis_accumulates_partial_steps_preserves_remainder_and_caps_frames() {
+    fn axis_accumulates_partial_steps_with_foot_thresholds() {
         let mut wheel = WheelAccumulator::default();
-        assert_eq!(wheel.push(0.0, 0, -60), None);
-        assert_eq!(wheel.push(0.0, 0, -59), None);
-        assert_eq!(wheel.push(0.0, 0, -1), Some((MouseAction::WheelUp, 1)));
-        assert_eq!(wheel.push(0.0, 0, 119), None);
-        assert_eq!(wheel.push(0.0, 0, 1), Some((MouseAction::WheelDown, 1)));
+        assert_eq!(wheel.push(0.0, 0, -60, 10), None);
+        assert_eq!(wheel.push(0.0, 0, -59, 10), None);
+        assert_eq!(wheel.push(0.0, 0, -1, 10), Some((MouseAction::WheelUp, 1)));
+        assert_eq!(wheel.push(0.0, 0, 119, 10), None);
+        assert_eq!(wheel.push(0.0, 0, 1, 10), Some((MouseAction::WheelDown, 1)));
 
         assert_eq!(
-            wheel.push(0.0, 20, 0),
-            Some((MouseAction::WheelDown, MAX_WHEEL_STEPS_PER_FRAME))
+            wheel.push(0.0, 20, 0, 10),
+            Some((MouseAction::WheelDown, 20))
         );
         assert_eq!(
-            wheel.push(0.0, 0, 0),
+            wheel.push(0.0, 0, 0, 10),
             None,
             "zero frames do not flush a different source implicitly"
         );
-        assert_eq!(
-            wheel.push(0.0, 1, 0),
-            Some((MouseAction::WheelDown, MAX_WHEEL_STEPS_PER_FRAME))
-        );
+        assert_eq!(wheel.push(0.0, 1, 0, 10), Some((MouseAction::WheelDown, 1)));
 
-        assert_eq!(wheel.push(-4.0, 0, 0), None);
-        assert_eq!(wheel.push(-6.0, 0, 0), Some((MouseAction::WheelUp, 1)));
+        assert_eq!(wheel.push(-4.0, 0, 0, 10), None);
+        assert_eq!(wheel.push(-6.0, 0, 0, 10), Some((MouseAction::WheelUp, 1)));
     }
 
     #[test]

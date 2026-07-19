@@ -33,7 +33,7 @@ pub use mode::{ActiveScreen, MouseTracking, TerminalModes};
 pub use row::Row;
 pub use snapshot::{
     CellAttributesSnapshot, CellSnapshot, CellSnapshotContent, CursorSnapshot, Dimensions,
-    RowSnapshot, ScrollbackSnapshot, SnapshotRequest, TerminalSnapshot,
+    RowSnapshot, ScrollbackPage, ScrollbackSnapshot, SnapshotRequest, TerminalSnapshot,
 };
 pub use terminal::Terminal;
 pub(crate) use update::ChangeSet;

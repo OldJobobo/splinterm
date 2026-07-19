@@ -65,6 +65,7 @@ pub struct LiveCell {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveRow {
+    pub row_id: Option<u64>,
     pub linebreak: bool,
     pub cells: Vec<LiveCell>,
 }
@@ -87,6 +88,14 @@ pub struct LiveSnapshot {
     pub scrollback_rows: Vec<LiveRow>,
     pub scrollback: ScrollbackSnapshot,
     pub exited: Option<ProcessExit>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveScrollbackPage {
+    pub terminal_revision: TerminalRevision,
+    pub history_generation: u64,
+    pub rows: Vec<LiveRow>,
+    pub has_older: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,6 +221,7 @@ enum Command {
     Input(Vec<u8>, Reply<()>),
     Resize(PtySize, Reply<()>),
     Snapshot(usize, Reply<LiveSnapshot>),
+    ScrollbackPage(u64, usize, Reply<LiveScrollbackPage>),
     Subscribe(usize, Reply<Subscription>),
     Attach(usize, usize, Reply<(LiveSnapshot, Subscription)>),
     Shutdown(oneshot::Sender<()>),
@@ -254,6 +264,15 @@ impl LiveSplintHandle {
         max_scrollback_rows: usize,
     ) -> Result<LiveSnapshot, LiveError> {
         self.request(|reply| Command::Snapshot(max_scrollback_rows, reply))
+            .await
+    }
+
+    pub async fn scrollback_page(
+        &self,
+        before_row_id: u64,
+        max_rows: usize,
+    ) -> Result<LiveScrollbackPage, LiveError> {
+        self.request(|reply| Command::ScrollbackPage(before_row_id, max_rows, reply))
             .await
     }
 
@@ -702,6 +721,18 @@ fn handle_command(
                 child_exit,
             )));
         }
+        Command::ScrollbackPage(before_row_id, max_rows, reply) => {
+            let page = terminal.scrollback_page(
+                before_row_id,
+                max_rows.min(config.max_scrollback_snapshot_rows),
+            );
+            let _ = reply.send(Ok(LiveScrollbackPage {
+                terminal_revision: page.terminal_revision,
+                history_generation: page.history_generation,
+                rows: page.rows.into_iter().map(owned_row).collect(),
+                has_older: page.has_older,
+            }));
+        }
         Command::Subscribe(capacity, reply) => {
             subscribers.retain(|subscriber| !subscriber.events.is_closed());
             if capacity == 0 {
@@ -869,6 +900,7 @@ fn owned_snapshot(
 
 fn owned_row(row: splinterm_terminal::RowSnapshot<'_>) -> LiveRow {
     LiveRow {
+        row_id: row.id(),
         linebreak: row.linebreak(),
         cells: row
             .cells()
