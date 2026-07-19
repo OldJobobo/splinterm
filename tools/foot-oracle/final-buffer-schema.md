@@ -8,23 +8,55 @@ Required metadata:
 ```json
 {
   "schema": "splinterm.final-buffer.v1",
-  "width": 800,
-  "height": 600,
-  "stride": 3200,
+  "width": 746,
+  "height": 462,
+  "stride": 2984,
   "format": "argb8888",
   "byte_order": "bgra",
   "endianness": "little",
   "scale_120": 120,
   "grid": {"columns": 80, "rows": 24},
   "cell": {"width": 9, "height": 18, "baseline": 14},
-  "padding": {"left": 40, "right": 40, "top": 84, "bottom": 84},
-  "origin": {"x": 40, "y": 84},
+  "padding": {"left": 12, "right": 14, "top": 14, "bottom": 16},
+  "origin": {"x": 12, "y": 14},
   "cursor": null,
   "fixture": "ascii",
   "frame_id": "ascii-regular-12px-1x",
   "background_bgra": [22, 18, 14, 255],
   "composition": ["terminal-backgrounds", "glyphs", "decorations", "cursor"],
-  "provenance": {}
+  "provenance": {
+    "font_size": {"value": 12, "unit": "pixels"},
+    "font_sizing_policy": "output-scale",
+    "font_resolution": {
+      "configured_size": {"value": 12, "unit": "pixels"},
+      "policy": "output-scale",
+      "observed_output_dpi": 96,
+      "observed_output_id": null,
+      "observed_output_name": null,
+      "observed_dpi_source": "provided-physical-dpi",
+      "observed_dpi_fallback_reason": null,
+      "sizing_dpi": 96,
+      "sizing_dpi_source": "output-scale",
+      "surface_scale_120": 120,
+      "effective_pixel_size_26_6": 768,
+      "effective_pixel_size": 12
+    },
+    "window_geometry": {
+      "surface_logical_size": {"width": 746, "height": 462},
+      "surface_buffer_size": {"width": 746, "height": 462},
+      "surface_scale_120": 120,
+      "grid": {"columns": 80, "rows": 24},
+      "cell": {"width": 9, "height": 18, "ascent": 13, "descent": 4, "baseline_from_top": 14, "advance_policy": "integer-primary-advance"},
+      "grid_rect": {"x": 12, "y": 14, "width": 720, "height": 432},
+      "visible_grid_rect": {"x": 12, "y": 14, "width": 720, "height": 432},
+      "requested_padding": {"left": 12, "right": 13, "top": 14, "bottom": 15},
+      "effective_base_padding": {"left": 12, "right": 13, "top": 14, "bottom": 15},
+      "actual_padding": {"left": 12, "right": 14, "top": 14, "bottom": 16},
+      "residual_right": 1,
+      "residual_bottom": 1,
+      "residual_policy": "trailing-edges"
+    }
+  }
 }
 ```
 
@@ -33,8 +65,12 @@ worker, bytes are stored as BGRA. `stride` may exceed `width * 4`; row padding i
 not compared. The raw file length must equal `stride * height` exactly.
 
 Coordinates are buffer-pixel coordinates. `origin` is declared directly and is
-never inferred by translating either image. All four padding edges are explicit
-even while the renderer still uses symmetric padding. Cursor metadata, when
+never inferred by translating either image. The top-level v1 `cell` and `padding`
+objects remain byte-for-byte contract-compatible with Slice 1 and pinned Foot;
+Slice 2 geometry is additive under `provenance.window_geometry`. All four logical
+padding edges are independent. Their effective buffer values are explicit;
+deterministic conversion floors each requested edge while any whole-cell fit
+residual belongs to the right/bottom trailing edges. Cursor metadata, when
 present, is `{ "column": N, "row": N, "shape": "block|beam|underline" }`.
 
 Readers must reject unknown schemas, unsupported format/order/endian values,

@@ -8,6 +8,7 @@
 
 mod box_drawing;
 pub mod config;
+pub mod geometry;
 pub mod renderer;
 pub mod viewport;
 pub mod wayland;

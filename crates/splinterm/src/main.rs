@@ -739,6 +739,9 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_size: config.font_size,
+        font_sizing_policy: config.font_sizing_policy,
+        physical_dpi: 96.0,
+        padding: config.padding,
     })?;
     let theme = load_theme(&config.theme_path).unwrap_or_else(|error| {
         eprintln!("splinterm theme: {error:#}; using safe fallback palette");
@@ -807,7 +810,6 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
             cursor_style: window_config.cursor_style,
             cursor_blink: window_config.cursor_blink,
             title: window_config.title,
-            dpi_aware: window_config.dpi_aware,
             theme,
             ..WindowOptions::default()
         })

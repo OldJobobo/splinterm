@@ -12,11 +12,18 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
-use crate::{box_drawing, config::CursorStyle};
+use crate::{
+    box_drawing,
+    config::CursorStyle,
+    geometry::{
+        BufferPadding, CellGeometry, FontSize, FontSizingPolicy, OutputDpiObservation,
+        TerminalPadding, WindowGeometry, resolve_font_size, resolve_font_size_with_output,
+    },
+};
 use anyhow::{Context, Result, bail};
 
 use splinterm_core::SplintId;
@@ -53,18 +60,25 @@ const SNAPSHOT_EMOJI: usize = 5;
 
 static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 6], String>> = OnceLock::new();
 static RENDERER_OPTIONS: OnceLock<RendererOptions> = OnceLock::new();
+static OUTPUT_DPI: OnceLock<Mutex<OutputDpiObservation>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct RendererOptions {
     pub font: String,
-    pub font_size: f32,
+    pub font_size: FontSize,
+    pub font_sizing_policy: FontSizingPolicy,
+    pub physical_dpi: f32,
+    pub padding: TerminalPadding,
 }
 
 impl Default for RendererOptions {
     fn default() -> Self {
         Self {
             font: PRIMARY_FONT.to_owned(),
-            font_size: BASE_FONT_SIZE,
+            font_size: FontSize::Pixels(BASE_FONT_SIZE),
+            font_sizing_policy: FontSizingPolicy::OutputScale,
+            physical_dpi: 96.0,
+            padding: TerminalPadding::DEFAULT,
         }
     }
 }
@@ -75,9 +89,16 @@ impl Default for RendererOptions {
 /// # Errors
 /// Returns an error for an invalid size or a second configuration attempt.
 pub fn configure(options: RendererOptions) -> Result<()> {
-    if !options.font_size.is_finite() || !(6.0..=96.0).contains(&options.font_size) {
-        bail!("font size must be between 6 and 96 pixels");
+    if !options.font_size.value().is_finite() || !(6.0..=96.0).contains(&options.font_size.value())
+    {
+        bail!("font size must be between 6 and 96 in its declared unit");
     }
+    resolve_font_size(
+        options.font_size,
+        options.font_sizing_policy,
+        120,
+        options.physical_dpi,
+    )?;
     RENDERER_OPTIONS
         .set(options)
         .map_err(|_| anyhow::anyhow!("renderer is already configured"))
@@ -87,11 +108,74 @@ fn renderer_options() -> &'static RendererOptions {
     RENDERER_OPTIONS.get_or_init(RendererOptions::default)
 }
 
+fn output_dpi() -> Result<OutputDpiObservation> {
+    let default = || {
+        OutputDpiObservation::provided(renderer_options().physical_dpi)
+            .expect("configured physical DPI was validated")
+    };
+    OUTPUT_DPI
+        .get_or_init(|| Mutex::new(default()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("renderer output DPI lock is poisoned"))
+        .map(|observation| observation.clone())
+}
+
+/// Resolves the current configured font against surface scale and output DPI.
+///
+/// # Errors
+/// Returns an error for invalid scale, DPI, or effective raster size.
+pub fn effective_font_resolution(
+    surface_scale_120: u32,
+) -> Result<crate::geometry::ResolvedFontSize> {
+    let options = renderer_options();
+    resolve_font_size_with_output(
+        options.font_size,
+        options.font_sizing_policy,
+        surface_scale_120,
+        &output_dpi()?,
+    )
+}
+
+fn effective_font_size(surface_scale_120: u32) -> Result<f32> {
+    Ok(effective_font_resolution(surface_scale_120)?.pixel_size)
+}
+
+/// Updates the most recently entered Wayland output DPI observation.
+/// Returns true only when the effective font raster size changes at this scale.
+///
+/// # Errors
+/// Returns an error for invalid scale/DPI/font resolution or a poisoned state lock.
+pub fn update_output_dpi(
+    observation: OutputDpiObservation,
+    surface_scale_120: u32,
+) -> Result<bool> {
+    let options = renderer_options();
+    // Validate and compare resolutions before publishing the observation.
+    let previous = effective_font_resolution(surface_scale_120)?;
+    let next = resolve_font_size_with_output(
+        options.font_size,
+        options.font_sizing_policy,
+        surface_scale_120,
+        &observation,
+    )?;
+    let mut current = OUTPUT_DPI
+        .get_or_init(|| Mutex::new(observation.clone()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("renderer output DPI lock is poisoned"))?;
+    *current = observation;
+    let changed = previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6;
+    drop(current);
+    if changed {
+        SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+    }
+    Ok(changed)
+}
+
 struct PersistentGlyphCache {
     context: ScaleContext,
-    raster_faces: HashMap<(u16, usize), RasterFace>,
-    glyphs: HashMap<(u16, GlyphKey), Arc<CachedGlyph>>,
-    order: VecDeque<(u16, GlyphKey)>,
+    raster_faces: HashMap<(isize, usize), RasterFace>,
+    glyphs: HashMap<(isize, GlyphKey), Arc<CachedGlyph>>,
+    order: VecDeque<(isize, GlyphKey)>,
     hits: u64,
     misses: u64,
     evictions: u64,
@@ -498,18 +582,18 @@ fn snapshot_faces() -> Result<&'static [FontFace; 6]> {
 
 fn snapshot_glyph(
     faces: &[FontFace],
-    scale: u16,
     face_index: usize,
     glyph_id: u16,
     font_size: f32,
 ) -> Result<Arc<CachedGlyph>> {
+    let effective_size_26_6 = pixel_size_26_6(font_size)?;
     let key = GlyphKey {
         face: face_index,
         glyph: glyph_id,
     };
     SNAPSHOT_GLYPH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(glyph) = cache.glyphs.get(&(scale, key)).cloned() {
+        if let Some(glyph) = cache.glyphs.get(&(effective_size_26_6, key)).cloned() {
             cache.hits = cache.hits.saturating_add(1);
             return Ok(glyph);
         }
@@ -539,7 +623,7 @@ fn snapshot_glyph(
                 data: image.data,
             }
         } else {
-            let raster_key = (scale, face_index);
+            let raster_key = (effective_size_26_6, face_index);
             if let std::collections::hash_map::Entry::Vacant(entry) =
                 cache.raster_faces.entry(raster_key)
             {
@@ -577,8 +661,10 @@ fn snapshot_glyph(
                 cache.evictions = cache.evictions.saturating_add(1);
             }
         }
-        cache.order.push_back((scale, key));
-        cache.glyphs.insert((scale, key), Arc::clone(&glyph));
+        cache.order.push_back((effective_size_26_6, key));
+        cache
+            .glyphs
+            .insert((effective_size_26_6, key), Arc::clone(&glyph));
         Ok(glyph)
     })
 }
@@ -622,7 +708,7 @@ pub fn snapshot_cache_metrics() -> serde_json::Value {
 /// Returns an error when the configured font cannot be resolved or parsed.
 pub fn ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
     let face = resolve_face("ASCII evidence", &renderer_options().font, "")?;
-    let font_size = renderer_options().font_size;
+    let font_size = effective_font_size(120)?;
     let font = font_ref(&face)?;
     let metrics = font.metrics(&[]).scale(font_size);
     let font_ascent = ceil_to_i32(metrics.ascent);
@@ -714,7 +800,7 @@ pub fn ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
 pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
     let faces = snapshot_faces()?;
     let face = &faces[SNAPSHOT_PRIMARY_REGULAR];
-    let font_size = renderer_options().font_size;
+    let font_size = effective_font_size(120)?;
     let font = font_ref(face)?;
     let font_metrics = font.metrics(&[]).scale(font_size);
     let metrics = cell_metrics(face, font_size)?;
@@ -723,7 +809,7 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
     for codepoint in 0x20_u32..=0x7e {
         let character = char::from_u32(codepoint).context("printable ASCII is valid Unicode")?;
         let glyph_id = font.charmap().map(character);
-        let glyph = snapshot_glyph(faces, 120, SNAPSHOT_PRIMARY_REGULAR, glyph_id, font_size)?;
+        let glyph = snapshot_glyph(faces, SNAPSHOT_PRIMARY_REGULAR, glyph_id, font_size)?;
         let ink = glyph.ink_bounds().unwrap_or(InkBounds {
             left: 0,
             top: 0,
@@ -796,6 +882,8 @@ fn glyph_alpha_bytes(glyph: &CachedGlyph) -> Vec<u8> {
 struct CellMetrics {
     width: u32,
     height: u32,
+    ascent: u32,
+    descent: u32,
     baseline: i32,
     mono_advance: f32,
     underline_position: i32,
@@ -826,6 +914,8 @@ fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<CellMetrics> 
     Ok(CellMetrics {
         width,
         height,
+        ascent: u32::try_from(metrics.ascent).context("cell ascent")?,
+        descent: u32::try_from(metrics.descent).context("cell descent")?,
         baseline: i32::try_from(height).context("cell baseline height")? - metrics.descent,
         mono_advance: glyph.advance_x as f32,
         underline_position: trunc_to_i32(swash_metrics.underline_offset),
@@ -1238,13 +1328,14 @@ pub(crate) struct SnapshotFrame {
     rows: u32,
     cell_width: u32,
     cell_height: u32,
+    ascent: u32,
+    descent: u32,
     baseline: i32,
     underline_position: i32,
     underline_thickness: u32,
     strike_position: i32,
     strike_thickness: u32,
-    origin_x: i32,
-    origin_y: i32,
+    padding: TerminalPadding,
     cursor: Option<(u32, u32)>,
     canvas_background: [u8; 3],
     cursor_color: [u8; 3],
@@ -1256,78 +1347,102 @@ impl SnapshotFrame {
         self.cell_height
     }
 
+    fn cell_geometry(&self) -> Result<CellGeometry> {
+        CellGeometry::from_metrics(
+            self.cell_width,
+            self.cell_height,
+            self.ascent,
+            self.descent,
+            u32::try_from(self.baseline).context("cell baseline is nonnegative")?,
+        )
+    }
+
+    /// Tight geometry is used only for initial sizing and deterministic captures.
+    fn tight_geometry(&self) -> Result<WindowGeometry> {
+        WindowGeometry::for_grid(
+            self.columns,
+            self.rows,
+            self.cell_geometry()?,
+            self.padding,
+            u32::from(self.scale_120),
+        )
+    }
+
+    pub(crate) fn window_geometry(
+        &self,
+        logical_width: u32,
+        logical_height: u32,
+        scale_120: u32,
+    ) -> Result<WindowGeometry> {
+        WindowGeometry::fit_window(
+            logical_width,
+            logical_height,
+            self.cell_geometry()?,
+            self.padding,
+            scale_120,
+            2,
+            u32::from(MAX_COLUMNS),
+            2,
+            u32::from(MAX_ROWS),
+        )
+    }
+
+    #[allow(
+        clippy::unused_self,
+        reason = "cell rectangles are resolved through the frame consumer boundary"
+    )]
+    fn cell_rect(
+        &self,
+        geometry: &WindowGeometry,
+        column: u32,
+        row: u32,
+    ) -> Option<(i32, i32, u32, u32)> {
+        let rect = geometry.cell_rect(column, row)?;
+        Some((
+            i32::try_from(rect.x).ok()?,
+            i32::try_from(rect.y).ok()?,
+            rect.width,
+            rect.height,
+        ))
+    }
+
     pub(crate) fn initial_logical_size(
         &self,
         columns: u16,
         rows: u16,
         scale_120: u32,
     ) -> Result<(u32, u32)> {
-        let physical_width = u32::from(columns)
-            .checked_mul(self.cell_width)
-            .and_then(|value| {
-                value.checked_add(u32::try_from(self.origin_x.max(0)).ok()?.checked_mul(2)?)
-            })
-            .context("initial width overflow")?;
-        let physical_height = u32::from(rows)
-            .checked_mul(self.cell_height)
-            .and_then(|value| {
-                value.checked_add(u32::try_from(self.origin_y.max(0)).ok()?.checked_mul(2)?)
-            })
-            .context("initial height overflow")?;
-        if scale_120 == 0 {
-            bail!("initial scale cannot be zero");
-        }
-        Ok((
-            physical_width
-                .saturating_mul(120)
-                .div_ceil(scale_120)
-                .max(480),
-            physical_height
-                .saturating_mul(120)
-                .div_ceil(scale_120)
-                .max(300),
-        ))
+        let geometry = WindowGeometry::for_grid(
+            u32::from(columns),
+            u32::from(rows),
+            self.cell_geometry()?,
+            self.padding,
+            scale_120,
+        )?;
+        Ok((geometry.logical_width(), geometry.logical_height()))
     }
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "finite nonnegative coordinates are divided and bounds-checked before use"
-    )]
+
     pub(crate) fn cell_at(
         &self,
         logical_x: f64,
         logical_y: f64,
-        scale_120: u32,
+        geometry: &WindowGeometry,
     ) -> Option<(usize, usize)> {
-        if !logical_x.is_finite() || !logical_y.is_finite() || scale_120 == 0 {
-            return None;
-        }
-        let scale = f64::from(scale_120) / 120.0;
-        let x = logical_x * scale - f64::from(self.origin_x);
-        let y = logical_y * scale - f64::from(self.origin_y);
-        if x < 0.0 || y < 0.0 {
-            return None;
-        }
-        let column = (x / f64::from(self.cell_width)) as usize;
-        let row = (y / f64::from(self.cell_height)) as usize;
-        (column < self.columns as usize && row < self.rows as usize).then_some((row, column))
+        let (row, column) = (geometry.surface_scale_120() == u32::from(self.scale_120))
+            .then(|| geometry.cell_at_logical(logical_x, logical_y))??;
+        (row < self.rows as usize && column < self.columns as usize).then_some((row, column))
     }
 
-    pub(crate) fn cursor_rectangle(&self, scale_120: u32) -> Option<(i32, i32, i32, i32)> {
+    pub(crate) fn cursor_rectangle(
+        &self,
+        geometry: &WindowGeometry,
+    ) -> Option<(i32, i32, i32, i32)> {
         let (column, row) = self.cursor?;
-        if scale_120 == 0 {
+        if geometry.surface_scale_120() != u32::from(self.scale_120) {
             return None;
         }
-        let scale = f64::from(scale_120) / 120.0;
-        let physical_x =
-            self.origin_x + i32::try_from(column.checked_mul(self.cell_width)?).ok()?;
-        let physical_y = self.origin_y + i32::try_from(row.checked_mul(self.cell_height)?).ok()?;
-        Some((
-            checked_floor_i32(f64::from(physical_x) / scale)?,
-            checked_floor_i32(f64::from(physical_y) / scale)?,
-            checked_ceil_i32(f64::from(self.cell_width) / scale)?,
-            checked_ceil_i32(f64::from(self.cell_height) / scale)?,
-        ))
+        let rect = geometry.logical_cell_rect(column, row)?;
+        Some((rect.x, rect.y, rect.width, rect.height))
     }
 
     pub(crate) fn terminal_size(
@@ -1336,31 +1451,13 @@ impl SnapshotFrame {
         logical_height: u32,
         scale_120: u32,
     ) -> Result<(u16, u16, u16, u16)> {
-        let physical_width = scaled_dimension(logical_width, scale_120)?;
-        let physical_height = scaled_dimension(logical_height, scale_120)?;
-        let horizontal_padding = u32::try_from(self.origin_x.max(0))
-            .context("terminal x padding")?
-            .checked_mul(2)
-            .context("terminal horizontal padding overflow")?;
-        let vertical_padding = u32::try_from(self.origin_y.max(0))
-            .context("terminal y padding")?
-            .checked_mul(2)
-            .context("terminal vertical padding overflow")?;
-        let drawable_width = physical_width.saturating_sub(horizontal_padding);
-        let drawable_height = physical_height.saturating_sub(vertical_padding);
-        let columns = (drawable_width / self.cell_width).clamp(2, u32::from(MAX_COLUMNS));
-        let rows = (drawable_height / self.cell_height).clamp(2, u32::from(MAX_ROWS));
-        let pixel_width = columns
-            .checked_mul(self.cell_width)
-            .context("terminal pixel width overflow")?;
-        let pixel_height = rows
-            .checked_mul(self.cell_height)
-            .context("terminal pixel height overflow")?;
+        let geometry = self.window_geometry(logical_width, logical_height, scale_120)?;
+        let (pixel_width, pixel_height) = geometry.terminal_pixels()?;
         Ok((
-            u16::try_from(columns).context("terminal columns fit u16")?,
-            u16::try_from(rows).context("terminal rows fit u16")?,
-            u16::try_from(pixel_width).context("terminal pixel width fits u16")?,
-            u16::try_from(pixel_height).context("terminal pixel height fits u16")?,
+            u16::try_from(geometry.columns).context("terminal columns fit u16")?,
+            u16::try_from(geometry.rows).context("terminal rows fit u16")?,
+            pixel_width,
+            pixel_height,
         ))
     }
 
@@ -1389,21 +1486,12 @@ impl SnapshotFrame {
             bail!("scale must be between 1x and 8x");
         }
         let scale_120 = u16::try_from(scale_120).context("scale fits u16")?;
-        let scale_factor = f32::from(scale_120) / 120.0;
-        let font_size = renderer_options().font_size * scale_factor;
+        let font_size = effective_font_size(u32::from(scale_120))?;
         let faces = snapshot_faces()?;
         let metrics = cell_metrics(&faces[0], font_size)?;
         let cell_width = metrics.width;
         let cell_height = metrics.height;
         let baseline = metrics.baseline;
-        let origin = u32::from(scale_120)
-            .checked_mul(12)
-            .and_then(|value| value.checked_add(60))
-            .map(|value| value / 120)
-            .and_then(|value| i32::try_from(value).ok())
-            .context("scaled snapshot origin fits i32")?;
-        let origin_x = origin;
-        let origin_y = origin;
         let columns = u32::try_from(snapshot.columns).context("snapshot columns fit u32")?;
         let rows = u32::try_from(snapshot.rows).context("snapshot rows fit u32")?;
         let background_len = usize::try_from(columns)
@@ -1455,13 +1543,14 @@ impl SnapshotFrame {
             rows,
             cell_width,
             cell_height,
+            ascent: metrics.ascent,
+            descent: metrics.descent,
             baseline,
             underline_position: metrics.underline_position,
             underline_thickness: metrics.underline_thickness,
             strike_position: metrics.strike_position,
             strike_thickness: metrics.strike_thickness,
-            origin_x,
-            origin_y,
+            padding: renderer_options().padding,
             cursor,
             canvas_background: default_background,
             cursor_color,
@@ -1484,7 +1573,7 @@ impl SnapshotFrame {
             bail!("snapshot palette must contain exactly 256 colors");
         }
         let faces = snapshot_faces()?;
-        let font_size = renderer_options().font_size * f32::from(self.scale_120) / 120.0;
+        let font_size = effective_font_size(u32::from(self.scale_120))?;
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
         let mut shape_context = ShapeContext::new();
@@ -1620,7 +1709,17 @@ pub struct FinalBufferCapture {
     pub rows: u32,
     pub cell_width: u32,
     pub cell_height: u32,
+    pub ascent: u32,
+    pub descent: u32,
     pub baseline: i32,
+    pub requested_padding: TerminalPadding,
+    pub effective_base_padding: BufferPadding,
+    pub residual_right: u32,
+    pub residual_bottom: u32,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub grid_rect: crate::geometry::Rect,
+    pub visible_grid_rect: crate::geometry::Rect,
     pub padding_left: u32,
     pub padding_right: u32,
     pub padding_top: u32,
@@ -1647,18 +1746,51 @@ pub fn capture_final_buffer(
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
     let frame = SnapshotFrame::load_scaled(snapshot, scale_120)?;
-    let origin_x = u32::try_from(frame.origin_x).context("capture origin x")?;
-    let origin_y = u32::try_from(frame.origin_y).context("capture origin y")?;
-    let width = frame
-        .columns
-        .checked_mul(frame.cell_width)
-        .and_then(|value| value.checked_add(origin_x.checked_mul(2)?))
-        .context("capture width overflow")?;
-    let height = frame
-        .rows
-        .checked_mul(frame.cell_height)
-        .and_then(|value| value.checked_add(origin_y.checked_mul(2)?))
-        .context("capture height overflow")?;
+    let geometry = frame.tight_geometry()?;
+    capture_prepared_frame(&frame, geometry, show_cursor, cursor_style)
+}
+
+/// Paints a snapshot into an explicitly configured logical surface.
+///
+/// This is used by the Foot oracle when the compositor contributes trailing
+/// residual pixels to an otherwise fixed cell grid.
+///
+/// # Errors
+/// Returns an error if the surface does not fit exactly the snapshot grid.
+pub fn capture_final_buffer_sized(
+    snapshot: &TerminalSnapshot,
+    scale_120: u32,
+    logical_width: u32,
+    logical_height: u32,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+) -> Result<FinalBufferCapture> {
+    snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let frame = SnapshotFrame::load_scaled(snapshot, scale_120)?;
+    let geometry = WindowGeometry::grid_in_surface(
+        frame.columns,
+        frame.rows,
+        logical_width,
+        logical_height,
+        frame.cell_geometry()?,
+        frame.padding,
+        scale_120,
+    )?;
+    capture_prepared_frame(&frame, geometry, show_cursor, cursor_style)
+}
+
+fn capture_prepared_frame(
+    frame: &SnapshotFrame,
+    geometry: WindowGeometry,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+) -> Result<FinalBufferCapture> {
+    let origin_x = geometry.actual_padding.left;
+    let origin_y = geometry.actual_padding.top;
+    let width = geometry.buffer_width();
+    let height = geometry.buffer_height();
     let stride = width.checked_mul(4).context("capture stride overflow")?;
     let length = usize::try_from(stride)
         .ok()
@@ -1669,7 +1801,8 @@ pub fn capture_final_buffer(
         &mut pixels,
         width,
         height,
-        &frame,
+        frame,
+        &geometry,
         show_cursor,
         cursor_style,
     );
@@ -1682,11 +1815,21 @@ pub fn capture_final_buffer(
         rows: frame.rows,
         cell_width: frame.cell_width,
         cell_height: frame.cell_height,
+        ascent: frame.ascent,
+        descent: frame.descent,
         baseline: frame.baseline,
-        padding_left: origin_x,
-        padding_right: origin_x,
-        padding_top: origin_y,
-        padding_bottom: origin_y,
+        requested_padding: geometry.requested_padding,
+        effective_base_padding: geometry.effective_base_padding,
+        residual_right: geometry.residual_right,
+        residual_bottom: geometry.residual_bottom,
+        logical_width: geometry.logical_width(),
+        logical_height: geometry.logical_height(),
+        grid_rect: geometry.grid_rect,
+        visible_grid_rect: geometry.visible_grid_rect,
+        padding_left: geometry.actual_padding.left,
+        padding_right: geometry.actual_padding.right,
+        padding_top: geometry.actual_padding.top,
+        padding_bottom: geometry.actual_padding.bottom,
         origin_x,
         origin_y,
         cursor: show_cursor.then_some(frame.cursor).flatten(),
@@ -1829,9 +1972,9 @@ fn prepare_snapshot_row(
                 face: face_index,
                 glyph: glyph_id,
             };
-            cache.entry(key).or_insert(snapshot_glyph(
-                faces, scale, face_index, glyph_id, font_size,
-            )?);
+            cache
+                .entry(key)
+                .or_insert(snapshot_glyph(faces, face_index, glyph_id, font_size)?);
             glyphs.push(SnapshotGlyph {
                 key,
                 column,
@@ -1949,44 +2092,6 @@ fn rendition_colors(
     (foreground, background)
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "the explicit finite i32 bounds make the float-to-int conversion checked"
-)]
-fn checked_floor_i32(value: f64) -> Option<i32> {
-    let value = value.floor();
-    (value.is_finite() && value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
-        .then_some(value as i32)
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "the explicit finite i32 bounds make the float-to-int conversion checked"
-)]
-fn checked_ceil_i32(value: f64) -> Option<i32> {
-    let value = value.ceil();
-    (value.is_finite() && value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
-        .then_some(value as i32)
-}
-
-fn scaled_dimension(logical: u32, scale_120: u32) -> Result<u32> {
-    if scale_120 == 0 {
-        bail!("scale must be positive");
-    }
-    logical
-        .checked_mul(scale_120)
-        .and_then(|value| value.checked_add(119))
-        .map(|value| value / 120)
-        .context("scaled dimension overflow")
-}
-
-fn grid_pixel_offset(index: usize, cell_size: u32) -> Option<i32> {
-    u32::try_from(index)
-        .ok()?
-        .checked_mul(cell_size)
-        .and_then(|offset| i32::try_from(offset).ok())
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct SnapshotOverlays<'a> {
     pub(crate) selection: Option<((usize, usize), (usize, usize))>,
@@ -2004,6 +2109,7 @@ pub(crate) fn paint_snapshot_overlays(
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
     overlays: SnapshotOverlays<'_>,
 ) {
     let SnapshotOverlays {
@@ -2035,19 +2141,17 @@ pub(crate) fn paint_snapshot_overlays(
                 frame.columns.saturating_sub(1) as usize
             };
             for column in first..=last.min(frame.columns.saturating_sub(1) as usize) {
-                let (Some(x_offset), Some(y_offset)) = (
-                    grid_pixel_offset(column, frame.cell_width),
-                    grid_pixel_offset(row, frame.cell_height),
-                ) else {
+                let (Ok(column), Ok(row)) = (u32::try_from(column), u32::try_from(row)) else {
                     continue;
                 };
-                let x = frame.origin_x + x_offset;
-                let y = frame.origin_y + y_offset;
+                let Some(rect) = frame.cell_rect(geometry, column, row) else {
+                    continue;
+                };
                 blend_rect(
                     canvas,
                     width,
                     height,
-                    (x, y, frame.cell_width, frame.cell_height),
+                    rect,
                     themed_bgra(selection_color, 112),
                 );
             }
@@ -2056,21 +2160,23 @@ pub(crate) fn paint_snapshot_overlays(
     if let Some((start, end)) = hovered_url {
         if start.0 == end.0 && row_is_dirty(start.0) {
             for column in start.1..=end.1.min(frame.columns.saturating_sub(1) as usize) {
-                let (Some(x_offset), Some(row_offset)) = (
-                    grid_pixel_offset(column, frame.cell_width),
-                    grid_pixel_offset(start.0, frame.cell_height),
-                ) else {
+                let (Ok(column), Ok(row)) = (u32::try_from(column), u32::try_from(start.0)) else {
                     continue;
                 };
-                let x = frame.origin_x + x_offset;
-                let y = frame.origin_y
-                    + row_offset
-                    + i32::try_from(frame.cell_height.saturating_sub(2)).unwrap_or(0);
+                let Some((x, y, cell_width, cell_height)) = frame.cell_rect(geometry, column, row)
+                else {
+                    continue;
+                };
                 fill_rect(
                     canvas,
                     width,
                     height,
-                    (x, y, frame.cell_width, 2),
+                    (
+                        x,
+                        y + i32::try_from(cell_height.saturating_sub(2)).unwrap_or(0),
+                        cell_width,
+                        2,
+                    ),
                     themed_bgra(url_color, 255),
                 );
             }
@@ -2180,6 +2286,7 @@ fn paint_decorations(
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
     dirty_rows: Option<&[bool]>,
 ) {
     for span in &frame.decorations {
@@ -2191,10 +2298,9 @@ fn paint_decorations(
         }) {
             continue;
         }
-        let x = frame.origin_x
-            + i32::try_from(span.column.saturating_mul(frame.cell_width)).expect("decoration x");
-        let row_top = frame.origin_y
-            + i32::try_from(span.row.saturating_mul(frame.cell_height)).expect("decoration y");
+        let Some((x, row_top, _, _)) = frame.cell_rect(geometry, span.column, span.row) else {
+            continue;
+        };
         let span_width = frame.cell_width.saturating_mul(span.cells);
         let underline_color = [
             span.underline_color[0],
@@ -2241,19 +2347,18 @@ fn paint_placed_glyph(
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
     placed: &SnapshotGlyph,
     foreground: [u8; 3],
 ) {
     let glyph = &frame.cache[&placed.key];
     let span = frame.cell_width.saturating_mul(placed.cells);
     let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
-    let pen_x = frame.origin_x
-        + i32::try_from(placed.column * frame.cell_width).expect("glyph x")
-        + round_to_i32(centered_pen + placed.x_offset);
-    let baseline = frame.origin_y
-        + i32::try_from(placed.row * frame.cell_height).expect("glyph y")
-        + frame.baseline
-        - round_to_i32(placed.y_offset);
+    let Some((cell_x, cell_y, _, _)) = frame.cell_rect(geometry, placed.column, placed.row) else {
+        return;
+    };
+    let pen_x = cell_x + round_to_i32(centered_pen + placed.x_offset);
+    let baseline = cell_y + frame.baseline - round_to_i32(placed.y_offset);
     blend_glyph(
         canvas,
         width,
@@ -2270,6 +2375,7 @@ fn paint_glyphs(
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
     dirty_rows: Option<&[bool]>,
 ) {
     for row in 0..frame.rows {
@@ -2287,7 +2393,15 @@ fn paint_glyphs(
         // when a glyph overhangs into its neighbor and both masks touch the
         // same antialiased pixel.
         for placed in frame.glyphs[start..end].iter().rev() {
-            paint_placed_glyph(canvas, width, height, frame, placed, placed.foreground);
+            paint_placed_glyph(
+                canvas,
+                width,
+                height,
+                frame,
+                geometry,
+                placed,
+                placed.foreground,
+            );
         }
     }
 }
@@ -2297,6 +2411,7 @@ pub(crate) fn paint_snapshot(
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
     cursor_visible: bool,
     cursor_style: CursorStyle,
 ) {
@@ -2312,28 +2427,27 @@ pub(crate) fn paint_snapshot(
         for column in 0..frame.columns {
             let index = usize::try_from(row * frame.columns + column).expect("background index");
             let color = frame.backgrounds[index];
+            let Some(rect) = frame.cell_rect(geometry, column, row) else {
+                continue;
+            };
             fill_rect(
                 canvas,
                 width,
                 height,
-                (
-                    frame.origin_x + i32::try_from(column * frame.cell_width).expect("cell x"),
-                    frame.origin_y + i32::try_from(row * frame.cell_height).expect("cell y"),
-                    frame.cell_width,
-                    frame.cell_height,
-                ),
+                rect,
                 [color[0], color[1], color[2], 0xff],
             );
         }
     }
-    paint_glyphs(canvas, width, height, frame, None);
-    paint_decorations(canvas, width, height, frame, None);
+    paint_glyphs(canvas, width, height, frame, geometry, None);
+    paint_decorations(canvas, width, height, frame, geometry, None);
     if cursor_visible {
         let Some((column, row)) = frame.cursor else {
             return;
         };
-        let x = frame.origin_x + i32::try_from(column * frame.cell_width).expect("cursor x");
-        let y = frame.origin_y + i32::try_from(row * frame.cell_height).expect("cursor y");
+        let Some((x, y, _, _)) = frame.cell_rect(geometry, column, row) else {
+            return;
+        };
         let color = [
             frame.cursor_color[0],
             frame.cursor_color[1],
@@ -2345,6 +2459,7 @@ pub(crate) fn paint_snapshot(
             width,
             height,
             frame,
+            geometry,
             column,
             row,
             x,
@@ -2355,11 +2470,16 @@ pub(crate) fn paint_snapshot(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the configured window geometry and damage inputs remain explicit"
+)]
 pub(crate) fn paint_snapshot_rows(
     canvas: &mut [u8],
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
     dirty_rows: &[bool],
     cursor_visible: bool,
     cursor_style: CursorStyle,
@@ -2375,22 +2495,20 @@ pub(crate) fn paint_snapshot_rows(
         for column in 0..frame.columns {
             let index = usize::try_from(row * frame.columns + column).expect("background index");
             let color = frame.backgrounds[index];
+            let Some(rect) = frame.cell_rect(geometry, column, row) else {
+                continue;
+            };
             fill_rect(
                 canvas,
                 width,
                 height,
-                (
-                    frame.origin_x + i32::try_from(column * frame.cell_width).expect("cell x"),
-                    frame.origin_y + i32::try_from(row * frame.cell_height).expect("cell y"),
-                    frame.cell_width,
-                    frame.cell_height,
-                ),
+                rect,
                 [color[0], color[1], color[2], 0xff],
             );
         }
     }
-    paint_glyphs(canvas, width, height, frame, Some(dirty_rows));
-    paint_decorations(canvas, width, height, frame, Some(dirty_rows));
+    paint_glyphs(canvas, width, height, frame, geometry, Some(dirty_rows));
+    paint_decorations(canvas, width, height, frame, geometry, Some(dirty_rows));
     if cursor_visible {
         if let Some((column, row)) = frame.cursor.filter(|(_, row)| {
             dirty_rows
@@ -2398,8 +2516,9 @@ pub(crate) fn paint_snapshot_rows(
                 .copied()
                 .unwrap_or(false)
         }) {
-            let x = frame.origin_x + i32::try_from(column * frame.cell_width).expect("cursor x");
-            let y = frame.origin_y + i32::try_from(row * frame.cell_height).expect("cursor y");
+            let Some((x, y, _, _)) = frame.cell_rect(geometry, column, row) else {
+                return;
+            };
             let color = [
                 frame.cursor_color[0],
                 frame.cursor_color[1],
@@ -2411,6 +2530,7 @@ pub(crate) fn paint_snapshot_rows(
                 width,
                 height,
                 frame,
+                geometry,
                 column,
                 row,
                 x,
@@ -2431,6 +2551,7 @@ fn paint_cursor_for_frame(
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
     column: u32,
     row: u32,
     x: i32,
@@ -2458,6 +2579,7 @@ fn paint_cursor_for_frame(
                     width,
                     height,
                     frame,
+                    geometry,
                     placed,
                     frame.canvas_background,
                 );
@@ -2483,6 +2605,7 @@ pub(crate) fn scroll_snapshot_pixels(
     canvas: &mut [u8],
     width: u32,
     frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
     scroll: TerminalScroll,
 ) {
     if scroll.rows == 0
@@ -2499,25 +2622,23 @@ pub(crate) fn scroll_snapshot_pixels(
         return;
     };
     let canvas_height = canvas.len() / stride;
-    let Some(x) = usize::try_from(frame.origin_x.max(0))
+    let grid = geometry.grid_rect();
+    let Some(x) = usize::try_from(grid.x)
         .ok()
         .and_then(|origin| origin.checked_mul(4))
         .filter(|x| *x < stride)
     else {
         return;
     };
-    let Some(grid_width) = frame.columns.checked_mul(frame.cell_width) else {
-        return;
-    };
-    let copy_width = usize::try_from(grid_width)
+    let copy_width = usize::try_from(grid.width)
         .ok()
         .and_then(|width| width.checked_mul(4))
         .map_or(0, |width| width.min(stride - x));
     if copy_width == 0 {
         return;
     }
-    let cell_height = usize::try_from(frame.cell_height).expect("cell height");
-    let origin_y = usize::try_from(frame.origin_y.max(0)).expect("origin fits usize");
+    let cell_height = usize::try_from(geometry.cell.height).expect("cell height");
+    let origin_y = usize::try_from(grid.y).expect("origin fits usize");
     let Some(start_y) = scroll
         .start_row
         .checked_mul(cell_height)
@@ -2561,16 +2682,16 @@ pub(crate) fn scroll_snapshot_pixels(
     }
 }
 
-pub(crate) fn snapshot_row_rect(frame: &SnapshotFrame, row: usize) -> Option<(i32, i32, i32, i32)> {
-    if row >= frame.rows as usize {
-        return None;
-    }
+pub(crate) fn snapshot_row_rect(
+    geometry: &WindowGeometry,
+    row: usize,
+) -> Option<(i32, i32, i32, i32)> {
+    let rect = geometry.row_rect(row)?;
     Some((
-        frame.origin_x,
-        frame.origin_y
-            + i32::try_from(u32::try_from(row).ok()?.checked_mul(frame.cell_height)?).ok()?,
-        i32::try_from(frame.columns * frame.cell_width).ok()?,
-        i32::try_from(frame.cell_height).ok()?,
+        i32::try_from(rect.x).ok()?,
+        i32::try_from(rect.y).ok()?,
+        i32::try_from(rect.width).ok()?,
+        i32::try_from(rect.height).ok()?,
     ))
 }
 
@@ -2709,16 +2830,9 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
         let mut frame = SnapshotFrame::load(&snapshot, 1)?;
         let cold_ns = u64::try_from(cold_started.elapsed().as_nanos())
             .context("cold frame duration fits u64")?;
-        let width = frame
-            .columns
-            .checked_mul(frame.cell_width)
-            .and_then(|width| width.checked_add(24))
-            .context("benchmark width overflow")?;
-        let height = frame
-            .rows
-            .checked_mul(frame.cell_height)
-            .and_then(|height| height.checked_add(24))
-            .context("benchmark height overflow")?;
+        let geometry = frame.tight_geometry()?;
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
         let canvas_len = usize::try_from(
             width
                 .checked_mul(height)
@@ -2745,7 +2859,15 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             );
 
             let started = Instant::now();
-            paint_snapshot(&mut canvas, width, height, &frame, true, CursorStyle::Block);
+            paint_snapshot(
+                &mut canvas,
+                width,
+                height,
+                &frame,
+                &geometry,
+                true,
+                CursorStyle::Block,
+            );
             std::hint::black_box(&canvas);
             full.push(u64::try_from(started.elapsed().as_nanos()).context("full paint duration")?);
 
@@ -2755,6 +2877,7 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
                 width,
                 height,
                 &frame,
+                &geometry,
                 &dirty,
                 true,
                 CursorStyle::Block,
@@ -3116,13 +3239,17 @@ mod tests {
         for scale_120 in [120_u32, 150, 180, 240] {
             let frame = SnapshotFrame::load_scaled(&snapshot, scale_120).expect("scaled frame");
             assert_eq!(u32::from(frame.scale_120), scale_120);
+            let geometry = frame.tight_geometry().unwrap();
             let scale = f64::from(scale_120) / 120.0;
-            let logical_x = (f64::from(frame.origin_x) + f64::from(frame.cell_width) / 2.0) / scale;
-            let logical_y =
-                (f64::from(frame.origin_y) + f64::from(frame.cell_height) / 2.0) / scale;
-            assert_eq!(frame.cell_at(logical_x, logical_y, scale_120), Some((0, 0)));
+            let logical_x = (f64::from(geometry.actual_padding.left)
+                + f64::from(frame.cell_width) / 2.0)
+                / scale;
+            let logical_y = (f64::from(geometry.actual_padding.top)
+                + f64::from(frame.cell_height) / 2.0)
+                / scale;
+            assert_eq!(frame.cell_at(logical_x, logical_y, &geometry), Some((0, 0)));
             let (_, _, width, height) = frame
-                .cursor_rectangle(scale_120)
+                .cursor_rectangle(&geometry)
                 .expect("visible cursor rectangle");
             assert!(width > 0 && height > 0);
         }
@@ -3137,6 +3264,28 @@ mod tests {
         assert_eq!(capture.origin_y, capture.padding_top);
         assert_eq!(capture.padding_left, capture.padding_right);
         assert_eq!(capture.padding_top, capture.padding_bottom);
+        assert!(capture.ascent + capture.descent <= capture.cell_height);
+        assert_eq!(
+            u32::try_from(capture.baseline).unwrap(),
+            capture.cell_height - capture.descent
+        );
+        assert_eq!(capture.requested_padding, TerminalPadding::DEFAULT);
+        assert_eq!(
+            capture.padding_left + capture.columns * capture.cell_width + capture.padding_right,
+            capture.width
+        );
+        assert_eq!(
+            capture.padding_top + capture.rows * capture.cell_height + capture.padding_bottom,
+            capture.height
+        );
+        assert_eq!(
+            capture.padding_right,
+            capture.effective_base_padding.right + capture.residual_right
+        );
+        assert_eq!(
+            capture.padding_bottom,
+            capture.effective_base_padding.bottom + capture.residual_bottom
+        );
         assert_eq!(capture.stride, capture.width * 4);
         assert_eq!(
             capture.pixels.len(),
@@ -3144,6 +3293,56 @@ mod tests {
         );
         assert_eq!(capture.cursor, Some((0, 0)));
         assert_eq!(capture.background_bgra[3], u8::MAX);
+    }
+
+    #[test]
+    fn asymmetric_capture_serializes_geometry_owned_rectangles_and_edges() {
+        let snapshot = incremental_snapshot();
+        let mut frame = SnapshotFrame::load_scaled(&snapshot, 150).unwrap();
+        frame.padding = TerminalPadding {
+            left: 1,
+            right: 3,
+            top: 5,
+            bottom: 7,
+        };
+        let geometry = frame.tight_geometry().unwrap();
+        let capture = capture_prepared_frame(&frame, geometry, false, CursorStyle::Block).unwrap();
+        assert_eq!(capture.requested_padding, frame.padding);
+        assert_ne!(capture.padding_left, capture.padding_right);
+        assert_ne!(capture.padding_top, capture.padding_bottom);
+        assert_eq!(capture.grid_rect.x, capture.origin_x);
+        assert_eq!(capture.grid_rect.y, capture.origin_y);
+        assert_eq!(
+            capture.grid_rect.width,
+            capture.columns * capture.cell_width
+        );
+        assert_eq!(capture.grid_rect.height, capture.rows * capture.cell_height);
+        assert_eq!(
+            capture.padding_left + capture.grid_rect.width + capture.padding_right,
+            capture.width
+        );
+        assert_eq!(
+            capture.padding_top + capture.grid_rect.height + capture.padding_bottom,
+            capture.height
+        );
+    }
+
+    #[test]
+    fn sized_capture_preserves_explicit_grid_and_owns_trailing_residual() {
+        let snapshot = incremental_snapshot();
+        let tight = capture_final_buffer(&snapshot, 120, false, CursorStyle::Block).unwrap();
+        let capture = capture_final_buffer_sized(
+            &snapshot,
+            120,
+            tight.logical_width,
+            tight.logical_height + 1,
+            false,
+            CursorStyle::Block,
+        )
+        .unwrap();
+        assert_eq!((capture.columns, capture.rows), (2, 2));
+        assert_eq!(capture.padding_bottom, tight.padding_bottom + 1);
+        assert_eq!(capture.residual_bottom, tight.residual_bottom + 1);
     }
 
     #[test]
@@ -3220,15 +3419,17 @@ mod tests {
                 foreground: [235; 3],
             },
         ];
-        let width = u32::try_from(frame.origin_x).unwrap() * 2 + frame.cell_width * 2;
-        let height = u32::try_from(frame.origin_y).unwrap() * 2 + frame.cell_height;
+        let geometry = frame.tight_geometry().unwrap();
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
         let mut canvas = vec![0; usize::try_from(width * height * 4).unwrap()];
         for pixel in canvas.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[22, 18, 14, 255]);
         }
-        paint_glyphs(&mut canvas, width, height, &frame, None);
-        let x = u32::try_from(frame.origin_x).unwrap() + frame.cell_width;
-        let y = u32::try_from(frame.origin_y).unwrap();
+        paint_glyphs(&mut canvas, width, height, &frame, &geometry, None);
+        let rect = geometry.cell_rect(1, 0).unwrap();
+        let x = rect.x;
+        let y = rect.y;
         let index = usize::try_from((y * width + x) * 4).unwrap();
         assert_eq!(&canvas[index..index + 4], &[171, 169, 168, 255]);
     }
@@ -3249,18 +3450,27 @@ mod tests {
         assert_eq!(frame.strike_position, 7);
         assert_eq!(frame.strike_thickness, 1);
 
-        let width =
-            u32::try_from(frame.origin_x.max(0)).unwrap() * 2 + frame.columns * frame.cell_width;
-        let height =
-            u32::try_from(frame.origin_y.max(0)).unwrap() * 2 + frame.rows * frame.cell_height;
+        let geometry = frame.tight_geometry().unwrap();
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
         let mut full = vec![0; usize::try_from(width * height * 4).unwrap()];
-        paint_snapshot(&mut full, width, height, &frame, false, CursorStyle::Block);
-        let underline_y = usize::try_from(frame.origin_y + frame.baseline + 3).unwrap();
-        let strike_y =
-            usize::try_from(frame.origin_y + frame.baseline - frame.strike_position).unwrap();
-        let underline_x = usize::try_from(frame.origin_x).unwrap();
-        let strike_x =
-            usize::try_from(frame.origin_x).unwrap() + usize::try_from(frame.cell_width).unwrap();
+        paint_snapshot(
+            &mut full,
+            width,
+            height,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        let first = geometry.cell_rect(0, 0).unwrap();
+        let second = geometry.cell_rect(1, 0).unwrap();
+        let underline_y =
+            usize::try_from(first.y).unwrap() + usize::try_from(frame.baseline + 3).unwrap();
+        let strike_y = usize::try_from(second.y).unwrap()
+            + usize::try_from(frame.baseline - frame.strike_position).unwrap();
+        let underline_x = usize::try_from(first.x).unwrap();
+        let strike_x = usize::try_from(second.x).unwrap();
         let pixel = |x: usize, y: usize| &full[(y * width as usize + x) * 4..][..4];
         assert_eq!(pixel(underline_x, underline_y), &[0x56, 0x34, 0x12, 0xff]);
         assert_eq!(pixel(strike_x, strike_y), &[0xeb, 0xeb, 0xeb, 0xff]);
@@ -3274,6 +3484,7 @@ mod tests {
             width,
             height,
             &frame,
+            &geometry,
             &[true, true],
             false,
             CursorStyle::Block,
@@ -3318,13 +3529,20 @@ mod tests {
     fn full_and_all_row_damage_paints_are_byte_identical() {
         let snapshot = incremental_snapshot();
         let frame = SnapshotFrame::load_scaled(&snapshot, 120).expect("frame");
-        let width =
-            u32::try_from(frame.origin_x.max(0)).unwrap() * 2 + frame.columns * frame.cell_width;
-        let height =
-            u32::try_from(frame.origin_y.max(0)).unwrap() * 2 + frame.rows * frame.cell_height;
+        let geometry = frame.tight_geometry().unwrap();
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
         let bytes = usize::try_from(width * height * 4).unwrap();
         let mut full = vec![0; bytes];
-        paint_snapshot(&mut full, width, height, &frame, true, CursorStyle::Block);
+        paint_snapshot(
+            &mut full,
+            width,
+            height,
+            &frame,
+            &geometry,
+            true,
+            CursorStyle::Block,
+        );
 
         let background = [
             frame.canvas_background[2],
@@ -3341,6 +3559,7 @@ mod tests {
             width,
             height,
             &frame,
+            &geometry,
             &vec![true; frame.rows as usize],
             true,
             CursorStyle::Block,
@@ -3370,16 +3589,16 @@ mod tests {
             .collect();
         let mut incremental = SnapshotFrame::load_scaled(&initial, 120).expect("initial frame");
         let reference = SnapshotFrame::load_scaled(&shifted, 120).expect("shifted frame");
-        let width = u32::try_from(incremental.origin_x.max(0)).unwrap() * 2
-            + incremental.columns * incremental.cell_width;
-        let height = u32::try_from(incremental.origin_y.max(0)).unwrap() * 2
-            + incremental.rows * incremental.cell_height;
+        let geometry = incremental.tight_geometry().unwrap();
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
         let mut actual = vec![0; usize::try_from(width * height * 4).unwrap()];
         paint_snapshot(
             &mut actual,
             width,
             height,
             &incremental,
+            &geometry,
             false,
             CursorStyle::Block,
         );
@@ -3387,12 +3606,13 @@ mod tests {
             .scroll_viewport_rows(&shifted, 1)
             .expect("viewport shift")
             .expect("incremental scroll");
-        scroll_snapshot_pixels(&mut actual, width, &incremental, scroll);
+        scroll_snapshot_pixels(&mut actual, width, &incremental, &geometry, scroll);
         paint_snapshot_rows(
             &mut actual,
             width,
             height,
             &incremental,
+            &geometry,
             &[true, false],
             false,
             CursorStyle::Block,
@@ -3403,6 +3623,7 @@ mod tests {
             width,
             height,
             &reference,
+            &geometry,
             false,
             CursorStyle::Block,
         );
@@ -3410,7 +3631,7 @@ mod tests {
     }
 
     #[test]
-    fn glyph_cache_entries_are_scale_specific() {
+    fn glyph_cache_entries_are_effective_raster_size_specific() {
         let snapshot = incremental_snapshot();
         let one = SnapshotFrame::load_scaled(&snapshot, 120).expect("1x frame");
         let fractional = SnapshotFrame::load_scaled(&snapshot, 150).expect("1.25x frame");
@@ -3427,6 +3648,7 @@ mod tests {
     fn empty_overlays_leave_compositor_border_area_untouched() {
         let snapshot = incremental_snapshot();
         let frame = SnapshotFrame::load_scaled(&snapshot, 120).expect("frame");
+        let geometry = frame.tight_geometry().unwrap();
         let mut focused = vec![0_u8; 200 * 200 * 4];
         let mut unfocused = focused.clone();
         paint_snapshot_overlays(
@@ -3434,6 +3656,7 @@ mod tests {
             200,
             200,
             &frame,
+            &geometry,
             SnapshotOverlays {
                 selection: None,
                 hovered_url: None,
@@ -3449,6 +3672,7 @@ mod tests {
             200,
             200,
             &frame,
+            &geometry,
             SnapshotOverlays {
                 selection: None,
                 hovered_url: None,
@@ -3648,20 +3872,30 @@ mod tests {
             rows: 1,
             cell_width: 4,
             cell_height: 4,
+            ascent: 2,
+            descent: 2,
             baseline: 2,
             underline_position: -1,
             underline_thickness: 1,
             strike_position: 1,
             strike_thickness: 1,
-            origin_x: 2,
-            origin_y: 2,
+            padding: TerminalPadding::uniform(2),
             cursor: Some((1, 0)),
             canvas_background: [14, 18, 22],
             cursor_color: [0xeb, 0xeb, 0xeb],
             scale_120: 120,
         };
+        let geometry = frame.tight_geometry().unwrap();
         let mut canvas = vec![0; 12 * 8 * 4];
-        paint_snapshot(&mut canvas, 12, 8, &frame, true, CursorStyle::Block);
+        paint_snapshot(
+            &mut canvas,
+            12,
+            8,
+            &frame,
+            &geometry,
+            true,
+            CursorStyle::Block,
+        );
         let pixel = |x: usize, y: usize| &canvas[(y * 12 + x) * 4..(y * 12 + x + 1) * 4];
         assert_eq!(pixel(2, 2), [3, 2, 1, 0xff]);
         assert_eq!(pixel(4, 3), [50, 100, 200, 0xff]);
@@ -3679,13 +3913,14 @@ mod tests {
             rows: 3,
             cell_width: 2,
             cell_height: 2,
+            ascent: 1,
+            descent: 1,
             baseline: 1,
             underline_position: 0,
             underline_thickness: 1,
             strike_position: 0,
             strike_thickness: 1,
-            origin_x: 0,
-            origin_y: 0,
+            padding: TerminalPadding::uniform(0),
             cursor: None,
             canvas_background: [0, 0, 0],
             cursor_color: [255, 255, 255],
@@ -3696,12 +3931,14 @@ mod tests {
     #[test]
     fn row_damage_paints_only_selected_rows() {
         let frame = damage_test_frame();
+        let geometry = frame.tight_geometry().unwrap();
         let mut canvas = vec![0; 2 * 6 * 4];
         paint_snapshot_rows(
             &mut canvas,
             2,
             6,
             &frame,
+            &geometry,
             &[false, true, false],
             false,
             CursorStyle::Block,
@@ -3714,12 +3951,22 @@ mod tests {
     #[test]
     fn scroll_damage_copies_existing_grid_pixels() {
         let frame = damage_test_frame();
+        let geometry = frame.tight_geometry().unwrap();
         let mut canvas = vec![0; 2 * 6 * 4];
-        paint_snapshot(&mut canvas, 2, 6, &frame, false, CursorStyle::Block);
+        paint_snapshot(
+            &mut canvas,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
         scroll_snapshot_pixels(
             &mut canvas,
             2,
             &frame,
+            &geometry,
             TerminalScroll {
                 direction: ScrollDirection::Forward,
                 start_row: 0,
@@ -3734,6 +3981,7 @@ mod tests {
     #[test]
     fn scroll_copy_clips_to_undersized_framebuffers() {
         let frame = damage_test_frame();
+        let geometry = frame.tight_geometry().unwrap();
         let scroll = TerminalScroll {
             direction: ScrollDirection::Forward,
             start_row: 0,
@@ -3742,16 +3990,16 @@ mod tests {
         };
         let mut narrow = vec![0_u8; 12];
         narrow[8..12].copy_from_slice(&[1, 2, 3, 4]);
-        scroll_snapshot_pixels(&mut narrow, 1, &frame, scroll);
+        scroll_snapshot_pixels(&mut narrow, 1, &frame, &geometry, scroll);
         assert_eq!(&narrow[..4], &[1, 2, 3, 4]);
 
         let mut short = vec![0_u8; 8];
         let unchanged = short.clone();
-        scroll_snapshot_pixels(&mut short, 2, &frame, scroll);
+        scroll_snapshot_pixels(&mut short, 2, &frame, &geometry, scroll);
         assert_eq!(short, unchanged);
 
         let mut partial_scanline = vec![0_u8; 7];
-        scroll_snapshot_pixels(&mut partial_scanline, 2, &frame, scroll);
+        scroll_snapshot_pixels(&mut partial_scanline, 2, &frame, &geometry, scroll);
     }
 
     #[test]
@@ -3765,13 +4013,14 @@ mod tests {
             rows: 0,
             cell_width: 10,
             cell_height: 20,
+            ascent: 15,
+            descent: 5,
             baseline: 15,
             underline_position: -2,
             underline_thickness: 1,
             strike_position: 5,
             strike_thickness: 1,
-            origin_x: 10,
-            origin_y: 10,
+            padding: TerminalPadding::uniform(10),
             cursor: None,
             canvas_background: [14, 18, 22],
             cursor_color: [0xeb, 0xeb, 0xeb],
@@ -3781,9 +4030,12 @@ mod tests {
             frame.terminal_size(1_020, 620, 120).expect("normal grid"),
             (100, 30, 1_000, 600)
         );
-        assert_eq!(
-            frame.terminal_size(1, 1, 120).expect("minimum grid"),
-            (2, 2, 20, 40)
+        assert!(
+            frame
+                .terminal_size(1, 1, 120)
+                .unwrap_err()
+                .to_string()
+                .contains("SurfaceTooSmall")
         );
         assert_eq!(
             frame
@@ -3791,6 +4043,24 @@ mod tests {
                 .expect("bounded grid"),
             (MAX_COLUMNS, MAX_ROWS, 2_400, 1_600)
         );
+        let configured = frame.window_geometry(1_027, 629, 120).unwrap();
+        assert_eq!(
+            (configured.logical_width(), configured.logical_height()),
+            (1_027, 629)
+        );
+        assert_eq!(
+            configured.actual_padding.left
+                + configured.grid_rect.width
+                + configured.actual_padding.right,
+            1_027
+        );
+        assert_eq!(
+            configured.actual_padding.top
+                + configured.grid_rect.height
+                + configured.actual_padding.bottom,
+            629
+        );
+        assert!(configured.residual_right > 0 || configured.residual_bottom > 0);
     }
 
     #[test]

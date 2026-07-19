@@ -17,13 +17,17 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::geometry::{FontSize, FontSizingPolicy, TerminalPadding};
+
 pub const APP_ID: &str = "com.oldjobobo.splinterm";
 pub const DEFAULT_FONT: &str = "JetBrains Mono Nerd Font:style=Regular";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
     pub font: String,
-    pub font_size: f32,
+    pub font_size: FontSize,
+    pub font_sizing_policy: FontSizingPolicy,
+    pub padding: TerminalPadding,
     pub initial_columns: u16,
     pub initial_rows: u16,
     pub shell: Option<String>,
@@ -33,7 +37,6 @@ pub struct AppConfig {
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub resize_delay_ms: u64,
-    pub dpi_aware: bool,
     pub theme_path: PathBuf,
 }
 
@@ -49,7 +52,9 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             font: DEFAULT_FONT.to_owned(),
-            font_size: 22.0,
+            font_size: FontSize::Pixels(22.0),
+            font_sizing_policy: FontSizingPolicy::OutputScale,
+            padding: TerminalPadding::DEFAULT,
             initial_columns: 80,
             initial_rows: 24,
             shell: None,
@@ -59,7 +64,6 @@ impl Default for AppConfig {
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             resize_delay_ms: 0,
-            dpi_aware: true,
             theme_path: default_config_dir().join("theme.json"),
         }
     }
@@ -108,6 +112,9 @@ pub fn load_default() -> Result<ConfigLoad> {
 pub fn parse(text: &str) -> Result<ConfigLoad> {
     let mut config = AppConfig::default();
     let mut diagnostics = Vec::new();
+    let mut explicit_font_policy_line = None;
+    let mut legacy_dpi_aware_line = None;
+    let mut explicit_font_size_line = None;
     let mut section = String::new();
     for (index, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -139,11 +146,71 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
         };
         let unsupported = match full.as_str() {
             "main.font" | "font" => {
-                config.font = nonempty(value, index)?;
+                let font = nonempty(value, index)?;
+                let normalized = font.to_ascii_lowercase();
+                if normalized.contains(":size=") || normalized.contains(":pixelsize=") {
+                    bail!(
+                        "line {}: main.font is only a face/style pattern; use main.font-pixelsize or main.font-point-size",
+                        index + 1
+                    );
+                }
+                config.font = font;
                 false
             }
-            "main.font-size" | "font-size" => {
-                config.font_size = parse_range(value, 6.0, 96.0, index)?;
+            "main.font-size" | "font-size" | "main.font-pixelsize" => {
+                if let Some(previous) = explicit_font_size_line {
+                    bail!(
+                        "line {}: font size conflicts with line {previous}; configure exactly one size key",
+                        index + 1
+                    );
+                }
+                config.font_size = FontSize::Pixels(parse_range(value, 6.0, 96.0, index)?);
+                explicit_font_size_line = Some(index + 1);
+                if full != "main.font-pixelsize" {
+                    diagnostics.push(format!(
+                        "line {}: font-size is deprecated; use main.font-pixelsize",
+                        index + 1
+                    ));
+                }
+                false
+            }
+            "main.font-point-size" => {
+                if let Some(previous) = explicit_font_size_line {
+                    bail!(
+                        "line {}: font size conflicts with line {previous}; configure exactly one size key",
+                        index + 1
+                    );
+                }
+                config.font_size = FontSize::Points(parse_range(value, 6.0, 96.0, index)?);
+                explicit_font_size_line = Some(index + 1);
+                false
+            }
+            "main.font-sizing-policy" => {
+                config.font_sizing_policy = match value.to_ascii_lowercase().as_str() {
+                    "output-scale" => FontSizingPolicy::OutputScale,
+                    "physical-dpi" => FontSizingPolicy::PhysicalDpi,
+                    _ => bail!(
+                        "line {}: font-sizing-policy must be output-scale or physical-dpi",
+                        index + 1
+                    ),
+                };
+                explicit_font_policy_line = Some(index + 1);
+                false
+            }
+            "main.padding-left" => {
+                config.padding.left = parse_range(value, 0, 10_000, index)?;
+                false
+            }
+            "main.padding-right" => {
+                config.padding.right = parse_range(value, 0, 10_000, index)?;
+                false
+            }
+            "main.padding-top" => {
+                config.padding.top = parse_range(value, 0, 10_000, index)?;
+                false
+            }
+            "main.padding-bottom" => {
+                config.padding.bottom = parse_range(value, 0, 10_000, index)?;
                 false
             }
             "main.initial-columns" => {
@@ -180,7 +247,19 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
                 false
             }
             "main.dpi-aware" => {
-                config.dpi_aware = parse_bool(value, index)?;
+                let value = parse_bool(value, index)?;
+                if !value {
+                    bail!(
+                        "line {}: legacy Splinterm dpi-aware=no forced the whole surface to 1x and cannot be migrated safely; remove it and choose main.font-sizing-policy explicitly",
+                        index + 1
+                    );
+                }
+                legacy_dpi_aware_line = Some(index + 1);
+                config.font_sizing_policy = FontSizingPolicy::OutputScale;
+                diagnostics.push(format!(
+                    "line {}: legacy Splinterm dpi-aware=yes is deprecated and maps only to main.font-sizing-policy=output-scale",
+                    index + 1
+                ));
                 false
             }
             "main.theme" => {
@@ -226,6 +305,11 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
         if unsupported {
             diagnostics.push(format!("line {}: unsupported option {full}", index + 1));
         }
+    }
+    if let (Some(legacy), Some(explicit)) = (legacy_dpi_aware_line, explicit_font_policy_line) {
+        bail!(
+            "line {legacy}: legacy dpi-aware conflicts with font-sizing-policy on line {explicit}; remove the legacy key"
+        );
     }
     Ok(ConfigLoad {
         config,
@@ -360,12 +444,75 @@ mod tests {
     fn supported_subset_and_diagnostics_are_explicit() {
         let loaded = parse("[main]\nfont=Mono\nfont-size=14\ninitial-columns=100\napp-id=spoof\nunknown=x\n[cursor]\nstyle=beam\nblink=no\n").unwrap();
         assert_eq!(loaded.config.font, "Mono");
-        assert!((loaded.config.font_size - 14.0).abs() < f32::EPSILON);
+        assert_eq!(loaded.config.font_size, FontSize::Pixels(14.0));
         assert_eq!(loaded.config.initial_columns, 100);
         assert_eq!(loaded.config.cursor_style, CursorStyle::Beam);
         assert!(!loaded.config.cursor_blink);
-        assert_eq!(loaded.diagnostics.len(), 2);
+        assert_eq!(loaded.diagnostics.len(), 3);
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|line| line.contains("font-size is deprecated"))
+        );
     }
+    #[test]
+    fn geometry_font_units_and_padding_are_explicit() {
+        let loaded = parse(
+            "[main]\nfont-point-size=12\nfont-sizing-policy=physical-dpi\npadding-left=1\npadding-right=2\npadding-top=3\npadding-bottom=4\n",
+        )
+        .unwrap();
+        assert_eq!(loaded.config.font_size, FontSize::Points(12.0));
+        assert_eq!(
+            loaded.config.font_sizing_policy,
+            FontSizingPolicy::PhysicalDpi
+        );
+        assert_eq!(
+            loaded.config.padding,
+            TerminalPadding {
+                left: 1,
+                right: 2,
+                top: 3,
+                bottom: 4
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_splinterm_dpi_aware_migration_is_safe_and_conflicts_fail() {
+        let legacy = parse("[main]\ndpi-aware=yes\n").unwrap();
+        assert_eq!(
+            legacy.config.font_sizing_policy,
+            FontSizingPolicy::OutputScale
+        );
+        assert!(legacy.diagnostics[0].contains("legacy Splinterm"));
+        let no = parse("[main]\ndpi-aware=no\n").unwrap_err().to_string();
+        assert!(no.contains("forced the whole surface to 1x"));
+        assert!(
+            parse("[main]\ndpi-aware=yes\nfont-sizing-policy=output-scale\n")
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts")
+        );
+        assert!(
+            parse("[main]\nfont-sizing-policy=output-scale\ndpi-aware=yes\n")
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts")
+        );
+    }
+
+    #[test]
+    fn font_sizing_authorities_cannot_conflict_or_hide_in_face_pattern() {
+        assert!(parse("[main]\nfont-pixelsize=12\nfont-point-size=12\n").is_err());
+        assert!(
+            parse("[main]\nfont=Mono:size=12\n")
+                .unwrap_err()
+                .to_string()
+                .contains("face/style")
+        );
+    }
+
     #[test]
     fn invalid_ranges_and_values_fail() {
         assert!(parse("font-size=2").is_err());

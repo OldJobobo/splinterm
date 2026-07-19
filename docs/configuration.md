@@ -10,14 +10,18 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | Section/key | Meaning | Range/default |
 | --- | --- | --- |
 | `main.font` | fontconfig pattern | JetBrains Mono Nerd Font Regular |
-| `main.font-size` | logical pixel size | 6–96; 22 |
+| `main.font-pixelsize` | configured pixel font size | 6–96; 22 |
+| `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
+| `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
+| `main.font-sizing-policy` | `output-scale` or `physical-dpi` (no auto mode) | output-scale |
+| `main.padding-left`, `padding-right`, `padding-top`, `padding-bottom` | independent logical padding edges | 0–10000; 12 each |
 | `main.initial-columns`, `initial-rows` | requested initial grid | 2–240, 2–80; 80×24 |
 | `main.shell` | shell executable used for an empty launch | login shell from the account |
 | `main.login-shell` | use login-style argv[0] for the shell | yes |
 | `main.title` | fixed window title; otherwise OSC title | unset |
 | `main.app-id` | diagnostic only | fixed to `com.oldjobobo.splinterm` |
 | `main.resize-delay-ms` | bounded delay before resize command | 0–1000; 0 |
-| `main.dpi-aware` | legacy name: follow compositor output scale (`yes`) or force 1× (`no`) | yes |
+| `main.dpi-aware` | deprecated **legacy Splinterm** key: `yes` maps only to `output-scale`; `no` fails with migration guidance | unset |
 | `main.theme` | generated JSON role map | `~/.config/splinterm/theme.json` |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | block |
@@ -36,9 +40,16 @@ Terminal key mappings otherwise follow the implemented Foot/xterm behavior.
 
 Copy values rather than copying a whole `foot.ini`:
 
-- Foot `font` → `main.font`. Splinterm `main.font-size` is pixels, so Foot
-  `pixelsize=` maps directly. Foot `size=` is points and must be converted using
-  the intended DPI (`pixels = points × DPI / 72`; at 96 DPI, `12pt = 16px`).
+- Foot `font` → `main.font`. Foot `pixelsize=N` →
+  `main.font-pixelsize=N`; Foot `size=N` → `main.font-point-size=N`.
+  A `size=` or `pixelsize=` embedded in `main.font` is rejected because the
+  face/style pattern cannot become a second sizing authority.
+- Foot `dpi-aware=no` → `main.font-sizing-policy=output-scale`: a 96-DPI font
+  is scaled with compositor output scale. Foot `dpi-aware=yes` →
+  `main.font-sizing-policy=physical-dpi`: points use the most recently entered
+  Wayland output's mode/physical-size DPI and pixel sizes remain fixed. Missing,
+  invalid, or unreasonable output data falls back to 96 DPI with provenance.
+  Splinterm intentionally has no `auto` value.
 - Foot `initial-window-size-chars` → `main.initial-columns` and
   `main.initial-rows`.
 - Foot `shell` → `main.shell`; Splinterm never evaluates it as a shell command.
@@ -46,11 +57,16 @@ Copy values rather than copying a whole `foot.ini`:
 - Convert colors through the Omarchy generator below instead of pasting Foot's
   complete `[colors]` section.
 
-The current `main.dpi-aware` name is not Foot-compatible: `yes` follows the
-compositor scale, which corresponds to Foot's `dpi-aware=no` sizing behavior.
-`no` merely forces 1×; Splinterm does not yet implement Foot's physical-output
-DPI mode. Phase 8.1 Slice 2 will separate surface scale from font-sizing policy
-before introducing compatible `yes`/`no`/`auto` semantics.
+The Foot mapping above is separate from migration of Splinterm's old key.
+Legacy Splinterm `main.dpi-aware=yes` meant “follow compositor scale” and maps
+only to `output-scale`. Legacy Splinterm `dpi-aware=no` forced the whole surface
+to 1×, has no behavior-preserving mapping, and fails with a targeted message.
+Using the legacy and new policy keys together is rejected.
+
+Wayland `surface_scale_120` always follows compositor output geometry and is
+never disabled by font policy. Font resolution records the configured unit,
+policy, observed/sizing DPI provenance, compositor scale, effective 26.6 size,
+and final pixel size.
 
 Foot options outside the table—server mode, pad geometry, URL modes, arbitrary
 bindings, notifications, and advanced rendering controls—are unsupported in

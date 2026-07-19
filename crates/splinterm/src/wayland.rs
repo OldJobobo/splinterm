@@ -96,9 +96,10 @@ use smithay_client_toolkit::reexports::protocols::wp::{
 };
 
 use crate::config::{APP_ID, CursorStyle, ResolvedTheme};
+use crate::geometry::{OutputDpiObservation, SurfaceGeometry};
 use crate::renderer::{
     SnapshotFrame, SnapshotOverlays, TextRow, paint, paint_snapshot, paint_snapshot_overlays,
-    paint_snapshot_rows, scroll_snapshot_pixels, snapshot_row_rect, write_ppm,
+    paint_snapshot_rows, scroll_snapshot_pixels, snapshot_row_rect, update_output_dpi, write_ppm,
 };
 use crate::viewport::ScrollbackViewport;
 
@@ -316,8 +317,6 @@ pub struct WindowOptions {
     pub cursor_blink: bool,
     /// Optional fixed user title; terminal OSC titles remain active when absent.
     pub title: Option<String>,
-    /// Ignore compositor DPI/scale changes when disabled.
-    pub dpi_aware: bool,
     /// Current project-owned Omarchy role mapping.
     pub theme: ResolvedTheme,
 }
@@ -338,7 +337,6 @@ impl Default for WindowOptions {
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             title: None,
-            dpi_aware: true,
             theme: ResolvedTheme::default(),
         }
     }
@@ -438,7 +436,6 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     };
     window.set_title(title);
     window.set_app_id(APP_ID);
-    window.set_min_size(Some((480, 300)));
     window
         .set_buffer_scale(1)
         .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
@@ -486,7 +483,6 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         cursor_style: options.cursor_style,
         cursor_blink: options.cursor_blink,
         title_override: options.title,
-        dpi_aware: options.dpi_aware,
         theme: options.theme,
         evidence_close_shortcuts: options.evidence_close_shortcuts,
         modifiers: Modifiers::default(),
@@ -534,6 +530,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         scale_120: SCALE_DENOMINATOR,
         integer_fallback_scale: 1,
         output_count: 0,
+        entered_outputs: Vec::new(),
         seat_count: 0,
     };
 
@@ -622,29 +619,23 @@ fn viewport_destination(width: u32, height: u32) -> Result<(i32, i32)> {
     ))
 }
 
-fn scaled_dimension(logical: u32, scale_120: u32) -> Result<u32> {
-    if !(MIN_SCALE_120..=MAX_SCALE_120).contains(&scale_120) {
-        anyhow::bail!("scale must be between 1x and 8x");
-    }
-    logical
-        .checked_mul(scale_120)
-        .and_then(|value| value.checked_add(SCALE_DENOMINATOR - 1))
-        .map(|value| value / SCALE_DENOMINATOR)
-        .context("scaled dimension overflow")
-}
-
 fn buffer_dimensions(
     logical_width: u32,
     logical_height: u32,
     scale_120: u32,
 ) -> Result<(u32, u32, i32)> {
-    let width = scaled_dimension(logical_width, scale_120)?;
-    let height = scaled_dimension(logical_height, scale_120)?;
-    let stride = i32::try_from(width.checked_mul(4).context("buffer stride overflow")?)
-        .context("buffer stride fits i32")?;
-    i32::try_from(width).context("buffer width fits i32")?;
-    i32::try_from(height).context("buffer height fits i32")?;
-    Ok((width, height, stride))
+    SurfaceGeometry::new(logical_width, logical_height, scale_120)?.buffer_layout()
+}
+
+fn note_output_enter<T: Clone + Eq>(entered: &mut Vec<T>, output: &T) {
+    entered.retain(|candidate| candidate != output);
+    entered.push(output.clone());
+}
+
+fn note_output_leave<T: Eq>(entered: &mut Vec<T>, output: &T) -> bool {
+    let was_most_recent = entered.last() == Some(output);
+    entered.retain(|candidate| candidate != output);
+    was_most_recent
 }
 
 #[allow(
@@ -685,7 +676,6 @@ struct App {
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
-    dpi_aware: bool,
     theme: ResolvedTheme,
     evidence_close_shortcuts: bool,
     modifiers: Modifiers,
@@ -733,6 +723,8 @@ struct App {
     scale_120: u32,
     integer_fallback_scale: u32,
     output_count: usize,
+    /// Enter order is significant: the last element is Foot's most-recent output.
+    entered_outputs: Vec<wl_output::WlOutput>,
     seat_count: usize,
 }
 
@@ -1467,6 +1459,24 @@ fn resize_changed(previous: Option<(u16, u16, u16, u16)>, candidate: (u16, u16, 
     previous != Some(candidate)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalResizeCause {
+    SnapshotAvailable,
+    SurfaceConfigure,
+    OutputDpiChanged,
+    CompositorScaleChanged,
+}
+
+const fn terminal_resize_allowed(cause: TerminalResizeCause, resize_known: bool) -> bool {
+    match cause {
+        TerminalResizeCause::SnapshotAvailable => !resize_known,
+        TerminalResizeCause::SurfaceConfigure => true,
+        TerminalResizeCause::OutputDpiChanged | TerminalResizeCause::CompositorScaleChanged => {
+            false
+        }
+    }
+}
+
 fn reduced_motion_requested() -> bool {
     std::env::var_os("SPLINTERM_REDUCED_MOTION")
         .is_some_and(|value| matches!(value.to_str(), Some("1" | "true" | "yes")))
@@ -1773,10 +1783,11 @@ impl App {
     }
 
     fn pointer_cell_at(&self, position: (f64, f64)) -> Option<CellPosition> {
-        let (row, column) =
-            self.snapshot_frame
-                .as_ref()?
-                .cell_at(position.0, position.1, self.scale_120)?;
+        let frame = self.snapshot_frame.as_ref()?;
+        let geometry = frame
+            .window_geometry(self.logical_width, self.logical_height, self.scale_120)
+            .ok()?;
+        let (row, column) = frame.cell_at(position.0, position.1, &geometry)?;
         Some(CellPosition { row, column })
     }
 
@@ -1949,7 +1960,12 @@ impl App {
         let (Some(text_input), Some(frame)) = (&self.text_input, &self.snapshot_frame) else {
             return;
         };
-        if let Some((x, y, width, height)) = frame.cursor_rectangle(self.scale_120) {
+        let Ok(geometry) =
+            frame.window_geometry(self.logical_width, self.logical_height, self.scale_120)
+        else {
+            return;
+        };
+        if let Some((x, y, width, height)) = frame.cursor_rectangle(&geometry) {
             text_input.set_cursor_rectangle(x, y, width, height);
             self.commit_text_input();
         }
@@ -1979,8 +1995,12 @@ impl App {
             zwp_text_input_v3::ContentPurpose::Terminal,
         );
         if let Some(frame) = &self.snapshot_frame {
-            if let Some((x, y, width, height)) = frame.cursor_rectangle(self.scale_120) {
-                text_input.set_cursor_rectangle(x, y, width, height);
+            if let Ok(geometry) =
+                frame.window_geometry(self.logical_width, self.logical_height, self.scale_120)
+            {
+                if let Some((x, y, width, height)) = frame.cursor_rectangle(&geometry) {
+                    text_input.set_cursor_rectangle(x, y, width, height);
+                }
             }
         }
         self.commit_text_input();
@@ -2136,7 +2156,11 @@ impl App {
             return Ok(());
         };
         let resize =
-            frame.terminal_size(self.logical_width, self.logical_height, self.scale_120)?;
+            match frame.terminal_size(self.logical_width, self.logical_height, self.scale_120) {
+                Ok(resize) => resize,
+                Err(error) if error.to_string().contains("SurfaceTooSmall") => return Ok(()),
+                Err(error) => return Err(error),
+            };
         if !resize_changed(self.last_resize, resize) {
             return Ok(());
         }
@@ -2412,7 +2436,12 @@ impl App {
             self.prepare_dirty_rows.fill(false);
             self.refresh_ime_preedit()?;
             self.update_ime_cursor_rectangle();
-            self.emit_resize()?;
+            if terminal_resize_allowed(
+                TerminalResizeCause::SnapshotAvailable,
+                self.last_resize.is_some(),
+            ) {
+                self.emit_resize()?;
+            }
             if self.configured {
                 self.schedule_draw(queue_handle)?;
             }
@@ -2428,16 +2457,53 @@ impl App {
         Ok(())
     }
 
+    fn output_dpi_observation(&self, output: &wl_output::WlOutput) -> OutputDpiObservation {
+        let Some(info) = self.output_state.info(output) else {
+            return OutputDpiObservation::unavailable("output-info-pending");
+        };
+        let current_mode = info
+            .modes
+            .iter()
+            .find(|mode| mode.current)
+            .map(|mode| mode.dimensions);
+        OutputDpiObservation::from_wayland(info.id, info.name, current_mode, info.physical_size)
+    }
+
+    fn refresh_output_dpi(
+        &mut self,
+        output: &wl_output::WlOutput,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<()> {
+        let observation = self.output_dpi_observation(output);
+        if !update_output_dpi(observation, self.scale_120)? {
+            return Ok(());
+        }
+        if let Some(display) = self.display_snapshot() {
+            self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+            self.rendered_viewport_offset = self.scrollback_viewport.offset_from_bottom();
+            self.viewport_dirty = false;
+        }
+        self.buffer = None;
+        self.backing.clear();
+        self.full_redraw = true;
+        self.refresh_ime_preedit()?;
+        debug_assert!(!terminal_resize_allowed(
+            TerminalResizeCause::OutputDpiChanged,
+            self.last_resize.is_some(),
+        ));
+        self.update_ime_cursor_rectangle();
+        if self.configured {
+            self.schedule_draw(queue_handle)?;
+        }
+        Ok(())
+    }
+
     fn apply_scale(
         &mut self,
         requested_scale_120: u32,
         queue_handle: &QueueHandle<Self>,
     ) -> Result<()> {
-        let scale_120 = if self.dpi_aware {
-            requested_scale_120
-        } else {
-            SCALE_DENOMINATOR
-        };
+        let scale_120 = requested_scale_120;
         if !(MIN_SCALE_120..=MAX_SCALE_120).contains(&scale_120) || scale_120 == self.scale_120 {
             return Ok(());
         }
@@ -2464,9 +2530,11 @@ impl App {
         self.buffer = None;
         self.backing.clear();
         self.full_redraw = true;
-        self.last_resize = None;
         self.refresh_ime_preedit()?;
-        self.emit_resize()?;
+        debug_assert!(!terminal_resize_allowed(
+            TerminalResizeCause::CompositorScaleChanged,
+            self.last_resize.is_some(),
+        ));
         self.update_ime_cursor_rectangle();
         if self.configured {
             self.schedule_draw(queue_handle)?;
@@ -2576,11 +2644,29 @@ impl App {
             self.rendered_viewport_offset = current_offset;
             self.viewport_dirty = false;
         }
-        let (width, height, stride) = buffer_dimensions(
-            self.logical_width.max(1),
-            self.logical_height.max(1),
-            self.scale_120,
-        )?;
+        let window_geometry = self
+            .snapshot_frame
+            .as_ref()
+            .map(|frame| {
+                frame.window_geometry(self.logical_width, self.logical_height, self.scale_120)
+            })
+            .transpose()
+            .or_else(|error| {
+                if error.to_string().contains("SurfaceTooSmall") {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            })?;
+        let (width, height, stride) = if let Some(geometry) = window_geometry {
+            geometry.buffer_layout()?
+        } else {
+            buffer_dimensions(
+                self.logical_width.max(1),
+                self.logical_height.max(1),
+                self.scale_120,
+            )?
+        };
         let width_i32 = i32::try_from(width).context("buffer width fits i32")?;
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
         let buffer = if let Some(buffer) = self.buffer.as_mut() {
@@ -2616,25 +2702,27 @@ impl App {
             self.backing.resize(backing_len, 0);
             self.full_redraw = true;
         }
-        if let Some(frame) = &self.snapshot_frame {
+        if let (Some(frame), Some(geometry)) = (&self.snapshot_frame, &window_geometry) {
             if self.full_redraw {
                 paint_snapshot(
                     &mut self.backing,
                     width,
                     height,
                     frame,
+                    geometry,
                     self.cursor_blink_visible,
                     self.cursor_style,
                 );
             } else {
                 for scroll in self.pending_scrolls.drain(..) {
-                    scroll_snapshot_pixels(&mut self.backing, width, frame, scroll);
+                    scroll_snapshot_pixels(&mut self.backing, width, frame, geometry, scroll);
                 }
                 paint_snapshot_rows(
                     &mut self.backing,
                     width,
                     height,
                     frame,
+                    geometry,
                     &self.raster_dirty_rows,
                     self.cursor_blink_visible,
                     self.cursor_style,
@@ -2654,6 +2742,7 @@ impl App {
                 width,
                 height,
                 frame,
+                geometry,
                 SnapshotOverlays {
                     selection,
                     hovered_url,
@@ -2667,6 +2756,12 @@ impl App {
             if self.trusted_consent.is_some() {
                 paint_trusted_consent_chrome(canvas, width, height);
             }
+        } else if self.snapshot_frame.is_some() {
+            let [_, red, green, blue] = self.theme.background.to_be_bytes();
+            for pixel in self.backing.chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[blue, green, red, u8::MAX]);
+            }
+            canvas.copy_from_slice(&self.backing);
         } else if let Some(row) = &self.text_row {
             paint(canvas, width, height, row);
         } else {
@@ -2690,12 +2785,12 @@ impl App {
             self.window
                 .wl_surface()
                 .damage_buffer(0, 0, width_i32, height_i32);
-        } else if let Some(frame) = &self.snapshot_frame {
+        } else if let Some(geometry) = &window_geometry {
             for (row, dirty) in self.surface_dirty_rows.iter().copied().enumerate() {
                 if !dirty {
                     continue;
                 }
-                if let Some((x, y, row_width, row_height)) = snapshot_row_rect(frame, row) {
+                if let Some((x, y, row_width, row_height)) = snapshot_row_rect(geometry, row) {
                     self.window
                         .wl_surface()
                         .damage_buffer(x, y, row_width, row_height);
@@ -2789,24 +2884,40 @@ impl CompositorHandler for App {
     fn surface_enter(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
+        queue_handle: &QueueHandle<Self>,
         surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        output: &wl_output::WlOutput,
     ) {
-        if surface == self.window.wl_surface() {
-            self.output_count += 1;
+        if surface != self.window.wl_surface() {
+            return;
+        }
+        note_output_enter(&mut self.entered_outputs, output);
+        self.output_count = self.entered_outputs.len();
+        if let Err(error) = self.refresh_output_dpi(output, queue_handle) {
+            self.fail(error);
         }
     }
 
     fn surface_leave(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
+        queue_handle: &QueueHandle<Self>,
         surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        output: &wl_output::WlOutput,
     ) {
-        if surface == self.window.wl_surface() {
-            self.output_count = self.output_count.saturating_sub(1);
+        if surface != self.window.wl_surface() {
+            return;
+        }
+        let was_most_recent = note_output_leave(&mut self.entered_outputs, output);
+        self.output_count = self.entered_outputs.len();
+        if was_most_recent {
+            // With no entered output, retain the last observation as Foot does
+            // while temporarily unmapped. Otherwise promote the previous output.
+            if let Some(current) = self.entered_outputs.last().cloned() {
+                if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
+                    self.fail(error);
+                }
+            }
         }
     }
 }
@@ -2861,6 +2972,10 @@ impl WindowHandler for App {
         let initial_configure = !self.configured;
         self.configured = true;
         if initial_configure || resized {
+            debug_assert!(terminal_resize_allowed(
+                TerminalResizeCause::SurfaceConfigure,
+                self.last_resize.is_some(),
+            ));
             if let Err(error) = self
                 .emit_resize()
                 .and_then(|()| self.schedule_draw(queue_handle))
@@ -3549,16 +3664,30 @@ impl OutputHandler for App {
     fn update_output(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        queue_handle: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
     ) {
+        if self.entered_outputs.last() == Some(&output) {
+            if let Err(error) = self.refresh_output_dpi(&output, queue_handle) {
+                self.fail(error);
+            }
+        }
     }
     fn output_destroyed(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        queue_handle: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
     ) {
+        let was_most_recent = note_output_leave(&mut self.entered_outputs, &output);
+        self.output_count = self.entered_outputs.len();
+        if was_most_recent {
+            if let Some(current) = self.entered_outputs.last().cloned() {
+                if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
+                    self.fail(error);
+                }
+            }
+        }
     }
 }
 
@@ -4361,6 +4490,51 @@ mod tests {
         assert!(resize_changed(None, size));
         assert!(!resize_changed(Some(size), size));
         assert!(resize_changed(Some(size), (81, 24, 1_134, 720)));
+    }
+
+    #[test]
+    fn output_lifecycle_preserves_grid_until_surface_configure() {
+        for cause in [
+            TerminalResizeCause::OutputDpiChanged,
+            TerminalResizeCause::CompositorScaleChanged,
+        ] {
+            assert!(!terminal_resize_allowed(cause, false));
+            assert!(!terminal_resize_allowed(cause, true));
+        }
+        assert!(terminal_resize_allowed(
+            TerminalResizeCause::SurfaceConfigure,
+            true
+        ));
+        assert!(terminal_resize_allowed(
+            TerminalResizeCause::SurfaceConfigure,
+            false
+        ));
+    }
+
+    #[test]
+    fn startup_snapshot_emits_only_the_first_grid_resize() {
+        assert!(terminal_resize_allowed(
+            TerminalResizeCause::SnapshotAvailable,
+            false
+        ));
+        assert!(!terminal_resize_allowed(
+            TerminalResizeCause::SnapshotAvailable,
+            true
+        ));
+    }
+
+    #[test]
+    fn output_entry_order_selects_most_recent_and_retains_when_unmapped() {
+        let mut entered = Vec::new();
+        note_output_enter(&mut entered, &1);
+        note_output_enter(&mut entered, &2);
+        note_output_enter(&mut entered, &1);
+        assert_eq!(entered, vec![2, 1]);
+        assert!(!note_output_leave(&mut entered, &2));
+        assert_eq!(entered.last(), Some(&1));
+        assert!(note_output_leave(&mut entered, &1));
+        assert!(entered.is_empty());
+        // App deliberately leaves renderer's last DPI observation unchanged here.
     }
 
     #[test]

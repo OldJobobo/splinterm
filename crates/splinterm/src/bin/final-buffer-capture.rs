@@ -4,7 +4,8 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use splinterm::{
     config::CursorStyle,
-    renderer::{RendererOptions, capture_final_buffer, configure},
+    geometry::{FontSize, FontSizingPolicy, TerminalPadding, resolve_font_size},
+    renderer::{RendererOptions, capture_final_buffer, capture_final_buffer_sized, configure},
 };
 use splinterm_core::SplintId;
 use splinterm_protocol::{
@@ -23,12 +24,30 @@ struct Arguments {
     font: String,
     #[arg(long, default_value_t = 12.0)]
     font_size: f32,
+    #[arg(long, default_value = "pixels")]
+    font_size_unit: String,
+    #[arg(long, default_value = "output-scale")]
+    font_sizing_policy: String,
+    #[arg(long, default_value_t = 96.0)]
+    physical_dpi: f32,
+    #[arg(long, default_value_t = 12)]
+    pad_left: u32,
+    #[arg(long, default_value_t = 12)]
+    pad_right: u32,
+    #[arg(long, default_value_t = 12)]
+    pad_top: u32,
+    #[arg(long, default_value_t = 12)]
+    pad_bottom: u32,
     #[arg(long, default_value_t = 120)]
     scale_120: u32,
     #[arg(long, default_value_t = 95)]
     columns: usize,
     #[arg(long, default_value_t = 1)]
     rows: usize,
+    #[arg(long, requires = "logical_height")]
+    logical_width: Option<u32>,
+    #[arg(long, requires = "logical_width")]
+    logical_height: Option<u32>,
     #[arg(long)]
     text_hex: Option<String>,
     #[arg(long, default_value = "normal")]
@@ -173,19 +192,60 @@ fn cursor_style(value: &str) -> Result<CursorStyle> {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "capture configuration and the emitted provenance contract remain one auditable transaction"
+)]
 fn main() -> Result<()> {
     let arguments = Arguments::parse();
+    let font_size = match arguments.font_size_unit.as_str() {
+        "pixels" | "px" => FontSize::Pixels(arguments.font_size),
+        "points" | "pt" => FontSize::Points(arguments.font_size),
+        _ => bail!("font-size-unit must be pixels or points"),
+    };
+    let font_sizing_policy = match arguments.font_sizing_policy.as_str() {
+        "output-scale" => FontSizingPolicy::OutputScale,
+        "physical-dpi" => FontSizingPolicy::PhysicalDpi,
+        _ => bail!("font-sizing-policy must be output-scale or physical-dpi"),
+    };
+    let padding = TerminalPadding {
+        left: arguments.pad_left,
+        right: arguments.pad_right,
+        top: arguments.pad_top,
+        bottom: arguments.pad_bottom,
+    };
+    let resolved_font = resolve_font_size(
+        font_size,
+        font_sizing_policy,
+        arguments.scale_120,
+        arguments.physical_dpi,
+    )?;
     configure(RendererOptions {
         font: arguments.font.clone(),
-        font_size: arguments.font_size,
+        font_size,
+        font_sizing_policy,
+        physical_dpi: arguments.physical_dpi,
+        padding,
     })?;
     let style = cursor_style(&arguments.cursor_shape)?;
-    let capture = capture_final_buffer(
-        &snapshot(&arguments)?,
-        arguments.scale_120,
-        !arguments.hide_cursor,
-        style,
-    )?;
+    let snapshot = snapshot(&arguments)?;
+    let capture = match (arguments.logical_width, arguments.logical_height) {
+        (Some(width), Some(height)) => capture_final_buffer_sized(
+            &snapshot,
+            arguments.scale_120,
+            width,
+            height,
+            !arguments.hide_cursor,
+            style,
+        )?,
+        (None, None) => capture_final_buffer(
+            &snapshot,
+            arguments.scale_120,
+            !arguments.hide_cursor,
+            style,
+        )?,
+        _ => unreachable!("clap requires both logical surface dimensions"),
+    };
     let frame_id = arguments.frame_id.clone().unwrap_or_else(|| {
         format!(
             "{}-{}x{}-{}",
@@ -229,7 +289,37 @@ fn main() -> Result<()> {
         "provenance": {
             "implementation": "splinterm",
             "font_pattern": arguments.font,
-            "logical_font_size_px": arguments.font_size,
+            "font_size": {"value": arguments.font_size, "unit": font_size.unit_name()},
+            "font_sizing_policy": font_sizing_policy.name(),
+            "font_resolution": {
+                "configured_size": {"value": arguments.font_size, "unit": font_size.unit_name()},
+                "policy": font_sizing_policy.name(),
+                "observed_output_dpi": resolved_font.observed_output_dpi,
+                "observed_output_id": resolved_font.observed_output_id,
+                "observed_output_name": resolved_font.observed_output_name,
+                "observed_dpi_source": resolved_font.observed_dpi_source,
+                "observed_dpi_fallback_reason": resolved_font.observed_dpi_fallback_reason,
+                "sizing_dpi": resolved_font.sizing_dpi,
+                "sizing_dpi_source": resolved_font.dpi_source,
+                "surface_scale_120": resolved_font.surface_scale_120,
+                "effective_pixel_size_26_6": resolved_font.effective_pixel_size_26_6,
+                "effective_pixel_size": resolved_font.pixel_size,
+            },
+            "window_geometry": {
+                "surface_logical_size": {"width": capture.logical_width, "height": capture.logical_height},
+                "surface_buffer_size": {"width": capture.width, "height": capture.height},
+                "surface_scale_120": arguments.scale_120,
+                "grid": {"columns": capture.columns, "rows": capture.rows},
+                "cell": {"width": capture.cell_width, "height": capture.cell_height, "ascent": capture.ascent, "descent": capture.descent, "baseline_from_top": capture.baseline, "advance_policy": "integer-primary-advance"},
+                "grid_rect": {"x": capture.grid_rect.x, "y": capture.grid_rect.y, "width": capture.grid_rect.width, "height": capture.grid_rect.height},
+                "visible_grid_rect": {"x": capture.visible_grid_rect.x, "y": capture.visible_grid_rect.y, "width": capture.visible_grid_rect.width, "height": capture.visible_grid_rect.height},
+                "requested_padding": {"left": capture.requested_padding.left, "right": capture.requested_padding.right, "top": capture.requested_padding.top, "bottom": capture.requested_padding.bottom},
+                "effective_base_padding": {"left": capture.effective_base_padding.left, "right": capture.effective_base_padding.right, "top": capture.effective_base_padding.top, "bottom": capture.effective_base_padding.bottom},
+                "actual_padding": {"left": capture.padding_left, "right": capture.padding_right, "top": capture.padding_top, "bottom": capture.padding_bottom},
+                "residual_right": capture.residual_right,
+                "residual_bottom": capture.residual_bottom,
+                "residual_policy": "trailing-edges",
+            },
             "cargo_lock": "Cargo.lock",
         },
     });

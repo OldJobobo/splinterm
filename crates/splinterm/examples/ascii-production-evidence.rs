@@ -9,7 +9,8 @@ fn main() -> Result<()> {
     let font_size: f32 = value.parse().context("parse evidence font size")?;
     splinterm::renderer::configure(splinterm::renderer::RendererOptions {
         font: splinterm::config::DEFAULT_FONT.into(),
-        font_size,
+        font_size: splinterm::geometry::FontSize::Pixels(font_size),
+        ..splinterm::renderer::RendererOptions::default()
     })?;
     let stdout = io::stdout();
     let mut output = stdout.lock();

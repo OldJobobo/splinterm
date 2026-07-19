@@ -243,16 +243,24 @@ tools/foot-oracle/run-final-buffer-comparison.py \
 ```
 
 The runner refuses every other workspace/monitor mapping, refuses to run while
-DP-2/workspace 8 is active or occupied, launches with a silent no-focus rule,
-checks the mapped window's workspace and monitor before capture, and aborts if
-the user's active workspace moves to the test display.
+DP-2/workspace 8 is active or occupied, uses an `exec` launcher so Hyprland's
+silent no-focus rule follows the Foot PID, checks placement before and throughout
+capture, and aborts and cleans up if the user's active workspace moves to the
+test display. Window operations use Hyprland 0.55's table-form Lua dispatchers.
+If the compositor contributes trailing residual pixels, the runner recaptures
+Splinterm at Foot's declared logical surface size instead of translating images
+or widening comparison tolerances.
 
 The command preflights Foot, patch, font, native-library, and Cargo.lock
 provenance; builds and tests patched Foot; runs all 16 manifest cases; and writes
 an aggregate `summary.json`. The clean 2026-07-19 closure run at
 `/tmp/splinterm-final-buffer-clean-retest/` passed 16/16 with zero ARGB
 mismatches, exact geometry, four-edge padding, origins, ink bounds, and no
-80/240-column drift.
+80/240-column drift. The Slice 2 closure run at
+`/tmp/splinterm-slice2-foot-edge-final/` retained exact bytes and zero edge delta
+for all 13 non-cursor fixtures with one compositor-added bottom residual pixel.
+The three cursor-cell-only differences remain assigned to Slice 3 because Foot
+is intentionally unfocused on the inactive test workspace.
 
 The final two mismatches were not FreeType differences: 12 px fcft, isolated
 FreeType, and the production cache had identical masks. Foot paints each row

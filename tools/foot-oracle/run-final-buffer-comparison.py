@@ -96,7 +96,8 @@ def assert_user_workspace_untouched() -> None:
 
 
 def kill_oracle_window(address: str) -> None:
-    expression = f"hl.dispatch(hl.dsp.window.kill('address:{address}'))"
+    selector = json.dumps(f"address:{address}")
+    expression = f"hl.dispatch(hl.dsp.window.kill({{ window = {selector} }}))"
     run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
 
 
@@ -242,6 +243,7 @@ def capture_splinterm(
     output_prefix: Path,
     profile: dict[str, Any],
     case: dict[str, Any],
+    logical_size: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     cursor = case["cursor"]
     command = [
@@ -275,6 +277,15 @@ def capture_splinterm(
     ]
     if not cursor["visible"]:
         command.append("--hide-cursor")
+    if logical_size is not None:
+        command.extend(
+            [
+                "--logical-width",
+                str(logical_size[0]),
+                "--logical-height",
+                str(logical_size[1]),
+            ]
+        )
     result = run(command, cwd=ROOT, capture_output=True)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Splinterm capture failed")
@@ -301,7 +312,7 @@ def capture_foot(
     monitor_id: int,
     width: int,
     height: int,
-) -> None:
+) -> dict[str, Any]:
     wait_for_oracle_windows_to_close()
     assert_user_workspace_untouched()
     if workspace_clients(workspace):
@@ -336,14 +347,12 @@ def capture_foot(
         child,
         payload.hex(),
     ]
-    done = output_dir / "foot.done"
     launcher = output_dir / "launch-foot.sh"
     launcher.write_text(
-        "#!/usr/bin/env bash\nset +e\n"
+        "#!/usr/bin/env bash\n"
+        + "exec "
         + shlex.join(command)
-        + f" >{shlex.quote(str(output_dir / 'foot.stdout'))} 2>{shlex.quote(str(output_dir / 'foot.stderr'))}\n"
-        + "status=$?\n"
-        + f"printf '%s\\n' \"$status\" >{shlex.quote(str(done))}\n",
+        + f" >{shlex.quote(str(output_dir / 'foot.stdout'))} 2>{shlex.quote(str(output_dir / 'foot.stderr'))}\n",
         encoding="utf-8",
     )
     launcher.chmod(0o700)
@@ -372,48 +381,72 @@ def capture_foot(
     if oracle_client is None:
         raise RuntimeError("Foot oracle window did not map")
     address = oracle_client["address"]
-    if (
-        oracle_client.get("workspace", {}).get("id") != workspace
-        or oracle_client.get("monitor") != monitor_id
-    ):
-        kill_oracle_window(address)
-        raise RuntimeError(
-            f"Foot oracle escaped workspace {workspace} on {TEST_MONITOR}"
-        )
     try:
+        if (
+            oracle_client.get("workspace", {}).get("id") != workspace
+            or oracle_client.get("monitor") != monitor_id
+        ):
+            actual_workspace = oracle_client.get("workspace", {}).get("id")
+            actual_monitor = oracle_client.get("monitor")
+            raise RuntimeError(
+                f"Foot oracle escaped workspace {workspace} on {TEST_MONITOR}: "
+                f"mapped to workspace {actual_workspace} on monitor {actual_monitor}"
+            )
         assert_user_workspace_untouched()
-    except RuntimeError:
-        kill_oracle_window(address)
-        raise
-    if not oracle_client.get("floating"):
-        expression = f"hl.dispatch(hl.dsp.window.float('address:{address}'))"
-        result = run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
-        if result.returncode:
-            raise RuntimeError(result.stderr or result.stdout)
-        time.sleep(0.05)
-    resize = f"hl.dispatch(hl.dsp.window.resize('exact {width} {height},address:{address}'))"
-    configured = False
-    deadline = time.monotonic() + 2.0
-    while not configured and time.monotonic() < deadline:
-        result = run(["hyprctl", "eval", resize], capture_output=True, timeout=5)
-        if result.returncode:
-            raise RuntimeError(result.stderr or result.stdout)
-        time.sleep(0.03)
-        current = next((client for client in all_clients() if client.get("address") == address), None)
-        configured = bool(current and current.get("floating") and current.get("size") == [width, height])
-    if not configured:
-        raise RuntimeError("Foot oracle window did not reach the declared floating size")
+        selector = json.dumps(f"address:{address}")
+        if not oracle_client.get("floating"):
+            expression = (
+                "hl.dispatch(hl.dsp.window.float("
+                f"{{ action = 'enable', window = {selector} }}))"
+            )
+            result = run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
+            if result.returncode:
+                raise RuntimeError(result.stderr or result.stdout)
+            time.sleep(0.05)
+        resize = (
+            "hl.dispatch(hl.dsp.window.resize("
+            f"{{ x = {width}, y = {height}, window = {selector} }}))"
+        )
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            result = run(["hyprctl", "eval", resize], capture_output=True, timeout=5)
+            if result.returncode:
+                raise RuntimeError(result.stderr or result.stdout)
+            time.sleep(0.03)
+            current = next(
+                (client for client in all_clients() if client.get("address") == address),
+                None,
+            )
+            if current is not None and (
+                current.get("workspace", {}).get("id") != workspace
+                or current.get("monitor") != monitor_id
+            ):
+                raise RuntimeError("Foot oracle moved outside the reserved test workspace")
+            assert_user_workspace_untouched()
+            if output_prefix.with_suffix(".json").exists():
+                break
 
-    deadline = time.monotonic() + 10
-    while not done.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    if not done.exists() or done.read_text().strip() != "0":
-        stderr = output_dir / "foot.stderr"
-        raise RuntimeError(stderr.read_text() if stderr.exists() else "Foot launcher did not complete")
-    if not output_prefix.with_suffix(".json").exists():
-        raise RuntimeError("Foot produced no final-buffer capture")
-    wait_for_oracle_windows_to_close()
-    assert_user_workspace_untouched()
+        deadline = time.monotonic() + 10
+        while not output_prefix.with_suffix(".json").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not output_prefix.with_suffix(".json").exists():
+            stderr = output_dir / "foot.stderr"
+            raise RuntimeError(
+                stderr.read_text() if stderr.exists() else "Foot produced no final-buffer capture"
+            )
+        metadata = json.loads(output_prefix.with_suffix(".json").read_text(encoding="utf-8"))
+        wait_for_oracle_windows_to_close()
+        assert_user_workspace_untouched()
+        return metadata
+    finally:
+        try:
+            still_mapped = any(
+                client.get("address") == address for client in all_clients()
+            )
+        except (OSError, RuntimeError, json.JSONDecodeError):
+            still_mapped = True
+        if still_mapped:
+            kill_oracle_window(address)
 
 
 def read_comparison_result(
@@ -482,7 +515,7 @@ def main() -> int:
         record: dict[str, Any] = {"id": case["id"], "exact": False}
         try:
             metadata = capture_splinterm(splinterm_binary, splinterm_prefix, manifest["profile"], case)
-            capture_foot(
+            foot_metadata = capture_foot(
                 foot_binary,
                 foot_prefix,
                 case_dir,
@@ -494,6 +527,15 @@ def main() -> int:
                 metadata["width"],
                 metadata["height"],
             )
+            foot_size = (int(foot_metadata["width"]), int(foot_metadata["height"]))
+            if foot_size != (metadata["width"], metadata["height"]):
+                metadata = capture_splinterm(
+                    splinterm_binary,
+                    splinterm_prefix,
+                    manifest["profile"],
+                    case,
+                    foot_size,
+                )
             comparison = run(
                 [
                     sys.executable,

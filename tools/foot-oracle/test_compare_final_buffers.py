@@ -114,6 +114,25 @@ def test_parser_rejects_invalid_cursor_and_composition(tmp_path):
         write_capture(tmp_path, "composition", invalid, pixels)
 
 
+def test_v1_comparator_accepts_additive_slice2_provenance_and_asymmetric_padding(tmp_path):
+    pixels = background_pixels()
+    reference_meta = metadata()
+    actual_meta = metadata()
+    for candidate in (reference_meta, actual_meta):
+        candidate["padding"] = {"left": 0, "right": 2, "top": 1, "bottom": 1}
+        candidate["origin"] = {"x": 0, "y": 1}
+    actual_meta["provenance"]["window_geometry"] = {
+        "surface_scale_120": 120,
+        "requested_padding": {"left": 0, "right": 2, "top": 1, "bottom": 1},
+        "actual_padding": actual_meta["padding"],
+        "grid_rect": {"x": 0, "y": 1, "width": 2, "height": 2},
+        "residual_policy": "trailing-edges",
+    }
+    reference = write_capture(tmp_path, "reference", reference_meta, pixels)
+    actual = write_capture(tmp_path, "actual", actual_meta, pixels)
+    assert MODULE.compare(reference, actual, tmp_path / "diff")["exact"]
+
+
 def test_comparator_rejects_declared_origin_difference(tmp_path):
     pixels = background_pixels()
     reference = write_capture(tmp_path, "reference", metadata(), pixels)

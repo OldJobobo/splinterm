@@ -112,6 +112,37 @@ def test_failed_comparator_cannot_reuse_stale_success(tmp_path):
         MODULE.read_comparison_result(failed, stale)
 
 
+def test_kill_uses_current_table_form_window_selector(monkeypatch):
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(MODULE, "run", fake_run)
+    MODULE.kill_oracle_window("0xabc")
+    expression = calls[0][2]
+    assert "hl.dsp.window.kill({ window =" in expression
+    assert "address:0xabc" in expression
+
+
+def test_splinterm_sized_recapture_passes_both_logical_extents(tmp_path, monkeypatch):
+    output = tmp_path / "capture"
+    seen = []
+
+    def fake_run(command, **_kwargs):
+        seen.extend(command)
+        output.with_suffix(".json").write_text('{"width": 52, "height": 42}')
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(MODULE, "run", fake_run)
+    MODULE.capture_splinterm(
+        Path("splinterm-capture"), output, manifest()["profile"], manifest()["cases"][0], (52, 42)
+    )
+    assert seen[seen.index("--logical-width") + 1] == "52"
+    assert seen[seen.index("--logical-height") + 1] == "42"
+
+
 def test_foot_payload_encodes_style_and_cursor():
     case = manifest()["cases"][0]
     case["style"] = "reverse"
