@@ -30,8 +30,8 @@ use splinterm_protocol::{
     MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking,
     PROTOCOL_VERSION, ProtocolError, Request, Response, ScrollDirection as WireScrollDirection,
     ServerFrame, ServerLimits, SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes,
-    TerminalRow, TerminalRowPatch, TerminalScroll, TerminalSnapshot,
-    TerminalUpdate as WireTerminalUpdate, encode_frame,
+    TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
+    TerminalUpdate as WireTerminalUpdate, UnderlineStyle as WireUnderlineStyle, encode_frame,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
@@ -442,7 +442,10 @@ fn first_party_ui_scopes(scopes: &[AccessScope]) -> bool {
     scopes.iter().all(|scope| {
         matches!(
             scope,
-            AccessScope::Observe | AccessScope::Input | AccessScope::Resize
+            AccessScope::Observe
+                | AccessScope::Scrollback
+                | AccessScope::Input
+                | AccessScope::Resize
         )
     })
 }
@@ -1138,6 +1141,10 @@ fn not_found() -> ProtocolError {
     ProtocolError::new(ErrorCode::NotFound, "resource not found")
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "wire conversion keeps one revision's bounded semantic damage atomic"
+)]
 fn wire_update(
     update: &TerminalUpdate,
     snapshot: &LiveSnapshot,
@@ -1149,6 +1156,7 @@ fn wire_update(
     let mut modes = false;
     let mut palette = false;
     let mut dimensions = false;
+    let mut scrollback = false;
     for damage in update.damage() {
         match damage {
             TerminalDamage::FullSnapshot => {
@@ -1158,6 +1166,7 @@ fn wire_update(
                 modes = true;
                 palette = true;
                 dimensions = true;
+                scrollback = true;
             }
             TerminalDamage::Viewport => damaged.fill(true),
             TerminalDamage::Rows { start, end } => {
@@ -1193,7 +1202,7 @@ fn wire_update(
             }
             TerminalDamage::Title => title = true,
             TerminalDamage::Palette { .. } => palette = true,
-            TerminalDamage::Scrollback => {}
+            TerminalDamage::Scrollback => scrollback = true,
         }
     }
     let position = snapshot.cursor.cursor.position();
@@ -1223,6 +1232,25 @@ fn wire_update(
         default_colors: palette.then_some(snapshot.default_colors),
         columns: dimensions.then_some(snapshot.dimensions.columns),
         row_count: dimensions.then_some(snapshot.dimensions.rows),
+        scrollback: scrollback.then(|| {
+            let first = snapshot
+                .scrollback_rows
+                .len()
+                .saturating_sub(MAX_SNAPSHOT_SCROLLBACK_ROWS);
+            let rows: Vec<_> = snapshot.scrollback_rows[first..]
+                .iter()
+                .cloned()
+                .map(wire_row)
+                .collect();
+            TerminalScrollbackUpdate {
+                omitted_oldest_rows: snapshot
+                    .scrollback
+                    .available_rows
+                    .saturating_sub(rows.len()),
+                available_rows: snapshot.scrollback.available_rows,
+                rows,
+            }
+        }),
     })
 }
 
@@ -1290,7 +1318,18 @@ fn wire_row(row: splinterd::LiveRow) -> TerminalRow {
                     bold: cell.attributes.bold,
                     dim: cell.attributes.dim,
                     italic: cell.attributes.italic,
-                    underline: cell.attributes.underline,
+                    underline: match cell.attributes.underline {
+                        splinterm_terminal::UnderlineStyle::None => WireUnderlineStyle::None,
+                        splinterm_terminal::UnderlineStyle::Single => WireUnderlineStyle::Single,
+                        splinterm_terminal::UnderlineStyle::Double => WireUnderlineStyle::Double,
+                        splinterm_terminal::UnderlineStyle::Curly => WireUnderlineStyle::Curly,
+                        splinterm_terminal::UnderlineStyle::Dotted => WireUnderlineStyle::Dotted,
+                        splinterm_terminal::UnderlineStyle::Dashed => WireUnderlineStyle::Dashed,
+                    },
+                    underline_color_source: wire_color_source(
+                        cell.attributes.underline_color.source(),
+                    ),
+                    underline_color: cell.attributes.underline_color.value(),
                     strikethrough: cell.attributes.strikethrough,
                     blink: cell.attributes.blink,
                     conceal: cell.attributes.conceal,
@@ -1537,13 +1576,16 @@ mod tests {
     }
 
     #[test]
-    fn first_party_ui_scope_policy_excludes_sensitive_authority() {
+    fn first_party_ui_scope_policy_allows_terminal_history_but_excludes_external_authority() {
         assert!(first_party_ui_scopes(&[
             AccessScope::Observe,
             AccessScope::Input,
             AccessScope::Resize,
         ]));
-        assert!(!first_party_ui_scopes(&[AccessScope::Scrollback]));
+        assert!(first_party_ui_scopes(&[
+            AccessScope::Observe,
+            AccessScope::Scrollback,
+        ]));
         assert!(!first_party_ui_scopes(&[AccessScope::ClipboardRead]));
         assert!(!first_party_ui_scopes(&[AccessScope::ClipboardWrite]));
         assert!(!first_party_ui_scopes(&[AccessScope::Terminate]));

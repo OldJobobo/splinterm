@@ -22,7 +22,7 @@ mod terminal;
 mod update;
 mod vt;
 
-pub use cell::{Attributes, Cell, CellContent, Color, ColorSource};
+pub use cell::{Attributes, Cell, CellContent, Color, ColorSource, UnderlineStyle};
 pub(crate) use composed::ComposedTable;
 pub use config::TerminalConfig;
 pub use coord::{Coordinate, CoordinateRange, ScrollRegion};

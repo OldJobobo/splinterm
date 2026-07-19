@@ -5,7 +5,7 @@
 
 use crate::{
     ActiveScreen, Attributes, Cell, CellContent, Color, ComposedTable, Coordinate, Cursor, Row,
-    ScrollRegion, TerminalModes, TerminalRevision,
+    ScrollRegion, TerminalModes, TerminalRevision, UnderlineStyle,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -41,7 +41,8 @@ pub struct CellAttributesSnapshot {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: UnderlineStyle,
+    pub underline_color: Color,
     pub strikethrough: bool,
     pub blink: bool,
     pub conceal: bool,
@@ -56,7 +57,8 @@ impl From<Attributes> for CellAttributesSnapshot {
             bold: attributes.bold(),
             dim: attributes.dim(),
             italic: attributes.italic(),
-            underline: attributes.underline(),
+            underline: attributes.underline_style(),
+            underline_color: attributes.underline_color(),
             strikethrough: attributes.strikethrough(),
             blink: attributes.blink(),
             conceal: attributes.conceal(),

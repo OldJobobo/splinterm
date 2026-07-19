@@ -9,6 +9,7 @@
 mod box_drawing;
 pub mod config;
 pub mod renderer;
+pub mod viewport;
 pub mod wayland;
 
 pub use wayland::{

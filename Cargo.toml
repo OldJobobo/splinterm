@@ -6,6 +6,7 @@ members = [
     "crates/splinterm-protocol",
     "crates/splinterm-pty",
     "crates/splinterm-terminal",
+    "crates/splinterm-freetype",
 ]
 resolver = "3"
 
@@ -20,6 +21,7 @@ repository = "https://github.com/oldjobobo/splinterm"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 fontdb = "0.23.0"
+freetype-rs = "0.38.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smithay-client-toolkit = "0.20.0"

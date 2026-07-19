@@ -20,9 +20,11 @@ use crate::{box_drawing, config::CursorStyle};
 use anyhow::{Context, Result, bail};
 
 use splinterm_core::SplintId;
+use splinterm_freetype::RasterFace;
 use splinterm_protocol::{
     ActiveScreen, CellAttributes, ColorSource, MAX_COLUMNS, MAX_ROWS, ScrollDirection,
     TerminalCell, TerminalInputModes, TerminalRow, TerminalScroll, TerminalSnapshot,
+    UnderlineStyle,
 };
 use swash::{
     FontRef,
@@ -42,7 +44,14 @@ const CJK_FONT: &str = "Noto Sans CJK JP:style=Regular";
 const EMOJI_FONT: &str = "Noto Color Emoji";
 const SNAPSHOT_GLYPH_CACHE_BUDGET: usize = 2_048;
 
-static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 3], String>> = OnceLock::new();
+const SNAPSHOT_PRIMARY_REGULAR: usize = 0;
+const SNAPSHOT_PRIMARY_BOLD: usize = 1;
+const SNAPSHOT_PRIMARY_ITALIC: usize = 2;
+const SNAPSHOT_PRIMARY_BOLD_ITALIC: usize = 3;
+const SNAPSHOT_CJK: usize = 4;
+const SNAPSHOT_EMOJI: usize = 5;
+
+static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 6], String>> = OnceLock::new();
 static RENDERER_OPTIONS: OnceLock<RendererOptions> = OnceLock::new();
 
 #[derive(Clone, Debug)]
@@ -80,6 +89,7 @@ fn renderer_options() -> &'static RendererOptions {
 
 struct PersistentGlyphCache {
     context: ScaleContext,
+    raster_faces: HashMap<(u16, usize), RasterFace>,
     glyphs: HashMap<(u16, GlyphKey), Arc<CachedGlyph>>,
     order: VecDeque<(u16, GlyphKey)>,
     hits: u64,
@@ -91,6 +101,7 @@ impl Default for PersistentGlyphCache {
     fn default() -> Self {
         Self {
             context: ScaleContext::new(),
+            raster_faces: HashMap::new(),
             glyphs: HashMap::new(),
             order: VecDeque::new(),
             hits: 0,
@@ -244,7 +255,14 @@ impl TextRow {
             started.elapsed().as_secs_f64() * 1_000.0
         );
 
-        let (cell_width, cell_height, baseline, mono_advance) = cell_metrics(&faces[0], font_size)?;
+        let metrics = cell_metrics(&faces[0], font_size)?;
+        let CellMetrics {
+            width: cell_width,
+            height: cell_height,
+            baseline,
+            mono_advance,
+            ..
+        } = metrics;
         eprintln!(
             "Text row metrics: scale={integer_scale} size={font_size:.1}px cell={cell_width}x{cell_height}px baseline={baseline}px primary-M-advance={mono_advance:.3}px"
         );
@@ -452,12 +470,22 @@ fn cache_glyph(
     Ok(())
 }
 
-fn snapshot_faces() -> Result<&'static [FontFace; 3]> {
+fn snapshot_faces() -> Result<&'static [FontFace; 6]> {
     SNAPSHOT_FACES
         .get_or_init(|| {
             Ok([
                 resolve_face("primary", &renderer_options().font, "")
                     .map_err(|error| error.to_string())?,
+                resolve_face("primary bold", PRIMARY_BOLD_FONT, "jetbrains mono")
+                    .map_err(|error| error.to_string())?,
+                resolve_face("primary italic", PRIMARY_ITALIC_FONT, "jetbrains mono")
+                    .map_err(|error| error.to_string())?,
+                resolve_face(
+                    "primary bold italic",
+                    PRIMARY_BOLD_ITALIC_FONT,
+                    "jetbrains mono",
+                )
+                .map_err(|error| error.to_string())?,
                 resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")
                     .map_err(|error| error.to_string())?,
                 resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")
@@ -469,7 +497,7 @@ fn snapshot_faces() -> Result<&'static [FontFace; 3]> {
 }
 
 fn snapshot_glyph(
-    faces: &[FontFace; 3],
+    faces: &[FontFace],
     scale: u16,
     face_index: usize,
     glyph_id: u16,
@@ -486,29 +514,61 @@ fn snapshot_glyph(
             return Ok(glyph);
         }
         cache.misses = cache.misses.saturating_add(1);
-        let font = font_ref(&faces[face_index])?;
-        let mut scaler = cache
-            .context
-            .builder(font)
-            .size(font_size)
-            .hint(true)
-            .build();
-        let image = Render::new(&[
-            Source::ColorOutline(0),
-            Source::ColorBitmap(StrikeWith::BestFit),
-            Source::Outline,
-        ])
-        .format(Format::Alpha)
-        .render(&mut scaler, glyph_id)
-        .with_context(|| format!("rasterize snapshot glyph {glyph_id}"))?;
-        let glyph = Arc::new(CachedGlyph {
-            content: image.content,
-            left: image.placement.left,
-            top: image.placement.top,
-            width: image.placement.width,
-            height: image.placement.height,
-            data: image.data,
-        });
+        let glyph = if face_index == SNAPSHOT_EMOJI {
+            let font = font_ref(&faces[face_index])?;
+            let mut scaler = cache
+                .context
+                .builder(font)
+                .size(font_size)
+                .hint(true)
+                .build();
+            let image = Render::new(&[
+                Source::ColorOutline(0),
+                Source::ColorBitmap(StrikeWith::BestFit),
+                Source::Outline,
+            ])
+            .format(Format::Alpha)
+            .render(&mut scaler, glyph_id)
+            .with_context(|| format!("rasterize color snapshot glyph {glyph_id}"))?;
+            CachedGlyph {
+                content: image.content,
+                left: image.placement.left,
+                top: image.placement.top,
+                width: image.placement.width,
+                height: image.placement.height,
+                data: image.data,
+            }
+        } else {
+            let raster_key = (scale, face_index);
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                cache.raster_faces.entry(raster_key)
+            {
+                let raster_face = RasterFace::open(
+                    &faces[face_index].path,
+                    u32::try_from(faces[face_index].index).context("face index fits u32")?,
+                    pixel_size_26_6(font_size)?,
+                )
+                .with_context(|| {
+                    format!("open FreeType raster face {}", faces[face_index].label)
+                })?;
+                entry.insert(raster_face);
+            }
+            let raster = cache
+                .raster_faces
+                .get_mut(&raster_key)
+                .context("inserted FreeType raster face remains present")?
+                .rasterize_gray(u32::from(glyph_id))
+                .with_context(|| format!("rasterize snapshot glyph {glyph_id} with FreeType"))?;
+            CachedGlyph {
+                content: Content::Mask,
+                left: raster.left,
+                top: raster.top,
+                width: raster.width,
+                height: raster.height,
+                data: raster.alpha.into_vec(),
+            }
+        };
+        let glyph = Arc::new(glyph);
         while cache.glyphs.len() >= SNAPSHOT_GLYPH_CACHE_BUDGET {
             let Some(oldest) = cache.order.pop_front() else {
                 break;
@@ -523,6 +583,18 @@ fn snapshot_glyph(
     })
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "validated bounded finite pixel size"
+)]
+fn pixel_size_26_6(font_size: f32) -> Result<isize> {
+    let value = (font_size * 64.0).round();
+    if !value.is_finite() || !(64.0..=(768.0 * 64.0)).contains(&value) {
+        bail!("scaled font size is outside the FreeType raster policy");
+    }
+    Ok(value as isize)
+}
+
 /// Returns bounded persistent snapshot-glyph-cache metrics.
 #[must_use]
 pub fn snapshot_cache_metrics() -> serde_json::Value {
@@ -530,6 +602,7 @@ pub fn snapshot_cache_metrics() -> serde_json::Value {
         let cache = cache.borrow();
         serde_json::json!({
             "entries": cache.glyphs.len(),
+            "raster_faces": cache.raster_faces.len(),
             "budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
             "hits": cache.hits,
             "misses": cache.misses,
@@ -539,21 +612,239 @@ pub fn snapshot_cache_metrics() -> serde_json::Value {
     })
 }
 
-fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<(u32, u32, i32, f32)> {
+/// Emits deterministic Swash raster evidence for every printable ASCII glyph.
+///
+/// The records intentionally mirror `tools/foot-oracle/fcft-mask-probe.c` so
+/// the strict Phase 8.1 comparator can classify metric, placement, and mask
+/// differences before production placement is changed.
+///
+/// # Errors
+/// Returns an error when the configured font cannot be resolved or parsed.
+pub fn ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
+    let face = resolve_face("ASCII evidence", &renderer_options().font, "")?;
+    let font_size = renderer_options().font_size;
+    let font = font_ref(&face)?;
+    let metrics = font.metrics(&[]).scale(font_size);
+    let font_ascent = ceil_to_i32(metrics.ascent);
+    let font_descent = ceil_to_i32(metrics.descent);
+    let resolved_metrics = cell_metrics(&face, font_size)?;
+    let font_height = i32::try_from(resolved_metrics.height).context("font height fits i32")?;
+    let glyph_metrics = font.glyph_metrics(&[]).scale(font_size);
+    let mut context = ScaleContext::new();
+    let mut records = Vec::with_capacity(95);
+
+    for codepoint in 0x20_u32..=0x7e {
+        let character = char::from_u32(codepoint).context("printable ASCII is valid Unicode")?;
+        let glyph_id = font.charmap().map(character);
+        let advance = positive_round_to_u32(glyph_metrics.advance_width(glyph_id));
+        let mut scaler = context.builder(font).size(font_size).hint(true).build();
+        let rendered = Render::new(&[
+            Source::ColorOutline(0),
+            Source::ColorBitmap(StrikeWith::BestFit),
+            Source::Outline,
+        ])
+        .format(Format::Alpha)
+        .render(&mut scaler, glyph_id);
+        let glyph = rendered.map_or_else(
+            || CachedGlyph {
+                content: Content::Mask,
+                left: 0,
+                top: 0,
+                width: 0,
+                height: 0,
+                data: Vec::new(),
+            },
+            |image| CachedGlyph {
+                content: image.content,
+                left: image.placement.left,
+                top: image.placement.top,
+                width: image.placement.width,
+                height: image.placement.height,
+                data: image.data,
+            },
+        );
+        let ink = glyph.ink_bounds().unwrap_or(InkBounds {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        });
+        let alpha = glyph_alpha_bytes(&glyph);
+        records.push(serde_json::json!({
+            "schema": 1,
+            "label": format!("ASCII-U+{codepoint:04X}"),
+            "codepoint": codepoint,
+            "cols": 1,
+            "glyph_id": glyph_id,
+            "font": face.family.as_str(),
+            "font_path": face.path.display().to_string(),
+            "font_index": face.index,
+            "font_ascent": font_ascent,
+            "font_descent": font_descent,
+            "font_height": font_height,
+            "decorations": {
+                "underline_position": resolved_metrics.underline_position,
+                "underline_thickness": resolved_metrics.underline_thickness,
+                "strike_position": resolved_metrics.strike_position,
+                "strike_thickness": resolved_metrics.strike_thickness,
+            },
+            "color": matches!(glyph.content, Content::Color),
+            "pixel_format": "swash-alpha",
+            "source_stride": glyph.width,
+            "placement": {"x": glyph.left, "y": glyph.top},
+            "image": {"width": glyph.width, "height": glyph.height},
+            "advance": {"x": advance, "y": 0},
+            "ink": {
+                "left": ink.left,
+                "top": ink.top,
+                "right": ink.right,
+                "bottom": ink.bottom,
+            },
+            "alpha_hex": bytes_to_hex(&alpha),
+        }));
+    }
+    Ok(records)
+}
+
+/// Emits printable-ASCII evidence through the production snapshot glyph cache.
+///
+/// # Errors
+/// Returns an error when configured face resolution, shaping identity, or the
+/// production raster bridge fails.
+pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
+    let faces = snapshot_faces()?;
+    let face = &faces[SNAPSHOT_PRIMARY_REGULAR];
+    let font_size = renderer_options().font_size;
+    let font = font_ref(face)?;
+    let font_metrics = font.metrics(&[]).scale(font_size);
+    let metrics = cell_metrics(face, font_size)?;
+    let glyph_metrics = font.glyph_metrics(&[]).scale(font_size);
+    let mut records = Vec::with_capacity(95);
+    for codepoint in 0x20_u32..=0x7e {
+        let character = char::from_u32(codepoint).context("printable ASCII is valid Unicode")?;
+        let glyph_id = font.charmap().map(character);
+        let glyph = snapshot_glyph(faces, 120, SNAPSHOT_PRIMARY_REGULAR, glyph_id, font_size)?;
+        let ink = glyph.ink_bounds().unwrap_or(InkBounds {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        });
+        let alpha = glyph_alpha_bytes(&glyph);
+        records.push(serde_json::json!({
+            "schema": 1,
+            "label": format!("ASCII-U+{codepoint:04X}"),
+            "codepoint": codepoint,
+            "cols": 1,
+            "glyph_id": glyph_id,
+            "font": face.family.as_str(),
+            "font_path": face.path.display().to_string(),
+            "font_index": face.index,
+            "font_ascent": ceil_to_i32(font_metrics.ascent),
+            "font_descent": ceil_to_i32(font_metrics.descent),
+            "font_height": metrics.height,
+            "decorations": {
+                "underline_position": metrics.underline_position,
+                "underline_thickness": metrics.underline_thickness,
+                "strike_position": metrics.strike_position,
+                "strike_thickness": metrics.strike_thickness,
+            },
+            "color": matches!(glyph.content, Content::Color),
+            "pixel_format": "production-alpha",
+            "source_stride": glyph.width,
+            "placement": {"x": glyph.left, "y": glyph.top},
+            "image": {"width": glyph.width, "height": glyph.height},
+            "advance": {
+                "x": positive_round_to_u32(glyph_metrics.advance_width(glyph_id)),
+                "y": 0,
+            },
+            "ink": {
+                "left": ink.left,
+                "top": ink.top,
+                "right": ink.right,
+                "bottom": ink.bottom,
+            },
+            "alpha_hex": bytes_to_hex(&alpha),
+        }));
+    }
+    Ok(records)
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn glyph_alpha_bytes(glyph: &CachedGlyph) -> Vec<u8> {
+    match glyph.content {
+        Content::Mask => glyph.data.clone(),
+        Content::SubpixelMask => glyph
+            .data
+            .chunks_exact(4)
+            .map(|pixel| pixel[..3].iter().copied().max().unwrap_or(0))
+            .collect(),
+        Content::Color => glyph.data.chunks_exact(4).map(|pixel| pixel[3]).collect(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CellMetrics {
+    width: u32,
+    height: u32,
+    baseline: i32,
+    mono_advance: f32,
+    underline_position: i32,
+    underline_thickness: u32,
+    strike_position: i32,
+    strike_thickness: u32,
+}
+
+impl CellMetrics {
+    fn from_scaled_font_metrics(
+        mono_advance: f32,
+        ascent: f32,
+        descent: f32,
+        leading: f32,
+    ) -> Self {
+        // Foot/fcft exposes integer pixel extents. Round the complete line
+        // extent once; independently ceiling fractional components widened the
+        // accepted 22 px fixture from Foot's 29 px to 30 px.
+        Self {
+            width: positive_round_to_u32(mono_advance),
+            height: positive_round_to_u32(ascent + descent + leading.max(0.0)),
+            baseline: ceil_to_i32(ascent),
+            mono_advance,
+            underline_position: 0,
+            underline_thickness: 1,
+            strike_position: 0,
+            strike_thickness: 1,
+        }
+    }
+}
+
+fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<CellMetrics> {
     let primary = font_ref(primary_face)?;
     let metrics = primary.metrics(&[]).scale(font_size);
     let mono_advance = primary
         .glyph_metrics(&[])
         .scale(font_size)
         .advance_width(primary.charmap().map('M'));
-    // fcft exposes the 26.6 advance as an integer cell width (13 px for the
-    // accepted 22 px JetBrains Mono fixture). Ceil widened 13.2 px to 14 px,
-    // creating a visible extra column between every ASCII character.
-    let cell_width = positive_round_to_u32(mono_advance);
-    let cell_height =
-        positive_ceil_to_u32(metrics.ascent + metrics.descent + metrics.leading.max(0.0));
-    let baseline = ceil_to_i32(metrics.ascent);
-    Ok((cell_width, cell_height, baseline, mono_advance))
+    let mut cell = CellMetrics::from_scaled_font_metrics(
+        mono_advance,
+        metrics.ascent,
+        metrics.descent,
+        metrics.leading,
+    );
+    cell.underline_position = trunc_to_i32(metrics.underline_offset);
+    cell.underline_thickness = positive_round_to_u32(metrics.stroke_size);
+    cell.strike_position = trunc_to_i32(metrics.strikeout_offset);
+    cell.strike_thickness = positive_round_to_u32(metrics.stroke_size);
+    Ok(cell)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -562,16 +853,16 @@ fn positive_round_to_u32(value: f32) -> u32 {
     value.round().max(1.0) as u32
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn positive_ceil_to_u32(value: f32) -> u32 {
-    assert!(value.is_finite() && value > 0.0);
-    value.ceil() as u32
-}
-
 #[allow(clippy::cast_possible_truncation)]
 fn ceil_to_i32(value: f32) -> i32 {
     assert!(value.is_finite());
     value.ceil() as i32
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn trunc_to_i32(value: f32) -> i32 {
+    assert!(value.is_finite());
+    value as i32
 }
 
 fn resolve_face(
@@ -932,9 +1223,21 @@ struct SnapshotGlyph {
     foreground: [u8; 3],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DecorationSpan {
+    column: u32,
+    row: u32,
+    cells: u32,
+    underline: UnderlineStyle,
+    strikethrough: bool,
+    underline_color: [u8; 3],
+    strike_color: [u8; 3],
+}
+
 /// One immutable, scale-dependent rendering of an owned daemon snapshot.
 pub(crate) struct SnapshotFrame {
     glyphs: Vec<SnapshotGlyph>,
+    decorations: Vec<DecorationSpan>,
     cache: HashMap<GlyphKey, Arc<CachedGlyph>>,
     backgrounds: Vec<[u8; 3]>,
     columns: u32,
@@ -942,6 +1245,10 @@ pub(crate) struct SnapshotFrame {
     cell_width: u32,
     cell_height: u32,
     baseline: i32,
+    underline_position: i32,
+    underline_thickness: u32,
+    strike_position: i32,
+    strike_thickness: u32,
     origin_x: i32,
     origin_y: i32,
     cursor: Option<(u32, u32)>,
@@ -1087,7 +1394,10 @@ impl SnapshotFrame {
         let scale_factor = f32::from(scale_120) / 120.0;
         let font_size = renderer_options().font_size * scale_factor;
         let faces = snapshot_faces()?;
-        let (cell_width, cell_height, baseline, _) = cell_metrics(&faces[0], font_size)?;
+        let metrics = cell_metrics(&faces[0], font_size)?;
+        let cell_width = metrics.width;
+        let cell_height = metrics.height;
+        let baseline = metrics.baseline;
         let origin = u32::from(scale_120)
             .checked_mul(12)
             .and_then(|value| value.checked_add(60))
@@ -1114,6 +1424,7 @@ impl SnapshotFrame {
         let cursor_color = packed_rgb(snapshot.default_colors[2]);
         let mut backgrounds = vec![default_background; background_len];
         let mut glyphs = Vec::new();
+        let mut decorations = Vec::new();
         let mut cache = HashMap::new();
         let mut shape_context = ShapeContext::new();
 
@@ -1132,12 +1443,14 @@ impl SnapshotFrame {
                 &mut shape_context,
                 &mut backgrounds,
                 &mut glyphs,
+                &mut decorations,
                 &mut cache,
             )?;
         }
         let cursor = snapshot_cursor(snapshot, columns, rows);
         let mut frame = Self {
             glyphs,
+            decorations,
             cache,
             backgrounds,
             columns,
@@ -1145,6 +1458,10 @@ impl SnapshotFrame {
             cell_width,
             cell_height,
             baseline,
+            underline_position: metrics.underline_position,
+            underline_thickness: metrics.underline_thickness,
+            strike_position: metrics.strike_position,
+            strike_thickness: metrics.strike_thickness,
             origin_x,
             origin_y,
             cursor,
@@ -1179,6 +1496,7 @@ impl SnapshotFrame {
             }
             let row_number = u32::try_from(row_index).context("row fits u32")?;
             self.glyphs.retain(|glyph| glyph.row != row_number);
+            self.decorations.retain(|span| span.row != row_number);
             let start = row_index
                 .checked_mul(snapshot.columns)
                 .context("snapshot row start overflow")?;
@@ -1200,11 +1518,80 @@ impl SnapshotFrame {
                 &mut shape_context,
                 &mut self.backgrounds,
                 &mut self.glyphs,
+                &mut self.decorations,
                 &mut self.cache,
             )?;
         }
         self.prune_unreferenced_glyphs();
         Ok(())
+    }
+
+    /// Shifts prepared viewport rows and rebuilds only rows exposed by local
+    /// history navigation. Returns the equivalent pixel scroll operation.
+    pub(crate) fn scroll_viewport_rows(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        offset_delta: isize,
+    ) -> Result<Option<TerminalScroll>> {
+        if offset_delta == 0 || self.rows == 0 {
+            return Ok(None);
+        }
+        let count = offset_delta.unsigned_abs().min(self.rows as usize);
+        if count == 0 || count >= self.rows as usize {
+            return Ok(None);
+        }
+        let rows = self.rows as usize;
+        let columns = self.columns as usize;
+        let direction = if offset_delta > 0 {
+            self.backgrounds
+                .copy_within(0..(rows - count) * columns, count * columns);
+            self.glyphs.retain_mut(|glyph| {
+                glyph.row = glyph
+                    .row
+                    .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+                glyph.row < self.rows
+            });
+            self.decorations.retain_mut(|span| {
+                span.row = span
+                    .row
+                    .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+                span.row < self.rows
+            });
+            ScrollDirection::Reverse
+        } else {
+            self.backgrounds
+                .copy_within(count * columns..rows * columns, 0);
+            self.glyphs.retain_mut(|glyph| {
+                let keep = glyph.row >= u32::try_from(count).unwrap_or(u32::MAX);
+                if keep {
+                    glyph.row -= u32::try_from(count).unwrap_or(0);
+                }
+                keep
+            });
+            self.decorations.retain_mut(|span| {
+                let keep = span.row >= u32::try_from(count).unwrap_or(u32::MAX);
+                if keep {
+                    span.row -= u32::try_from(count).unwrap_or(0);
+                }
+                keep
+            });
+            ScrollDirection::Forward
+        };
+        let mut dirty = vec![false; rows];
+        let exposed = match direction {
+            ScrollDirection::Reverse => 0..count,
+            ScrollDirection::Forward => rows - count..rows,
+        };
+        for row in exposed {
+            dirty[row] = true;
+        }
+        self.refresh_rows(snapshot, &dirty)?;
+        Ok(Some(TerminalScroll {
+            direction,
+            start_row: 0,
+            end_row: rows,
+            rows: count,
+        }))
     }
 
     fn prune_unreferenced_glyphs(&mut self) {
@@ -1239,7 +1626,7 @@ fn snapshot_cursor(snapshot: &TerminalSnapshot, columns: u32, rows: u32) -> Opti
 fn prepare_snapshot_row(
     snapshot: &TerminalSnapshot,
     row_index: usize,
-    faces: &[FontFace; 3],
+    faces: &[FontFace],
     scale: u16,
     font_size: f32,
     cell_width: u32,
@@ -1250,6 +1637,7 @@ fn prepare_snapshot_row(
     shape_context: &mut ShapeContext,
     backgrounds: &mut [[u8; 3]],
     glyphs: &mut Vec<SnapshotGlyph>,
+    decorations: &mut Vec<DecorationSpan>,
     cache: &mut HashMap<GlyphKey, Arc<CachedGlyph>>,
 ) -> Result<()> {
     let Some(row) = snapshot.visible_rows.get(row_index) else {
@@ -1267,12 +1655,32 @@ fn prepare_snapshot_row(
             .and_then(|index| index.checked_add(column_index))
             .context("snapshot cell index overflow")?;
         backgrounds[background_index] = background;
-        if !cell_is_renderable(cell) {
+        if cell.spacer_remaining.is_some() || cell.attributes.conceal {
             continue;
         }
         let cells = leader_span(&row.cells, column_index);
         let column = u32::try_from(column_index).context("column fits u32")?;
         let row_number = u32::try_from(row_index).context("row fits u32")?;
+        if cell.attributes.underline != UnderlineStyle::None || cell.attributes.strikethrough {
+            let underline_color = wire_color(
+                cell.attributes.underline_color_source,
+                cell.attributes.underline_color,
+                &snapshot.palette,
+                foreground,
+            );
+            decorations.push(DecorationSpan {
+                column,
+                row: row_number,
+                cells,
+                underline: cell.attributes.underline,
+                strikethrough: cell.attributes.strikethrough,
+                underline_color,
+                strike_color: foreground,
+            });
+        }
+        if !cell_is_renderable(cell) {
+            continue;
+        }
         if cell.content.chars().count() == 1 {
             let character = cell.content.chars().next().context("cell has content")?;
             let thickness = u32::from(scale).div_ceil(120).max(1);
@@ -1305,10 +1713,11 @@ fn prepare_snapshot_row(
                 continue;
             }
         }
-        let (face_index, content) = match select_face_for_text(faces, &cell.content) {
-            Ok(face_index) => (face_index, cell.content.as_str()),
-            Err(_) => (0, "\u{fffd}"),
-        };
+        let (face_index, content) =
+            match select_face_for_text(faces, &cell.content, &cell.attributes) {
+                Ok(face_index) => (face_index, cell.content.as_str()),
+                Err(_) => (primary_face_index(&cell.attributes), "\u{fffd}"),
+            };
         let font = font_ref(&faces[face_index])?;
         let mut shaped_glyphs = Vec::new();
         let mut shaper = shape_context.builder(font).size(font_size).build();
@@ -1362,8 +1771,13 @@ fn leader_span(cells: &[splinterm_protocol::TerminalCell], leader: usize) -> u32
     span
 }
 
-fn select_face_for_text(faces: &[FontFace; 3], text: &str) -> Result<usize> {
-    [0_usize, 1, 2]
+fn select_face_for_text(
+    faces: &[FontFace],
+    text: &str,
+    attributes: &CellAttributes,
+) -> Result<usize> {
+    let primary = primary_face_index(attributes);
+    [primary, SNAPSHOT_CJK, SNAPSHOT_EMOJI]
         .into_iter()
         .find(|index| {
             font_ref(&faces[*index]).is_ok_and(|font| {
@@ -1372,6 +1786,15 @@ fn select_face_for_text(faces: &[FontFace; 3], text: &str) -> Result<usize> {
             })
         })
         .with_context(|| format!("no explicit font covers snapshot cell {text:?}"))
+}
+
+fn primary_face_index(attributes: &CellAttributes) -> usize {
+    match (attributes.bold, attributes.italic) {
+        (false, false) => SNAPSHOT_PRIMARY_REGULAR,
+        (true, false) => SNAPSHOT_PRIMARY_BOLD,
+        (false, true) => SNAPSHOT_PRIMARY_ITALIC,
+        (true, true) => SNAPSHOT_PRIMARY_BOLD_ITALIC,
+    }
 }
 
 fn packed_rgb(value: u32) -> [u8; 3] {
@@ -1561,6 +1984,164 @@ pub(crate) fn paint_snapshot_overlays(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "underline raster geometry and destination buffer are explicit"
+)]
+fn paint_underline_style(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    span_width: u32,
+    thickness: u32,
+    style: UnderlineStyle,
+    color: [u8; 4],
+) {
+    match style {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Single => {
+            fill_rect(canvas, width, height, (x, y, span_width, thickness), color);
+        }
+        UnderlineStyle::Double => {
+            let gap = thickness.max(1);
+            fill_rect(canvas, width, height, (x, y, span_width, thickness), color);
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    x,
+                    y + i32::try_from(thickness.saturating_add(gap)).unwrap_or(0),
+                    span_width,
+                    thickness,
+                ),
+                color,
+            );
+        }
+        UnderlineStyle::Curly => {
+            let amplitude = thickness.max(1);
+            for offset in 0..span_width {
+                let phase = offset % 4;
+                let wave = if phase == 1 || phase == 2 {
+                    amplitude
+                } else {
+                    0
+                };
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (
+                        x + i32::try_from(offset).unwrap_or(0),
+                        y + i32::try_from(wave).unwrap_or(0),
+                        1,
+                        thickness,
+                    ),
+                    color,
+                );
+            }
+        }
+        UnderlineStyle::Dotted => {
+            let step = thickness.saturating_mul(2).max(2);
+            for offset in (0..span_width).step_by(usize::try_from(step).unwrap_or(2)) {
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (
+                        x + i32::try_from(offset).unwrap_or(0),
+                        y,
+                        thickness,
+                        thickness,
+                    ),
+                    color,
+                );
+            }
+        }
+        UnderlineStyle::Dashed => {
+            let dash = thickness.saturating_mul(3).max(3);
+            let step = dash.saturating_add(thickness.saturating_mul(2).max(2));
+            for offset in (0..span_width).step_by(usize::try_from(step).unwrap_or(5)) {
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (
+                        x + i32::try_from(offset).unwrap_or(0),
+                        y,
+                        dash.min(span_width.saturating_sub(offset)),
+                        thickness,
+                    ),
+                    color,
+                );
+            }
+        }
+    }
+}
+
+fn paint_decorations(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    dirty_rows: Option<&[bool]>,
+) {
+    for span in &frame.decorations {
+        if dirty_rows.is_some_and(|rows| {
+            !rows
+                .get(usize::try_from(span.row).expect("row fits usize"))
+                .copied()
+                .unwrap_or(false)
+        }) {
+            continue;
+        }
+        let x = frame.origin_x
+            + i32::try_from(span.column.saturating_mul(frame.cell_width)).expect("decoration x");
+        let row_top = frame.origin_y
+            + i32::try_from(span.row.saturating_mul(frame.cell_height)).expect("decoration y");
+        let span_width = frame.cell_width.saturating_mul(span.cells);
+        let underline_color = [
+            span.underline_color[0],
+            span.underline_color[1],
+            span.underline_color[2],
+            0xff,
+        ];
+        paint_underline_style(
+            canvas,
+            width,
+            height,
+            x,
+            row_top + frame.baseline - frame.underline_position,
+            span_width,
+            frame.underline_thickness,
+            span.underline,
+            underline_color,
+        );
+        if span.strikethrough {
+            let strike_color = [
+                span.strike_color[0],
+                span.strike_color[1],
+                span.strike_color[2],
+                0xff,
+            ];
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    x,
+                    row_top + frame.baseline - frame.strike_position,
+                    span_width,
+                    frame.strike_thickness,
+                ),
+                strike_color,
+            );
+        }
+    }
+}
+
 pub(crate) fn paint_snapshot(
     canvas: &mut [u8],
     width: u32,
@@ -1616,6 +2197,7 @@ pub(crate) fn paint_snapshot(
             placed.foreground,
         );
     }
+    paint_decorations(canvas, width, height, frame, None);
     if cursor_visible {
         let Some((column, row)) = frame.cursor else {
             return;
@@ -1704,6 +2286,7 @@ pub(crate) fn paint_snapshot_rows(
             placed.foreground,
         );
     }
+    paint_decorations(canvas, width, height, frame, Some(dirty_rows));
     if cursor_visible {
         if let Some((column, row)) = frame.cursor.filter(|(_, row)| {
             dirty_rows
@@ -1946,7 +2529,9 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
                 bold: false,
                 dim: false,
                 italic: false,
-                underline: false,
+                underline: UnderlineStyle::None,
+                underline_color_source: ColorSource::Default,
+                underline_color: 0,
                 strikethrough: false,
                 blink: false,
                 conceal: false,
@@ -2232,6 +2817,63 @@ mod tests {
     }
 
     #[test]
+    fn primary_face_selection_tracks_bold_and_italic_attributes() {
+        let mut attributes = default_attributes();
+        assert_eq!(primary_face_index(&attributes), SNAPSHOT_PRIMARY_REGULAR);
+        attributes.bold = true;
+        assert_eq!(primary_face_index(&attributes), SNAPSHOT_PRIMARY_BOLD);
+        attributes.italic = true;
+        assert_eq!(
+            primary_face_index(&attributes),
+            SNAPSHOT_PRIMARY_BOLD_ITALIC
+        );
+        attributes.bold = false;
+        assert_eq!(primary_face_index(&attributes), SNAPSHOT_PRIMARY_ITALIC);
+    }
+
+    #[test]
+    fn cell_metrics_round_the_complete_foot_line_extent_once() {
+        let metrics = CellMetrics::from_scaled_font_metrics(13.2, 22.7, 6.2, 0.0);
+        assert_eq!(metrics.width, 13);
+        assert_eq!(metrics.height, 29);
+        assert_eq!(metrics.baseline, 23);
+        assert!((metrics.mono_advance - 13.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn glyph_alpha_bytes_normalize_supported_swash_content() {
+        let mask = CachedGlyph {
+            content: Content::Mask,
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 1,
+            data: vec![10, 20],
+        };
+        assert_eq!(glyph_alpha_bytes(&mask), vec![10, 20]);
+
+        let subpixel = CachedGlyph {
+            content: Content::SubpixelMask,
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 1,
+            data: vec![10, 30, 20, 0, 40, 20, 30, 0],
+        };
+        assert_eq!(glyph_alpha_bytes(&subpixel), vec![30, 40]);
+
+        let color = CachedGlyph {
+            content: Content::Color,
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 1,
+            data: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        assert_eq!(glyph_alpha_bytes(&color), vec![4, 8]);
+    }
+
+    #[test]
     fn ink_bounds_cover_mask_and_color_images() {
         let mask = CachedGlyph {
             content: Content::Mask,
@@ -2275,7 +2917,9 @@ mod tests {
             bold: false,
             dim: false,
             italic: false,
-            underline: false,
+            underline: UnderlineStyle::None,
+            underline_color_source: ColorSource::Default,
+            underline_color: 0,
             strikethrough: false,
             blink: false,
             conceal: false,
@@ -2350,6 +2994,203 @@ mod tests {
                 .expect("visible cursor rectangle");
             assert!(width > 0 && height > 0);
         }
+    }
+
+    #[test]
+    fn underline_styles_render_distinct_bounded_patterns() {
+        let styles = [
+            UnderlineStyle::Single,
+            UnderlineStyle::Double,
+            UnderlineStyle::Curly,
+            UnderlineStyle::Dotted,
+            UnderlineStyle::Dashed,
+        ];
+        let mut outputs = Vec::new();
+        for style in styles {
+            let mut canvas = vec![0; 16 * 6 * 4];
+            paint_underline_style(&mut canvas, 16, 6, 0, 1, 16, 1, style, [255, 255, 255, 255]);
+            assert!(canvas.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            outputs.push(canvas);
+        }
+        for left in 0..outputs.len() {
+            for right in left + 1..outputs.len() {
+                assert_ne!(outputs[left], outputs[right]);
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_decorations_use_foot_baseline_metrics_in_full_and_row_paints() {
+        let mut snapshot = incremental_snapshot();
+        snapshot.visible_rows[0].cells[0].attributes.underline = UnderlineStyle::Single;
+        snapshot.visible_rows[0].cells[0]
+            .attributes
+            .underline_color_source = ColorSource::Rgb;
+        snapshot.visible_rows[0].cells[0].attributes.underline_color = 0x0012_3456;
+        snapshot.visible_rows[0].cells[1].attributes.strikethrough = true;
+        let frame = SnapshotFrame::load_scaled(&snapshot, 120).expect("decorated frame");
+        assert_eq!(frame.decorations.len(), 2);
+        assert_eq!(frame.underline_position, -3);
+        assert_eq!(frame.underline_thickness, 1);
+        assert_eq!(frame.strike_position, 7);
+        assert_eq!(frame.strike_thickness, 1);
+
+        let width =
+            u32::try_from(frame.origin_x.max(0)).unwrap() * 2 + frame.columns * frame.cell_width;
+        let height =
+            u32::try_from(frame.origin_y.max(0)).unwrap() * 2 + frame.rows * frame.cell_height;
+        let mut full = vec![0; usize::try_from(width * height * 4).unwrap()];
+        paint_snapshot(&mut full, width, height, &frame, false, CursorStyle::Block);
+        let underline_y = usize::try_from(frame.origin_y + frame.baseline + 3).unwrap();
+        let strike_y = usize::try_from(frame.origin_y + frame.baseline - 7).unwrap();
+        let underline_x = usize::try_from(frame.origin_x).unwrap();
+        let strike_x =
+            usize::try_from(frame.origin_x).unwrap() + usize::try_from(frame.cell_width).unwrap();
+        let pixel = |x: usize, y: usize| &full[(y * width as usize + x) * 4..][..4];
+        assert_eq!(pixel(underline_x, underline_y), &[0x56, 0x34, 0x12, 0xff]);
+        assert_eq!(pixel(strike_x, strike_y), &[0xeb, 0xeb, 0xeb, 0xff]);
+
+        let mut rows = vec![0; full.len()];
+        for pixel in rows.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0x16, 0x12, 0x0e, 0xff]);
+        }
+        paint_snapshot_rows(
+            &mut rows,
+            width,
+            height,
+            &frame,
+            &[true, true],
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(full, rows);
+    }
+
+    #[test]
+    fn snapshot_styles_select_distinct_primary_faces_and_cache_keys() {
+        let mut snapshot = incremental_snapshot();
+        snapshot.visible_rows[0].cells[0].content = "A".to_owned();
+        snapshot.visible_rows[0].cells[1].content = "A".to_owned();
+        snapshot.visible_rows[0].cells[1].attributes.bold = true;
+        snapshot.visible_rows[1].cells[0].content = "A".to_owned();
+        snapshot.visible_rows[1].cells[0].attributes.italic = true;
+        snapshot.visible_rows[1].cells[1].content = "A".to_owned();
+        snapshot.visible_rows[1].cells[1].attributes.bold = true;
+        snapshot.visible_rows[1].cells[1].attributes.italic = true;
+
+        let frame = SnapshotFrame::load_scaled(&snapshot, 120).expect("styled frame");
+        let faces: HashSet<_> = frame.glyphs.iter().map(|glyph| glyph.key.face).collect();
+        assert_eq!(
+            faces,
+            HashSet::from([
+                SNAPSHOT_PRIMARY_REGULAR,
+                SNAPSHOT_PRIMARY_BOLD,
+                SNAPSHOT_PRIMARY_ITALIC,
+                SNAPSHOT_PRIMARY_BOLD_ITALIC,
+            ])
+        );
+        assert_eq!(frame.cache.len(), 4, "each style owns a distinct cache key");
+    }
+
+    #[test]
+    fn production_ascii_evidence_is_identical_with_cold_and_warm_cache() {
+        let cold = production_ascii_glyph_evidence().expect("cold production evidence");
+        let warm = production_ascii_glyph_evidence().expect("warm production evidence");
+        assert_eq!(cold, warm);
+    }
+
+    #[test]
+    fn full_and_all_row_damage_paints_are_byte_identical() {
+        let snapshot = incremental_snapshot();
+        let frame = SnapshotFrame::load_scaled(&snapshot, 120).expect("frame");
+        let width =
+            u32::try_from(frame.origin_x.max(0)).unwrap() * 2 + frame.columns * frame.cell_width;
+        let height =
+            u32::try_from(frame.origin_y.max(0)).unwrap() * 2 + frame.rows * frame.cell_height;
+        let bytes = usize::try_from(width * height * 4).unwrap();
+        let mut full = vec![0; bytes];
+        paint_snapshot(&mut full, width, height, &frame, true, CursorStyle::Block);
+
+        let background = [
+            frame.canvas_background[2],
+            frame.canvas_background[1],
+            frame.canvas_background[0],
+            0xff,
+        ];
+        let mut incremental = vec![0; bytes];
+        for pixel in incremental.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&background);
+        }
+        paint_snapshot_rows(
+            &mut incremental,
+            width,
+            height,
+            &frame,
+            &vec![true; frame.rows as usize],
+            true,
+            CursorStyle::Block,
+        );
+        assert_eq!(full, incremental);
+    }
+
+    #[test]
+    fn local_viewport_scroll_copy_matches_clean_full_repaint() {
+        let mut initial = incremental_snapshot();
+        initial.input_modes.cursor_visible = false;
+        let mut shifted = initial.clone();
+        shifted.visible_rows = ["xy", "ab"]
+            .into_iter()
+            .map(|text| TerminalRow {
+                linebreak: false,
+                cells: text
+                    .chars()
+                    .map(|character| TerminalCell {
+                        content: character.to_string(),
+                        spacer_remaining: None,
+                        attributes: default_attributes(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let mut incremental = SnapshotFrame::load_scaled(&initial, 120).expect("initial frame");
+        let reference = SnapshotFrame::load_scaled(&shifted, 120).expect("shifted frame");
+        let width = u32::try_from(incremental.origin_x.max(0)).unwrap() * 2
+            + incremental.columns * incremental.cell_width;
+        let height = u32::try_from(incremental.origin_y.max(0)).unwrap() * 2
+            + incremental.rows * incremental.cell_height;
+        let mut actual = vec![0; usize::try_from(width * height * 4).unwrap()];
+        paint_snapshot(
+            &mut actual,
+            width,
+            height,
+            &incremental,
+            false,
+            CursorStyle::Block,
+        );
+        let scroll = incremental
+            .scroll_viewport_rows(&shifted, 1)
+            .expect("viewport shift")
+            .expect("incremental scroll");
+        scroll_snapshot_pixels(&mut actual, width, &incremental, scroll);
+        paint_snapshot_rows(
+            &mut actual,
+            width,
+            height,
+            &incremental,
+            &[true, false],
+            false,
+            CursorStyle::Block,
+        );
+        let mut expected = vec![0; actual.len()];
+        paint_snapshot(
+            &mut expected,
+            width,
+            height,
+            &reference,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -2577,6 +3418,7 @@ mod tests {
                     foreground: [200, 100, 50],
                 },
             ],
+            decorations: Vec::new(),
             cache: HashMap::from([(
                 key,
                 Arc::new(CachedGlyph {
@@ -2594,6 +3436,10 @@ mod tests {
             cell_width: 4,
             cell_height: 4,
             baseline: 2,
+            underline_position: -1,
+            underline_thickness: 1,
+            strike_position: 1,
+            strike_thickness: 1,
             origin_x: 2,
             origin_y: 2,
             cursor: Some((1, 0)),
@@ -2613,6 +3459,7 @@ mod tests {
     fn damage_test_frame() -> SnapshotFrame {
         SnapshotFrame {
             glyphs: Vec::new(),
+            decorations: Vec::new(),
             cache: HashMap::new(),
             backgrounds: vec![[1, 0, 0], [2, 0, 0], [3, 0, 0]],
             columns: 1,
@@ -2620,6 +3467,10 @@ mod tests {
             cell_width: 2,
             cell_height: 2,
             baseline: 1,
+            underline_position: 0,
+            underline_thickness: 1,
+            strike_position: 0,
+            strike_thickness: 1,
             origin_x: 0,
             origin_y: 0,
             cursor: None,
@@ -2694,6 +3545,7 @@ mod tests {
     fn terminal_size_calculation_clamps_minimum_and_protocol_limits() {
         let frame = SnapshotFrame {
             glyphs: Vec::new(),
+            decorations: Vec::new(),
             cache: HashMap::new(),
             backgrounds: Vec::new(),
             columns: 0,
@@ -2701,6 +3553,10 @@ mod tests {
             cell_width: 10,
             cell_height: 20,
             baseline: 15,
+            underline_position: -2,
+            underline_thickness: 1,
+            strike_position: 5,
+            strike_thickness: 1,
             origin_x: 10,
             origin_y: 10,
             cursor: None,

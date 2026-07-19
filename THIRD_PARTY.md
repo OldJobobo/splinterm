@@ -54,6 +54,25 @@ coverage. Shaping and raster suitability remain under evaluation.
 - Version: 0.2.10
 - License: Apache-2.0 OR MIT
 
+## FreeType and freetype-rs
+
+Phase 8.1 uses the system FreeType library through the safe `freetype-rs`
+wrapper in the dedicated `splinterm-freetype` crate. The bridge reproduces the
+pinned Foot/fcft light-hinted normal-grayscale raster path and returns only
+bounded owned glyph data.
+
+- FreeType source: <https://freetype.org/>
+- Reference-host FreeType version: 2.14.1 (`pkg-config` 26.6.20)
+- FreeType license: FreeType License (FTL) OR GPL-2.0-only
+- freetype-rs source: <https://github.com/PistonDevelopers/freetype-rs>
+- freetype-rs version: 0.38.0
+- freetype-rs license: MIT
+- freetype-sys version: 0.23.0
+- Linkage: dynamic system FreeType discovered through `pkg-config`
+
+No first-party unsafe block is used. Exact raster fixtures remain sensitive to
+the FreeType build, font file, face index, fontconfig policy, and pixel size.
+
 ## smithay-client-toolkit
 
 Splinterm's Roadmap Phase 2 native Wayland mechanism spike uses

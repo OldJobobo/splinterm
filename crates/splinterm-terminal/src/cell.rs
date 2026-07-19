@@ -15,7 +15,7 @@ const SPACER_BASE: u32 = COMPOSED_END + 1;
 const BOLD: u32 = 1 << 0;
 const DIM: u32 = 1 << 1;
 const ITALIC: u32 = 1 << 2;
-const UNDERLINE: u32 = 1 << 3;
+const _RESERVED_UNDERLINE: u32 = 1 << 3;
 const STRIKETHROUGH: u32 = 1 << 4;
 const BLINK: u32 = 1 << 5;
 const CONCEAL: u32 = 1 << 6;
@@ -96,6 +96,19 @@ impl Color {
     }
 }
 
+/// Terminal underline rendition carried independently from glyph styling.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum UnderlineStyle {
+    #[default]
+    None = 0,
+    Single = 1,
+    Double = 2,
+    Curly = 3,
+    Dotted = 4,
+    Dashed = 5,
+}
+
 /// Compact cell rendition and renderer-state attributes.
 ///
 /// Foot stores eight style flags and the foreground in one 32-bit word, then
@@ -106,6 +119,8 @@ impl Color {
 pub struct Attributes {
     style_and_foreground: u32,
     state_and_background: u32,
+    underline_style: UnderlineStyle,
+    underline_color: Color,
 }
 
 macro_rules! boolean_attribute {
@@ -133,7 +148,38 @@ impl Attributes {
     boolean_attribute!(bold, set_bold, style_and_foreground, BOLD);
     boolean_attribute!(dim, set_dim, style_and_foreground, DIM);
     boolean_attribute!(italic, set_italic, style_and_foreground, ITALIC);
-    boolean_attribute!(underline, set_underline, style_and_foreground, UNDERLINE);
+
+    #[must_use]
+    pub const fn underline(self) -> bool {
+        !matches!(self.underline_style, UnderlineStyle::None)
+    }
+
+    #[must_use]
+    pub const fn underline_style(self) -> UnderlineStyle {
+        self.underline_style
+    }
+
+    pub fn set_underline(&mut self, enabled: bool) {
+        self.underline_style = if enabled {
+            UnderlineStyle::Single
+        } else {
+            UnderlineStyle::None
+        };
+    }
+
+    pub fn set_underline_style(&mut self, style: UnderlineStyle) {
+        self.underline_style = style;
+    }
+
+    #[must_use]
+    pub const fn underline_color(self) -> Color {
+        self.underline_color
+    }
+
+    pub fn set_underline_color(&mut self, color: Color) {
+        self.underline_color = color;
+    }
+
     boolean_attribute!(
         strikethrough,
         set_strikethrough,
@@ -400,9 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn compact_types_match_the_phase_one_baseline() {
+    fn compact_types_match_the_phase_ten_underline_baseline() {
         assert_eq!(size_of::<ColorSource>(), 1);
-        assert_eq!(size_of::<Attributes>(), 8);
-        assert_eq!(size_of::<Cell>(), 12);
+        assert_eq!(size_of::<Attributes>(), 20);
+        assert_eq!(size_of::<Cell>(), 24);
     }
 }

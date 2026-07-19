@@ -1,0 +1,117 @@
+#!/bin/sh
+set -eu
+
+repo=${SPLINTERM_REPO:-"$HOME/Projects/splinterm"}
+runtime=${SPLINTERM_TEST_RUNTIME:-"${XDG_RUNTIME_DIR:-/tmp}/splinterm-test"}
+socket="$runtime/splinterd.sock"
+pid_file="$runtime/splinterd.pid"
+log_file="$runtime/daemon.log"
+working_directory=$PWD
+action=${1:-launch}
+
+mkdir -p "$runtime"
+chmod 700 "$runtime"
+
+stop_daemon() {
+  # Kill every daemon using this isolated socket, not only the newest PID file.
+  # Interrupted test launches used to overwrite the PID file and leave older
+  # daemons alive after their socket pathname was removed.
+  for process in /proc/[0-9]*; do
+    [ -r "$process/environ" ] || continue
+    if cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
+      | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
+      pid=${process##*/}
+      command=$(tr '\0' ' ' <"$process/cmdline" 2>/dev/null || true)
+      case "$command" in
+        *target/debug/splinterd*) kill "$pid" 2>/dev/null || true ;;
+      esac
+    fi
+  done
+
+  if [ -f "$pid_file" ]; then
+    pid=$(cat "$pid_file")
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *) kill "$pid" 2>/dev/null || true ;;
+    esac
+  fi
+
+  attempt=0
+  while :; do
+    alive=false
+    for process in /proc/[0-9]*; do
+      [ -r "$process/environ" ] || continue
+      if cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
+        | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
+        alive=true
+        break
+      fi
+    done
+    [ "$alive" = false ] && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge 100 ] && break
+    sleep 0.05
+  done
+  rm -f "$pid_file" "$socket"
+}
+
+case "$action" in
+  stop)
+    stop_daemon
+    exit 0
+    ;;
+  restart)
+    stop_daemon
+    action=launch
+    ;;
+  launch|ping)
+    ;;
+  *)
+    printf 'usage: splinterm-test [launch|restart|ping|stop]\n' >&2
+    exit 2
+    ;;
+esac
+
+cd "$repo"
+
+if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists freetype2; then
+  printf 'splinterm-test: FreeType development files are required (pkg-config freetype2)\n' >&2
+  exit 1
+fi
+
+cargo build -q -p splinterd -p splinterm
+
+# A failed ping usually means a stale daemon from an older protocol build.
+if ! SPLINTERM_SOCKET="$socket" target/debug/splinterm ping >/dev/null 2>&1; then
+  stop_daemon
+  : >"$log_file"
+  SPLINTERM_SOCKET="$socket" \
+  SPLINTERM_ENABLE_DEV_ATTACH=1 \
+    target/debug/splinterd >>"$log_file" 2>&1 &
+  daemon_pid=$!
+  printf '%s\n' "$daemon_pid" >"$pid_file"
+
+  attempt=0
+  while ! SPLINTERM_SOCKET="$socket" target/debug/splinterm ping >/dev/null 2>&1; do
+    if ! kill -0 "$daemon_pid" 2>/dev/null; then
+      printf 'splinterm-test: daemon exited; see %s\n' "$log_file" >&2
+      exit 1
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 100 ]; then
+      printf 'splinterm-test: daemon did not start; see %s\n' "$log_file" >&2
+      stop_daemon
+      exit 1
+    fi
+    sleep 0.05
+  done
+fi
+
+if [ "$action" = ping ]; then
+  SPLINTERM_SOCKET="$socket" target/debug/splinterm ping
+  exit 0
+fi
+
+SPLINTERM_SOCKET="$socket" \
+SPLINTERM_ENABLE_DEV_ATTACH=1 \
+  target/debug/splinterm launch --working-directory "$working_directory"

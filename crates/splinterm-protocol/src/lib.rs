@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use splinterm_core::{Dojo, SplintId};
 
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 10;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -314,6 +314,14 @@ pub struct TerminalUpdate {
     pub default_colors: Option<[u32; 3]>,
     pub columns: Option<usize>,
     pub row_count: Option<usize>,
+    pub scrollback: Option<TerminalScrollbackUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalScrollbackUpdate {
+    pub rows: Vec<TerminalRow>,
+    pub available_rows: usize,
+    pub omitted_oldest_rows: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -330,6 +338,10 @@ impl TerminalUpdate {
     ///
     /// Returns `InvalidArgument` when the update cannot be applied without an
     /// allocation or index exceeding negotiated protocol limits.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "wire update validation keeps every bounded field check in one transaction"
+    )]
     pub fn validate_against(
         &self,
         current_revision: u64,
@@ -369,6 +381,40 @@ impl TerminalUpdate {
                 ErrorCode::ResourceLimit,
                 "terminal update contains too many scroll operations",
             ));
+        }
+        if let Some(scrollback) = &self.scrollback {
+            if scrollback.rows.len() > MAX_SNAPSHOT_SCROLLBACK_ROWS {
+                return Err(ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "terminal update has too many scrollback rows",
+                ));
+            }
+            if scrollback
+                .rows
+                .iter()
+                .any(|row| row.cells.len() > usize::from(MAX_COLUMNS))
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "terminal update scrollback row exceeds column limit",
+                ));
+            }
+            if scrollback.rows.len() > scrollback.available_rows {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal update returns more scrollback rows than available",
+                ));
+            }
+            if scrollback.omitted_oldest_rows
+                != scrollback
+                    .available_rows
+                    .saturating_sub(scrollback.rows.len())
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal update scrollback omitted count is inconsistent",
+                ));
+            }
         }
         let mut seen = vec![false; rows];
         for patch in &self.rows {
@@ -497,6 +543,42 @@ pub struct TerminalCell {
     pub attributes: CellAttributes,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip predicate receives a reference"
+)]
+fn underline_is_none(style: &UnderlineStyle) -> bool {
+    *style == UnderlineStyle::None
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip predicate receives a reference"
+)]
+fn color_source_is_default(source: &ColorSource) -> bool {
+    *source == ColorSource::Default
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip predicate receives a reference"
+)]
+fn color_value_is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "wire rendition flags are independent terminal semantics"
@@ -506,7 +588,12 @@ pub struct CellAttributes {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
-    pub underline: bool,
+    #[serde(default, skip_serializing_if = "underline_is_none")]
+    pub underline: UnderlineStyle,
+    #[serde(default, skip_serializing_if = "color_source_is_default")]
+    pub underline_color_source: ColorSource,
+    #[serde(default, skip_serializing_if = "color_value_is_zero")]
+    pub underline_color: u32,
     pub strikethrough: bool,
     pub blink: bool,
     pub conceal: bool,
@@ -517,9 +604,10 @@ pub struct CellAttributes {
     pub background: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ColorSource {
+    #[default]
     Default,
     Base16,
     Base256,
@@ -600,6 +688,7 @@ mod tests {
             default_colors: None,
             columns: None,
             row_count: None,
+            scrollback: None,
         }
     }
 
@@ -630,6 +719,17 @@ mod tests {
 
         let mut invalid = update();
         invalid.palette = Some(vec![0; 255]);
+        assert!(invalid.validate_against(4, 80, 24).is_err());
+
+        let mut invalid = update();
+        invalid.scrollback = Some(TerminalScrollbackUpdate {
+            rows: vec![TerminalRow {
+                linebreak: false,
+                cells: Vec::new(),
+            }],
+            available_rows: 0,
+            omitted_oldest_rows: 0,
+        });
         assert!(invalid.validate_against(4, 80, 24).is_err());
     }
 }

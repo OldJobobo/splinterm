@@ -50,6 +50,21 @@ defines the native Wayland client milestone. Persistence remains later work.
 
 ## Try the scaffold
 
+For the current isolated development build, run:
+
+```bash
+./splinterm-test          # build, start/reuse the test daemon, and open Splinterm
+./splinterm-test restart  # restart after protocol/daemon changes
+./splinterm-test ping     # build and verify the isolated daemon
+./splinterm-test stop     # stop the isolated daemon
+```
+
+The helper uses an owner-only socket under `$XDG_RUNTIME_DIR/splinterm-test`,
+keeps daemon logs there, and enables the explicitly labeled development attach
+bypass. It requires `pkg-config` and the FreeType development files.
+
+Manual commands remain available:
+
 ```bash
 cargo build
 

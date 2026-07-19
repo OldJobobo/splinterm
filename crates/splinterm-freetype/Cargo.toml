@@ -1,0 +1,15 @@
+[package]
+name = "splinterm-freetype"
+description = "Bounded FreeType grayscale raster bridge for Splinterm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freetype-rs.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

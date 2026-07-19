@@ -75,7 +75,7 @@ use wayland_client::{
 
 use splinterm_protocol::{
     CellAttributes, ColorSource, MouseTracking, TerminalCell, TerminalInputModes, TerminalRow,
-    TerminalSnapshot, TerminalUpdate,
+    TerminalSnapshot, TerminalUpdate, UnderlineStyle,
 };
 
 use smithay_client_toolkit::reexports::protocols::wp::{
@@ -99,6 +99,7 @@ use crate::renderer::{
     SnapshotFrame, SnapshotOverlays, TextRow, paint, paint_snapshot, paint_snapshot_overlays,
     paint_snapshot_rows, scroll_snapshot_pixels, snapshot_row_rect, write_ppm,
 };
+use crate::viewport::ScrollbackViewport;
 
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 600;
@@ -107,6 +108,10 @@ const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 const MAX_CLIPBOARD_WORKERS: usize = 4;
 const CLIPBOARD_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_WHEEL_STEPS_PER_FRAME: usize = 8;
+// Foot's default `[scrollback].multiplier` is 3. Keep terminal mouse reports
+// at one report per wheel step, but translate local history navigation at the
+// same three-lines-per-step rate.
+const SCROLLBACK_WHEEL_MULTIPLIER: f64 = 3.0;
 const MAX_BUFFERED_WHEEL_STEPS: f64 = 64.0;
 const WHEEL_VALUE120_STEP: f64 = 120.0;
 const WHEEL_PIXEL_STEP: f64 = 10.0;
@@ -455,6 +460,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         text_row,
         snapshot: options.snapshot,
         snapshot_frame,
+        scrollback_viewport: ScrollbackViewport::default(),
+        rendered_viewport_offset: 0,
+        viewport_dirty: false,
         updates: options.updates,
         commands: options.commands,
         controller_active,
@@ -497,6 +505,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         last_pointer_serial: None,
         pressed_buttons: HashMap::new(),
         vertical_wheel: WheelAccumulator::default(),
+        scrollback_wheel: WheelAccumulator::default(),
         loop_handle: event_loop.handle(),
         logical_width: initial_width,
         logical_height: initial_height,
@@ -647,6 +656,9 @@ struct App {
     text_row: Option<TextRow>,
     snapshot: Option<TerminalSnapshot>,
     snapshot_frame: Option<SnapshotFrame>,
+    scrollback_viewport: ScrollbackViewport,
+    rendered_viewport_offset: usize,
+    viewport_dirty: bool,
     updates: Option<Receiver<WindowUpdate>>,
     commands: Option<Sender<WindowCommand>>,
     controller_active: bool,
@@ -689,6 +701,7 @@ struct App {
     last_pointer_serial: Option<u32>,
     pressed_buttons: HashMap<u32, PressOwner>,
     vertical_wheel: WheelAccumulator,
+    scrollback_wheel: WheelAccumulator,
     loop_handle: LoopHandle<'static, App>,
     logical_width: u32,
     logical_height: u32,
@@ -747,7 +760,9 @@ fn blank_row(columns: usize) -> TerminalRow {
                     bold: false,
                     dim: false,
                     italic: false,
-                    underline: false,
+                    underline: UnderlineStyle::None,
+                    underline_color_source: ColorSource::Default,
+                    underline_color: 0,
                     strikethrough: false,
                     blink: false,
                     conceal: false,
@@ -771,6 +786,7 @@ fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
         || update.palette.is_some()
         || update.default_colors.is_some()
         || update.active_screen.is_some()
+        || update.scrollback.is_some()
 }
 
 fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate) -> Result<()> {
@@ -821,6 +837,11 @@ fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate
     }
     if let Some(colors) = update.default_colors {
         snapshot.default_colors = colors;
+    }
+    if let Some(scrollback) = update.scrollback {
+        snapshot.scrollback_rows = scrollback.rows;
+        snapshot.available_scrollback_rows = scrollback.available_rows;
+        snapshot.omitted_oldest_scrollback_rows = scrollback.omitted_oldest_rows;
     }
     snapshot.revision = update.revision;
     Ok(())
@@ -1133,6 +1154,25 @@ enum MouseAction {
     WheelDown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryNavigation {
+    PageUp,
+    PageDown,
+    ReturnToLive,
+}
+
+fn history_navigation(keysym: Keysym, shift: bool, detached: bool) -> Option<HistoryNavigation> {
+    if !shift {
+        return None;
+    }
+    match keysym {
+        Keysym::Page_Up => Some(HistoryNavigation::PageUp),
+        Keysym::Page_Down => Some(HistoryNavigation::PageDown),
+        Keysym::End if detached => Some(HistoryNavigation::ReturnToLive),
+        _ => None,
+    }
+}
+
 fn mouse_button_code(button: u32) -> Option<u8> {
     match button {
         BTN_LEFT => Some(0),
@@ -1203,16 +1243,37 @@ impl WheelAccumulator {
         discrete: i32,
         value120: i32,
     ) -> Option<(MouseAction, usize)> {
+        self.push_scaled(absolute, discrete, value120, 1.0)
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "the finite accumulated value and emitted count are clamped to eight wheel steps"
+    )]
+    fn push_scaled(
+        &mut self,
+        absolute: f64,
+        discrete: i32,
+        value120: i32,
+        multiplier: f64,
+    ) -> Option<(MouseAction, usize)> {
+        let multiplier = if multiplier.is_finite() && multiplier > 0.0 {
+            multiplier
+        } else {
+            1.0
+        };
         let (unit, delta, threshold) = if value120 != 0 {
             (
                 WheelUnit::Value120,
                 f64::from(value120),
-                WHEEL_VALUE120_STEP,
+                WHEEL_VALUE120_STEP / multiplier,
             )
         } else if discrete != 0 {
-            (WheelUnit::Discrete, f64::from(discrete), 1.0)
+            (WheelUnit::Discrete, f64::from(discrete) * multiplier, 1.0)
         } else if absolute != 0.0 && absolute.is_finite() {
-            (WheelUnit::Pixel, absolute, WHEEL_PIXEL_STEP)
+            (WheelUnit::Pixel, absolute, WHEEL_PIXEL_STEP / multiplier)
         } else {
             return None;
         };
@@ -1443,7 +1504,114 @@ fn spawn_clipboard_read(fd: OwnedFd, target: PasteTarget, tx: StdSender<Clipboar
     });
 }
 
+fn viewport_cursor_row(cursor_row: i32, offset: usize, rows: usize) -> Option<i32> {
+    if cursor_row < 0 {
+        return None;
+    }
+    i32::try_from(offset)
+        .ok()
+        .and_then(|offset| cursor_row.checked_add(offset))
+        .filter(|row| *row >= 0 && usize::try_from(*row).is_ok_and(|row| row < rows))
+}
+
 impl App {
+    fn display_snapshot(&self) -> Option<TerminalSnapshot> {
+        let snapshot = self.snapshot.as_ref()?;
+        if self.scrollback_viewport.is_live() {
+            return Some(snapshot.clone());
+        }
+        let mut input_modes = snapshot.input_modes;
+        let viewport_cursor_row = viewport_cursor_row(
+            snapshot.cursor_row,
+            self.scrollback_viewport.offset_from_bottom(),
+            snapshot.rows,
+        );
+        if viewport_cursor_row.is_none() {
+            input_modes.cursor_visible = false;
+        }
+        Some(TerminalSnapshot {
+            splint_id: snapshot.splint_id,
+            incarnation: snapshot.incarnation,
+            revision: snapshot.revision,
+            columns: snapshot.columns,
+            rows: snapshot.rows,
+            cursor_column: viewport_cursor_row.map_or(-1, |_| snapshot.cursor_column),
+            cursor_row: viewport_cursor_row.unwrap_or(-1),
+            cursor_deferred_wrap: false,
+            active_screen: snapshot.active_screen,
+            input_modes,
+            palette: snapshot.palette.clone(),
+            default_colors: snapshot.default_colors,
+            title: snapshot.title.clone(),
+            visible_rows: self
+                .scrollback_viewport
+                .visible_rows(snapshot)
+                .into_iter()
+                .cloned()
+                .collect(),
+            scrollback_rows: Vec::new(),
+            available_scrollback_rows: snapshot.available_scrollback_rows,
+            omitted_oldest_scrollback_rows: snapshot.omitted_oldest_scrollback_rows,
+            exited_code: snapshot.exited_code,
+            exited_signal: snapshot.exited_signal,
+        })
+    }
+
+    fn scroll_history(&mut self, action: MouseAction, lines: usize) -> Result<bool> {
+        let snapshot = self.snapshot.as_ref().context("scroll requires snapshot")?;
+        let previous_offset = self.scrollback_viewport.offset_from_bottom();
+        match action {
+            MouseAction::WheelUp => self.scrollback_viewport.scroll_up(lines, snapshot),
+            MouseAction::WheelDown => self.scrollback_viewport.scroll_down(lines),
+            _ => return Ok(false),
+        }
+        if self.scrollback_viewport.offset_from_bottom() == previous_offset {
+            return Ok(false);
+        }
+        self.invalidate_local_content_state();
+        // Coalesce high-resolution wheel events until the next compositor frame.
+        // Re-shaping the entire viewport synchronously for every axis event made
+        // fast scrolling stall the Wayland dispatch loop.
+        self.viewport_dirty = true;
+        Ok(true)
+    }
+
+    fn handle_history_key(
+        &mut self,
+        event: &KeyEvent,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<bool> {
+        let Some(navigation) = history_navigation(
+            event.keysym,
+            self.modifiers.shift,
+            !self.scrollback_viewport.is_live(),
+        ) else {
+            return Ok(false);
+        };
+        let page = self
+            .snapshot
+            .as_ref()
+            .map_or(1, |snapshot| snapshot.rows.saturating_sub(1).max(1));
+        match navigation {
+            HistoryNavigation::PageUp => {
+                if self.scroll_history(MouseAction::WheelUp, page)? && self.configured {
+                    self.schedule_draw(queue_handle)?;
+                }
+            }
+            HistoryNavigation::PageDown => {
+                if self.scroll_history(MouseAction::WheelDown, page)? && self.configured {
+                    self.schedule_draw(queue_handle)?;
+                }
+            }
+            HistoryNavigation::ReturnToLive => {
+                if self.scroll_history(MouseAction::WheelDown, usize::MAX)? && self.configured {
+                    self.schedule_draw(queue_handle)?;
+                }
+            }
+        }
+        Ok(true)
+    }
+
     fn send_input(&mut self, bytes: Vec<u8>) -> Result<()> {
         if let Some(commands) = &self.commands {
             try_window_command(commands, WindowCommand::Input(bytes))?;
@@ -1493,8 +1661,9 @@ impl App {
 
     fn recompute_hovered_url(&mut self) {
         let previous = self.hovered_url.take();
+        let display = self.display_snapshot();
         self.hovered_url = self.pointer_cell.and_then(|position| {
-            self.snapshot
+            display
                 .as_ref()
                 .and_then(|snapshot| url_at(snapshot, position))
         });
@@ -1865,6 +2034,19 @@ impl App {
                         .as_ref()
                         .is_none_or(|current| snapshot_is_newer(current, &snapshot).unwrap_or(true))
                     {
+                        let previous_available = self
+                            .snapshot
+                            .as_ref()
+                            .map_or(0, |current| current.available_scrollback_rows);
+                        let previous_rows = self
+                            .snapshot
+                            .as_ref()
+                            .map_or_else(Vec::new, |current| current.scrollback_rows.clone());
+                        self.scrollback_viewport.observe_history_change(
+                            previous_available,
+                            &previous_rows,
+                            &snapshot,
+                        );
                         self.invalidate_local_content_state();
                         self.snapshot = Some(snapshot);
                         self.full_redraw = true;
@@ -1882,7 +2064,8 @@ impl App {
                     let patched_rows: Vec<_> =
                         update.rows.iter().map(|patch| patch.index).collect();
                     let scrolls = update.scrolls.clone();
-                    let full = update.columns.is_some()
+                    let history_changed = update.scrollback.is_some();
+                    let mut full = update.columns.is_some()
                         || update.row_count.is_some()
                         || update.palette.is_some()
                         || update.default_colors.is_some()
@@ -1890,12 +2073,28 @@ impl App {
                     let content_changed = terminal_update_changes_visible_content(&update);
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
+                    let previous_available = self
+                        .snapshot
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.available_scrollback_rows);
+                    let previous_rows = self
+                        .snapshot
+                        .as_ref()
+                        .map_or_else(Vec::new, |snapshot| snapshot.scrollback_rows.clone());
                     let snapshot = self
                         .snapshot
                         .as_mut()
                         .context("terminal update arrived before initial snapshot")?;
                     apply_terminal_update(snapshot, update)?;
                     apply_theme(snapshot, self.theme);
+                    self.scrollback_viewport.observe_history_change(
+                        previous_available,
+                        &previous_rows,
+                        snapshot,
+                    );
+                    if history_changed && !self.scrollback_viewport.is_live() {
+                        full = true;
+                    }
                     if content_changed {
                         self.invalidate_local_content_state();
                     }
@@ -1984,13 +2183,19 @@ impl App {
         if visual_changed {
             self.cursor_blink_visible = true;
             self.last_cursor_blink = Instant::now();
-            let snapshot = self.snapshot.as_ref().context("updated snapshot exists")?;
-            if full_frame_reload || self.snapshot_frame.is_none() {
-                self.snapshot_frame = Some(SnapshotFrame::load_scaled(snapshot, self.scale_120)?);
+            let display = self.display_snapshot().context("updated snapshot exists")?;
+            if full_frame_reload
+                || self.snapshot_frame.is_none()
+                || !self.scrollback_viewport.is_live()
+            {
+                self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
             } else if let Some(frame) = &mut self.snapshot_frame {
+                let snapshot = self.snapshot.as_ref().context("updated snapshot exists")?;
                 frame.refresh_rows(snapshot, &self.prepare_dirty_rows)?;
                 frame.refresh_cursor(snapshot);
             }
+            self.rendered_viewport_offset = self.scrollback_viewport.offset_from_bottom();
+            self.viewport_dirty = false;
             self.prepare_dirty_rows.fill(false);
             self.refresh_ime_preedit()?;
             self.update_ime_cursor_rectangle();
@@ -2035,8 +2240,10 @@ impl App {
                 .set_buffer_scale(1)
                 .map_err(|_| anyhow::anyhow!("compositor rejected unit buffer scale"))?;
         }
-        if let Some(snapshot) = &self.snapshot {
-            self.snapshot_frame = Some(SnapshotFrame::load_scaled(snapshot, scale_120)?);
+        if let Some(display) = self.display_snapshot() {
+            self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, scale_120)?);
+            self.rendered_viewport_offset = self.scrollback_viewport.offset_from_bottom();
+            self.viewport_dirty = false;
         } else {
             self.text_row = Some(TextRow::load(scale_120.div_ceil(SCALE_DENOMINATOR))?);
         }
@@ -2113,6 +2320,47 @@ impl App {
     )]
     fn draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         self.redraw_pending = false;
+        if self.viewport_dirty {
+            let display = self.display_snapshot().context("scroll display snapshot")?;
+            let current_offset = self.scrollback_viewport.offset_from_bottom();
+            let delta = isize::try_from(current_offset)
+                .ok()
+                .zip(isize::try_from(self.rendered_viewport_offset).ok())
+                .map(|(current, rendered)| current - rendered);
+            self.prepare_dirty_rows.fill(false);
+            self.raster_dirty_rows.fill(false);
+            self.surface_dirty_rows.fill(false);
+            self.pending_scrolls.clear();
+            let incremental = if let (Some(frame), Some(delta)) = (&mut self.snapshot_frame, delta)
+            {
+                let scroll = frame.scroll_viewport_rows(&display, delta)?;
+                frame.refresh_cursor(&display);
+                scroll
+            } else {
+                None
+            };
+            if let Some(scroll) = incremental {
+                let count = scroll.rows.min(display.rows);
+                let exposed = match scroll.direction {
+                    splinterm_protocol::ScrollDirection::Forward => {
+                        display.rows.saturating_sub(count)..display.rows
+                    }
+                    splinterm_protocol::ScrollDirection::Reverse => 0..count,
+                };
+                self.raster_dirty_rows.resize(display.rows, false);
+                self.surface_dirty_rows.resize(display.rows, false);
+                for row in exposed {
+                    self.raster_dirty_rows[row] = true;
+                }
+                self.surface_dirty_rows.fill(true);
+                self.pending_scrolls.push(scroll);
+            } else {
+                self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+                self.full_redraw = true;
+            }
+            self.rendered_viewport_offset = current_offset;
+            self.viewport_dirty = false;
+        }
         let (width, height, stride) = buffer_dimensions(
             self.logical_width.max(1),
             self.logical_height.max(1),
@@ -2141,14 +2389,6 @@ impl App {
             canvas
         };
 
-        eprintln!(
-            "Presenting logical={}x{} buffer={}x{} scale={}x stride={stride}",
-            self.logical_width,
-            self.logical_height,
-            width,
-            height,
-            f64::from(self.scale_120) / 120.0
-        );
         let backing_len = usize::try_from(
             width
                 .checked_mul(height)
@@ -2591,19 +2831,27 @@ impl KeyboardHandler for App {
         {
             self.begin_clipboard_read(PasteTarget::Clipboard);
         } else {
-            self.handle_key(&event);
+            match self.handle_history_key(&event, queue_handle) {
+                Ok(true) => {}
+                Ok(false) => self.handle_key(&event),
+                Err(error) => self.fail(error),
+            }
         }
     }
 
     fn repeat_key(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
+        queue_handle: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
         event: KeyEvent,
     ) {
-        self.handle_key(&event);
+        match self.handle_history_key(&event, queue_handle) {
+            Ok(true) => {}
+            Ok(false) => self.handle_key(&event),
+            Err(error) => self.fail(error),
+        }
     }
 
     fn release_key(
@@ -2659,8 +2907,9 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Motion { .. } => {
                     self.pointer_cell = cell;
+                    let display = self.display_snapshot();
                     self.hovered_url = cell.and_then(|position| {
-                        self.snapshot
+                        display
                             .as_ref()
                             .and_then(|snapshot| url_at(snapshot, position))
                     });
@@ -2770,8 +3019,8 @@ impl PointerHandler for App {
                         PressOwner::Selection => {
                             self.selecting = false;
                             self.selected_text = self.selection.and_then(|selection| {
-                                self.snapshot.as_ref().map(|snapshot| {
-                                    selection_text(snapshot, selection).into_bytes()
+                                self.display_snapshot().map(|snapshot| {
+                                    selection_text(&snapshot, selection).into_bytes()
                                 })
                             });
                             self.publish_clipboard(queue_handle, serial, true);
@@ -2786,13 +3035,21 @@ impl PointerHandler for App {
                 } => {
                     // Xterm's mouse protocol has only vertical wheel button codes 4/5;
                     // Foot does not synthesize horizontal wheel reports into unrelated buttons.
-                    let Some(position) = cell else { continue };
                     let modes = self.input_modes();
-                    if modes.mouse_tracking == MouseTracking::None {
-                        self.vertical_wheel = WheelAccumulator::default();
+                    if vertical.is_none() {
                         continue;
                     }
-                    if vertical.is_none() {
+                    if modes.mouse_tracking == MouseTracking::None {
+                        if let Some((action, count)) = self.scrollback_wheel.push_scaled(
+                            vertical.absolute,
+                            vertical.discrete,
+                            vertical.value120,
+                            SCROLLBACK_WHEEL_MULTIPLIER,
+                        ) {
+                            if let Err(error) = self.scroll_history(action, count) {
+                                self.fail(error);
+                            }
+                        }
                         continue;
                     }
                     if let Some((action, count)) = self.vertical_wheel.push(
@@ -2800,6 +3057,7 @@ impl PointerHandler for App {
                         vertical.discrete,
                         vertical.value120,
                     ) {
+                        let Some(position) = cell else { continue };
                         if let Some(report) =
                             mouse_report(action, position, self.modifiers, modes.sgr_mouse)
                         {
@@ -2822,7 +3080,8 @@ impl PointerHandler for App {
             }
         }
         if self.configured
-            && (self.raster_dirty_rows.iter().any(|dirty| *dirty)
+            && (self.viewport_dirty
+                || self.raster_dirty_rows.iter().any(|dirty| *dirty)
                 || self.surface_dirty_rows.iter().any(|dirty| *dirty))
         {
             if let Err(error) = self.schedule_draw(queue_handle) {
@@ -3268,6 +3527,14 @@ mod tests {
                 default_colors: None,
                 columns: None,
                 row_count: None,
+                scrollback: Some(splinterm_protocol::TerminalScrollbackUpdate {
+                    rows: vec![TerminalRow {
+                        linebreak: true,
+                        cells: Vec::new(),
+                    }],
+                    available_rows: 1,
+                    omitted_oldest_rows: 0,
+                }),
             },
         )
         .expect("contiguous semantic update");
@@ -3276,6 +3543,8 @@ mod tests {
         assert_eq!((current.cursor_column, current.cursor_row), (1, 0));
         assert!(current.cursor_deferred_wrap);
         assert_eq!(current.title, "revision eleven");
+        assert_eq!(current.available_scrollback_rows, 1);
+        assert_eq!(current.scrollback_rows.len(), 1);
     }
 
     #[test]
@@ -3334,11 +3603,51 @@ mod tests {
             default_colors: None,
             columns: None,
             row_count: None,
+            scrollback: None,
         }
     }
 
     fn encoded(keysym: Keysym, utf8: Option<&str>, modifiers: Modifiers) -> Option<Vec<u8>> {
         key_input(keysym, utf8, modifiers, normal_modes())
+    }
+
+    #[test]
+    fn viewport_cursor_moves_with_content_until_it_leaves_the_grid() {
+        assert_eq!(viewport_cursor_row(2, 0, 6), Some(2));
+        assert_eq!(viewport_cursor_row(2, 3, 6), Some(5));
+        assert_eq!(viewport_cursor_row(2, 4, 6), None);
+        assert_eq!(viewport_cursor_row(-1, 3, 6), None);
+    }
+
+    #[test]
+    fn local_scrollback_uses_foot_default_wheel_multiplier() {
+        let mut wheel = WheelAccumulator::default();
+        assert_eq!(
+            wheel.push_scaled(0.0, 0, -40, SCROLLBACK_WHEEL_MULTIPLIER),
+            Some((MouseAction::WheelUp, 1))
+        );
+        assert_eq!(
+            wheel.push_scaled(0.0, 1, 0, SCROLLBACK_WHEEL_MULTIPLIER),
+            Some((MouseAction::WheelDown, 3))
+        );
+    }
+
+    #[test]
+    fn history_navigation_requires_shift_and_detached_end() {
+        assert_eq!(
+            history_navigation(Keysym::Page_Up, true, false),
+            Some(HistoryNavigation::PageUp)
+        );
+        assert_eq!(
+            history_navigation(Keysym::Page_Down, true, true),
+            Some(HistoryNavigation::PageDown)
+        );
+        assert_eq!(history_navigation(Keysym::Page_Up, false, true), None);
+        assert_eq!(history_navigation(Keysym::End, true, false), None);
+        assert_eq!(
+            history_navigation(Keysym::End, true, true),
+            Some(HistoryNavigation::ReturnToLive)
+        );
     }
 
     #[test]

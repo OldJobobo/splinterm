@@ -13,7 +13,7 @@ use crate::{
     Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, MouseTracking, ResnapshotRequired,
     RowSnapshot, ScrollDirection, ScrollRegion, ScrollbackSnapshot, SnapshotRequest,
     TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision,
-    TerminalSnapshot, TerminalUpdate, UpdateBatch,
+    TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -1247,7 +1247,18 @@ impl Terminal {
                 1 => self.attributes.set_bold(true),
                 2 => self.attributes.set_dim(true),
                 3 => self.attributes.set_italic(true),
-                4 | 21 => self.attributes.set_underline(true),
+                4 => {
+                    let style = match params.get(index).subparam(0).unwrap_or(1) {
+                        0 => UnderlineStyle::None,
+                        2 => UnderlineStyle::Double,
+                        3 => UnderlineStyle::Curly,
+                        4 => UnderlineStyle::Dotted,
+                        5 => UnderlineStyle::Dashed,
+                        _ => UnderlineStyle::Single,
+                    };
+                    self.attributes.set_underline_style(style);
+                }
+                21 => self.attributes.set_underline_style(UnderlineStyle::Double),
                 5 => self.attributes.set_blink(true),
                 7 => self.attributes.set_reverse(true),
                 8 => self.attributes.set_conceal(true),
@@ -1257,7 +1268,7 @@ impl Terminal {
                     self.attributes.set_dim(false);
                 }
                 23 => self.attributes.set_italic(false),
-                24 => self.attributes.set_underline(false),
+                24 => self.attributes.set_underline_style(UnderlineStyle::None),
                 25 => self.attributes.set_blink(false),
                 27 => self.attributes.set_reverse(false),
                 28 => self.attributes.set_conceal(false),
@@ -1266,6 +1277,7 @@ impl Terminal {
                     .attributes
                     .set_foreground(Color::new(ColorSource::Base16, code - 30)),
                 39 => self.attributes.set_foreground(Color::default()),
+                59 => self.attributes.set_underline_color(Color::default()),
                 40..=47 => self
                     .attributes
                     .set_background(Color::new(ColorSource::Base16, code - 40)),
@@ -1276,12 +1288,13 @@ impl Terminal {
                 100..=107 => self
                     .attributes
                     .set_background(Color::new(ColorSource::Base16, code - 100 + 8)),
-                38 | 48 => {
+                38 | 48 | 58 => {
                     if let Some((color, consumed)) = extended_color(params, index) {
-                        if code == 38 {
-                            self.attributes.set_foreground(color);
-                        } else {
-                            self.attributes.set_background(color);
+                        match code {
+                            38 => self.attributes.set_foreground(color),
+                            48 => self.attributes.set_background(color),
+                            58 => self.attributes.set_underline_color(color),
+                            _ => unreachable!(),
                         }
                         index += consumed;
                     }
@@ -1713,6 +1726,44 @@ mod tests {
     }
 
     #[test]
+    fn sgr_colon_underline_styles_and_reset_match_foot() {
+        let mut terminal = terminal(6, 1);
+        terminal.advance(b"\x1b[4:1mA\x1b[4:2mB\x1b[4:3mC\x1b[4:4mD\x1b[4:5mE\x1b[24mF");
+        let row = terminal.grid().row(0).unwrap();
+        assert_eq!(
+            row[0].attributes().underline_style(),
+            UnderlineStyle::Single
+        );
+        assert_eq!(
+            row[1].attributes().underline_style(),
+            UnderlineStyle::Double
+        );
+        assert_eq!(row[2].attributes().underline_style(), UnderlineStyle::Curly);
+        assert_eq!(
+            row[3].attributes().underline_style(),
+            UnderlineStyle::Dotted
+        );
+        assert_eq!(
+            row[4].attributes().underline_style(),
+            UnderlineStyle::Dashed
+        );
+        assert_eq!(row[5].attributes().underline_style(), UnderlineStyle::None);
+    }
+
+    #[test]
+    fn sgr_underline_color_set_and_reset_are_independent() {
+        let mut terminal = terminal(2, 1);
+        terminal.advance(b"\x1b[4:3;58;2;12;34;56mA\x1b[59mB");
+        let row = terminal.grid().row(0).unwrap();
+        assert_eq!(
+            row[0].attributes().underline_color(),
+            Color::rgb(0x000c_2238)
+        );
+        assert_eq!(row[1].attributes().underline_color(), Color::default());
+        assert_eq!(row[1].attributes().underline_style(), UnderlineStyle::Curly);
+    }
+
+    #[test]
     fn scroll_region_and_line_feed_preserve_outside_rows() {
         let mut terminal = terminal(4, 4);
         terminal.advance(b"top\r\n111\r\n222\r\nend");
@@ -1923,7 +1974,7 @@ mod tests {
         terminal.advance(b"\x1b[1;21mA\x1b]4;1;?\x07");
         let attributes = terminal.grid().row(0).unwrap()[0].attributes();
         assert!(attributes.bold());
-        assert!(attributes.underline());
+        assert_eq!(attributes.underline_style(), UnderlineStyle::Double);
         let replies = terminal.drain_events().collect::<Vec<_>>();
         assert!(replies.iter().any(|event| {
             matches!(event, TerminalEvent::PtyWrite(bytes) if String::from_utf8_lossy(bytes).contains("rgb:8080/0000/0000"))

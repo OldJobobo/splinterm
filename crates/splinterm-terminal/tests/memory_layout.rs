@@ -6,7 +6,7 @@ use splinterm_terminal::{
 };
 
 #[test]
-fn phase_one_memory_layout_baseline() {
+fn phase_eight_underline_style_memory_layout_baseline() {
     let sizes = [
         ("ColorSource", size_of::<ColorSource>()),
         ("Color", size_of::<Color>()),
@@ -26,9 +26,9 @@ fn phase_one_memory_layout_baseline() {
 
     assert_eq!(size_of::<ColorSource>(), 1);
     assert_eq!(size_of::<Color>(), 8);
-    assert_eq!(size_of::<Attributes>(), 8);
+    assert_eq!(size_of::<Attributes>(), 20);
     assert_eq!(size_of::<CellContent>(), 8);
-    assert_eq!(size_of::<Cell>(), 12);
+    assert_eq!(size_of::<Cell>(), 24);
     assert_eq!(size_of::<Coordinate>(), 8);
     assert_eq!(size_of::<CoordinateRange>(), 16);
     assert_eq!(size_of::<Cursor>(), 12);

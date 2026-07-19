@@ -18,7 +18,8 @@ use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen, CellAttributes, ClientFrame, ColorSource,
     ConsentPrompt, ConsentReply, ErrorCode, MAX_CONSENT_FRAME_BYTES, MAX_FRAME_BYTES,
     PROTOCOL_VERSION, Request, Response, ServerFrame, SubscriptionEvent, TerminalCell,
-    TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, encode_frame,
+    TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
+    encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -275,7 +276,9 @@ fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
         bold: false,
         dim: false,
         italic: false,
-        underline: false,
+        underline: UnderlineStyle::None,
+        underline_color_source: ColorSource::Default,
+        underline_color: 0,
         strikethrough: false,
         blink: false,
         conceal: false,
@@ -420,7 +423,7 @@ async fn attach(
         .request(Request::Attach {
             splint_id,
             incarnation,
-            scrollback_rows: 0,
+            scrollback_rows: splinterm_protocol::MAX_SNAPSHOT_SCROLLBACK_ROWS,
         })
         .await?
     else {
@@ -652,6 +655,7 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
 
     loop {
         tokio::select! {
+            biased;
             result = &mut window => {
                 // Dropping the window closes its command sender. The controller task then
                 // releases the lease explicitly; connection teardown is the fallback.
@@ -684,20 +688,22 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
                         EventAction::Ignore => {}
                         EventAction::Snapshot { sequence, snapshot } => {
                             last_revision = snapshot.revision;
-                            updates
-                                .send(WindowUpdate::Snapshot(snapshot))
-                                .await
-                                .context("Wayland window closed its update queue")?;
+                            if updates.send(WindowUpdate::Snapshot(snapshot)).await.is_err() {
+                                let window_result = window.await.context("Wayland window task failed")?;
+                                controller.await.context("window controller task failed")??;
+                                return window_result;
+                            }
                             last_sequence = sequence;
                         }
                         EventAction::Update { sequence, update }
                             if update.base_revision == last_revision
                                 && update.revision == last_revision.saturating_add(1) => {
                             last_revision = update.revision;
-                            updates
-                                .send(WindowUpdate::Update(update))
-                                .await
-                                .context("Wayland window closed its update queue")?;
+                            if updates.send(WindowUpdate::Update(update)).await.is_err() {
+                                let window_result = window.await.context("Wayland window task failed")?;
+                                controller.await.context("window controller task failed")??;
+                                return window_result;
+                            }
                             last_sequence = sequence;
                         }
                         EventAction::Update { .. } | EventAction::Resynchronize => {
@@ -707,10 +713,15 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
                                 splint_id,
                                 incarnation,
                             ).await?;
-                            updates
+                            if updates
                                 .send(WindowUpdate::Snapshot(attachment.snapshot.clone()))
                                 .await
-                                .context("Wayland window closed its update queue")?;
+                                .is_err()
+                            {
+                                let window_result = window.await.context("Wayland window task failed")?;
+                                controller.await.context("window controller task failed")??;
+                                return window_result;
+                            }
                             last_revision = attachment.snapshot.revision;
                             last_sequence = 0;
                         }
