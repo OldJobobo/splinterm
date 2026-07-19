@@ -2,10 +2,15 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use serde::Deserialize;
 use splinterm::{
     config::CursorStyle,
     geometry::{FontSize, FontSizingPolicy, TerminalPadding, resolve_font_size},
-    renderer::{RendererOptions, capture_final_buffer, capture_final_buffer_sized, configure},
+    renderer::{
+        CursorPresentation, RendererOptions, UnfocusedCursorStyle, capture_final_buffer,
+        capture_final_buffer_presented, capture_final_buffer_sized,
+        capture_final_buffer_sized_presented, configure, effective_cursor_shape,
+    },
 };
 use splinterm_core::SplintId;
 use splinterm_protocol::{
@@ -50,6 +55,8 @@ struct Arguments {
     logical_height: Option<u32>,
     #[arg(long)]
     text_hex: Option<String>,
+    #[arg(long, conflicts_with = "text_hex")]
+    cells_json: Option<PathBuf>,
     #[arg(long, default_value = "normal")]
     style: String,
     #[arg(long, default_value = "block")]
@@ -62,6 +69,18 @@ struct Arguments {
     hide_cursor: bool,
     #[arg(long)]
     frame_id: Option<String>,
+    #[arg(long, default_value = "v1")]
+    capture_schema: String,
+    #[arg(long, default_value = "focused-steady")]
+    target_focus_semantics: String,
+    #[arg(long, default_value = "unchanged")]
+    unfocused_style: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuredGrid {
+    rows: Vec<Vec<TerminalCell>>,
 }
 
 fn attributes(style: &str) -> Result<CellAttributes> {
@@ -119,6 +138,67 @@ fn fixture_text(name: &str, columns: usize, rows: usize) -> Result<String> {
     Ok(text)
 }
 
+fn structured_rows(arguments: &Arguments) -> Result<Option<Vec<TerminalRow>>> {
+    let Some(path) = &arguments.cells_json else {
+        return Ok(None);
+    };
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() > 1024 * 1024 {
+        bail!("structured cell grid exceeds 1 MiB");
+    }
+    let grid: StructuredGrid =
+        serde_json::from_slice(&bytes).context("parse structured cell grid")?;
+    if grid.rows.len() != arguments.rows
+        || grid.rows.iter().any(|row| row.len() != arguments.columns)
+    {
+        bail!("structured cell grid dimensions do not match --columns/--rows");
+    }
+    for row in &grid.rows {
+        for (index, cell) in row.iter().enumerate() {
+            if let Some(remaining) = cell.spacer_remaining {
+                let valid_leader = index > 0
+                    && row[index - 1].spacer_remaining.is_none()
+                    && !row[index - 1].content.is_empty();
+                if remaining != 1 || !cell.content.is_empty() || !valid_leader {
+                    bail!(
+                        "structured wide spacer must be an empty width-2 continuation after a leader"
+                    );
+                }
+            }
+        }
+    }
+    Ok(Some(
+        grid.rows
+            .into_iter()
+            .map(|cells| TerminalRow {
+                row_id: None,
+                linebreak: true,
+                cells,
+            })
+            .collect(),
+    ))
+}
+
+fn cursor_presentation(arguments: &Arguments) -> Result<CursorPresentation> {
+    let unfocused_style = match arguments.unfocused_style.as_str() {
+        "unchanged" => UnfocusedCursorStyle::Unchanged,
+        "hollow" => UnfocusedCursorStyle::Hollow,
+        "none" => UnfocusedCursorStyle::None,
+        _ => bail!("unfocused-style must be unchanged, hollow, or none"),
+    };
+    match arguments.target_focus_semantics.as_str() {
+        "focused-steady" if unfocused_style == UnfocusedCursorStyle::Unchanged => {
+            Ok(CursorPresentation::FOCUSED_STEADY)
+        }
+        "unfocused" => Ok(CursorPresentation {
+            keyboard_focused: false,
+            unfocused_style,
+        }),
+        "focused-steady" => bail!("focused-steady requires unfocused-style=unchanged"),
+        _ => bail!("target-focus-semantics must be focused-steady or unfocused"),
+    }
+}
+
 fn snapshot(arguments: &Arguments) -> Result<TerminalSnapshot> {
     if arguments.columns == 0 || arguments.rows == 0 {
         bail!("grid dimensions must be positive");
@@ -126,28 +206,51 @@ fn snapshot(arguments: &Arguments) -> Result<TerminalSnapshot> {
     if arguments.cursor_column >= arguments.columns || arguments.cursor_row >= arguments.rows {
         bail!("cursor must be inside the declared grid");
     }
-    let text = arguments.text_hex.as_deref().map_or_else(
-        || fixture_text(&arguments.fixture, arguments.columns, arguments.rows),
-        decode_hex,
-    )?;
-    if text.chars().count() > arguments.columns.saturating_mul(arguments.rows) {
-        bail!("fixture text exceeds the declared grid");
-    }
-    let attributes = attributes(&arguments.style)?;
-    let mut characters = text.chars();
-    let visible_rows = (0..arguments.rows)
-        .map(|_| TerminalRow {
-            row_id: None,
-            linebreak: true,
-            cells: (0..arguments.columns)
-                .map(|_| TerminalCell {
-                    content: characters.next().unwrap_or(' ').to_string(),
-                    spacer_remaining: None,
-                    attributes,
-                })
-                .collect(),
-        })
-        .collect();
+    let visible_rows = if let Some(rows) = structured_rows(arguments)? {
+        rows
+    } else {
+        let text = arguments.text_hex.as_deref().map_or_else(
+            || fixture_text(&arguments.fixture, arguments.columns, arguments.rows),
+            decode_hex,
+        )?;
+        if text.chars().count() > arguments.columns.saturating_mul(arguments.rows) {
+            bail!("fixture text exceeds the declared grid");
+        }
+        let attributes = attributes(&arguments.style)?;
+        let mut characters = text.chars();
+        (0..arguments.rows)
+            .map(|_| TerminalRow {
+                row_id: None,
+                linebreak: true,
+                cells: (0..arguments.columns)
+                    .map(|_| TerminalCell {
+                        content: characters.next().unwrap_or(' ').to_string(),
+                        spacer_remaining: None,
+                        attributes,
+                    })
+                    .collect(),
+            })
+            .collect()
+    };
+    let mut palette = vec![0; 256];
+    palette[..16].copy_from_slice(&[
+        0x0000_0000,
+        0x0080_0000,
+        0x0000_8000,
+        0x0080_8000,
+        0x0000_0080,
+        0x0080_0080,
+        0x0000_8080,
+        0x00c0_c0c0,
+        0x0080_8080,
+        0x00ff_0000,
+        0x0000_ff00,
+        0x00ff_ff00,
+        0x0000_00ff,
+        0x00ff_00ff,
+        0x0000_ffff,
+        0x00ff_ffff,
+    ]);
     Ok(TerminalSnapshot {
         splint_id: SplintId::new(),
         incarnation: 1,
@@ -168,7 +271,7 @@ fn snapshot(arguments: &Arguments) -> Result<TerminalSnapshot> {
             mouse_tracking: MouseTracking::None,
             sgr_mouse: false,
         },
-        palette: vec![0; 256],
+        palette,
         default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
         title: arguments.fixture.clone(),
         visible_rows,
@@ -228,9 +331,27 @@ fn main() -> Result<()> {
         padding,
     })?;
     let style = cursor_style(&arguments.cursor_shape)?;
+    let presentation = cursor_presentation(&arguments)?;
     let snapshot = snapshot(&arguments)?;
-    let capture = match (arguments.logical_width, arguments.logical_height) {
-        (Some(width), Some(height)) => capture_final_buffer_sized(
+    let is_v2 = match arguments.capture_schema.as_str() {
+        "v1" => false,
+        "slice3-v2" => true,
+        _ => bail!("capture-schema must be v1 or slice3-v2"),
+    };
+    if !is_v2 && presentation != CursorPresentation::FOCUSED_STEADY {
+        bail!("v1 captures support only focused-steady cursor presentation");
+    }
+    let capture = match (arguments.logical_width, arguments.logical_height, is_v2) {
+        (Some(width), Some(height), true) => capture_final_buffer_sized_presented(
+            &snapshot,
+            arguments.scale_120,
+            width,
+            height,
+            !arguments.hide_cursor,
+            style,
+            presentation,
+        )?,
+        (Some(width), Some(height), false) => capture_final_buffer_sized(
             &snapshot,
             arguments.scale_120,
             width,
@@ -238,7 +359,14 @@ fn main() -> Result<()> {
             !arguments.hide_cursor,
             style,
         )?,
-        (None, None) => capture_final_buffer(
+        (None, None, true) => capture_final_buffer_presented(
+            &snapshot,
+            arguments.scale_120,
+            !arguments.hide_cursor,
+            style,
+            presentation,
+        )?,
+        (None, None, false) => capture_final_buffer(
             &snapshot,
             arguments.scale_120,
             !arguments.hide_cursor,
@@ -252,15 +380,46 @@ fn main() -> Result<()> {
             arguments.fixture, arguments.columns, arguments.rows, arguments.scale_120
         )
     });
-    let cursor = capture.cursor.map(|(column, row)| {
+    let effective = effective_cursor_shape(style, !arguments.hide_cursor, presentation);
+    let cursor = if is_v2 {
+        let position = (!arguments.hide_cursor).then(
+            || serde_json::json!({"column": arguments.cursor_column, "row": arguments.cursor_row}),
+        );
         serde_json::json!({
-            "column": column,
-            "row": row,
-            "shape": arguments.cursor_shape,
+            "position": position,
+            "configured_shape": arguments.cursor_shape,
+            "effective_shape": effective.name(),
+            "target_focus_semantics": arguments.target_focus_semantics,
+        })
+    } else {
+        capture
+            .cursor
+            .map_or(serde_json::Value::Null, |(column, row)| {
+                serde_json::json!({
+                    "column": column,
+                    "row": row,
+                    "shape": arguments.cursor_shape,
+                })
+            })
+    };
+    let schema = if is_v2 {
+        "splinterm.final-buffer.slice3.v2"
+    } else {
+        "splinterm.final-buffer.v1"
+    };
+    let composition = if is_v2 {
+        serde_json::json!("foot-cell-rtl-v1")
+    } else {
+        serde_json::json!(["terminal-backgrounds", "glyphs", "decorations", "cursor"])
+    };
+    let capture_context = is_v2.then(|| {
+        serde_json::json!({
+            "actual_keyboard_focus": false,
+            "unfocused_style": arguments.unfocused_style,
         })
     });
-    let metadata = serde_json::json!({
-        "schema": "splinterm.final-buffer.v1",
+    let mut metadata = serde_json::json!({
+        "schema": schema,
         "width": capture.width,
         "height": capture.height,
         "stride": capture.stride,
@@ -285,7 +444,7 @@ fn main() -> Result<()> {
         "fixture": arguments.fixture,
         "frame_id": frame_id,
         "background_bgra": capture.background_bgra,
-        "composition": ["terminal-backgrounds", "glyphs", "decorations", "cursor"],
+        "composition": composition,
         "provenance": {
             "implementation": "splinterm",
             "font_pattern": arguments.font,
@@ -323,6 +482,13 @@ fn main() -> Result<()> {
             "cargo_lock": "Cargo.lock",
         },
     });
+
+    if let Some(capture_context) = capture_context {
+        metadata
+            .as_object_mut()
+            .expect("capture metadata is an object")
+            .insert("capture_context".into(), capture_context);
+    }
 
     let raw_path = arguments.output_prefix.with_extension("argb");
     let metadata_path = arguments.output_prefix.with_extension("json");

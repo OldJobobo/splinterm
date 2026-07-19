@@ -98,8 +98,9 @@ use smithay_client_toolkit::reexports::protocols::wp::{
 use crate::config::{APP_ID, CursorStyle, ResolvedTheme};
 use crate::geometry::{OutputDpiObservation, SurfaceGeometry};
 use crate::renderer::{
-    SnapshotFrame, SnapshotOverlays, TextRow, paint, paint_snapshot, paint_snapshot_overlays,
-    paint_snapshot_rows, scroll_snapshot_pixels, snapshot_row_rect, update_output_dpi, write_ppm,
+    CursorPresentation, SnapshotFrame, SnapshotOverlays, TextRow, paint, paint_snapshot_overlays,
+    paint_snapshot_presented, paint_snapshot_rows_presented, scroll_snapshot_pixels,
+    snapshot_row_rect, update_output_dpi, write_ppm,
 };
 use crate::viewport::ScrollbackViewport;
 
@@ -2704,7 +2705,7 @@ impl App {
         }
         if let (Some(frame), Some(geometry)) = (&self.snapshot_frame, &window_geometry) {
             if self.full_redraw {
-                paint_snapshot(
+                paint_snapshot_presented(
                     &mut self.backing,
                     width,
                     height,
@@ -2712,12 +2713,13 @@ impl App {
                     geometry,
                     self.cursor_blink_visible,
                     self.cursor_style,
+                    CursorPresentation::for_keyboard_focus(self.keyboard_focused),
                 );
             } else {
                 for scroll in self.pending_scrolls.drain(..) {
                     scroll_snapshot_pixels(&mut self.backing, width, frame, geometry, scroll);
                 }
-                paint_snapshot_rows(
+                paint_snapshot_rows_presented(
                     &mut self.backing,
                     width,
                     height,
@@ -2726,6 +2728,7 @@ impl App {
                     &self.raster_dirty_rows,
                     self.cursor_blink_visible,
                     self.cursor_style,
+                    CursorPresentation::for_keyboard_focus(self.keyboard_focused),
                 );
             }
             let selection = self

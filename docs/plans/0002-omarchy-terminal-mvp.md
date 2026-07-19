@@ -811,15 +811,17 @@ ADR 0004.
   box drawing, CJK, and fallback cases.
 
 **Implementation:** parameterize fcft, isolated FreeType, production-cache, and
-final-buffer exporters by face pattern, logical size, and scale. Resolve styles
-from the configured primary family rather than hard-coded JetBrains patterns.
-Record face file/index/hash for every matrix cell. Run cheap geometry/property
-tests for the continuous supported size range while keeping the pinned visual
-matrix finite.
+capture exporters by face pattern, logical size, and scale. Resolve styles from
+the configured primary family rather than hard-coded JetBrains patterns. Record
+face file/index/hash for every matrix cell. Run the complete matrix headlessly
+for identity, metrics, masks, placement, fallback, and cache keys. Reserve
+Wayland final-buffer runs for a reduced pairwise/boundary subset that proves
+integration without replaying the entire Cartesian product.
 
-**Acceptance:** every matrix cell passes exact face identity, metrics, advance,
-cell placement, and grayscale alpha. Color/fallback tolerances are explicit.
-No style changes the terminal advance contract or causes cache identity reuse.
+**Acceptance:** every headless matrix cell passes exact face identity, metrics,
+advance, cell placement, and grayscale alpha. Representative graphical boundary
+cases confirm final composition. Color/fallback tolerances are explicit. No
+style changes the terminal advance contract or causes cache identity reuse.
 
 ##### A3. Decorations
 
@@ -833,15 +835,19 @@ No style changes the terminal advance contract or causes cache identity reuse.
    shared row compositor used by full and incremental paths.
 4. Clip decorations to their intended cell spans, including wide leaders,
    spacers, italic overhang, reverse/dim colors, and adjacent styled runs.
-5. Add Foot final-buffer fixtures at every required scale and style.
+5. Lock every formula and scale-rounding boundary with exact vectors derived
+   from pinned Foot source, then use a bounded graphical subset covering 1×, a
+   fractional scale, a high integer scale, and both cursor focus presentations.
 
 If the current wire attributes cannot distinguish single/double/curly
 underline, extend terminal semantics and protocol explicitly; do not collapse
 styles into one boolean while claiming parity.
 
-**Acceptance:** baseline-relative coordinates and thickness match Foot;
-decorations do not leave gaps between adjacent equal runs, cross unrelated
-cells, or differ between full and damaged-row paints.
+**Acceptance:** source-derived baseline-relative coordinates, masks, ordering,
+and thickness match Foot exactly; decorations do not leave gaps between adjacent
+equal runs, cross unrelated cells, or differ between full and damaged-row
+paints. Representative final-buffer cases prove integration without requiring
+every source-derived formula at every graphical scale.
 
 ##### A4. Independent four-sided geometry
 

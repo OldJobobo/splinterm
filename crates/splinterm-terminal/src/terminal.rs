@@ -1507,7 +1507,8 @@ fn rows_semantically_equal(left: &crate::Row, right: &crate::Row) -> bool {
                 && left_attributes.bold() == right_attributes.bold()
                 && left_attributes.dim() == right_attributes.dim()
                 && left_attributes.italic() == right_attributes.italic()
-                && left_attributes.underline() == right_attributes.underline()
+                && left_attributes.underline_style() == right_attributes.underline_style()
+                && left_attributes.underline_color() == right_attributes.underline_color()
                 && left_attributes.strikethrough() == right_attributes.strikethrough()
                 && left_attributes.blink() == right_attributes.blink()
                 && left_attributes.conceal() == right_attributes.conceal()
@@ -2018,6 +2019,26 @@ mod tests {
         assert!(replies.iter().any(|event| {
             matches!(event, TerminalEvent::PtyWrite(bytes) if String::from_utf8_lossy(bytes).contains("rgb:8080/0000/0000"))
         }));
+    }
+
+    #[test]
+    fn row_damage_detects_underline_style_and_color_only_changes() {
+        let mut original = crate::Row::new(1);
+        original[0]
+            .attributes_mut()
+            .set_underline_style(UnderlineStyle::Single);
+
+        let mut styled = original.clone();
+        styled[0]
+            .attributes_mut()
+            .set_underline_style(UnderlineStyle::Curly);
+        assert!(!rows_semantically_equal(&original, &styled));
+
+        let mut colored = original.clone();
+        colored[0]
+            .attributes_mut()
+            .set_underline_color(Color::rgb(0x12_34_56));
+        assert!(!rows_semantically_equal(&original, &colored));
     }
 
     #[test]

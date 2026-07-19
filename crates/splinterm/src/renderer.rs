@@ -1308,6 +1308,25 @@ struct SnapshotGlyph {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DecorationMetrics {
+    underline_position: i32,
+    underline_thickness: u32,
+    strike_position: i32,
+    strike_thickness: u32,
+}
+
+impl From<CellMetrics> for DecorationMetrics {
+    fn from(metrics: CellMetrics) -> Self {
+        Self {
+            underline_position: metrics.underline_position,
+            underline_thickness: metrics.underline_thickness,
+            strike_position: metrics.strike_position,
+            strike_thickness: metrics.strike_thickness,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DecorationSpan {
     column: u32,
     row: u32,
@@ -1315,7 +1334,9 @@ struct DecorationSpan {
     underline: UnderlineStyle,
     strikethrough: bool,
     underline_color: [u8; 3],
+    underline_uses_foreground: bool,
     strike_color: [u8; 3],
+    metrics: DecorationMetrics,
 }
 
 /// One immutable, scale-dependent rendering of an owned daemon snapshot.
@@ -1324,6 +1345,9 @@ pub(crate) struct SnapshotFrame {
     decorations: Vec<DecorationSpan>,
     cache: HashMap<GlyphKey, Arc<CachedGlyph>>,
     backgrounds: Vec<[u8; 3]>,
+    foregrounds: Vec<[u8; 3]>,
+    cell_metrics: Vec<DecorationMetrics>,
+    cell_spans: Vec<u32>,
     columns: u32,
     rows: u32,
     cell_width: u32,
@@ -1331,9 +1355,13 @@ pub(crate) struct SnapshotFrame {
     ascent: u32,
     descent: u32,
     baseline: i32,
+    #[allow(dead_code, reason = "retained as the regular-face evidence baseline")]
     underline_position: i32,
+    #[allow(dead_code, reason = "retained as the regular-face evidence baseline")]
     underline_thickness: u32,
+    #[allow(dead_code, reason = "retained as the regular-face evidence baseline")]
     strike_position: i32,
+    #[allow(dead_code, reason = "retained as the regular-face evidence baseline")]
     strike_thickness: u32,
     padding: TerminalPadding,
     cursor: Option<(u32, u32)>,
@@ -1508,11 +1536,16 @@ impl SnapshotFrame {
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
         let cursor_color = packed_rgb(snapshot.default_colors[2]);
+        let default_metrics = DecorationMetrics::from(metrics);
         let mut backgrounds = vec![default_background; background_len];
+        let mut foregrounds = vec![default_foreground; background_len];
+        let mut cell_metrics = vec![default_metrics; background_len];
+        let mut cell_spans = vec![1; background_len];
         let mut glyphs = Vec::new();
         let mut decorations = Vec::new();
         let mut cache = HashMap::new();
         let mut shape_context = ShapeContext::new();
+        let primary_metrics = primary_decoration_metrics(faces, font_size)?;
 
         for row_index in 0..snapshot.rows {
             prepare_snapshot_row(
@@ -1526,8 +1559,12 @@ impl SnapshotFrame {
                 baseline,
                 default_foreground,
                 default_background,
+                &primary_metrics,
                 &mut shape_context,
                 &mut backgrounds,
+                &mut foregrounds,
+                &mut cell_metrics,
+                &mut cell_spans,
                 &mut glyphs,
                 &mut decorations,
                 &mut cache,
@@ -1539,6 +1576,9 @@ impl SnapshotFrame {
             decorations,
             cache,
             backgrounds,
+            foregrounds,
+            cell_metrics,
+            cell_spans,
             columns,
             rows,
             cell_width,
@@ -1576,6 +1616,7 @@ impl SnapshotFrame {
         let font_size = effective_font_size(u32::from(self.scale_120))?;
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
+        let primary_metrics = primary_decoration_metrics(faces, font_size)?;
         let mut shape_context = ShapeContext::new();
         for (row_index, dirty) in dirty_rows.iter().copied().enumerate().take(snapshot.rows) {
             if !dirty {
@@ -1591,6 +1632,7 @@ impl SnapshotFrame {
                 .checked_add(snapshot.columns)
                 .context("snapshot row end overflow")?;
             self.backgrounds[start..end].fill(default_background);
+            self.foregrounds[start..end].fill(default_foreground);
             prepare_snapshot_row(
                 snapshot,
                 row_index,
@@ -1602,8 +1644,12 @@ impl SnapshotFrame {
                 self.baseline,
                 default_foreground,
                 default_background,
+                &primary_metrics,
                 &mut shape_context,
                 &mut self.backgrounds,
+                &mut self.foregrounds,
+                &mut self.cell_metrics,
+                &mut self.cell_spans,
                 &mut self.glyphs,
                 &mut self.decorations,
                 &mut self.cache,
@@ -1632,8 +1678,12 @@ impl SnapshotFrame {
         let rows = self.rows as usize;
         let columns = self.columns as usize;
         let direction = if offset_delta > 0 {
-            self.backgrounds
-                .copy_within(0..(rows - count) * columns, count * columns);
+            let source = 0..(rows - count) * columns;
+            let destination = count * columns;
+            self.backgrounds.copy_within(source.clone(), destination);
+            self.foregrounds.copy_within(source.clone(), destination);
+            self.cell_metrics.copy_within(source.clone(), destination);
+            self.cell_spans.copy_within(source, destination);
             self.glyphs.retain_mut(|glyph| {
                 glyph.row = glyph
                     .row
@@ -1648,8 +1698,11 @@ impl SnapshotFrame {
             });
             ScrollDirection::Reverse
         } else {
-            self.backgrounds
-                .copy_within(count * columns..rows * columns, 0);
+            let source = count * columns..rows * columns;
+            self.backgrounds.copy_within(source.clone(), 0);
+            self.foregrounds.copy_within(source.clone(), 0);
+            self.cell_metrics.copy_within(source.clone(), 0);
+            self.cell_spans.copy_within(source, 0);
             self.glyphs.retain_mut(|glyph| {
                 let keep = glyph.row >= u32::try_from(count).unwrap_or(u32::MAX);
                 if keep {
@@ -1742,12 +1795,32 @@ pub fn capture_final_buffer(
     show_cursor: bool,
     cursor_style: CursorStyle,
 ) -> Result<FinalBufferCapture> {
+    capture_final_buffer_presented(
+        snapshot,
+        scale_120,
+        show_cursor,
+        cursor_style,
+        CursorPresentation::FOCUSED_STEADY,
+    )
+}
+
+/// Captures with an explicit semantic focus/unfocused-cursor policy.
+///
+/// # Errors
+/// Returns an error for invalid snapshot, font, scale, geometry, or allocation bounds.
+pub fn capture_final_buffer_presented(
+    snapshot: &TerminalSnapshot,
+    scale_120: u32,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+    presentation: CursorPresentation,
+) -> Result<FinalBufferCapture> {
     snapshot
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
     let frame = SnapshotFrame::load_scaled(snapshot, scale_120)?;
     let geometry = frame.tight_geometry()?;
-    capture_prepared_frame(&frame, geometry, show_cursor, cursor_style)
+    capture_prepared_frame(&frame, geometry, show_cursor, cursor_style, presentation)
 }
 
 /// Paints a snapshot into an explicitly configured logical surface.
@@ -1765,6 +1838,34 @@ pub fn capture_final_buffer_sized(
     show_cursor: bool,
     cursor_style: CursorStyle,
 ) -> Result<FinalBufferCapture> {
+    capture_final_buffer_sized_presented(
+        snapshot,
+        scale_120,
+        logical_width,
+        logical_height,
+        show_cursor,
+        cursor_style,
+        CursorPresentation::FOCUSED_STEADY,
+    )
+}
+
+/// Sized capture with an explicit semantic focus/unfocused-cursor policy.
+///
+/// # Errors
+/// Returns an error when the declared surface cannot contain the exact snapshot grid.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "capture geometry and cursor policy are explicit"
+)]
+pub fn capture_final_buffer_sized_presented(
+    snapshot: &TerminalSnapshot,
+    scale_120: u32,
+    logical_width: u32,
+    logical_height: u32,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+    presentation: CursorPresentation,
+) -> Result<FinalBufferCapture> {
     snapshot
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -1778,7 +1879,7 @@ pub fn capture_final_buffer_sized(
         frame.padding,
         scale_120,
     )?;
-    capture_prepared_frame(&frame, geometry, show_cursor, cursor_style)
+    capture_prepared_frame(&frame, geometry, show_cursor, cursor_style, presentation)
 }
 
 fn capture_prepared_frame(
@@ -1786,6 +1887,7 @@ fn capture_prepared_frame(
     geometry: WindowGeometry,
     show_cursor: bool,
     cursor_style: CursorStyle,
+    presentation: CursorPresentation,
 ) -> Result<FinalBufferCapture> {
     let origin_x = geometry.actual_padding.left;
     let origin_y = geometry.actual_padding.top;
@@ -1797,7 +1899,7 @@ fn capture_prepared_frame(
         .and_then(|stride| usize::try_from(height).ok()?.checked_mul(stride))
         .context("capture allocation overflow")?;
     let mut pixels = vec![0_u8; length];
-    paint_snapshot(
+    paint_snapshot_presented(
         &mut pixels,
         width,
         height,
@@ -1805,6 +1907,7 @@ fn capture_prepared_frame(
         &geometry,
         show_cursor,
         cursor_style,
+        presentation,
     );
     Ok(FinalBufferCapture {
         pixels,
@@ -1855,6 +1958,18 @@ fn snapshot_cursor(snapshot: &TerminalSnapshot, columns: u32, rows: u32) -> Opti
     }
 }
 
+fn primary_decoration_metrics(
+    faces: &[FontFace],
+    font_size: f32,
+) -> Result<[DecorationMetrics; 4]> {
+    Ok([
+        cell_metrics(&faces[SNAPSHOT_PRIMARY_REGULAR], font_size)?.into(),
+        cell_metrics(&faces[SNAPSHOT_PRIMARY_BOLD], font_size)?.into(),
+        cell_metrics(&faces[SNAPSHOT_PRIMARY_ITALIC], font_size)?.into(),
+        cell_metrics(&faces[SNAPSHOT_PRIMARY_BOLD_ITALIC], font_size)?.into(),
+    ])
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -1871,8 +1986,12 @@ fn prepare_snapshot_row(
     baseline: i32,
     default_foreground: [u8; 3],
     default_background: [u8; 3],
+    primary_metrics: &[DecorationMetrics; 4],
     shape_context: &mut ShapeContext,
     backgrounds: &mut [[u8; 3]],
+    foregrounds: &mut [[u8; 3]],
+    cell_metrics_by_cell: &mut [DecorationMetrics],
+    cell_spans: &mut [u32],
     glyphs: &mut Vec<SnapshotGlyph>,
     decorations: &mut Vec<DecorationSpan>,
     cache: &mut HashMap<GlyphKey, Arc<CachedGlyph>>,
@@ -1892,10 +2011,19 @@ fn prepare_snapshot_row(
             .and_then(|index| index.checked_add(column_index))
             .context("snapshot cell index overflow")?;
         backgrounds[background_index] = background;
-        if cell.spacer_remaining.is_some() || cell.attributes.conceal {
+        foregrounds[background_index] = foreground;
+        let face_index = primary_face_index(&cell.attributes);
+        let metrics = primary_metrics[face_index];
+        cell_metrics_by_cell[background_index] = metrics;
+        if cell.spacer_remaining.is_some() {
+            cell_spans[background_index] = 0;
             continue;
         }
         let cells = leader_span(&row.cells, column_index);
+        cell_spans[background_index] = cells;
+        if cell.attributes.conceal {
+            continue;
+        }
         let column = u32::try_from(column_index).context("column fits u32")?;
         let row_number = u32::try_from(row_index).context("row fits u32")?;
         if cell.attributes.underline != UnderlineStyle::None || cell.attributes.strikethrough {
@@ -1912,7 +2040,10 @@ fn prepare_snapshot_row(
                 underline: cell.attributes.underline,
                 strikethrough: cell.attributes.strikethrough,
                 underline_color,
+                underline_uses_foreground: cell.attributes.underline_color_source
+                    == ColorSource::Default,
                 strike_color: foreground,
+                metrics,
             });
         }
         if !cell_is_renderable(cell) {
@@ -2081,13 +2212,13 @@ fn rendition_colors(
         palette,
         default_background,
     );
+    if attributes.reverse {
+        std::mem::swap(&mut foreground, &mut background);
+    }
     if attributes.dim {
         for component in &mut foreground {
             *component = u8::try_from(u16::from(*component) * 2 / 3).expect("dimmed color fits u8");
         }
-    }
-    if attributes.reverse {
-        std::mem::swap(&mut foreground, &mut background);
     }
     (foreground, background)
 }
@@ -2184,6 +2315,192 @@ pub(crate) fn paint_snapshot_overlays(
     }
 }
 
+const PIXMAN_FIXED_ONE: i64 = 1 << 16;
+const PIXMAN_A8_Y_SAMPLES: i64 = 15;
+const PIXMAN_A8_X_SAMPLES: i64 = 17;
+const PIXMAN_A8_Y_STEP: i64 = PIXMAN_FIXED_ONE / PIXMAN_A8_Y_SAMPLES;
+const PIXMAN_A8_Y_FIRST: i64 =
+    (PIXMAN_FIXED_ONE - (PIXMAN_A8_Y_SAMPLES - 1) * PIXMAN_A8_Y_STEP) / 2;
+const PIXMAN_A8_X_STEP: i64 = PIXMAN_FIXED_ONE / PIXMAN_A8_X_SAMPLES;
+const PIXMAN_A8_X_FIRST: i64 =
+    (PIXMAN_FIXED_ONE - (PIXMAN_A8_X_SAMPLES - 1) * PIXMAN_A8_X_STEP) / 2;
+
+fn pixman_edge_x_at(first: (i32, i32), second: (i32, i32), sample_y_fixed: i64) -> i64 {
+    let (top, bottom) = if first.1 <= second.1 {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let x_top = i64::from(top.0) * PIXMAN_FIXED_ONE;
+    let y_top = i64::from(top.1) * PIXMAN_FIXED_ONE;
+    let x_bottom = i64::from(bottom.0) * PIXMAN_FIXED_ONE;
+    let y_bottom = i64::from(bottom.1) * PIXMAN_FIXED_ONE;
+    let dx = x_bottom - x_top;
+    let dy = y_bottom - y_top;
+    if dy == 0 {
+        return x_top;
+    }
+    let (sign_dx, step_x, edge_dx, edge_error) = if dx >= 0 {
+        (1_i64, dx / dy, dx % dy, -dy)
+    } else {
+        (-1_i64, -((-dx) / dy), (-dx) % dy, 0_i64)
+    };
+    let steps = sample_y_fixed - y_top;
+    let mut x = x_top + steps * step_x;
+    let mut next_error = edge_error + steps * edge_dx;
+    if steps >= 0 {
+        if next_error > 0 {
+            let crossed = (next_error + dy - 1) / dy;
+            next_error -= crossed * dy;
+            x += crossed * sign_dx;
+        }
+    } else if next_error <= -dy {
+        let crossed = (-next_error) / dy;
+        next_error += crossed * dy;
+        x -= crossed * sign_dx;
+    }
+    let _ = next_error;
+    x
+}
+
+fn pixman_a8_sample_x(x_fixed: i64) -> i64 {
+    (x_fixed.rem_euclid(PIXMAN_FIXED_ONE) + PIXMAN_A8_X_FIRST) / PIXMAN_A8_X_STEP
+}
+
+fn pixman_a8_add_span(mask: &mut [u8], row: usize, width: usize, mut left: i64, mut right: i64) {
+    left = left.max(0);
+    if right.div_euclid(PIXMAN_FIXED_ONE) >= i64::try_from(width).unwrap_or(i64::MAX) {
+        right = i64::try_from(width)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(PIXMAN_FIXED_ONE)
+            .saturating_sub(1);
+    }
+    if right <= left {
+        return;
+    }
+    let left_pixel = left.div_euclid(PIXMAN_FIXED_ONE);
+    let right_pixel = right.div_euclid(PIXMAN_FIXED_ONE);
+    if left_pixel < 0 || right_pixel < 0 {
+        return;
+    }
+    let Ok(left_pixel) = usize::try_from(left_pixel) else {
+        return;
+    };
+    let Ok(right_pixel) = usize::try_from(right_pixel) else {
+        return;
+    };
+    if left_pixel >= width || right_pixel >= width {
+        return;
+    }
+    let left_samples = pixman_a8_sample_x(left);
+    let right_samples = pixman_a8_sample_x(right);
+    let mut add = |column: usize, coverage: i64| {
+        let index = row * width + column;
+        let coverage = u8::try_from(coverage.clamp(0, 255)).unwrap_or(255);
+        mask[index] = mask[index].saturating_add(coverage);
+    };
+    if left_pixel == right_pixel {
+        add(left_pixel, right_samples - left_samples);
+        return;
+    }
+    add(left_pixel, PIXMAN_A8_X_SAMPLES - left_samples);
+    for column in left_pixel + 1..right_pixel {
+        add(column, PIXMAN_A8_X_SAMPLES);
+    }
+    add(right_pixel, right_samples);
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "terminal-bounded dimensions keep the rounded pixman edge within i32"
+)]
+fn pixman_curly_a8_mask(span_width: u32, thickness: u32) -> Vec<u8> {
+    let height = thickness.saturating_mul(3);
+    let Some(length) = usize::try_from(span_width)
+        .ok()
+        .and_then(|width| usize::try_from(height).ok()?.checked_mul(width))
+    else {
+        return Vec::new();
+    };
+    let mut mask = vec![0_u8; length];
+    if span_width == 0 || thickness == 0 {
+        return mask;
+    }
+    let full = i32::try_from(span_width).unwrap_or(i32::MAX);
+    let half = full / 2;
+    let bottom = i32::try_from(height).unwrap_or(i32::MAX);
+    let thickness_f = f64::from(thickness);
+    let bottom_f = f64::from(bottom);
+    let width_f = f64::from(span_width);
+    let edge = ((thickness_f.powi(2)
+        + thickness_f.powi(2) * bottom_f.powi(2) / (width_f.powi(2) / 4.0))
+        .sqrt()
+        / 2.0)
+        .round() as i32;
+    let traps = [
+        (
+            ((0, bottom - edge), (half, -edge)),
+            ((0, bottom + edge), (half, edge)),
+        ),
+        (
+            ((half, edge), (full, bottom + edge)),
+            ((half, -edge), (full, bottom - edge)),
+        ),
+    ];
+    let width = usize::try_from(span_width).unwrap_or(0);
+    for row in 0..height {
+        for sample in 0..PIXMAN_A8_Y_SAMPLES {
+            let sample_y =
+                i64::from(row) * PIXMAN_FIXED_ONE + PIXMAN_A8_Y_FIRST + sample * PIXMAN_A8_Y_STEP;
+            for (left, right) in traps {
+                let left_x = pixman_edge_x_at(left.0, left.1, sample_y);
+                let right_x = pixman_edge_x_at(right.0, right.1, sample_y);
+                pixman_a8_add_span(
+                    &mut mask,
+                    usize::try_from(row).unwrap_or(0),
+                    width,
+                    left_x,
+                    right_x,
+                );
+            }
+        }
+    }
+    mask
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Pixman-equivalent A8 mask composition keeps geometry explicit"
+)]
+fn paint_curly_trapezoids(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    top: i32,
+    span_width: u32,
+    thickness: u32,
+    color: [u8; 4],
+) {
+    let mask = pixman_curly_a8_mask(span_width, thickness);
+    let mask_width = usize::try_from(span_width).unwrap_or(0);
+    for (index, coverage) in mask.into_iter().enumerate() {
+        if coverage == 0 || mask_width == 0 {
+            continue;
+        }
+        let alpha = u8::try_from((u16::from(coverage) * u16::from(color[3]) + 127) / 255)
+            .unwrap_or(u8::MAX);
+        blend_pixel(
+            canvas,
+            width,
+            height,
+            x + i32::try_from(index % mask_width).unwrap_or(0),
+            top + i32::try_from(index / mask_width).unwrap_or(0),
+            [color[0], color[1], color[2], alpha],
+        );
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "underline raster geometry and destination buffer are explicit"
@@ -2195,6 +2512,7 @@ fn paint_underline_style(
     x: i32,
     y: i32,
     span_width: u32,
+    cell_width: u32,
     thickness: u32,
     style: UnderlineStyle,
     color: [u8; 4],
@@ -2205,7 +2523,6 @@ fn paint_underline_style(
             fill_rect(canvas, width, height, (x, y, span_width, thickness), color);
         }
         UnderlineStyle::Double => {
-            let gap = thickness.max(1);
             fill_rect(canvas, width, height, (x, y, span_width, thickness), color);
             fill_rect(
                 canvas,
@@ -2213,7 +2530,7 @@ fn paint_underline_style(
                 height,
                 (
                     x,
-                    y + i32::try_from(thickness.saturating_add(gap)).unwrap_or(0),
+                    y + i32::try_from(thickness.saturating_mul(2)).unwrap_or(0),
                     span_width,
                     thickness,
                 ),
@@ -2221,124 +2538,135 @@ fn paint_underline_style(
             );
         }
         UnderlineStyle::Curly => {
-            let amplitude = thickness.max(1);
-            for offset in 0..span_width {
-                let phase = offset % 4;
-                let wave = if phase == 1 || phase == 2 {
-                    amplitude
-                } else {
-                    0
-                };
-                fill_rect(
-                    canvas,
-                    width,
-                    height,
-                    (
-                        x + i32::try_from(offset).unwrap_or(0),
-                        y + i32::try_from(wave).unwrap_or(0),
-                        1,
-                        thickness,
-                    ),
-                    color,
-                );
-            }
+            paint_curly_trapezoids(canvas, width, height, x, y, span_width, thickness, color);
         }
         UnderlineStyle::Dotted => {
-            let step = thickness.saturating_mul(2).max(2);
-            for offset in (0..span_width).step_by(usize::try_from(step).unwrap_or(2)) {
+            let mut per_cell = (cell_width / thickness) / 2;
+            if per_cell == 0 {
+                per_cell = 1;
+            }
+            let mut spacing = vec![thickness; usize::try_from(per_cell).unwrap_or(1)];
+            let used = per_cell.saturating_mul(2).saturating_mul(thickness);
+            let mut remaining = cell_width.saturating_sub(used);
+            let mut index = 0_usize;
+            while remaining > 0 {
+                spacing[index] = spacing[index].saturating_add(1);
+                remaining -= 1;
+                index = (index + 1) % spacing.len();
+            }
+            let mut dot_x = 0_u32;
+            for gap in spacing {
+                if dot_x >= span_width {
+                    break;
+                }
                 fill_rect(
                     canvas,
                     width,
                     height,
                     (
-                        x + i32::try_from(offset).unwrap_or(0),
+                        x + i32::try_from(dot_x).unwrap_or(0),
                         y,
-                        thickness,
+                        thickness.min(span_width - dot_x),
                         thickness,
                     ),
                     color,
                 );
+                dot_x = dot_x.saturating_add(thickness).saturating_add(gap);
             }
         }
         UnderlineStyle::Dashed => {
-            let dash = thickness.saturating_mul(3).max(3);
-            let step = dash.saturating_add(thickness.saturating_mul(2).max(2));
-            for offset in (0..span_width).step_by(usize::try_from(step).unwrap_or(5)) {
-                fill_rect(
-                    canvas,
-                    width,
-                    height,
-                    (
-                        x + i32::try_from(offset).unwrap_or(0),
-                        y,
-                        dash.min(span_width.saturating_sub(offset)),
-                        thickness,
-                    ),
-                    color,
-                );
+            let dash = span_width.div_ceil(3);
+            for offset in [0, dash.saturating_mul(2)] {
+                if offset < span_width {
+                    fill_rect(
+                        canvas,
+                        width,
+                        height,
+                        (
+                            x + i32::try_from(offset).unwrap_or(0),
+                            y,
+                            dash.min(span_width - offset),
+                            thickness,
+                        ),
+                        color,
+                    );
+                }
             }
         }
     }
 }
 
-fn paint_decorations(
+fn underline_y_offset(
+    cell_height: u32,
+    baseline: i32,
+    metrics: DecorationMetrics,
+    style: UnderlineStyle,
+) -> i32 {
+    let thickness = metrics.underline_thickness.max(1);
+    let bottom_reserve = match style {
+        UnderlineStyle::Double | UnderlineStyle::Curly => thickness.saturating_mul(3),
+        _ => thickness,
+    };
+    let natural = baseline - metrics.underline_position;
+    let maximum = i32::try_from(cell_height)
+        .unwrap_or(i32::MAX)
+        .saturating_sub(i32::try_from(bottom_reserve).unwrap_or(i32::MAX));
+    natural.min(maximum)
+}
+
+fn paint_decoration_span(
     canvas: &mut [u8],
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
     geometry: &WindowGeometry,
-    dirty_rows: Option<&[bool]>,
+    span: &DecorationSpan,
+    foreground_override: Option<[u8; 3]>,
 ) {
-    for span in &frame.decorations {
-        if dirty_rows.is_some_and(|rows| {
-            !rows
-                .get(usize::try_from(span.row).expect("row fits usize"))
-                .copied()
-                .unwrap_or(false)
-        }) {
-            continue;
-        }
-        let Some((x, row_top, _, _)) = frame.cell_rect(geometry, span.column, span.row) else {
-            continue;
-        };
-        let span_width = frame.cell_width.saturating_mul(span.cells);
-        let underline_color = [
-            span.underline_color[0],
-            span.underline_color[1],
-            span.underline_color[2],
-            0xff,
-        ];
-        paint_underline_style(
+    let Some((x, row_top, _, _)) = frame.cell_rect(geometry, span.column, span.row) else {
+        return;
+    };
+    let span_width = frame.cell_width.saturating_mul(span.cells);
+    let underline_rgb = if span.underline_uses_foreground {
+        foreground_override.unwrap_or(span.underline_color)
+    } else {
+        span.underline_color
+    };
+    let underline_color = [underline_rgb[0], underline_rgb[1], underline_rgb[2], 0xff];
+    let thickness = span.metrics.underline_thickness.max(1);
+    paint_underline_style(
+        canvas,
+        width,
+        height,
+        x,
+        row_top
+            + underline_y_offset(
+                frame.cell_height,
+                frame.baseline,
+                span.metrics,
+                span.underline,
+            ),
+        span_width,
+        frame.cell_width,
+        thickness,
+        span.underline,
+        underline_color,
+    );
+    if span.strikethrough {
+        let strike_rgb = foreground_override.unwrap_or(span.strike_color);
+        let strike_color = [strike_rgb[0], strike_rgb[1], strike_rgb[2], 0xff];
+        fill_rect(
             canvas,
             width,
             height,
-            x,
-            row_top + frame.baseline - frame.underline_position,
-            span_width,
-            frame.underline_thickness,
-            span.underline,
-            underline_color,
+            (
+                x,
+                row_top + frame.baseline - span.metrics.strike_position,
+                span_width,
+                span.metrics.strike_thickness,
+            ),
+            strike_color,
         );
-        if span.strikethrough {
-            let strike_color = [
-                span.strike_color[0],
-                span.strike_color[1],
-                span.strike_color[2],
-                0xff,
-            ];
-            fill_rect(
-                canvas,
-                width,
-                height,
-                (
-                    x,
-                    row_top + frame.baseline - frame.strike_position,
-                    span_width,
-                    frame.strike_thickness,
-                ),
-                strike_color,
-            );
-        }
     }
 }
 
@@ -2370,6 +2698,7 @@ fn paint_placed_glyph(
     );
 }
 
+#[cfg(test)]
 fn paint_glyphs(
     canvas: &mut [u8],
     width: u32,
@@ -2406,168 +2735,262 @@ fn paint_glyphs(
     }
 }
 
-pub(crate) fn paint_snapshot(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnfocusedCursorStyle {
+    Unchanged,
+    Hollow,
+    None,
+}
+
+impl UnfocusedCursorStyle {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::Hollow => "hollow",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CursorPresentation {
+    pub keyboard_focused: bool,
+    pub unfocused_style: UnfocusedCursorStyle,
+}
+
+impl CursorPresentation {
+    pub const FOCUSED_STEADY: Self = Self {
+        keyboard_focused: true,
+        unfocused_style: UnfocusedCursorStyle::Unchanged,
+    };
+
+    #[must_use]
+    pub const fn for_keyboard_focus(keyboard_focused: bool) -> Self {
+        Self {
+            keyboard_focused,
+            unfocused_style: UnfocusedCursorStyle::Hollow,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectiveCursorShape {
+    Block,
+    Beam,
+    Underline,
+    Hollow,
+    None,
+}
+
+impl EffectiveCursorShape {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Beam => "beam",
+            Self::Underline => "underline",
+            Self::Hollow => "hollow",
+            Self::None => "none",
+        }
+    }
+}
+
+#[must_use]
+pub const fn effective_cursor_shape(
+    configured: CursorStyle,
+    visible: bool,
+    presentation: CursorPresentation,
+) -> EffectiveCursorShape {
+    if !visible {
+        return EffectiveCursorShape::None;
+    }
+    if !presentation.keyboard_focused {
+        match presentation.unfocused_style {
+            UnfocusedCursorStyle::Hollow => return EffectiveCursorShape::Hollow,
+            UnfocusedCursorStyle::None => return EffectiveCursorShape::None,
+            UnfocusedCursorStyle::Unchanged => {}
+        }
+    }
+    match configured {
+        CursorStyle::Block => EffectiveCursorShape::Block,
+        CursorStyle::Beam => EffectiveCursorShape::Beam,
+        CursorStyle::Underline => EffectiveCursorShape::Underline,
+    }
+}
+
+fn cursor_colors_for_cell(
+    explicit_cursor: Option<[u8; 3]>,
+    foreground: [u8; 3],
+    background: [u8; 3],
+) -> ([u8; 3], [u8; 3]) {
+    let mut cursor = explicit_cursor.unwrap_or(foreground);
+    let mut text = background;
+    if cursor == text {
+        text = background;
+        cursor = foreground;
+        if cursor == text {
+            cursor = cursor.map(|channel| !channel);
+        }
+    }
+    (cursor, text)
+}
+
+fn cursor_span(frame: &SnapshotFrame, column: u32, row: u32) -> u32 {
+    usize::try_from(row * frame.columns + column)
+        .ok()
+        .and_then(|index| frame.cell_spans.get(index))
+        .copied()
+        .unwrap_or(1)
+        .max(1)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "cursor geometry is an explicit Foot contract"
+)]
+fn paint_effective_cursor(
     canvas: &mut [u8],
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
-    geometry: &WindowGeometry,
-    cursor_visible: bool,
-    cursor_style: CursorStyle,
+    x: i32,
+    y: i32,
+    span: u32,
+    metrics: DecorationMetrics,
+    color: [u8; 4],
+    shape: EffectiveCursorShape,
 ) {
-    for pixel in canvas.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[
-            frame.canvas_background[2],
-            frame.canvas_background[1],
-            frame.canvas_background[0],
-            0xff,
-        ]);
-    }
-    for row in 0..frame.rows {
-        for column in 0..frame.columns {
-            let index = usize::try_from(row * frame.columns + column).expect("background index");
-            let color = frame.backgrounds[index];
-            let Some(rect) = frame.cell_rect(geometry, column, row) else {
-                continue;
-            };
-            fill_rect(
-                canvas,
-                width,
-                height,
-                rect,
-                [color[0], color[1], color[2], 0xff],
-            );
-        }
-    }
-    paint_glyphs(canvas, width, height, frame, geometry, None);
-    paint_decorations(canvas, width, height, frame, geometry, None);
-    if cursor_visible {
-        let Some((column, row)) = frame.cursor else {
-            return;
-        };
-        let Some((x, y, _, _)) = frame.cell_rect(geometry, column, row) else {
-            return;
-        };
-        let color = [
-            frame.cursor_color[0],
-            frame.cursor_color[1],
-            frame.cursor_color[2],
-            0xff,
-        ];
-        paint_cursor_for_frame(
+    let cursor_width = frame.cell_width.saturating_mul(span);
+    match shape {
+        EffectiveCursorShape::Block => fill_rect(
             canvas,
             width,
             height,
-            frame,
-            geometry,
-            column,
-            row,
-            x,
-            y,
+            (x, y, cursor_width, frame.cell_height),
             color,
-            cursor_style,
-        );
+        ),
+        EffectiveCursorShape::Beam => {
+            let thickness = (2 * u32::from(frame.scale_120) + 60) / 120;
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    x,
+                    y + frame.baseline - i32::try_from(frame.ascent).unwrap_or(i32::MAX),
+                    thickness,
+                    frame.ascent.saturating_add(frame.descent),
+                ),
+                color,
+            );
+        }
+        EffectiveCursorShape::Underline => {
+            let thickness = metrics.underline_thickness.max(1);
+            let natural = frame
+                .baseline
+                .saturating_sub(metrics.underline_position)
+                .saturating_add(i32::try_from(thickness).unwrap_or(i32::MAX));
+            let maximum =
+                i32::try_from(frame.cell_height.saturating_sub(thickness)).unwrap_or(i32::MAX);
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (x, y + natural.min(maximum), cursor_width, thickness),
+                color,
+            );
+        }
+        EffectiveCursorShape::Hollow => {
+            let border = (u32::from(frame.scale_120) + 60) / 120;
+            let border = border.min(frame.cell_height).min(cursor_width);
+            for rect in [
+                (x, y, cursor_width, border),
+                (x, y, border, frame.cell_height),
+                (
+                    x + i32::try_from(cursor_width.saturating_sub(border)).unwrap_or(0),
+                    y,
+                    border,
+                    frame.cell_height,
+                ),
+                (
+                    x,
+                    y + i32::try_from(frame.cell_height.saturating_sub(border)).unwrap_or(0),
+                    cursor_width,
+                    border,
+                ),
+            ] {
+                fill_rect(canvas, width, height, rect, color);
+            }
+        }
+        EffectiveCursorShape::None => {}
     }
 }
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "the configured window geometry and damage inputs remain explicit"
+    reason = "one compositor owns all per-cell inputs"
 )]
-pub(crate) fn paint_snapshot_rows(
+fn compose_snapshot_rows(
     canvas: &mut [u8],
     width: u32,
     height: u32,
     frame: &SnapshotFrame,
     geometry: &WindowGeometry,
-    dirty_rows: &[bool],
+    dirty_rows: Option<&[bool]>,
     cursor_visible: bool,
     cursor_style: CursorStyle,
+    presentation: CursorPresentation,
 ) {
+    let effective = effective_cursor_shape(cursor_style, cursor_visible, presentation);
     for row in 0..frame.rows {
-        if !dirty_rows
-            .get(usize::try_from(row).expect("row fits usize"))
-            .copied()
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        for column in 0..frame.columns {
-            let index = usize::try_from(row * frame.columns + column).expect("background index");
-            let color = frame.backgrounds[index];
-            let Some(rect) = frame.cell_rect(geometry, column, row) else {
-                continue;
-            };
-            fill_rect(
-                canvas,
-                width,
-                height,
-                rect,
-                [color[0], color[1], color[2], 0xff],
-            );
-        }
-    }
-    paint_glyphs(canvas, width, height, frame, geometry, Some(dirty_rows));
-    paint_decorations(canvas, width, height, frame, geometry, Some(dirty_rows));
-    if cursor_visible {
-        if let Some((column, row)) = frame.cursor.filter(|(_, row)| {
-            dirty_rows
-                .get(usize::try_from(*row).expect("row fits usize"))
+        if dirty_rows.is_some_and(|rows| {
+            !rows
+                .get(usize::try_from(row).expect("row fits usize"))
                 .copied()
                 .unwrap_or(false)
         }) {
-            let Some((x, y, _, _)) = frame.cell_rect(geometry, column, row) else {
-                return;
-            };
-            let color = [
-                frame.cursor_color[0],
-                frame.cursor_color[1],
-                frame.cursor_color[2],
-                0xff,
-            ];
-            paint_cursor_for_frame(
-                canvas,
-                width,
-                height,
-                frame,
-                geometry,
-                column,
-                row,
-                x,
-                y,
-                color,
-                cursor_style,
-            );
+            continue;
         }
-    }
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "cursor geometry and Foot's block-glyph recolor are explicit and allocation-free"
-)]
-fn paint_cursor_for_frame(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    frame: &SnapshotFrame,
-    geometry: &WindowGeometry,
-    column: u32,
-    row: u32,
-    x: i32,
-    y: i32,
-    color: [u8; 4],
-    style: CursorStyle,
-) {
-    match style {
-        CursorStyle::Block => {
+        for column in (0..frame.columns).rev() {
+            let index = usize::try_from(row * frame.columns + column).expect("cell index");
+            let Some((x, y, cell_width, cell_height)) = frame.cell_rect(geometry, column, row)
+            else {
+                continue;
+            };
+            let background = frame.backgrounds[index];
+            let foreground = frame.foregrounds[index];
+            let background_span = frame.cell_spans[index].max(1);
             fill_rect(
                 canvas,
                 width,
                 height,
-                (x, y, frame.cell_width, frame.cell_height),
-                color,
+                (
+                    x,
+                    y,
+                    cell_width.saturating_mul(background_span),
+                    cell_height,
+                ),
+                [background[0], background[1], background[2], 0xff],
             );
+            let has_cursor = frame.cursor == Some((column, row));
+            let span = cursor_span(frame, column, row);
+            let (cursor_color, cursor_text) =
+                cursor_colors_for_cell(Some(frame.cursor_color), foreground, background);
+            if has_cursor && effective == EffectiveCursorShape::Block {
+                paint_effective_cursor(
+                    canvas,
+                    width,
+                    height,
+                    frame,
+                    x,
+                    y,
+                    span,
+                    frame.cell_metrics[index],
+                    [cursor_color[0], cursor_color[1], cursor_color[2], 0xff],
+                    effective,
+                );
+            }
             for placed in frame
                 .glyphs
                 .iter()
@@ -2581,24 +3004,149 @@ fn paint_cursor_for_frame(
                     frame,
                     geometry,
                     placed,
-                    frame.canvas_background,
+                    if has_cursor && effective == EffectiveCursorShape::Block {
+                        cursor_text
+                    } else {
+                        placed.foreground
+                    },
+                );
+            }
+            for decoration in frame
+                .decorations
+                .iter()
+                .filter(|span| span.row == row && span.column == column)
+            {
+                paint_decoration_span(
+                    canvas,
+                    width,
+                    height,
+                    frame,
+                    geometry,
+                    decoration,
+                    (has_cursor && effective == EffectiveCursorShape::Block).then_some(cursor_text),
+                );
+            }
+            if has_cursor && effective != EffectiveCursorShape::Block {
+                paint_effective_cursor(
+                    canvas,
+                    width,
+                    height,
+                    frame,
+                    x,
+                    y,
+                    span,
+                    frame.cell_metrics[index],
+                    [cursor_color[0], cursor_color[1], cursor_color[2], 0xff],
+                    effective,
                 );
             }
         }
-        CursorStyle::Beam => fill_rect(canvas, width, height, (x, y, 2, frame.cell_height), color),
-        CursorStyle::Underline => fill_rect(
-            canvas,
-            width,
-            height,
-            (
-                x,
-                y + i32::try_from(frame.cell_height.saturating_sub(2)).unwrap_or(0),
-                frame.cell_width,
-                1,
-            ),
-            color,
-        ),
     }
+}
+
+#[allow(clippy::too_many_arguments, reason = "cursor presentation is explicit")]
+pub(crate) fn paint_snapshot_presented(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
+    cursor_visible: bool,
+    cursor_style: CursorStyle,
+    presentation: CursorPresentation,
+) {
+    for pixel in canvas.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[
+            frame.canvas_background[2],
+            frame.canvas_background[1],
+            frame.canvas_background[0],
+            0xff,
+        ]);
+    }
+    compose_snapshot_rows(
+        canvas,
+        width,
+        height,
+        frame,
+        geometry,
+        None,
+        cursor_visible,
+        cursor_style,
+        presentation,
+    );
+}
+
+pub(crate) fn paint_snapshot(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
+    cursor_visible: bool,
+    cursor_style: CursorStyle,
+) {
+    paint_snapshot_presented(
+        canvas,
+        width,
+        height,
+        frame,
+        geometry,
+        cursor_visible,
+        cursor_style,
+        CursorPresentation::FOCUSED_STEADY,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "damage and cursor presentation are explicit"
+)]
+pub(crate) fn paint_snapshot_rows_presented(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
+    dirty_rows: &[bool],
+    cursor_visible: bool,
+    cursor_style: CursorStyle,
+    presentation: CursorPresentation,
+) {
+    compose_snapshot_rows(
+        canvas,
+        width,
+        height,
+        frame,
+        geometry,
+        Some(dirty_rows),
+        cursor_visible,
+        cursor_style,
+        presentation,
+    );
+}
+
+#[allow(clippy::too_many_arguments, reason = "damage inputs remain explicit")]
+pub(crate) fn paint_snapshot_rows(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
+    dirty_rows: &[bool],
+    cursor_visible: bool,
+    cursor_style: CursorStyle,
+) {
+    paint_snapshot_rows_presented(
+        canvas,
+        width,
+        height,
+        frame,
+        geometry,
+        dirty_rows,
+        cursor_visible,
+        cursor_style,
+        CursorPresentation::FOCUSED_STEADY,
+    );
 }
 
 pub(crate) fn scroll_snapshot_pixels(
@@ -3306,7 +3854,14 @@ mod tests {
             bottom: 7,
         };
         let geometry = frame.tight_geometry().unwrap();
-        let capture = capture_prepared_frame(&frame, geometry, false, CursorStyle::Block).unwrap();
+        let capture = capture_prepared_frame(
+            &frame,
+            geometry,
+            false,
+            CursorStyle::Block,
+            CursorPresentation::FOCUSED_STEADY,
+        )
+        .unwrap();
         assert_eq!(capture.requested_padding, frame.padding);
         assert_ne!(capture.padding_left, capture.padding_right);
         assert_ne!(capture.padding_top, capture.padding_bottom);
@@ -3345,6 +3900,246 @@ mod tests {
         assert_eq!(capture.residual_bottom, tight.residual_bottom + 1);
     }
 
+    fn underline_red_mask(
+        style: UnderlineStyle,
+        width: u32,
+        cell_width: u32,
+        thickness: u32,
+    ) -> Vec<u8> {
+        let height = thickness.saturating_mul(3).max(1);
+        let mut canvas = vec![0; usize::try_from(width * height * 4).unwrap()];
+        paint_underline_style(
+            &mut canvas,
+            width,
+            height,
+            0,
+            0,
+            width,
+            cell_width,
+            thickness,
+            style,
+            [255, 255, 255, 255],
+        );
+        canvas.chunks_exact(4).map(|pixel| pixel[2]).collect()
+    }
+
+    #[test]
+    fn foot_dashed_dotted_and_double_vectors_are_exact() {
+        let dashed = underline_red_mask(UnderlineStyle::Dashed, 14, 7, 1);
+        assert_eq!(
+            &dashed[..14],
+            &[255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255, 255, 255]
+        );
+        let dotted = underline_red_mask(UnderlineStyle::Dotted, 7, 7, 1);
+        assert_eq!(&dotted[..7], &[255, 0, 0, 255, 0, 255, 0]);
+        let double = underline_red_mask(UnderlineStyle::Double, 7, 7, 2);
+        assert!(double[..14].iter().all(|value| *value == 255));
+        assert!(double[14..28].iter().all(|value| *value == 0));
+        assert!(double[28..42].iter().all(|value| *value == 255));
+    }
+
+    #[test]
+    fn underline_bottom_clamps_match_single_and_three_thickness_styles() {
+        let metrics = DecorationMetrics {
+            underline_position: -100,
+            underline_thickness: 3,
+            strike_position: 0,
+            strike_thickness: 1,
+        };
+        assert_eq!(
+            underline_y_offset(10, 7, metrics, UnderlineStyle::Single),
+            7
+        );
+        assert_eq!(
+            underline_y_offset(10, 7, metrics, UnderlineStyle::Dotted),
+            7
+        );
+        assert_eq!(
+            underline_y_offset(10, 7, metrics, UnderlineStyle::Dashed),
+            7
+        );
+        assert_eq!(
+            underline_y_offset(10, 7, metrics, UnderlineStyle::Double),
+            1
+        );
+        assert_eq!(underline_y_offset(10, 7, metrics, UnderlineStyle::Curly), 1);
+    }
+
+    #[test]
+    fn curly_trapezoid_a8_vectors_match_pinned_pixman_0_46_4() {
+        let vectors = [
+            (
+                7,
+                1,
+                vec![
+                    0, 137, 255, 255, 211, 44, 0, 127, 255, 128, 96, 245, 245, 96, 255, 128, 0, 0,
+                    44, 211, 255,
+                ],
+            ),
+            (
+                9,
+                1,
+                vec![
+                    0, 44, 245, 255, 255, 255, 128, 9, 0, 96, 245, 245, 96, 76, 220, 255, 221, 77,
+                    255, 211, 44, 0, 0, 9, 127, 246, 255,
+                ],
+            ),
+            (
+                11,
+                2,
+                vec![
+                    0, 0, 0, 66, 255, 255, 128, 0, 0, 0, 0, 0, 0, 36, 240, 150, 127, 255, 128, 0,
+                    0, 0, 0, 15, 219, 189, 3, 0, 127, 255, 128, 0, 0, 3, 189, 219, 15, 0, 0, 0,
+                    127, 255, 128, 0, 150, 240, 36, 0, 0, 0, 0, 0, 127, 255, 128, 252, 66, 0, 0, 0,
+                    0, 0, 0, 0, 127, 255,
+                ],
+            ),
+            (
+                14,
+                2,
+                vec![
+                    0, 0, 0, 0, 12, 181, 255, 255, 181, 12, 0, 0, 0, 0, 0, 0, 0, 28, 207, 252, 108,
+                    108, 252, 207, 28, 0, 0, 0, 0, 0, 48, 227, 243, 77, 0, 0, 77, 243, 227, 48, 0,
+                    0, 0, 77, 243, 227, 48, 0, 0, 0, 0, 48, 227, 243, 77, 0, 108, 252, 207, 28, 0,
+                    0, 0, 0, 0, 0, 28, 207, 252, 108, 255, 178, 12, 0, 0, 0, 0, 0, 0, 0, 0, 12,
+                    178, 255,
+                ],
+            ),
+        ];
+        for (width, thickness, expected) in vectors {
+            assert_eq!(pixman_curly_a8_mask(width, thickness), expected);
+        }
+    }
+
+    #[test]
+    fn cursor_focus_policy_and_cell_relative_color_fallback_are_truthful() {
+        for style in [
+            CursorStyle::Block,
+            CursorStyle::Beam,
+            CursorStyle::Underline,
+        ] {
+            assert_eq!(
+                effective_cursor_shape(style, true, CursorPresentation::for_keyboard_focus(false)),
+                EffectiveCursorShape::Hollow
+            );
+            assert_eq!(
+                effective_cursor_shape(
+                    style,
+                    true,
+                    CursorPresentation {
+                        keyboard_focused: false,
+                        unfocused_style: UnfocusedCursorStyle::None,
+                    }
+                ),
+                EffectiveCursorShape::None
+            );
+        }
+        assert_eq!(
+            cursor_colors_for_cell(None, [1, 2, 3], [4, 5, 6]),
+            ([1, 2, 3], [4, 5, 6])
+        );
+        assert_eq!(
+            cursor_colors_for_cell(Some([9, 9, 9]), [1, 2, 3], [9, 9, 9]),
+            ([1, 2, 3], [9, 9, 9])
+        );
+        assert_eq!(
+            cursor_colors_for_cell(None, [7, 7, 7], [7, 7, 7]),
+            ([248, 248, 248], [7, 7, 7])
+        );
+    }
+
+    #[test]
+    fn cursor_geometry_matches_foot_at_required_scales() {
+        let snapshot = incremental_snapshot();
+        for scale in [120_u32, 150, 180, 240] {
+            let frame = SnapshotFrame::load_scaled(&snapshot, scale).unwrap();
+            let geometry = frame.tight_geometry().unwrap();
+            let rect = geometry.cell_rect(0, 0).unwrap();
+            let metrics = frame.cell_metrics[0];
+            let width = geometry.buffer_width();
+            let height = geometry.buffer_height();
+            for shape in [
+                EffectiveCursorShape::Beam,
+                EffectiveCursorShape::Underline,
+                EffectiveCursorShape::Hollow,
+            ] {
+                let mut canvas = vec![0; usize::try_from(width * height * 4).unwrap()];
+                paint_effective_cursor(
+                    &mut canvas,
+                    width,
+                    height,
+                    &frame,
+                    i32::try_from(rect.x).unwrap(),
+                    i32::try_from(rect.y).unwrap(),
+                    1,
+                    metrics,
+                    [255, 255, 255, 255],
+                    shape,
+                );
+                let painted = canvas.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
+                assert!(painted > 0);
+            }
+            let expected_beam = (2 * scale + 60) / 120;
+            assert!(expected_beam >= 2);
+            let expected_hollow = (scale + 60) / 120;
+            assert!((1..=2).contains(&expected_hollow));
+        }
+    }
+
+    #[test]
+    fn focused_and_unfocused_full_dirty_composition_share_one_path() {
+        let mut snapshot = incremental_snapshot();
+        snapshot.visible_rows[0].cells[0].attributes.underline = UnderlineStyle::Curly;
+        snapshot.visible_rows[0].cells[0].attributes.strikethrough = true;
+        let frame = SnapshotFrame::load_scaled(&snapshot, 120).unwrap();
+        let geometry = frame.tight_geometry().unwrap();
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
+        for presentation in [
+            CursorPresentation::FOCUSED_STEADY,
+            CursorPresentation::for_keyboard_focus(false),
+        ] {
+            for style in [
+                CursorStyle::Block,
+                CursorStyle::Beam,
+                CursorStyle::Underline,
+            ] {
+                let mut full = vec![0; usize::try_from(width * height * 4).unwrap()];
+                paint_snapshot_presented(
+                    &mut full,
+                    width,
+                    height,
+                    &frame,
+                    &geometry,
+                    true,
+                    style,
+                    presentation,
+                );
+                let mut rows = vec![0; full.len()];
+                for pixel in rows.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[
+                        frame.canvas_background[2],
+                        frame.canvas_background[1],
+                        frame.canvas_background[0],
+                        255,
+                    ]);
+                }
+                paint_snapshot_rows_presented(
+                    &mut rows,
+                    width,
+                    height,
+                    &frame,
+                    &geometry,
+                    &[true, true],
+                    true,
+                    style,
+                    presentation,
+                );
+                assert_eq!(full, rows);
+            }
+        }
+    }
+
     #[test]
     fn underline_styles_render_distinct_bounded_patterns() {
         let styles = [
@@ -3357,7 +4152,18 @@ mod tests {
         let mut outputs = Vec::new();
         for style in styles {
             let mut canvas = vec![0; 16 * 6 * 4];
-            paint_underline_style(&mut canvas, 16, 6, 0, 1, 16, 1, style, [255, 255, 255, 255]);
+            paint_underline_style(
+                &mut canvas,
+                16,
+                6,
+                0,
+                1,
+                16,
+                16,
+                1,
+                style,
+                [255, 255, 255, 255],
+            );
             assert!(canvas.chunks_exact(4).any(|pixel| pixel[3] != 0));
             outputs.push(canvas);
         }
@@ -3496,10 +4302,12 @@ mod tests {
     fn snapshot_styles_select_distinct_primary_faces_and_cache_keys() {
         let mut snapshot = incremental_snapshot();
         snapshot.visible_rows[0].cells[0].content = "A".to_owned();
+        snapshot.visible_rows[0].cells[0].attributes.underline = UnderlineStyle::Single;
         snapshot.visible_rows[0].cells[1].content = "A".to_owned();
         snapshot.visible_rows[0].cells[1].attributes.bold = true;
         snapshot.visible_rows[1].cells[0].content = "A".to_owned();
         snapshot.visible_rows[1].cells[0].attributes.italic = true;
+        snapshot.visible_rows[1].cells[0].attributes.underline = UnderlineStyle::Single;
         snapshot.visible_rows[1].cells[1].content = "A".to_owned();
         snapshot.visible_rows[1].cells[1].attributes.bold = true;
         snapshot.visible_rows[1].cells[1].attributes.italic = true;
@@ -3516,6 +4324,69 @@ mod tests {
             ])
         );
         assert_eq!(frame.cache.len(), 4, "each style owns a distinct cache key");
+        let regular = frame
+            .decorations
+            .iter()
+            .find(|span| span.row == 0 && span.column == 0)
+            .unwrap();
+        let italic = frame
+            .decorations
+            .iter()
+            .find(|span| span.row == 1 && span.column == 0)
+            .unwrap();
+        assert_eq!(regular.metrics, frame.cell_metrics[0]);
+        assert_eq!(italic.metrics, frame.cell_metrics[2]);
+    }
+
+    #[test]
+    fn underline_style_color_partial_mutation_matches_clean_full_rebuild() {
+        let mut initial = incremental_snapshot();
+        initial.visible_rows[0].cells[0].attributes.underline = UnderlineStyle::Single;
+        let mut changed = initial.clone();
+        changed.visible_rows[0].cells[0].attributes.underline = UnderlineStyle::Dashed;
+        changed.visible_rows[0].cells[0]
+            .attributes
+            .underline_color_source = ColorSource::Rgb;
+        changed.visible_rows[0].cells[0].attributes.underline_color = 0x12_34_56;
+
+        let mut frame = SnapshotFrame::load_scaled(&initial, 120).unwrap();
+        let geometry = frame.tight_geometry().unwrap();
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
+        let mut actual = vec![0; usize::try_from(width * height * 4).unwrap()];
+        paint_snapshot(
+            &mut actual,
+            width,
+            height,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        frame.refresh_rows(&changed, &[true, false]).unwrap();
+        paint_snapshot_rows(
+            &mut actual,
+            width,
+            height,
+            &frame,
+            &geometry,
+            &[true, false],
+            false,
+            CursorStyle::Block,
+        );
+
+        let reference = SnapshotFrame::load_scaled(&changed, 120).unwrap();
+        let mut expected = vec![0; actual.len()];
+        paint_snapshot(
+            &mut expected,
+            width,
+            height,
+            &reference,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -3825,7 +4696,7 @@ mod tests {
                 default_foreground(),
                 default_background()
             ),
-            ([0xff, 0, 0], [0x55, 0x2a, 0x15])
+            ([0xaa, 0, 0], [0x80, 0x40, 0x20])
         );
     }
 
@@ -3868,6 +4739,17 @@ mod tests {
                 }),
             )]),
             backgrounds: vec![[1, 2, 3], [4, 5, 6]],
+            foregrounds: vec![[200, 100, 50]; 2],
+            cell_metrics: vec![
+                DecorationMetrics {
+                    underline_position: -1,
+                    underline_thickness: 1,
+                    strike_position: 1,
+                    strike_thickness: 1,
+                };
+                2
+            ],
+            cell_spans: vec![2, 0],
             columns: 2,
             rows: 1,
             cell_width: 4,
@@ -3880,7 +4762,7 @@ mod tests {
             strike_position: 1,
             strike_thickness: 1,
             padding: TerminalPadding::uniform(2),
-            cursor: Some((1, 0)),
+            cursor: None,
             canvas_background: [14, 18, 22],
             cursor_color: [0xeb, 0xeb, 0xeb],
             scale_120: 120,
@@ -3893,14 +4775,14 @@ mod tests {
             8,
             &frame,
             &geometry,
-            true,
+            false,
             CursorStyle::Block,
         );
         let pixel = |x: usize, y: usize| &canvas[(y * 12 + x) * 4..(y * 12 + x + 1) * 4];
         assert_eq!(pixel(2, 2), [3, 2, 1, 0xff]);
         assert_eq!(pixel(4, 3), [50, 100, 200, 0xff]);
         assert_eq!(pixel(5, 3), [50, 100, 200, 0xff]);
-        assert_eq!(pixel(6, 2), [0xeb, 0xeb, 0xeb, 0xff]);
+        assert_eq!(pixel(6, 2), [3, 2, 1, 0xff]);
     }
 
     fn damage_test_frame() -> SnapshotFrame {
@@ -3909,6 +4791,17 @@ mod tests {
             decorations: Vec::new(),
             cache: HashMap::new(),
             backgrounds: vec![[1, 0, 0], [2, 0, 0], [3, 0, 0]],
+            foregrounds: vec![[255, 255, 255]; 3],
+            cell_metrics: vec![
+                DecorationMetrics {
+                    underline_position: 0,
+                    underline_thickness: 1,
+                    strike_position: 0,
+                    strike_thickness: 1,
+                };
+                3
+            ],
+            cell_spans: vec![1; 3],
             columns: 1,
             rows: 3,
             cell_width: 2,
@@ -4009,6 +4902,9 @@ mod tests {
             decorations: Vec::new(),
             cache: HashMap::new(),
             backgrounds: Vec::new(),
+            foregrounds: Vec::new(),
+            cell_metrics: Vec::new(),
+            cell_spans: Vec::new(),
             columns: 0,
             rows: 0,
             cell_width: 10,

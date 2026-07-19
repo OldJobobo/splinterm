@@ -37,9 +37,12 @@
       },
       {
         "path": "tools/foot-oracle/patches/0002-final-buffer-dump.patch",
-        "sha256": "65cf26f507b6fd1513819d6984614d63e2b6e4e700ce8dab1048c44dc2669a18"
+        "sha256": "3d132fd62ca4cc8afa1594bcbd22126d633659f6b395d0ab32972819bad07290"
       }
     ],
+    "slice3_runner": "tools/foot-oracle/run-slice3-final-buffer-comparison.py",
+    "slice3_manifest": "tools/foot-oracle/slice3-final-buffer-fixtures.json",
+    "slice3_schema": "tools/foot-oracle/slice3-final-buffer-schema.md",
     "requires_wayland_compositor": true
   },
   "default_final_buffer_profile": {

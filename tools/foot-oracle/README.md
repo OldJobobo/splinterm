@@ -270,6 +270,42 @@ uses Foot's observable order for full and dirty-row paths, with a focused
 overhang regression test. The matrix additionally resolved Foot's two-thirds
 dim intensity and opaque block/one-pixel underline cursor composition.
 
+### Slice 3 decoration/cursor v2
+
+Slice 3 keeps v1 closed and adds separate, truthful artifacts:
+
+- `slice3-final-buffer-fixtures.json` — structured semantic cells plus exact Foot
+  VT bytes for decoration, wide-cell, italic-overhang, and dual cursor lanes;
+- `validate-slice3-fixtures.py` — rejects unknown modes, malformed wide cells,
+  oversized steps, and incompatible scales;
+- `slice3-final-buffer-schema.md` — configured/effective cursor and physical
+  capture-focus provenance;
+- `compare-slice3-final-buffers.py` — exact ARGB comparison with no translation
+  or pre-authorized decoration tolerance;
+- `run-slice3-final-buffer-comparison.py` — bounded source-first integration
+  cases at 1×, fractional, and high integer scale.
+
+Exact source-derived vectors cover every decoration/cursor formula and rounding
+boundary. The graphical subset tests integration rather than replaying that
+Cartesian product. Focused-steady beam/underline evidence leaves Foot physically
+unfocused and configures `cursor.unfocused-style=unchanged`; default-unfocused
+evidence retains Foot's hollow cursor. Focused block ordering remains a portable
+pinned-source vector because Foot deliberately paints an actually unfocused block
+after its glyph even when the configured unfocused shape is unchanged. Cursor
+colors use Foot's unset fallback policy rather than an explicit override.
+
+```bash
+tools/foot-oracle/run-slice3-final-buffer-comparison.py \
+  /tmp/splinterm-slice3-final --workspace 8
+```
+
+The runner requires inactive, empty workspace 8 on DP-2. It snapshots DP-2's
+mode, position, transform, and scale; changes only that inactive output's scale;
+rechecks placement/focus isolation; and restores the original monitor state in
+`finally` on success or failure. The 2026-07-20 closure run at
+`/tmp/splinterm-slice3-source-first-final-3/` passed all six bounded cases with
+exact bytes at 1×, 1.25×, 1.5×, and 2×.
+
 ## Rules
 
 - Never silently update expected output to match Rust.

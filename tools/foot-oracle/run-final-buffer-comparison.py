@@ -312,13 +312,17 @@ def capture_foot(
     monitor_id: int,
     width: int,
     height: int,
+    *,
+    payload_override: bytes | None = None,
+    extra_environment: list[str] | None = None,
+    extra_overrides: list[str] | None = None,
 ) -> dict[str, Any]:
     wait_for_oracle_windows_to_close()
     assert_user_workspace_untouched()
     if workspace_clients(workspace):
         raise RuntimeError(f"workspace {workspace} became occupied")
     existing_addresses = {client.get("address") for client in all_clients()}
-    payload = foot_payload(case)
+    payload = payload_override if payload_override is not None else foot_payload(case)
     child = (
         "import os,sys,time; time.sleep(2); "
         "open(os.environ['FOOT_ORACLE_BUFFER_PREFIX']+'.capture','w').close(); "
@@ -334,11 +338,13 @@ def capture_foot(
         f"FOOT_ORACLE_FONT_SHA256={provenance['default_final_buffer_profile']['font_sha256']}",
         f"FOOT_ORACLE_FCFT_VERSION={provenance['build']['fcft_version']}",
         f"SPLINTERM_FOOT_ORACLE_SIZE={case['columns']}x{case['rows']}",
+        *(extra_environment or []),
         str(binary),
         "--config=/dev/null",
         f"--override=pad={profile['padding']}x{profile['padding']}",
         f"--override=colors.background={profile['background']}",
         f"--override=colors.foreground={profile['foreground']}",
+        *(extra_overrides or []),
         f"--font={font_family}:pixelsize={profile['font_size']:g}",
         f"--window-size-chars={case['columns']}x{case['rows']}",
         f"--app-id={APP_ID}",
@@ -435,6 +441,13 @@ def capture_foot(
                 stderr.read_text() if stderr.exists() else "Foot produced no final-buffer capture"
             )
         metadata = json.loads(output_prefix.with_suffix(".json").read_text(encoding="utf-8"))
+        current = next(
+            (client for client in all_clients() if client.get("address") == address),
+            None,
+        )
+        metadata["_oracle_logical_size"] = (
+            current.get("size") if current is not None else [width, height]
+        )
         wait_for_oracle_windows_to_close()
         assert_user_workspace_untouched()
         return metadata

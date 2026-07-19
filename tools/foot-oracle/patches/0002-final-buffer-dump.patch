@@ -1,15 +1,18 @@
 diff --git a/render.c b/render.c
-index cf5f969a..f6444a3e 100644
+index cf5f969a..a36861cf 100644
 --- a/render.c
 +++ b/render.c
-@@ -2,4 +2,6 @@
+@@ -1,6 +1,8 @@
+ #include "render.h"
  
  #include <limits.h>
 +#include <stdio.h>
 +#include <stdlib.h>
  #include <signal.h>
  #include <string.h>
-@@ -3321,4 +3323,127 @@ dirty_cursor(struct terminal *term)
+ #include <unistd.h>
+@@ -3320,6 +3322,166 @@ dirty_cursor(struct terminal *term)
+     row->dirty = true;
  }
  
 +static bool
@@ -35,10 +38,14 @@ index cf5f969a..f6444a3e 100644
 +    const char *font_file = getenv("FOOT_ORACLE_FONT_FILE");
 +    const char *font_sha256 = getenv("FOOT_ORACLE_FONT_SHA256");
 +    const char *fcft_version = getenv("FOOT_ORACLE_FCFT_VERSION");
++    const char *schema_env = getenv("FOOT_ORACLE_SCHEMA");
++    const char *target_focus = getenv("FOOT_ORACLE_TARGET_FOCUS");
++    const bool slice3_v2 = schema_env != NULL && strcmp(schema_env, "slice3-v2") == 0;
 +    if (prefix == NULL || prefix[0] == '\0')
 +        return;
 +    if (!oracle_safe_identifier(fixture) || !oracle_safe_identifier(frame_id) ||
 +        !oracle_safe_identifier(font_sha256) || !oracle_safe_identifier(fcft_version) ||
++        (slice3_v2 && !oracle_safe_identifier(target_focus)) ||
 +        font_file == NULL || strchr(font_file, '\"') != NULL) {
 +        LOG_ERR("invalid final-buffer oracle identity or provenance");
 +        return;
@@ -88,6 +95,18 @@ index cf5f969a..f6444a3e 100644
 +    const char *cursor_shape =
 +        term->cursor_style == CURSOR_BEAM ? "beam" :
 +        term->cursor_style == CURSOR_UNDERLINE ? "underline" : "block";
++    const char *unfocused_style =
++        term->conf->cursor.unfocused_style == CURSOR_UNFOCUSED_UNCHANGED ? "unchanged" :
++        term->conf->cursor.unfocused_style == CURSOR_UNFOCUSED_NONE ? "none" : "hollow";
++    const char *effective_cursor = cursor_shape;
++    if (term->hide_cursor)
++        effective_cursor = "none";
++    else if (!term->kbd_focus) {
++        if (term->conf->cursor.unfocused_style == CURSOR_UNFOCUSED_HOLLOW)
++            effective_cursor = "hollow";
++        else if (term->conf->cursor.unfocused_style == CURSOR_UNFOCUSED_NONE)
++            effective_cursor = "none";
++    }
 +    int cursor_row = term->grid->cursor.point.row + term->grid->offset - term->grid->view;
 +    cursor_row &= term->grid->num_rows - 1;
 +    FILE *metadata = fopen(metadata_tmp, "w");
@@ -98,7 +117,7 @@ index cf5f969a..f6444a3e 100644
 +    const int scale_120 = (int)(term->scale * 120.f + .5f);
 +    fprintf(metadata,
 +            "{\n"
-+            "  \"schema\": \"splinterm.final-buffer.v1\",\n"
++            "  \"schema\": \"%s\",\n"
 +            "  \"width\": %d, \"height\": %d, \"stride\": %d,\n"
 +            "  \"format\": \"argb8888\", \"byte_order\": \"bgra\", \"endianness\": \"little\",\n"
 +            "  \"scale_120\": %d,\n"
@@ -106,12 +125,31 @@ index cf5f969a..f6444a3e 100644
 +            "  \"cell\": {\"width\": %d, \"height\": %d, \"baseline\": %d},\n"
 +            "  \"padding\": {\"left\": %d, \"right\": %d, \"top\": %d, \"bottom\": %d},\n"
 +            "  \"origin\": {\"x\": %d, \"y\": %d},\n",
++            slice3_v2 ? "splinterm.final-buffer.slice3.v2" : "splinterm.final-buffer.v1",
 +            buf->width, buf->height, buf->stride, scale_120,
 +            term->cols, term->rows, term->cell_width, term->cell_height,
 +            term->font_baseline, term->margins.left, term->margins.right,
 +            term->margins.top, term->margins.bottom, term->margins.left,
 +            term->margins.top);
-+    if (term->hide_cursor)
++    if (slice3_v2) {
++        if (term->hide_cursor)
++            fprintf(metadata,
++                    "  \"cursor\": {\"position\": null, "
++                    "\"configured_shape\": \"%s\", \"effective_shape\": \"none\", "
++                    "\"target_focus_semantics\": \"%s\"},\n",
++                    cursor_shape, target_focus);
++        else
++            fprintf(metadata,
++                    "  \"cursor\": {\"position\": {\"column\": %d, \"row\": %d}, "
++                    "\"configured_shape\": \"%s\", \"effective_shape\": \"%s\", "
++                    "\"target_focus_semantics\": \"%s\"},\n",
++                    term->grid->cursor.point.col, cursor_row, cursor_shape,
++                    effective_cursor, target_focus);
++        fprintf(metadata,
++                "  \"capture_context\": {\"actual_keyboard_focus\": %s, "
++                "\"unfocused_style\": \"%s\"},\n",
++                term->kbd_focus ? "true" : "false", unfocused_style);
++    } else if (term->hide_cursor)
 +        fprintf(metadata, "  \"cursor\": null,\n");
 +    else
 +        fprintf(metadata,
@@ -120,11 +158,13 @@ index cf5f969a..f6444a3e 100644
 +    fprintf(metadata,
 +            "  \"fixture\": \"%s\", \"frame_id\": \"%s\",\n"
 +            "  \"background_bgra\": [%u, %u, %u, 255],\n"
-+            "  \"composition\": [\"terminal-backgrounds\", \"glyphs\", \"decorations\", \"cursor\"],\n"
++            "  \"composition\": %s,\n"
 +            "  \"provenance\": {\"implementation\": \"foot\", \"commit\": \"3c5b584b0eafa772eb4376fb6eaf6643399e190e\", "
 +            "\"fcft_version\": \"%s\", \"font_file\": \"%s\", \"font_index\": 0, \"font_sha256\": \"%s\"}\n"
 +            "}\n",
 +            fixture, frame_id, bg & 0xff, (bg >> 8) & 0xff, (bg >> 16) & 0xff,
++            slice3_v2 ? "\"foot-cell-rtl-v1\"" :
++                "[\"terminal-backgrounds\", \"glyphs\", \"decorations\", \"cursor\"]",
 +            fcft_version, font_file, font_sha256);
 +    const bool metadata_ok = fclose(metadata) == 0;
 +    if (!metadata_ok || rename(raw_tmp, raw_path) < 0 || rename(metadata_tmp, metadata_path) < 0) {
@@ -137,10 +177,13 @@ index cf5f969a..f6444a3e 100644
 +
  static void
  grid_render(struct terminal *term)
-@@ -3713,4 +3838,6 @@ grid_render(struct terminal *term)
+ {
+@@ -3712,6 +3874,8 @@ grid_render(struct terminal *term)
+             term->window->surface.surf, 0, 0, INT32_MAX, INT32_MAX);
      }
  
 +    oracle_dump_final_buffer(term, buf);
 +
      wl_surface_attach(term->window->surface.surf, buf->wl_buf, 0, 0);
      wl_surface_commit(term->window->surface.surf);
+ }
