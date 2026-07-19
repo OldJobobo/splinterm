@@ -149,16 +149,43 @@ python tools/foot-oracle/validate-fixtures.py
 ## fcft raster evidence probe
 
 The test-only probe reports raw fcft glyph placement, image dimensions,
-advances, and half-open nonzero-alpha ink bounds without opening a window:
+advances, half-open nonzero-alpha ink bounds, and tightly packed row-major alpha
+masks without opening a window. It emits every printable ASCII character
+(U+0020 through U+007E) plus the existing CJK, emoji, and combining evidence:
 
 ```bash
-tools/foot-oracle/run-fcft-mask-probe.sh
+tools/foot-oracle/run-fcft-mask-probe.sh \
+  > /tmp/splinterm-fcft-glyphs.jsonl
 ```
 
 It compiles `fcft-mask-probe.c` against the fcft 3.3.3 static library produced
 by the pinned Foot reference build. It validates the Foot revision first and
 builds the reference when necessary. This compares the raster stage directly;
 it does not substitute compositor screenshots for glyph-mask evidence.
+
+Compare two probe-compatible JSONL streams by explicit glyph identity and
+geometry. The command exits nonzero for missing glyphs, geometry differences,
+or any alpha mismatch and writes `comparison.json` plus PGM heatmaps:
+
+```bash
+python tools/foot-oracle/compare-glyph-masks.py \
+  --reference /tmp/splinterm-fcft-glyphs.jsonl \
+  --actual /tmp/splinterm-glyphs.jsonl \
+  --output-dir /tmp/splinterm-glyph-diff
+```
+
+The comparator does not translate or best-fit masks. Splinterm provides the
+provisional Swash `ascii-glyph-evidence` exporter and the production-candidate
+FreeType `ascii-freetype-evidence` exporter. Run both against pinned fcft with:
+
+```bash
+tools/foot-oracle/run-ascii-comparison.sh /tmp/splinterm-ascii-comparison
+```
+
+The command reports provisional Swash, isolated FreeType, and the real
+production snapshot cache separately. Review `swash-diff/`, `freetype-diff/`,
+and `production-diff/`; never replace the fcft reference with any generated
+output. Both pinned FreeType gates must remain 95/95 exact.
 
 ## Rules
 
