@@ -187,7 +187,7 @@ production snapshot cache separately. Review `swash-diff/`, `freetype-diff/`,
 and `production-diff/`; never replace the fcft reference with any generated
 output. Both pinned FreeType gates must remain 95/95 exact.
 
-## Final-buffer oracle (in progress)
+## Final-buffer oracle
 
 The versioned raw-buffer contract is documented in
 `final-buffer-schema.md`. Splinterm can already export the exact production
@@ -202,9 +202,10 @@ cargo run -q -p splinterm --bin final-buffer-capture -- \
 ```
 
 The exporter writes atomic `.json` metadata and `.argb` raw little-endian BGRA
-bytes. It currently exposes `ascii`, `spacing`, and long `drift` fixtures plus
-font, logical size, scale, grid, and cursor controls. Four-sided padding is
-reported explicitly but remains symmetric until Slice 2 owns that geometry.
+bytes. The bounded fixture manifest covers ASCII, spacing/punctuation,
+narrow/wide runs, 80/240-column drift, edge cells, reverse, dim, conceal, and
+hidden/block/beam/underline cursor states. Four-sided padding is reported
+explicitly but remains symmetric until Slice 2 owns that geometry.
 
 Compare two captures without translation or best-fit alignment:
 
@@ -218,38 +219,48 @@ python tools/foot-oracle/compare-final-buffers.py \
 The comparator rejects incompatible declared origins/geometry and unsafe input,
 then writes exact mismatch count, maximum channel delta, bounds, per-cell
 counts, edge-clearance deltas, first divergent cell, a PPM heatmap, and a
-mismatch crop. Its parser/comparator tests run with:
+paired reference/actual/difference crops. Its parser, comparator, and manifest
+tests run with:
 
 ```bash
-python -m pytest -q tools/foot-oracle/test_compare_final_buffers.py
+python -m pytest -q \
+  tools/foot-oracle/test_compare_final_buffers.py \
+  tools/foot-oracle/test_run_final_buffer_comparison.py
 ```
 
 The matching disposable Foot pre-submit capture is implemented by
-`patches/0002-final-buffer-dump.patch`. It writes only the most complete
-non-blank frame, preventing a later shutdown repaint from replacing evidence.
+`patches/0002-final-buffer-dump.patch`. A runner-controlled marker prevents
+startup frames from becoming evidence, and the patch retains the most complete
+marked frame so shutdown repainting cannot replace it.
 `build-oracle.sh` applies all numbered patches in lexical order and never
 changes the canonical Foot checkout.
 
-Run the default end-to-end capture on an empty Hyprland workspace:
+Run the default end-to-end capture only on the reserved workspace 8 / DP-2:
 
 ```bash
 tools/foot-oracle/run-final-buffer-comparison.py \
   /tmp/splinterm-final-buffer --workspace 8
 ```
 
-The command builds and tests patched Foot, launches it floating at the declared
-buffer size, exports the matching Splinterm production buffer, and compares the
-pair. Current default evidence has exact 95×1 grid, 7×17 cell, 13 px baseline,
-four-edge padding, origins, ink bounds, zero drift/clipping, and zero ARGB
-mismatches.
+The runner refuses every other workspace/monitor mapping, refuses to run while
+DP-2/workspace 8 is active or occupied, launches with a silent no-focus rule,
+checks the mapped window's workspace and monitor before capture, and aborts if
+the user's active workspace moves to the test display.
+
+The command preflights Foot, patch, font, native-library, and Cargo.lock
+provenance; builds and tests patched Foot; runs all 16 manifest cases; and writes
+an aggregate `summary.json`. The clean 2026-07-19 closure run at
+`/tmp/splinterm-final-buffer-clean-retest/` passed 16/16 with zero ARGB
+mismatches, exact geometry, four-edge padding, origins, ink bounds, and no
+80/240-column drift.
 
 The final two mismatches were not FreeType differences: 12 px fcft, isolated
 FreeType, and the production cache had identical masks. Foot paints each row
 right-to-left, so the one-alpha overhang pixel from `%` is composed after the
 left edge of `&`; Splinterm had painted glyphs left-to-right. The compositor now
 uses Foot's observable order for full and dirty-row paths, with a focused
-overhang regression test. Slice 1 remains open only for the remaining fixture
-and parameter matrix automation.
+overhang regression test. The matrix additionally resolved Foot's two-thirds
+dim intensity and opaque block/one-pixel underline cursor composition.
 
 ## Rules
 

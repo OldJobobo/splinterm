@@ -1,0 +1,182 @@
+{
+  "schema": "splinterm.final-buffer-fixtures.v1",
+  "profile": {
+    "font": "JetBrains Mono Nerd Font:style=Regular",
+    "font_size": 12.0,
+    "scale_120": 120,
+    "padding": 12,
+    "foreground": "ebebeb",
+    "background": "0e1216"
+  },
+  "cases": [
+    {
+      "id": "ascii",
+      "columns": 95,
+      "rows": 1,
+      "text": " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "spacing-punctuation",
+      "columns": 40,
+      "rows": 1,
+      "text": "  !?[]{}()<>  iiii WWWW .... ____ ||||  ",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "narrow-iiii",
+      "columns": 4,
+      "rows": 1,
+      "text": "iiii",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "wide-WWWW",
+      "columns": 4,
+      "rows": 1,
+      "text": "WWWW",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "dots",
+      "columns": 4,
+      "rows": 1,
+      "text": "....",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "underscores",
+      "columns": 4,
+      "rows": 1,
+      "text": "____",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "bars",
+      "columns": 4,
+      "rows": 1,
+      "text": "||||",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "drift-80",
+      "columns": 80,
+      "rows": 1,
+      "text": "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnop",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "drift-240",
+      "columns": 240,
+      "rows": 1,
+      "text": "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRST",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "edge-cells",
+      "columns": 16,
+      "rows": 1,
+      "text": "X              X",
+      "style": "normal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "reverse",
+      "columns": 7,
+      "rows": 1,
+      "text": "REVERSE",
+      "style": "reverse",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "dim",
+      "columns": 3,
+      "rows": 1,
+      "text": "dim",
+      "style": "dim",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "conceal",
+      "columns": 7,
+      "rows": 1,
+      "text": "conceal",
+      "style": "conceal",
+      "cursor": {
+        "visible": false
+      }
+    },
+    {
+      "id": "cursor-block",
+      "columns": 4,
+      "rows": 1,
+      "text": "ABCD",
+      "style": "normal",
+      "cursor": {
+        "visible": true,
+        "column": 1,
+        "row": 0,
+        "shape": "block"
+      }
+    },
+    {
+      "id": "cursor-beam",
+      "columns": 4,
+      "rows": 1,
+      "text": "ABCD",
+      "style": "normal",
+      "cursor": {
+        "visible": true,
+        "column": 1,
+        "row": 0,
+        "shape": "beam"
+      }
+    },
+    {
+      "id": "cursor-underline",
+      "columns": 4,
+      "rows": 1,
+      "text": "ABCD",
+      "style": "normal",
+      "cursor": {
+        "visible": true,
+        "column": 1,
+        "row": 0,
+        "shape": "underline"
+      }
+    }
+  ]
+}

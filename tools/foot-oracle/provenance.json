@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "reference": {
     "name": "foot",
     "version": "1.27.0",
@@ -10,8 +10,10 @@
   },
   "local_source_default": "~/Playground/foot",
   "build": {
-    "script": "tools/foot-oracle/build-reference.sh",
-    "default_directory": "/tmp/splinterm-foot-build",
+    "reference_script": "tools/foot-oracle/build-reference.sh",
+    "oracle_script": "tools/foot-oracle/build-oracle.sh",
+    "reference_directory": "/tmp/splinterm-foot-build",
+    "oracle_directory": "/tmp/splinterm-foot-oracle-build",
     "meson_options": [
       "-Ddocs=disabled",
       "-Dthemes=false",
@@ -19,13 +21,45 @@
       "-Dutmp-backend=none",
       "-Dgrapheme-clustering=disabled",
       "-Dtests=true"
-    ]
+    ],
+    "fcft_version": "3.3.3",
+    "freetype_version": "26.6.20",
+    "fontconfig_version": "2.18.2",
+    "pixman_version": "0.46.4"
   },
   "oracle": {
-    "build_script": "tools/foot-oracle/build-oracle.sh",
-    "runner": "tools/foot-oracle/run-fixtures.py",
-    "patch": "tools/foot-oracle/patches/0001-semantic-state-dump.patch",
+    "semantic_runner": "tools/foot-oracle/run-fixtures.py",
+    "final_buffer_runner": "tools/foot-oracle/run-final-buffer-comparison.py",
+    "patches": [
+      {
+        "path": "tools/foot-oracle/patches/0001-semantic-state-dump.patch",
+        "sha256": "5c11c2f67ed949bc3320eb8954b8fd012f4fe86d649eaa00bc2103f01d60566f"
+      },
+      {
+        "path": "tools/foot-oracle/patches/0002-final-buffer-dump.patch",
+        "sha256": "65cf26f507b6fd1513819d6984614d63e2b6e4e700ce8dab1048c44dc2669a18"
+      }
+    ],
     "requires_wayland_compositor": true
   },
-  "fixture_schema": "fixtures/terminal/v1/schema.md"
+  "default_final_buffer_profile": {
+    "fixture_manifest": "tools/foot-oracle/final-buffer-fixtures.json",
+    "font_pattern": "JetBrains Mono Nerd Font:style=Regular:pixelsize=12",
+    "font_file": "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+    "font_index": 0,
+    "font_sha256": "0ec29a68b539ece7078fc714cebff0c0accb2f4948f8f7963d9f5e86633b12d9",
+    "logical_size_px": 12.0,
+    "scale_120": 120,
+    "padding": {
+      "left": 12,
+      "right": 12,
+      "top": 12,
+      "bottom": 12
+    },
+    "foreground": "ebebeb",
+    "background": "0e1216",
+    "cargo_lock_sha256": "ab1697670ccedaea16854fff72ed12808954430980615b52351604418b157619"
+  },
+  "semantic_fixture_schema": "fixtures/terminal/v1/schema.md",
+  "final_buffer_schema": "tools/foot-oracle/final-buffer-schema.md"
 }

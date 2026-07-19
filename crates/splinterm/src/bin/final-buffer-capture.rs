@@ -29,16 +29,24 @@ struct Arguments {
     columns: usize,
     #[arg(long, default_value_t = 1)]
     rows: usize,
+    #[arg(long)]
+    text_hex: Option<String>,
+    #[arg(long, default_value = "normal")]
+    style: String,
     #[arg(long, default_value = "block")]
     cursor_shape: String,
+    #[arg(long, default_value_t = 0)]
+    cursor_column: usize,
+    #[arg(long, default_value_t = 0)]
+    cursor_row: usize,
     #[arg(long)]
     hide_cursor: bool,
     #[arg(long)]
     frame_id: Option<String>,
 }
 
-fn attributes() -> CellAttributes {
-    CellAttributes {
+fn attributes(style: &str) -> Result<CellAttributes> {
+    let mut attributes = CellAttributes {
         bold: false,
         dim: false,
         italic: false,
@@ -53,7 +61,31 @@ fn attributes() -> CellAttributes {
         foreground: 0,
         background_source: ColorSource::Default,
         background: 0,
+    };
+    match style {
+        "normal" => {}
+        "reverse" => attributes.reverse = true,
+        "dim" => attributes.dim = true,
+        "conceal" => attributes.conceal = true,
+        other => bail!("unsupported fixture style {other:?}"),
     }
+    Ok(attributes)
+}
+
+fn decode_hex(value: &str) -> Result<String> {
+    if value.len() % 2 != 0 || value.len() > 2 * usize::from(splinterm_protocol::MAX_COLUMNS) * 4096
+    {
+        bail!("fixture text hex is malformed or exceeds bounds");
+    }
+    let bytes = value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).context("fixture hex is ASCII")?;
+            u8::from_str_radix(text, 16).context("fixture text contains non-hex bytes")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    String::from_utf8(bytes).context("fixture text is not UTF-8")
 }
 
 fn fixture_text(name: &str, columns: usize, rows: usize) -> Result<String> {
@@ -72,7 +104,17 @@ fn snapshot(arguments: &Arguments) -> Result<TerminalSnapshot> {
     if arguments.columns == 0 || arguments.rows == 0 {
         bail!("grid dimensions must be positive");
     }
-    let text = fixture_text(&arguments.fixture, arguments.columns, arguments.rows)?;
+    if arguments.cursor_column >= arguments.columns || arguments.cursor_row >= arguments.rows {
+        bail!("cursor must be inside the declared grid");
+    }
+    let text = arguments.text_hex.as_deref().map_or_else(
+        || fixture_text(&arguments.fixture, arguments.columns, arguments.rows),
+        decode_hex,
+    )?;
+    if text.chars().count() > arguments.columns.saturating_mul(arguments.rows) {
+        bail!("fixture text exceeds the declared grid");
+    }
+    let attributes = attributes(&arguments.style)?;
     let mut characters = text.chars();
     let visible_rows = (0..arguments.rows)
         .map(|_| TerminalRow {
@@ -82,7 +124,7 @@ fn snapshot(arguments: &Arguments) -> Result<TerminalSnapshot> {
                 .map(|_| TerminalCell {
                     content: characters.next().unwrap_or(' ').to_string(),
                     spacer_remaining: None,
-                    attributes: attributes(),
+                    attributes,
                 })
                 .collect(),
         })
@@ -93,8 +135,8 @@ fn snapshot(arguments: &Arguments) -> Result<TerminalSnapshot> {
         revision: 1,
         columns: arguments.columns,
         rows: arguments.rows,
-        cursor_column: 0,
-        cursor_row: 0,
+        cursor_column: i32::try_from(arguments.cursor_column).context("cursor column")?,
+        cursor_row: i32::try_from(arguments.cursor_row).context("cursor row")?,
         cursor_deferred_wrap: false,
         active_screen: ActiveScreen::Normal,
         input_modes: TerminalInputModes {

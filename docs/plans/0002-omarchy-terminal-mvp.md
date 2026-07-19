@@ -80,9 +80,9 @@
 - [ ] Record the full Phase 4 baseline matrix with host/software context,
   including continuous `yes`, large colored-file `cat`, measured resize and
   detach/reattach costs, and total renderer-memory metrics.
-- [ ] Build a reproducible pre-compositor Foot/fcft oracle for all 95 printable
+- [x] Build a reproducible pre-compositor Foot/fcft oracle for all 95 printable
   ASCII characters, with exact face, metrics, bitmap, placement, and environment
-  provenance.
+  provenance, plus the 16-case final-buffer matrix closed by Plan 0003 Slice 1.
 - [ ] Replace approximate font/cell placement with an explicit Foot-derived cell
   geometry contract and verify ink clearance and terminal padding on all sides.
 - [ ] Make full-frame, row-damage, scroll-copy, cold-cache, and warm-cache paths

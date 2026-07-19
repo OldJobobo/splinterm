@@ -17,7 +17,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `main.title` | fixed window title; otherwise OSC title | unset |
 | `main.app-id` | diagnostic only | fixed to `com.oldjobobo.splinterm` |
 | `main.resize-delay-ms` | bounded delay before resize command | 0–1000; 0 |
-| `main.dpi-aware` | respond to output/fractional scale | yes |
+| `main.dpi-aware` | legacy name: follow compositor output scale (`yes`) or force 1× (`no`) | yes |
 | `main.theme` | generated JSON role map | `~/.config/splinterm/theme.json` |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | block |
@@ -36,13 +36,21 @@ Terminal key mappings otherwise follow the implemented Foot/xterm behavior.
 
 Copy values rather than copying a whole `foot.ini`:
 
-- Foot `font` → `main.font`; move a `size=` component to `main.font-size`.
+- Foot `font` → `main.font`. Splinterm `main.font-size` is pixels, so Foot
+  `pixelsize=` maps directly. Foot `size=` is points and must be converted using
+  the intended DPI (`pixels = points × DPI / 72`; at 96 DPI, `12pt = 16px`).
 - Foot `initial-window-size-chars` → `main.initial-columns` and
   `main.initial-rows`.
 - Foot `shell` → `main.shell`; Splinterm never evaluates it as a shell command.
 - Foot `scrollback.lines` and cursor style/blink map directly.
 - Convert colors through the Omarchy generator below instead of pasting Foot's
   complete `[colors]` section.
+
+The current `main.dpi-aware` name is not Foot-compatible: `yes` follows the
+compositor scale, which corresponds to Foot's `dpi-aware=no` sizing behavior.
+`no` merely forces 1×; Splinterm does not yet implement Foot's physical-output
+DPI mode. Phase 8.1 Slice 2 will separate surface scale from font-sizing policy
+before introducing compatible `yes`/`no`/`auto` semantics.
 
 Foot options outside the table—server mode, pad geometry, URL modes, arbitrary
 bindings, notifications, and advanced rendering controls—are unsupported in

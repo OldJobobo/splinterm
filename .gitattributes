@@ -1,0 +1,2 @@
+# Unified patches require a single-space prefix for blank context lines.
+tools/foot-oracle/patches/*.patch whitespace=-blank-at-eol

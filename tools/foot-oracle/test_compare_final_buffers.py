@@ -54,7 +54,6 @@ def test_exact_comparison_ignores_declared_stride_padding(tmp_path):
     pixels = background_pixels()
     reference = write_capture(tmp_path, "reference", metadata(), pixels)
     actual_meta = metadata(20)
-    actual_meta["frame_id"] = "actual"
     actual = write_capture(tmp_path, "actual", actual_meta, pixels, b"pad!")
     report = MODULE.compare(reference, actual, tmp_path / "diff")
     assert report["exact"]
@@ -69,7 +68,6 @@ def test_mismatch_reports_bounds_delta_and_cell(tmp_path):
     actual_pixels[offset : offset + 4] = bytes([10, 20, 30, 255])
     reference = write_capture(tmp_path, "reference", metadata(), reference_pixels)
     actual_meta = metadata()
-    actual_meta["frame_id"] = "actual"
     actual = write_capture(tmp_path, "actual", actual_meta, actual_pixels)
     report = MODULE.compare(reference, actual, tmp_path / "diff")
     assert not report["exact"]
@@ -78,7 +76,9 @@ def test_mismatch_reports_bounds_delta_and_cell(tmp_path):
     assert report["mismatch_bounds"] == [2, 1, 2, 1]
     assert report["first_divergent_cell"] == {"row": 0, "column": 1}
     assert report["per_cell_mismatch_pixels"] == {"0,1": 1}
+    assert (tmp_path / "diff" / "reference-mismatch-crop.ppm").exists()
     assert (tmp_path / "diff" / "actual-mismatch-crop.ppm").exists()
+    assert (tmp_path / "diff" / "difference-mismatch-crop.ppm").exists()
 
 
 def test_parser_rejects_geometry_raw_length_and_malformed_json(tmp_path):
@@ -99,6 +99,19 @@ def test_parser_rejects_geometry_raw_length_and_malformed_json(tmp_path):
     metadata_path.write_text("{", encoding="utf-8")
     with pytest.raises(MODULE.CaptureError):
         MODULE.load_capture(metadata_path, raw_path)
+
+
+def test_parser_rejects_invalid_cursor_and_composition(tmp_path):
+    pixels = background_pixels()
+    invalid = metadata()
+    invalid["cursor"] = {"column": 2, "row": 0, "shape": "block"}
+    with pytest.raises(MODULE.CaptureError, match="cursor.column"):
+        write_capture(tmp_path, "cursor", invalid, pixels)
+
+    invalid = metadata()
+    invalid["composition"] = ["glyphs"]
+    with pytest.raises(MODULE.CaptureError, match="composition"):
+        write_capture(tmp_path, "composition", invalid, pixels)
 
 
 def test_comparator_rejects_declared_origin_difference(tmp_path):

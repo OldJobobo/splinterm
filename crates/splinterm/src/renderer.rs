@@ -1940,7 +1940,7 @@ fn rendition_colors(
     );
     if attributes.dim {
         for component in &mut foreground {
-            *component /= 2;
+            *component = u8::try_from(u16::from(*component) * 2 / 3).expect("dimmed color fits u8");
         }
     }
     if attributes.reverse {
@@ -2236,6 +2236,35 @@ fn paint_decorations(
     }
 }
 
+fn paint_placed_glyph(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    placed: &SnapshotGlyph,
+    foreground: [u8; 3],
+) {
+    let glyph = &frame.cache[&placed.key];
+    let span = frame.cell_width.saturating_mul(placed.cells);
+    let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
+    let pen_x = frame.origin_x
+        + i32::try_from(placed.column * frame.cell_width).expect("glyph x")
+        + round_to_i32(centered_pen + placed.x_offset);
+    let baseline = frame.origin_y
+        + i32::try_from(placed.row * frame.cell_height).expect("glyph y")
+        + frame.baseline
+        - round_to_i32(placed.y_offset);
+    blend_glyph(
+        canvas,
+        width,
+        height,
+        pen_x + glyph.left,
+        baseline - glyph.top,
+        glyph,
+        foreground,
+    );
+}
+
 fn paint_glyphs(
     canvas: &mut [u8],
     width: u32,
@@ -2258,25 +2287,7 @@ fn paint_glyphs(
         // when a glyph overhangs into its neighbor and both masks touch the
         // same antialiased pixel.
         for placed in frame.glyphs[start..end].iter().rev() {
-            let glyph = &frame.cache[&placed.key];
-            let span = frame.cell_width.saturating_mul(placed.cells);
-            let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
-            let pen_x = frame.origin_x
-                + i32::try_from(placed.column * frame.cell_width).expect("glyph x")
-                + round_to_i32(centered_pen + placed.x_offset);
-            let baseline = frame.origin_y
-                + i32::try_from(placed.row * frame.cell_height).expect("glyph y")
-                + frame.baseline
-                - round_to_i32(placed.y_offset);
-            blend_glyph(
-                canvas,
-                width,
-                height,
-                pen_x + glyph.left,
-                baseline - glyph.top,
-                glyph,
-                placed.foreground,
-            );
+            paint_placed_glyph(canvas, width, height, frame, placed, placed.foreground);
         }
     }
 }
@@ -2329,14 +2340,15 @@ pub(crate) fn paint_snapshot(
             frame.cursor_color[2],
             0xff,
         ];
-        paint_cursor(
+        paint_cursor_for_frame(
             canvas,
             width,
             height,
+            frame,
+            column,
+            row,
             x,
             y,
-            frame.cell_width,
-            frame.cell_height,
             color,
             cursor_style,
         );
@@ -2394,14 +2406,15 @@ pub(crate) fn paint_snapshot_rows(
                 frame.cursor_color[2],
                 0xff,
             ];
-            paint_cursor(
+            paint_cursor_for_frame(
                 canvas,
                 width,
                 height,
+                frame,
+                column,
+                row,
                 x,
                 y,
-                frame.cell_width,
-                frame.cell_height,
                 color,
                 cursor_style,
             );
@@ -2411,37 +2424,55 @@ pub(crate) fn paint_snapshot_rows(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "cursor geometry is explicit and allocation-free"
+    reason = "cursor geometry and Foot's block-glyph recolor are explicit and allocation-free"
 )]
-fn paint_cursor(
+fn paint_cursor_for_frame(
     canvas: &mut [u8],
     width: u32,
     height: u32,
+    frame: &SnapshotFrame,
+    column: u32,
+    row: u32,
     x: i32,
     y: i32,
-    cell_width: u32,
-    cell_height: u32,
     color: [u8; 4],
     style: CursorStyle,
 ) {
     match style {
-        CursorStyle::Block => fill_rect(
-            canvas,
-            width,
-            height,
-            (x, y, cell_width, cell_height),
-            [color[0], color[1], color[2], 96],
-        ),
-        CursorStyle::Beam => fill_rect(canvas, width, height, (x, y, 2, cell_height), color),
+        CursorStyle::Block => {
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (x, y, frame.cell_width, frame.cell_height),
+                color,
+            );
+            for placed in frame
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.row == row && glyph.column == column)
+                .rev()
+            {
+                paint_placed_glyph(
+                    canvas,
+                    width,
+                    height,
+                    frame,
+                    placed,
+                    frame.canvas_background,
+                );
+            }
+        }
+        CursorStyle::Beam => fill_rect(canvas, width, height, (x, y, 2, frame.cell_height), color),
         CursorStyle::Underline => fill_rect(
             canvas,
             width,
             height,
             (
                 x,
-                y + i32::try_from(cell_height.saturating_sub(2)).unwrap_or(0),
-                cell_width,
-                2,
+                y + i32::try_from(frame.cell_height.saturating_sub(2)).unwrap_or(0),
+                frame.cell_width,
+                1,
             ),
             color,
         ),
@@ -3560,7 +3591,7 @@ mod tests {
                 default_foreground(),
                 default_background()
             ),
-            ([0x40, 0x20, 0x10], [0xff, 0, 0])
+            ([0x55, 0x2a, 0x15], [0xff, 0, 0])
         );
         attributes.reverse = true;
         assert_eq!(
@@ -3570,7 +3601,7 @@ mod tests {
                 default_foreground(),
                 default_background()
             ),
-            ([0xff, 0, 0], [0x40, 0x20, 0x10])
+            ([0xff, 0, 0], [0x55, 0x2a, 0x15])
         );
     }
 
@@ -3635,7 +3666,7 @@ mod tests {
         assert_eq!(pixel(2, 2), [3, 2, 1, 0xff]);
         assert_eq!(pixel(4, 3), [50, 100, 200, 0xff]);
         assert_eq!(pixel(5, 3), [50, 100, 200, 0xff]);
-        assert_eq!(pixel(6, 2), [0xeb, 0xeb, 0xeb, 96]);
+        assert_eq!(pixel(6, 2), [0xeb, 0xeb, 0xeb, 0xff]);
     }
 
     fn damage_test_frame() -> SnapshotFrame {

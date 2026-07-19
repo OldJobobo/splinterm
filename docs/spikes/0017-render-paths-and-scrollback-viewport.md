@@ -140,6 +140,23 @@ at 16 wire rows.
 No trace contains terminal content. The exact numeric release performance
 budgets and committed host manifests remain Slice 9 work.
 
+## Slice 1 final-buffer closure evidence
+
+The clean pinned-host command
+`tools/foot-oracle/run-final-buffer-comparison.py
+/tmp/splinterm-final-buffer-clean-retest --workspace 8` rebuilt and tested Foot,
+preflighted the pinned commit, patch/font/native-library/Cargo.lock identities,
+and passed all 16 regular-12px/1× fixtures byte-for-byte. The matrix covers
+printable ASCII, spacing and punctuation, narrow/wide runs, 80/240-column drift,
+edge cells, reverse, dim, conceal, and hidden/block/beam/underline cursor states.
+The aggregate report records 16/16 exact with zero maximum channel delta.
+
+Matrix automation exposed and fixed three observable Foot contracts: rows
+compose right-to-left when overhang masks overlap, dim foreground intensity is
+two-thirds, and focused block/underline cursors are opaque with Foot's one-pixel
+underline geometry. The Foot patch now uses contextual hunks, a capture marker,
+and a clean disposable build; stale patched binaries are not closure evidence.
+
 ## Remaining work
 
 1. Add a visible unseen-output indication and explicit clickable return-to-live

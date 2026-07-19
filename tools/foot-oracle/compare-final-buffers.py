@@ -85,6 +85,17 @@ def load_capture(metadata_path: Path, raw_path: Path | None = None) -> tuple[dic
         raise CaptureError("background_bgra must contain four channels")
     for index, channel in enumerate(background):
         _integer(channel, f"background_bgra[{index}]", 0, 255)
+    cursor = metadata.get("cursor")
+    if cursor is not None:
+        cursor = _object(cursor, "cursor")
+        _integer(cursor.get("column"), "cursor.column", 0, columns - 1)
+        _integer(cursor.get("row"), "cursor.row", 0, rows - 1)
+        if cursor.get("shape") not in ("block", "beam", "underline"):
+            raise CaptureError("cursor.shape is unsupported")
+    composition = metadata.get("composition")
+    if composition != ["terminal-backgrounds", "glyphs", "decorations", "cursor"]:
+        raise CaptureError("composition does not describe the production terminal layers")
+    _object(metadata.get("provenance"), "provenance")
 
     raw_path = raw_path or metadata_path.with_suffix(".argb")
     raw = raw_path.read_bytes()
@@ -131,7 +142,23 @@ def _write_ppm(path: Path, pixels: list[tuple[int, int, int]], width: int, heigh
 def compare(reference: tuple[dict[str, Any], bytes], actual: tuple[dict[str, Any], bytes], output: Path) -> dict[str, Any]:
     ref_meta, ref_raw = reference
     act_meta, act_raw = actual
-    comparable = ("width", "height", "format", "byte_order", "endianness", "scale_120", "grid", "cell", "padding", "origin", "fixture")
+    comparable = (
+        "width",
+        "height",
+        "format",
+        "byte_order",
+        "endianness",
+        "scale_120",
+        "grid",
+        "cell",
+        "padding",
+        "origin",
+        "cursor",
+        "fixture",
+        "frame_id",
+        "background_bgra",
+        "composition",
+    )
     differences = [name for name in comparable if ref_meta.get(name) != act_meta.get(name)]
     if differences:
         raise CaptureError("capture contracts differ: " + ", ".join(differences))
@@ -190,12 +217,29 @@ def compare(reference: tuple[dict[str, Any], bytes], actual: tuple[dict[str, Any
     _write_ppm(output / "heatmap.ppm", heatmap, width, height)
     if bounds is not None:
         left, top, right, bottom = bounds
-        crop = []
+        reference_crop = []
+        actual_crop = []
+        difference_crop = []
         for y in range(top, bottom + 1):
             for x in range(left, right + 1):
-                blue, green, red, _alpha = _pixel(act_raw, act_meta["stride"], x, y)
-                crop.append((red, green, blue))
-        _write_ppm(output / "actual-mismatch-crop.ppm", crop, right - left + 1, bottom - top + 1)
+                expected = _pixel(ref_raw, ref_meta["stride"], x, y)
+                observed = _pixel(act_raw, act_meta["stride"], x, y)
+                ref_blue, ref_green, ref_red, _ref_alpha = expected
+                act_blue, act_green, act_red, _act_alpha = observed
+                reference_crop.append((ref_red, ref_green, ref_blue))
+                actual_crop.append((act_red, act_green, act_blue))
+                difference_crop.append(
+                    (
+                        abs(ref_red - act_red),
+                        abs(ref_green - act_green),
+                        abs(ref_blue - act_blue),
+                    )
+                )
+        crop_width = right - left + 1
+        crop_height = bottom - top + 1
+        _write_ppm(output / "reference-mismatch-crop.ppm", reference_crop, crop_width, crop_height)
+        _write_ppm(output / "actual-mismatch-crop.ppm", actual_crop, crop_width, crop_height)
+        _write_ppm(output / "difference-mismatch-crop.ppm", difference_crop, crop_width, crop_height)
     return report
 
 
