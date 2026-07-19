@@ -8,7 +8,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use splinterm::{
-    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowUpdate, run_window,
+    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowUpdate,
+    config::{AppConfig, ConfigLoad, ResolvedTheme, load_default, load_theme},
+    renderer::{self, RendererOptions},
+    run_window,
 };
 use splinterm_core::SplintId;
 use splinterm_protocol::{
@@ -43,6 +46,19 @@ enum Command {
         name: String,
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Execute argv directly instead of starting the configured shell.
+        #[arg(last = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// xdg-terminal-exec-compatible create/attach and graphical launch.
+    Launch {
+        #[arg(long = "working-directory", alias = "dir")]
+        cwd: Option<PathBuf>,
+        #[arg(long, default_value = "main")]
+        name: String,
+        /// Executable and arguments passed directly, never through a shell.
+        #[arg(last = true, allow_hyphen_values = true)]
+        command: Vec<String>,
     },
     /// Show the current live terminal snapshot (development mode only).
     Snapshot,
@@ -65,8 +81,22 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let command = Cli::parse().command;
+    let ConfigLoad {
+        config,
+        diagnostics,
+    } = load_default()?;
+    for diagnostic in diagnostics {
+        eprintln!("splinterm config: {diagnostic}");
+    }
     if matches!(command, Command::Window) {
-        return run_live_window().await;
+        return run_live_window(config).await;
+    }
+    if let Command::Launch { cwd, name, command } = &command {
+        let cwd = cwd
+            .clone()
+            .unwrap_or(env::current_dir().context("failed to read current directory")?);
+        launch(name.clone(), cwd, command.clone(), config).await?;
+        return Ok(());
     }
     if matches!(command, Command::Consent) {
         return tokio::task::spawn_blocking(run_consent_client)
@@ -76,18 +106,19 @@ async fn main() -> Result<()> {
 
     let mut connection = Connection::connect().await?;
     match command {
-        Command::Window | Command::Consent => {
+        Command::Window | Command::Launch { .. } | Command::Consent => {
             unreachable!("graphical command returned before daemon connection")
         }
         Command::Ping => print_response(connection.request(Request::Ping).await?),
         Command::List => print_response(connection.request(Request::ListDojos).await?),
-        Command::New { name, cwd } => print_response(
+        Command::New { name, cwd, command } => print_response(
             connection
-                .request(Request::CreateDojo {
+                .request(create_request(
                     name,
-                    cwd: cwd
-                        .unwrap_or(env::current_dir().context("failed to read current directory")?),
-                })
+                    cwd.unwrap_or(env::current_dir().context("failed to read current directory")?),
+                    command,
+                    &config,
+                ))
                 .await?,
         ),
         Command::Snapshot => {
@@ -145,6 +176,41 @@ async fn main() -> Result<()> {
             )
         }
     }
+}
+
+fn create_request(name: String, cwd: PathBuf, command: Vec<String>, config: &AppConfig) -> Request {
+    Request::CreateDojo {
+        name,
+        cwd,
+        command,
+        shell: config.shell.clone(),
+        login_shell: config.login_shell,
+        scrollback_lines: config.scrollback_lines,
+    }
+}
+
+async fn launch(name: String, cwd: PathBuf, command: Vec<String>, config: AppConfig) -> Result<()> {
+    let mut connection = Connection::connect().await.context(
+        "splinterd is unavailable; start com.oldjobobo.splinterm-daemon.service or run splinterd",
+    )?;
+    let Response::Dojos { dojos } = connection.request(Request::ListDojos).await? else {
+        bail!("splinterd did not return its session list");
+    };
+    let requested_command = !command.is_empty();
+    if dojos.is_empty() {
+        if !matches!(
+            connection
+                .request(create_request(name, cwd, command, &config))
+                .await?,
+            Response::DojoCreated { .. }
+        ) {
+            bail!("splinterd did not create the requested terminal");
+        }
+    } else if requested_command {
+        bail!("cannot execute a new command while the MVP's single Splint is already live");
+    }
+    drop(connection);
+    run_live_window(config).await
 }
 
 fn read_private_frame<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
@@ -425,6 +491,7 @@ async fn run_controller(
     controller_id: u64,
     splint_id: SplintId,
     incarnation: u64,
+    resize_delay_ms: u64,
 ) -> Result<()> {
     let mut active_controller = Some(controller_id);
     let result = async {
@@ -447,6 +514,9 @@ async fn run_controller(
                     pixel_width,
                     pixel_height,
                 } => {
+                    if resize_delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(resize_delay_ms)).await;
+                    }
                     let Some(controller_id) = active_controller else {
                         continue;
                     };
@@ -481,11 +551,41 @@ async fn run_controller(
     result
 }
 
+async fn watch_theme(
+    path: PathBuf,
+    mut current: ResolvedTheme,
+    updates: mpsc::Sender<WindowUpdate>,
+) {
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        poll.tick().await;
+        match load_theme(&path) {
+            Ok(next) if next != current => {
+                current = next;
+                if updates.send(WindowUpdate::Theme(next)).await.is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("splinterm theme reload rejected: {error:#}"),
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "subscription resync, controller ownership, and window task shutdown are one lifecycle"
 )]
-async fn run_live_window() -> Result<()> {
+async fn run_live_window(config: AppConfig) -> Result<()> {
+    renderer::configure(RendererOptions {
+        font: config.font.clone(),
+        font_size: config.font_size,
+    })?;
+    let theme = load_theme(&config.theme_path).unwrap_or_else(|error| {
+        eprintln!("splinterm theme: {error:#}; using safe fallback palette");
+        ResolvedTheme::default()
+    });
     let mut connection = Connection::connect().await?;
     let (splint_id, incarnation) = connection.live_identity().await?;
     let requested_scopes = vec![
@@ -515,6 +615,11 @@ async fn run_live_window() -> Result<()> {
     let controller_id = control.acquire_control(splint_id, incarnation).await?;
     println!("Controller lease {controller_id} granted for live Splint");
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
+    let _theme_watcher = tokio::spawn(watch_theme(
+        config.theme_path.clone(),
+        theme,
+        updates.clone(),
+    ));
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
     let mut controller = tokio::spawn(run_controller(
         control,
@@ -522,15 +627,24 @@ async fn run_live_window() -> Result<()> {
         controller_id,
         splint_id,
         incarnation,
+        config.resize_delay_ms,
     ));
     let mut last_revision = attachment.snapshot.revision;
     let initial_snapshot = attachment.snapshot;
+    let window_config = config.clone();
     let mut window = tokio::task::spawn_blocking(move || {
         run_window(WindowOptions {
             snapshot: Some(initial_snapshot),
             updates: Some(receiver),
             commands: Some(command_sender),
             authority,
+            initial_columns: window_config.initial_columns,
+            initial_rows: window_config.initial_rows,
+            cursor_style: window_config.cursor_style,
+            cursor_blink: window_config.cursor_blink,
+            title: window_config.title,
+            dpi_aware: window_config.dpi_aware,
+            theme,
             ..WindowOptions::default()
         })
     });
@@ -873,6 +987,25 @@ mod tests {
             exited_code: None,
             exited_signal: None,
         }
+    }
+
+    #[test]
+    fn create_request_preserves_direct_argv_without_shell_interpolation() {
+        let argv = vec![
+            "/usr/bin/printf".to_owned(),
+            "%s\\n".to_owned(),
+            "$(touch /tmp/must-not-run); spaced argument".to_owned(),
+        ];
+        let request = create_request(
+            "argv".to_owned(),
+            PathBuf::from("/tmp"),
+            argv.clone(),
+            &AppConfig::default(),
+        );
+        let Request::CreateDojo { command, .. } = request else {
+            panic!("expected create request");
+        };
+        assert_eq!(command, argv);
     }
 
     #[test]

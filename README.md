@@ -89,6 +89,15 @@ Ctrl+Shift+L releases the local controller. The
 `SPLINTERM_ENABLE_DEV_ATTACH=1` bypass remains available only for isolated
 development and is prominently labeled in the window title.
 
+Phase 8 uses the stable identity `com.oldjobobo.splinterm`. The files under
+`dist/` provide the desktop entry, icon, AppStream metadata, systemd user unit,
+`xdg-terminals.list` entry, and `splinterm-xdg-terminal-exec` launcher. The
+launcher preserves command arguments and working directory without shell
+interpolation. Project-owned configuration and Omarchy theme templates live in
+`config/`; open clients safely reload generated theme roles. See
+[`docs/configuration.md`](docs/configuration.md) for the supported Foot subset
+and migration guide.
+
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
 for development with `SPLINTERM_SOCKET=/path/to/socket`.
 
@@ -121,6 +130,12 @@ cargo run -p splinterm -- window
 
 # Workspace-8-safe human review launcher
 tools/run-wayland-window-demo.py
+
+# Generate a project-owned theme from an Omarchy colors.toml
+python tools/generate-omarchy-theme.py /path/to/colors.toml --output /tmp/theme.json
+
+# Exercise the xdg-terminal-exec-compatible contract without installing it
+PATH="$PWD/target/debug:$PATH" dist/bin/splinterm-xdg-terminal-exec --working-directory "$PWD"
 
 # Initial renderer and font-stack evidence
 cargo run --release -p splinterm --example cpu-shm-benchmark

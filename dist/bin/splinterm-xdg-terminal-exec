@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stable xdg-terminal-exec target. Arguments remain distinct argv entries.
+set -eu
+exec splinterm launch "$@"

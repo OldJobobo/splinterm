@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=Splinterm
+GenericName=Terminal
+Comment=Persistent Omarchy-native Wayland terminal
+TryExec=splinterm-xdg-terminal-exec
+Exec=splinterm-xdg-terminal-exec
+Icon=com.oldjobobo.splinterm
+Terminal=false
+StartupNotify=true
+StartupWMClass=com.oldjobobo.splinterm
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;terminal;
+Actions=New;
+X-TerminalArgExec=--
+X-TerminalArgDir=--working-directory=
+
+[Desktop Action New]
+Name=New Terminal
+Exec=splinterm-xdg-terminal-exec

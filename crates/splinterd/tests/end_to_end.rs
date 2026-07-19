@@ -281,6 +281,10 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .request(Request::CreateDojo {
                 name: "phase8".into(),
                 cwd: cwd.clone(),
+                command: Vec::new(),
+                shell: None,
+                login_shell: true,
+                scrollback_lines: 1_000,
             })
             .await
         {

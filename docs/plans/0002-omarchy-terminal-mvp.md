@@ -1,7 +1,7 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Phase 7 implementation complete — trusted consent validation recorded
-- **Roadmap:** Phase 7 validation
+- **Status:** Phase 8 implementation complete — Omarchy integration validation recorded
+- **Roadmap:** Phase 8 validation
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -73,6 +73,10 @@
   controller release, active authority indication, and bounded metadata audit
   described in [ADR 0005](../adr/0005-trusted-consent-broker.md) and
   [Spike 0014](../spikes/0014-trusted-consent-and-control.md).
+- [x] Add stable application identity, safe `xdg-terminal-exec` command/cwd
+  launch contracts, project-owned Omarchy theme generation and live reload,
+  and the documented Foot configuration subset in
+  [Spike 0015](../spikes/0015-omarchy-integration-and-configuration.md).
 - [ ] Record the full Phase 4 baseline matrix with host/software context,
   including continuous `yes`, large colored-file `cat`, measured resize and
   detach/reattach costs, and total renderer-memory metrics.

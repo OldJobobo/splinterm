@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use splinterm_core::{Dojo, SplintId};
 
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -107,6 +107,11 @@ pub enum Request {
     CreateDojo {
         name: String,
         cwd: PathBuf,
+        /// Direct executable plus argv. Empty selects the configured/default shell.
+        command: Vec<String>,
+        shell: Option<String>,
+        login_shell: bool,
+        scrollback_lines: usize,
     },
     Attach {
         splint_id: SplintId,

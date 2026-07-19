@@ -26,7 +26,7 @@ smithay-client-toolkit = "0.20.0"
 swash = "0.2.10"
 rustix = { version = "1.1.4", features = ["event", "fs", "process", "pty", "rand", "termios"] }
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-width = "0.2"

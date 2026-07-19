@@ -16,7 +16,7 @@ use std::{
     time::Instant,
 };
 
-use crate::box_drawing;
+use crate::{box_drawing, config::CursorStyle};
 use anyhow::{Context, Result, bail};
 
 use splinterm_core::SplintId;
@@ -43,6 +43,40 @@ const EMOJI_FONT: &str = "Noto Color Emoji";
 const SNAPSHOT_GLYPH_CACHE_BUDGET: usize = 2_048;
 
 static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 3], String>> = OnceLock::new();
+static RENDERER_OPTIONS: OnceLock<RendererOptions> = OnceLock::new();
+
+#[derive(Clone, Debug)]
+pub struct RendererOptions {
+    pub font: String,
+    pub font_size: f32,
+}
+
+impl Default for RendererOptions {
+    fn default() -> Self {
+        Self {
+            font: PRIMARY_FONT.to_owned(),
+            font_size: BASE_FONT_SIZE,
+        }
+    }
+}
+
+/// Installs immutable per-process renderer configuration before a window opens.
+/// A process owns one graphical window in the MVP, so caches cannot mix fonts.
+///
+/// # Errors
+/// Returns an error for an invalid size or a second configuration attempt.
+pub fn configure(options: RendererOptions) -> Result<()> {
+    if !options.font_size.is_finite() || !(6.0..=96.0).contains(&options.font_size) {
+        bail!("font size must be between 6 and 96 pixels");
+    }
+    RENDERER_OPTIONS
+        .set(options)
+        .map_err(|_| anyhow::anyhow!("renderer is already configured"))
+}
+
+fn renderer_options() -> &'static RendererOptions {
+    RENDERER_OPTIONS.get_or_init(RendererOptions::default)
+}
 
 struct PersistentGlyphCache {
     context: ScaleContext,
@@ -422,7 +456,7 @@ fn snapshot_faces() -> Result<&'static [FontFace; 3]> {
     SNAPSHOT_FACES
         .get_or_init(|| {
             Ok([
-                resolve_face("primary", PRIMARY_FONT, "jetbrains mono")
+                resolve_face("primary", &renderer_options().font, "")
                     .map_err(|error| error.to_string())?,
                 resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")
                     .map_err(|error| error.to_string())?,
@@ -512,11 +546,20 @@ fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<(u32, u32, i3
         .glyph_metrics(&[])
         .scale(font_size)
         .advance_width(primary.charmap().map('M'));
-    let cell_width = positive_ceil_to_u32(mono_advance);
+    // fcft exposes the 26.6 advance as an integer cell width (13 px for the
+    // accepted 22 px JetBrains Mono fixture). Ceil widened 13.2 px to 14 px,
+    // creating a visible extra column between every ASCII character.
+    let cell_width = positive_round_to_u32(mono_advance);
     let cell_height =
         positive_ceil_to_u32(metrics.ascent + metrics.descent + metrics.leading.max(0.0));
     let baseline = ceil_to_i32(metrics.ascent);
     Ok((cell_width, cell_height, baseline, mono_advance))
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn positive_round_to_u32(value: f32) -> u32 {
+    assert!(value.is_finite() && value > 0.0);
+    value.round().max(1.0) as u32
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -580,7 +623,7 @@ fn resolve_face(
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect();
-    if !normalized_family.contains(&normalized_expected) {
+    if !normalized_expected.is_empty() && !normalized_family.contains(&normalized_expected) {
         bail!("explicit {label} pattern {pattern:?} resolved unexpectedly to {family:?}");
     }
     let data = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
@@ -908,6 +951,38 @@ pub(crate) struct SnapshotFrame {
 }
 
 impl SnapshotFrame {
+    pub(crate) fn initial_logical_size(
+        &self,
+        columns: u16,
+        rows: u16,
+        scale_120: u32,
+    ) -> Result<(u32, u32)> {
+        let physical_width = u32::from(columns)
+            .checked_mul(self.cell_width)
+            .and_then(|value| {
+                value.checked_add(u32::try_from(self.origin_x.max(0)).ok()?.checked_mul(2)?)
+            })
+            .context("initial width overflow")?;
+        let physical_height = u32::from(rows)
+            .checked_mul(self.cell_height)
+            .and_then(|value| {
+                value.checked_add(u32::try_from(self.origin_y.max(0)).ok()?.checked_mul(2)?)
+            })
+            .context("initial height overflow")?;
+        if scale_120 == 0 {
+            bail!("initial scale cannot be zero");
+        }
+        Ok((
+            physical_width
+                .saturating_mul(120)
+                .div_ceil(scale_120)
+                .max(480),
+            physical_height
+                .saturating_mul(120)
+                .div_ceil(scale_120)
+                .max(300),
+        ))
+    }
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -1010,7 +1085,7 @@ impl SnapshotFrame {
         }
         let scale_120 = u16::try_from(scale_120).context("scale fits u16")?;
         let scale_factor = f32::from(scale_120) / 120.0;
-        let font_size = BASE_FONT_SIZE * scale_factor;
+        let font_size = renderer_options().font_size * scale_factor;
         let faces = snapshot_faces()?;
         let (cell_width, cell_height, baseline, _) = cell_metrics(&faces[0], font_size)?;
         let origin = u32::from(scale_120)
@@ -1094,7 +1169,7 @@ impl SnapshotFrame {
             bail!("snapshot palette must contain exactly 256 colors");
         }
         let faces = snapshot_faces()?;
-        let font_size = BASE_FONT_SIZE * f32::from(self.scale_120) / 120.0;
+        let font_size = renderer_options().font_size * f32::from(self.scale_120) / 120.0;
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
         let mut shape_context = ShapeContext::new();
@@ -1401,6 +1476,10 @@ pub(crate) struct SnapshotOverlays<'a> {
     pub(crate) hovered_url: Option<((usize, usize), (usize, usize))>,
     pub(crate) dirty_rows: Option<&'a [bool]>,
     pub(crate) focused: bool,
+    /// Packed `0xRRGGBB` project theme roles.
+    pub(crate) selection_color: u32,
+    pub(crate) url_color: u32,
+    pub(crate) accent_color: u32,
 }
 
 pub(crate) fn paint_snapshot_overlays(
@@ -1414,39 +1493,17 @@ pub(crate) fn paint_snapshot_overlays(
         selection,
         hovered_url,
         dirty_rows,
-        focused,
+        focused: _focused,
+        selection_color,
+        url_color,
+        accent_color: _accent_color,
     } = overlays;
-    let focus_color = if focused {
-        [120, 210, 255, 255]
-    } else {
-        [90, 90, 90, 255]
+    let themed_bgra = |color: u32, alpha: u8| {
+        let [_, red, green, blue] = color.to_be_bytes();
+        [blue, green, red, alpha]
     };
-    fill_rect(canvas, width, height, (0, 0, width, 2), focus_color);
-    fill_rect(canvas, width, height, (0, 0, 2, height), focus_color);
-    fill_rect(
-        canvas,
-        width,
-        height,
-        (
-            0,
-            i32::try_from(height.saturating_sub(2)).unwrap_or(0),
-            width,
-            2,
-        ),
-        focus_color,
-    );
-    fill_rect(
-        canvas,
-        width,
-        height,
-        (
-            i32::try_from(width.saturating_sub(2)).unwrap_or(0),
-            0,
-            2,
-            height,
-        ),
-        focus_color,
-    );
+    // Focus framing belongs to the compositor. Painting a second solid frame
+    // inside the client obscures Hyprland's active-border gradient.
     let row_is_dirty =
         |row: usize| dirty_rows.is_none_or(|dirty| dirty.get(row).copied().unwrap_or(false));
     if let Some((start, end)) = selection {
@@ -1474,7 +1531,7 @@ pub(crate) fn paint_snapshot_overlays(
                     width,
                     height,
                     (x, y, frame.cell_width, frame.cell_height),
-                    [53, 74, 96, 112],
+                    themed_bgra(selection_color, 112),
                 );
             }
         }
@@ -1497,7 +1554,7 @@ pub(crate) fn paint_snapshot_overlays(
                     width,
                     height,
                     (x, y, frame.cell_width, 2),
-                    [120, 190, 255, 255],
+                    themed_bgra(url_color, 255),
                 );
             }
         }
@@ -1510,6 +1567,7 @@ pub(crate) fn paint_snapshot(
     height: u32,
     frame: &SnapshotFrame,
     cursor_visible: bool,
+    cursor_style: CursorStyle,
 ) {
     for pixel in canvas.chunks_exact_mut(4) {
         pixel.copy_from_slice(&[
@@ -1570,31 +1628,16 @@ pub(crate) fn paint_snapshot(
             frame.cursor_color[2],
             0xff,
         ];
-        fill_rect(canvas, width, height, (x, y, frame.cell_width, 2), color);
-        fill_rect(
+        paint_cursor(
             canvas,
             width,
             height,
-            (
-                x,
-                y + i32::try_from(frame.cell_height.saturating_sub(2)).expect("cursor bottom"),
-                frame.cell_width,
-                2,
-            ),
+            x,
+            y,
+            frame.cell_width,
+            frame.cell_height,
             color,
-        );
-        fill_rect(canvas, width, height, (x, y, 2, frame.cell_height), color);
-        fill_rect(
-            canvas,
-            width,
-            height,
-            (
-                x + i32::try_from(frame.cell_width.saturating_sub(2)).expect("cursor right"),
-                y,
-                2,
-                frame.cell_height,
-            ),
-            color,
+            cursor_style,
         );
     }
 }
@@ -1606,6 +1649,7 @@ pub(crate) fn paint_snapshot_rows(
     frame: &SnapshotFrame,
     dirty_rows: &[bool],
     cursor_visible: bool,
+    cursor_style: CursorStyle,
 ) {
     for row in 0..frame.rows {
         if !dirty_rows
@@ -1675,33 +1719,57 @@ pub(crate) fn paint_snapshot_rows(
                 frame.cursor_color[2],
                 0xff,
             ];
-            fill_rect(canvas, width, height, (x, y, frame.cell_width, 2), color);
-            fill_rect(
+            paint_cursor(
                 canvas,
                 width,
                 height,
-                (
-                    x,
-                    y + i32::try_from(frame.cell_height.saturating_sub(2)).expect("cursor bottom"),
-                    frame.cell_width,
-                    2,
-                ),
+                x,
+                y,
+                frame.cell_width,
+                frame.cell_height,
                 color,
-            );
-            fill_rect(canvas, width, height, (x, y, 2, frame.cell_height), color);
-            fill_rect(
-                canvas,
-                width,
-                height,
-                (
-                    x + i32::try_from(frame.cell_width.saturating_sub(2)).expect("cursor right"),
-                    y,
-                    2,
-                    frame.cell_height,
-                ),
-                color,
+                cursor_style,
             );
         }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "cursor geometry is explicit and allocation-free"
+)]
+fn paint_cursor(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    cell_width: u32,
+    cell_height: u32,
+    color: [u8; 4],
+    style: CursorStyle,
+) {
+    match style {
+        CursorStyle::Block => fill_rect(
+            canvas,
+            width,
+            height,
+            (x, y, cell_width, cell_height),
+            [color[0], color[1], color[2], 96],
+        ),
+        CursorStyle::Beam => fill_rect(canvas, width, height, (x, y, 2, cell_height), color),
+        CursorStyle::Underline => fill_rect(
+            canvas,
+            width,
+            height,
+            (
+                x,
+                y + i32::try_from(cell_height.saturating_sub(2)).unwrap_or(0),
+                cell_width,
+                2,
+            ),
+            color,
+        ),
     }
 }
 
@@ -1965,12 +2033,20 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             );
 
             let started = Instant::now();
-            paint_snapshot(&mut canvas, width, height, &frame, true);
+            paint_snapshot(&mut canvas, width, height, &frame, true, CursorStyle::Block);
             std::hint::black_box(&canvas);
             full.push(u64::try_from(started.elapsed().as_nanos()).context("full paint duration")?);
 
             let started = Instant::now();
-            paint_snapshot_rows(&mut canvas, width, height, &frame, &dirty, true);
+            paint_snapshot_rows(
+                &mut canvas,
+                width,
+                height,
+                &frame,
+                &dirty,
+                true,
+                CursorStyle::Block,
+            );
             std::hint::black_box(&canvas);
             row_damage
                 .push(u64::try_from(started.elapsed().as_nanos()).context("row paint duration")?);
@@ -2291,7 +2367,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_overlay_visibly_distinguishes_focused_and_unfocused_windows() {
+    fn empty_overlays_leave_compositor_border_area_untouched() {
         let snapshot = incremental_snapshot();
         let frame = SnapshotFrame::load_scaled(&snapshot, 120).expect("frame");
         let mut focused = vec![0_u8; 200 * 200 * 4];
@@ -2306,6 +2382,9 @@ mod tests {
                 hovered_url: None,
                 dirty_rows: None,
                 focused: true,
+                selection_color: 0x0035_4a60,
+                url_color: 0x0078_beff,
+                accent_color: 0x0078_d2ff,
             },
         );
         paint_snapshot_overlays(
@@ -2318,9 +2397,13 @@ mod tests {
                 hovered_url: None,
                 dirty_rows: None,
                 focused: false,
+                selection_color: 0x0035_4a60,
+                url_color: 0x0078_beff,
+                accent_color: 0x0078_d2ff,
             },
         );
-        assert_ne!(&focused[..4], &unfocused[..4]);
+        assert_eq!(&focused[..4], &[0, 0, 0, 0]);
+        assert_eq!(focused, unfocused);
     }
 
     #[test]
@@ -2519,12 +2602,12 @@ mod tests {
             scale_120: 120,
         };
         let mut canvas = vec![0; 12 * 8 * 4];
-        paint_snapshot(&mut canvas, 12, 8, &frame, true);
+        paint_snapshot(&mut canvas, 12, 8, &frame, true, CursorStyle::Block);
         let pixel = |x: usize, y: usize| &canvas[(y * 12 + x) * 4..(y * 12 + x + 1) * 4];
         assert_eq!(pixel(2, 2), [3, 2, 1, 0xff]);
         assert_eq!(pixel(4, 3), [50, 100, 200, 0xff]);
         assert_eq!(pixel(5, 3), [50, 100, 200, 0xff]);
-        assert_eq!(pixel(6, 2), [0xeb, 0xeb, 0xeb, 0xff]);
+        assert_eq!(pixel(6, 2), [0xeb, 0xeb, 0xeb, 96]);
     }
 
     fn damage_test_frame() -> SnapshotFrame {
@@ -2550,7 +2633,15 @@ mod tests {
     fn row_damage_paints_only_selected_rows() {
         let frame = damage_test_frame();
         let mut canvas = vec![0; 2 * 6 * 4];
-        paint_snapshot_rows(&mut canvas, 2, 6, &frame, &[false, true, false], false);
+        paint_snapshot_rows(
+            &mut canvas,
+            2,
+            6,
+            &frame,
+            &[false, true, false],
+            false,
+            CursorStyle::Block,
+        );
         assert_eq!(&canvas[0..4], &[0, 0, 0, 0]);
         assert_eq!(&canvas[2 * 2 * 4..2 * 2 * 4 + 4], &[0, 0, 2, 0xff]);
         assert_eq!(&canvas[4 * 2 * 4..4 * 2 * 4 + 4], &[0, 0, 0, 0]);
@@ -2560,7 +2651,7 @@ mod tests {
     fn scroll_damage_copies_existing_grid_pixels() {
         let frame = damage_test_frame();
         let mut canvas = vec![0; 2 * 6 * 4];
-        paint_snapshot(&mut canvas, 2, 6, &frame, false);
+        paint_snapshot(&mut canvas, 2, 6, &frame, false, CursorStyle::Block);
         scroll_snapshot_pixels(
             &mut canvas,
             2,

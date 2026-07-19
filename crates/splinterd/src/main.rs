@@ -3,6 +3,7 @@ mod consent;
 use std::{
     collections::HashMap,
     env,
+    ffi::OsString,
     io::ErrorKind,
     os::unix::{
         ffi::OsStrExt,
@@ -437,6 +438,19 @@ async fn controlled_handle(
     Ok(handle)
 }
 
+fn first_party_ui_scopes(scopes: &[AccessScope]) -> bool {
+    scopes.iter().all(|scope| {
+        matches!(
+            scope,
+            AccessScope::Observe | AccessScope::Input | AccessScope::Resize
+        )
+    })
+}
+
+fn trusted_first_party_ui(peer: &PeerIdentity, scopes: &[AccessScope]) -> bool {
+    peer.is_matching_splinterm() && first_party_ui_scopes(scopes)
+}
+
 async fn authorize_scope(
     state: &DaemonState,
     peer: &PeerIdentity,
@@ -444,7 +458,7 @@ async fn authorize_scope(
     incarnation: u64,
     scopes: &[AccessScope],
 ) -> Result<Option<u64>, ProtocolError> {
-    if state.development_terminal_access {
+    if state.development_terminal_access || trusted_first_party_ui(peer, scopes) {
         return Ok(None);
     }
     state
@@ -454,6 +468,21 @@ async fn authorize_scope(
         .authorize(peer, splint_id, incarnation, scopes)
         .map(Some)
         .ok_or_else(|| ProtocolError::new(ErrorCode::Unauthorized, "trusted consent is required"))
+}
+
+fn first_party_grant(
+    splint_id: SplintId,
+    incarnation: u64,
+    scopes: Vec<AccessScope>,
+) -> AccessGrant {
+    AccessGrant {
+        grant_id: 0,
+        splint_id,
+        incarnation,
+        scopes,
+        requester: "TRUSTED FIRST-PARTY SPLINTERM UI".to_owned(),
+        expires_at_unix_seconds: u64::MAX,
+    }
 }
 
 fn development_grant(
@@ -512,6 +541,10 @@ async fn handle_request(
             if state.development_terminal_access {
                 Response::AccessGranted {
                     grant: development_grant(peer, splint_id, incarnation, scopes),
+                }
+            } else if trusted_first_party_ui(peer, &scopes) {
+                Response::AccessGranted {
+                    grant: first_party_grant(splint_id, incarnation, scopes),
                 }
             } else if let Some(grant_id) =
                 state
@@ -598,9 +631,27 @@ async fn handle_request(
             );
             Response::Acknowledged
         }
-        Request::CreateDojo { name, cwd } => {
-            if name.len() > 128 || cwd.as_os_str().as_bytes().len() > 4096 {
-                return Err(invalid("dojo name or working directory exceeds limit"));
+        Request::CreateDojo {
+            name,
+            cwd,
+            command,
+            shell,
+            login_shell,
+            scrollback_lines,
+        } => {
+            let command_bytes = command
+                .iter()
+                .try_fold(0_usize, |total, item| total.checked_add(item.len()));
+            if name.len() > 128
+                || cwd.as_os_str().as_bytes().len() > 4096
+                || command.len() > 256
+                || command_bytes.is_none_or(|bytes| bytes > MAX_INPUT_BYTES)
+                || shell
+                    .as_ref()
+                    .is_some_and(|shell| shell.is_empty() || shell.len() > 4096)
+                || scrollback_lines > 1_000_000
+            {
+                return Err(invalid("dojo launch parameters exceed limits"));
             }
             let mut live = state.live_splint.lock().await;
             if live.is_some() {
@@ -616,12 +667,21 @@ async fn handle_request(
                 unreachable!()
             };
             let splint_id = splint.id;
-            let command = PtyCommand::new(default_shell(), cwd).login_shell(true);
+            let pty_command = if let Some((program, arguments)) = command.split_first() {
+                PtyCommand::new(program, cwd)
+                    .args(arguments.iter())
+                    .login_shell(false)
+            } else {
+                PtyCommand::new(shell.map_or_else(default_shell, OsString::from), cwd)
+                    .login_shell(login_shell)
+            };
+            let mut live_config = LiveSplintConfig::default();
+            live_config.terminal.scrollback_lines = scrollback_lines;
             let Ok(runtime) = LiveSplintRuntime::spawn(
                 splint_id,
                 state.pty_backend.clone(),
-                command,
-                LiveSplintConfig::default(),
+                pty_command,
+                live_config,
             )
             .await
             else {
@@ -700,7 +760,9 @@ async fn handle_request(
             splint_id,
             incarnation,
         } => {
-            let grant_id = if state.development_terminal_access {
+            let grant_id = if state.development_terminal_access
+                || trusted_first_party_ui(peer, &[AccessScope::Input, AccessScope::Resize])
+            {
                 None
             } else {
                 let mut grants = state.grants.lock().await;
@@ -1472,6 +1534,19 @@ mod tests {
         controllers.release_identity(splint_id, 7);
         assert_eq!(controllers.active, None);
         assert!(controllers.acquire(splint_id, 8, None).is_ok());
+    }
+
+    #[test]
+    fn first_party_ui_scope_policy_excludes_sensitive_authority() {
+        assert!(first_party_ui_scopes(&[
+            AccessScope::Observe,
+            AccessScope::Input,
+            AccessScope::Resize,
+        ]));
+        assert!(!first_party_ui_scopes(&[AccessScope::Scrollback]));
+        assert!(!first_party_ui_scopes(&[AccessScope::ClipboardRead]));
+        assert!(!first_party_ui_scopes(&[AccessScope::ClipboardWrite]));
+        assert!(!first_party_ui_scopes(&[AccessScope::Terminate]));
     }
 
     #[test]

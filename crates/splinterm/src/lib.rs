@@ -7,6 +7,7 @@
 //! the daemon remains the terminal-state and shell-lifetime authority.
 
 mod box_drawing;
+pub mod config;
 pub mod renderer;
 pub mod wayland;
 

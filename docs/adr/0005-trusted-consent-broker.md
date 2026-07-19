@@ -47,8 +47,17 @@ Audit records are bounded metadata: timestamp/order, peer identity, Splint
 identity, scopes, decision, revocation, and reason. They never contain terminal
 bodies, clipboard bodies, or input bytes.
 
+The matching sibling `splinterm` executable is the trusted first-party UI and
+may implicitly receive only observe, input, and resize authority for its normal
+window lifecycle. This identity check uses the same executable device/inode
+binding as trusted status/revocation UI. It does not cover scrollback,
+clipboard, or terminate scopes and does not authorize another executable,
+automation client, or copied binary. Those requests continue through explicit
+consent. This avoids prompting every time the disposable first-party window is
+reopened without creating a persistent third-party allow rule.
+
 Development bypass remains explicit, visually labeled, and unsuitable for
-supported automation. No grant is persisted across daemon restart.
+supported automation. No third-party grant is persisted across daemon restart.
 
 ## Consequences
 

@@ -1,0 +1,2 @@
+# Copy or merge into ${XDG_CONFIG_HOME:-~/.config}/xdg-terminals.list.
+com.oldjobobo.splinterm.desktop

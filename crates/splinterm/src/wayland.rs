@@ -94,6 +94,7 @@ use smithay_client_toolkit::reexports::protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
+use crate::config::{APP_ID, CursorStyle, ResolvedTheme};
 use crate::renderer::{
     SnapshotFrame, SnapshotOverlays, TextRow, paint, paint_snapshot, paint_snapshot_overlays,
     paint_snapshot_rows, scroll_snapshot_pixels, snapshot_row_rect, write_ppm,
@@ -101,7 +102,6 @@ use crate::renderer::{
 
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 600;
-const APP_ID: &str = "com.oldjobobo.splinterm";
 const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
 const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 const MAX_CLIPBOARD_WORKERS: usize = 4;
@@ -250,6 +250,7 @@ pub enum WindowUpdate {
     Snapshot(TerminalSnapshot),
     Update(TerminalUpdate),
     Authority(AuthorityStatus),
+    Theme(ResolvedTheme),
     Shutdown,
 }
 
@@ -277,7 +278,6 @@ pub struct TrustedConsentUi {
     pub decision: StdSender<bool>,
 }
 
-#[derive(Default)]
 pub struct WindowOptions {
     pub capture: Option<PathBuf>,
     /// Initial owned daemon snapshot. `None` retains the deterministic evidence row.
@@ -294,6 +294,40 @@ pub struct WindowOptions {
     pub trusted_consent: Option<TrustedConsentUi>,
     /// Trusted authority state rendered in persistent application chrome.
     pub authority: AuthorityStatus,
+    /// Initial terminal dimensions from the supported configuration subset.
+    pub initial_columns: u16,
+    pub initial_rows: u16,
+    /// Configured cursor presentation policy.
+    pub cursor_style: CursorStyle,
+    pub cursor_blink: bool,
+    /// Optional fixed user title; terminal OSC titles remain active when absent.
+    pub title: Option<String>,
+    /// Ignore compositor DPI/scale changes when disabled.
+    pub dpi_aware: bool,
+    /// Current project-owned Omarchy role mapping.
+    pub theme: ResolvedTheme,
+}
+
+impl Default for WindowOptions {
+    fn default() -> Self {
+        Self {
+            capture: None,
+            snapshot: None,
+            updates: None,
+            commands: None,
+            evidence_close_shortcuts: false,
+            capture_scale: None,
+            trusted_consent: None,
+            authority: AuthorityStatus::default(),
+            initial_columns: 80,
+            initial_rows: 24,
+            cursor_style: CursorStyle::Block,
+            cursor_blink: true,
+            title: None,
+            dpi_aware: true,
+            theme: ResolvedTheme::default(),
+        }
+    }
 }
 
 /// Opens the native window and runs until compositor close or an explicit shutdown.
@@ -308,7 +342,10 @@ pub struct WindowOptions {
     clippy::too_many_lines,
     reason = "Wayland global binding and application state initialization form one startup transaction"
 )]
-pub fn run(options: WindowOptions) -> Result<()> {
+pub fn run(mut options: WindowOptions) -> Result<()> {
+    if let Some(snapshot) = options.snapshot.as_mut() {
+        apply_theme(snapshot, options.theme);
+    }
     let text_row = options
         .snapshot
         .is_none()
@@ -319,6 +356,11 @@ pub fn run(options: WindowOptions) -> Result<()> {
         .as_ref()
         .map(|snapshot| SnapshotFrame::load(snapshot, 1))
         .transpose()?;
+    let (initial_width, initial_height) = snapshot_frame
+        .as_ref()
+        .map_or(Ok((INITIAL_WIDTH, INITIAL_HEIGHT)), |frame| {
+            frame.initial_logical_size(options.initial_columns, options.initial_rows, 120)
+        })?;
     let connection = Connection::connect_to_env().context("connect to Wayland compositor")?;
     let (globals, event_queue) =
         registry_queue_init(&connection).context("read Wayland registry")?;
@@ -358,7 +400,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
         .zip(viewporter.as_ref())
         .map(|(_, manager)| manager.get_viewport(window.wl_surface(), &queue_handle, ()));
     if let Some(viewport) = &viewport {
-        let (width, height) = viewport_destination(INITIAL_WIDTH, INITIAL_HEIGHT)?;
+        let (width, height) = viewport_destination(initial_width, initial_height)?;
         viewport.set_destination(width, height);
     }
     let controller_active = options.commands.is_some();
@@ -367,10 +409,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
         "Splinterm — Trusted Access Request".to_owned()
     } else {
         window_title(
-            options
-                .snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.title.as_str()),
+            options.title.as_deref().or_else(|| {
+                options
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.title.as_str())
+            }),
             controller_active,
             &options.authority,
         )
@@ -383,8 +427,13 @@ pub fn run(options: WindowOptions) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
     window.commit();
 
-    let pool_size = usize::try_from(INITIAL_WIDTH * INITIAL_HEIGHT * 4)
-        .context("initial SHM pool size fits usize")?;
+    let pool_size = usize::try_from(
+        initial_width
+            .checked_mul(initial_height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .context("initial SHM size overflow")?,
+    )
+    .context("initial SHM pool size fits usize")?;
     let pool = SlotPool::new(pool_size, &shm).context("create SHM pool")?;
     let mut app = App {
         registry_state: RegistryState::new(&globals),
@@ -411,6 +460,11 @@ pub fn run(options: WindowOptions) -> Result<()> {
         controller_active,
         trusted_consent,
         authority: options.authority,
+        cursor_style: options.cursor_style,
+        cursor_blink: options.cursor_blink,
+        title_override: options.title,
+        dpi_aware: options.dpi_aware,
+        theme: options.theme,
         evidence_close_shortcuts: options.evidence_close_shortcuts,
         modifiers: Modifiers::default(),
         last_resize: None,
@@ -444,8 +498,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
         pressed_buttons: HashMap::new(),
         vertical_wheel: WheelAccumulator::default(),
         loop_handle: event_loop.handle(),
-        logical_width: INITIAL_WIDTH,
-        logical_height: INITIAL_HEIGHT,
+        logical_width: initial_width,
+        logical_height: initial_height,
         configured: false,
         exit: false,
         failure: None,
@@ -530,6 +584,13 @@ fn paint_trusted_consent_chrome(canvas: &mut [u8], width: u32, height: u32) {
     );
 }
 
+fn apply_theme(snapshot: &mut TerminalSnapshot, theme: ResolvedTheme) {
+    if snapshot.palette.len() == 256 {
+        snapshot.palette[..16].copy_from_slice(&theme.ansi);
+    }
+    snapshot.default_colors = [theme.foreground, theme.background, theme.cursor];
+}
+
 fn viewport_destination(width: u32, height: u32) -> Result<(i32, i32)> {
     Ok((
         i32::try_from(width).context("viewport width fits i32")?,
@@ -591,6 +652,11 @@ struct App {
     controller_active: bool,
     trusted_consent: Option<TrustedConsentUi>,
     authority: AuthorityStatus,
+    cursor_style: CursorStyle,
+    cursor_blink: bool,
+    title_override: Option<String>,
+    dpi_aware: bool,
+    theme: ResolvedTheme,
     evidence_close_shortcuts: bool,
     modifiers: Modifiers,
     last_resize: Option<(u16, u16, u16, u16)>,
@@ -1705,7 +1771,7 @@ impl App {
             self.authority.grants.clear();
             if let Some(snapshot) = &self.snapshot {
                 self.window.set_title(window_title(
-                    Some(&snapshot.title),
+                    self.title_override.as_deref().or(Some(&snapshot.title)),
                     self.controller_active,
                     &self.authority,
                 ));
@@ -1720,7 +1786,7 @@ impl App {
             self.controller_active = false;
             if let Some(snapshot) = &self.snapshot {
                 self.window.set_title(window_title(
-                    Some(&snapshot.title),
+                    self.title_override.as_deref().or(Some(&snapshot.title)),
                     self.controller_active,
                     &self.authority,
                 ));
@@ -1792,7 +1858,8 @@ impl App {
         let mut full_frame_reload = false;
         for update in pending {
             match update {
-                WindowUpdate::Snapshot(snapshot) => {
+                WindowUpdate::Snapshot(mut snapshot) => {
+                    apply_theme(&mut snapshot, self.theme);
                     if self
                         .snapshot
                         .as_ref()
@@ -1828,6 +1895,7 @@ impl App {
                         .as_mut()
                         .context("terminal update arrived before initial snapshot")?;
                     apply_terminal_update(snapshot, update)?;
+                    apply_theme(snapshot, self.theme);
                     if content_changed {
                         self.invalidate_local_content_state();
                     }
@@ -1898,6 +1966,15 @@ impl App {
                     visual_changed = true;
                     self.full_redraw = true;
                 }
+                WindowUpdate::Theme(theme) => {
+                    self.theme = theme;
+                    if let Some(snapshot) = self.snapshot.as_mut() {
+                        apply_theme(snapshot, theme);
+                    }
+                    visual_changed = true;
+                    full_frame_reload = true;
+                    self.full_redraw = true;
+                }
                 WindowUpdate::Shutdown => {
                     self.exit = true;
                     return Ok(());
@@ -1925,7 +2002,7 @@ impl App {
         if title_changed {
             let snapshot = self.snapshot.as_ref().context("updated snapshot exists")?;
             self.window.set_title(window_title(
-                Some(&snapshot.title),
+                self.title_override.as_deref().or(Some(&snapshot.title)),
                 self.controller_active,
                 &self.authority,
             ));
@@ -1933,7 +2010,16 @@ impl App {
         Ok(())
     }
 
-    fn apply_scale(&mut self, scale_120: u32, queue_handle: &QueueHandle<Self>) -> Result<()> {
+    fn apply_scale(
+        &mut self,
+        requested_scale_120: u32,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<()> {
+        let scale_120 = if self.dpi_aware {
+            requested_scale_120
+        } else {
+            SCALE_DENOMINATOR
+        };
         if !(MIN_SCALE_120..=MAX_SCALE_120).contains(&scale_120) || scale_120 == self.scale_120 {
             return Ok(());
         }
@@ -1969,13 +2055,14 @@ impl App {
     }
 
     fn tick_cursor_blink(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        let blinking = self.snapshot.as_ref().is_some_and(|snapshot| {
-            cursor_blink_enabled(
-                self.reduced_motion,
-                self.keyboard_focused,
-                snapshot.input_modes,
-            )
-        });
+        let blinking = self.cursor_blink
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                cursor_blink_enabled(
+                    self.reduced_motion,
+                    self.keyboard_focused,
+                    snapshot.input_modes,
+                )
+            });
         if blinking && self.last_cursor_blink.elapsed() >= Duration::from_millis(500) {
             self.cursor_blink_visible = !self.cursor_blink_visible;
             self.last_cursor_blink = Instant::now();
@@ -2082,6 +2169,7 @@ impl App {
                     height,
                     frame,
                     self.cursor_blink_visible,
+                    self.cursor_style,
                 );
             } else {
                 for scroll in self.pending_scrolls.drain(..) {
@@ -2094,6 +2182,7 @@ impl App {
                     frame,
                     &self.raster_dirty_rows,
                     self.cursor_blink_visible,
+                    self.cursor_style,
                 );
             }
             let selection = self
@@ -2115,6 +2204,9 @@ impl App {
                     hovered_url,
                     dirty_rows: None,
                     focused: self.keyboard_focused,
+                    selection_color: self.theme.selection,
+                    url_color: self.theme.url,
+                    accent_color: self.theme.ui_accent,
                 },
             );
             if self.trusted_consent.is_some() {

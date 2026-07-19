@@ -4,7 +4,8 @@
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e` (MIT). U+2500,
 //! U+250C, U+2510, U+253C, and the U+2800–U+28FF Braille range are translated.
 //! The integer midpoint and Braille dot formulas intentionally match Foot's
-//! helpers; this is not yet a general box-drawing renderer.
+//! helpers. The common light-line set is generated across complete cell edges
+//! so adjacent terminal cells cannot expose rasterizer-bearing gaps.
 
 /// An 8-bit alpha mask occupying one complete terminal cell.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,22 +34,72 @@ pub(crate) fn generate(
         mask.draw_braille(u8::try_from(u32::from(character) - 0x2800).ok()?);
         return Some(mask);
     }
+    match character {
+        '▀' => mask.fill(0, 0, width, height.div_ceil(2)),
+        '▄' => mask.fill(0, height / 2, width, height),
+        '█' => mask.fill(0, 0, width, height),
+        '▌' => mask.fill(0, 0, width.div_ceil(2), height),
+        '▐' => mask.fill(width / 2, 0, width, height),
+        '░' => mask.draw_shade(1),
+        '▒' => mask.draw_shade(2),
+        '▓' => mask.draw_shade(3),
+        _ => {}
+    }
+    if matches!(character, '▀' | '▄' | '█' | '▌' | '▐' | '░' | '▒' | '▓') {
+        return Some(mask);
+    }
     let horizontal_y = height.saturating_sub(thickness) / 2;
     let vertical_x = width.saturating_sub(thickness) / 2;
+    let right_of_center = vertical_x.saturating_add(thickness);
+    let below_center = horizontal_y.saturating_add(thickness);
     match character {
         '─' => mask.horizontal(0, width, horizontal_y, thickness),
+        '│' => mask.vertical(0, height, vertical_x, thickness),
         '┌' => {
             mask.horizontal(vertical_x, width, horizontal_y, thickness);
             mask.vertical(horizontal_y, height, vertical_x, thickness);
         }
         '┐' => {
-            mask.horizontal(
-                0,
-                width.saturating_add(thickness) / 2,
-                horizontal_y,
-                thickness,
-            );
+            mask.horizontal(0, right_of_center, horizontal_y, thickness);
             mask.vertical(horizontal_y, height, vertical_x, thickness);
+        }
+        '└' => {
+            mask.horizontal(vertical_x, width, horizontal_y, thickness);
+            mask.vertical(0, below_center, vertical_x, thickness);
+        }
+        '┘' => {
+            mask.horizontal(0, right_of_center, horizontal_y, thickness);
+            mask.vertical(0, below_center, vertical_x, thickness);
+        }
+        '╭' => mask.rounded_corner(RoundedCorner::TopLeft, vertical_x, horizontal_y, thickness),
+        '╮' => mask.rounded_corner(RoundedCorner::TopRight, vertical_x, horizontal_y, thickness),
+        '╰' => mask.rounded_corner(
+            RoundedCorner::BottomLeft,
+            vertical_x,
+            horizontal_y,
+            thickness,
+        ),
+        '╯' => mask.rounded_corner(
+            RoundedCorner::BottomRight,
+            vertical_x,
+            horizontal_y,
+            thickness,
+        ),
+        '├' => {
+            mask.horizontal(vertical_x, width, horizontal_y, thickness);
+            mask.vertical(0, height, vertical_x, thickness);
+        }
+        '┤' => {
+            mask.horizontal(0, right_of_center, horizontal_y, thickness);
+            mask.vertical(0, height, vertical_x, thickness);
+        }
+        '┬' => {
+            mask.horizontal(0, width, horizontal_y, thickness);
+            mask.vertical(horizontal_y, height, vertical_x, thickness);
+        }
+        '┴' => {
+            mask.horizontal(0, width, horizontal_y, thickness);
+            mask.vertical(0, below_center, vertical_x, thickness);
         }
         '┼' => {
             mask.horizontal(0, width, horizontal_y, thickness);
@@ -59,7 +110,29 @@ pub(crate) fn generate(
     Some(mask)
 }
 
+#[derive(Clone, Copy)]
+enum RoundedCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
 impl BoxMask {
+    fn draw_shade(&mut self, level: u32) {
+        // A stable 2×2 ordered pattern gives 25%, 50%, and 75% coverage while
+        // using the entire cell; font bearings must not introduce edge gaps.
+        const BAYER: [[u32; 2]; 2] = [[0, 2], [3, 1]];
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if BAYER[(y % 2) as usize][(x % 2) as usize] < level {
+                    let index = usize::try_from(y * self.width + x).expect("shade index fits");
+                    self.data[index] = 0xff;
+                }
+            }
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the adjustment order is a direct translation of Foot's Braille geometry"
@@ -139,6 +212,93 @@ impl BoxMask {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "bounded rounded-corner samples are clipped to the cell before conversion"
+    )]
+    fn rounded_corner(
+        &mut self,
+        corner: RoundedCorner,
+        center_x: u32,
+        center_y: u32,
+        thickness: u32,
+    ) {
+        let radius = (self.width / 3).min(self.height / 6).max(2);
+        match corner {
+            RoundedCorner::TopLeft => {
+                self.horizontal(center_x + radius, self.width, center_y, thickness);
+                self.vertical(center_y + radius, self.height, center_x, thickness);
+            }
+            RoundedCorner::TopRight => {
+                self.horizontal(
+                    0,
+                    center_x.saturating_sub(radius) + thickness,
+                    center_y,
+                    thickness,
+                );
+                self.vertical(center_y + radius, self.height, center_x, thickness);
+            }
+            RoundedCorner::BottomLeft => {
+                self.horizontal(center_x + radius, self.width, center_y, thickness);
+                self.vertical(
+                    0,
+                    center_y.saturating_sub(radius) + thickness,
+                    center_x,
+                    thickness,
+                );
+            }
+            RoundedCorner::BottomRight => {
+                self.horizontal(
+                    0,
+                    center_x.saturating_sub(radius) + thickness,
+                    center_y,
+                    thickness,
+                );
+                self.vertical(
+                    0,
+                    center_y.saturating_sub(radius) + thickness,
+                    center_x,
+                    thickness,
+                );
+            }
+        }
+
+        let (origin_x, origin_y, start) = match corner {
+            RoundedCorner::TopLeft => (center_x + radius, center_y + radius, std::f64::consts::PI),
+            RoundedCorner::TopRight => (
+                center_x.saturating_sub(radius),
+                center_y + radius,
+                -std::f64::consts::FRAC_PI_2,
+            ),
+            RoundedCorner::BottomLeft => (
+                center_x + radius,
+                center_y.saturating_sub(radius),
+                std::f64::consts::FRAC_PI_2,
+            ),
+            RoundedCorner::BottomRight => (
+                center_x.saturating_sub(radius),
+                center_y.saturating_sub(radius),
+                0.0,
+            ),
+        };
+        let samples = radius.saturating_mul(8);
+        for sample in 0..=samples {
+            let angle =
+                start + f64::from(sample) / f64::from(samples) * std::f64::consts::FRAC_PI_2;
+            let x = f64::from(origin_x) + f64::from(radius) * angle.cos();
+            let y = f64::from(origin_y) + f64::from(radius) * angle.sin();
+            let x = x.round().max(0.0) as u32;
+            let y = y.round().max(0.0) as u32;
+            self.fill(
+                x,
+                y,
+                x.saturating_add(thickness),
+                y.saturating_add(thickness),
+            );
+        }
+    }
+
     fn horizontal(&mut self, x1: u32, x2: u32, y: u32, thickness: u32) {
         self.fill(x1, y, x2, y.saturating_add(thickness));
     }
@@ -181,7 +341,7 @@ mod tests {
         for (width, height, thickness) in [(7, 9, 1), (8, 10, 2)] {
             let center_x = (width - thickness) / 2;
             let center_y = (height - thickness) / 2;
-            for character in ['┌', '┐', '┼'] {
+            for character in ['┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'] {
                 let mask = generate(character, width, height, thickness).expect("supported");
                 for y in center_y..center_y + thickness {
                     for x in center_x..center_x + thickness {
@@ -190,6 +350,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn block_elements_cover_cell_edges_without_font_bearing_gaps() {
+        let full = generate('█', 13, 30, 1).expect("full block");
+        assert!(full.data.iter().all(|alpha| *alpha == 0xff));
+        let upper = generate('▀', 13, 30, 1).expect("upper block");
+        assert!((0..13).all(|x| pixel(&upper, x, 0) == 0xff));
+        assert!((0..13).all(|x| pixel(&upper, x, 29) == 0));
+        let lower = generate('▄', 13, 30, 1).expect("lower block");
+        assert!((0..13).all(|x| pixel(&lower, x, 0) == 0));
+        assert!((0..13).all(|x| pixel(&lower, x, 29) == 0xff));
+        for shade in ['░', '▒', '▓'] {
+            let mask = generate(shade, 13, 30, 1).expect("shade");
+            assert!(mask.data.contains(&0));
+            assert!(mask.data.contains(&0xff));
+        }
+    }
+
+    #[test]
+    fn rounded_corners_keep_line_weight_and_do_not_become_square() {
+        let top_right = generate('╮', 13, 30, 1).expect("rounded corner");
+        assert_eq!(pixel(&top_right, 0, 14), 0xff, "horizontal edge");
+        assert_eq!(pixel(&top_right, 6, 29), 0xff, "vertical edge");
+        assert_eq!(pixel(&top_right, 6, 14), 0, "sharp center must stay empty");
+        assert!(top_right.data.iter().all(|alpha| matches!(alpha, 0 | 0xff)));
+    }
+
+    #[test]
+    fn straight_lines_reach_opposite_cell_edges() {
+        let horizontal = generate('─', 13, 30, 1).expect("horizontal");
+        let vertical = generate('│', 13, 30, 1).expect("vertical");
+        let center_x = 6;
+        let center_y = 14;
+        assert_eq!(pixel(&horizontal, 0, center_y), 0xff);
+        assert_eq!(pixel(&horizontal, 12, center_y), 0xff);
+        assert_eq!(pixel(&vertical, center_x, 0), 0xff);
+        assert_eq!(pixel(&vertical, center_x, 29), 0xff);
     }
 
     #[test]

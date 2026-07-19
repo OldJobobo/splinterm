@@ -36,9 +36,11 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 Request/response types shared by both processes. The current development
 protocol uses bounded length-prefixed JSON frames, version-range negotiation,
 request IDs, peer-UID verification, stable errors, and explicit subscription
-resynchronization. Protocol v7 also carries closed access scopes, grant status,
-revocation, and revocation events. Protocol DTOs remain separate from terminal
-and daemon runtime structs.
+resynchronization. Protocol v8 carries closed access scopes, grant status,
+revocation events, and bounded direct command argv, working-directory,
+shell/login, and scrollback launch fields. Command arguments are never rebuilt
+as a shell string. Protocol DTOs remain separate from terminal and daemon
+runtime structs.
 
 ### `splinterd`
 
@@ -62,6 +64,12 @@ local input, clipboard/IME integration, and rendering state received from the
 daemon. Its private consent mode renders fixed trusted application chrome and
 never accepts requester-supplied terminal content. Normal windows keep active
 authority, development bypass, and controller state visibly indicated.
+
+The graphical identity is fixed to `com.oldjobobo.splinterm` across Wayland and
+desktop metadata. `splinterm launch` is the `xdg-terminal-exec` boundary.
+Client-owned configuration controls renderer/window policy; a generated,
+project-owned theme maps Omarchy roles and reloads without mutating daemon
+terminal state or process lifetime.
 
 ## Foot reference map
 
