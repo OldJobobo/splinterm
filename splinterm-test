@@ -108,7 +108,7 @@ if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists freetype2; t
 fi
 
 # Interaction/performance checks must not use unoptimized renderer binaries.
-cargo build -q $build_flag -p splinterd -p splinterm
+cargo build -q $build_flag -p splinterd -p splinterm -p splinterm-pty
 
 # A failed ping usually means a stale daemon from an older protocol build.
 if ! SPLINTERM_SOCKET="$socket" "$bin_dir/splinterm" ping >/dev/null 2>&1; then

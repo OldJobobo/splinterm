@@ -694,16 +694,20 @@ async fn handle_request(
             };
             let mut live_config = LiveSplintConfig::default();
             live_config.terminal.scrollback_lines = scrollback_lines;
-            let Ok(runtime) = LiveSplintRuntime::spawn(
+            let runtime = match LiveSplintRuntime::spawn(
                 splint_id,
                 state.pty_backend.clone(),
                 pty_command,
                 live_config,
             )
             .await
-            else {
-                state.lair.write().await.remove_dojo(dojo.id);
-                return Err(internal());
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    error!(%error, "failed to spawn live Splint");
+                    state.lair.write().await.remove_dojo(dojo.id);
+                    return Err(internal());
+                }
             };
             let handle = runtime.handle();
             let process_incarnation = handle.incarnation.value();
