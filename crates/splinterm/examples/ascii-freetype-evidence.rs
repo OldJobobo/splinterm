@@ -1,7 +1,6 @@
 //! Emit printable-ASCII FreeType-light glyph evidence for the Foot oracle.
 
 use std::{
-    fs,
     io::{self, Write},
     path::PathBuf,
     process::Command,
@@ -10,17 +9,13 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use splinterm_freetype::{RasterFace, RasterizedGlyph};
-use swash::FontRef;
 
 fn main() -> Result<()> {
     let font_size = evidence_font_size()?;
-    let (path, index, family) = resolve_primary(font_size)?;
+    let style = evidence_font_style()?;
+    let (path, index, family) = resolve_primary(font_size, style)?;
     let mut face = RasterFace::open(&path, index, pixel_size_26_6(font_size))?;
     let metrics = face.metrics()?;
-    let font_data = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    let font = FontRef::from_index(&font_data, usize::try_from(index).context("face index")?)
-        .context("parse selected font")?;
-    let style_metrics = font.metrics(&[]).scale(font_size);
     let stdout = io::stdout();
     let mut output = stdout.lock();
 
@@ -35,6 +30,7 @@ fn main() -> Result<()> {
             "codepoint": codepoint,
             "cols": 1,
             "glyph_id": glyph_id,
+            "style": style,
             "font": family.as_str(),
             "font_path": path.display().to_string(),
             "font_index": index,
@@ -42,10 +38,10 @@ fn main() -> Result<()> {
             "font_descent": metrics.descent,
             "font_height": metrics.height,
             "decorations": {
-                "underline_position": trunc_i32(style_metrics.underline_offset),
-                "underline_thickness": round_i32(style_metrics.stroke_size),
-                "strike_position": trunc_i32(style_metrics.strikeout_offset),
-                "strike_thickness": round_i32(style_metrics.stroke_size),
+                "underline_position": metrics.underline_position,
+                "underline_thickness": metrics.underline_thickness,
+                "strike_position": metrics.strike_position,
+                "strike_thickness": metrics.strike_thickness,
             },
             "color": false,
             "pixel_format": "freetype-gray",
@@ -65,8 +61,8 @@ fn main() -> Result<()> {
 fn evidence_font_size() -> Result<f32> {
     let value = std::env::var("SPLINTERM_EVIDENCE_FONT_SIZE").unwrap_or_else(|_| "22".into());
     let size: f32 = value.parse().context("parse evidence font size")?;
-    if !size.is_finite() || !(6.0..=96.0).contains(&size) {
-        bail!("evidence font size must be between 6 and 96 pixels");
+    if !size.is_finite() || !(6.0..=192.0).contains(&size) {
+        bail!("effective evidence font size must be between 6 and 192 pixels");
     }
     Ok(size)
 }
@@ -79,8 +75,21 @@ fn pixel_size_26_6(font_size: f32) -> isize {
     (font_size * 64.0).round() as isize
 }
 
-fn resolve_primary(font_size: f32) -> Result<(PathBuf, u32, String)> {
-    let pattern = format!("JetBrains Mono Nerd Font:style=Regular:pixelsize={font_size}");
+fn evidence_font_style() -> Result<&'static str> {
+    match std::env::var("SPLINTERM_EVIDENCE_FONT_STYLE")
+        .unwrap_or_else(|_| "Regular".into())
+        .as_str()
+    {
+        "Regular" => Ok("Regular"),
+        "Bold" => Ok("Bold"),
+        "Italic" => Ok("Italic"),
+        "Bold Italic" => Ok("Bold Italic"),
+        style => bail!("unsupported evidence font style {style:?}"),
+    }
+}
+
+fn resolve_primary(font_size: f32, style: &str) -> Result<(PathBuf, u32, String)> {
+    let pattern = format!("JetBrains Mono Nerd Font:style={style}:pixelsize={font_size}");
     let output = Command::new("fc-match")
         .args(["-f", "%{file}\n%{index}\n%{family}\n", &pattern])
         .output()
@@ -123,16 +132,6 @@ fn ink_bounds(glyph: &RasterizedGlyph) -> serde_json::Value {
     }
     let (left, top, right, bottom) = bounds.unwrap_or((0, 0, 0, 0));
     json!({"left": left, "top": top, "right": right, "bottom": bottom})
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn trunc_i32(value: f32) -> i32 {
-    value.trunc() as i32
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn round_i32(value: f32) -> i32 {
-    value.round().max(1.0) as i32
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {

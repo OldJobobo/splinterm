@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <fcft/fcft.h>
 
@@ -123,10 +124,18 @@ main(void)
     const char *size = getenv("SPLINTERM_EVIDENCE_FONT_SIZE");
     if (size == NULL || size[0] == '\0')
         size = "22";
-    char primary[128];
+    const char *style = getenv("SPLINTERM_EVIDENCE_FONT_STYLE");
+    if (style == NULL || style[0] == '\0')
+        style = "Regular";
+    if (strcmp(style, "Regular") != 0 && strcmp(style, "Bold") != 0 &&
+        strcmp(style, "Italic") != 0 && strcmp(style, "Bold Italic") != 0) {
+        fprintf(stderr, "unsupported evidence font style: %s\n", style);
+        return EXIT_FAILURE;
+    }
+    char primary[192];
     char cjk[128];
     char emoji[128];
-    if (snprintf(primary, sizeof(primary), "JetBrains Mono Nerd Font:pixelsize=%s", size) >= sizeof(primary) ||
+    if (snprintf(primary, sizeof(primary), "JetBrains Mono Nerd Font:style=%s:pixelsize=%s", style, size) >= sizeof(primary) ||
         snprintf(cjk, sizeof(cjk), "Noto Sans CJK JP:pixelsize=%s", size) >= sizeof(cjk) ||
         snprintf(emoji, sizeof(emoji), "Noto Color Emoji:pixelsize=%s", size) >= sizeof(emoji))
         return EXIT_FAILURE;

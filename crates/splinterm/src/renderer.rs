@@ -798,18 +798,30 @@ pub fn ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
 /// Returns an error when configured face resolution, shaping identity, or the
 /// production raster bridge fails.
 pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
+    let face_index = match std::env::var("SPLINTERM_EVIDENCE_FONT_STYLE")
+        .unwrap_or_else(|_| "Regular".into())
+        .as_str()
+    {
+        "Regular" => SNAPSHOT_PRIMARY_REGULAR,
+        "Bold" => SNAPSHOT_PRIMARY_BOLD,
+        "Italic" => SNAPSHOT_PRIMARY_ITALIC,
+        "Bold Italic" => SNAPSHOT_PRIMARY_BOLD_ITALIC,
+        style => bail!("unsupported evidence font style {style:?}"),
+    };
     let faces = snapshot_faces()?;
-    let face = &faces[SNAPSHOT_PRIMARY_REGULAR];
-    let font_size = effective_font_size(120)?;
+    let face = &faces[face_index];
+    let scale_120 = std::env::var("SPLINTERM_EVIDENCE_SCALE_120").map_or(Ok(120_u32), |value| {
+        value.parse().context("parse evidence scale")
+    })?;
+    let font_size = effective_font_size(scale_120)?;
     let font = font_ref(face)?;
-    let font_metrics = font.metrics(&[]).scale(font_size);
     let metrics = cell_metrics(face, font_size)?;
     let glyph_metrics = font.glyph_metrics(&[]).scale(font_size);
     let mut records = Vec::with_capacity(95);
     for codepoint in 0x20_u32..=0x7e {
         let character = char::from_u32(codepoint).context("printable ASCII is valid Unicode")?;
         let glyph_id = font.charmap().map(character);
-        let glyph = snapshot_glyph(faces, SNAPSHOT_PRIMARY_REGULAR, glyph_id, font_size)?;
+        let glyph = snapshot_glyph(faces, face_index, glyph_id, font_size)?;
         let ink = glyph.ink_bounds().unwrap_or(InkBounds {
             left: 0,
             top: 0,
@@ -826,9 +838,9 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
             "font": face.family.as_str(),
             "font_path": face.path.display().to_string(),
             "font_index": face.index,
-            "font_ascent": ceil_to_i32(font_metrics.ascent),
-            "font_descent": ceil_to_i32(font_metrics.descent),
-            "font_height": metrics.height,
+            "font_ascent": metrics.ascent,
+            "font_descent": metrics.descent,
+            "font_height": metrics.font_height,
             "decorations": {
                 "underline_position": metrics.underline_position,
                 "underline_thickness": metrics.underline_thickness,
@@ -884,6 +896,7 @@ struct CellMetrics {
     height: u32,
     ascent: u32,
     descent: u32,
+    font_height: i32,
     baseline: i32,
     mono_advance: f32,
     underline_position: i32,
@@ -907,7 +920,6 @@ fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<CellMetrics> 
     let glyph = face
         .rasterize_gray(face.glyph_index('M'))
         .context("rasterize primary M advance")?;
-    let swash_metrics = font_ref(primary_face)?.metrics(&[]).scale(font_size);
     let width = u32::try_from(glyph.advance_x.max(1)).context("cell width")?;
     let height = u32::try_from(metrics.height.max(metrics.ascent + metrics.descent).max(1))
         .context("cell height")?;
@@ -916,12 +928,14 @@ fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<CellMetrics> 
         height,
         ascent: u32::try_from(metrics.ascent).context("cell ascent")?,
         descent: u32::try_from(metrics.descent).context("cell descent")?,
+        font_height: metrics.height,
         baseline: i32::try_from(height).context("cell baseline height")? - metrics.descent,
         mono_advance: glyph.advance_x as f32,
-        underline_position: trunc_to_i32(swash_metrics.underline_offset),
-        underline_thickness: positive_round_to_u32(swash_metrics.stroke_size),
-        strike_position: trunc_to_i32(swash_metrics.strikeout_offset),
-        strike_thickness: positive_round_to_u32(swash_metrics.stroke_size),
+        underline_position: metrics.underline_position,
+        underline_thickness: u32::try_from(metrics.underline_thickness)
+            .context("underline thickness")?,
+        strike_position: metrics.strike_position,
+        strike_thickness: u32::try_from(metrics.strike_thickness).context("strike thickness")?,
     })
 }
 
@@ -935,12 +949,6 @@ fn positive_round_to_u32(value: f32) -> u32 {
 fn ceil_to_i32(value: f32) -> i32 {
     assert!(value.is_finite());
     value.ceil() as i32
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn trunc_to_i32(value: f32) -> i32 {
-    assert!(value.is_finite());
-    value as i32
 }
 
 fn resolve_face(

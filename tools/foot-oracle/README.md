@@ -306,6 +306,29 @@ rechecks placement/focus isolation; and restores the original monitor state in
 `/tmp/splinterm-slice3-source-first-final-3/` passed all six bounded cases with
 exact bytes at 1×, 1.25×, 1.5×, and 2×.
 
+### Slice 4 primary face/size/scale matrix
+
+`run-font-matrix.py` compares pinned fcft against the isolated FreeType bridge
+and production glyph cache for regular, bold, italic, and bold italic faces;
+logical sizes 6, 12, 22, 32, 48, and 96 px; and scales 1×, 1.25×, 1.5×, and 2×.
+Every cell records the resolved face file, index, SHA-256, logical size, scale,
+and effective fractional 26.6 size. Metrics, decorations, advances, placement,
+ink bounds, dimensions, and grayscale masks are exact with zero tolerance.
+
+```bash
+# One portable smoke cell
+tools/foot-oracle/run-font-matrix.py \
+  /tmp/splinterm-font-smoke --case regular-6px-120
+
+# Complete 96-cell primary matrix
+tools/foot-oracle/run-font-matrix.py /tmp/splinterm-font-matrix
+```
+
+The 2026-07-20 primary closure run at `/tmp/splinterm-font-matrix-final/`
+passed 96/96 cells, 95 printable-ASCII glyphs per cell, through both Rust paths.
+Fallback, combining, box-drawing, and color-glyph lanes remain separate so their
+identity and color policies cannot weaken the strict grayscale gate.
+
 ## Rules
 
 - Never silently update expected output to match Rust.

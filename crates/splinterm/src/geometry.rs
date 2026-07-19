@@ -289,13 +289,13 @@ pub fn resolve_font_size_with_output(
     if !pixel_size.is_finite() || pixel_size <= 0.0 {
         bail!("resolved font pixel size is invalid");
     }
-    // Pinned Foot/fcft rounds to an integer raster pixel size before converting
-    // to the FreeType 26.6 request. Retain this order in every consumer/cache key.
-    let rounded_pixel_size = pixel_size.round();
-    if !(1.0..=768.0).contains(&rounded_pixel_size) {
+    // Pinned fcft passes fractional pixel values to FT_Set_Char_Size(). Round
+    // only when converting to FreeType's 26.6 request and cache-key boundary.
+    let rounded_pixel_size_26_6 = (pixel_size * 64.0).round();
+    if !(64.0..=(768.0 * 64.0)).contains(&rounded_pixel_size_26_6) {
         bail!("resolved FreeType font size is out of range");
     }
-    let effective_pixel_size_26_6 = (rounded_pixel_size as u32) * 64;
+    let effective_pixel_size_26_6 = rounded_pixel_size_26_6 as u32;
     Ok(ResolvedFontSize {
         source,
         policy,
@@ -1083,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn font_resolution_rounds_pixels_before_free_type_26_6() {
+    fn font_resolution_preserves_fractional_pixels_at_free_type_26_6() {
         let low = resolve_font_size(
             FontSize::Pixels(12.49),
             FontSizingPolicy::PhysicalDpi,
@@ -1098,10 +1098,13 @@ mod tests {
             96.0,
         )
         .unwrap();
-        assert_eq!((low.pixel_size, low.effective_pixel_size_26_6), (12.0, 768));
+        assert_eq!(
+            (low.pixel_size, low.effective_pixel_size_26_6),
+            (799.0 / 64.0, 799)
+        );
         assert_eq!(
             (high.pixel_size, high.effective_pixel_size_26_6),
-            (13.0, 832)
+            (12.5, 800)
         );
     }
 

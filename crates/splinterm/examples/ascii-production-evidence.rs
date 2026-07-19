@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 
 fn main() -> Result<()> {
-    let value = std::env::var("SPLINTERM_EVIDENCE_FONT_SIZE").unwrap_or_else(|_| "22".into());
+    let value = std::env::var("SPLINTERM_EVIDENCE_LOGICAL_FONT_SIZE")
+        .or_else(|_| std::env::var("SPLINTERM_EVIDENCE_FONT_SIZE"))
+        .unwrap_or_else(|_| "22".into());
     let font_size: f32 = value.parse().context("parse evidence font size")?;
     splinterm::renderer::configure(splinterm::renderer::RendererOptions {
         font: splinterm::config::DEFAULT_FONT.into(),

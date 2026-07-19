@@ -24,4 +24,4 @@ jobs:
       - run: python tools/foot-oracle/validate-fixtures.py
       - run: python tools/foot-oracle/validate-slice3-fixtures.py
       - run: python -m pip install pytest
-      - run: python -m pytest -q tools/foot-oracle/test_compare_glyph_masks.py tools/foot-oracle/test_compare_final_buffers.py tools/foot-oracle/test_run_final_buffer_comparison.py tools/foot-oracle/test_compare_slice3_final_buffers.py tools/foot-oracle/test_slice3_fixtures.py tools/foot-oracle/test_validate_slice3_fixtures.py tools/foot-oracle/test_run_slice3_final_buffer_comparison.py
+      - run: python -m pytest -q tools/foot-oracle/test_compare_glyph_masks.py tools/foot-oracle/test_compare_final_buffers.py tools/foot-oracle/test_run_final_buffer_comparison.py tools/foot-oracle/test_compare_slice3_final_buffers.py tools/foot-oracle/test_slice3_fixtures.py tools/foot-oracle/test_validate_slice3_fixtures.py tools/foot-oracle/test_run_slice3_final_buffer_comparison.py tools/foot-oracle/test_run_font_matrix.py

@@ -8,7 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use freetype::{Face, Library, RenderMode, bitmap::PixelMode, face::LoadFlag};
+use freetype::{
+    Face, Library, RenderMode, bitmap::PixelMode, face::LoadFlag, tt_os2::TrueTypeOS2Table,
+};
 use thiserror::Error;
 
 pub const MIN_PIXEL_SIZE_26_6: isize = 6 * 64;
@@ -162,7 +164,7 @@ impl RasterFace {
         clippy::cast_precision_loss,
         reason = "FreeType 26.6 metrics are bounded font extents"
     )]
-    pub fn metrics(&self) -> Result<FontMetrics, RasterError> {
+    pub fn metrics(&mut self) -> Result<FontMetrics, RasterError> {
         let metrics = self
             .face
             .size_metrics()
@@ -178,8 +180,17 @@ impl RasterFace {
         }
         let underline_top = (underline_position + underline_thickness / 2.0).trunc();
         let underline_width = underline_thickness.max(1.0).round();
-        let strike_thickness = underline_thickness;
-        let strike_position = 3.0 * ascent / 8.0 - strike_thickness / 2.0;
+        let (mut strike_position, mut strike_thickness) =
+            TrueTypeOS2Table::from_face(&mut self.face).map_or((0.0, 0.0), |os2| {
+                (
+                    f64::from(os2.y_strikeout_position()) * y_scale / 64.0,
+                    f64::from(os2.y_strikeout_size()) * y_scale / 64.0,
+                )
+            });
+        if strike_position == 0.0 {
+            strike_thickness = underline_thickness;
+            strike_position = 3.0 * ascent / 8.0 - strike_thickness / 2.0;
+        }
         Ok(FontMetrics {
             ascent: ceil_26_6(metrics.ascender)?,
             descent: ceil_26_6(-metrics.descender)?,
