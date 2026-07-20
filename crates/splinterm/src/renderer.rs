@@ -743,6 +743,37 @@ fn snapshot_color_advance(face_index: usize, glyph_id: u16, font_size: f32) -> R
     })
 }
 
+fn reset_snapshot_cache() {
+    SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+}
+
+fn evict_snapshot_glyphs() -> usize {
+    SNAPSHOT_GLYPH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let evicted = cache.glyphs.len();
+        cache.glyphs.clear();
+        cache.advances.clear();
+        cache.order.clear();
+        cache.glyph_bytes = 0;
+        cache.evictions = cache
+            .evictions
+            .saturating_add(u64::try_from(evicted).unwrap_or(u64::MAX));
+        evicted
+    })
+}
+
+fn process_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    kib.checked_mul(1024)
+}
+
 /// Returns bounded persistent snapshot-glyph-cache metrics.
 #[must_use]
 pub fn snapshot_cache_metrics() -> serde_json::Value {
@@ -3832,7 +3863,9 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
         bail!("benchmark sample count must be positive");
     }
     let mut grids = Vec::new();
+    let benchmark_rss_before = process_rss_bytes();
     for (columns, rows) in [(80_usize, 24_usize), (240, 80)] {
+        reset_snapshot_cache();
         let cell = TerminalCell {
             content: "x".into(),
             spacer_remaining: None,
@@ -3876,14 +3909,15 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             palette: vec![0; 256],
             default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
             title: "phase4 benchmark".into(),
-            visible_rows: vec![
-                TerminalRow {
-                    row_id: None,
-                    linebreak: false,
-                    cells: vec![cell; columns],
-                };
-                rows
-            ],
+            visible_rows: (0..rows)
+                .map(|row| {
+                    Ok(TerminalRow {
+                        row_id: Some(u64::try_from(row + 1).context("benchmark row ID fits u64")?),
+                        linebreak: false,
+                        cells: vec![cell.clone(); columns],
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
             history_generation: 1,
             oldest_available_scrollback_row_id: None,
             newest_available_scrollback_row_id: None,
@@ -3953,20 +3987,49 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             row_damage
                 .push(u64::try_from(started.elapsed().as_nanos()).context("row paint duration")?);
         }
+        let evicted_entries = evict_snapshot_glyphs();
+        let repopulate_started = Instant::now();
+        std::hint::black_box(SnapshotFrame::load_scaled(&snapshot, 120)?);
+        let repopulate_ns = u64::try_from(repopulate_started.elapsed().as_nanos())
+            .context("repopulate duration fits u64")?;
+        let scale_started = Instant::now();
+        std::hint::black_box(SnapshotFrame::load_scaled(&snapshot, 150)?);
+        let scale_change_ns = u64::try_from(scale_started.elapsed().as_nanos())
+            .context("scale change duration fits u64")?;
+        let scale_return_started = Instant::now();
+        std::hint::black_box(SnapshotFrame::load_scaled(&snapshot, 120)?);
+        let scale_return_ns = u64::try_from(scale_return_started.elapsed().as_nanos())
+            .context("scale return duration fits u64")?;
+        let mut alternate_theme = snapshot.clone();
+        alternate_theme.default_colors = [0x0011_2233, 0x0044_5566, 0x0077_8899];
+        let theme_started = Instant::now();
+        std::hint::black_box(SnapshotFrame::load_scaled(&alternate_theme, 120)?);
+        let theme_change_ns = u64::try_from(theme_started.elapsed().as_nanos())
+            .context("theme change duration fits u64")?;
+        let theme_return_started = Instant::now();
+        std::hint::black_box(SnapshotFrame::load_scaled(&snapshot, 120)?);
+        let theme_return_ns = u64::try_from(theme_return_started.elapsed().as_nanos())
+            .context("theme return duration fits u64")?;
         grids.push(serde_json::json!({
             "columns": columns,
             "rows": rows,
-            "canvas": { "width": width, "height": height },
+            "canvas": { "width": width, "height": height, "bytes": canvas_len },
             "cold_frame_ns": cold_ns,
             "warm_full_prepare_ns": timing_summary(&mut warm),
             "one_row_prepare_ns": timing_summary(&mut row_prepare),
             "full_paint_ns": timing_summary(&mut full),
             "one_row_paint_ns": timing_summary(&mut row_damage),
+            "forced_eviction": { "entries": evicted_entries, "repopulate_ns": repopulate_ns },
+            "scale_invalidation_ns": { "change": scale_change_ns, "return": scale_return_ns },
+            "theme_invalidation_ns": { "change": theme_change_ns, "return": theme_return_ns },
+            "rss_bytes_after_grid": process_rss_bytes(),
+            "glyph_cache": snapshot_cache_metrics(),
         }));
     }
     Ok(serde_json::json!({
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "samples": samples,
+        "rss_bytes": { "before": benchmark_rss_before, "after": process_rss_bytes() },
         "grids": grids,
         "glyph_cache": snapshot_cache_metrics(),
     }))
