@@ -132,9 +132,16 @@ pub(crate) struct CellPosition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SelectionEndpoint {
+    history_generation: u64,
+    row_id: u64,
+    column: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Selection {
-    anchor: CellPosition,
-    end: CellPosition,
+    anchor: SelectionEndpoint,
+    end: SelectionEndpoint,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1151,16 +1158,48 @@ fn safe_paste(bytes: &[u8]) -> Result<&[u8]> {
     Ok(bytes)
 }
 
-fn selection_bounds(selection: Selection) -> (CellPosition, CellPosition) {
-    if selection.anchor <= selection.end {
-        (selection.anchor, selection.end)
-    } else {
-        (selection.end, selection.anchor)
-    }
+fn selection_endpoint(
+    snapshot: &TerminalSnapshot,
+    position: CellPosition,
+) -> Option<SelectionEndpoint> {
+    let row_id = snapshot.visible_rows.get(position.row)?.row_id?;
+    Some(SelectionEndpoint {
+        history_generation: snapshot.history_generation,
+        row_id,
+        column: position.column,
+    })
 }
 
-fn selection_text(snapshot: &TerminalSnapshot, selection: Selection) -> String {
-    let (start, end) = selection_bounds(selection);
+fn selection_bounds(
+    snapshot: &TerminalSnapshot,
+    selection: Selection,
+) -> Option<(CellPosition, CellPosition)> {
+    if selection.anchor.history_generation != snapshot.history_generation
+        || selection.end.history_generation != snapshot.history_generation
+    {
+        return None;
+    }
+    let resolve = |endpoint: SelectionEndpoint| {
+        snapshot
+            .visible_rows
+            .iter()
+            .position(|row| row.row_id == Some(endpoint.row_id))
+            .map(|row| CellPosition {
+                row,
+                column: endpoint.column,
+            })
+    };
+    let anchor = resolve(selection.anchor)?;
+    let end = resolve(selection.end)?;
+    Some(if anchor <= end {
+        (anchor, end)
+    } else {
+        (end, anchor)
+    })
+}
+
+fn selection_text(snapshot: &TerminalSnapshot, selection: Selection) -> Option<String> {
+    let (start, end) = selection_bounds(snapshot, selection)?;
     let mut output = String::new();
     for row_index in start.row..=end.row.min(snapshot.rows.saturating_sub(1)) {
         let Some(row) = snapshot.visible_rows.get(row_index) else {
@@ -1187,7 +1226,7 @@ fn selection_text(snapshot: &TerminalSnapshot, selection: Selection) -> String {
             output.push('\n');
         }
     }
-    output
+    Some(output)
 }
 
 fn url_at(
@@ -1839,8 +1878,11 @@ impl App {
     }
 
     fn dirty_selection(&mut self, selection: Option<Selection>) {
-        if let Some(selection) = selection {
-            let (start, end) = selection_bounds(selection);
+        let bounds = selection.and_then(|selection| {
+            self.display_snapshot()
+                .and_then(|snapshot| selection_bounds(&snapshot, selection))
+        });
+        if let Some((start, end)) = bounds {
             for row in start.row..=end.row {
                 self.dirty_row(row);
             }
@@ -2706,6 +2748,11 @@ impl App {
         };
         let width_i32 = i32::try_from(width).context("buffer width fits i32")?;
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
+        let resolved_selection = self.selection.and_then(|selection| {
+            self.display_snapshot()
+                .and_then(|snapshot| selection_bounds(&snapshot, selection))
+                .map(|(start, end)| ((start.row, start.column), (end.row, end.column)))
+        });
         let buffer = if let Some(buffer) = self.buffer.as_mut() {
             buffer
         } else {
@@ -2767,10 +2814,7 @@ impl App {
                     CursorPresentation::for_keyboard_focus(self.keyboard_focused),
                 );
             }
-            let selection = self
-                .selection
-                .map(selection_bounds)
-                .map(|(start, end)| ((start.row, start.column), (end.row, end.column)));
+            let selection = resolved_selection;
             let hovered_url = self
                 .hovered_url
                 .as_ref()
@@ -3324,11 +3368,15 @@ impl PointerHandler for App {
                             .and_then(|snapshot| url_at(snapshot, position))
                     });
                     if self.selecting {
-                        if let (Some(mut selection), Some(position)) = (self.selection, cell) {
-                            self.dirty_selection(Some(selection));
-                            selection.end = position;
-                            self.selection = Some(selection);
-                            self.dirty_selection(Some(selection));
+                        if let (Some(mut selection), Some(position), Some(snapshot)) =
+                            (self.selection, cell, self.display_snapshot())
+                        {
+                            if let Some(endpoint) = selection_endpoint(&snapshot, position) {
+                                self.dirty_selection(Some(selection));
+                                selection.end = endpoint;
+                                self.selection = Some(selection);
+                                self.dirty_selection(Some(selection));
+                            }
                         }
                     } else if let Some(position) = cell {
                         let active_press =
@@ -3409,15 +3457,19 @@ impl PointerHandler for App {
                             }
                         }
                         PressOwner::Selection => {
-                            if let Some(position) = cell {
-                                self.dirty_selection(self.selection);
-                                let selection = Selection {
-                                    anchor: position,
-                                    end: position,
-                                };
-                                self.selection = Some(selection);
-                                self.selecting = true;
-                                self.dirty_selection(Some(selection));
+                            if let (Some(position), Some(snapshot)) =
+                                (cell, self.display_snapshot())
+                            {
+                                if let Some(endpoint) = selection_endpoint(&snapshot, position) {
+                                    self.dirty_selection(self.selection);
+                                    let selection = Selection {
+                                        anchor: endpoint,
+                                        end: endpoint,
+                                    };
+                                    self.selection = Some(selection);
+                                    self.selecting = true;
+                                    self.dirty_selection(Some(selection));
+                                }
                             }
                         }
                         PressOwner::PrimaryPaste => {
@@ -3450,8 +3502,8 @@ impl PointerHandler for App {
                         PressOwner::Selection => {
                             self.selecting = false;
                             self.selected_text = self.selection.and_then(|selection| {
-                                self.display_snapshot().map(|snapshot| {
-                                    selection_text(&snapshot, selection).into_bytes()
+                                self.display_snapshot().and_then(|snapshot| {
+                                    selection_text(&snapshot, selection).map(String::into_bytes)
                                 })
                             });
                             self.publish_clipboard(queue_handle, serial, true);
@@ -4348,6 +4400,8 @@ mod tests {
         view.columns = 4;
         view.rows = 2;
         view.visible_rows = vec![blank_row(4), blank_row(4)];
+        view.visible_rows[0].row_id = Some(1);
+        view.visible_rows[1].row_id = Some(2);
         view.visible_rows[0].cells[0].content = "A".to_owned();
         view.visible_rows[0].cells[1].content = "界".to_owned();
         view.visible_rows[0].cells[2].spacer_remaining = Some(0);
@@ -4355,10 +4409,26 @@ mod tests {
         view.visible_rows[1].cells[0].content = "B".to_owned();
         view.visible_rows[1].cells[1].content = "C".to_owned();
         let selection = Selection {
-            anchor: CellPosition { row: 1, column: 1 },
-            end: CellPosition { row: 0, column: 0 },
+            anchor: SelectionEndpoint {
+                history_generation: 1,
+                row_id: 2,
+                column: 1,
+            },
+            end: SelectionEndpoint {
+                history_generation: 1,
+                row_id: 1,
+                column: 0,
+            },
         };
-        assert_eq!(selection_text(&view, selection), "A界\nBC");
+        assert_eq!(selection_text(&view, selection).as_deref(), Some("A界\nBC"));
+        let stale = Selection {
+            anchor: SelectionEndpoint {
+                history_generation: 2,
+                ..selection.anchor
+            },
+            ..selection
+        };
+        assert_eq!(selection_text(&view, stale), None);
     }
 
     #[test]
