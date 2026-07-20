@@ -22,6 +22,17 @@ def monitor(scale=1.0):
     }
 
 
+def test_slice4_manifest_is_a_bounded_compatible_extension():
+    manifest = MODULE.FIXTURES.load_manifest(
+        Path(__file__).with_name("slice4-final-buffer-fixtures.json")
+    )
+    assert {case["id"] for case in manifest["cases"]} == {
+        "slice4-drift-240",
+        "slice4-mixed-fractional",
+        "slice4-box-emoji-high",
+    }
+
+
 def test_monitor_expression_preserves_mode_position_and_transform():
     expression = MODULE.monitor_expression(monitor(), 1.25)
     assert 'output = "DP-2"' in expression

@@ -44,12 +44,14 @@
     "slice3_manifest": "tools/foot-oracle/slice3-final-buffer-fixtures.json",
     "slice3_schema": "tools/foot-oracle/slice3-final-buffer-schema.md",
     "font_matrix_runner": "tools/foot-oracle/run-font-matrix.py",
+    "slice4_graphical_runner": "tools/foot-oracle/run-slice3-final-buffer-comparison.py",
+    "slice4_graphical_manifest": "tools/foot-oracle/slice4-final-buffer-fixtures.json",
     "font_matrix": {
       "styles": ["Regular", "Bold", "Italic", "Bold Italic"],
       "logical_sizes_px": [6, 12, 22, 32, 48, 96],
       "scales_120": [120, 150, 180, 240],
       "glyph_policy": "exact primary/CJK grayscale and emoji alpha, metrics, placement, dimensions, production advance, face file/index/SHA-256; isolated combining ignores shaping-owned advance only",
-      "color_raster": "FreeType BGRA fixed strike plus pixman 0.46.4 cubic pixel fixup"
+      "color_raster": "FreeType BGRA fixed strike plus Foot-default pixman 0.46.4 Lanczos3 pixel fixup"
     },
     "requires_wayland_compositor": true
   },

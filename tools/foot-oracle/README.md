@@ -316,7 +316,7 @@ and effective fractional 26.6 size. Metrics, decorations, advances, placement,
 ink bounds, dimensions, and grayscale masks are exact with zero tolerance.
 Each cell also checks CJK fallback identity/raster, one shaped combining glyph,
 and Noto Color Emoji. Color glyphs use the pinned fcft fixed-strike and pixman
-cubic pixel-fixup path; alpha, placement, dimensions, and advance remain exact.
+Lanczos3 pixel-fixup path; RGBA, placement, dimensions, and advance remain exact.
 The isolated combining lane ignores only shaping-owned advance while retaining
 exact metrics, placement, dimensions, ink, and mask bytes; production shaping
 compares advance strictly.
@@ -328,13 +328,18 @@ tools/foot-oracle/run-font-matrix.py \
 
 # Complete 96-cell matrix
 tools/foot-oracle/run-font-matrix.py /tmp/splinterm-font-matrix
+
+# Guarded three-case graphical integration subset
+tools/foot-oracle/run-slice3-final-buffer-comparison.py \
+  /tmp/splinterm-slice4-graphical --workspace 8 \
+  --manifest tools/foot-oracle/slice4-final-buffer-fixtures.json
 ```
 
-The primary checkpoint at `/tmp/splinterm-font-matrix-final/` passed 96/96
-cells. The expanded run at `/tmp/splinterm-font-matrix-all-glyphs-final/`
-passed 96/96 cells and all 98 records per cell with no pixel tolerance.
-Box-drawing and long-drift evidence remain source-derived lanes because they are
-cell compositor contracts rather than font fallback rasterization.
+The final headless run at `/tmp/splinterm-font-matrix-lanczos-final/` passed
+96/96 cells and all 98 records per cell with no pixel tolerance. The guarded
+integration run at `/tmp/splinterm-slice4-graphical-final-2/` passed 3/3 exact,
+covering 240-column drift, mixed fractional fallback/composition, and high-scale
+box/emoji behavior. DP-2 was restored after capture.
 
 ## Rules
 

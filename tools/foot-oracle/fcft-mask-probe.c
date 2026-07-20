@@ -167,7 +167,12 @@ main(void)
         snprintf(emoji, sizeof(emoji), "Noto Color Emoji:pixelsize=%s", size) >= sizeof(emoji))
         return EXIT_FAILURE;
     const char *names[] = {primary, cjk, emoji};
-    struct fcft_font *font = fcft_from_name(3, names, NULL);
+    struct fcft_font_options *options = fcft_font_options_create();
+    if (options == NULL)
+        return EXIT_FAILURE;
+    options->scaling_filter = FCFT_SCALING_FILTER_LANCZOS3;
+    struct fcft_font *font = fcft_from_name2(3, names, NULL, options);
+    fcft_font_options_destroy(options);
     if (font == NULL)
         return EXIT_FAILURE;
 

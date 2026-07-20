@@ -30,7 +30,7 @@ impl Drop for Image {
     }
 }
 
-/// Scale premultiplied `FreeType` BGRA with fcft's pinned pixman cubic policy.
+/// Scale premultiplied `FreeType` BGRA with Foot's pinned pixman Lanczos3 policy.
 ///
 /// Returned bytes are tightly packed premultiplied RGBA for Splinterm's color
 /// compositor. Dimensions use fcft's truncating `source * pixel_fixup` rule.
@@ -44,7 +44,7 @@ impl Drop for Image {
     clippy::too_many_lines,
     reason = "this is a bounded line-for-line fcft/pixman scaling adapter"
 )]
-pub fn scale_bgra_cubic(
+pub fn scale_bgra_lanczos3(
     bgra: &[u8],
     width: u32,
     height: u32,
@@ -143,10 +143,10 @@ pub fn scale_bgra_cubic(
             &raw mut parameter_count,
             fixed_inverse,
             fixed_inverse,
-            ffi::pixman_kernel_t_PIXMAN_KERNEL_CUBIC,
-            ffi::pixman_kernel_t_PIXMAN_KERNEL_CUBIC,
-            ffi::pixman_kernel_t_PIXMAN_KERNEL_CUBIC,
-            ffi::pixman_kernel_t_PIXMAN_KERNEL_CUBIC,
+            ffi::pixman_kernel_t_PIXMAN_KERNEL_LANCZOS3,
+            ffi::pixman_kernel_t_PIXMAN_KERNEL_LANCZOS3,
+            ffi::pixman_kernel_t_PIXMAN_KERNEL_LANCZOS3,
+            ffi::pixman_kernel_t_PIXMAN_KERNEL_LANCZOS3,
             1,
             1,
         );
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn identity_scale_converts_premultiplied_bgra_to_rgba() {
         let source = [0x10, 0x20, 0x30, 0x40, 0x01, 0x02, 0x03, 0xff];
-        let (width, height, rgba) = scale_bgra_cubic(&source, 2, 1, 1.0).unwrap();
+        let (width, height, rgba) = scale_bgra_lanczos3(&source, 2, 1, 1.0).unwrap();
         assert_eq!((width, height), (2, 1));
         assert_eq!(rgba, [0x30, 0x20, 0x10, 0x40, 0x03, 0x02, 0x01, 0xff]);
     }
@@ -219,11 +219,11 @@ mod tests {
     #[test]
     fn invalid_or_unbounded_inputs_are_rejected() {
         assert!(matches!(
-            scale_bgra_cubic(&[], 0, 1, 1.0),
+            scale_bgra_lanczos3(&[], 0, 1, 1.0),
             Err(ScaleError::InvalidGeometry)
         ));
         assert!(matches!(
-            scale_bgra_cubic(&[0; 3], 1, 1, 1.0),
+            scale_bgra_lanczos3(&[0; 3], 1, 1, 1.0),
             Err(ScaleError::InvalidBuffer)
         ));
     }

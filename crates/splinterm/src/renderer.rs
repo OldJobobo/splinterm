@@ -1312,7 +1312,7 @@ pub(crate) fn paint(canvas: &mut [u8], width: u32, height: u32, row: &TextRow) {
         let span = row.cell_width.saturating_mul(placed.cells);
         let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
         let (x, y) = glyph_origin(row, placed, glyph, centered_pen);
-        blend_glyph(canvas, width, height, x, y, glyph, [235, 235, 235]);
+        blend_glyph(canvas, width, height, x, y, glyph, [235, 235, 235], None);
     }
 }
 
@@ -1384,6 +1384,10 @@ fn blend_rect(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "glyph blending keeps explicit canvas, placement, color, and clip contracts"
+)]
 fn blend_glyph(
     canvas: &mut [u8],
     canvas_width: u32,
@@ -1392,6 +1396,7 @@ fn blend_glyph(
     y: i32,
     glyph: &CachedGlyph,
     foreground: [u8; 3],
+    clip: Option<(i32, i32, i32, i32)>,
 ) {
     let pixel_count = usize::try_from(glyph.width)
         .expect("glyph width fits usize")
@@ -1435,14 +1440,32 @@ fn blend_glyph(
                     [foreground[0], foreground[1], foreground[2], alpha]
                 }
             };
-            blend_pixel(
-                canvas,
-                canvas_width,
-                canvas_height,
-                x + i32::try_from(gx).expect("glyph x fits i32"),
-                y + i32::try_from(gy).expect("glyph y fits i32"),
-                source,
-            );
+            let target_x = x + i32::try_from(gx).expect("glyph x fits i32");
+            let target_y = y + i32::try_from(gy).expect("glyph y fits i32");
+            if clip.is_some_and(|(left, top, right, bottom)| {
+                target_x < left || target_x >= right || target_y < top || target_y >= bottom
+            }) {
+                continue;
+            }
+            if glyph.content == Content::Color {
+                blend_premultiplied_pixel(
+                    canvas,
+                    canvas_width,
+                    canvas_height,
+                    target_x,
+                    target_y,
+                    source,
+                );
+            } else {
+                blend_pixel(
+                    canvas,
+                    canvas_width,
+                    canvas_height,
+                    target_x,
+                    target_y,
+                    source,
+                );
+            }
         }
     }
 }
@@ -1468,6 +1491,32 @@ fn put_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba: [
 fn pixman_multiply_unorm8(value: u8, alpha: u32) -> u32 {
     let product = u32::from(value) * alpha + 0x80;
     ((product >> 8) + product) >> 8
+}
+
+fn blend_premultiplied_pixel(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    rgba: [u8; 4],
+) {
+    let Some(index) = pixel_index(width, height, x, y) else {
+        return;
+    };
+    let inverse = 255 - u32::from(rgba[3]);
+    for (destination_channel, source_channel) in canvas[index..index + 3]
+        .iter_mut()
+        .zip([rgba[2], rgba[1], rgba[0]])
+    {
+        *destination_channel = u8::try_from(
+            u32::from(source_channel)
+                .saturating_add(pixman_multiply_unorm8(*destination_channel, inverse))
+                .min(255),
+        )
+        .expect("premultiplied channel fits u8");
+    }
+    canvas[index + 3] = 0xff;
 }
 
 fn blend_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba: [u8; 4]) {
@@ -2883,13 +2932,18 @@ fn paint_placed_glyph(
     foreground: [u8; 3],
 ) {
     let glyph = &frame.cache[&placed.key];
-    let span = frame.cell_width.saturating_mul(placed.cells);
-    let centered_pen = (u32_to_f32(span) - placed.cluster_advance) / 2.0;
     let Some((cell_x, cell_y, _, _)) = frame.cell_rect(geometry, placed.column, placed.row) else {
         return;
     };
-    let pen_x = cell_x + round_to_i32(centered_pen + placed.x_offset);
+    // Foot starts each cell at its grid pen; fallback advance does not center
+    // wide glyphs inside the declared terminal span.
+    let pen_x = cell_x + round_to_i32(placed.x_offset);
     let baseline = cell_y + frame.baseline - round_to_i32(placed.y_offset);
+    let grid = geometry.grid_rect;
+    let grid_left = i32::try_from(grid.x).unwrap_or(i32::MAX);
+    let grid_top = i32::try_from(grid.y).unwrap_or(i32::MAX);
+    let grid_right = i32::try_from(grid.x.saturating_add(grid.width)).unwrap_or(i32::MAX);
+    let grid_bottom = i32::try_from(grid.y.saturating_add(grid.height)).unwrap_or(i32::MAX);
     blend_glyph(
         canvas,
         width,
@@ -2898,6 +2952,7 @@ fn paint_placed_glyph(
         baseline - glyph.top,
         glyph,
         foreground,
+        Some((grid_left, grid_top, grid_right, grid_bottom)),
     );
 }
 
@@ -3876,6 +3931,38 @@ mod tests {
     }
 
     #[test]
+    fn glyph_clip_preserves_inside_overhang_and_rejects_outside_pixels() {
+        let glyph = CachedGlyph {
+            content: Content::Mask,
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 1,
+            data: vec![255, 255],
+        };
+        let mut canvas = vec![0; 2 * 4];
+        blend_glyph(
+            &mut canvas,
+            2,
+            1,
+            0,
+            0,
+            &glyph,
+            [255, 255, 255],
+            Some((0, 0, 1, 1)),
+        );
+        assert_eq!(&canvas[..4], &[255, 255, 255, 255]);
+        assert_eq!(&canvas[4..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn premultiplied_color_over_does_not_multiply_source_twice() {
+        let mut canvas = vec![10, 20, 30, 255];
+        blend_premultiplied_pixel(&mut canvas, 1, 1, 0, 0, [40, 20, 10, 128]);
+        assert_eq!(canvas, [15, 30, 55, 255]);
+    }
+
+    #[test]
     fn ink_bounds_cover_mask_and_color_images() {
         let mask = CachedGlyph {
             content: Content::Mask,
@@ -4444,6 +4531,43 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_fallback_uses_cell_pen_without_centering() {
+        let snapshot = incremental_snapshot();
+        let mut frame = SnapshotFrame::load_scaled(&snapshot, 120).unwrap();
+        let key = GlyphKey { face: 5, glyph: 1 };
+        frame.cache.clear();
+        frame.cache.insert(
+            key,
+            Arc::new(CachedGlyph {
+                content: Content::Mask,
+                left: 0,
+                top: frame.baseline,
+                width: 1,
+                height: 1,
+                data: vec![255],
+            }),
+        );
+        frame.glyphs = vec![SnapshotGlyph {
+            key,
+            column: 0,
+            row: 0,
+            cells: 2,
+            cluster_advance: u32_to_f32(frame.cell_width.saturating_mul(2) - 3),
+            x_offset: 0.0,
+            y_offset: 0.0,
+            foreground: [235; 3],
+        }];
+        let geometry = frame.tight_geometry().unwrap();
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
+        let mut canvas = vec![0; usize::try_from(width * height * 4).unwrap()];
+        paint_glyphs(&mut canvas, width, height, &frame, &geometry, None);
+        let origin = geometry.cell_rect(0, 0).unwrap();
+        let index = usize::try_from((origin.y * width + origin.x) * 4).unwrap();
+        assert_eq!(&canvas[index..index + 4], &[235, 235, 235, 255]);
+    }
+
+    #[test]
     fn snapshot_decorations_use_foot_baseline_metrics_in_full_and_row_paints() {
         let mut snapshot = incremental_snapshot();
         snapshot.visible_rows[0].cells[0].attributes.underline = UnderlineStyle::Single;
@@ -4999,8 +5123,8 @@ mod tests {
         );
         let pixel = |x: usize, y: usize| &canvas[(y * 12 + x) * 4..(y * 12 + x + 1) * 4];
         assert_eq!(pixel(2, 2), [3, 2, 1, 0xff]);
-        assert_eq!(pixel(4, 3), [50, 100, 200, 0xff]);
-        assert_eq!(pixel(5, 3), [50, 100, 200, 0xff]);
+        assert_eq!(pixel(2, 3), [50, 100, 200, 0xff]);
+        assert_eq!(pixel(4, 3), [3, 2, 1, 0xff]);
         assert_eq!(pixel(6, 2), [3, 2, 1, 0xff]);
     }
 

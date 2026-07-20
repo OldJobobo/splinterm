@@ -190,7 +190,7 @@ impl RasterFace {
             i32::try_from(selected_pixel_size_26_6).map_err(|_| RasterError::InvalidPixelSize)?;
         let pixel_fixup = f64::from(requested) / f64::from(selected);
         let (scaled_width, scaled_height, rgba) =
-            splinterm_pixman::scale_bgra_cubic(&bgra, width, height, pixel_fixup)?;
+            splinterm_pixman::scale_bgra_lanczos3(&bgra, width, height, pixel_fixup)?;
         let advance = slot.advance();
         Ok(RasterizedColorGlyph {
             left: scale_trunc(slot.bitmap_left(), pixel_fixup)?,

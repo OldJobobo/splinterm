@@ -190,7 +190,12 @@ def main() -> int:
     if args.workspace != V1.TEST_WORKSPACE or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         parser.error("Slice 3 graphical tests are restricted to workspace 8 on DP-2")
     manifest = FIXTURES.load_manifest(args.manifest)
-    selected = set(args.case_ids or SELECTED_CASES)
+    default_selected = (
+        SELECTED_CASES
+        if args.manifest.resolve() == DEFAULT_MANIFEST.resolve()
+        else {case["id"] for case in manifest["cases"]}
+    )
+    selected = set(args.case_ids or default_selected)
     cases = sorted(
         (case for case in manifest["cases"] if case["id"] in selected),
         key=lambda case: (case["scale_120"], case["id"]),
@@ -221,7 +226,12 @@ def main() -> int:
             print(f"{'PASS' if record['exact'] else 'FAIL'} {case['id']}")
     finally:
         restore_monitor(original)
-    summary = {"schema": "splinterm.final-buffer.slice3-matrix.v2", "source_first": True, "cases": records, "exact": all(item["exact"] for item in records)}
+    schema = (
+        "splinterm.final-buffer.slice3-matrix.v2"
+        if args.manifest.resolve() == DEFAULT_MANIFEST.resolve()
+        else "splinterm.final-buffer.slice4-matrix.v1"
+    )
+    summary = {"schema": schema, "source_first": True, "cases": records, "exact": all(item["exact"] for item in records)}
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(f"Slice 3 matrix: {sum(item['exact'] for item in records)}/{len(records)} exact")
     return 0 if summary["exact"] else 1
