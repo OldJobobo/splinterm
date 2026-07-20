@@ -34,7 +34,9 @@
     "daemon_commit": "31f59f8",
     "daemon_worker_threads": 2,
     "client_runtime_commit": "b25f5112d6f4455c6ed37d9d505ac0b2b570f0bf",
-    "client_worker_threads": 2
+    "client_worker_threads": 2,
+    "lazy_font_data_commit": "4bad8e6da9648b9934e48756d37213820ce5b80c",
+    "eager_font_data_bytes_removed_from_ascii_startup": 30158264
   },
   "isolated_daemon_smoke": {
     "development_socket": true,
@@ -56,7 +58,7 @@
   },
   "limitations": [
     "The installed daemon was not restarted because doing so would terminate its live shell.",
-    "Post-install client RSS with the two-worker runtime remains to be measured in the user's real window.",
+    "Post-install ASCII client RSS with lazy CJK and emoji data remains to be measured in the user's real window.",
     "The isolated daemon smoke is bounded diagnostic evidence, not a replacement for the committed Phase 9 baseline."
   ]
 }

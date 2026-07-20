@@ -15,7 +15,10 @@ Commit `31f59f8` bounds the asynchronous local daemon to two Tokio workers. An
 isolated 12,000-line output smoke then used four total threads, 9.8 MiB RSS, and
 no anonymous mapping over 1 MiB. A post-cache-fix client still used 14 threads,
 90.2 MiB RSS, and 77.2 MiB PSS; commit `b25f511` now bounds its Tokio runtime to
-two workers as well.
+two workers as well. Further inspection found that the renderer eagerly retained
+38.2 MiB of six complete font files. Commit `4bad8e6` loads each face's bytes only
+when shaping first uses it, removing 28.8 MiB of CJK and emoji data from ordinary
+ASCII startup while preserving exact fallback behavior.
 
 See [`summary.json`](summary.json) for machine-readable measurements and explicit
 limitations. The installed daemon was intentionally not restarted because that
