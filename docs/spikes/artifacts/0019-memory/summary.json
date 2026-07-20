@@ -1,0 +1,56 @@
+{
+  "schema": "splinterm.memory-diagnostic.v1",
+  "recorded_at": "2026-07-19T23:34:00-07:00",
+  "host": "wintermute",
+  "pre_change_observation": {
+    "client": {
+      "windows": 1,
+      "window_logical_size": [2460, 1340],
+      "rss_kib": 180696,
+      "pss_kib": 119476,
+      "anonymous_kib": 106224,
+      "shm_kib": 12880,
+      "backing_kib": 12880,
+      "raster_faces": 24,
+      "font_mapping_rss_kib": 51476
+    },
+    "installed_daemon": {
+      "dojos": 1,
+      "splints": 1,
+      "shells": 1,
+      "threads": 13,
+      "rss_kib": 129408,
+      "anonymous_kib": 125032,
+      "large_allocator_arena_mappings": 6
+    }
+  },
+  "changes": {
+    "client_commit": "b295e5e9b09c6e9a27bf99f7ab70fea9b32da9d6",
+    "client_policy": "clear persistent glyph and raster-face caches after each accepted runtime font-size change",
+    "daemon_commit": "31f59f8",
+    "daemon_worker_threads": 2
+  },
+  "isolated_daemon_smoke": {
+    "development_socket": true,
+    "shells": 1,
+    "plain_and_colored_output_lines": 12000,
+    "threads": 4,
+    "rss_kib": 9988,
+    "anonymous_kib": 5540,
+    "anonymous_mappings_over_1_mib": 0,
+    "large_anonymous_mapping_rss_kib": 0
+  },
+  "validation": {
+    "splinterm_tests": 128,
+    "splinterd_library_tests": 9,
+    "splinterd_binary_tests": 13,
+    "splinterd_end_to_end_tests": 1,
+    "strict_clippy": true,
+    "phase9_baseline_passed": true
+  },
+  "limitations": [
+    "The installed daemon was not restarted because doing so would terminate its live shell.",
+    "Post-install client RSS after repeated zoom remains to be measured in the user's real window.",
+    "The isolated daemon smoke is bounded diagnostic evidence, not a replacement for the committed Phase 9 baseline."
+  ]
+}
