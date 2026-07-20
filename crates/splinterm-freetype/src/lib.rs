@@ -40,6 +40,17 @@ pub struct RasterizedGlyph {
     pub alpha: Box<[u8]>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RasterizedColorGlyph {
+    pub left: i32,
+    pub top: i32,
+    pub width: u32,
+    pub height: u32,
+    pub advance_x: i32,
+    pub advance_y: i32,
+    pub rgba: Box<[u8]>,
+}
+
 #[derive(Debug, Error)]
 pub enum RasterError {
     #[error("physical pixel size must be between 6 and 768 pixels in 26.6 units")]
@@ -76,6 +87,8 @@ pub enum RasterError {
     TruncatedBitmap,
     #[error("FreeType advance does not fit the owned raster contract")]
     InvalidAdvance,
+    #[error("scale color glyph with pixman: {0}")]
+    ScaleColor(#[from] splinterm_pixman::ScaleError),
 }
 
 pub struct RasterFace {
@@ -109,6 +122,85 @@ impl RasterFace {
         face.set_char_size(pixel_size_26_6, 0, 72, 72)
             .map_err(RasterError::SetSize)?;
         Ok(Self { face })
+    }
+
+    /// Rasterize one fixed-strike color glyph using pinned fcft's pixel fixup.
+    ///
+    /// `selected_pixel_size_26_6` is Fontconfig's actual fixed strike size;
+    /// `requested_pixel_size_26_6` is the terminal's effective requested size.
+    ///
+    /// # Errors
+    /// Returns a typed error for invalid bounds, `FreeType` failures, non-BGRA
+    /// output, malformed bitmap geometry, or pixman scaling failures.
+    pub fn rasterize_color(
+        path: impl AsRef<Path>,
+        face_index: u32,
+        requested_pixel_size_26_6: isize,
+        selected_pixel_size_26_6: isize,
+        glyph_id: u32,
+    ) -> Result<RasterizedColorGlyph, RasterError> {
+        if !(MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&requested_pixel_size_26_6)
+            || !(MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&selected_pixel_size_26_6)
+        {
+            return Err(RasterError::InvalidPixelSize);
+        }
+        let index = isize::try_from(face_index).map_err(|_| RasterError::InvalidFaceIndex)?;
+        let library = Library::init().map_err(RasterError::Initialize)?;
+        let path = path.as_ref();
+        let face = library
+            .new_face(path, index)
+            .map_err(|source| RasterError::OpenFace {
+                path: path.to_path_buf(),
+                index: face_index,
+                source,
+            })?;
+        face.set_char_size(selected_pixel_size_26_6, 0, 72, 72)
+            .map_err(RasterError::SetSize)?;
+        face.load_glyph(
+            glyph_id,
+            LoadFlag::DEFAULT | LoadFlag::TARGET_LIGHT | LoadFlag::COLOR,
+        )
+        .map_err(|source| RasterError::LoadGlyph { glyph_id, source })?;
+        if face.glyph().raw().format != freetype::ffi::FT_GLYPH_FORMAT_BITMAP {
+            face.glyph()
+                .render_glyph(RenderMode::Normal)
+                .map_err(|source| RasterError::RenderGlyph { glyph_id, source })?;
+        }
+        let slot = face.glyph();
+        let bitmap = slot.bitmap();
+        let mode = bitmap
+            .pixel_mode()
+            .map_err(|_| RasterError::InvalidBitmapGeometry)?;
+        if mode != PixelMode::Bgra {
+            return Err(RasterError::UnsupportedPixelMode { glyph_id, mode });
+        }
+        let width =
+            u32::try_from(bitmap.width()).map_err(|_| RasterError::InvalidBitmapGeometry)?;
+        let height =
+            u32::try_from(bitmap.rows()).map_err(|_| RasterError::InvalidBitmapGeometry)?;
+        let bgra = normalize_bgra_bitmap(
+            bitmap.buffer(),
+            bitmap.width(),
+            bitmap.rows(),
+            bitmap.pitch(),
+        )?;
+        let requested =
+            i32::try_from(requested_pixel_size_26_6).map_err(|_| RasterError::InvalidPixelSize)?;
+        let selected =
+            i32::try_from(selected_pixel_size_26_6).map_err(|_| RasterError::InvalidPixelSize)?;
+        let pixel_fixup = f64::from(requested) / f64::from(selected);
+        let (scaled_width, scaled_height, rgba) =
+            splinterm_pixman::scale_bgra_cubic(&bgra, width, height, pixel_fixup)?;
+        let advance = slot.advance();
+        Ok(RasterizedColorGlyph {
+            left: scale_trunc(slot.bitmap_left(), pixel_fixup)?,
+            top: scale_trunc(slot.bitmap_top(), pixel_fixup)?,
+            width: scaled_width,
+            height: scaled_height,
+            advance_x: scale_advance_trunc(advance.x, pixel_fixup)?,
+            advance_y: scale_advance_trunc(advance.y, pixel_fixup)?,
+            rgba: rgba.into_boxed_slice(),
+        })
     }
 
     /// Rasterizes one glyph with `FreeType` light hinting and normal grayscale,
@@ -229,6 +321,72 @@ fn round_26_6(value: i64) -> Result<i32, RasterError> {
         .ok_or(RasterError::InvalidBitmapGeometry)?
         .div_euclid(64);
     i32::try_from(pixels).map_err(|_| RasterError::InvalidBitmapGeometry)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn scale_trunc(value: i32, pixel_fixup: f64) -> Result<i32, RasterError> {
+    let scaled = f64::from(value) * pixel_fixup;
+    if !scaled.is_finite() || scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        return Err(RasterError::InvalidBitmapGeometry);
+    }
+    Ok(scaled as i32)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn scale_advance_trunc(value_26_6: i64, pixel_fixup: f64) -> Result<i32, RasterError> {
+    let scaled = value_26_6 as f64 / 64.0 * pixel_fixup;
+    if !scaled.is_finite() || scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        return Err(RasterError::InvalidAdvance);
+    }
+    Ok(scaled as i32)
+}
+
+fn normalize_bgra_bitmap(
+    source: &[u8],
+    width: i32,
+    height: i32,
+    pitch: i32,
+) -> Result<Box<[u8]>, RasterError> {
+    let width = u32::try_from(width).map_err(|_| RasterError::InvalidBitmapGeometry)?;
+    let height = u32::try_from(height).map_err(|_| RasterError::InvalidBitmapGeometry)?;
+    if width > MAX_GLYPH_DIMENSION || height > MAX_GLYPH_DIMENSION {
+        return Err(RasterError::BitmapTooLarge);
+    }
+    let row_bytes = usize::try_from(width)
+        .map_err(|_| RasterError::InvalidBitmapGeometry)?
+        .checked_mul(4)
+        .ok_or(RasterError::BitmapTooLarge)?;
+    let rows = usize::try_from(height).map_err(|_| RasterError::InvalidBitmapGeometry)?;
+    let pitch_abs =
+        usize::try_from(pitch.unsigned_abs()).map_err(|_| RasterError::InvalidBitmapGeometry)?;
+    if row_bytes > pitch_abs && rows != 0 {
+        return Err(RasterError::InvalidBitmapGeometry);
+    }
+    let bytes = row_bytes
+        .checked_mul(rows)
+        .ok_or(RasterError::BitmapTooLarge)?;
+    if bytes / 4 > MAX_GLYPH_PIXELS {
+        return Err(RasterError::BitmapTooLarge);
+    }
+    let source_len = pitch_abs
+        .checked_mul(rows)
+        .ok_or(RasterError::BitmapTooLarge)?;
+    if source.len() < source_len {
+        return Err(RasterError::TruncatedBitmap);
+    }
+    let mut output = Vec::with_capacity(bytes);
+    for output_row in 0..rows {
+        let source_row = if pitch < 0 {
+            rows.saturating_sub(output_row + 1)
+        } else {
+            output_row
+        };
+        let start = source_row
+            .checked_mul(pitch_abs)
+            .ok_or(RasterError::BitmapTooLarge)?;
+        output.extend_from_slice(&source[start..start + row_bytes]);
+    }
+    Ok(output.into_boxed_slice())
 }
 
 fn normalize_gray_bitmap(

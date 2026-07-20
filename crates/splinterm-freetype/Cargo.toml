@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 freetype-rs.workspace = true
+splinterm-pixman = { path = "../splinterm-pixman" }
 thiserror.workspace = true
 
 [lints]

@@ -81,6 +81,27 @@ print_alpha_hex(const struct fcft_glyph *glyph)
 }
 
 static void
+print_rgba_hex(const struct fcft_glyph *glyph)
+{
+    static const char hex[] = "0123456789abcdef";
+    const int stride = pixman_image_get_stride(glyph->pix);
+    const uint8_t *data = (const uint8_t *)pixman_image_get_data(glyph->pix);
+    for (int y = 0; y < glyph->height; y++) {
+        const uint32_t *row = (const uint32_t *)(data + y * stride);
+        for (int x = 0; x < glyph->width; x++) {
+            const uint32_t pixel = row[x];
+            const uint8_t channels[] = {
+                pixel >> 16, pixel >> 8, pixel, pixel >> 24,
+            };
+            for (size_t channel = 0; channel < 4; channel++) {
+                putchar(hex[channels[channel] >> 4]);
+                putchar(hex[channels[channel] & 0x0f]);
+            }
+        }
+    }
+}
+
+static void
 print_glyph(const char *label, const struct fcft_font *font,
             const struct fcft_glyph *glyph)
 {
@@ -112,7 +133,13 @@ print_glyph(const char *label, const struct fcft_font *font,
         glyph->height, glyph->advance.x, glyph->advance.y, bounds.left,
         bounds.top, bounds.right, bounds.bottom);
     print_alpha_hex(glyph);
-    puts("\"}");
+    putchar('"');
+    if (glyph->is_color_glyph) {
+        fputs(",\"rgba_hex\":\"", stdout);
+        print_rgba_hex(glyph);
+        putchar('"');
+    }
+    puts("}");
 }
 
 int

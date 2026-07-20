@@ -306,7 +306,7 @@ rechecks placement/focus isolation; and restores the original monitor state in
 `/tmp/splinterm-slice3-source-first-final-3/` passed all six bounded cases with
 exact bytes at 1×, 1.25×, 1.5×, and 2×.
 
-### Slice 4 primary face/size/scale matrix
+### Slice 4 face/size/scale matrix
 
 `run-font-matrix.py` compares pinned fcft against the isolated FreeType bridge
 and production glyph cache for regular, bold, italic, and bold italic faces;
@@ -314,20 +314,27 @@ logical sizes 6, 12, 22, 32, 48, and 96 px; and scales 1×, 1.25×, 1.5×, and 2
 Every cell records the resolved face file, index, SHA-256, logical size, scale,
 and effective fractional 26.6 size. Metrics, decorations, advances, placement,
 ink bounds, dimensions, and grayscale masks are exact with zero tolerance.
+Each cell also checks CJK fallback identity/raster, one shaped combining glyph,
+and Noto Color Emoji. Color glyphs use the pinned fcft fixed-strike and pixman
+cubic pixel-fixup path; alpha, placement, dimensions, and advance remain exact.
+The isolated combining lane ignores only shaping-owned advance while retaining
+exact metrics, placement, dimensions, ink, and mask bytes; production shaping
+compares advance strictly.
 
 ```bash
 # One portable smoke cell
 tools/foot-oracle/run-font-matrix.py \
   /tmp/splinterm-font-smoke --case regular-6px-120
 
-# Complete 96-cell primary matrix
+# Complete 96-cell matrix
 tools/foot-oracle/run-font-matrix.py /tmp/splinterm-font-matrix
 ```
 
-The 2026-07-20 primary closure run at `/tmp/splinterm-font-matrix-final/`
-passed 96/96 cells, 95 printable-ASCII glyphs per cell, through both Rust paths.
-Fallback, combining, box-drawing, and color-glyph lanes remain separate so their
-identity and color policies cannot weaken the strict grayscale gate.
+The primary checkpoint at `/tmp/splinterm-font-matrix-final/` passed 96/96
+cells. The expanded run at `/tmp/splinterm-font-matrix-all-glyphs-final/`
+passed 96/96 cells and all 98 records per cell with no pixel tolerance.
+Box-drawing and long-drift evidence remain source-derived lanes because they are
+cell compositor contracts rather than font fallback rasterization.
 
 ## Rules
 

@@ -171,28 +171,15 @@ pub fn update_output_dpi(
     Ok(changed)
 }
 
+#[derive(Default)]
 struct PersistentGlyphCache {
-    context: ScaleContext,
     raster_faces: HashMap<(isize, usize), RasterFace>,
     glyphs: HashMap<(isize, GlyphKey), Arc<CachedGlyph>>,
+    advances: HashMap<(isize, GlyphKey), i32>,
     order: VecDeque<(isize, GlyphKey)>,
     hits: u64,
     misses: u64,
     evictions: u64,
-}
-
-impl Default for PersistentGlyphCache {
-    fn default() -> Self {
-        Self {
-            context: ScaleContext::new(),
-            raster_faces: HashMap::new(),
-            glyphs: HashMap::new(),
-            order: VecDeque::new(),
-            hits: 0,
-            misses: 0,
-            evictions: 0,
-        }
-    }
 }
 
 thread_local! {
@@ -233,6 +220,7 @@ struct FontFace {
     style: String,
     path: PathBuf,
     index: usize,
+    selected_pixel_size_26_6: isize,
     data: Vec<u8>,
 }
 
@@ -598,30 +586,27 @@ fn snapshot_glyph(
             return Ok(glyph);
         }
         cache.misses = cache.misses.saturating_add(1);
-        let glyph = if face_index == SNAPSHOT_EMOJI {
-            let font = font_ref(&faces[face_index])?;
-            let mut scaler = cache
-                .context
-                .builder(font)
-                .size(font_size)
-                .hint(true)
-                .build();
-            let image = Render::new(&[
-                Source::ColorOutline(0),
-                Source::ColorBitmap(StrikeWith::BestFit),
-                Source::Outline,
-            ])
-            .format(Format::Alpha)
-            .render(&mut scaler, glyph_id)
+        let (glyph, color_advance) = if face_index == SNAPSHOT_EMOJI {
+            let face = &faces[face_index];
+            let raster = RasterFace::rasterize_color(
+                &face.path,
+                u32::try_from(face.index).context("emoji face index fits u32")?,
+                effective_size_26_6,
+                face.selected_pixel_size_26_6,
+                u32::from(glyph_id),
+            )
             .with_context(|| format!("rasterize color snapshot glyph {glyph_id}"))?;
-            CachedGlyph {
-                content: image.content,
-                left: image.placement.left,
-                top: image.placement.top,
-                width: image.placement.width,
-                height: image.placement.height,
-                data: image.data,
-            }
+            (
+                CachedGlyph {
+                    content: Content::Color,
+                    left: raster.left,
+                    top: raster.top,
+                    width: raster.width,
+                    height: raster.height,
+                    data: raster.rgba.into_vec(),
+                },
+                Some(raster.advance_x),
+            )
         } else {
             let raster_key = (effective_size_26_6, face_index);
             if let std::collections::hash_map::Entry::Vacant(entry) =
@@ -643,14 +628,17 @@ fn snapshot_glyph(
                 .context("inserted FreeType raster face remains present")?
                 .rasterize_gray(u32::from(glyph_id))
                 .with_context(|| format!("rasterize snapshot glyph {glyph_id} with FreeType"))?;
-            CachedGlyph {
-                content: Content::Mask,
-                left: raster.left,
-                top: raster.top,
-                width: raster.width,
-                height: raster.height,
-                data: raster.alpha.into_vec(),
-            }
+            (
+                CachedGlyph {
+                    content: Content::Mask,
+                    left: raster.left,
+                    top: raster.top,
+                    width: raster.width,
+                    height: raster.height,
+                    data: raster.alpha.into_vec(),
+                },
+                None,
+            )
         };
         let glyph = Arc::new(glyph);
         while cache.glyphs.len() >= SNAPSHOT_GLYPH_CACHE_BUDGET {
@@ -658,10 +646,14 @@ fn snapshot_glyph(
                 break;
             };
             if cache.glyphs.remove(&oldest).is_some() {
+                cache.advances.remove(&oldest);
                 cache.evictions = cache.evictions.saturating_add(1);
             }
         }
         cache.order.push_back((effective_size_26_6, key));
+        if let Some(advance) = color_advance {
+            cache.advances.insert((effective_size_26_6, key), advance);
+        }
         cache
             .glyphs
             .insert((effective_size_26_6, key), Arc::clone(&glyph));
@@ -679,6 +671,24 @@ fn pixel_size_26_6(font_size: f32) -> Result<isize> {
         bail!("scaled font size is outside the FreeType raster policy");
     }
     Ok(value as isize)
+}
+
+fn snapshot_color_advance(face_index: usize, glyph_id: u16, font_size: f32) -> Result<i32> {
+    let cache_key = (
+        pixel_size_26_6(font_size)?,
+        GlyphKey {
+            face: face_index,
+            glyph: glyph_id,
+        },
+    );
+    SNAPSHOT_GLYPH_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .advances
+            .get(&cache_key)
+            .copied()
+            .context("color glyph cache retained its fcft-compatible advance")
+    })
 }
 
 /// Returns bounded persistent snapshot-glyph-cache metrics.
@@ -797,6 +807,10 @@ pub fn ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
 /// # Errors
 /// Returns an error when configured face resolution, shaping identity, or the
 /// production raster bridge fails.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one evidence record builder keeps all strict oracle fields visibly aligned"
+)]
 pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
     let face_index = match std::env::var("SPLINTERM_EVIDENCE_FONT_STYLE")
         .unwrap_or_else(|_| "Regular".into())
@@ -817,7 +831,7 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
     let font = font_ref(face)?;
     let metrics = cell_metrics(face, font_size)?;
     let glyph_metrics = font.glyph_metrics(&[]).scale(font_size);
-    let mut records = Vec::with_capacity(95);
+    let mut records = Vec::with_capacity(96);
     for codepoint in 0x20_u32..=0x7e {
         let character = char::from_u32(codepoint).context("printable ASCII is valid Unicode")?;
         let glyph_id = font.charmap().map(character);
@@ -865,6 +879,166 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
             "alpha_hex": bytes_to_hex(&alpha),
         }));
     }
+
+    let codepoint = 0x754c;
+    let fallback_face = &faces[SNAPSHOT_CJK];
+    let fallback_font = font_ref(fallback_face)?;
+    let glyph_id = fallback_font
+        .charmap()
+        .map(char::from_u32(codepoint).context("CJK codepoint")?);
+    let glyph = snapshot_glyph(faces, SNAPSHOT_CJK, glyph_id, font_size)?;
+    let ink = glyph.ink_bounds().unwrap_or(InkBounds {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    });
+    let fallback_metrics = fallback_font.glyph_metrics(&[]).scale(font_size);
+    records.push(serde_json::json!({
+        "schema": 1,
+        "label": "CJK",
+        "codepoint": codepoint,
+        "cols": 2,
+        "glyph_id": glyph_id,
+        "font": fallback_face.family.as_str(),
+        "font_path": fallback_face.path.display().to_string(),
+        "font_index": fallback_face.index,
+        "font_ascent": metrics.ascent,
+        "font_descent": metrics.descent,
+        "font_height": metrics.font_height,
+        "decorations": {
+            "underline_position": metrics.underline_position,
+            "underline_thickness": metrics.underline_thickness,
+            "strike_position": metrics.strike_position,
+            "strike_thickness": metrics.strike_thickness,
+        },
+        "color": matches!(glyph.content, Content::Color),
+        "pixel_format": "production-alpha",
+        "source_stride": glyph.width,
+        "placement": {"x": glyph.left, "y": glyph.top},
+        "image": {"width": glyph.width, "height": glyph.height},
+        "advance": {
+            "x": positive_round_to_u32(fallback_metrics.advance_width(glyph_id)),
+            "y": 0,
+        },
+        "ink": {
+            "left": ink.left,
+            "top": ink.top,
+            "right": ink.right,
+            "bottom": ink.bottom,
+        },
+        "alpha_hex": bytes_to_hex(&glyph_alpha_bytes(&glyph)),
+    }));
+
+    let codepoint = 0x1f642;
+    let emoji_face = &faces[SNAPSHOT_EMOJI];
+    let emoji_font = font_ref(emoji_face)?;
+    let glyph_id = emoji_font
+        .charmap()
+        .map(char::from_u32(codepoint).context("emoji codepoint")?);
+    let glyph = snapshot_glyph(faces, SNAPSHOT_EMOJI, glyph_id, font_size)?;
+    let ink = glyph.ink_bounds().unwrap_or(InkBounds {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    });
+    let emoji_advance = snapshot_color_advance(SNAPSHOT_EMOJI, glyph_id, font_size)?;
+    records.push(serde_json::json!({
+        "schema": 1,
+        "label": "emoji",
+        "codepoint": codepoint,
+        "cols": 2,
+        "glyph_id": glyph_id,
+        "font": emoji_face.family.as_str(),
+        "font_path": emoji_face.path.display().to_string(),
+        "font_index": emoji_face.index,
+        "font_ascent": metrics.ascent,
+        "font_descent": metrics.descent,
+        "font_height": metrics.font_height,
+        "decorations": {
+            "underline_position": metrics.underline_position,
+            "underline_thickness": metrics.underline_thickness,
+            "strike_position": metrics.strike_position,
+            "strike_thickness": metrics.strike_thickness,
+        },
+        "color": true,
+        "pixel_format": "production-color-alpha",
+        "source_stride": glyph.width,
+        "placement": {"x": glyph.left, "y": glyph.top},
+        "image": {"width": glyph.width, "height": glyph.height},
+        "advance": {"x": emoji_advance, "y": 0},
+        "ink": {
+            "left": ink.left,
+            "top": ink.top,
+            "right": ink.right,
+            "bottom": ink.bottom,
+        },
+        "alpha_hex": bytes_to_hex(&glyph_alpha_bytes(&glyph)),
+        "rgba_hex": bytes_to_hex(&glyph.data),
+    }));
+
+    let mut shaped_glyphs = Vec::new();
+    let mut shape_context = ShapeContext::new();
+    let mut shaper = shape_context.builder(font).size(font_size).build();
+    shaper.add_str("e\u{301}");
+    shaper.shape_with(|cluster| {
+        let mut pen = 0.0;
+        for shaped_glyph in cluster.glyphs {
+            shaped_glyphs.push((
+                shaped_glyph.id,
+                cluster.advance(),
+                pen + shaped_glyph.x,
+                shaped_glyph.y,
+            ));
+            pen += shaped_glyph.advance;
+        }
+    });
+    let [(glyph_id, cluster_advance, x_offset, y_offset)] = shaped_glyphs.as_slice() else {
+        bail!("combining evidence did not shape to one pinned glyph");
+    };
+    let glyph = snapshot_glyph(faces, face_index, *glyph_id, font_size)?;
+    let ink = glyph.ink_bounds().unwrap_or(InkBounds {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    });
+    records.push(serde_json::json!({
+        "schema": 1,
+        "label": "combining-0",
+        "codepoint": u32::from('e'),
+        "cols": 1,
+        "glyph_id": glyph_id,
+        "font": face.family.as_str(),
+        "font_path": face.path.display().to_string(),
+        "font_index": face.index,
+        "font_ascent": metrics.ascent,
+        "font_descent": metrics.descent,
+        "font_height": metrics.font_height,
+        "decorations": {
+            "underline_position": metrics.underline_position,
+            "underline_thickness": metrics.underline_thickness,
+            "strike_position": metrics.strike_position,
+            "strike_thickness": metrics.strike_thickness,
+        },
+        "color": matches!(glyph.content, Content::Color),
+        "pixel_format": "production-alpha",
+        "source_stride": glyph.width,
+        "placement": {
+            "x": glyph.left + round_to_i32(*x_offset),
+            "y": glyph.top + round_to_i32(*y_offset),
+        },
+        "image": {"width": glyph.width, "height": glyph.height},
+        "advance": {"x": positive_trunc_to_u32(*cluster_advance), "y": 0},
+        "ink": {
+            "left": ink.left,
+            "top": ink.top,
+            "right": ink.right,
+            "bottom": ink.bottom,
+        },
+        "alpha_hex": bytes_to_hex(&glyph_alpha_bytes(&glyph)),
+    }));
     Ok(records)
 }
 
@@ -945,6 +1119,12 @@ fn positive_round_to_u32(value: f32) -> u32 {
     value.round().max(1.0) as u32
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn positive_trunc_to_u32(value: f32) -> u32 {
+    assert!(value.is_finite() && value > 0.0);
+    value.trunc().max(1.0) as u32
+}
+
 #[allow(clippy::cast_possible_truncation)]
 fn ceil_to_i32(value: f32) -> i32 {
     assert!(value.is_finite());
@@ -959,7 +1139,7 @@ fn resolve_face(
     let output = Command::new("fc-match")
         .args([
             "-f",
-            "%{file}\\n%{index}\\n%{family}\\n%{style}\\n",
+            "%{file}\\n%{index}\\n%{family}\\n%{style}\\n%{pixelsize}\\n",
             pattern,
         ])
         .output()
@@ -990,6 +1170,12 @@ fn resolve_face(
         .next()
         .with_context(|| format!("fc-match returned no style for {label}"))?
         .to_owned();
+    let selected_pixel_size = lines
+        .next()
+        .with_context(|| format!("fc-match returned no pixel size for {label}"))?
+        .parse::<f32>()
+        .with_context(|| format!("fc-match returned an invalid pixel size for {label}"))?;
+    let selected_pixel_size_26_6 = pixel_size_26_6(selected_pixel_size)?;
     let normalized_family: String = family
         .chars()
         .filter(|character| character.is_alphanumeric())
@@ -1010,6 +1196,7 @@ fn resolve_face(
         style,
         path,
         index,
+        selected_pixel_size_26_6,
         data,
     };
     let _ = font_ref(&face)?;
@@ -2114,6 +2301,14 @@ fn prepare_snapshot_row(
             cache
                 .entry(key)
                 .or_insert(snapshot_glyph(faces, face_index, glyph_id, font_size)?);
+            let cluster_advance = if face_index == SNAPSHOT_EMOJI {
+                f32::from(
+                    i16::try_from(snapshot_color_advance(face_index, glyph_id, font_size)?)
+                        .context("color glyph advance fits i16")?,
+                )
+            } else {
+                cluster_advance.trunc()
+            };
             glyphs.push(SnapshotGlyph {
                 key,
                 column,
@@ -4344,6 +4539,22 @@ mod tests {
             .unwrap();
         assert_eq!(regular.metrics, frame.cell_metrics[0]);
         assert_eq!(italic.metrics, frame.cell_metrics[2]);
+    }
+
+    #[test]
+    fn color_fallback_cache_uses_fcft_fixed_strike_size_and_advance() {
+        let faces = snapshot_faces().unwrap();
+        let font = font_ref(&faces[SNAPSHOT_EMOJI]).unwrap();
+        let glyph_id = font.charmap().map('\u{1f642}');
+        let small = snapshot_glyph(faces, SNAPSHOT_EMOJI, glyph_id, 12.0).unwrap();
+        let small_advance = snapshot_color_advance(SNAPSHOT_EMOJI, glyph_id, 12.0).unwrap();
+        let larger = snapshot_glyph(faces, SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap();
+        let larger_advance = snapshot_color_advance(SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap();
+
+        assert_eq!((small.width, small.height, small_advance), (14, 14, 14));
+        assert_eq!((larger.width, larger.height, larger_advance), (18, 17, 18));
+        assert!(!Arc::ptr_eq(&small, &larger));
+        assert_ne!(small.data, larger.data);
     }
 
     #[test]

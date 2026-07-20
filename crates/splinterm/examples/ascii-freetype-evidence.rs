@@ -10,6 +10,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::json;
 use splinterm_freetype::{RasterFace, RasterizedGlyph};
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one evidence emitter keeps all strict oracle fields visibly aligned"
+)]
 fn main() -> Result<()> {
     let font_size = evidence_font_size()?;
     let style = evidence_font_style()?;
@@ -55,6 +59,77 @@ fn main() -> Result<()> {
         serde_json::to_writer(&mut output, &record)?;
         output.write_all(b"\n")?;
     }
+
+    let (fallback_path, fallback_index, fallback_family) =
+        resolve_pattern(&format!("Noto Sans CJK JP:pixelsize={font_size}"))?;
+    let mut fallback =
+        RasterFace::open(&fallback_path, fallback_index, pixel_size_26_6(font_size))?;
+    let codepoint = 0x754c;
+    let glyph_id = fallback.glyph_index(char::from_u32(codepoint).context("CJK codepoint")?);
+    let glyph = fallback.rasterize_gray(glyph_id)?;
+    let record = json!({
+        "schema": 1,
+        "label": "CJK",
+        "codepoint": codepoint,
+        "cols": 2,
+        "glyph_id": glyph_id,
+        "style": style,
+        "font": fallback_family,
+        "font_path": fallback_path.display().to_string(),
+        "font_index": fallback_index,
+        "font_ascent": metrics.ascent,
+        "font_descent": metrics.descent,
+        "font_height": metrics.height,
+        "decorations": {
+            "underline_position": metrics.underline_position,
+            "underline_thickness": metrics.underline_thickness,
+            "strike_position": metrics.strike_position,
+            "strike_thickness": metrics.strike_thickness,
+        },
+        "color": false,
+        "pixel_format": "freetype-gray",
+        "source_stride": glyph.width,
+        "placement": {"x": glyph.left, "y": glyph.top},
+        "image": {"width": glyph.width, "height": glyph.height},
+        "advance": {"x": glyph.advance_x, "y": glyph.advance_y},
+        "ink": ink_bounds(&glyph),
+        "alpha_hex": bytes_to_hex(&glyph.alpha),
+    });
+    serde_json::to_writer(&mut output, &record)?;
+    output.write_all(b"\n")?;
+
+    let glyph_id = face.glyph_index('\u{e9}');
+    let glyph = face.rasterize_gray(glyph_id)?;
+    let record = json!({
+        "schema": 1,
+        "label": "combining-0",
+        "codepoint": u32::from('e'),
+        "cols": 1,
+        "glyph_id": glyph_id,
+        "style": style,
+        "font": family,
+        "font_path": path.display().to_string(),
+        "font_index": index,
+        "font_ascent": metrics.ascent,
+        "font_descent": metrics.descent,
+        "font_height": metrics.height,
+        "decorations": {
+            "underline_position": metrics.underline_position,
+            "underline_thickness": metrics.underline_thickness,
+            "strike_position": metrics.strike_position,
+            "strike_thickness": metrics.strike_thickness,
+        },
+        "color": false,
+        "pixel_format": "freetype-gray",
+        "source_stride": glyph.width,
+        "placement": {"x": glyph.left, "y": glyph.top},
+        "image": {"width": glyph.width, "height": glyph.height},
+        "advance": {"x": glyph.advance_x, "y": glyph.advance_y},
+        "ink": ink_bounds(&glyph),
+        "alpha_hex": bytes_to_hex(&glyph.alpha),
+    });
+    serde_json::to_writer(&mut output, &record)?;
+    output.write_all(b"\n")?;
     Ok(())
 }
 
@@ -89,9 +164,14 @@ fn evidence_font_style() -> Result<&'static str> {
 }
 
 fn resolve_primary(font_size: f32, style: &str) -> Result<(PathBuf, u32, String)> {
-    let pattern = format!("JetBrains Mono Nerd Font:style={style}:pixelsize={font_size}");
+    resolve_pattern(&format!(
+        "JetBrains Mono Nerd Font:style={style}:pixelsize={font_size}"
+    ))
+}
+
+fn resolve_pattern(pattern: &str) -> Result<(PathBuf, u32, String)> {
     let output = Command::new("fc-match")
-        .args(["-f", "%{file}\n%{index}\n%{family}\n", &pattern])
+        .args(["-f", "%{file}\n%{index}\n%{family}\n", pattern])
         .output()
         .context("run fc-match")?;
     if !output.status.success() {

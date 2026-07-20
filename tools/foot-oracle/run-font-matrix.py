@@ -80,15 +80,20 @@ def require_success(result: subprocess.CompletedProcess[str], label: str) -> Non
         raise RuntimeError(f"{label} failed: {detail}")
 
 
-def first_record(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as records:
-        line = records.readline()
-    if not line:
+def records_by_label(path: Path) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        if not isinstance(record, dict) or not isinstance(record.get("label"), str):
+            raise RuntimeError(f"{path} contains an invalid evidence record")
+        records[record["label"]] = record
+    if not records:
         raise RuntimeError(f"{path} contains no evidence records")
-    record = json.loads(line)
-    if not isinstance(record, dict):
-        raise RuntimeError(f"{path} first record is not an object")
-    return record
+    return records
+
+
+def first_record(path: Path) -> dict[str, Any]:
+    return next(iter(records_by_label(path).values()))
 
 
 def sha256(path: Path) -> str:
@@ -99,16 +104,12 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def resolve_face(case: MatrixCase) -> dict[str, Any]:
-    pattern = (
-        "JetBrains Mono Nerd Font:"
-        f"style={case.style}:pixelsize={case.effective_size:g}"
-    )
+def resolve_pattern(pattern: str, label: str) -> dict[str, Any]:
     result = run(["fc-match", "-f", "%{file}\n%{index}\n%{family}\n%{style}\n", pattern])
-    require_success(result, f"resolve {case.identifier}")
+    require_success(result, f"resolve {label}")
     lines = result.stdout.splitlines()
     if len(lines) < 4:
-        raise RuntimeError(f"fc-match omitted identity for {case.identifier}")
+        raise RuntimeError(f"fc-match omitted identity for {label}")
     path = Path(lines[0])
     if not path.is_file():
         raise RuntimeError(f"resolved face is not a file: {path}")
@@ -122,29 +123,58 @@ def resolve_face(case: MatrixCase) -> dict[str, Any]:
     }
 
 
-def validate_actual_identity(path: Path, expected: dict[str, Any]) -> None:
-    record = first_record(path)
+def resolve_face(case: MatrixCase) -> dict[str, Any]:
+    pattern = (
+        "JetBrains Mono Nerd Font:"
+        f"style={case.style}:pixelsize={case.effective_size:g}"
+    )
+    return resolve_pattern(pattern, case.identifier)
+
+
+def resolve_cjk(case: MatrixCase) -> dict[str, Any]:
+    pattern = f"Noto Sans CJK JP:pixelsize={case.effective_size:g}"
+    return resolve_pattern(pattern, f"{case.identifier} CJK fallback")
+
+
+def resolve_emoji(case: MatrixCase) -> dict[str, Any]:
+    pattern = f"Noto Color Emoji:pixelsize={case.effective_size:g}"
+    return resolve_pattern(pattern, f"{case.identifier} emoji fallback")
+
+
+def validate_actual_identity(
+    path: Path, expected: dict[str, Any], label: str = "ASCII-U+0020"
+) -> None:
+    record = records_by_label(path).get(label)
+    if record is None:
+        raise RuntimeError(f"{path}: missing identity record {label}")
     observed = (record.get("font_path"), record.get("font_index"))
     wanted = (expected["path"], expected["index"])
     if observed != wanted:
         raise RuntimeError(f"{path}: face identity {observed!r} != {wanted!r}")
 
 
-def compare(reference: Path, actual: Path, output: Path) -> dict[str, Any]:
-    result = run(
-        [
-            sys.executable,
-            TOOLS / "compare-glyph-masks.py",
-            "--reference",
-            reference,
-            "--actual",
-            actual,
-            "--label-prefix",
-            "ASCII-U+",
-            "--output-dir",
-            output,
-        ]
-    )
+def compare(
+    reference: Path,
+    actual: Path,
+    output: Path,
+    label_prefix: str,
+    ignored_geometry_fields: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    command: list[str | Path] = [
+        sys.executable,
+        TOOLS / "compare-glyph-masks.py",
+        "--reference",
+        reference,
+        "--actual",
+        actual,
+        "--label-prefix",
+        label_prefix,
+        "--output-dir",
+        output,
+    ]
+    for field in ignored_geometry_fields:
+        command.extend(["--ignore-geometry-field", field])
+    result = run(command)
     summary_path = output / "comparison.json"
     if not summary_path.is_file():
         require_success(result, f"compare {actual.name}")
@@ -191,10 +221,36 @@ def capture_case(
     require_success(result, f"production capture {case.identifier}")
 
     identity = resolve_face(case)
+    fallback_identity = resolve_cjk(case)
+    emoji_identity = resolve_emoji(case)
     validate_actual_identity(isolated, identity)
     validate_actual_identity(production, identity)
-    isolated_summary = compare(reference, isolated, case_dir / "freetype-diff")
-    production_summary = compare(reference, production, case_dir / "production-diff")
+    validate_actual_identity(isolated, fallback_identity, "CJK")
+    validate_actual_identity(production, fallback_identity, "CJK")
+    validate_actual_identity(production, emoji_identity, "emoji")
+    validate_actual_identity(isolated, identity, "combining-0")
+    validate_actual_identity(production, identity, "combining-0")
+    isolated_summary = compare(reference, isolated, case_dir / "freetype-diff", "ASCII-U+")
+    production_summary = compare(
+        reference, production, case_dir / "production-diff", "ASCII-U+"
+    )
+    isolated_cjk = compare(reference, isolated, case_dir / "freetype-cjk-diff", "CJK")
+    production_cjk = compare(
+        reference, production, case_dir / "production-cjk-diff", "CJK"
+    )
+    isolated_combining = compare(
+        reference,
+        isolated,
+        case_dir / "freetype-combining-diff",
+        "combining-",
+        ("advance",),
+    )
+    production_combining = compare(
+        reference, production, case_dir / "production-combining-diff", "combining-"
+    )
+    production_emoji = compare(
+        reference, production, case_dir / "production-emoji-diff", "emoji"
+    )
     return {
         "id": case.identifier,
         "style": case.style,
@@ -202,10 +258,22 @@ def capture_case(
         "scale_120": case.scale_120,
         "effective_size_px": case.effective_size,
         "face": identity,
+        "cjk_fallback": fallback_identity,
+        "emoji_fallback": emoji_identity,
         "reference_font": first_record(reference).get("font"),
         "isolated_passing": isolated_summary["passing"],
         "production_passing": production_summary["passing"],
-        "glyphs": isolated_summary["reference_glyphs"],
+        "cjk_isolated_passing": isolated_cjk["passing"],
+        "cjk_production_passing": production_cjk["passing"],
+        "combining_isolated_passing": isolated_combining["passing"],
+        "combining_production_passing": production_combining["passing"],
+        "emoji_production_passing": production_emoji["passing"],
+        "glyphs": (
+            isolated_summary["reference_glyphs"]
+            + isolated_cjk["reference_glyphs"]
+            + isolated_combining["reference_glyphs"]
+            + production_emoji["reference_glyphs"]
+        ),
         "exact": True,
     }
 

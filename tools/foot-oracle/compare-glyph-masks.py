@@ -44,6 +44,13 @@ def load_records(path: Path, label_prefix: str | None = None) -> dict[str, dict]
             raise ValueError(
                 f"{path}:{line_number}: alpha_hex length does not match image dimensions"
             )
+        rgba = record.get("rgba_hex")
+        if rgba is not None and (
+            not isinstance(rgba, str) or len(rgba) != expected_bytes * 8
+        ):
+            raise ValueError(
+                f"{path}:{line_number}: rgba_hex length does not match image dimensions"
+            )
         records[label] = record
     return records
 
@@ -52,7 +59,12 @@ def write_heatmap(path: Path, width: int, height: int, differences: bytes) -> No
     path.write_bytes(f"P5\n{width} {height}\n255\n".encode("ascii") + differences)
 
 
-def compare(reference: dict[str, dict], actual: dict[str, dict], output_dir: Path) -> dict:
+def compare(
+    reference: dict[str, dict],
+    actual: dict[str, dict],
+    output_dir: Path,
+    ignored_geometry_fields: frozenset[str] = frozenset(),
+) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     missing = sorted(set(reference) - set(actual))
     unexpected = sorted(set(actual) - set(reference))
@@ -63,7 +75,10 @@ def compare(reference: dict[str, dict], actual: dict[str, dict], output_dir: Pat
         observed = actual[label]
         codepoint = expected["codepoint"]
         geometry_mismatches = [
-            field for field in GEOMETRY_FIELDS if expected.get(field) != observed.get(field)
+            field
+            for field in GEOMETRY_FIELDS
+            if field not in ignored_geometry_fields
+            and expected.get(field) != observed.get(field)
         ]
         expected_mask = bytes.fromhex(expected["alpha_hex"])
         observed_mask = bytes.fromhex(observed["alpha_hex"])
@@ -76,11 +91,44 @@ def compare(reference: dict[str, dict], actual: dict[str, dict], output_dir: Pat
             mismatch_count = max(len(expected_mask), len(observed_mask))
             maximum_delta = 255
 
+        expected_rgba = expected.get("rgba_hex")
+        observed_rgba = observed.get("rgba_hex")
+        color_differences = b""
+        color_mismatch_count = 0
+        maximum_color_delta = 0
+        if expected_rgba is None and observed_rgba is None:
+            pass
+        elif not isinstance(expected_rgba, str) or not isinstance(observed_rgba, str):
+            color_mismatch_count = max(len(expected_mask), len(observed_mask), 1)
+            maximum_color_delta = 255
+        else:
+            expected_color = bytes.fromhex(expected_rgba)
+            observed_color = bytes.fromhex(observed_rgba)
+            if len(expected_color) == len(observed_color):
+                channel_differences = bytes(
+                    abs(left - right) for left, right in zip(expected_color, observed_color)
+                )
+                color_differences = bytes(
+                    max(channel_differences[offset : offset + 4])
+                    for offset in range(0, len(channel_differences), 4)
+                )
+                color_mismatch_count = sum(value != 0 for value in color_differences)
+                maximum_color_delta = max(channel_differences, default=0)
+            else:
+                color_mismatch_count = max(len(expected_color), len(observed_color)) // 4
+                maximum_color_delta = 255
+
         heatmap = None
         image = expected["image"]
-        if differences and mismatch_count:
+        heatmap_differences = color_differences or differences
+        if heatmap_differences and (mismatch_count or color_mismatch_count):
             heatmap = f"U+{codepoint:04X}.pgm"
-            write_heatmap(output_dir / heatmap, image["width"], image["height"], differences)
+            write_heatmap(
+                output_dir / heatmap,
+                image["width"],
+                image["height"],
+                heatmap_differences,
+            )
 
         glyphs.append(
             {
@@ -90,8 +138,14 @@ def compare(reference: dict[str, dict], actual: dict[str, dict], output_dir: Pat
                 "geometry_mismatches": geometry_mismatches,
                 "mismatch_pixels": mismatch_count,
                 "maximum_alpha_delta": maximum_delta,
+                "color_mismatch_pixels": color_mismatch_count,
+                "maximum_color_delta": maximum_color_delta,
                 "heatmap": heatmap,
-                "pass": not geometry_mismatches and mismatch_count == 0,
+                "pass": (
+                    not geometry_mismatches
+                    and mismatch_count == 0
+                    and color_mismatch_count == 0
+                ),
             }
         )
 
@@ -118,6 +172,13 @@ def main() -> int:
     parser.add_argument(
         "--label-prefix", help="compare only records whose labels start with this value"
     )
+    parser.add_argument(
+        "--ignore-geometry-field",
+        action="append",
+        choices=GEOMETRY_FIELDS,
+        default=[],
+        help="ignore one explicitly lane-owned geometry field",
+    )
     args = parser.parse_args()
 
     try:
@@ -125,6 +186,7 @@ def main() -> int:
             load_records(args.reference, args.label_prefix),
             load_records(args.actual, args.label_prefix),
             args.output_dir,
+            frozenset(args.ignore_geometry_field),
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"glyph comparison failed: {error}", file=sys.stderr)

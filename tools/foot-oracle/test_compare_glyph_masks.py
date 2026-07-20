@@ -51,6 +51,34 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual(glyph["maximum_alpha_delta"], 255)
             self.assertTrue((Path(directory) / "U+0041.pgm").exists())
 
+    def test_color_channel_mismatch_fails_even_when_alpha_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            expected = {**record(), "rgba_hex": "00000000ffffffff"}
+            observed = {**record(), "rgba_hex": "01000000ffffffff"}
+            summary = MODULE.compare(
+                {"ASCII-U+0041": expected},
+                {"ASCII-U+0041": observed},
+                Path(directory),
+            )
+            glyph = summary["glyphs"][0]
+            self.assertEqual(glyph["mismatch_pixels"], 0)
+            self.assertEqual(glyph["color_mismatch_pixels"], 1)
+            self.assertEqual(glyph["maximum_color_delta"], 1)
+            self.assertEqual(summary["failing"], 1)
+
+    def test_lane_owned_geometry_field_can_be_explicitly_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            observed = record()
+            observed["advance"] = {"x": 7, "y": 0}
+            summary = MODULE.compare(
+                {"ASCII-U+0041": record()},
+                {"ASCII-U+0041": observed},
+                Path(directory),
+                frozenset({"advance"}),
+            )
+            self.assertEqual(summary["passing"], 1)
+            self.assertEqual(summary["glyphs"][0]["geometry_mismatches"], [])
+
     def test_missing_and_unexpected_glyphs_fail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             summary = MODULE.compare(

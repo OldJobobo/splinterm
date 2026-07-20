@@ -1,0 +1,20 @@
+[package]
+name = "splinterm-pixman"
+description = "Narrow safe pixman scaling bridge for Splinterm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc.workspace = true
+pixman-sys.workspace = true
+thiserror.workspace = true
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[lints.rust]
+unsafe_code = "allow"
