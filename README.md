@@ -11,8 +11,9 @@ persistent multiplexing built in.
 - **Splints** — individual terminal surfaces
 
 > [!IMPORTANT]
-> Splinterm is pre-alpha. This repository currently establishes the process,
-> domain, and protocol boundaries; it is not yet a usable terminal emulator.
+> Splinterm is a private prerelease. The single-Splint Omarchy-native terminal
+> MVP is usable and validated, but multiplexing, durable restart persistence,
+> supported third-party automation, and public distribution remain future work.
 
 ## Workspace
 
@@ -43,10 +44,11 @@ replay. `splinterm-pty` provides the tested Linux PTY/process boundary.
 tracks terminal state, and survives client disconnection. The local protocol
 uses bounded framed messages, version negotiation, request IDs, peer-UID
 verification, owner-only socket permissions, and explicit resynchronization.
-The complete headless lifecycle is covered by an isolated real-daemon test;
-Roadmap Phase 1 is complete. The
+The complete headless lifecycle is covered by an isolated real-daemon test.
+Roadmap Phases 1 and 2 are complete; the
 [Omarchy-native terminal MVP plan](docs/plans/0002-omarchy-terminal-mvp.md)
-defines the native Wayland client milestone. Persistence remains later work.
+links exact renderer, graphical sign-off, and private package evidence.
+Multiplexing and durable restart persistence remain later work.
 
 ## Try the scaffold
 

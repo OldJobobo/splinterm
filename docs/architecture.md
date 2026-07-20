@@ -36,11 +36,12 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 Request/response types shared by both processes. The current development
 protocol uses bounded length-prefixed JSON frames, version-range negotiation,
 request IDs, peer-UID verification, stable errors, and explicit subscription
-resynchronization. Protocol v8 carries closed access scopes, grant status,
-revocation events, and bounded direct command argv, working-directory,
-shell/login, and scrollback launch fields. Command arguments are never rebuilt
-as a shell string. Protocol DTOs remain separate from terminal and daemon
-runtime structs.
+resynchronization. Protocol v12 carries closed access scopes, grant status,
+revocation events, bounded direct command argv/working-directory/shell launch
+fields, semantic terminal updates, history generations and stable row IDs,
+revision-bound scrollback pages, and visible-row identity. Command arguments
+are never rebuilt as a shell string. Protocol DTOs remain separate from
+terminal and daemon runtime structs.
 
 ### `splinterd`
 
@@ -70,6 +71,16 @@ desktop metadata. `splinterm launch` is the `xdg-terminal-exec` boundary.
 Client-owned configuration controls renderer/window policy; a generated,
 project-owned theme maps Omarchy roles and reloads without mutating daemon
 terminal state or process lifetime.
+
+## Private prerelease deployment
+
+The Arch package installs all three adjacent runtime executables, an on-demand
+systemd user service, xdg launcher/desktop metadata, icon/AppStream metadata,
+theme generator, examples, and license notices. The launcher starts the daemon
+and performs one bounded restart when protocol negotiation reveals a stale
+pre-upgrade process. The unit uses SIGINT for the daemon's graceful child/socket
+cleanup path. Package scripts do not edit user homes, terminal preferences, or
+Omarchy-owned directories; see [packaging.md](packaging.md).
 
 ## Foot reference map
 

@@ -1,0 +1,32 @@
+{
+  "schema": "splinterm.packaging.phase9.v1",
+  "exact": true,
+  "private_prerelease": true,
+  "published": false,
+  "installed": false,
+  "git_commit": "9d2519a4f5f1df0805407aa523b83a2793add329",
+  "package": {
+    "name": "splinterm",
+    "version": "0.1.0.pre-1",
+    "architecture": "x86_64",
+    "file": "splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst",
+    "size_bytes": 3337880,
+    "sha256": "05122c099650e6170e6a6baa13ebd3b30efa6586424734e595dc08a98a80f82a"
+  },
+  "checks": {
+    "makepkg_committed_archive": true,
+    "package_workspace_tests": true,
+    "owned_paths": true,
+    "forbidden_home_etc_omarchy_paths_absent": true,
+    "executable_modes": true,
+    "elf_dependencies_resolved": true,
+    "runtime_dependencies_declared": true,
+    "desktop_metadata": true,
+    "appstream_metadata": true,
+    "theme_generator": true,
+    "protocol_mismatch_restart_simulation": true,
+    "isolated_daemon_client_handshake": true,
+    "graceful_sigint_socket_cleanup": true,
+    "namcap_errors": 0
+  }
+}

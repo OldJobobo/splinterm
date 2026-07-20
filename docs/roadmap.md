@@ -23,7 +23,7 @@ Detailed plan: [`plans/0001-terminal-kernel.md`](plans/0001-terminal-kernel.md)
 - Test-only attach snapshot, ordered deltas, backpressure, and resynchronization
 - Durable metadata with honest relaunch/recovery semantics
 
-## Phase 2 — Omarchy-native terminal MVP (in progress: packaging/release validation)
+## Phase 2 — Omarchy-native terminal MVP (complete)
 
 Detailed plans: [`plans/0002-omarchy-terminal-mvp.md`](plans/0002-omarchy-terminal-mvp.md) and the completed [`Phase 8.1 closure execution plan`](plans/0003-phase8.1-closure-execution.md)
 
@@ -40,9 +40,10 @@ Detailed plans: [`plans/0002-omarchy-terminal-mvp.md`](plans/0002-omarchy-termin
   anchoring, follow-live, selection, resize, resync, and reattach behavior
 
 Part 8.1 parity, scrollback, performance, and Hyprland/Omarchy sign-off are
-complete with durable evidence. Phase 2 remains open only for Plan 0002 Phase 9
-Arch packaging, install/uninstall/upgrade documentation, and package-level
-release validation.
+complete with durable evidence. Phase 9 produced and isolated-validated a
+private Arch prerelease package with coherent binaries, service, desktop/theme
+integration, upgrade handling, documentation, and licenses. Installation and
+public/AUR publication remain optional post-milestone decisions.
 
 ## Phase 3 — multiplexing
 

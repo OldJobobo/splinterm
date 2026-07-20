@@ -1,6 +1,6 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Phase 8.1 complete — Phase 9 packaging/release validation remains
+- **Status:** Complete (2026-07-20)
 - **Roadmap:** Phase 2 Omarchy-native terminal MVP
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
@@ -1124,6 +1124,15 @@ Deliver:
 - no modifications under `/usr/share/omarchy/` outside package-managed install
   artifacts.
 
+**Phase 9 status:** Complete. The private local `0.1.0.pre-1` Arch package owns
+release client/daemon/PTY-helper binaries, on-demand user service, desktop and
+AppStream metadata, icon, xdg launcher, theme generator, examples, and license
+notices. It neither mutates user homes nor installs under `/usr/share/omarchy`.
+The committed-source `makepkg` build ran workspace tests; isolated validation
+covered paths/modes/dependencies, theme generation, protocol-mismatch restart,
+client/daemon negotiation, and graceful socket cleanup. The package was not
+installed or published. Evidence: [`artifacts/0018-packaging`](../spikes/artifacts/0018-packaging/README.md).
+
 ## Test strategy
 
 ### Unit tests
@@ -1271,10 +1280,10 @@ Do not call Roadmap Phase 2 complete until:
 - workspace formatting, strict Clippy, tests, visual fixtures, and package
   checks pass.
 
-## Immediate next task
+## Closure
 
-Execute Phase 9 packaging and release validation: add the Arch package/install
-path, package-owned desktop/helper/theme-hook artifacts, dependency and license
-manifests, install/uninstall/upgrade documentation, upgrade-mismatch checks, and
-package-level validation. Phase 8.1 no longer blocks that work. Do not declare
-Roadmap Phase 2 complete until the packaging review gates above pass.
+Roadmap Phase 2 is complete. Phase 8.1 closed exact renderer/scrollback parity
+and guarded Hyprland/Omarchy behavior; Phase 9 closed private package layout,
+build, upgrade handling, documentation, and isolated release validation. Live
+installation and public/AUR publishing remain explicit post-closure choices,
+not prerequisites for the private prerelease milestone.
