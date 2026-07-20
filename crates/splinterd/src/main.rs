@@ -419,6 +419,7 @@ struct SubscriptionAccess {
 
 #[derive(Clone, Copy, Debug)]
 struct HistoryState {
+    revision: u64,
     generation: u64,
     available_rows: usize,
 }
@@ -1152,6 +1153,7 @@ async fn current_revision(handle: &LiveSplintHandle, scrollback_rows: usize) -> 
 
 fn history_state(snapshot: &LiveSnapshot) -> HistoryState {
     HistoryState {
+        revision: snapshot.revision.value(),
         generation: snapshot.scrollback.history_generation,
         available_rows: snapshot.scrollback.available_rows,
     }
@@ -1171,7 +1173,12 @@ fn subscription_update_event(
             snapshot: wire_snapshot(snapshot),
         };
     }
-    match wire_update(update, &snapshot, previous_history) {
+    match wire_update(
+        update,
+        &snapshot,
+        previous_history.revision,
+        previous_history,
+    ) {
         Ok(update) => SubscriptionEvent::Update { update },
         Err(_) => SubscriptionEvent::ResyncRequired {
             current_revision: snapshot.revision.value(),
@@ -1261,6 +1268,7 @@ fn not_found() -> ProtocolError {
 fn wire_update(
     update: &TerminalUpdate,
     snapshot: &LiveSnapshot,
+    previous_revision: u64,
     previous_history: HistoryState,
 ) -> Result<WireTerminalUpdate, ProtocolError> {
     let mut damaged = vec![false; snapshot.visible_rows.len()];
@@ -1340,7 +1348,7 @@ fn wire_update(
         })
         .collect();
     Ok(WireTerminalUpdate {
-        base_revision: update.revision().value().saturating_sub(1),
+        base_revision: previous_revision,
         revision: update.revision().value(),
         rows,
         scrolls,

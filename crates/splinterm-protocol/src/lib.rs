@@ -418,7 +418,7 @@ pub struct TerminalRowPatch {
 }
 
 impl TerminalUpdate {
-    /// Validates revision continuity and every collection/index bound against
+    /// Validates an advancing aggregate revision interval and every bound against
     /// the client's current semantic view.
     ///
     /// # Errors
@@ -436,12 +436,10 @@ impl TerminalUpdate {
         current_columns: usize,
         current_rows: usize,
     ) -> Result<(), ProtocolError> {
-        if self.base_revision != current_revision
-            || self.revision != current_revision.saturating_add(1)
-        {
+        if self.base_revision != current_revision || self.revision <= current_revision {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
-                "terminal update revision is not contiguous",
+                "terminal update revision interval does not advance from the current state",
             ));
         }
         let columns = self.columns.unwrap_or(current_columns);
@@ -1097,8 +1095,12 @@ mod tests {
     fn terminal_update_validation_bounds_revisions_rows_scrolls_and_palette() {
         assert!(update().validate_against(4, 1, 80, 24).is_ok());
 
+        let mut aggregated = update();
+        aggregated.revision = 6;
+        assert!(aggregated.validate_against(4, 1, 80, 24).is_ok());
+
         let mut invalid = update();
-        invalid.revision = 6;
+        invalid.revision = 4;
         assert!(invalid.validate_against(4, 1, 80, 24).is_err());
 
         let mut invalid = update();

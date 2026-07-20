@@ -420,6 +420,10 @@ fn classify_subscription_event(
     }
 }
 
+fn update_advances_from(update: &TerminalUpdate, current_revision: u64) -> bool {
+    update.base_revision == current_revision && update.revision > current_revision
+}
+
 fn validate_attached_snapshot(
     snapshot: &TerminalSnapshot,
     splint_id: SplintId,
@@ -879,8 +883,7 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
                             last_sequence = sequence;
                         }
                         EventAction::Update { sequence, update }
-                            if update.base_revision == last_revision
-                                && update.revision == last_revision.saturating_add(1) => {
+                            if update_advances_from(&update, last_revision) => {
                             last_revision = update.revision;
                             if updates.send(WindowUpdate::Update(update)).await.is_err() {
                                 let window_result = window.await.context("Wayland window task failed")?;
@@ -1287,6 +1290,32 @@ mod tests {
             panic!("expected create request");
         };
         assert_eq!(command, argv);
+    }
+
+    #[test]
+    fn aggregate_update_interval_advances_from_published_revision() {
+        let update = TerminalUpdate {
+            base_revision: 4,
+            revision: 29,
+            rows: Vec::new(),
+            scrolls: Vec::new(),
+            cursor: None,
+            title: None,
+            input_modes: None,
+            active_screen: None,
+            palette: None,
+            default_colors: None,
+            columns: None,
+            row_count: None,
+            scrollback: None,
+        };
+        assert!(update_advances_from(&update, 4));
+        assert!(!update_advances_from(&update, 3));
+        let stale = TerminalUpdate {
+            revision: 4,
+            ..update
+        };
+        assert!(!update_advances_from(&stale, 4));
     }
 
     #[test]
