@@ -22,6 +22,7 @@ if [[ -n "$missing" ]]; then
 fi
 
 rm -rf "$package_dir/src" "$package_dir/pkg" "$archive"
+rm -f "$package_dir"/splinterm-*.pkg.tar.*
 git -C "$root" archive --format=tar.gz --prefix="splinterm-$pkgver/" -o "$archive" HEAD
 (
   cd "$package_dir"
