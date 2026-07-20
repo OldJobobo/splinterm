@@ -1186,7 +1186,7 @@ mod tests {
             default_colors: [0x00eb_ebeb, 0x000e_1216, 0x00eb_ebeb],
             title: String::new(),
             visible_rows: vec![TerminalRow {
-                row_id: None,
+                row_id: Some(1),
                 linebreak: true,
                 cells: Vec::new(),
             }],

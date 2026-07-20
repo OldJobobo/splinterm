@@ -4026,7 +4026,7 @@ mod tests {
         current.rows = 1;
         current.visible_rows = vec![blank_row(2)];
         let row = TerminalRow {
-            row_id: None,
+            row_id: Some(8),
             linebreak: true,
             cells: vec![TerminalCell {
                 content: "x".into(),

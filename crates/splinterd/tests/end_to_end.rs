@@ -315,8 +315,11 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         .await;
         assert!(snapshot_text(&with_pwd).contains(cwd.to_str().unwrap()));
         with_pwd.validate().expect("daemon snapshot identity is valid");
-        assert!(with_pwd.visible_rows.iter().all(|row| row.row_id.is_none()));
-        assert!(with_pwd.scrollback_rows.iter().all(|row| row.row_id.is_some()));
+        assert!(with_pwd
+            .visible_rows
+            .iter()
+            .chain(&with_pwd.scrollback_rows)
+            .all(|row| row.row_id.is_some_and(|id| id > 0)));
         assert!(with_pwd
             .visible_rows
             .iter()

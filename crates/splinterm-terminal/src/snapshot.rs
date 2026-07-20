@@ -122,9 +122,9 @@ pub struct RowSnapshot<'a> {
 }
 
 impl<'a> RowSnapshot<'a> {
-    pub(crate) const fn new(row: &'a Row, composed: &'a ComposedTable) -> Self {
+    pub(crate) const fn visible(id: u64, row: &'a Row, composed: &'a ComposedTable) -> Self {
         Self {
-            id: None,
+            id: Some(id),
             row,
             composed,
         }

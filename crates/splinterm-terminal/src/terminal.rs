@@ -267,9 +267,9 @@ impl Terminal {
     pub fn snapshot(&self, request: SnapshotRequest) -> TerminalSnapshot<'_> {
         let grid = self.grid();
         let visible_rows = grid
-            .snapshot_view_rows()
+            .snapshot_identified_view_rows()
             .into_iter()
-            .map(|row| RowSnapshot::new(row, &self.composed))
+            .map(|(id, row)| RowSnapshot::visible(id, row, &self.composed))
             .collect();
         let (scrollback_rows, available, omitted, oldest, newest) =
             if self.active == ActiveScreen::Normal {

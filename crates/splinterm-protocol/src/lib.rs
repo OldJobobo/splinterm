@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use splinterm_core::{Dojo, SplintId};
 
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -562,9 +562,14 @@ impl TerminalUpdate {
             }
         }
         let mut seen = vec![false; rows];
+        let mut seen_row_ids = std::collections::BTreeSet::new();
         for patch in &self.rows {
+            let valid_row_id = patch
+                .row
+                .row_id
+                .is_some_and(|id| id > 0 && seen_row_ids.insert(id));
             if patch.index >= rows
-                || patch.row.row_id.is_some()
+                || !valid_row_id
                 || patch.row.cells.len() > columns
                 || seen[patch.index]
             {
@@ -674,7 +679,8 @@ impl TerminalSnapshot {
         if self
             .visible_rows
             .iter()
-            .any(|row| row.row_id.is_some() || row.cells.len() > self.columns)
+            .any(|row| row.cells.len() > self.columns)
+            || !valid_visible_identity(&self.visible_rows, &self.scrollback_rows)
             || self.scrollback_rows.len() > MAX_SNAPSHOT_SCROLLBACK_ROWS
             || self
                 .scrollback_rows
@@ -738,6 +744,16 @@ pub struct TerminalRow {
     pub row_id: Option<u64>,
     pub linebreak: bool,
     pub cells: Vec<TerminalCell>,
+}
+
+fn valid_visible_identity(visible: &[TerminalRow], scrollback: &[TerminalRow]) -> bool {
+    let mut ids = std::collections::BTreeSet::new();
+    visible
+        .iter()
+        .all(|row| row.row_id.is_some_and(|id| id > 0 && ids.insert(id)))
+        && scrollback
+            .iter()
+            .all(|row| row.row_id.is_none_or(|id| !ids.contains(&id)))
 }
 
 fn valid_scrollback_identity(
@@ -911,7 +927,7 @@ mod tests {
             rows: vec![TerminalRowPatch {
                 index: 1,
                 row: TerminalRow {
-                    row_id: None,
+                    row_id: Some(6),
                     linebreak: false,
                     cells: Vec::new(),
                 },
@@ -954,7 +970,7 @@ mod tests {
             default_colors: [0; 3],
             title: String::new(),
             visible_rows: vec![TerminalRow {
-                row_id: None,
+                row_id: Some(6),
                 linebreak: true,
                 cells: Vec::new(),
             }],
@@ -985,6 +1001,9 @@ mod tests {
         assert!(snapshot().validate().is_ok());
         let mut invalid = snapshot();
         invalid.visible_rows[0].row_id = Some(4);
+        assert!(invalid.validate().is_err());
+        let mut invalid = snapshot();
+        invalid.visible_rows[0].row_id = None;
         assert!(invalid.validate().is_err());
         let mut invalid = snapshot();
         invalid.scrollback_rows[1].row_id = Some(4);
@@ -1084,6 +1103,10 @@ mod tests {
 
         let mut invalid = update();
         invalid.rows[0].index = 24;
+        assert!(invalid.validate_against(4, 1, 80, 24).is_err());
+
+        let mut invalid = update();
+        invalid.rows[0].row.row_id = None;
         assert!(invalid.validate_against(4, 1, 80, 24).is_err());
 
         let mut invalid = update();

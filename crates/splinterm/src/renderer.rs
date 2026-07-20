@@ -4308,8 +4308,9 @@ mod tests {
             title: "incremental".into(),
             visible_rows: ["ab", "cd"]
                 .into_iter()
-                .map(|text| TerminalRow {
-                    row_id: None,
+                .enumerate()
+                .map(|(index, text)| TerminalRow {
+                    row_id: Some(u64::try_from(index + 1).unwrap()),
                     linebreak: false,
                     cells: text
                         .chars()

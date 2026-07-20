@@ -586,6 +586,19 @@ impl Grid {
             .collect()
     }
 
+    pub(crate) fn snapshot_identified_view_rows(&self) -> Vec<(u64, &Row)> {
+        (0..self.screen_rows)
+            .filter_map(|row| {
+                let index = self.absolute_index_in_view(Self::signed_row(row));
+                self.rows[index].as_ref().map(|row| {
+                    let id = self.row_ids[index];
+                    assert_ne!(id, 0, "allocated visible row has stable identity");
+                    (id, row)
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn snapshot_scrollback_rows(&self, maximum_rows: usize) -> ScrollbackRows<'_> {
         let mut rows = self.scrollback_rows_chronological();
         let available = rows.len();

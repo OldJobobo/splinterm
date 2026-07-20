@@ -27,6 +27,7 @@ fn snapshot_resolves_composed_content_and_semantic_attributes() {
     assert_eq!(snapshot.dimensions().columns, 8);
     assert_eq!(snapshot.active_screen(), ActiveScreen::Normal);
     let first = snapshot.visible_rows().next().unwrap();
+    assert!(first.id().is_some_and(|id| id > 0));
     let cell = first.cells().next().unwrap();
     assert_eq!(
         cell.content(),
