@@ -388,16 +388,20 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .input(
                 splint_id,
                 incarnation,
-                b"i=0; while [ $i -lt 300 ]; do printf 'overflow-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; printf 'overflow-finished\\n'\n",
+                b"i=0; while [ $i -lt 300 ]; do printf 'overflow-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); sleep 0.002; done; printf 'overflow-finished\\n'\n",
             )
             .await;
 
         let mut saw_resync = false;
         for _ in 0..128 {
+            let Ok(frame) = time::timeout(Duration::from_secs(2), read_frame(&mut slow.stream)).await
+            else {
+                break;
+            };
             if let ServerFrame::Event {
                 event: SubscriptionEvent::ResyncRequired { .. },
                 ..
-            } = read_frame(&mut slow.stream).await
+            } = frame
             {
                 saw_resync = true;
                 break;
