@@ -1372,6 +1372,13 @@ enum MouseAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WheelOutcome {
+    Noop,
+    History { before: usize, after: usize },
+    Application { reports: usize, bytes: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HistoryNavigation {
     PageUp,
     PageDown,
@@ -1936,6 +1943,103 @@ impl App {
             try_window_command(commands, WindowCommand::Input(bytes))?;
         }
         Ok(())
+    }
+
+    fn handle_vertical_wheel(
+        &mut self,
+        position: Option<CellPosition>,
+        absolute: f64,
+        discrete: i32,
+        value120: i32,
+    ) -> Result<WheelOutcome> {
+        let modes = self.input_modes();
+        let cell_height = self
+            .snapshot_frame
+            .as_ref()
+            .map_or(1, SnapshotFrame::cell_height);
+        if modes.mouse_tracking == MouseTracking::None {
+            let before = self.scrollback_viewport.offset_from_bottom();
+            let Some((action, count)) = self.scrollback_wheel.push_scaled(
+                absolute,
+                discrete,
+                value120,
+                SCROLLBACK_WHEEL_MULTIPLIER,
+                cell_height,
+            ) else {
+                return Ok(WheelOutcome::Noop);
+            };
+            self.scroll_history(action, count)?;
+            return Ok(WheelOutcome::History {
+                before,
+                after: self.scrollback_viewport.offset_from_bottom(),
+            });
+        }
+        let Some((action, count)) =
+            self.vertical_wheel
+                .push(absolute, discrete, value120, cell_height)
+        else {
+            return Ok(WheelOutcome::Noop);
+        };
+        let Some(position) = position else {
+            return Ok(WheelOutcome::Noop);
+        };
+        let Some(report) = mouse_report(action, position, self.modifiers, modes.sgr_mouse) else {
+            return Ok(WheelOutcome::Noop);
+        };
+        let bytes = report.len().saturating_mul(count);
+        let mut batch = Vec::with_capacity(bytes);
+        for _ in 0..count {
+            batch.extend_from_slice(&report);
+        }
+        self.send_command(WindowCommand::Input(batch));
+        Ok(WheelOutcome::Application {
+            reports: count,
+            bytes,
+        })
+    }
+
+    fn begin_selection(&mut self, position: CellPosition) -> bool {
+        let Some(snapshot) = self.display_snapshot() else {
+            return false;
+        };
+        let Some(endpoint) = selection_endpoint(&snapshot, position) else {
+            return false;
+        };
+        self.dirty_selection(self.selection);
+        let selection = Selection {
+            anchor: endpoint,
+            end: endpoint,
+        };
+        self.selection = Some(selection);
+        self.selecting = true;
+        self.history_selection_pin_blocked = false;
+        self.dirty_selection(Some(selection));
+        true
+    }
+
+    fn extend_selection(&mut self, position: CellPosition) -> bool {
+        let (Some(mut selection), Some(snapshot)) = (self.selection, self.display_snapshot())
+        else {
+            return false;
+        };
+        let Some(endpoint) = selection_endpoint(&snapshot, position) else {
+            return false;
+        };
+        self.dirty_selection(Some(selection));
+        selection.end = endpoint;
+        self.selection = Some(selection);
+        self.dirty_selection(Some(selection));
+        true
+    }
+
+    fn finish_selection(&mut self) -> Option<&[u8]> {
+        self.selecting = false;
+        self.selected_text = self.selection.and_then(|selection| {
+            self.snapshot
+                .as_ref()
+                .and_then(|snapshot| selection_text(snapshot, selection).map(String::into_bytes))
+        });
+        self.selected_text.as_deref()
     }
 
     fn pointer_cell_at(&self, position: (f64, f64)) -> Option<CellPosition> {
@@ -3485,15 +3589,8 @@ impl PointerHandler for App {
                             .and_then(|snapshot| url_at(snapshot, position))
                     });
                     if self.selecting {
-                        if let (Some(mut selection), Some(position), Some(snapshot)) =
-                            (self.selection, cell, self.display_snapshot())
-                        {
-                            if let Some(endpoint) = selection_endpoint(&snapshot, position) {
-                                self.dirty_selection(Some(selection));
-                                selection.end = endpoint;
-                                self.selection = Some(selection);
-                                self.dirty_selection(Some(selection));
-                            }
+                        if let Some(position) = cell {
+                            self.extend_selection(position);
                         }
                     } else if let Some(position) = cell {
                         let active_press =
@@ -3574,20 +3671,8 @@ impl PointerHandler for App {
                             }
                         }
                         PressOwner::Selection => {
-                            if let (Some(position), Some(snapshot)) =
-                                (cell, self.display_snapshot())
-                            {
-                                if let Some(endpoint) = selection_endpoint(&snapshot, position) {
-                                    self.dirty_selection(self.selection);
-                                    let selection = Selection {
-                                        anchor: endpoint,
-                                        end: endpoint,
-                                    };
-                                    self.selection = Some(selection);
-                                    self.selecting = true;
-                                    self.history_selection_pin_blocked = false;
-                                    self.dirty_selection(Some(selection));
-                                }
+                            if let Some(position) = cell {
+                                self.begin_selection(position);
                             }
                         }
                         PressOwner::PrimaryPaste => {
@@ -3618,12 +3703,7 @@ impl PointerHandler for App {
                             }
                         }
                         PressOwner::Selection => {
-                            self.selecting = false;
-                            self.selected_text = self.selection.and_then(|selection| {
-                                self.snapshot.as_ref().and_then(|snapshot| {
-                                    selection_text(snapshot, selection).map(String::into_bytes)
-                                })
-                            });
+                            self.finish_selection();
                             self.publish_clipboard(queue_handle, serial, true);
                         }
                         PressOwner::PrimaryPaste | PressOwner::Url | PressOwner::Ignored => {}
@@ -3636,44 +3716,16 @@ impl PointerHandler for App {
                 } => {
                     // Xterm's mouse protocol has only vertical wheel button codes 4/5;
                     // Foot does not synthesize horizontal wheel reports into unrelated buttons.
-                    let modes = self.input_modes();
                     if vertical.is_none() {
                         continue;
                     }
-                    let cell_height = self
-                        .snapshot_frame
-                        .as_ref()
-                        .map_or(1, SnapshotFrame::cell_height);
-                    if modes.mouse_tracking == MouseTracking::None {
-                        if let Some((action, count)) = self.scrollback_wheel.push_scaled(
-                            vertical.absolute,
-                            vertical.discrete,
-                            vertical.value120,
-                            SCROLLBACK_WHEEL_MULTIPLIER,
-                            cell_height,
-                        ) {
-                            if let Err(error) = self.scroll_history(action, count) {
-                                self.fail(error);
-                            }
-                        }
-                        continue;
-                    }
-                    if let Some((action, count)) = self.vertical_wheel.push(
+                    if let Err(error) = self.handle_vertical_wheel(
+                        cell,
                         vertical.absolute,
                         vertical.discrete,
                         vertical.value120,
-                        cell_height,
                     ) {
-                        let Some(position) = cell else { continue };
-                        if let Some(report) =
-                            mouse_report(action, position, self.modifiers, modes.sgr_mouse)
-                        {
-                            let mut batch = Vec::with_capacity(report.len().saturating_mul(count));
-                            for _ in 0..count {
-                                batch.extend_from_slice(&report);
-                            }
-                            self.send_command(WindowCommand::Input(batch));
-                        }
+                        self.fail(error);
                     }
                 }
             }
