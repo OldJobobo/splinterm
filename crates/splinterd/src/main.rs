@@ -175,7 +175,9 @@ struct DaemonState {
     development_terminal_access: bool,
 }
 
-#[tokio::main]
+// Local PTY and Unix-socket work is asynchronous; bounding workers also bounds
+// glibc per-thread allocator arenas after sustained terminal output.
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
