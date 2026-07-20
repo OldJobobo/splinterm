@@ -439,6 +439,35 @@ pub struct WindowGeometry {
 }
 
 impl WindowGeometry {
+    /// Returns this pane geometry translated into a window-owned backing buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either translated coordinate overflows `u32`.
+    pub fn translated(mut self, x: u32, y: u32) -> Result<Self> {
+        self.grid_rect.x = self
+            .grid_rect
+            .x
+            .checked_add(x)
+            .context("translated grid x overflow")?;
+        self.grid_rect.y = self
+            .grid_rect
+            .y
+            .checked_add(y)
+            .context("translated grid y overflow")?;
+        self.visible_grid_rect.x = self
+            .visible_grid_rect
+            .x
+            .checked_add(x)
+            .context("translated visible grid x overflow")?;
+        self.visible_grid_rect.y = self
+            .visible_grid_rect
+            .y
+            .checked_add(y)
+            .context("translated visible grid y overflow")?;
+        Ok(self)
+    }
+
     /// Computes the initial logical surface needed for an explicitly requested grid.
     pub fn for_grid(
         columns: u32,

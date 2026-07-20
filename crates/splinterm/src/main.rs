@@ -8,12 +8,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use splinterm::{
-    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowUpdate,
+    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowPaneOptions,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
     config::{AppConfig, ConfigLoad, ResolvedTheme, load_default, load_theme},
     renderer::{self, RendererOptions},
     run_window,
 };
-use splinterm_core::{Axis, DojoId, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId};
+use splinterm_core::{
+    Axis, DojoId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
+};
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen, CellAttributes, ClientFrame, ColorSource,
     ConsentPrompt, ConsentReply, ErrorCode, LaunchParameters, MAX_CONSENT_FRAME_BYTES,
@@ -246,8 +249,8 @@ async fn main() -> Result<()> {
         eprintln!("splinterm config: {diagnostic}");
     }
     if let Command::Window { dojo_id, window_id } = command {
-        let splint_id = select_window(dojo_id.zip(window_id)).await?;
-        return run_live_window(config, splint_id).await;
+        let window = select_window(dojo_id.zip(window_id)).await?;
+        return run_live_multipane_window(config, window).await;
     }
     if let Command::Launch {
         cwd,
@@ -635,7 +638,7 @@ fn choose_session(dojos: &[splinterm_core::Dojo], allow_new: bool) -> Result<Opt
 fn select_window_from(
     dojos: &[splinterm_core::Dojo],
     selection: (DojoId, WindowId),
-) -> Result<SplintId> {
+) -> Result<splinterm_core::Window> {
     let (dojo_id, window_id) = selection;
     let dojo = dojos
         .iter()
@@ -649,18 +652,32 @@ fn select_window_from(
     window
         .root
         .find_splint(window.default_focus)
-        .map(|splint| splint.id)
-        .context("selected window has an invalid default-focus hint")
+        .context("selected window has an invalid default-focus hint")?;
+    Ok(window.clone())
 }
 
-async fn select_window(selection: Option<(DojoId, WindowId)>) -> Result<SplintId> {
+fn window_containing(
+    dojos: &[splinterm_core::Dojo],
+    splint_id: SplintId,
+) -> Option<splinterm_core::Window> {
+    dojos
+        .iter()
+        .flat_map(|dojo| &dojo.windows)
+        .find(|window| window.root.find_splint(splint_id).is_some())
+        .cloned()
+}
+
+async fn select_window(selection: Option<(DojoId, WindowId)>) -> Result<splinterm_core::Window> {
     let mut connection = Connection::connect().await?;
     let Response::Dojos { dojos } = connection.request(Request::ListDojos).await? else {
         bail!("splinterd did not return its session list");
     };
-    match selection {
-        Some(selection) => select_window_from(&dojos, selection),
-        None => choose_session(&dojos, false)?.context("no Splint was selected"),
+    if let Some(selection) = selection {
+        select_window_from(&dojos, selection)
+    } else {
+        let splint_id = choose_session(&dojos, false)?.context("no Splint was selected")?;
+        window_containing(&dojos, splint_id)
+            .context("selected Splint is not present in a daemon window")
     }
 }
 
@@ -1107,23 +1124,140 @@ struct ControllerOutputs {
     resyncs: mpsc::Sender<()>,
 }
 
+type PaneResize = (u16, u16, u16, u16);
+
+async fn ensure_pane_control(
+    control: &mut Connection,
+    active_controller: &mut Option<u64>,
+    prepared_resize: &mut Option<PaneResize>,
+    updates: &mpsc::Sender<WindowUpdate>,
+    splint_id: SplintId,
+    incarnation: u64,
+    apply_prepared_resize: bool,
+) -> Result<u64> {
+    if let Some(controller_id) = *active_controller {
+        return Ok(controller_id);
+    }
+    let controller_id = control.acquire_control(splint_id, incarnation).await?;
+    *active_controller = Some(controller_id);
+    let _ = updates.send(WindowUpdate::Control(true)).await;
+    if apply_prepared_resize {
+        if let Some((columns, rows, pixel_width, pixel_height)) = prepared_resize.take() {
+            if !matches!(
+                control
+                    .request(Request::Resize {
+                        controller_id,
+                        splint_id,
+                        incarnation,
+                        columns,
+                        rows,
+                        pixel_width,
+                        pixel_height,
+                    })
+                    .await?,
+                Response::Acknowledged
+            ) {
+                bail!("splinterd did not acknowledge prepared pane resize");
+            }
+        }
+    }
+    Ok(controller_id)
+}
+
+async fn handle_scrollback_fetch(
+    control: &mut Connection,
+    outputs: &ControllerOutputs,
+    splint_id: SplintId,
+    incarnation: u64,
+    terminal_revision: u64,
+    history_generation: u64,
+    before_row_id: u64,
+) -> Result<bool> {
+    match fetch_scrollback_pages(
+        control,
+        splint_id,
+        incarnation,
+        terminal_revision,
+        history_generation,
+        before_row_id,
+    )
+    .await?
+    {
+        Some(pages) if !pages.is_empty() => Ok(outputs
+            .updates
+            .send(WindowUpdate::ScrollbackPages(pages))
+            .await
+            .is_ok()),
+        Some(_) => Ok(true),
+        None => {
+            let _ = outputs
+                .updates
+                .send(WindowUpdate::ScrollbackResyncRequired)
+                .await;
+            Ok(outputs.resyncs.send(()).await.is_ok())
+        }
+    }
+}
+
+async fn active_resize_request(
+    control: &mut Connection,
+    active_controller: &mut Option<u64>,
+    prepared_resize: &mut Option<PaneResize>,
+    updates: &mpsc::Sender<WindowUpdate>,
+    identity: (SplintId, u64),
+    resize: PaneResize,
+    resize_delay_ms: u64,
+) -> Result<Request> {
+    if resize_delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(resize_delay_ms)).await;
+    }
+    let (splint_id, incarnation) = identity;
+    let controller_id = ensure_pane_control(
+        control,
+        active_controller,
+        prepared_resize,
+        updates,
+        splint_id,
+        incarnation,
+        false,
+    )
+    .await?;
+    Ok(Request::Resize {
+        controller_id,
+        splint_id,
+        incarnation,
+        columns: resize.0,
+        rows: resize.1,
+        pixel_width: resize.2,
+        pixel_height: resize.3,
+    })
+}
+
 async fn run_controller(
     mut control: Connection,
     mut commands: mpsc::Receiver<WindowCommand>,
     outputs: ControllerOutputs,
-    controller_id: u64,
+    controller_id: Option<u64>,
     splint_id: SplintId,
     incarnation: u64,
     resize_delay_ms: u64,
 ) -> Result<()> {
-    let mut active_controller = Some(controller_id);
+    let mut active_controller = controller_id;
+    let mut prepared_resize = None;
     let result = async {
         while let Some(command) = commands.recv().await {
             let request = match command {
                 WindowCommand::Input(bytes) => {
-                    let Some(controller_id) = active_controller else {
-                        continue;
-                    };
+                    let controller_id = ensure_pane_control(
+                        &mut control,
+                        &mut active_controller,
+                        &mut prepared_resize,
+                        &outputs.updates,
+                        splint_id,
+                        incarnation,
+                        true,
+                    )
+                    .await?;
                     Request::Input {
                         controller_id,
                         splint_id,
@@ -1137,21 +1271,25 @@ async fn run_controller(
                     pixel_width,
                     pixel_height,
                 } => {
-                    if resize_delay_ms > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(resize_delay_ms)).await;
-                    }
-                    let Some(controller_id) = active_controller else {
-                        continue;
-                    };
-                    Request::Resize {
-                        controller_id,
-                        splint_id,
-                        incarnation,
-                        columns,
-                        rows,
-                        pixel_width,
-                        pixel_height,
-                    }
+                    active_resize_request(
+                        &mut control,
+                        &mut active_controller,
+                        &mut prepared_resize,
+                        &outputs.updates,
+                        (splint_id, incarnation),
+                        (columns, rows, pixel_width, pixel_height),
+                        resize_delay_ms,
+                    )
+                    .await?
+                }
+                WindowCommand::PrepareResize {
+                    columns,
+                    rows,
+                    pixel_width,
+                    pixel_height,
+                } => {
+                    prepared_resize = Some((columns, rows, pixel_width, pixel_height));
+                    continue;
                 }
                 WindowCommand::FetchScrollback {
                     splint_id,
@@ -1160,8 +1298,9 @@ async fn run_controller(
                     history_generation,
                     before_row_id,
                 } => {
-                    match fetch_scrollback_pages(
+                    if !handle_scrollback_fetch(
                         &mut control,
+                        &outputs,
                         splint_id,
                         incarnation,
                         terminal_revision,
@@ -1170,26 +1309,7 @@ async fn run_controller(
                     )
                     .await?
                     {
-                        Some(pages) if !pages.is_empty() => {
-                            if outputs
-                                .updates
-                                .send(WindowUpdate::ScrollbackPages(pages))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Some(_) => {}
-                        None => {
-                            let _ = outputs
-                                .updates
-                                .send(WindowUpdate::ScrollbackResyncRequired)
-                                .await;
-                            if outputs.resyncs.send(()).await.is_err() {
-                                break;
-                            }
-                        }
+                        break;
                     }
                     continue;
                 }
@@ -1198,6 +1318,7 @@ async fn run_controller(
                     let Some(controller_id) = active_controller.take() else {
                         continue;
                     };
+                    let _ = outputs.updates.send(WindowUpdate::Control(false)).await;
                     Request::ReleaseControl { controller_id }
                 }
             };
@@ -1234,6 +1355,488 @@ async fn watch_theme(
             Err(error) => eprintln!("splinterm theme reload rejected: {error:#}"),
         }
     }
+}
+
+struct PreparedPane {
+    options: WindowPaneOptions,
+    updates: mpsc::Sender<WindowUpdate>,
+    task: tokio::task::JoinHandle<Result<()>>,
+}
+
+fn layout_splint_ids(root: &LayoutNode, ids: &mut Vec<SplintId>) {
+    match root {
+        LayoutNode::Leaf(splint) => ids.push(splint.id),
+        LayoutNode::Branch { first, second, .. } => {
+            layout_splint_ids(first, ids);
+            layout_splint_ids(second, ids);
+        }
+    }
+}
+
+async fn prepare_live_pane(config: &AppConfig, splint_id: SplintId) -> Result<PreparedPane> {
+    let mut connection = Connection::connect().await?;
+    let incarnation = connection.live_incarnation(splint_id).await?;
+    let scopes = vec![
+        AccessScope::Observe,
+        AccessScope::Scrollback,
+        AccessScope::Input,
+        AccessScope::Resize,
+    ];
+    if !matches!(
+        connection
+            .request(Request::RequestAccess {
+                splint_id,
+                incarnation,
+                scopes,
+            })
+            .await?,
+        Response::AccessGranted { .. }
+    ) {
+        bail!("splinterd did not grant requested terminal access");
+    }
+    let authority = load_authority_status(&mut connection, splint_id, incarnation).await?;
+    let attachment = attach(&mut connection, splint_id, incarnation).await?;
+    let snapshot = attachment.snapshot.clone();
+    let mut control = Connection::connect().await?;
+    if control.live_incarnation(splint_id).await? != incarnation {
+        bail!("control connection observed a different process incarnation");
+    }
+    let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
+    let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
+    let (resync_sender, resyncs) = mpsc::channel(1);
+    let controller_updates = updates.clone();
+    let resize_delay_ms = config.resize_delay_ms;
+    let controller = tokio::spawn(run_controller(
+        control,
+        commands,
+        ControllerOutputs {
+            updates: controller_updates,
+            resyncs: resync_sender,
+        },
+        None,
+        splint_id,
+        incarnation,
+        resize_delay_ms,
+    ));
+    let task_updates = updates.clone();
+    let task = tokio::spawn(run_pane_subscription(
+        connection,
+        attachment,
+        controller,
+        resyncs,
+        task_updates,
+        splint_id,
+        incarnation,
+    ));
+    Ok(PreparedPane {
+        options: WindowPaneOptions {
+            snapshot,
+            updates: receiver,
+            commands: command_sender,
+            authority,
+            controlled: false,
+        },
+        updates,
+        task,
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "subscription ordering and controller resynchronization form one pane lifecycle"
+)]
+async fn run_pane_subscription(
+    mut connection: Connection,
+    mut attachment: Attachment,
+    mut controller: tokio::task::JoinHandle<Result<()>>,
+    mut resyncs: mpsc::Receiver<()>,
+    updates: mpsc::Sender<WindowUpdate>,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<()> {
+    let mut last_revision = attachment.snapshot.revision;
+    let mut last_sequence = 0_u64;
+    loop {
+        tokio::select! {
+            result = &mut controller => return result.context("pane controller task failed")?,
+            Some(()) = resyncs.recv() => {
+                attachment = resynchronize(
+                    &mut connection, attachment.subscription_id, splint_id, incarnation,
+                ).await?;
+                last_revision = attachment.snapshot.revision;
+                last_sequence = 0;
+                if updates.send(WindowUpdate::Snapshot(attachment.snapshot.clone())).await.is_err() {
+                    return controller.await.context("pane controller task failed")?;
+                }
+            }
+            frame = connection.next_server_frame() => {
+                let ServerFrame::Event { subscription_id, sequence, event } = frame? else {
+                    bail!("splinterd sent an unexpected frame while subscribed");
+                };
+                match classify_subscription_event(
+                    attachment.subscription_id, last_sequence, subscription_id, sequence, event,
+                ) {
+                    EventAction::Ignore => {}
+                    EventAction::Snapshot { sequence, snapshot } => {
+                        validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
+                        last_revision = snapshot.revision;
+                        if updates.send(WindowUpdate::Snapshot(snapshot)).await.is_err() {
+                            return controller.await.context("pane controller task failed")?;
+                        }
+                        last_sequence = sequence;
+                    }
+                    EventAction::Update { sequence, update }
+                        if update_advances_from(&update, last_revision) => {
+                        last_revision = update.revision;
+                        if updates.send(WindowUpdate::Update(update)).await.is_err() {
+                            return controller.await.context("pane controller task failed")?;
+                        }
+                        last_sequence = sequence;
+                    }
+                    EventAction::Update { .. } | EventAction::Resynchronize => {
+                        attachment = resynchronize(
+                            &mut connection, attachment.subscription_id, splint_id, incarnation,
+                        ).await?;
+                        last_revision = attachment.snapshot.revision;
+                        last_sequence = 0;
+                        if updates.send(WindowUpdate::Snapshot(attachment.snapshot.clone())).await.is_err() {
+                            return controller.await.context("pane controller task failed")?;
+                        }
+                    }
+                    EventAction::Shutdown => {
+                        let _ = updates.send(WindowUpdate::Shutdown).await;
+                        return controller.await.context("pane controller task failed")?;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn window_root_from_topology(
+    snapshot: &splinterm_protocol::TopologySnapshot,
+    window_id: WindowId,
+) -> Result<LayoutNode> {
+    snapshot
+        .lair
+        .dojos()
+        .flat_map(|dojo| &dojo.windows)
+        .find(|window| window.id == window_id)
+        .map(|window| window.root.clone())
+        .context("edited window is absent from committed topology")
+}
+
+fn parent_ratio(root: &LayoutNode, target: SplintId) -> Option<SplitRatio> {
+    match root {
+        LayoutNode::Leaf(_) => None,
+        LayoutNode::Branch {
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            let direct_child =
+                |node: &LayoutNode| matches!(node, LayoutNode::Leaf(splint) if splint.id == target);
+            if direct_child(first) || direct_child(second) {
+                Some(*ratio)
+            } else {
+                parent_ratio(first, target).or_else(|| parent_ratio(second, target))
+            }
+        }
+    }
+}
+
+async fn inspect_window_state(
+    connection: &mut Connection,
+    window_id: WindowId,
+) -> Result<(TopologyRevision, LayoutNode)> {
+    let Response::Topology { snapshot } = connection.request(Request::InspectTopology).await?
+    else {
+        bail!("splinterd did not return topology after edit");
+    };
+    snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let root = window_root_from_topology(&snapshot, window_id)?;
+    Ok((snapshot.revision, root))
+}
+
+async fn apply_topology_command(
+    connection: &mut Connection,
+    config: &AppConfig,
+    root: &LayoutNode,
+    expected_topology_revision: TopologyRevision,
+    command: WindowTopologyCommand,
+) -> Result<()> {
+    let request = match command {
+        WindowTopologyCommand::Split { target, axis } => Request::SplitSplint {
+            expected_topology_revision,
+            target_splint_id: target,
+            axis,
+            side: SplitSide::Second,
+            ratio: SplitRatio::new(500).expect("fixed split ratio is valid"),
+            launch: launch_parameters(
+                env::current_dir().context("failed to read current directory")?,
+                Vec::new(),
+                config,
+            ),
+        },
+        WindowTopologyCommand::Close { target } => Request::CloseSplint {
+            expected_topology_revision,
+            splint_id: target,
+        },
+        WindowTopologyCommand::AdjustRatio { target, delta } => {
+            let current = i32::from(
+                parent_ratio(root, target)
+                    .context("focused pane has no adjustable parent ratio")?
+                    .get(),
+            );
+            let next = u16::try_from((current + i32::from(delta)).clamp(1, 999))?;
+            Request::SetSplitRatio {
+                expected_topology_revision,
+                target_splint_id: target,
+                ratio: SplitRatio::new(next).map_err(|_| anyhow::anyhow!("invalid ratio"))?,
+            }
+        }
+    };
+    match connection.request(request).await? {
+        Response::TopologyCommitted { .. } | Response::SplintStarted { .. } => Ok(()),
+        response => bail!("splinterd returned unexpected topology response: {response:?}"),
+    }
+}
+
+fn topology_identity_diff(
+    previous: &LayoutNode,
+    current: &LayoutNode,
+) -> (Vec<SplintId>, Vec<SplintId>) {
+    let mut previous_ids = Vec::new();
+    let mut current_ids = Vec::new();
+    layout_splint_ids(previous, &mut previous_ids);
+    layout_splint_ids(current, &mut current_ids);
+    let previous = previous_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let current = current_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    (
+        current.difference(&previous).copied().collect(),
+        previous.difference(&current).copied().collect(),
+    )
+}
+
+async fn reconcile_window_topology(
+    config: &AppConfig,
+    root: &mut LayoutNode,
+    next: LayoutNode,
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+    pane_tasks: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<bool> {
+    if *root == next {
+        return Ok(true);
+    }
+    let (added_ids, removed) = topology_identity_diff(root, &next);
+    let mut added = Vec::new();
+    for splint_id in added_ids {
+        let pane = prepare_live_pane(config, splint_id).await?;
+        pane_tasks.push(pane.task);
+        added.push(pane.options);
+    }
+    if updates
+        .send(WindowTopologyUpdate::Apply {
+            layout: next.clone(),
+            added,
+            removed,
+        })
+        .await
+        .is_err()
+    {
+        return Ok(false);
+    }
+    *root = next;
+    Ok(true)
+}
+
+async fn run_topology_manager(
+    config: AppConfig,
+    window_id: WindowId,
+    mut root: LayoutNode,
+    mut commands: mpsc::Receiver<WindowTopologyCommand>,
+    updates: mpsc::Sender<WindowTopologyUpdate>,
+    mut pane_tasks: Vec<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<()> {
+    let mut connection = Connection::connect().await?;
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => command,
+            _ = poll.tick() => None,
+        };
+        let (revision, authoritative) = match inspect_window_state(&mut connection, window_id).await
+        {
+            Ok(state) => state,
+            Err(error) => {
+                let _ = updates
+                    .send(WindowTopologyUpdate::Shutdown(format!("{error:#}")))
+                    .await;
+                return Err(error);
+            }
+        };
+        let reconciled = match reconcile_window_topology(
+            &config,
+            &mut root,
+            authoritative,
+            &updates,
+            &mut pane_tasks,
+        )
+        .await
+        {
+            Ok(reconciled) => reconciled,
+            Err(error) => {
+                let _ = updates
+                    .send(WindowTopologyUpdate::Shutdown(format!("{error:#}")))
+                    .await;
+                return Err(error);
+            }
+        };
+        if !reconciled {
+            break;
+        }
+        let Some(command) = command else {
+            if commands.is_closed() {
+                break;
+            }
+            continue;
+        };
+        if let Err(error) =
+            apply_topology_command(&mut connection, &config, &root, revision, command).await
+        {
+            eprintln!("splinterm topology edit rejected: {error:#}");
+        }
+    }
+    for task in pane_tasks {
+        task.await.context("pane subscription task failed")??;
+    }
+    Ok(())
+}
+
+fn spawn_topology_smoke(
+    commands: mpsc::Sender<WindowTopologyCommand>,
+    target: SplintId,
+) -> Result<Option<tokio::task::JoinHandle<Result<()>>>> {
+    if env::var_os("SPLINTERM_TOPOLOGY_SMOKE").is_none() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").is_some(),
+        "SPLINTERM_TOPOLOGY_SMOKE requires development attach"
+    );
+    Ok(Some(tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        commands
+            .send(WindowTopologyCommand::Split {
+                target,
+                axis: Axis::Horizontal,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("topology smoke split channel closed"))?;
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        commands
+            .send(WindowTopologyCommand::AdjustRatio { target, delta: 100 })
+            .await
+            .map_err(|_| anyhow::anyhow!("topology smoke ratio channel closed"))
+    })))
+}
+
+async fn run_live_multipane_window(
+    config: AppConfig,
+    window_model: splinterm_core::Window,
+) -> Result<()> {
+    renderer::configure(RendererOptions {
+        font: config.font.clone(),
+        font_size: config.font_size,
+        font_sizing_policy: config.font_sizing_policy,
+        physical_dpi: 96.0,
+        padding: config.padding,
+        background_alpha: config.background_alpha,
+    })?;
+    let theme = load_theme(&config.theme_path).unwrap_or_default();
+    let mut ids = Vec::new();
+    layout_splint_ids(&window_model.root, &mut ids);
+    let mut prepared = Vec::with_capacity(ids.len());
+    for splint_id in ids {
+        prepared.push(prepare_live_pane(&config, splint_id).await?);
+    }
+    let theme_senders = prepared
+        .iter()
+        .map(|pane| pane.updates.clone())
+        .collect::<Vec<_>>();
+    let theme_path = config.theme_path.clone();
+    let theme_task = tokio::spawn(async move {
+        let mut current = theme;
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            poll.tick().await;
+            if let Ok(next) = load_theme(&theme_path) {
+                if next != current {
+                    current = next;
+                    for sender in &theme_senders {
+                        let _ = sender.send(WindowUpdate::Theme(next)).await;
+                    }
+                }
+            }
+        }
+    });
+    let mut panes = Vec::with_capacity(prepared.len());
+    let mut tasks = Vec::with_capacity(prepared.len());
+    for pane in prepared {
+        panes.push(pane.options);
+        tasks.push(pane.task);
+    }
+    let (topology_commands, topology_command_receiver) = mpsc::channel(8);
+    let (topology_update_sender, topology_updates) = mpsc::channel(4);
+    let topology_smoke =
+        spawn_topology_smoke(topology_commands.clone(), window_model.default_focus)?;
+    let window_config = config.clone();
+    let root = window_model.root;
+    let manager_root = root.clone();
+    let active_splint = window_model.default_focus;
+    let window_id = window_model.id;
+    let topology_manager = tokio::spawn(run_topology_manager(
+        config,
+        window_id,
+        manager_root,
+        topology_command_receiver,
+        topology_update_sender,
+        tasks,
+    ));
+    let result = tokio::task::spawn_blocking(move || {
+        run_window(WindowOptions {
+            panes,
+            layout: Some(root),
+            active_splint: Some(active_splint),
+            topology_updates: Some(topology_updates),
+            topology_commands: Some(topology_commands),
+            initial_columns: window_config.initial_columns,
+            initial_rows: window_config.initial_rows,
+            cursor_style: window_config.cursor_style,
+            cursor_blink: window_config.cursor_blink,
+            title: window_config.title,
+            theme,
+            ..WindowOptions::default()
+        })
+    })
+    .await
+    .context("Wayland window task failed")?;
+    theme_task.abort();
+    if let Some(smoke) = topology_smoke {
+        smoke.await.context("topology smoke task failed")??;
+    }
+    topology_manager
+        .await
+        .context("topology manager task failed")??;
+    result
 }
 
 #[allow(
@@ -1297,7 +1900,7 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
             updates: updates.clone(),
             resyncs: resync_sender,
         },
-        controller_id,
+        Some(controller_id),
         splint_id,
         incarnation,
         config.resize_delay_ms,
@@ -1997,11 +2600,11 @@ mod tests {
         let second_window = second.windows[0].id;
         let second_hint = second.windows[0].default_focus;
 
-        assert_eq!(
+        let selected =
             select_window_from(&[first.clone(), second.clone()], (first_dojo, first_window))
-                .unwrap(),
-            first_hint
-        );
+                .unwrap();
+        assert_eq!(selected.default_focus, first_hint);
+        assert_eq!(selected.root, first.windows[0].root);
         assert_ne!(first_hint, second_hint);
         assert!(select_window_from(&[first.clone(), second], (first_dojo, second_window)).is_err());
 
@@ -2169,6 +2772,39 @@ mod tests {
         assert!(
             validate_attached_snapshot(&valid, valid.splint_id, valid.incarnation + 1).is_err()
         );
+    }
+
+    #[test]
+    fn topology_diff_and_parent_ratio_are_identity_local() {
+        let first = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let first_id = first.id;
+        let second = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let second_id = second.id;
+        let third = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let third_id = third.id;
+        let initial = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(400).unwrap(),
+            first: Box::new(LayoutNode::Leaf(first.clone())),
+            second: Box::new(LayoutNode::Leaf(second.clone())),
+        };
+        let nested = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(400).unwrap(),
+            first: Box::new(LayoutNode::Leaf(first)),
+            second: Box::new(LayoutNode::Branch {
+                axis: Axis::Vertical,
+                ratio: SplitRatio::new(650).unwrap(),
+                first: Box::new(LayoutNode::Leaf(second)),
+                second: Box::new(LayoutNode::Leaf(third)),
+            }),
+        };
+        let (added, removed) = topology_identity_diff(&initial, &nested);
+        assert_eq!(added, vec![third_id]);
+        assert!(removed.is_empty());
+        assert_eq!(parent_ratio(&nested, first_id).unwrap().get(), 400);
+        assert_eq!(parent_ratio(&nested, second_id).unwrap().get(), 650);
+        assert_eq!(parent_ratio(&nested, third_id).unwrap().get(), 650);
     }
 
     #[test]

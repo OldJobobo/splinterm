@@ -283,6 +283,20 @@ socket were empty afterward. No broader graphical matrix ran. Evidence:
 horizontal plus nested vertical split, focus traversal, independent shell input,
 resize/reflow, selection, scrollback, IME placement, close/collapse, and reattach.
 
+**Status:** Complete. Pure tests cover stable nested geometry, focus traversal,
+clipped neighbor isolation, pane-local resize, inactive detached scrollback, input
+encoding, selection, and pane-offset IME rectangles. Because graphical isolation
+forbids focusing a test window, interaction semantics are exercised headlessly;
+the guarded workspace-8/DP-2 evidence covers static nested panes plus live
+single-to-split reconciliation, ratio changes, observer input/control isolation,
+exited-pane retention, close/collapse, detach, and reattach without focus or
+pointer movement. Evidence is recorded under
+`docs/spikes/artifacts/phase3-slice5-panes/`,
+`docs/spikes/artifacts/phase3-slice5-dynamic/`, and
+`docs/spikes/artifacts/phase3-slice5-final/`. A read-only review found lazy-control,
+stale-topology, IME-origin, and inactive-scrollback defects; all received targeted
+fixes and regression coverage before final workspace validation.
+
 ### Slice 6 — simultaneous clients and explicit control transfer
 
 - Expose bounded per-Splint control status to trusted first-party UI without

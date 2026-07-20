@@ -13,8 +13,8 @@ persistent multiplexing built in.
 > [!IMPORTANT]
 > Splinterm is a private prerelease. The Omarchy-native terminal MVP, headless
 > multi-Splint lifecycle, and explicit durable metadata restore are validated.
-> Split-pane rendering, supported third-party automation, and public distribution
-> remain future work.
+> Native split-pane rendering is under active Phase 3 validation. Supported
+> third-party automation and public distribution remain future work.
 
 ## Workspace
 
@@ -49,8 +49,8 @@ The complete headless lifecycle is covered by an isolated real-daemon test.
 Roadmap Phases 1 and 2 are complete; the
 [Omarchy-native terminal MVP plan](docs/plans/0002-omarchy-terminal-mvp.md)
 links exact renderer, graphical sign-off, and private package evidence.
-Headless multiplexing, crash-safe metadata restore, and independently attachable
-Dojo windows are implemented; graphical multi-pane composition remains later work.
+Headless multiplexing, crash-safe metadata restore, independently attachable
+Dojo windows, and clipped multi-pane composition in one Wayland toplevel are implemented.
 
 ## Try the scaffold
 
@@ -116,11 +116,14 @@ but every explicitly restored process receives a new incarnation. Terminal and
 scrollback bodies, clipboard data, PTY handles, grants, and controller tokens
 are never persisted.
 
-The `window` command keeps an ordered daemon subscription, renders current
-terminal snapshots, sends UTF-8 and essential terminal keys, and owns the
-configure-derived PTY/grid size through a separate authenticated control
-connection. Input and resize require one exclusive connection-owned controller
-lease, released when the window disconnects. Function/navigation/keypad keys,
+The `window` command keeps one ordered daemon subscription per pane, renders a
+persisted binary window tree into one clipped backing buffer, sends UTF-8 and
+essential terminal keys to the client-local focused pane, and derives each
+PTY/grid size from its pane rectangle. Pane observers do not acquire controller
+leases merely by attaching or receiving focus. First input acquires the focused
+pane's exclusive connection-owned lease, applies its remembered geometry, and
+then delivers input in order; explicit release or disconnect relinquishes it.
+Function/navigation/keypad keys,
 xterm modifiers, application cursor/keypad modes, xkb compose, focus reporting,
 and exact snapshot colors are supported. Protocol v16 streams bounded semantic
 row, scroll, cursor, mode, palette, dimension, and title updates. The client
@@ -134,7 +137,10 @@ fallback, focus indication, and reduced-motion cursor behavior are implemented. 
 normal development grant with a daemon-launched trusted Wayland consent client,
 scoped five-minute grant-once authority, explicit revocation, and visible
 active-authority/controller indication. Ctrl+Shift+R revokes active grants and
-Ctrl+Shift+L releases the local controller. The
+Ctrl+Shift+L releases the local controller. Pane focus uses Ctrl+Shift+Arrow or
+Ctrl+Shift+Tab (Shift+Tab reverses traversal). Ctrl+Shift+Enter splits
+horizontally, Ctrl+Shift+\\ splits vertically, Ctrl+Shift+W closes an exited
+pane, and Ctrl+Shift+[ / ] adjusts its parent ratio. The
 `SPLINTERM_ENABLE_DEV_ATTACH=1` bypass remains available only for isolated
 development and is prominently labeled in the window title.
 

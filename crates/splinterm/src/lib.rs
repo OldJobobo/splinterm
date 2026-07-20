@@ -9,11 +9,12 @@
 mod box_drawing;
 pub mod config;
 pub mod geometry;
+pub mod pane;
 pub mod renderer;
 pub mod viewport;
 pub mod wayland;
 
 pub use wayland::{
-    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowUpdate,
-    run as run_window,
+    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowPaneOptions,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, run as run_window,
 };

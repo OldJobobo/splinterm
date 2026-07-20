@@ -1,0 +1,21 @@
+{
+  "case": "phase3-slice5-dynamic-topology",
+  "result": "pass",
+  "workspace": 8,
+  "monitor": "DP-2",
+  "initial_panes": 1,
+  "final_panes": 2,
+  "operations": ["horizontal split", "parent ratio 500 -> 600"],
+  "delivery": "dev-attach-only internal WindowTopologyCommand smoke hook",
+  "window_count": 1,
+  "pane_sizes": {
+    "controlled_original": "48x22",
+    "uncontrolled_new_observer": "80x24"
+  },
+  "control_evidence": "external input to the controlled original was rejected as controller unavailable; the new observer accepted isolated external input",
+  "focus_before_after": "workspace 1 on DP-1",
+  "pointer_before_after": "1744, 926",
+  "placement": "pre-map workspace 8 silent, floating, no_initial_focus",
+  "evidence": "dynamic-panes.png",
+  "cleanup": "window, daemon, and test processes removed; workspace 8 empty"
+}

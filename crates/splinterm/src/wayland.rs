@@ -5,7 +5,7 @@
 //! The client owns these objects; the daemon remains headless.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     os::fd::{AsFd, OwnedFd},
     path::PathBuf,
@@ -73,7 +73,7 @@ use wayland_client::{
     },
 };
 
-use splinterm_core::SplintId;
+use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{
     ActiveScreen, CellAttributes, ColorSource, HistoryTransition, MouseTracking, TerminalCell,
     TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
@@ -96,12 +96,16 @@ use smithay_client_toolkit::reexports::protocols::wp::{
 };
 
 use crate::config::{APP_ID, CursorStyle, ResolvedTheme};
-use crate::geometry::{OutputDpiObservation, SurfaceGeometry};
+use crate::geometry::{
+    OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, logical_extent_to_buffer,
+};
+use crate::pane::{FocusDirection, PaneLayout};
 use crate::renderer::{
     CursorPresentation, HistoryOverlayStatus, SnapshotFrame, SnapshotOverlays, TextRow,
     configured_background_bgra, history_overlay_layout, paint, paint_history_overlay,
-    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_rows_presented,
-    scroll_snapshot_pixels, set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
+    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
+    paint_snapshot_rows_presented, scroll_snapshot_pixels, set_font_zoom_steps, snapshot_row_rect,
+    update_output_dpi, write_ppm,
 };
 use crate::viewport::ScrollbackViewport;
 
@@ -315,6 +319,7 @@ pub enum WindowUpdate {
     ScrollbackPages(Vec<splinterm_protocol::ScrollbackPage>),
     ScrollbackResyncRequired,
     Authority(AuthorityStatus),
+    Control(bool),
     Theme(ResolvedTheme),
     Shutdown,
 }
@@ -324,6 +329,12 @@ pub enum WindowUpdate {
 pub enum WindowCommand {
     Input(Vec<u8>),
     Resize {
+        columns: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    },
+    PrepareResize {
         columns: u16,
         rows: u16,
         pixel_width: u16,
@@ -350,6 +361,38 @@ pub struct TrustedConsentUi {
     pub decision: StdSender<bool>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowTopologyCommand {
+    Split {
+        target: SplintId,
+        axis: splinterm_core::Axis,
+    },
+    Close {
+        target: SplintId,
+    },
+    AdjustRatio {
+        target: SplintId,
+        delta: i16,
+    },
+}
+
+pub enum WindowTopologyUpdate {
+    Apply {
+        layout: LayoutNode,
+        added: Vec<WindowPaneOptions>,
+        removed: Vec<SplintId>,
+    },
+    Shutdown(String),
+}
+
+pub struct WindowPaneOptions {
+    pub snapshot: TerminalSnapshot,
+    pub updates: Receiver<WindowUpdate>,
+    pub commands: Sender<WindowCommand>,
+    pub authority: AuthorityStatus,
+    pub controlled: bool,
+}
+
 pub struct WindowOptions {
     pub capture: Option<PathBuf>,
     /// Initial owned daemon snapshot. `None` retains the deterministic evidence row.
@@ -366,6 +409,8 @@ pub struct WindowOptions {
     pub trusted_consent: Option<TrustedConsentUi>,
     /// Trusted authority state rendered in persistent application chrome.
     pub authority: AuthorityStatus,
+    /// Whether the legacy single-pane command channel already owns control.
+    pub controlled: bool,
     /// Initial terminal dimensions from the supported configuration subset.
     pub initial_columns: u16,
     pub initial_rows: u16,
@@ -376,6 +421,63 @@ pub struct WindowOptions {
     pub title: Option<String>,
     /// Current project-owned Omarchy role mapping.
     pub theme: ResolvedTheme,
+    /// Multi-pane input. Empty retains the legacy one-pane fields above.
+    pub panes: Vec<WindowPaneOptions>,
+    pub layout: Option<LayoutNode>,
+    /// Client-local initial focus; never written back implicitly.
+    pub active_splint: Option<SplintId>,
+    pub topology_updates: Option<Receiver<WindowTopologyUpdate>>,
+    pub topology_commands: Option<Sender<WindowTopologyCommand>>,
+}
+
+impl WindowOptions {
+    fn activate_multi_pane_input(&mut self) -> Result<Vec<WindowPaneOptions>> {
+        if self.panes.is_empty() {
+            return Ok(Vec::new());
+        }
+        anyhow::ensure!(
+            self.snapshot.is_none() && self.updates.is_none() && self.commands.is_none(),
+            "legacy and multi-pane window inputs cannot be mixed"
+        );
+        let layout = self
+            .layout
+            .as_ref()
+            .context("multi-pane layout is required")?;
+        anyhow::ensure!(
+            layout.splint_count() == self.panes.len(),
+            "layout and pane input counts differ"
+        );
+        let mut identities = HashSet::new();
+        for pane in &self.panes {
+            pane.snapshot
+                .validate()
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            anyhow::ensure!(
+                identities.insert(pane.snapshot.splint_id)
+                    && layout.find_splint(pane.snapshot.splint_id).is_some(),
+                "pane input identity is duplicate or absent from the layout"
+            );
+        }
+        let active = self
+            .active_splint
+            .unwrap_or_else(|| layout.first_splint_id());
+        let index = self
+            .panes
+            .iter()
+            .position(|pane| pane.snapshot.splint_id == active)
+            .context("active Splint is absent from pane inputs")?;
+        let mut active = self.panes.remove(index);
+        apply_theme(&mut active.snapshot, self.theme);
+        self.snapshot = Some(active.snapshot);
+        self.updates = Some(active.updates);
+        self.commands = Some(active.commands);
+        self.authority = active.authority;
+        self.controlled = active.controlled;
+        for pane in &mut self.panes {
+            apply_theme(&mut pane.snapshot, self.theme);
+        }
+        Ok(std::mem::take(&mut self.panes))
+    }
 }
 
 impl Default for WindowOptions {
@@ -389,12 +491,18 @@ impl Default for WindowOptions {
             capture_scale: None,
             trusted_consent: None,
             authority: AuthorityStatus::default(),
+            controlled: true,
             initial_columns: 80,
             initial_rows: 24,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             title: None,
             theme: ResolvedTheme::default(),
+            panes: Vec::new(),
+            layout: None,
+            active_splint: None,
+            topology_updates: None,
+            topology_commands: None,
         }
     }
 }
@@ -412,6 +520,7 @@ impl Default for WindowOptions {
     reason = "Wayland global binding and application state initialization form one startup transaction"
 )]
 pub fn run(mut options: WindowOptions) -> Result<()> {
+    let inactive_options = options.activate_multi_pane_input()?;
     if let Some(snapshot) = options.snapshot.as_mut() {
         snapshot
             .validate()
@@ -475,7 +584,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         let (width, height) = viewport_destination(initial_width, initial_height)?;
         viewport.set_destination(width, height);
     }
-    let controller_active = options.commands.is_some();
+    let controller_active = options.controlled && options.commands.is_some();
     let trusted_consent = options.trusted_consent;
     let title = if trusted_consent.is_some() {
         "Splinterm — Trusted Access Request".to_owned()
@@ -525,38 +634,52 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         window,
         pool,
         text_row,
-        snapshot: options.snapshot,
-        snapshot_frame,
-        scrollback_viewport: ScrollbackViewport::default(),
-        painted_history_status: None,
-        history_page_pending: false,
-        history_selection_pin_blocked: false,
+        pane: PaneView {
+            snapshot: options.snapshot,
+            snapshot_frame,
+            scrollback_viewport: ScrollbackViewport::default(),
+            painted_history_status: None,
+            history_page_pending: false,
+            history_selection_pin_blocked: false,
+            scroll_started_at: None,
+            rendered_viewport_offset: 0,
+            viewport_dirty: false,
+            updates: options.updates,
+            commands: options.commands,
+            controller_active,
+            authority: options.authority,
+            last_resize: None,
+            prepare_dirty_rows: Vec::new(),
+            raster_dirty_rows: Vec::new(),
+            surface_dirty_rows: Vec::new(),
+            pending_scrolls: Vec::new(),
+            selected_text: None,
+            selection: None,
+            selecting: false,
+            pointer_cell: None,
+            hovered_url: None,
+        },
+        inactive_panes: inactive_options
+            .into_iter()
+            .map(|pane| PaneView::from_options(pane, SCALE_DENOMINATOR))
+            .collect::<Result<Vec<_>>>()?,
+        layout: options.layout,
+        topology_updates: options.topology_updates,
+        topology_commands: options.topology_commands,
         signoff,
         scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
-        scroll_started_at: None,
-        rendered_viewport_offset: 0,
-        viewport_dirty: false,
-        updates: options.updates,
-        commands: options.commands,
-        controller_active,
         trusted_consent,
-        authority: options.authority,
         cursor_style: options.cursor_style,
         cursor_blink: options.cursor_blink,
         title_override: options.title,
         theme: options.theme,
         evidence_close_shortcuts: options.evidence_close_shortcuts,
         modifiers: Modifiers::default(),
-        last_resize: None,
         font_zoom_steps: 0,
         capture: options.capture,
         capture_scale: options.capture_scale,
         buffer: None,
         backing: Vec::new(),
-        prepare_dirty_rows: Vec::new(),
-        raster_dirty_rows: Vec::new(),
-        surface_dirty_rows: Vec::new(),
-        pending_scrolls: Vec::new(),
         full_redraw: true,
         keyboard: None,
         keyboard_seat: None,
@@ -570,11 +693,6 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         primary_sources: Vec::new(),
         clipboard_tx,
         clipboard_rx,
-        selected_text: None,
-        selection: None,
-        selecting: false,
-        pointer_cell: None,
-        hovered_url: None,
         last_pointer_serial: None,
         pressed_buttons: HashMap::new(),
         vertical_wheel: WheelAccumulator::default(),
@@ -705,6 +823,266 @@ fn note_output_leave<T: Eq>(entered: &mut Vec<T>, output: &T) -> bool {
     clippy::struct_excessive_bools,
     reason = "independent Wayland lifecycle and evidence-mode flags are not one state machine"
 )]
+struct PaneView {
+    snapshot: Option<TerminalSnapshot>,
+    snapshot_frame: Option<SnapshotFrame>,
+    scrollback_viewport: ScrollbackViewport,
+    painted_history_status: Option<HistoryOverlayStatus>,
+    history_page_pending: bool,
+    history_selection_pin_blocked: bool,
+    scroll_started_at: Option<Instant>,
+    rendered_viewport_offset: usize,
+    viewport_dirty: bool,
+    updates: Option<Receiver<WindowUpdate>>,
+    commands: Option<Sender<WindowCommand>>,
+    controller_active: bool,
+    authority: AuthorityStatus,
+    last_resize: Option<(u16, u16, u16, u16)>,
+    prepare_dirty_rows: Vec<bool>,
+    raster_dirty_rows: Vec<bool>,
+    surface_dirty_rows: Vec<bool>,
+    pending_scrolls: Vec<splinterm_protocol::TerminalScroll>,
+    selected_text: Option<Vec<u8>>,
+    selection: Option<Selection>,
+    selecting: bool,
+    pointer_cell: Option<CellPosition>,
+    hovered_url: Option<(CellPosition, CellPosition, String)>,
+}
+
+impl PaneView {
+    fn from_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
+        let snapshot_frame = Some(SnapshotFrame::load_scaled(&options.snapshot, scale_120)?);
+        Ok(Self {
+            snapshot: Some(options.snapshot),
+            snapshot_frame,
+            scrollback_viewport: ScrollbackViewport::default(),
+            painted_history_status: None,
+            history_page_pending: false,
+            history_selection_pin_blocked: false,
+            scroll_started_at: None,
+            rendered_viewport_offset: 0,
+            viewport_dirty: false,
+            updates: Some(options.updates),
+            commands: Some(options.commands),
+            controller_active: options.controlled,
+            authority: options.authority,
+            last_resize: None,
+            prepare_dirty_rows: Vec::new(),
+            raster_dirty_rows: Vec::new(),
+            surface_dirty_rows: Vec::new(),
+            pending_scrolls: Vec::new(),
+            selected_text: None,
+            selection: None,
+            selecting: false,
+            pointer_cell: None,
+            hovered_url: None,
+        })
+    }
+
+    fn clear_local_content_state(&mut self) {
+        self.selected_text = None;
+        self.selection = None;
+        self.selecting = false;
+        self.hovered_url = None;
+        self.history_selection_pin_blocked = false;
+    }
+
+    fn display_snapshot(&self) -> Option<TerminalSnapshot> {
+        let snapshot = self.snapshot.as_ref()?;
+        if self.scrollback_viewport.is_live() {
+            return Some(snapshot.clone());
+        }
+        let mut display = snapshot.clone();
+        let cursor_row = viewport_cursor_row(
+            snapshot.cursor_row,
+            self.scrollback_viewport.offset_from_bottom(),
+            snapshot.rows,
+        );
+        if cursor_row.is_none() {
+            display.input_modes.cursor_visible = false;
+        }
+        display.cursor_column = cursor_row.map_or(-1, |_| snapshot.cursor_column);
+        display.cursor_row = cursor_row.unwrap_or(-1);
+        display.cursor_deferred_wrap = false;
+        display.visible_rows = self
+            .scrollback_viewport
+            .visible_rows(snapshot)
+            .into_iter()
+            .cloned()
+            .collect();
+        display.oldest_available_scrollback_row_id = None;
+        display.newest_available_scrollback_row_id = None;
+        display.scrollback_rows.clear();
+        display.omitted_oldest_scrollback_rows = display.available_scrollback_rows;
+        Some(display)
+    }
+
+    fn apply_background_pages(
+        &mut self,
+        pages: Vec<splinterm_protocol::ScrollbackPage>,
+    ) -> Result<bool> {
+        self.history_page_pending = false;
+        let pinned = self
+            .selection
+            .map(|selection| [selection.anchor.row_id, selection.end.row_id]);
+        let snapshot = self
+            .snapshot
+            .as_mut()
+            .context("scrollback pages arrived before initial pane snapshot")?;
+        if pages.iter().any(|page| {
+            page.splint_id != snapshot.splint_id
+                || page.incarnation != snapshot.incarnation
+                || page.terminal_revision != snapshot.revision
+                || page.history_generation != snapshot.history_generation
+        }) {
+            return Ok(false);
+        }
+        let first_loaded = snapshot
+            .scrollback_rows
+            .first()
+            .and_then(|row| row.row_id)
+            .unwrap_or(u64::MAX);
+        let existing = snapshot
+            .scrollback_rows
+            .iter()
+            .filter_map(|row| row.row_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let metadata = pages
+            .first()
+            .map(|page| (page.oldest_available_row_id, page.newest_available_row_id));
+        let mut older = pages
+            .into_iter()
+            .rev()
+            .flat_map(|page| page.rows)
+            .filter(|row| {
+                row.row_id
+                    .is_some_and(|id| id < first_loaded && !existing.contains(&id))
+            })
+            .collect::<Vec<_>>();
+        if older.is_empty() {
+            return Ok(false);
+        }
+        older.extend(snapshot.scrollback_rows.iter().cloned());
+        let Some(older) = bound_history_page_with_pins(older, pinned, &snapshot.visible_rows)
+        else {
+            self.history_selection_pin_blocked = true;
+            return Ok(false);
+        };
+        snapshot.scrollback_rows = older;
+        snapshot.omitted_oldest_scrollback_rows = omitted_rows_before_cache(
+            snapshot.oldest_available_scrollback_row_id,
+            &snapshot.scrollback_rows,
+            snapshot.available_scrollback_rows,
+        );
+        if let Some((oldest, newest)) = metadata {
+            snapshot.oldest_available_scrollback_row_id = oldest;
+            snapshot.newest_available_scrollback_row_id = newest;
+        }
+        Ok(true)
+    }
+
+    fn apply_background_update(
+        &mut self,
+        update: WindowUpdate,
+        theme: ResolvedTheme,
+        scale_120: u32,
+    ) -> Result<bool> {
+        match update {
+            WindowUpdate::Snapshot(mut snapshot) => {
+                snapshot
+                    .validate()
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                apply_theme(&mut snapshot, theme);
+                if let Some(current) = self.snapshot.as_ref() {
+                    if !snapshot_is_newer(current, &snapshot)? {
+                        return Ok(false);
+                    }
+                }
+                let previous_generation = self
+                    .snapshot
+                    .as_ref()
+                    .map_or(snapshot.history_generation, |current| {
+                        current.history_generation
+                    });
+                let previous_rows = self
+                    .snapshot
+                    .as_ref()
+                    .map_or_else(Vec::new, |current| current.scrollback_rows.clone());
+                self.scrollback_viewport.observe_history_change(
+                    previous_generation,
+                    &previous_rows,
+                    &snapshot,
+                );
+                self.clear_local_content_state();
+                self.snapshot = Some(snapshot);
+                let display = self
+                    .display_snapshot()
+                    .context("background display snapshot")?;
+                self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, scale_120)?);
+                Ok(true)
+            }
+            WindowUpdate::Update(update) => {
+                let changed = terminal_update_changes_visible_content(&update);
+                let previous_generation = self
+                    .snapshot
+                    .as_ref()
+                    .map_or(1, |snapshot| snapshot.history_generation);
+                let previous_rows = self
+                    .snapshot
+                    .as_ref()
+                    .map_or_else(Vec::new, |snapshot| snapshot.scrollback_rows.clone());
+                {
+                    let snapshot = self
+                        .snapshot
+                        .as_mut()
+                        .context("terminal update arrived before initial pane snapshot")?;
+                    apply_terminal_update(snapshot, update)?;
+                    apply_theme(snapshot, theme);
+                    self.scrollback_viewport.observe_history_change(
+                        previous_generation,
+                        &previous_rows,
+                        snapshot,
+                    );
+                }
+                let display = self
+                    .display_snapshot()
+                    .context("background display snapshot")?;
+                let frame = SnapshotFrame::load_scaled(&display, scale_120)?;
+                if changed {
+                    self.clear_local_content_state();
+                }
+                self.snapshot_frame = Some(frame);
+                Ok(true)
+            }
+            WindowUpdate::Authority(authority) => {
+                self.authority = authority;
+                Ok(true)
+            }
+            WindowUpdate::Control(active) => {
+                self.controller_active = active;
+                Ok(true)
+            }
+            WindowUpdate::ScrollbackResyncRequired => {
+                self.history_page_pending = false;
+                self.clear_local_content_state();
+                Ok(true)
+            }
+            WindowUpdate::ScrollbackPages(pages) => self.apply_background_pages(pages),
+            WindowUpdate::Theme(_) => Ok(false),
+            WindowUpdate::Shutdown => {
+                self.controller_active = false;
+                self.commands = None;
+                self.updates = None;
+                Ok(true)
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent Wayland lifecycle and evidence-mode flags are not one state machine"
+)]
 struct App {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -723,38 +1101,25 @@ struct App {
     window: Window,
     pool: SlotPool,
     text_row: Option<TextRow>,
-    snapshot: Option<TerminalSnapshot>,
-    snapshot_frame: Option<SnapshotFrame>,
-    scrollback_viewport: ScrollbackViewport,
-    painted_history_status: Option<HistoryOverlayStatus>,
-    history_page_pending: bool,
-    history_selection_pin_blocked: bool,
+    pane: PaneView,
+    inactive_panes: Vec<PaneView>,
+    layout: Option<LayoutNode>,
+    topology_updates: Option<Receiver<WindowTopologyUpdate>>,
+    topology_commands: Option<Sender<WindowTopologyCommand>>,
     signoff: Option<SignoffProbe>,
     scroll_trace: bool,
-    scroll_started_at: Option<Instant>,
-    rendered_viewport_offset: usize,
-    viewport_dirty: bool,
-    updates: Option<Receiver<WindowUpdate>>,
-    commands: Option<Sender<WindowCommand>>,
-    controller_active: bool,
     trusted_consent: Option<TrustedConsentUi>,
-    authority: AuthorityStatus,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
     theme: ResolvedTheme,
     evidence_close_shortcuts: bool,
     modifiers: Modifiers,
-    last_resize: Option<(u16, u16, u16, u16)>,
     font_zoom_steps: i16,
     capture: Option<PathBuf>,
     capture_scale: Option<u32>,
     buffer: Option<Buffer>,
     backing: Vec<u8>,
-    prepare_dirty_rows: Vec<bool>,
-    raster_dirty_rows: Vec<bool>,
-    surface_dirty_rows: Vec<bool>,
-    pending_scrolls: Vec<splinterm_protocol::TerminalScroll>,
     full_redraw: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     keyboard_seat: Option<wl_seat::WlSeat>,
@@ -768,11 +1133,6 @@ struct App {
     primary_sources: Vec<(PrimarySelectionSource, Arc<[u8]>)>,
     clipboard_tx: StdSender<ClipboardRead>,
     clipboard_rx: StdReceiver<ClipboardRead>,
-    selected_text: Option<Vec<u8>>,
-    selection: Option<Selection>,
-    selecting: bool,
-    pointer_cell: Option<CellPosition>,
-    hovered_url: Option<(CellPosition, CellPosition, String)>,
     last_pointer_serial: Option<u32>,
     pressed_buttons: HashMap<u32, PressOwner>,
     vertical_wheel: WheelAccumulator,
@@ -1718,6 +2078,48 @@ fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Opt
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaneTopologyAction {
+    Split(splinterm_core::Axis),
+    Close,
+    AdjustRatio(i16),
+}
+
+fn pane_topology_action(keysym: Keysym, modifiers: Modifiers) -> Option<PaneTopologyAction> {
+    if !modifiers.ctrl || !modifiers.shift || modifiers.alt || modifiers.logo {
+        return None;
+    }
+    match keysym {
+        Keysym::Return => Some(PaneTopologyAction::Split(splinterm_core::Axis::Horizontal)),
+        Keysym::backslash => Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical)),
+        Keysym::w | Keysym::W => Some(PaneTopologyAction::Close),
+        Keysym::bracketleft => Some(PaneTopologyAction::AdjustRatio(-50)),
+        Keysym::bracketright => Some(PaneTopologyAction::AdjustRatio(50)),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaneFocusAction {
+    Direction(FocusDirection),
+    Next { reverse: bool },
+}
+
+fn pane_focus_action(keysym: Keysym, modifiers: Modifiers) -> Option<PaneFocusAction> {
+    if !modifiers.ctrl || !modifiers.shift || modifiers.alt || modifiers.logo {
+        return None;
+    }
+    match keysym {
+        Keysym::Left => Some(PaneFocusAction::Direction(FocusDirection::Left)),
+        Keysym::Right => Some(PaneFocusAction::Direction(FocusDirection::Right)),
+        Keysym::Up => Some(PaneFocusAction::Direction(FocusDirection::Up)),
+        Keysym::Down => Some(PaneFocusAction::Direction(FocusDirection::Down)),
+        Keysym::Tab => Some(PaneFocusAction::Next { reverse: false }),
+        Keysym::ISO_Left_Tab => Some(PaneFocusAction::Next { reverse: true }),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FontZoomAction {
     Increase,
     Decrease,
@@ -1738,6 +2140,18 @@ fn font_zoom_action(keysym: Keysym, modifiers: Modifiers) -> Option<FontZoomActi
 
 fn cursor_blink_enabled(reduced_motion: bool, focused: bool, modes: TerminalInputModes) -> bool {
     !reduced_motion && focused && modes.cursor_visible && modes.cursor_blink
+}
+
+fn offset_cursor_rectangle(
+    cursor: (i32, i32, i32, i32),
+    pane: Rect,
+) -> Option<(i32, i32, i32, i32)> {
+    Some((
+        cursor.0.checked_add(i32::try_from(pane.x).ok()?)?,
+        cursor.1.checked_add(i32::try_from(pane.y).ok()?)?,
+        cursor.2,
+        cursor.3,
+    ))
 }
 
 fn resize_changed(previous: Option<(u16, u16, u16, u16)>, candidate: (u16, u16, u16, u16)) -> bool {
@@ -1916,56 +2330,154 @@ fn viewport_cursor_row(cursor_row: i32, offset: usize, rows: usize) -> Option<i3
 }
 
 impl App {
-    fn display_snapshot(&self) -> Option<TerminalSnapshot> {
-        let snapshot = self.snapshot.as_ref()?;
-        if self.scrollback_viewport.is_live() {
-            return Some(snapshot.clone());
-        }
-        let mut input_modes = snapshot.input_modes;
-        let viewport_cursor_row = viewport_cursor_row(
-            snapshot.cursor_row,
-            self.scrollback_viewport.offset_from_bottom(),
-            snapshot.rows,
-        );
-        if viewport_cursor_row.is_none() {
-            input_modes.cursor_visible = false;
-        }
-        Some(TerminalSnapshot {
-            splint_id: snapshot.splint_id,
-            incarnation: snapshot.incarnation,
-            revision: snapshot.revision,
-            columns: snapshot.columns,
-            rows: snapshot.rows,
-            cursor_column: viewport_cursor_row.map_or(-1, |_| snapshot.cursor_column),
-            cursor_row: viewport_cursor_row.unwrap_or(-1),
-            cursor_deferred_wrap: false,
-            active_screen: snapshot.active_screen,
-            input_modes,
-            palette: snapshot.palette.clone(),
-            default_colors: snapshot.default_colors,
-            title: snapshot.title.clone(),
-            visible_rows: self
-                .scrollback_viewport
-                .visible_rows(snapshot)
-                .into_iter()
-                .cloned()
-                .collect(),
-            history_generation: snapshot.history_generation,
-            oldest_available_scrollback_row_id: None,
-            newest_available_scrollback_row_id: None,
-            scrollback_rows: Vec::new(),
-            available_scrollback_rows: snapshot.available_scrollback_rows,
-            omitted_oldest_scrollback_rows: snapshot.available_scrollback_rows,
-            exited_code: snapshot.exited_code,
-            exited_signal: snapshot.exited_signal,
+    fn focused_splint(&self) -> Option<SplintId> {
+        self.pane
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.splint_id)
+    }
+
+    fn splint_at_point(&self, point: (f64, f64)) -> Option<SplintId> {
+        let layout = self.computed_pane_layout().ok().flatten()?;
+        layout.panes.into_iter().find_map(|pane| {
+            let right = pane.rect.x.checked_add(pane.rect.width)?;
+            let bottom = pane.rect.y.checked_add(pane.rect.height)?;
+            (point.0 >= f64::from(pane.rect.x)
+                && point.0 < f64::from(right)
+                && point.1 >= f64::from(pane.rect.y)
+                && point.1 < f64::from(bottom))
+            .then_some(pane.splint_id)
         })
     }
 
+    fn focus_splint(&mut self, splint_id: SplintId) -> bool {
+        if self.focused_splint() == Some(splint_id) {
+            return false;
+        }
+        let Some(index) = self.inactive_panes.iter().position(|pane| {
+            pane.snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.splint_id == splint_id)
+        }) else {
+            return false;
+        };
+        std::mem::swap(&mut self.pane, &mut self.inactive_panes[index]);
+        self.pane.pointer_cell = None;
+        self.pane.hovered_url = None;
+        self.full_redraw = true;
+        true
+    }
+
+    fn focus_direction(&mut self, direction: FocusDirection) -> bool {
+        let (Some(layout), Some(current)) = (&self.layout, self.focused_splint()) else {
+            return false;
+        };
+        let Ok(layout) = PaneLayout::compute(
+            layout,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1_000_000,
+                height: 1_000_000,
+            },
+            1,
+            1,
+            1,
+        ) else {
+            return false;
+        };
+        layout
+            .directional(current, direction)
+            .is_some_and(|next| self.focus_splint(next))
+    }
+
+    fn focus_next(&mut self, reverse: bool) -> bool {
+        let (Some(layout), Some(current)) = (&self.layout, self.focused_splint()) else {
+            return false;
+        };
+        let Ok(layout) = PaneLayout::compute(
+            layout,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1_000_000,
+                height: 1_000_000,
+            },
+            1,
+            1,
+            1,
+        ) else {
+            return false;
+        };
+        layout
+            .next(current, reverse)
+            .is_some_and(|next| self.focus_splint(next))
+    }
+
+    fn computed_pane_layout(&self) -> Result<Option<PaneLayout>> {
+        self.layout
+            .as_ref()
+            .map(|layout| {
+                PaneLayout::compute(
+                    layout,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: self.logical_width,
+                        height: self.logical_height,
+                    },
+                    1,
+                    1,
+                    1,
+                )
+                .map_err(anyhow::Error::msg)
+            })
+            .transpose()
+    }
+
+    fn buffer_rect(rect: Rect, scale_120: u32) -> Result<Rect> {
+        let right = rect
+            .x
+            .checked_add(rect.width)
+            .context("pane right overflow")?;
+        let bottom = rect
+            .y
+            .checked_add(rect.height)
+            .context("pane bottom overflow")?;
+        let x = logical_extent_to_buffer(rect.x, scale_120)?;
+        let y = logical_extent_to_buffer(rect.y, scale_120)?;
+        Ok(Rect {
+            x,
+            y,
+            width: logical_extent_to_buffer(right, scale_120)?.saturating_sub(x),
+            height: logical_extent_to_buffer(bottom, scale_120)?.saturating_sub(y),
+        })
+    }
+
+    fn pane_geometry(
+        pane: &PaneView,
+        rect: Rect,
+        scale_120: u32,
+    ) -> Result<Option<WindowGeometry>> {
+        let Some(frame) = pane.snapshot_frame.as_ref() else {
+            return Ok(None);
+        };
+        let geometry = frame.window_geometry(rect.width, rect.height, scale_120)?;
+        Ok(Some(geometry.translated(
+            logical_extent_to_buffer(rect.x, scale_120)?,
+            logical_extent_to_buffer(rect.y, scale_120)?,
+        )?))
+    }
+
+    fn display_snapshot(&self) -> Option<TerminalSnapshot> {
+        self.pane.display_snapshot()
+    }
+
     fn request_older_history(&mut self) -> Result<()> {
-        if self.history_page_pending || self.history_selection_pin_blocked {
+        if self.pane.history_page_pending || self.pane.history_selection_pin_blocked {
             return Ok(());
         }
-        let Some(snapshot) = self.snapshot.as_ref() else {
+        let Some(snapshot) = self.pane.snapshot.as_ref() else {
             return Ok(());
         };
         if snapshot.omitted_oldest_scrollback_rows == 0 {
@@ -1975,7 +2487,7 @@ impl App {
         else {
             return Ok(());
         };
-        let Some(commands) = self.commands.as_ref() else {
+        let Some(commands) = self.pane.commands.as_ref() else {
             return Ok(());
         };
         try_window_command(
@@ -1988,22 +2500,27 @@ impl App {
                 before_row_id,
             },
         )?;
-        self.history_page_pending = true;
+        self.pane.history_page_pending = true;
         Ok(())
     }
 
     fn scroll_history(&mut self, action: MouseAction, lines: usize) -> Result<bool> {
-        let snapshot = self.snapshot.as_ref().context("scroll requires snapshot")?;
-        let previous_offset = self.scrollback_viewport.offset_from_bottom();
+        let snapshot = self
+            .pane
+            .snapshot
+            .as_ref()
+            .context("scroll requires snapshot")?;
+        let previous_offset = self.pane.scrollback_viewport.offset_from_bottom();
         match action {
-            MouseAction::WheelUp => self.scrollback_viewport.scroll_up(lines, snapshot),
-            MouseAction::WheelDown => self.scrollback_viewport.scroll_down(lines, snapshot),
+            MouseAction::WheelUp => self.pane.scrollback_viewport.scroll_up(lines, snapshot),
+            MouseAction::WheelDown => self.pane.scrollback_viewport.scroll_down(lines, snapshot),
             _ => return Ok(false),
         }
-        let moved = self.scrollback_viewport.offset_from_bottom() != previous_offset;
+        let moved = self.pane.scrollback_viewport.offset_from_bottom() != previous_offset;
         if action == MouseAction::WheelUp {
             let loaded = snapshot.scrollback_rows.len();
-            let remaining = loaded.saturating_sub(self.scrollback_viewport.offset_from_bottom());
+            let remaining =
+                loaded.saturating_sub(self.pane.scrollback_viewport.offset_from_bottom());
             let prefetch_distance = snapshot.rows.saturating_mul(2).max(32);
             if remaining <= prefetch_distance {
                 self.request_older_history()?;
@@ -2012,14 +2529,14 @@ impl App {
         if !moved {
             return Ok(false);
         }
-        self.scroll_started_at.get_or_insert_with(Instant::now);
+        self.pane.scroll_started_at.get_or_insert_with(Instant::now);
         self.invalidate_viewport_local_state();
         self.refresh_ime_preedit()?;
         self.update_ime_cursor_rectangle();
         // Coalesce high-resolution wheel events until the next compositor frame.
         // Re-shaping the entire viewport synchronously for every axis event made
         // fast scrolling stall the Wayland dispatch loop.
-        self.viewport_dirty = true;
+        self.pane.viewport_dirty = true;
         Ok(true)
     }
 
@@ -2035,7 +2552,7 @@ impl App {
         }
         self.signoff = Some(probe);
         result?;
-        if self.configured && self.viewport_dirty {
+        if self.configured && self.pane.viewport_dirty {
             self.schedule_draw(queue_handle)?;
         }
         Ok(())
@@ -2051,7 +2568,7 @@ impl App {
             "sign-off probe timed out at {:?}",
             probe.step
         );
-        let Some(snapshot) = self.snapshot.as_ref() else {
+        let Some(snapshot) = self.pane.snapshot.as_ref() else {
             return Ok(());
         };
         match probe.step {
@@ -2063,6 +2580,7 @@ impl App {
             SignoffStep::LoadSelectionWindow => {
                 self.scroll_history(MouseAction::WheelUp, usize::MAX)?;
                 if self
+                    .pane
                     .snapshot
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.scrollback_rows.len() >= 640)
@@ -2072,7 +2590,7 @@ impl App {
             }
             SignoffStep::LoadClientCache => {
                 self.scroll_history(MouseAction::WheelUp, usize::MAX)?;
-                let snapshot = self.snapshot.as_ref().context("sign-off snapshot")?;
+                let snapshot = self.pane.snapshot.as_ref().context("sign-off snapshot")?;
                 let cache_bytes = history_cache_bytes(&snapshot.scrollback_rows);
                 let loaded_rows = snapshot.scrollback_rows.len();
                 let first_row_id = snapshot.scrollback_rows.first().and_then(|row| row.row_id);
@@ -2087,7 +2605,7 @@ impl App {
                 let row_capacity_hit = loaded_rows >= MAX_CACHED_HISTORY_ROWS;
                 let byte_capacity_hit = cache_bytes >= MAX_CACHED_HISTORY_BYTES;
                 if (row_capacity_hit || byte_capacity_hit || bounded_eviction_observed)
-                    && self.scrollback_viewport.offset_from_bottom()
+                    && self.pane.scrollback_viewport.offset_from_bottom()
                         >= snapshot.scrollback_rows.len().saturating_sub(snapshot.rows)
                 {
                     anyhow::ensure!(
@@ -2101,7 +2619,7 @@ impl App {
                         "loaded_bytes": cache_bytes,
                         "available_rows": snapshot.available_scrollback_rows,
                         "omitted_oldest_rows": snapshot.omitted_oldest_scrollback_rows,
-                        "offset": self.scrollback_viewport.offset_from_bottom(),
+                        "offset": self.pane.scrollback_viewport.offset_from_bottom(),
                         "row_capacity_hit": row_capacity_hit,
                         "byte_capacity_hit": byte_capacity_hit,
                         "bounded_eviction_observed": bounded_eviction_observed,
@@ -2113,6 +2631,7 @@ impl App {
             SignoffStep::BeginSelection => {
                 if self.begin_selection(CellPosition { row: 0, column: 0 }) {
                     probe.selection_revision = self
+                        .pane
                         .snapshot
                         .as_ref()
                         .context("selection snapshot")?
@@ -2131,7 +2650,7 @@ impl App {
                     self.extend_selection(CellPosition { row, column: 8 }),
                     "could not extend cross-page selection"
                 );
-                let selection = self.selection.context("selection exists")?;
+                let selection = self.pane.selection.context("selection exists")?;
                 let row_span = selection.anchor.row_id.abs_diff(selection.end.row_id);
                 anyhow::ensure!(row_span > 256, "selection did not cross a history page");
                 probe.evidence.push(serde_json::json!({
@@ -2144,7 +2663,7 @@ impl App {
             }
             SignoffStep::WaitSelectedOutput => {
                 if snapshot.revision >= probe.selection_revision.saturating_add(20) {
-                    let selection = self.selection.context("selection survived output")?;
+                    let selection = self.pane.selection.context("selection survived output")?;
                     anyhow::ensure!(
                         selection_is_retained(snapshot, selection),
                         "selection endpoints were not retained during output"
@@ -2153,7 +2672,7 @@ impl App {
                         "check": "selection_during_detached_output",
                         "revision_before": probe.selection_revision,
                         "revision_after": snapshot.revision,
-                        "unseen_rows": self.scrollback_viewport.unseen_rows(),
+                        "unseen_rows": self.pane.scrollback_viewport.unseen_rows(),
                         "retained": true,
                     }));
                     probe.step = SignoffStep::FinishSelection;
@@ -2183,10 +2702,10 @@ impl App {
                     "before": before,
                     "after": after,
                 }));
-                self.dirty_selection(self.selection);
-                self.selection = None;
-                self.selected_text = None;
-                self.history_selection_pin_blocked = false;
+                self.dirty_selection(self.pane.selection);
+                self.pane.selection = None;
+                self.pane.selected_text = None;
+                self.pane.history_selection_pin_blocked = false;
                 probe.step = SignoffStep::LoadClientCache;
             }
             SignoffStep::WaitMouseTracking => {
@@ -2218,7 +2737,7 @@ impl App {
             }
             SignoffStep::ReturnLive => {
                 self.scroll_history(MouseAction::WheelDown, usize::MAX)?;
-                if self.scrollback_viewport.is_live() {
+                if self.pane.scrollback_viewport.is_live() {
                     probe.evidence.push(serde_json::json!({
                         "check": "return_to_live",
                         "offset": 0,
@@ -2237,7 +2756,7 @@ impl App {
         exact: bool,
         error: Option<&str>,
     ) -> Result<()> {
-        let snapshot = self.snapshot.as_ref();
+        let snapshot = self.pane.snapshot.as_ref();
         let report = serde_json::json!({
             "schema": "splinterm.signoff.interactions.v1",
             "exact": exact,
@@ -2251,10 +2770,10 @@ impl App {
                 "loaded_history_bytes": snapshot.map(|value| history_cache_bytes(&value.scrollback_rows)),
                 "first_loaded_row_id": snapshot.and_then(|value| value.scrollback_rows.first()).and_then(|row| row.row_id),
                 "omitted_oldest_rows": snapshot.map(|value| value.omitted_oldest_scrollback_rows),
-                "history_page_pending": self.history_page_pending,
-                "viewport_offset": self.scrollback_viewport.offset_from_bottom(),
+                "history_page_pending": self.pane.history_page_pending,
+                "viewport_offset": self.pane.scrollback_viewport.offset_from_bottom(),
                 "mouse_tracking": snapshot.map(|value| format!("{:?}", value.input_modes.mouse_tracking)),
-                "selection_active": self.selection.is_some(),
+                "selection_active": self.pane.selection.is_some(),
             },
             "evidence": probe.evidence,
         });
@@ -2273,11 +2792,12 @@ impl App {
         let Some(navigation) = history_navigation(
             event.keysym,
             self.modifiers.shift,
-            !self.scrollback_viewport.is_live(),
+            !self.pane.scrollback_viewport.is_live(),
         ) else {
             return Ok(false);
         };
         let page = self
+            .pane
             .snapshot
             .as_ref()
             .map_or(1, |snapshot| snapshot.rows.saturating_sub(1).max(1));
@@ -2302,7 +2822,7 @@ impl App {
     }
 
     fn send_input(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if let Some(commands) = &self.commands {
+        if let Some(commands) = &self.pane.commands {
             try_window_command(commands, WindowCommand::Input(bytes))?;
         }
         Ok(())
@@ -2317,11 +2837,12 @@ impl App {
     ) -> Result<WheelOutcome> {
         let modes = self.input_modes();
         let cell_height = self
+            .pane
             .snapshot_frame
             .as_ref()
             .map_or(1, SnapshotFrame::cell_height);
         if modes.mouse_tracking == MouseTracking::None {
-            let before = self.scrollback_viewport.offset_from_bottom();
+            let before = self.pane.scrollback_viewport.offset_from_bottom();
             let Some((action, count)) = self.scrollback_wheel.push_scaled(
                 absolute,
                 discrete,
@@ -2334,7 +2855,7 @@ impl App {
             self.scroll_history(action, count)?;
             return Ok(WheelOutcome::History {
                 before,
-                after: self.scrollback_viewport.offset_from_bottom(),
+                after: self.pane.scrollback_viewport.offset_from_bottom(),
             });
         }
         let Some((action, count)) =
@@ -2368,20 +2889,20 @@ impl App {
         let Some(endpoint) = selection_endpoint(&snapshot, position) else {
             return false;
         };
-        self.dirty_selection(self.selection);
+        self.dirty_selection(self.pane.selection);
         let selection = Selection {
             anchor: endpoint,
             end: endpoint,
         };
-        self.selection = Some(selection);
-        self.selecting = true;
-        self.history_selection_pin_blocked = false;
+        self.pane.selection = Some(selection);
+        self.pane.selecting = true;
+        self.pane.history_selection_pin_blocked = false;
         self.dirty_selection(Some(selection));
         true
     }
 
     fn extend_selection(&mut self, position: CellPosition) -> bool {
-        let (Some(mut selection), Some(snapshot)) = (self.selection, self.display_snapshot())
+        let (Some(mut selection), Some(snapshot)) = (self.pane.selection, self.display_snapshot())
         else {
             return false;
         };
@@ -2390,43 +2911,65 @@ impl App {
         };
         self.dirty_selection(Some(selection));
         selection.end = endpoint;
-        self.selection = Some(selection);
+        self.pane.selection = Some(selection);
         self.dirty_selection(Some(selection));
         true
     }
 
     fn finish_selection(&mut self) -> Option<&[u8]> {
-        self.selecting = false;
-        self.selected_text = self.selection.and_then(|selection| {
-            self.snapshot
+        self.pane.selecting = false;
+        self.pane.selected_text = self.pane.selection.and_then(|selection| {
+            self.pane
+                .snapshot
                 .as_ref()
                 .and_then(|snapshot| selection_text(snapshot, selection).map(String::into_bytes))
         });
-        self.selected_text.as_deref()
+        self.pane.selected_text.as_deref()
     }
 
     fn pointer_cell_at(&self, position: (f64, f64)) -> Option<CellPosition> {
-        let frame = self.snapshot_frame.as_ref()?;
+        let frame = self.pane.snapshot_frame.as_ref()?;
+        let pane_rect = self.focused_splint().and_then(|splint_id| {
+            self.computed_pane_layout()
+                .ok()
+                .flatten()
+                .and_then(|layout| layout.rect(splint_id))
+        });
+        let (logical_width, logical_height, x, y) = pane_rect.map_or(
+            (self.logical_width, self.logical_height, 0.0, 0.0),
+            |rect| {
+                (
+                    rect.width,
+                    rect.height,
+                    f64::from(rect.x),
+                    f64::from(rect.y),
+                )
+            },
+        );
         let geometry = frame
-            .window_geometry(self.logical_width, self.logical_height, self.scale_120)
+            .window_geometry(logical_width, logical_height, self.scale_120)
             .ok()?;
-        let (row, column) = frame.cell_at(position.0, position.1, &geometry)?;
+        let (row, column) = frame.cell_at(position.0 - x, position.1 - y, &geometry)?;
         Some(CellPosition { row, column })
     }
 
     fn dirty_row(&mut self, row: usize) {
-        let rows = self.snapshot.as_ref().map_or(0, |snapshot| snapshot.rows);
-        self.raster_dirty_rows.resize(rows, false);
-        self.surface_dirty_rows.resize(rows, false);
+        let rows = self
+            .pane
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.rows);
+        self.pane.raster_dirty_rows.resize(rows, false);
+        self.pane.surface_dirty_rows.resize(rows, false);
         if row < rows {
-            self.raster_dirty_rows[row] = true;
-            self.surface_dirty_rows[row] = true;
+            self.pane.raster_dirty_rows[row] = true;
+            self.pane.surface_dirty_rows[row] = true;
         }
     }
 
     fn dirty_selection(&mut self, selection: Option<Selection>) {
         let bounds = selection.and_then(|selection| {
-            let snapshot = self.snapshot.as_ref()?;
+            let snapshot = self.pane.snapshot.as_ref()?;
             let display = self.display_snapshot()?;
             selection_display_bounds(snapshot, &display, selection)
         });
@@ -2438,12 +2981,12 @@ impl App {
     }
 
     fn invalidate_viewport_local_state(&mut self) {
-        if let Some((start, _, _)) = &self.hovered_url {
+        if let Some((start, _, _)) = &self.pane.hovered_url {
             self.dirty_row(start.row);
         }
-        self.selected_text = None;
-        self.hovered_url = None;
-        let selecting = self.selecting;
+        self.pane.selected_text = None;
+        self.pane.hovered_url = None;
+        let selecting = self.pane.selecting;
         self.pressed_buttons.retain(|_, owner| {
             matches!(owner, PressOwner::Application { .. })
                 || selecting && matches!(owner, PressOwner::Selection)
@@ -2451,40 +2994,41 @@ impl App {
     }
 
     fn invalidate_local_content_state(&mut self) {
-        self.dirty_selection(self.selection);
-        self.selection = None;
-        self.selecting = false;
-        self.history_selection_pin_blocked = false;
+        self.dirty_selection(self.pane.selection);
+        self.pane.selection = None;
+        self.pane.selecting = false;
+        self.pane.history_selection_pin_blocked = false;
         self.invalidate_viewport_local_state();
     }
 
     fn reconcile_selection_after_content_change(&mut self) {
-        let retained = self.selection.is_none_or(|selection| {
-            self.snapshot
+        let retained = self.pane.selection.is_none_or(|selection| {
+            self.pane
+                .snapshot
                 .as_ref()
                 .is_some_and(|snapshot| selection_is_retained(snapshot, selection))
         });
         if !retained {
-            self.selection = None;
-            self.selecting = false;
-            self.history_selection_pin_blocked = false;
+            self.pane.selection = None;
+            self.pane.selecting = false;
+            self.pane.history_selection_pin_blocked = false;
         }
         self.invalidate_viewport_local_state();
     }
 
     fn recompute_hovered_url(&mut self) {
-        let previous = self.hovered_url.take();
+        let previous = self.pane.hovered_url.take();
         let display = self.display_snapshot();
-        self.hovered_url = self.pointer_cell.and_then(|position| {
+        self.pane.hovered_url = self.pane.pointer_cell.and_then(|position| {
             display
                 .as_ref()
                 .and_then(|snapshot| url_at(snapshot, position))
         });
-        if previous != self.hovered_url {
+        if previous != self.pane.hovered_url {
             if let Some((start, _, _)) = previous {
                 self.dirty_row(start.row);
             }
-            if let Some((start, _, _)) = &self.hovered_url {
+            if let Some((start, _, _)) = &self.pane.hovered_url {
                 self.dirty_row(start.row);
             }
         }
@@ -2525,6 +3069,7 @@ impl App {
                 continue;
             };
             let bracketed = self
+                .pane
                 .snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.input_modes.bracketed_paste);
@@ -2535,7 +3080,7 @@ impl App {
     }
 
     fn publish_clipboard(&mut self, qh: &QueueHandle<Self>, serial: u32, primary: bool) {
-        let Some(text) = self.selected_text.as_ref() else {
+        let Some(text) = self.pane.selected_text.as_ref() else {
             return;
         };
         if text.is_empty() {
@@ -2562,7 +3107,7 @@ impl App {
     }
 
     fn open_hovered_url(&self) {
-        let Some((_, _, url)) = &self.hovered_url else {
+        let Some((_, _, url)) = &self.pane.hovered_url else {
             return;
         };
         let _ = Command::new("xdg-open").arg(url).spawn();
@@ -2574,8 +3119,17 @@ impl App {
         self.exit = true;
     }
 
+    fn send_topology_command(&mut self, command: WindowTopologyCommand) {
+        let Some(commands) = &self.topology_commands else {
+            return;
+        };
+        if let Err(error) = commands.try_send(command) {
+            self.fail(anyhow::anyhow!("topology command queue failed: {error}"));
+        }
+    }
+
     fn send_command(&mut self, command: WindowCommand) {
-        let Some(commands) = &self.commands else {
+        let Some(commands) = &self.pane.commands else {
             return;
         };
         if let Err(error) = try_window_command(commands, command) {
@@ -2584,7 +3138,7 @@ impl App {
     }
 
     fn send_coalescible_input(&mut self, bytes: Vec<u8>) {
-        let Some(commands) = &self.commands else {
+        let Some(commands) = &self.pane.commands else {
             return;
         };
         match commands.try_send(WindowCommand::Input(bytes)) {
@@ -2602,19 +3156,39 @@ impl App {
         }
     }
 
+    fn focused_logical_rect(&self) -> Rect {
+        self.focused_splint()
+            .and_then(|splint_id| {
+                self.computed_pane_layout()
+                    .ok()
+                    .flatten()
+                    .and_then(|layout| layout.rect(splint_id))
+            })
+            .unwrap_or(Rect {
+                x: 0,
+                y: 0,
+                width: self.logical_width,
+                height: self.logical_height,
+            })
+    }
+
+    fn ime_cursor_rectangle(&self) -> Option<(i32, i32, i32, i32)> {
+        let frame = self.pane.snapshot_frame.as_ref()?;
+        let rect = self.focused_logical_rect();
+        let geometry = frame
+            .window_geometry(rect.width, rect.height, self.scale_120)
+            .ok()?;
+        offset_cursor_rectangle(frame.cursor_rectangle(&geometry)?, rect)
+    }
+
     fn update_ime_cursor_rectangle(&mut self) {
         if !self.ime.entered || !self.ime.focused {
             return;
         }
-        let (Some(text_input), Some(frame)) = (&self.text_input, &self.snapshot_frame) else {
+        let Some(text_input) = &self.text_input else {
             return;
         };
-        let Ok(geometry) =
-            frame.window_geometry(self.logical_width, self.logical_height, self.scale_120)
-        else {
-            return;
-        };
-        if let Some((x, y, width, height)) = frame.cursor_rectangle(&geometry) {
+        if let Some((x, y, width, height)) = self.ime_cursor_rectangle() {
             text_input.set_cursor_rectangle(x, y, width, height);
             self.commit_text_input();
         }
@@ -2643,14 +3217,8 @@ impl App {
             zwp_text_input_v3::ContentHint::None,
             zwp_text_input_v3::ContentPurpose::Terminal,
         );
-        if let Some(frame) = &self.snapshot_frame {
-            if let Ok(geometry) =
-                frame.window_geometry(self.logical_width, self.logical_height, self.scale_120)
-            {
-                if let Some((x, y, width, height)) = frame.cursor_rectangle(&geometry) {
-                    text_input.set_cursor_rectangle(x, y, width, height);
-                }
-            }
+        if let Some((x, y, width, height)) = self.ime_cursor_rectangle() {
+            text_input.set_cursor_rectangle(x, y, width, height);
         }
         self.commit_text_input();
     }
@@ -2665,7 +3233,7 @@ impl App {
 
     fn refresh_ime_preedit(&mut self) -> Result<()> {
         // The prepared frame represents the display viewport, which may be
-        // detached from the live grid. Refreshing it from `self.snapshot`
+        // detached from the live grid. Refreshing it from `self.pane.snapshot`
         // corrupts an unrelated history row when focus loss clears preedit.
         let Some(mut render_snapshot) = self.display_snapshot() else {
             return Ok(());
@@ -2675,21 +3243,25 @@ impl App {
         else {
             return Ok(());
         };
-        let Some(frame) = &mut self.snapshot_frame else {
+        let Some(frame) = &mut self.pane.snapshot_frame else {
             return Ok(());
         };
         let mut dirty = vec![false; render_snapshot.rows];
         dirty[row] = true;
         frame.refresh_rows(&render_snapshot, &dirty)?;
-        self.raster_dirty_rows.resize(render_snapshot.rows, false);
-        self.surface_dirty_rows.resize(render_snapshot.rows, false);
-        self.raster_dirty_rows[row] = true;
-        self.surface_dirty_rows[row] = true;
+        self.pane
+            .raster_dirty_rows
+            .resize(render_snapshot.rows, false);
+        self.pane
+            .surface_dirty_rows
+            .resize(render_snapshot.rows, false);
+        self.pane.raster_dirty_rows[row] = true;
+        self.pane.surface_dirty_rows[row] = true;
         Ok(())
     }
 
     fn input_modes(&self) -> TerminalInputModes {
-        self.snapshot.as_ref().map_or(
+        self.pane.snapshot.as_ref().map_or(
             TerminalInputModes {
                 application_cursor: false,
                 application_keypad: false,
@@ -2725,13 +3297,13 @@ impl App {
             return Ok(true);
         }
         if let Some(display) = self.display_snapshot() {
-            self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
-            self.rendered_viewport_offset = self.scrollback_viewport.offset_from_bottom();
-            self.viewport_dirty = false;
+            self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+            self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
+            self.pane.viewport_dirty = false;
         }
         self.buffer = None;
         self.backing.clear();
-        self.pending_scrolls.clear();
+        self.pane.pending_scrolls.clear();
         self.full_redraw = true;
         self.cursor_blink_visible = true;
         self.last_cursor_blink = Instant::now();
@@ -2766,16 +3338,22 @@ impl App {
             && self.modifiers.shift
             && matches!(event.keysym, Keysym::r | Keysym::R)
         {
-            let ids: Vec<_> = self.authority.grants.iter().map(|(id, _)| *id).collect();
+            let ids: Vec<_> = self
+                .pane
+                .authority
+                .grants
+                .iter()
+                .map(|(id, _)| *id)
+                .collect();
             for id in ids {
                 self.send_command(WindowCommand::RevokeAccess(id));
             }
-            self.authority.grants.clear();
-            if let Some(snapshot) = &self.snapshot {
+            self.pane.authority.grants.clear();
+            if let Some(snapshot) = &self.pane.snapshot {
                 self.window.set_title(window_title(
                     self.title_override.as_deref().or(Some(&snapshot.title)),
-                    self.controller_active,
-                    &self.authority,
+                    self.pane.controller_active,
+                    &self.pane.authority,
                 ));
             }
             return;
@@ -2785,12 +3363,12 @@ impl App {
             && matches!(event.keysym, Keysym::l | Keysym::L)
         {
             self.send_command(WindowCommand::ReleaseControl);
-            self.controller_active = false;
-            if let Some(snapshot) = &self.snapshot {
+            self.pane.controller_active = false;
+            if let Some(snapshot) = &self.pane.snapshot {
                 self.window.set_title(window_title(
                     self.title_override.as_deref().or(Some(&snapshot.title)),
-                    self.controller_active,
-                    &self.authority,
+                    self.pane.controller_active,
+                    &self.pane.authority,
                 ));
             }
             return;
@@ -2812,28 +3390,192 @@ impl App {
     }
 
     fn emit_resize(&mut self) -> Result<()> {
-        let (Some(frame), Some(_)) = (&self.snapshot_frame, &self.commands) else {
-            return Ok(());
-        };
-        let resize =
-            match frame.terminal_size(self.logical_width, self.logical_height, self.scale_120) {
-                Ok(resize) => resize,
-                Err(error) if error.to_string().contains("SurfaceTooSmall") => return Ok(()),
-                Err(error) => return Err(error),
+        let layout = self.computed_pane_layout()?;
+        let active_rect = self
+            .focused_splint()
+            .and_then(|splint_id| layout.as_ref().and_then(|layout| layout.rect(splint_id)));
+        let (active_width, active_height) = active_rect
+            .map_or((self.logical_width, self.logical_height), |rect| {
+                (rect.width, rect.height)
+            });
+        let controller_active = self.pane.controller_active;
+        Self::emit_pane_resize(
+            &mut self.pane,
+            active_width,
+            active_height,
+            self.scale_120,
+            controller_active,
+        )?;
+        for pane in &mut self.inactive_panes {
+            let Some(splint_id) = pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id) else {
+                continue;
             };
-        if !resize_changed(self.last_resize, resize) {
-            return Ok(());
-        }
-        self.send_command(WindowCommand::Resize {
-            columns: resize.0,
-            rows: resize.1,
-            pixel_width: resize.2,
-            pixel_height: resize.3,
-        });
-        if !self.exit {
-            self.last_resize = Some(resize);
+            let Some(rect) = layout.as_ref().and_then(|layout| layout.rect(splint_id)) else {
+                continue;
+            };
+            Self::emit_pane_resize(pane, rect.width, rect.height, self.scale_120, false)?;
         }
         Ok(())
+    }
+
+    fn emit_pane_resize(
+        pane: &mut PaneView,
+        logical_width: u32,
+        logical_height: u32,
+        scale_120: u32,
+        activate: bool,
+    ) -> Result<()> {
+        let (Some(frame), Some(commands)) = (&pane.snapshot_frame, &pane.commands) else {
+            return Ok(());
+        };
+        let resize = match frame.terminal_size(logical_width, logical_height, scale_120) {
+            Ok(resize) => resize,
+            Err(error) if error.to_string().contains("SurfaceTooSmall") => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if !resize_changed(pane.last_resize, resize) {
+            return Ok(());
+        }
+        let resize_command = if activate {
+            WindowCommand::Resize {
+                columns: resize.0,
+                rows: resize.1,
+                pixel_width: resize.2,
+                pixel_height: resize.3,
+            }
+        } else {
+            WindowCommand::PrepareResize {
+                columns: resize.0,
+                rows: resize.1,
+                pixel_width: resize.2,
+                pixel_height: resize.3,
+            }
+        };
+        try_window_command(commands, resize_command)?;
+        pane.last_resize = Some(resize);
+        Ok(())
+    }
+
+    fn apply_topology_updates(&mut self) -> Result<bool> {
+        let mut pending = Vec::new();
+        if let Some(updates) = &mut self.topology_updates {
+            loop {
+                match updates.try_recv() {
+                    Ok(update) => pending.push(update),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.topology_updates = None;
+                        break;
+                    }
+                }
+            }
+        }
+        let mut changed = false;
+        for update in pending {
+            let (layout, added, removed) = match update {
+                WindowTopologyUpdate::Apply {
+                    layout,
+                    added,
+                    removed,
+                } => (layout, added, removed),
+                WindowTopologyUpdate::Shutdown(message) => {
+                    anyhow::bail!("topology manager stopped: {message}");
+                }
+            };
+            let removed = removed.into_iter().collect::<HashSet<_>>();
+            for pane in added {
+                self.inactive_panes
+                    .push(PaneView::from_options(pane, self.scale_120)?);
+            }
+            if self
+                .focused_splint()
+                .is_some_and(|splint_id| removed.contains(&splint_id))
+            {
+                let fallback = layout.first_splint_id();
+                anyhow::ensure!(
+                    self.focus_splint(fallback),
+                    "topology focus fallback is absent"
+                );
+            }
+            self.inactive_panes.retain(|pane| {
+                pane.snapshot
+                    .as_ref()
+                    .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
+            });
+            let mut identities = self
+                .inactive_panes
+                .iter()
+                .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id))
+                .collect::<HashSet<_>>();
+            if let Some(focused) = self.focused_splint() {
+                identities.insert(focused);
+            }
+            anyhow::ensure!(
+                identities.len() == layout.splint_count()
+                    && identities
+                        .iter()
+                        .all(|splint_id| layout.find_splint(*splint_id).is_some()),
+                "topology update pane identities do not match its layout"
+            );
+            self.layout = Some(layout);
+            self.full_redraw = true;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn apply_inactive_updates(&mut self) -> Result<bool> {
+        let mut changed = false;
+        let mut next_theme = None;
+        for pane in &mut self.inactive_panes {
+            let mut pending = Vec::new();
+            let mut disconnected = false;
+            if let Some(updates) = &mut pane.updates {
+                loop {
+                    match updates.try_recv() {
+                        Ok(update) => pending.push(update),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if disconnected {
+                pane.controller_active = false;
+                pane.commands = None;
+                pane.updates = None;
+                changed = true;
+            }
+            for update in pending {
+                if let WindowUpdate::Theme(theme) = update {
+                    next_theme = Some(theme);
+                } else {
+                    changed |= pane.apply_background_update(update, self.theme, self.scale_120)?;
+                }
+            }
+        }
+        if let Some(theme) = next_theme {
+            self.theme = theme;
+            if let Some(snapshot) = self.pane.snapshot.as_mut() {
+                apply_theme(snapshot, theme);
+                self.pane.snapshot_frame =
+                    Some(SnapshotFrame::load_scaled(snapshot, self.scale_120)?);
+            }
+            for pane in &mut self.inactive_panes {
+                if let Some(snapshot) = pane.snapshot.as_mut() {
+                    apply_theme(snapshot, theme);
+                    pane.snapshot_frame =
+                        Some(SnapshotFrame::load_scaled(snapshot, self.scale_120)?);
+                }
+            }
+            changed = true;
+        }
+        if changed {
+            self.full_redraw = true;
+        }
+        Ok(changed)
     }
 
     #[allow(
@@ -2843,7 +3585,7 @@ impl App {
     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         let mut pending = Vec::new();
         let mut disconnected = false;
-        if let Some(updates) = &mut self.updates {
+        if let Some(updates) = &mut self.pane.updates {
             loop {
                 match updates.try_recv() {
                     Ok(update) => pending.push(update),
@@ -2859,39 +3601,45 @@ impl App {
             self.exit = true;
             return Ok(());
         }
-        let mut visual_changed = false;
+        let topology_changed = self.apply_topology_updates()?;
+        if topology_changed {
+            self.emit_resize()?;
+        }
+        let mut visual_changed = topology_changed | self.apply_inactive_updates()?;
         let mut title_changed = false;
         let mut full_frame_reload = false;
         for update in pending {
             match update {
                 WindowUpdate::Snapshot(mut snapshot) => {
-                    self.history_page_pending = false;
+                    self.pane.history_page_pending = false;
                     snapshot
                         .validate()
                         .map_err(|error| anyhow::anyhow!(error.message))?;
                     apply_theme(&mut snapshot, self.theme);
-                    let accept = match self.snapshot.as_ref() {
+                    let accept = match self.pane.snapshot.as_ref() {
                         Some(current) => snapshot_is_newer(current, &snapshot)?,
                         None => true,
                     };
                     if accept {
                         let previous_generation = self
+                            .pane
                             .snapshot
                             .as_ref()
                             .map_or(snapshot.history_generation, |current| {
                                 current.history_generation
                             });
                         let previous_rows = self
+                            .pane
                             .snapshot
                             .as_ref()
                             .map_or_else(Vec::new, |current| current.scrollback_rows.clone());
-                        self.scrollback_viewport.observe_history_change(
+                        self.pane.scrollback_viewport.observe_history_change(
                             previous_generation,
                             &previous_rows,
                             &snapshot,
                         );
                         self.invalidate_local_content_state();
-                        self.snapshot = Some(snapshot);
+                        self.pane.snapshot = Some(snapshot);
                         self.full_redraw = true;
                         full_frame_reload = true;
                         visual_changed = true;
@@ -2899,7 +3647,7 @@ impl App {
                     }
                 }
                 WindowUpdate::Update(update) => {
-                    let old_cursor_row = self.snapshot.as_ref().and_then(|snapshot| {
+                    let old_cursor_row = self.pane.snapshot.as_ref().and_then(|snapshot| {
                         usize::try_from(snapshot.cursor_row)
                             .ok()
                             .filter(|row| *row < snapshot.rows)
@@ -2917,38 +3665,42 @@ impl App {
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
                     let previous_generation = self
+                        .pane
                         .snapshot
                         .as_ref()
                         .map_or(1, |snapshot| snapshot.history_generation);
                     let previous_rows = self
+                        .pane
                         .snapshot
                         .as_ref()
                         .map_or_else(Vec::new, |snapshot| snapshot.scrollback_rows.clone());
                     let snapshot = self
+                        .pane
                         .snapshot
                         .as_mut()
                         .context("terminal update arrived before initial snapshot")?;
                     apply_terminal_update(snapshot, update)?;
                     apply_theme(snapshot, self.theme);
-                    self.scrollback_viewport.observe_history_change(
+                    self.pane.scrollback_viewport.observe_history_change(
                         previous_generation,
                         &previous_rows,
                         snapshot,
                     );
-                    if history_changed && !self.scrollback_viewport.is_live() {
+                    if history_changed && !self.pane.scrollback_viewport.is_live() {
                         full = true;
                     }
                     if content_changed {
                         self.reconcile_selection_after_content_change();
                     }
                     let snapshot = self
+                        .pane
                         .snapshot
                         .as_ref()
                         .context("updated terminal snapshot exists")?;
                     let rows = snapshot.rows;
-                    self.prepare_dirty_rows.resize(rows, false);
-                    self.raster_dirty_rows.resize(rows, false);
-                    self.surface_dirty_rows.resize(rows, false);
+                    self.pane.prepare_dirty_rows.resize(rows, false);
+                    self.pane.raster_dirty_rows.resize(rows, false);
+                    self.pane.surface_dirty_rows.resize(rows, false);
                     if full {
                         self.full_redraw = true;
                         full_frame_reload = true;
@@ -2957,8 +3709,8 @@ impl App {
                             for row in scroll.start_row..scroll.end_row.min(rows) {
                                 // Rebuilding the bounded semantic scroll region keeps prepared
                                 // row geometry correct while pixel movement still uses scroll-copy.
-                                self.prepare_dirty_rows[row] = true;
-                                self.surface_dirty_rows[row] = true;
+                                self.pane.prepare_dirty_rows[row] = true;
+                                self.pane.surface_dirty_rows[row] = true;
                             }
                             let count = scroll
                                 .rows
@@ -2972,42 +3724,45 @@ impl App {
                                 }
                             };
                             for row in exposed.filter(|row| *row < rows) {
-                                self.raster_dirty_rows[row] = true;
+                                self.pane.raster_dirty_rows[row] = true;
                             }
                         }
                         for row in patched_rows.into_iter().filter(|row| *row < rows) {
-                            self.prepare_dirty_rows[row] = true;
+                            self.pane.prepare_dirty_rows[row] = true;
                             let copied = scrolls
                                 .iter()
                                 .any(|scroll| row >= scroll.start_row && row < scroll.end_row);
                             if !copied {
-                                self.raster_dirty_rows[row] = true;
-                                self.surface_dirty_rows[row] = true;
+                                self.pane.raster_dirty_rows[row] = true;
+                                self.pane.surface_dirty_rows[row] = true;
                             }
                         }
                         if cursor_changed {
                             if let Some(row) = old_cursor_row {
-                                self.raster_dirty_rows[row] = true;
-                                self.surface_dirty_rows[row] = true;
+                                self.pane.raster_dirty_rows[row] = true;
+                                self.pane.surface_dirty_rows[row] = true;
                             }
                             if let Ok(row) = usize::try_from(snapshot.cursor_row) {
                                 if row < rows {
-                                    self.raster_dirty_rows[row] = true;
-                                    self.surface_dirty_rows[row] = true;
+                                    self.pane.raster_dirty_rows[row] = true;
+                                    self.pane.surface_dirty_rows[row] = true;
                                 }
                             }
                         }
-                        self.pending_scrolls.extend(scrolls);
+                        self.pane.pending_scrolls.extend(scrolls);
                     }
-                    visual_changed |=
-                        full || cursor_changed || self.raster_dirty_rows.iter().any(|dirty| *dirty);
+                    visual_changed |= full
+                        || cursor_changed
+                        || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty);
                 }
                 WindowUpdate::ScrollbackPages(pages) => {
-                    self.history_page_pending = false;
+                    self.pane.history_page_pending = false;
                     let pinned_selection_rows = self
+                        .pane
                         .selection
                         .map(|selection| [selection.anchor.row_id, selection.end.row_id]);
                     let snapshot = self
+                        .pane
                         .snapshot
                         .as_mut()
                         .context("scrollback pages arrived before initial snapshot")?;
@@ -3062,24 +3817,30 @@ impl App {
                                 snapshot.newest_available_scrollback_row_id = newest;
                             }
                         } else {
-                            self.history_selection_pin_blocked = true;
+                            self.pane.history_selection_pin_blocked = true;
                         }
                     }
                 }
                 WindowUpdate::ScrollbackResyncRequired => {
-                    self.history_page_pending = false;
+                    self.pane.history_page_pending = false;
                     self.invalidate_local_content_state();
                     visual_changed = true;
                 }
                 WindowUpdate::Authority(authority) => {
-                    self.authority = authority;
+                    self.pane.authority = authority;
+                    title_changed = true;
+                    visual_changed = true;
+                    self.full_redraw = true;
+                }
+                WindowUpdate::Control(active) => {
+                    self.pane.controller_active = active;
                     title_changed = true;
                     visual_changed = true;
                     self.full_redraw = true;
                 }
                 WindowUpdate::Theme(theme) => {
                     self.theme = theme;
-                    if let Some(snapshot) = self.snapshot.as_mut() {
+                    if let Some(snapshot) = self.pane.snapshot.as_mut() {
                         apply_theme(snapshot, theme);
                     }
                     visual_changed = true;
@@ -3087,8 +3848,17 @@ impl App {
                     self.full_redraw = true;
                 }
                 WindowUpdate::Shutdown => {
-                    self.exit = true;
-                    return Ok(());
+                    if self.layout.is_some() {
+                        self.pane.controller_active = false;
+                        self.pane.commands = None;
+                        self.pane.updates = None;
+                        title_changed = true;
+                        visual_changed = true;
+                        self.full_redraw = true;
+                    } else {
+                        self.exit = true;
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -3097,23 +3867,28 @@ impl App {
             self.last_cursor_blink = Instant::now();
             let display = self.display_snapshot().context("updated snapshot exists")?;
             if full_frame_reload
-                || self.snapshot_frame.is_none()
-                || !self.scrollback_viewport.is_live()
+                || self.pane.snapshot_frame.is_none()
+                || !self.pane.scrollback_viewport.is_live()
             {
-                self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
-            } else if let Some(frame) = &mut self.snapshot_frame {
-                let snapshot = self.snapshot.as_ref().context("updated snapshot exists")?;
-                frame.refresh_rows(snapshot, &self.prepare_dirty_rows)?;
+                self.pane.snapshot_frame =
+                    Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+            } else if let Some(frame) = &mut self.pane.snapshot_frame {
+                let snapshot = self
+                    .pane
+                    .snapshot
+                    .as_ref()
+                    .context("updated snapshot exists")?;
+                frame.refresh_rows(snapshot, &self.pane.prepare_dirty_rows)?;
                 frame.refresh_cursor(snapshot);
             }
-            self.rendered_viewport_offset = self.scrollback_viewport.offset_from_bottom();
-            self.viewport_dirty = false;
-            self.prepare_dirty_rows.fill(false);
+            self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
+            self.pane.viewport_dirty = false;
+            self.pane.prepare_dirty_rows.fill(false);
             self.refresh_ime_preedit()?;
             self.update_ime_cursor_rectangle();
             if terminal_resize_allowed(
                 TerminalResizeCause::SnapshotAvailable,
-                self.last_resize.is_some(),
+                self.pane.last_resize.is_some(),
             ) {
                 self.emit_resize()?;
             }
@@ -3122,11 +3897,15 @@ impl App {
             }
         }
         if title_changed {
-            let snapshot = self.snapshot.as_ref().context("updated snapshot exists")?;
+            let snapshot = self
+                .pane
+                .snapshot
+                .as_ref()
+                .context("updated snapshot exists")?;
             self.window.set_title(window_title(
                 self.title_override.as_deref().or(Some(&snapshot.title)),
-                self.controller_active,
-                &self.authority,
+                self.pane.controller_active,
+                &self.pane.authority,
             ));
         }
         Ok(())
@@ -3154,9 +3933,9 @@ impl App {
             return Ok(());
         }
         if let Some(display) = self.display_snapshot() {
-            self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
-            self.rendered_viewport_offset = self.scrollback_viewport.offset_from_bottom();
-            self.viewport_dirty = false;
+            self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+            self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
+            self.pane.viewport_dirty = false;
         }
         self.buffer = None;
         self.backing.clear();
@@ -3164,7 +3943,7 @@ impl App {
         self.refresh_ime_preedit()?;
         debug_assert!(!terminal_resize_allowed(
             TerminalResizeCause::OutputDpiChanged,
-            self.last_resize.is_some(),
+            self.pane.last_resize.is_some(),
         ));
         self.update_ime_cursor_rectangle();
         if self.configured {
@@ -3195,9 +3974,9 @@ impl App {
                 .map_err(|_| anyhow::anyhow!("compositor rejected unit buffer scale"))?;
         }
         if let Some(display) = self.display_snapshot() {
-            self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, scale_120)?);
-            self.rendered_viewport_offset = self.scrollback_viewport.offset_from_bottom();
-            self.viewport_dirty = false;
+            self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, scale_120)?);
+            self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
+            self.pane.viewport_dirty = false;
         } else {
             self.text_row = Some(TextRow::load(scale_120.div_ceil(SCALE_DENOMINATOR))?);
         }
@@ -3208,7 +3987,7 @@ impl App {
         self.refresh_ime_preedit()?;
         debug_assert!(!terminal_resize_allowed(
             TerminalResizeCause::CompositorScaleChanged,
-            self.last_resize.is_some(),
+            self.pane.last_resize.is_some(),
         ));
         self.update_ime_cursor_rectangle();
         if self.configured {
@@ -3219,7 +3998,7 @@ impl App {
 
     fn tick_cursor_blink(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         let blinking = self.cursor_blink
-            && self.snapshot.as_ref().is_some_and(|snapshot| {
+            && self.pane.snapshot.as_ref().is_some_and(|snapshot| {
                 cursor_blink_enabled(
                     self.reduced_motion,
                     self.keyboard_focused,
@@ -3229,13 +4008,13 @@ impl App {
         if blinking && self.last_cursor_blink.elapsed() >= Duration::from_millis(500) {
             self.cursor_blink_visible = !self.cursor_blink_visible;
             self.last_cursor_blink = Instant::now();
-            if let Some(snapshot) = &self.snapshot {
+            if let Some(snapshot) = &self.pane.snapshot {
                 if let Ok(row) = usize::try_from(snapshot.cursor_row) {
                     if row < snapshot.rows {
-                        self.raster_dirty_rows.resize(snapshot.rows, false);
-                        self.surface_dirty_rows.resize(snapshot.rows, false);
-                        self.raster_dirty_rows[row] = true;
-                        self.surface_dirty_rows[row] = true;
+                        self.pane.raster_dirty_rows.resize(snapshot.rows, false);
+                        self.pane.surface_dirty_rows.resize(snapshot.rows, false);
+                        self.pane.raster_dirty_rows[row] = true;
+                        self.pane.surface_dirty_rows[row] = true;
                     }
                 }
             }
@@ -3244,13 +4023,13 @@ impl App {
             }
         } else if !blinking && !self.cursor_blink_visible {
             self.cursor_blink_visible = true;
-            if let Some(snapshot) = &self.snapshot {
+            if let Some(snapshot) = &self.pane.snapshot {
                 if let Ok(row) = usize::try_from(snapshot.cursor_row) {
                     if row < snapshot.rows {
-                        self.raster_dirty_rows.resize(snapshot.rows, false);
-                        self.surface_dirty_rows.resize(snapshot.rows, false);
-                        self.raster_dirty_rows[row] = true;
-                        self.surface_dirty_rows[row] = true;
+                        self.pane.raster_dirty_rows.resize(snapshot.rows, false);
+                        self.pane.surface_dirty_rows.resize(snapshot.rows, false);
+                        self.pane.raster_dirty_rows[row] = true;
+                        self.pane.surface_dirty_rows[row] = true;
                     }
                 }
             }
@@ -3277,26 +4056,26 @@ impl App {
     fn draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         self.redraw_pending = false;
         let draw_started = Instant::now();
-        let scroll_started = self.scroll_started_at.take();
-        if self.viewport_dirty {
+        let scroll_started = self.pane.scroll_started_at.take();
+        if self.pane.viewport_dirty {
             let display = self.display_snapshot().context("scroll display snapshot")?;
-            let current_offset = self.scrollback_viewport.offset_from_bottom();
+            let current_offset = self.pane.scrollback_viewport.offset_from_bottom();
             let delta = isize::try_from(current_offset)
                 .ok()
-                .zip(isize::try_from(self.rendered_viewport_offset).ok())
+                .zip(isize::try_from(self.pane.rendered_viewport_offset).ok())
                 .map(|(current, rendered)| current - rendered);
-            self.prepare_dirty_rows.fill(false);
-            self.raster_dirty_rows.fill(false);
-            self.surface_dirty_rows.fill(false);
-            self.pending_scrolls.clear();
-            let incremental = if let (Some(frame), Some(delta)) = (&mut self.snapshot_frame, delta)
-            {
-                let scroll = frame.scroll_viewport_rows(&display, delta)?;
-                frame.refresh_cursor(&display);
-                scroll
-            } else {
-                None
-            };
+            self.pane.prepare_dirty_rows.fill(false);
+            self.pane.raster_dirty_rows.fill(false);
+            self.pane.surface_dirty_rows.fill(false);
+            self.pane.pending_scrolls.clear();
+            let incremental =
+                if let (Some(frame), Some(delta)) = (&mut self.pane.snapshot_frame, delta) {
+                    let scroll = frame.scroll_viewport_rows(&display, delta)?;
+                    frame.refresh_cursor(&display);
+                    scroll
+                } else {
+                    None
+                };
             if let Some(scroll) = incremental {
                 let count = scroll.rows.min(display.rows);
                 let exposed = match scroll.direction {
@@ -3305,35 +4084,50 @@ impl App {
                     }
                     splinterm_protocol::ScrollDirection::Reverse => 0..count,
                 };
-                self.raster_dirty_rows.resize(display.rows, false);
-                self.surface_dirty_rows.resize(display.rows, false);
+                self.pane.raster_dirty_rows.resize(display.rows, false);
+                self.pane.surface_dirty_rows.resize(display.rows, false);
                 for row in exposed {
-                    self.raster_dirty_rows[row] = true;
+                    self.pane.raster_dirty_rows[row] = true;
                 }
-                self.surface_dirty_rows.fill(true);
-                self.pending_scrolls.push(scroll);
+                self.pane.surface_dirty_rows.fill(true);
+                self.pane.pending_scrolls.push(scroll);
             } else {
-                self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+                self.pane.snapshot_frame =
+                    Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
                 self.full_redraw = true;
             }
-            self.rendered_viewport_offset = current_offset;
-            self.viewport_dirty = false;
+            self.pane.rendered_viewport_offset = current_offset;
+            self.pane.viewport_dirty = false;
         }
-        let window_geometry = self
-            .snapshot_frame
-            .as_ref()
-            .map(|frame| {
-                frame.window_geometry(self.logical_width, self.logical_height, self.scale_120)
+        let pane_layout = self.computed_pane_layout()?;
+        let active_rect = self.focused_splint().and_then(|splint_id| {
+            pane_layout
+                .as_ref()
+                .and_then(|layout| layout.rect(splint_id))
+        });
+        let window_geometry = if let Some(rect) = active_rect {
+            Self::pane_geometry(&self.pane, rect, self.scale_120)
+        } else {
+            self.pane.snapshot_frame.as_ref().map_or(Ok(None), |frame| {
+                frame
+                    .window_geometry(self.logical_width, self.logical_height, self.scale_120)
+                    .map(Some)
             })
-            .transpose()
-            .or_else(|error| {
-                if error.to_string().contains("SurfaceTooSmall") {
-                    Ok(None)
-                } else {
-                    Err(error)
-                }
-            })?;
-        let (width, height, stride) = if let Some(geometry) = window_geometry {
+        }
+        .or_else(|error| {
+            if error.to_string().contains("SurfaceTooSmall") {
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        })?;
+        let (width, height, stride) = if pane_layout.is_some() {
+            buffer_dimensions(
+                self.logical_width.max(1),
+                self.logical_height.max(1),
+                self.scale_120,
+            )?
+        } else if let Some(geometry) = window_geometry {
             geometry.buffer_layout()?
         } else {
             buffer_dimensions(
@@ -3344,8 +4138,8 @@ impl App {
         };
         let width_i32 = i32::try_from(width).context("buffer width fits i32")?;
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
-        let resolved_selection = self.selection.and_then(|selection| {
-            let snapshot = self.snapshot.as_ref()?;
+        let resolved_selection = self.pane.selection.and_then(|selection| {
+            let snapshot = self.pane.snapshot.as_ref()?;
             let display = self.display_snapshot()?;
             selection_display_bounds(snapshot, &display, selection)
                 .map(|(start, end)| ((start.row, start.column), (end.row, end.column)))
@@ -3383,20 +4177,69 @@ impl App {
             self.backing.resize(backing_len, 0);
             self.full_redraw = true;
         }
-        if let (Some(frame), Some(geometry)) = (&self.snapshot_frame, &window_geometry) {
+        if let (Some(frame), Some(geometry)) = (&self.pane.snapshot_frame, &window_geometry) {
             if self.full_redraw {
-                paint_snapshot_presented(
-                    &mut self.backing,
-                    width,
-                    height,
-                    frame,
-                    geometry,
-                    self.cursor_blink_visible,
-                    self.cursor_style,
-                    CursorPresentation::for_keyboard_focus(self.keyboard_focused),
-                );
+                if let Some(layout) = pane_layout.as_ref() {
+                    let [_, red, green, blue] = self.theme.background.to_be_bytes();
+                    let background = configured_background_bgra([red, green, blue]);
+                    for pixel in self.backing.chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&background);
+                    }
+                    for pane in &self.inactive_panes {
+                        let Some(splint_id) =
+                            pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id)
+                        else {
+                            continue;
+                        };
+                        let Some(rect) = layout.rect(splint_id) else {
+                            continue;
+                        };
+                        let (Some(frame), Some(geometry)) = (
+                            &pane.snapshot_frame,
+                            Self::pane_geometry(pane, rect, self.scale_120)?,
+                        ) else {
+                            continue;
+                        };
+                        paint_snapshot_region_presented(
+                            &mut self.backing,
+                            width,
+                            height,
+                            frame,
+                            &geometry,
+                            Self::buffer_rect(rect, self.scale_120)?,
+                            self.cursor_blink_visible,
+                            self.cursor_style,
+                            CursorPresentation::for_keyboard_focus(false),
+                        );
+                    }
+                    paint_snapshot_region_presented(
+                        &mut self.backing,
+                        width,
+                        height,
+                        frame,
+                        geometry,
+                        Self::buffer_rect(
+                            active_rect.context("active pane rectangle")?,
+                            self.scale_120,
+                        )?,
+                        self.cursor_blink_visible,
+                        self.cursor_style,
+                        CursorPresentation::for_keyboard_focus(self.keyboard_focused),
+                    );
+                } else {
+                    paint_snapshot_presented(
+                        &mut self.backing,
+                        width,
+                        height,
+                        frame,
+                        geometry,
+                        self.cursor_blink_visible,
+                        self.cursor_style,
+                        CursorPresentation::for_keyboard_focus(self.keyboard_focused),
+                    );
+                }
             } else {
-                for scroll in self.pending_scrolls.drain(..) {
+                for scroll in self.pane.pending_scrolls.drain(..) {
                     scroll_snapshot_pixels(&mut self.backing, width, frame, geometry, scroll);
                 }
                 paint_snapshot_rows_presented(
@@ -3405,7 +4248,7 @@ impl App {
                     height,
                     frame,
                     geometry,
-                    &self.raster_dirty_rows,
+                    &self.pane.raster_dirty_rows,
                     self.cursor_blink_visible,
                     self.cursor_style,
                     CursorPresentation::for_keyboard_focus(self.keyboard_focused),
@@ -3413,6 +4256,7 @@ impl App {
             }
             let selection = resolved_selection;
             let hovered_url = self
+                .pane
                 .hovered_url
                 .as_ref()
                 .map(|(start, end, _)| ((start.row, start.column), (end.row, end.column)));
@@ -3434,7 +4278,7 @@ impl App {
                 },
             );
             if let Some(status) =
-                history_overlay_status(&self.scrollback_viewport, self.snapshot.as_ref())
+                history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref())
             {
                 paint_history_overlay(
                     canvas,
@@ -3449,7 +4293,7 @@ impl App {
             if self.trusted_consent.is_some() {
                 paint_trusted_consent_chrome(canvas, width, height);
             }
-        } else if self.snapshot_frame.is_some() {
+        } else if self.pane.snapshot_frame.is_some() {
             let [_, red, green, blue] = self.theme.background.to_be_bytes();
             let background = configured_background_bgra([red, green, blue]);
             for pixel in self.backing.chunks_exact_mut(4) {
@@ -3476,13 +4320,13 @@ impl App {
             }
         }
         let history_status =
-            history_overlay_status(&self.scrollback_viewport, self.snapshot.as_ref());
-        if self.snapshot_frame.is_none() || self.full_redraw {
+            history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref());
+        if self.pane.snapshot_frame.is_none() || self.full_redraw {
             self.window
                 .wl_surface()
                 .damage_buffer(0, 0, width_i32, height_i32);
         } else if let Some(geometry) = &window_geometry {
-            for (row, dirty) in self.surface_dirty_rows.iter().copied().enumerate() {
+            for (row, dirty) in self.pane.surface_dirty_rows.iter().copied().enumerate() {
                 if !dirty {
                     continue;
                 }
@@ -3493,7 +4337,7 @@ impl App {
                 }
             }
         }
-        if history_status != self.painted_history_status {
+        if history_status != self.pane.painted_history_status {
             if let Some(layout) = history_overlay_layout(width, height, self.scale_120) {
                 let (x, y, overlay_width, overlay_height) = layout.panel;
                 self.window.wl_surface().damage_buffer(
@@ -3504,11 +4348,11 @@ impl App {
                 );
             }
         }
-        self.painted_history_status = history_status;
+        self.pane.painted_history_status = history_status;
         self.full_redraw = false;
-        self.raster_dirty_rows.fill(false);
-        self.surface_dirty_rows.fill(false);
-        self.pending_scrolls.clear();
+        self.pane.raster_dirty_rows.fill(false);
+        self.pane.surface_dirty_rows.fill(false);
+        self.pane.pending_scrolls.clear();
         if !self.frame_pending {
             self.window
                 .wl_surface()
@@ -3525,11 +4369,12 @@ impl App {
                     "scroll-trace input_to_commit_us={} draw_us={} viewport_offset={} cached_rows={} page_pending={}",
                     scroll_started.elapsed().as_micros(),
                     draw_started.elapsed().as_micros(),
-                    self.scrollback_viewport.offset_from_bottom(),
-                    self.snapshot
+                    self.pane.scrollback_viewport.offset_from_bottom(),
+                    self.pane
+                        .snapshot
                         .as_ref()
                         .map_or(0, |snapshot| snapshot.scrollback_rows.len()),
-                    self.history_page_pending,
+                    self.pane.history_page_pending,
                 );
             }
         }
@@ -3682,7 +4527,7 @@ impl WindowHandler for App {
         if initial_configure || resized {
             debug_assert!(terminal_resize_allowed(
                 TerminalResizeCause::SurfaceConfigure,
-                self.last_resize.is_some(),
+                self.pane.last_resize.is_some(),
             ));
             if let Err(error) = self
                 .emit_resize()
@@ -3784,7 +4629,7 @@ impl SeatHandler for App {
                 pointer.release();
             }
             self.pointer_seat = None;
-            self.pointer_cell = None;
+            self.pane.pointer_cell = None;
         }
     }
 
@@ -3872,6 +4717,34 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
+        if let Some(action) = pane_topology_action(event.keysym, self.modifiers) {
+            if let Some(target) = self.focused_splint() {
+                let command = match action {
+                    PaneTopologyAction::Split(axis) => {
+                        WindowTopologyCommand::Split { target, axis }
+                    }
+                    PaneTopologyAction::Close => WindowTopologyCommand::Close { target },
+                    PaneTopologyAction::AdjustRatio(delta) => {
+                        WindowTopologyCommand::AdjustRatio { target, delta }
+                    }
+                };
+                self.send_topology_command(command);
+            }
+            return;
+        }
+        if let Some(action) = pane_focus_action(event.keysym, self.modifiers) {
+            let changed = match action {
+                PaneFocusAction::Direction(direction) => self.focus_direction(direction),
+                PaneFocusAction::Next { reverse } => self.focus_next(reverse),
+            };
+            if changed {
+                self.update_ime_cursor_rectangle();
+                if let Err(error) = self.schedule_draw(queue_handle) {
+                    self.fail(error);
+                }
+            }
+            return;
+        }
         if let Some(action) = font_zoom_action(event.keysym, self.modifiers) {
             if let Err(error) = self.apply_font_zoom(action, queue_handle) {
                 self.fail(error);
@@ -3958,26 +4831,26 @@ impl PointerHandler for App {
             if &event.surface != self.window.wl_surface() {
                 continue;
             }
-            let previous_hover = self.hovered_url.clone();
-            let cell = self.pointer_cell_at(event.position);
+            let previous_hover = self.pane.hovered_url.clone();
+            let mut cell = self.pointer_cell_at(event.position);
             match event.kind {
                 PointerEventKind::Enter { serial } => {
                     self.last_pointer_serial = Some(serial);
-                    self.pointer_cell = cell;
+                    self.pane.pointer_cell = cell;
                 }
                 PointerEventKind::Leave { .. } => {
-                    self.pointer_cell = None;
-                    self.hovered_url = None;
+                    self.pane.pointer_cell = None;
+                    self.pane.hovered_url = None;
                 }
                 PointerEventKind::Motion { .. } => {
-                    self.pointer_cell = cell;
+                    self.pane.pointer_cell = cell;
                     let display = self.display_snapshot();
-                    self.hovered_url = cell.and_then(|position| {
+                    self.pane.hovered_url = cell.and_then(|position| {
                         display
                             .as_ref()
                             .and_then(|snapshot| url_at(snapshot, position))
                     });
-                    if self.selecting {
+                    if self.pane.selecting {
                         if let Some(position) = cell {
                             self.extend_selection(position);
                         }
@@ -4006,12 +4879,23 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Press { button, serial, .. } => {
                     self.last_pointer_serial = Some(serial);
+                    if let Some(splint_id) = self.splint_at_point(event.position) {
+                        if self.focus_splint(splint_id) {
+                            cell = self.pointer_cell_at(event.position);
+                            self.pane.pointer_cell = cell;
+                            self.update_ime_cursor_rectangle();
+                            if let Err(error) = self.schedule_draw(queue_handle) {
+                                self.fail(error);
+                                return;
+                            }
+                        }
+                    }
                     if button == BTN_LEFT
                         && history_return_to_live_hit(
                             event.position,
                             self.logical_width,
                             self.logical_height,
-                            !self.scrollback_viewport.is_live(),
+                            !self.pane.scrollback_viewport.is_live(),
                         )
                     {
                         if let Err(error) = self
@@ -4034,14 +4918,14 @@ impl PointerHandler for App {
                         }
                         continue;
                     }
-                    self.pointer_cell = cell;
+                    self.pane.pointer_cell = cell;
                     self.recompute_hovered_url();
                     let owner = classify_press(
                         button,
                         cell.is_some(),
                         self.modifiers,
                         self.input_modes(),
-                        self.hovered_url.is_some(),
+                        self.pane.hovered_url.is_some(),
                     );
                     self.pressed_buttons.insert(button, owner);
                     match owner {
@@ -4080,7 +4964,7 @@ impl PointerHandler for App {
                             sgr,
                             modifiers,
                         } => {
-                            if let Some(position) = cell.or(self.pointer_cell) {
+                            if let Some(position) = cell.or(self.pane.pointer_cell) {
                                 if let Some(report) = mouse_report(
                                     MouseAction::Release(code),
                                     position,
@@ -4118,19 +5002,19 @@ impl PointerHandler for App {
                     }
                 }
             }
-            if previous_hover != self.hovered_url {
+            if previous_hover != self.pane.hovered_url {
                 if let Some((start, _, _)) = previous_hover {
                     self.dirty_row(start.row);
                 }
-                if let Some((start, _, _)) = &self.hovered_url {
+                if let Some((start, _, _)) = &self.pane.hovered_url {
                     self.dirty_row(start.row);
                 }
             }
         }
         if self.configured
-            && (self.viewport_dirty
-                || self.raster_dirty_rows.iter().any(|dirty| *dirty)
-                || self.surface_dirty_rows.iter().any(|dirty| *dirty))
+            && (self.pane.viewport_dirty
+                || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
+                || self.pane.surface_dirty_rows.iter().any(|dirty| *dirty))
         {
             if let Err(error) = self.schedule_draw(queue_handle) {
                 self.fail(error);
@@ -4517,8 +5401,10 @@ impl Dispatch<ZwpTextInputV3, ()> for App {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
-    use splinterm_core::SplintId;
+    use splinterm_core::{Axis, Splint, SplitRatio};
     use splinterm_protocol::ActiveScreen;
 
     fn snapshot(splint_id: SplintId, incarnation: u64, revision: u64) -> TerminalSnapshot {
@@ -4555,6 +5441,200 @@ mod tests {
             exited_code: None,
             exited_signal: None,
         }
+    }
+
+    fn valid_snapshot(splint_id: SplintId) -> TerminalSnapshot {
+        let mut snapshot = snapshot(splint_id, 1, 1);
+        snapshot.columns = 1;
+        snapshot.rows = 1;
+        let mut row = blank_row(1);
+        row.row_id = Some(1);
+        snapshot.visible_rows = vec![row];
+        snapshot
+    }
+
+    fn pane_options(splint_id: SplintId) -> WindowPaneOptions {
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+        WindowPaneOptions {
+            snapshot: valid_snapshot(splint_id),
+            updates: update_receiver,
+            commands,
+            authority: AuthorityStatus::default(),
+            controlled: false,
+        }
+    }
+
+    #[test]
+    fn multi_pane_inputs_select_local_focus_and_reject_identity_mismatch() {
+        let first = Splint::shell(PathBuf::from("/tmp"));
+        let first_id = first.id;
+        let second = Splint::shell(PathBuf::from("/tmp"));
+        let second_id = second.id;
+        let layout = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Leaf(first)),
+            second: Box::new(LayoutNode::Leaf(second)),
+        };
+        let mut options = WindowOptions {
+            panes: vec![pane_options(first_id), pane_options(second_id)],
+            layout: Some(layout.clone()),
+            active_splint: Some(second_id),
+            ..WindowOptions::default()
+        };
+        let inactive = options.activate_multi_pane_input().unwrap();
+        assert_eq!(
+            options.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+            Some(second_id)
+        );
+        assert_eq!(inactive.len(), 1);
+        assert_eq!(inactive[0].snapshot.splint_id, first_id);
+
+        let mut invalid = WindowOptions {
+            panes: vec![pane_options(first_id), pane_options(first_id)],
+            layout: Some(layout),
+            ..WindowOptions::default()
+        };
+        assert!(invalid.activate_multi_pane_input().is_err());
+    }
+
+    #[test]
+    fn pane_focus_bindings_are_explicit_and_do_not_capture_plain_arrows() {
+        let modifiers = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            pane_focus_action(Keysym::Left, modifiers),
+            Some(PaneFocusAction::Direction(FocusDirection::Left))
+        );
+        assert_eq!(
+            pane_focus_action(Keysym::Tab, modifiers),
+            Some(PaneFocusAction::Next { reverse: false })
+        );
+        assert_eq!(pane_focus_action(Keysym::Left, Modifiers::default()), None);
+        assert_eq!(
+            pane_topology_action(Keysym::Return, modifiers),
+            Some(PaneTopologyAction::Split(splinterm_core::Axis::Horizontal))
+        );
+        assert_eq!(
+            pane_topology_action(Keysym::bracketleft, modifiers),
+            Some(PaneTopologyAction::AdjustRatio(-50))
+        );
+        assert_eq!(pane_topology_action(Keysym::w, Modifiers::default()), None);
+        assert_eq!(
+            offset_cursor_rectangle(
+                (7, 11, 8, 16),
+                Rect {
+                    x: 100,
+                    y: 200,
+                    width: 400,
+                    height: 300,
+                },
+            ),
+            Some((107, 211, 8, 16))
+        );
+    }
+
+    #[test]
+    fn inactive_pane_reducer_applies_only_contiguous_matching_updates() {
+        let splint_id = SplintId::new();
+        let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
+        let mut update = empty_update();
+        update.title = Some("background pane".into());
+        assert!(
+            pane.apply_background_update(
+                WindowUpdate::Update(update),
+                ResolvedTheme::default(),
+                SCALE_DENOMINATOR,
+            )
+            .unwrap()
+        );
+        assert_eq!(pane.snapshot.as_ref().unwrap().revision, 2);
+        assert_eq!(pane.snapshot.as_ref().unwrap().title, "background pane");
+
+        let mut stale = empty_update();
+        stale.base_revision = 1;
+        stale.revision = 3;
+        assert!(
+            pane.apply_background_update(
+                WindowUpdate::Update(stale),
+                ResolvedTheme::default(),
+                SCALE_DENOMINATOR,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn inactive_detached_pane_stays_anchored_across_new_output() {
+        let splint_id = SplintId::new();
+        let mut initial = valid_snapshot(splint_id);
+        initial.visible_rows[0].row_id = Some(3);
+        initial.visible_rows[0].cells[0].content = "visible-three".into();
+        initial.scrollback_rows = vec![history_row(1, 0), history_row(2, 0)];
+        initial.available_scrollback_rows = 2;
+        initial.oldest_available_scrollback_row_id = Some(1);
+        initial.newest_available_scrollback_row_id = Some(2);
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: initial,
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+        pane.scrollback_viewport
+            .scroll_up(1, pane.snapshot.as_ref().unwrap());
+
+        let mut next = pane.snapshot.as_ref().unwrap().clone();
+        next.revision = 2;
+        next.scrollback_rows.push(next.visible_rows[0].clone());
+        next.available_scrollback_rows = 3;
+        next.newest_available_scrollback_row_id = Some(3);
+        next.visible_rows[0].row_id = Some(4);
+        next.visible_rows[0].cells[0].content = "live-four".into();
+        pane.apply_background_update(
+            WindowUpdate::Snapshot(next),
+            ResolvedTheme::default(),
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+
+        assert!(!pane.scrollback_viewport.is_live());
+        let display = pane.display_snapshot().unwrap();
+        assert_eq!(display.visible_rows[0].row_id, Some(2));
+        assert_ne!(display.visible_rows[0].cells[0].content, "live-four");
+    }
+
+    #[test]
+    fn pane_resize_uses_its_local_rectangle_and_suppresses_duplicates() {
+        let splint_id = SplintId::new();
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(2);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true).unwrap();
+        let first = command_receiver.try_recv().unwrap();
+        assert!(matches!(first, WindowCommand::Resize { .. }));
+        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true).unwrap();
+        assert!(command_receiver.try_recv().is_err());
     }
 
     fn history_row(id: u64, content_bytes: usize) -> TerminalRow {

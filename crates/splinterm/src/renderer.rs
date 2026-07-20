@@ -23,7 +23,7 @@ use crate::{
     box_drawing,
     config::CursorStyle,
     geometry::{
-        BufferPadding, CellGeometry, FontSize, FontSizingPolicy, OutputDpiObservation,
+        BufferPadding, CellGeometry, FontSize, FontSizingPolicy, OutputDpiObservation, Rect,
         TerminalPadding, WindowGeometry, resolve_font_size, resolve_font_size_with_output,
     },
 };
@@ -3724,10 +3724,52 @@ pub(crate) fn paint_snapshot_presented(
     cursor_style: CursorStyle,
     presentation: CursorPresentation,
 ) {
+    paint_snapshot_region_presented(
+        canvas,
+        width,
+        height,
+        frame,
+        geometry,
+        Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        cursor_visible,
+        cursor_style,
+        presentation,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pane region and cursor presentation are explicit"
+)]
+pub(crate) fn paint_snapshot_region_presented(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
+    region: Rect,
+    cursor_visible: bool,
+    cursor_style: CursorStyle,
+    presentation: CursorPresentation,
+) {
     let background = premultiplied_rgba(frame.canvas_background, background_alpha_u8());
-    for pixel in canvas.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[background[2], background[1], background[0], background[3]]);
-    }
+    fill_rect(
+        canvas,
+        width,
+        height,
+        (
+            i32::try_from(region.x).unwrap_or(i32::MAX),
+            i32::try_from(region.y).unwrap_or(i32::MAX),
+            region.width,
+            region.height,
+        ),
+        background,
+    );
     compose_snapshot_rows(
         canvas,
         width,
@@ -5958,6 +6000,33 @@ mod tests {
             cursor_color: [255, 255, 255],
             scale_120: 120,
         }
+    }
+
+    #[test]
+    fn pane_region_paint_preserves_neighbor_pixels() {
+        let frame = damage_test_frame();
+        let geometry = frame.tight_geometry().unwrap().translated(2, 0).unwrap();
+        let mut canvas = vec![9; 6 * 6 * 4];
+        paint_snapshot_region_presented(
+            &mut canvas,
+            6,
+            6,
+            &frame,
+            &geometry,
+            Rect {
+                x: 2,
+                y: 0,
+                width: 2,
+                height: 6,
+            },
+            false,
+            CursorStyle::Block,
+            CursorPresentation::for_keyboard_focus(false),
+        );
+        let pixel = |x: usize, y: usize| &canvas[(y * 6 + x) * 4..(y * 6 + x + 1) * 4];
+        assert_eq!(pixel(0, 0), [9, 9, 9, 9]);
+        assert_eq!(pixel(2, 0), [0, 0, 1, 0xff]);
+        assert_eq!(pixel(4, 0), [9, 9, 9, 9]);
     }
 
     #[test]
