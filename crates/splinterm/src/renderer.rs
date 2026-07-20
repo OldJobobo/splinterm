@@ -2531,7 +2531,6 @@ fn rendition_colors(
     (foreground, background)
 }
 
-#[allow(dead_code, reason = "wired by the next dependent Slice 6 checkpoint")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HistoryOverlayStatus {
     pub(crate) offset_from_bottom: usize,
@@ -2539,14 +2538,12 @@ pub(crate) struct HistoryOverlayStatus {
     pub(crate) unseen_rows: usize,
 }
 
-#[allow(dead_code, reason = "wired by the next dependent Slice 6 checkpoint")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HistoryOverlayLayout {
     pub(crate) panel: (i32, i32, u32, u32),
     pub(crate) return_to_live: (i32, i32, u32, u32),
 }
 
-#[allow(dead_code, reason = "wired by the next dependent Slice 6 checkpoint")]
 #[must_use]
 pub(crate) fn history_overlay_layout(
     width: u32,
@@ -2581,7 +2578,6 @@ pub(crate) fn history_overlay_layout(
     })
 }
 
-#[allow(dead_code, reason = "wired by the next dependent Slice 6 checkpoint")]
 pub(crate) fn paint_history_overlay(
     canvas: &mut [u8],
     width: u32,
@@ -2677,9 +2673,8 @@ pub(crate) fn paint_history_overlay(
 }
 
 #[allow(
-    dead_code,
     clippy::too_many_arguments,
-    reason = "wired next; the tiny bitmap painter keeps explicit canvas and placement contracts"
+    reason = "the tiny trusted bitmap painter keeps explicit canvas and placement contracts"
 )]
 fn paint_history_digits(
     canvas: &mut [u8],

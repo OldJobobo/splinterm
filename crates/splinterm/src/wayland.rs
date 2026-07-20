@@ -98,7 +98,8 @@ use smithay_client_toolkit::reexports::protocols::wp::{
 use crate::config::{APP_ID, CursorStyle, ResolvedTheme};
 use crate::geometry::{OutputDpiObservation, SurfaceGeometry};
 use crate::renderer::{
-    CursorPresentation, SnapshotFrame, SnapshotOverlays, TextRow, paint, paint_snapshot_overlays,
+    CursorPresentation, HistoryOverlayStatus, SnapshotFrame, SnapshotOverlays, TextRow,
+    history_overlay_layout, paint, paint_history_overlay, paint_snapshot_overlays,
     paint_snapshot_presented, paint_snapshot_rows_presented, scroll_snapshot_pixels,
     snapshot_row_rect, update_output_dpi, write_ppm,
 };
@@ -471,6 +472,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         snapshot: options.snapshot,
         snapshot_frame,
         scrollback_viewport: ScrollbackViewport::default(),
+        painted_history_status: None,
         history_page_pending: false,
         scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
         scroll_started_at: None,
@@ -664,6 +666,7 @@ struct App {
     snapshot: Option<TerminalSnapshot>,
     snapshot_frame: Option<SnapshotFrame>,
     scrollback_viewport: ScrollbackViewport,
+    painted_history_status: Option<HistoryOverlayStatus>,
     history_page_pending: bool,
     scroll_trace: bool,
     scroll_started_at: Option<Instant>,
@@ -1268,6 +1271,37 @@ fn history_navigation(keysym: Keysym, shift: bool, detached: bool) -> Option<His
     }
 }
 
+fn history_overlay_status(
+    viewport: &ScrollbackViewport,
+    snapshot: Option<&TerminalSnapshot>,
+) -> Option<HistoryOverlayStatus> {
+    let snapshot = snapshot?;
+    (!viewport.is_live()).then_some(HistoryOverlayStatus {
+        offset_from_bottom: viewport.offset_from_bottom().min(999),
+        available_rows: snapshot.available_scrollback_rows.min(999),
+        unseen_rows: viewport.unseen_rows().min(999),
+    })
+}
+
+fn history_return_to_live_hit(
+    position: (f64, f64),
+    logical_width: u32,
+    logical_height: u32,
+    detached: bool,
+) -> bool {
+    if !detached || !position.0.is_finite() || !position.1.is_finite() {
+        return false;
+    }
+    let Some(layout) = history_overlay_layout(logical_width, logical_height, 120) else {
+        return false;
+    };
+    let (x, y, width, height) = layout.return_to_live;
+    position.0 >= f64::from(x)
+        && position.1 >= f64::from(y)
+        && position.0 < f64::from(x) + f64::from(width)
+        && position.1 < f64::from(y) + f64::from(height)
+}
+
 fn mouse_button_code(button: u32) -> Option<u8> {
     match button {
         BTN_LEFT => Some(0),
@@ -1733,6 +1767,8 @@ impl App {
         }
         self.scroll_started_at.get_or_insert_with(Instant::now);
         self.invalidate_local_content_state();
+        self.refresh_ime_preedit()?;
+        self.update_ime_cursor_rectangle();
         // Coalesce high-resolution wheel events until the next compositor frame.
         // Re-shaping the entire viewport synchronously for every axis event made
         // fast scrolling stall the Wayland dispatch loop.
@@ -2756,6 +2792,19 @@ impl App {
                     accent_color: self.theme.ui_accent,
                 },
             );
+            if let Some(status) =
+                history_overlay_status(&self.scrollback_viewport, self.snapshot.as_ref())
+            {
+                paint_history_overlay(
+                    canvas,
+                    width,
+                    height,
+                    self.scale_120,
+                    status,
+                    self.theme.background,
+                    self.theme.ui_accent,
+                );
+            }
             if self.trusted_consent.is_some() {
                 paint_trusted_consent_chrome(canvas, width, height);
             }
@@ -2784,6 +2833,8 @@ impl App {
                 );
             }
         }
+        let history_status =
+            history_overlay_status(&self.scrollback_viewport, self.snapshot.as_ref());
         if self.snapshot_frame.is_none() || self.full_redraw {
             self.window
                 .wl_surface()
@@ -2800,6 +2851,18 @@ impl App {
                 }
             }
         }
+        if history_status != self.painted_history_status {
+            if let Some(layout) = history_overlay_layout(width, height, self.scale_120) {
+                let (x, y, overlay_width, overlay_height) = layout.panel;
+                self.window.wl_surface().damage_buffer(
+                    x,
+                    y,
+                    i32::try_from(overlay_width).unwrap_or(i32::MAX),
+                    i32::try_from(overlay_height).unwrap_or(i32::MAX),
+                );
+            }
+        }
+        self.painted_history_status = history_status;
         self.full_redraw = false;
         self.raster_dirty_rows.fill(false);
         self.surface_dirty_rows.fill(false);
@@ -3292,7 +3355,28 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Press { button, serial, .. } => {
                     self.last_pointer_serial = Some(serial);
-                    if self.trusted_consent.is_some() && button == 0x110 {
+                    if button == BTN_LEFT
+                        && history_return_to_live_hit(
+                            event.position,
+                            self.logical_width,
+                            self.logical_height,
+                            !self.scrollback_viewport.is_live(),
+                        )
+                    {
+                        if let Err(error) = self
+                            .scroll_history(MouseAction::WheelDown, usize::MAX)
+                            .and_then(|moved| {
+                                if moved && self.configured {
+                                    self.schedule_draw(queue_handle)?;
+                                }
+                                Ok(())
+                            })
+                        {
+                            self.fail(error);
+                        }
+                        continue;
+                    }
+                    if self.trusted_consent.is_some() && button == BTN_LEFT {
                         let (x, y) = event.position;
                         if y >= f64::from(self.logical_height) * 0.78 {
                             self.decide_consent(x >= f64::from(self.logical_width) / 2.0);
@@ -4212,6 +4296,50 @@ mod tests {
         assert!(safe_paste(b"unsafe\x1bsequence").is_err());
         assert!(safe_paste(&[0xff]).is_err());
         assert!(safe_paste(&vec![b'x'; MAX_CLIPBOARD_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn trusted_history_return_target_is_half_open_and_detached_only() {
+        let layout = history_overlay_layout(960, 600, 120).expect("overlay layout");
+        let (x, y, width, height) = layout.return_to_live;
+        let inside = (f64::from(x) + 1.0, f64::from(y) + 1.0);
+        assert!(history_return_to_live_hit(inside, 960, 600, true));
+        assert!(!history_return_to_live_hit(inside, 960, 600, false));
+        assert!(!history_return_to_live_hit(
+            (f64::from(x) + f64::from(width), f64::from(y) + 1.0),
+            960,
+            600,
+            true,
+        ));
+        assert!(!history_return_to_live_hit(
+            (f64::from(x) + 1.0, f64::from(y) + f64::from(height)),
+            960,
+            600,
+            true,
+        ));
+    }
+
+    #[test]
+    fn history_overlay_status_is_detached_and_display_bounded() {
+        let mut state = snapshot(SplintId::new(), 1, 1);
+        state.rows = 1;
+        state.scrollback_rows.push(TerminalRow {
+            row_id: Some(1),
+            linebreak: false,
+            cells: Vec::new(),
+        });
+        state.available_scrollback_rows = 5_000;
+        let mut viewport = ScrollbackViewport::default();
+        assert_eq!(history_overlay_status(&viewport, Some(&state)), None);
+        viewport.scroll_up(1, &state);
+        assert_eq!(
+            history_overlay_status(&viewport, Some(&state)),
+            Some(HistoryOverlayStatus {
+                offset_from_bottom: 1,
+                available_rows: 999,
+                unseen_rows: 0,
+            })
+        );
     }
 
     #[test]
