@@ -1,0 +1,18 @@
+[package]
+name = "splinterm-filemap"
+description = "Bounded read-only file mappings for package-managed Splinterm assets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+memmap2.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

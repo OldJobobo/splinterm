@@ -753,6 +753,7 @@ dependencies = [
  "serde_json",
  "smithay-client-toolkit",
  "splinterm-core",
+ "splinterm-filemap",
  "splinterm-freetype",
  "splinterm-protocol",
  "swash",
@@ -768,6 +769,13 @@ dependencies = [
  "serde",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "splinterm-filemap"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
 ]
 
 [[package]]

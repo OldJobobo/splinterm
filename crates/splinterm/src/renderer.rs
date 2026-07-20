@@ -30,6 +30,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 
 use splinterm_core::SplintId;
+use splinterm_filemap::ReadOnlyFileMap;
 use splinterm_freetype::{MAX_PIXEL_SIZE_26_6, MIN_PIXEL_SIZE_26_6, RasterFace};
 use splinterm_protocol::{
     ActiveScreen, CellAttributes, ColorSource, MAX_COLUMNS, MAX_ROWS, ScrollDirection,
@@ -357,7 +358,7 @@ struct FontFace {
     path: PathBuf,
     index: usize,
     selected_pixel_size_26_6: isize,
-    data: OnceLock<Result<Vec<u8>, String>>,
+    data: OnceLock<Result<ReadOnlyFileMap, String>>,
 }
 
 struct CachedGlyph {
@@ -1407,12 +1408,12 @@ fn verify_style_advances(regular: &FontFace, regular_advance: f32, font_size: f3
 fn font_data(face: &FontFace) -> Result<&[u8]> {
     face.data
         .get_or_init(|| {
-            fs::read(&face.path)
-                .with_context(|| format!("read {}", face.path.display()))
+            ReadOnlyFileMap::open(&face.path)
+                .with_context(|| format!("map {}", face.path.display()))
                 .map_err(|error| error.to_string())
         })
         .as_ref()
-        .map(Vec::as_slice)
+        .map(|mapping| &**mapping)
         .map_err(|error| anyhow::anyhow!(error.clone()))
 }
 
