@@ -1188,10 +1188,23 @@ fn selection_endpoint(
     })
 }
 
-fn selection_bounds(
-    snapshot: &TerminalSnapshot,
-    selection: Selection,
-) -> Option<(CellPosition, CellPosition)> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SelectionRange {
+    start_row: usize,
+    start_column: usize,
+    end_row: usize,
+    end_column: usize,
+}
+
+fn loaded_row_position(snapshot: &TerminalSnapshot, row_id: u64) -> Option<usize> {
+    snapshot
+        .scrollback_rows
+        .iter()
+        .chain(&snapshot.visible_rows)
+        .position(|row| row.row_id == Some(row_id))
+}
+
+fn selection_range(snapshot: &TerminalSnapshot, selection: Selection) -> Option<SelectionRange> {
     if selection.anchor.active_screen != snapshot.active_screen
         || selection.end.active_screen != snapshot.active_screen
         || selection.anchor.history_generation != snapshot.history_generation
@@ -1199,57 +1212,83 @@ fn selection_bounds(
     {
         return None;
     }
-    let resolve = |endpoint: SelectionEndpoint| {
-        snapshot
-            .visible_rows
-            .iter()
-            .position(|row| row.row_id == Some(endpoint.row_id))
-            .map(|row| CellPosition {
-                row,
-                column: endpoint.column,
-            })
-    };
-    let anchor = resolve(selection.anchor)?;
-    let end = resolve(selection.end)?;
-    Some(if anchor <= end {
+    let anchor_row = loaded_row_position(snapshot, selection.anchor.row_id)?;
+    let end_row = loaded_row_position(snapshot, selection.end.row_id)?;
+    let anchor = (anchor_row, selection.anchor.column);
+    let end = (end_row, selection.end.column);
+    let (start, end) = if anchor <= end {
         (anchor, end)
     } else {
         (end, anchor)
+    };
+    Some(SelectionRange {
+        start_row: start.0,
+        start_column: start.1,
+        end_row: end.0,
+        end_column: end.1,
     })
 }
 
+fn selection_display_bounds(
+    snapshot: &TerminalSnapshot,
+    display: &TerminalSnapshot,
+    selection: Selection,
+) -> Option<(CellPosition, CellPosition)> {
+    let range = selection_range(snapshot, selection)?;
+    let mut selected = display
+        .visible_rows
+        .iter()
+        .enumerate()
+        .filter_map(|(display_row, row)| {
+            let loaded_row = loaded_row_position(snapshot, row.row_id?)?;
+            (loaded_row >= range.start_row && loaded_row <= range.end_row)
+                .then_some((display_row, loaded_row))
+        });
+    let first = selected.next()?;
+    let last = selected.next_back().unwrap_or(first);
+    Some((
+        CellPosition {
+            row: first.0,
+            column: if first.1 == range.start_row {
+                range.start_column
+            } else {
+                0
+            },
+        },
+        CellPosition {
+            row: last.0,
+            column: if last.1 == range.end_row {
+                range.end_column
+            } else {
+                snapshot.columns.saturating_sub(1)
+            },
+        },
+    ))
+}
+
 fn selection_is_retained(snapshot: &TerminalSnapshot, selection: Selection) -> bool {
-    if selection.anchor.active_screen != snapshot.active_screen
-        || selection.end.active_screen != snapshot.active_screen
-        || selection.anchor.history_generation != snapshot.history_generation
-        || selection.end.history_generation != snapshot.history_generation
-    {
-        return false;
-    }
-    let contains = |row_id| {
-        snapshot
-            .scrollback_rows
-            .iter()
-            .chain(&snapshot.visible_rows)
-            .any(|row| row.row_id == Some(row_id))
-    };
-    contains(selection.anchor.row_id) && contains(selection.end.row_id)
+    selection_range(snapshot, selection).is_some()
 }
 
 fn selection_text(snapshot: &TerminalSnapshot, selection: Selection) -> Option<String> {
-    let (start, end) = selection_bounds(snapshot, selection)?;
+    let range = selection_range(snapshot, selection)?;
+    let rows = snapshot
+        .scrollback_rows
+        .iter()
+        .chain(&snapshot.visible_rows);
     let mut output = String::new();
-    for row_index in start.row..=end.row.min(snapshot.rows.saturating_sub(1)) {
-        let Some(row) = snapshot.visible_rows.get(row_index) else {
-            continue;
-        };
-        let first = if row_index == start.row {
-            start.column
+    for (row_index, row) in rows
+        .enumerate()
+        .skip(range.start_row)
+        .take(range.end_row.saturating_sub(range.start_row) + 1)
+    {
+        let first = if row_index == range.start_row {
+            range.start_column
         } else {
             0
         };
-        let last = if row_index == end.row {
-            end.column
+        let last = if row_index == range.end_row {
+            range.end_column
         } else {
             snapshot.columns.saturating_sub(1)
         };
@@ -1260,7 +1299,7 @@ fn selection_text(snapshot: &TerminalSnapshot, selection: Selection) -> Option<S
             }
         }
         output.push_str(line.trim_end_matches(' '));
-        if row_index != end.row {
+        if row_index != range.end_row {
             output.push('\n');
         }
     }
@@ -1917,8 +1956,9 @@ impl App {
 
     fn dirty_selection(&mut self, selection: Option<Selection>) {
         let bounds = selection.and_then(|selection| {
-            self.display_snapshot()
-                .and_then(|snapshot| selection_bounds(&snapshot, selection))
+            let snapshot = self.snapshot.as_ref()?;
+            let display = self.display_snapshot()?;
+            selection_display_bounds(snapshot, &display, selection)
         });
         if let Some((start, end)) = bounds {
             for row in start.row..=end.row {
@@ -1933,8 +1973,11 @@ impl App {
         }
         self.selected_text = None;
         self.hovered_url = None;
-        self.pressed_buttons
-            .retain(|_, owner| matches!(owner, PressOwner::Application { .. }));
+        let selecting = self.selecting;
+        self.pressed_buttons.retain(|_, owner| {
+            matches!(owner, PressOwner::Application { .. })
+                || selecting && matches!(owner, PressOwner::Selection)
+        });
     }
 
     fn invalidate_local_content_state(&mut self) {
@@ -2813,8 +2856,9 @@ impl App {
         let width_i32 = i32::try_from(width).context("buffer width fits i32")?;
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
         let resolved_selection = self.selection.and_then(|selection| {
-            self.display_snapshot()
-                .and_then(|snapshot| selection_bounds(&snapshot, selection))
+            let snapshot = self.snapshot.as_ref()?;
+            let display = self.display_snapshot()?;
+            selection_display_bounds(snapshot, &display, selection)
                 .map(|(start, end)| ((start.row, start.column), (end.row, end.column)))
         });
         let buffer = if let Some(buffer) = self.buffer.as_mut() {
@@ -3566,8 +3610,8 @@ impl PointerHandler for App {
                         PressOwner::Selection => {
                             self.selecting = false;
                             self.selected_text = self.selection.and_then(|selection| {
-                                self.display_snapshot().and_then(|snapshot| {
-                                    selection_text(&snapshot, selection).map(String::into_bytes)
+                                self.snapshot.as_ref().and_then(|snapshot| {
+                                    selection_text(snapshot, selection).map(String::into_bytes)
                                 })
                             });
                             self.publish_clipboard(queue_handle, serial, true);
@@ -4538,15 +4582,17 @@ mod tests {
     fn selection_copy_spans_three_loaded_pages_by_row_identity() {
         let mut state = snapshot(SplintId::new(), 1, 1);
         state.columns = 1;
-        state.rows = 48;
-        state.visible_rows = (1..=48)
+        state.rows = 8;
+        let rows = (1..=48)
             .map(|row_id| {
                 let mut row = blank_row(1);
                 row.row_id = Some(row_id);
                 row.cells[0].content = "x".to_owned();
                 row
             })
-            .collect();
+            .collect::<Vec<_>>();
+        state.scrollback_rows = rows[..40].to_vec();
+        state.visible_rows = rows[40..].to_vec();
         let selection = Selection {
             anchor: SelectionEndpoint {
                 active_screen: ActiveScreen::Normal,
@@ -4563,6 +4609,17 @@ mod tests {
         };
         let copied = selection_text(&state, selection).expect("loaded endpoints resolve");
         assert_eq!(copied.lines().count(), 48);
+
+        let mut display = state.clone();
+        display.scrollback_rows.clear();
+        display.visible_rows = rows[19..27].to_vec();
+        assert_eq!(
+            selection_display_bounds(&state, &display, selection),
+            Some((
+                CellPosition { row: 0, column: 0 },
+                CellPosition { row: 7, column: 0 },
+            ))
+        );
     }
 
     #[test]
