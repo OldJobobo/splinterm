@@ -30,7 +30,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 
 use splinterm_core::SplintId;
-use splinterm_freetype::RasterFace;
+use splinterm_freetype::{MAX_PIXEL_SIZE_26_6, MIN_PIXEL_SIZE_26_6, RasterFace};
 use splinterm_protocol::{
     ActiveScreen, CellAttributes, ColorSource, MAX_COLUMNS, MAX_ROWS, ScrollDirection,
     TerminalCell, TerminalInputModes, TerminalRow, TerminalScroll, TerminalSnapshot,
@@ -134,10 +134,15 @@ fn zoomed_font_size(
         FontSize::Pixels(pixels) => pixels * 72.0 / sizing_dpi,
     };
     let points = base_points + f32::from(steps) * FONT_ZOOM_STEP_POINTS;
-    if !points.is_finite() || !(1.0..=96.0).contains(&points) {
-        bail!("runtime font size must remain between 1 and 96 points");
+    if !points.is_finite() || !(6.0..=96.0).contains(&points) {
+        bail!("runtime font size must remain between 6 and 96 points");
     }
     Ok(FontSize::Points(points))
+}
+
+fn effective_raster_size_supported(pixel_size_26_6: u32) -> Result<bool> {
+    let pixels = isize::try_from(pixel_size_26_6).context("effective pixel size fits isize")?;
+    Ok((MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&pixels))
 }
 
 fn configured_zoom_steps() -> Result<i16> {
@@ -191,6 +196,9 @@ pub(crate) fn set_font_zoom_steps(steps: i16, surface_scale_120: u32) -> Result<
         surface_scale_120,
         &observation,
     )?;
+    if !effective_raster_size_supported(next.effective_pixel_size_26_6)? {
+        return Ok(None);
+    }
     FONT_ZOOM_STEPS.store(i32::from(steps), Ordering::Relaxed);
     Ok(Some(
         previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6,
@@ -5771,7 +5779,16 @@ mod tests {
             zoomed_font_size(&options, 1, &observation).unwrap(),
             FontSize::Points(11.5)
         );
-        assert!(zoomed_font_size(&options, -22, &observation).is_err());
+        assert_eq!(
+            zoomed_font_size(&options, -10, &observation).unwrap(),
+            FontSize::Points(6.0)
+        );
+        assert!(zoomed_font_size(&options, -11, &observation).is_err());
+        assert!(!effective_raster_size_supported(6 * 64 - 1).unwrap());
+        assert!(effective_raster_size_supported(6 * 64).unwrap());
+        let maximum = u32::try_from(MAX_PIXEL_SIZE_26_6).unwrap();
+        assert!(effective_raster_size_supported(maximum).unwrap());
+        assert!(!effective_raster_size_supported(maximum + 1).unwrap());
     }
 
     #[test]
