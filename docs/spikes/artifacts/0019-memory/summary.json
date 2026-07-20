@@ -36,7 +36,9 @@
     "client_runtime_commit": "b25f5112d6f4455c6ed37d9d505ac0b2b570f0bf",
     "client_worker_threads": 2,
     "lazy_font_data_commit": "4bad8e6da9648b9934e48756d37213820ce5b80c",
-    "eager_font_data_bytes_removed_from_ascii_startup": 30158264
+    "eager_font_data_bytes_removed_from_ascii_startup": 30158264,
+    "file_mapped_font_data_commit": "7a9e382f65c2964706d615c15bd9fcffaacd2fe5",
+    "font_mapping_boundary": "splinterm-filemap"
   },
   "isolated_daemon_smoke": {
     "development_socket": true,
@@ -48,8 +50,19 @@
     "anonymous_mappings_over_1_mib": 0,
     "large_anonymous_mapping_rss_kib": 0
   },
+  "heaptrack": {
+    "fresh_client_peak_heap_mib": 57.3,
+    "fresh_client_font_byte_buffers_mib": 35.1,
+    "fresh_client_json_deserialization_mib": 14.54,
+    "fresh_client_protocol_buffers_mib": 4.19,
+    "mapped_mixed_font_renderer_peak_heap_mib": 1.11,
+    "mapped_renderer_fixture": "ASCII, CJK, and emoji",
+    "comparison_scope": "The renderer capture proves removal of heap-copied font files; it is not a full-client RSS comparison."
+  },
   "validation": {
-    "splinterm_tests": 128,
+    "splinterm_tests": 129,
+    "filemap_tests": 2,
+    "oracle_tests": 39,
     "splinterd_library_tests": 9,
     "splinterd_binary_tests": 13,
     "splinterd_end_to_end_tests": 1,
@@ -58,7 +71,8 @@
   },
   "limitations": [
     "The installed daemon was not restarted because doing so would terminate its live shell.",
-    "Post-install ASCII client RSS with lazy CJK and emoji data remains to be measured in the user's real window.",
-    "The isolated daemon smoke is bounded diagnostic evidence, not a replacement for the committed Phase 9 baseline."
+    "Post-install client RSS with file-mapped fonts remains to be measured in the user's real window.",
+    "The isolated daemon smoke is bounded diagnostic evidence, not a replacement for the committed Phase 9 baseline.",
+    "The fresh Heaptrack window escaped workspace 8 and briefly took focus despite pre-map placement; it was immediately closed, focus returned to Foot, the pointer remained unchanged, and the launch method was not retried."
   ]
 }
