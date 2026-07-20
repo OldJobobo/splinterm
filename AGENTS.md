@@ -3,7 +3,6 @@
 ## Cost and delegation stop-loss
 
 - Work directly by default. Do not launch a subagent unless the user explicitly approves that specific launch.
-- Never launch parallel subagents or agent chains.
 - Launch at most one subagent at a time.
 - Delegate only one bounded diagnosis or localized edit. Never delegate an entire plan slice or broad architecture rewrite.
 - Cap an approved subagent at 8 assistant turns and 25 tool calls.
