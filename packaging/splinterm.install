@@ -1,0 +1,13 @@
+post_install() {
+  echo 'Splinterm installed as a private prerelease.'
+  echo 'Copy /usr/share/doc/splinterm/omarchy/10-splinterm.sh into ~/.config/omarchy/hooks/theme-set.d/ for theme switching.'
+  echo 'Add com.oldjobobo.splinterm.desktop to ~/.config/xdg-terminals.list when ready to make it preferred.'
+}
+
+post_upgrade() {
+  echo 'Restart running user splinterd services after protocol upgrades; the launcher does this when ping negotiation fails.'
+}
+
+post_remove() {
+  echo 'User-owned Splinterm configuration and runtime state were preserved.'
+}

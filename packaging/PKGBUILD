@@ -1,0 +1,74 @@
+# Maintainer: OldJobobo
+pkgname=splinterm
+pkgver=0.1.0.pre
+pkgrel=1
+pkgdesc='Persistent Omarchy-native Wayland terminal (private prerelease)'
+arch=('x86_64')
+url='https://github.com/oldjobobo/splinterm'
+license=('MIT')
+depends=(
+  'fontconfig'
+  'freetype2'
+  'gcc-libs'
+  'glibc'
+  'libxkbcommon'
+  'noto-fonts-cjk'
+  'noto-fonts-emoji'
+  'pixman'
+  'ttf-jetbrains-mono-nerd-basic'
+  'wayland'
+  'xdg-terminal-exec'
+)
+makedepends=('cargo' 'pkgconf' 'rust')
+optdepends=('fcitx5: Wayland text-input support')
+install=splinterm.install
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP') # Local archive is generated from the reviewed Git commit.
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CARGO_TARGET_DIR=target
+  export RUSTUP_TOOLCHAIN=stable
+  cargo build --frozen --release -p splinterm -p splinterd -p splinterm-pty
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export CARGO_TARGET_DIR=target
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  install -Dm755 target/release/splinterm "$pkgdir/usr/bin/splinterm"
+  install -Dm755 target/release/splinterd "$pkgdir/usr/bin/splinterd"
+  install -Dm755 target/release/splinterm-pty-child "$pkgdir/usr/bin/splinterm-pty-child"
+  install -Dm755 dist/bin/splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-xdg-terminal-exec"
+  install -Dm755 tools/generate-omarchy-theme.py "$pkgdir/usr/bin/generate-omarchy-theme.py"
+
+  install -Dm644 dist/applications/com.oldjobobo.splinterm.desktop \
+    "$pkgdir/usr/share/applications/com.oldjobobo.splinterm.desktop"
+  install -Dm644 dist/metainfo/com.oldjobobo.splinterm.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/com.oldjobobo.splinterm.metainfo.xml"
+  install -Dm644 dist/icons/com.oldjobobo.splinterm.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg"
+  install -Dm644 dist/systemd/user/splinterd.service \
+    "$pkgdir/usr/lib/systemd/user/splinterd.service"
+
+  install -Dm644 config/splinterm/config.ini "$pkgdir/usr/share/doc/splinterm/config.ini"
+  install -Dm644 config/splinterm/theme.json "$pkgdir/usr/share/doc/splinterm/theme.json"
+  install -Dm644 config/omarchy/hooks/theme-set.d/10-splinterm.sh \
+    "$pkgdir/usr/share/doc/splinterm/omarchy/10-splinterm.sh"
+  install -Dm644 dist/xdg-terminals.list "$pkgdir/usr/share/doc/splinterm/xdg-terminals.list"
+  install -Dm644 docs/packaging.md "$pkgdir/usr/share/doc/splinterm/packaging.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/splinterm/LICENSE"
+  install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/licenses/splinterm/THIRD_PARTY.md"
+}

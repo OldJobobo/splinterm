@@ -1,4 +1,39 @@
 #!/bin/sh
 # Stable xdg-terminal-exec target. Arguments remain distinct argv entries.
 set -eu
+
+ping() {
+  splinterm ping >/dev/null 2>&1
+}
+
+wait_for_daemon() {
+  attempt=0
+  while ! ping; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge 50 ] && return 1
+    sleep 0.05
+  done
+}
+
+if ! ping; then
+  if [ -n "${SPLINTERM_SOCKET:-}" ]; then
+    printf 'splinterm: development socket is unavailable or incompatible\n' >&2
+    exit 1
+  fi
+  if ! command -v systemctl >/dev/null 2>&1 \
+    || ! systemctl --user start splinterd.service; then
+    printf 'splinterm: could not start splinterd.service\n' >&2
+    exit 1
+  fi
+  if ! wait_for_daemon; then
+    # An older active daemon may use an incompatible protocol. A package
+    # upgrade cannot preserve that process, so restart it explicitly.
+    systemctl --user restart splinterd.service
+    wait_for_daemon || {
+      printf 'splinterm: daemon did not become ready\n' >&2
+      exit 1
+    }
+  fi
+fi
+
 exec splinterm launch "$@"
