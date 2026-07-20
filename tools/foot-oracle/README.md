@@ -270,6 +270,24 @@ uses Foot's observable order for full and dirty-row paths, with a focused
 overhang regression test. The matrix additionally resolved Foot's two-thirds
 dim intensity and opaque block/one-pixel underline cursor composition.
 
+### Provenance gates
+
+Validate repository-owned hashes and policy on every worker:
+
+```bash
+python tools/foot-oracle/check-provenance.py --portable
+```
+
+On the declared Omarchy reference host, omit `--portable` to require exact OS,
+architecture, native/Rust versions, all six resolved font files/indexes/hashes,
+active fontconfig fingerprint, environment, patches, and Cargo.lock. CI uses
+`--ci-host`: unsupported workers print `UNSUPPORTED_ORACLE_HOST` and exit 77;
+a supported worker with any drift fails normally. The optional self-hosted
+`splinterm-oracle` job runs a strict default matrix cell and uploads its failure
+directory. Reference changes require reviewed old/new metrics, heatmaps,
+provenance, and ADR 0004 updates where behavior changes; no command silently
+regenerates accepted references.
+
 ### Slice 3 decoration/cursor v2
 
 Slice 3 keeps v1 closed and adds separate, truthful artifacts:
