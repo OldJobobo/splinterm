@@ -163,7 +163,7 @@ def sha256(path: Path) -> str:
 def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     provenance_path = ROOT / "tools/foot-oracle/provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    if provenance.get("schema") != 2:
+    if provenance.get("schema") != 3:
         raise ValueError("unsupported oracle provenance schema")
     source = Path(os.environ.get("FOOT_SOURCE", Path.home() / "Playground/foot"))
     revision = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True)
