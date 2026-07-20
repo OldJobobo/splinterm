@@ -75,7 +75,7 @@ use wayland_client::{
 
 use splinterm_core::SplintId;
 use splinterm_protocol::{
-    CellAttributes, ColorSource, HistoryTransition, MouseTracking, TerminalCell,
+    ActiveScreen, CellAttributes, ColorSource, HistoryTransition, MouseTracking, TerminalCell,
     TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
 };
 
@@ -133,6 +133,7 @@ pub(crate) struct CellPosition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SelectionEndpoint {
+    active_screen: ActiveScreen,
     history_generation: u64,
     row_id: u64,
     column: usize,
@@ -825,6 +826,22 @@ fn bound_history_cache(rows: &mut Vec<TerminalRow>, keep_oldest: bool) {
     }
 }
 
+fn bound_history_page_with_pins(
+    mut rows: Vec<TerminalRow>,
+    pinned_selection_rows: Option<[u64; 2]>,
+    visible_rows: &[TerminalRow],
+) -> Option<Vec<TerminalRow>> {
+    bound_history_cache(&mut rows, false);
+    pinned_selection_rows
+        .is_none_or(|pins| {
+            pins.into_iter().all(|row_id| {
+                rows.iter().any(|row| row.row_id == Some(row_id))
+                    || visible_rows.iter().any(|row| row.row_id == Some(row_id))
+            })
+        })
+        .then_some(rows)
+}
+
 fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
     !update.rows.is_empty()
         || !update.scrolls.is_empty()
@@ -1164,6 +1181,7 @@ fn selection_endpoint(
 ) -> Option<SelectionEndpoint> {
     let row_id = snapshot.visible_rows.get(position.row)?.row_id?;
     Some(SelectionEndpoint {
+        active_screen: snapshot.active_screen,
         history_generation: snapshot.history_generation,
         row_id,
         column: position.column,
@@ -1174,7 +1192,9 @@ fn selection_bounds(
     snapshot: &TerminalSnapshot,
     selection: Selection,
 ) -> Option<(CellPosition, CellPosition)> {
-    if selection.anchor.history_generation != snapshot.history_generation
+    if selection.anchor.active_screen != snapshot.active_screen
+        || selection.end.active_screen != snapshot.active_screen
+        || selection.anchor.history_generation != snapshot.history_generation
         || selection.end.history_generation != snapshot.history_generation
     {
         return None;
@@ -1196,6 +1216,24 @@ fn selection_bounds(
     } else {
         (end, anchor)
     })
+}
+
+fn selection_is_retained(snapshot: &TerminalSnapshot, selection: Selection) -> bool {
+    if selection.anchor.active_screen != snapshot.active_screen
+        || selection.end.active_screen != snapshot.active_screen
+        || selection.anchor.history_generation != snapshot.history_generation
+        || selection.end.history_generation != snapshot.history_generation
+    {
+        return false;
+    }
+    let contains = |row_id| {
+        snapshot
+            .scrollback_rows
+            .iter()
+            .chain(&snapshot.visible_rows)
+            .any(|row| row.row_id == Some(row_id))
+    };
+    contains(selection.anchor.row_id) && contains(selection.end.row_id)
 }
 
 fn selection_text(snapshot: &TerminalSnapshot, selection: Selection) -> Option<String> {
@@ -1805,7 +1843,7 @@ impl App {
             return Ok(false);
         }
         self.scroll_started_at.get_or_insert_with(Instant::now);
-        self.invalidate_local_content_state();
+        self.invalidate_viewport_local_state();
         self.refresh_ime_preedit()?;
         self.update_ime_cursor_rectangle();
         // Coalesce high-resolution wheel events until the next compositor frame.
@@ -1889,17 +1927,34 @@ impl App {
         }
     }
 
-    fn invalidate_local_content_state(&mut self) {
-        self.dirty_selection(self.selection);
+    fn invalidate_viewport_local_state(&mut self) {
         if let Some((start, _, _)) = &self.hovered_url {
             self.dirty_row(start.row);
         }
-        self.selection = None;
         self.selected_text = None;
-        self.selecting = false;
         self.hovered_url = None;
         self.pressed_buttons
             .retain(|_, owner| matches!(owner, PressOwner::Application { .. }));
+    }
+
+    fn invalidate_local_content_state(&mut self) {
+        self.dirty_selection(self.selection);
+        self.selection = None;
+        self.selecting = false;
+        self.invalidate_viewport_local_state();
+    }
+
+    fn reconcile_selection_after_content_change(&mut self) {
+        let retained = self.selection.is_none_or(|selection| {
+            self.snapshot
+                .as_ref()
+                .is_some_and(|snapshot| selection_is_retained(snapshot, selection))
+        });
+        if !retained {
+            self.selection = None;
+            self.selecting = false;
+        }
+        self.invalidate_viewport_local_state();
     }
 
     fn recompute_hovered_url(&mut self) {
@@ -2358,7 +2413,7 @@ impl App {
                         full = true;
                     }
                     if content_changed {
-                        self.invalidate_local_content_state();
+                        self.reconcile_selection_after_content_change();
                     }
                     let snapshot = self
                         .snapshot
@@ -2423,6 +2478,9 @@ impl App {
                 }
                 WindowUpdate::ScrollbackPages(pages) => {
                     self.history_page_pending = false;
+                    let pinned_selection_rows = self
+                        .selection
+                        .map(|selection| [selection.anchor.row_id, selection.end.row_id]);
                     let snapshot = self
                         .snapshot
                         .as_mut()
@@ -2458,17 +2516,23 @@ impl App {
                         })
                         .collect::<Vec<_>>();
                     if !older.is_empty() {
-                        older.append(&mut snapshot.scrollback_rows);
-                        snapshot.scrollback_rows = older;
-                        // Keep one contiguous newest history window. Evicting from the
-                        // newest edge would create a gap that cannot be paged forward.
-                        bound_history_cache(&mut snapshot.scrollback_rows, false);
-                        snapshot.omitted_oldest_scrollback_rows = snapshot
-                            .available_scrollback_rows
-                            .saturating_sub(snapshot.scrollback_rows.len());
-                        if let Some((oldest, newest)) = metadata {
-                            snapshot.oldest_available_scrollback_row_id = oldest;
-                            snapshot.newest_available_scrollback_row_id = newest;
+                        older.extend(snapshot.scrollback_rows.iter().cloned());
+                        // Keep one contiguous newest history window. If normal bounding
+                        // would remove a selected endpoint, reject this older batch so the
+                        // existing bounded endpoint window remains pinned and pageable.
+                        if let Some(older) = bound_history_page_with_pins(
+                            older,
+                            pinned_selection_rows,
+                            &snapshot.visible_rows,
+                        ) {
+                            snapshot.scrollback_rows = older;
+                            snapshot.omitted_oldest_scrollback_rows = snapshot
+                                .available_scrollback_rows
+                                .saturating_sub(snapshot.scrollback_rows.len());
+                            if let Some((oldest, newest)) = metadata {
+                                snapshot.oldest_available_scrollback_row_id = oldest;
+                                snapshot.newest_available_scrollback_row_id = newest;
+                            }
                         }
                     }
                 }
@@ -4410,11 +4474,13 @@ mod tests {
         view.visible_rows[1].cells[1].content = "C".to_owned();
         let selection = Selection {
             anchor: SelectionEndpoint {
+                active_screen: ActiveScreen::Normal,
                 history_generation: 1,
                 row_id: 2,
                 column: 1,
             },
             end: SelectionEndpoint {
+                active_screen: ActiveScreen::Normal,
                 history_generation: 1,
                 row_id: 1,
                 column: 0,
@@ -4429,6 +4495,90 @@ mod tests {
             ..selection
         };
         assert_eq!(selection_text(&view, stale), None);
+    }
+
+    #[test]
+    fn selection_identity_survives_live_to_history_and_rejects_reset_or_trim() {
+        let mut state = snapshot(SplintId::new(), 1, 1);
+        state.columns = 1;
+        state.rows = 2;
+        state.visible_rows = vec![blank_row(1), blank_row(1)];
+        state.visible_rows[0].row_id = Some(10);
+        state.visible_rows[1].row_id = Some(11);
+        let selection = Selection {
+            anchor: SelectionEndpoint {
+                active_screen: ActiveScreen::Normal,
+                history_generation: 1,
+                row_id: 10,
+                column: 0,
+            },
+            end: SelectionEndpoint {
+                active_screen: ActiveScreen::Normal,
+                history_generation: 1,
+                row_id: 11,
+                column: 0,
+            },
+        };
+        assert!(selection_is_retained(&state, selection));
+
+        let moved = state.visible_rows.remove(0);
+        state.scrollback_rows.push(moved);
+        state.rows = 1;
+        assert!(selection_is_retained(&state, selection));
+        state.history_generation = 2;
+        assert!(!selection_is_retained(&state, selection));
+        state.history_generation = 1;
+        state.scrollback_rows.clear();
+        assert!(!selection_is_retained(&state, selection));
+        state.active_screen = ActiveScreen::Alternate;
+        assert!(!selection_is_retained(&state, selection));
+    }
+
+    #[test]
+    fn selection_copy_spans_three_loaded_pages_by_row_identity() {
+        let mut state = snapshot(SplintId::new(), 1, 1);
+        state.columns = 1;
+        state.rows = 48;
+        state.visible_rows = (1..=48)
+            .map(|row_id| {
+                let mut row = blank_row(1);
+                row.row_id = Some(row_id);
+                row.cells[0].content = "x".to_owned();
+                row
+            })
+            .collect();
+        let selection = Selection {
+            anchor: SelectionEndpoint {
+                active_screen: ActiveScreen::Normal,
+                history_generation: 1,
+                row_id: 1,
+                column: 0,
+            },
+            end: SelectionEndpoint {
+                active_screen: ActiveScreen::Normal,
+                history_generation: 1,
+                row_id: 48,
+                column: 0,
+            },
+        };
+        let copied = selection_text(&state, selection).expect("loaded endpoints resolve");
+        assert_eq!(copied.lines().count(), 48);
+    }
+
+    #[test]
+    fn page_bounding_rejects_eviction_of_selected_endpoint() {
+        let rows = (1..=u64::try_from(MAX_CACHED_HISTORY_ROWS + 1).unwrap())
+            .map(|row_id| {
+                let mut row = blank_row(1);
+                row.row_id = Some(row_id);
+                row
+            })
+            .collect::<Vec<_>>();
+        assert!(bound_history_page_with_pins(rows.clone(), Some([1, 2]), &[]).is_none());
+        let newest = u64::try_from(MAX_CACHED_HISTORY_ROWS + 1).unwrap();
+        let bounded = bound_history_page_with_pins(rows, Some([newest - 1, newest]), &[])
+            .expect("newest endpoints survive normal oldest-edge eviction");
+        assert_eq!(bounded.len(), MAX_CACHED_HISTORY_ROWS);
     }
 
     #[test]
