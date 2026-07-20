@@ -1190,7 +1190,7 @@ fn key_input(
             };
             modified_tilde(code, modifiers)
         }
-        _ if modes.application_keypad => {
+        _ if modes.application_keypad && keypad_input(keysym).is_some() => {
             let final_byte = keypad_input(keysym)?;
             alt_is_encoded = true;
             modified_final(final_byte, modifiers, true)
@@ -4829,6 +4829,20 @@ mod tests {
         assert_eq!(
             key_input(Keysym::KP_7, Some("7"), Modifiers::default(), modes),
             Some(b"\x1bOw".to_vec())
+        );
+        assert_eq!(
+            key_input(Keysym::colon, Some(":"), Modifiers::default(), modes),
+            Some(b":".to_vec()),
+            "application keypad mode must not consume Neovim commands"
+        );
+        assert_eq!(
+            key_input(Keysym::space, Some(" "), Modifiers::default(), modes),
+            Some(b" ".to_vec()),
+            "application keypad mode must not consume Space leader"
+        );
+        assert_eq!(
+            key_input(Keysym::w, Some("w"), Modifiers::default(), modes),
+            Some(b"w".to_vec())
         );
     }
 
