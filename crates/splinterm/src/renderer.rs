@@ -357,7 +357,7 @@ struct FontFace {
     path: PathBuf,
     index: usize,
     selected_pixel_size_26_6: isize,
-    data: Vec<u8>,
+    data: OnceLock<Result<Vec<u8>, String>>,
 }
 
 struct CachedGlyph {
@@ -1348,7 +1348,6 @@ fn resolve_face(
     if !normalized_expected.is_empty() && !normalized_family.contains(&normalized_expected) {
         bail!("explicit {label} pattern {pattern:?} resolved unexpectedly to {family:?}");
     }
-    let data = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let face = FontFace {
         label,
         family,
@@ -1356,9 +1355,8 @@ fn resolve_face(
         path,
         index,
         selected_pixel_size_26_6,
-        data,
+        data: OnceLock::new(),
     };
-    let _ = font_ref(&face)?;
     eprintln!(
         "Selected {label}: {} {} (face {}, {})",
         face.family,
@@ -1406,8 +1404,20 @@ fn verify_style_advances(regular: &FontFace, regular_advance: f32, font_size: f3
     Ok(())
 }
 
+fn font_data(face: &FontFace) -> Result<&[u8]> {
+    face.data
+        .get_or_init(|| {
+            fs::read(&face.path)
+                .with_context(|| format!("read {}", face.path.display()))
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
 fn font_ref(face: &FontFace) -> Result<FontRef<'_>> {
-    FontRef::from_index(&face.data, face.index).with_context(|| {
+    FontRef::from_index(font_data(face)?, face.index).with_context(|| {
         format!(
             "parse {} face {} with Swash",
             face.path.display(),
@@ -5172,6 +5182,14 @@ mod tests {
             CursorStyle::Block,
         );
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn selected_font_bytes_are_loaded_only_when_the_face_is_used() {
+        let face = resolve_face("lazy CJK test", CJK_FONT, "noto sans cjk").unwrap();
+        assert!(face.data.get().is_none());
+        assert_ne!(font_ref(&face).unwrap().charmap().map('界'), 0);
+        assert!(face.data.get().is_some_and(Result::is_ok));
     }
 
     #[test]
