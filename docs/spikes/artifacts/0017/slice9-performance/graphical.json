@@ -1,0 +1,26 @@
+{
+  "case": "all",
+  "cleanup": {
+    "focus_untouched": true,
+    "workspace_empty": true
+  },
+  "exact": true,
+  "failures": [],
+  "idle": {
+    "context_switches": 0,
+    "cpu_ticks": 0,
+    "rss_bytes": 59953152,
+    "seconds": 2.0,
+    "shm_bytes": 3166464,
+    "warmup_seconds": 2
+  },
+  "schema": "splinterm.performance.graphical.v1",
+  "workload": {
+    "cpu_ticks": 2,
+    "output_ns": 206941974,
+    "process_continuity": true,
+    "reattach_ns": 132330090,
+    "resize_sequence_ns": 206646033,
+    "rss_growth_bytes": 5660672
+  }
+}
