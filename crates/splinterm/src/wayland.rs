@@ -1677,6 +1677,44 @@ fn try_window_command(commands: &Sender<WindowCommand>, command: WindowCommand) 
     })
 }
 
+fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Option<usize> {
+    let row = usize::try_from(snapshot.cursor_row).ok()?;
+    if row >= snapshot.rows {
+        return None;
+    }
+    if let Some(text) = text {
+        let mut column = usize::try_from(snapshot.cursor_column.max(0)).unwrap_or(0);
+        let mut leader: Option<usize> = None;
+        for character in text.chars() {
+            let width = UnicodeWidthChar::width(character).unwrap_or(1).min(2);
+            if width == 0 {
+                if let Some(leader) = leader {
+                    if let Some(cell) = snapshot.visible_rows[row].cells.get_mut(leader) {
+                        cell.content.push(character);
+                    }
+                }
+                continue;
+            }
+            if column >= snapshot.columns || column + width > snapshot.columns {
+                break;
+            }
+            if let Some(cell) = snapshot.visible_rows[row].cells.get_mut(column) {
+                cell.content = character.to_string();
+                cell.spacer_remaining = None;
+            }
+            leader = Some(column);
+            if width == 2 {
+                if let Some(spacer) = snapshot.visible_rows[row].cells.get_mut(column + 1) {
+                    spacer.content.clear();
+                    spacer.spacer_remaining = Some(1);
+                }
+            }
+            column += width;
+        }
+    }
+    Some(row)
+}
+
 fn cursor_blink_enabled(reduced_motion: bool, focused: bool, modes: TerminalInputModes) -> bool {
     !reduced_motion && focused && modes.cursor_visible && modes.cursor_blink
 }
@@ -2605,54 +2643,25 @@ impl App {
     }
 
     fn refresh_ime_preedit(&mut self) -> Result<()> {
-        let (Some(snapshot), Some(frame)) = (&self.snapshot, &mut self.snapshot_frame) else {
+        // The prepared frame represents the display viewport, which may be
+        // detached from the live grid. Refreshing it from `self.snapshot`
+        // corrupts an unrelated history row when focus loss clears preedit.
+        let Some(mut render_snapshot) = self.display_snapshot() else {
             return Ok(());
         };
-        let Ok(row) = usize::try_from(snapshot.cursor_row) else {
+        let Some(row) =
+            apply_ime_preedit(&mut render_snapshot, self.ime.visible_preedit.as_deref())
+        else {
             return Ok(());
         };
-        if row >= snapshot.rows {
+        let Some(frame) = &mut self.snapshot_frame else {
             return Ok(());
-        }
-        let mut render_snapshot = snapshot.clone();
-        if let Some(text) = self.ime.visible_preedit.as_deref() {
-            let mut column = usize::try_from(snapshot.cursor_column.max(0)).unwrap_or(0);
-            let mut leader: Option<usize> = None;
-            for character in text.chars() {
-                let width = UnicodeWidthChar::width(character).unwrap_or(1).min(2);
-                if width == 0 {
-                    if let Some(leader) = leader {
-                        if let Some(cell) = render_snapshot.visible_rows[row].cells.get_mut(leader)
-                        {
-                            cell.content.push(character);
-                        }
-                    }
-                    continue;
-                }
-                if column >= render_snapshot.columns || column + width > render_snapshot.columns {
-                    break;
-                }
-                if let Some(cell) = render_snapshot.visible_rows[row].cells.get_mut(column) {
-                    cell.content = character.to_string();
-                    cell.spacer_remaining = None;
-                }
-                leader = Some(column);
-                if width == 2 {
-                    if let Some(spacer) =
-                        render_snapshot.visible_rows[row].cells.get_mut(column + 1)
-                    {
-                        spacer.content.clear();
-                        spacer.spacer_remaining = Some(1);
-                    }
-                }
-                column += width;
-            }
-        }
-        let mut dirty = vec![false; snapshot.rows];
+        };
+        let mut dirty = vec![false; render_snapshot.rows];
         dirty[row] = true;
         frame.refresh_rows(&render_snapshot, &dirty)?;
-        self.raster_dirty_rows.resize(snapshot.rows, false);
-        self.surface_dirty_rows.resize(snapshot.rows, false);
+        self.raster_dirty_rows.resize(render_snapshot.rows, false);
+        self.surface_dirty_rows.resize(render_snapshot.rows, false);
         self.raster_dirty_rows[row] = true;
         self.surface_dirty_rows[row] = true;
         Ok(())
@@ -4397,6 +4406,7 @@ impl Dispatch<ZwpTextInputV3, ()> for App {
             }
             zwp_text_input_v3::Event::Leave { surface } => {
                 if surface == *state.window.wl_surface() {
+                    state.ime.entered = false;
                     state.clear_ime_preedit();
                     if state.configured {
                         if let Err(error) = state.schedule_draw(queue_handle) {
@@ -5387,6 +5397,45 @@ mod tests {
 
         ime.set_preedit(Some("x".repeat(MAX_PREEDIT_BYTES + 1)));
         assert!(!ime.composing());
+    }
+
+    #[test]
+    fn detached_ime_repaint_targets_the_display_cursor_row_only() {
+        let mut display = snapshot(SplintId::new(), 1, 1);
+        display.columns = 2;
+        display.rows = 3;
+        display.cursor_column = 0;
+        display.cursor_row = 1;
+        display.visible_rows = ["a0", "b1", "c2"]
+            .map(|text| {
+                let mut row = blank_row(2);
+                for (cell, character) in row.cells.iter_mut().zip(text.chars()) {
+                    cell.content = character.to_string();
+                }
+                row
+            })
+            .into();
+
+        assert_eq!(apply_ime_preedit(&mut display, Some("Z")), Some(1));
+        let contents = display
+            .visible_rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| &cell.content)
+                    .cloned()
+                    .collect()
+            })
+            .collect::<Vec<String>>();
+        assert_eq!(contents, ["a0", "Z1", "c2"]);
+
+        display.cursor_row = -1;
+        assert_eq!(apply_ime_preedit(&mut display, None), None);
+        assert_eq!(
+            display.visible_rows[0].cells[0].content, "a",
+            "a hidden live cursor must not replace a visible history row"
+        );
     }
 
     #[test]
