@@ -1,0 +1,105 @@
+{
+  "cases": [
+    {
+      "exact": true,
+      "id": "ascii",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "spacing-punctuation",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "narrow-iiii",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "wide-WWWW",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "dots",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "underscores",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "bars",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "drift-80",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "drift-240",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "edge-cells",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "reverse",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "dim",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "conceal",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "cursor-block",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "cursor-beam",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    },
+    {
+      "exact": true,
+      "id": "cursor-underline",
+      "maximum_channel_delta": 0,
+      "mismatch_pixels": 0
+    }
+  ],
+  "exact": true,
+  "foot_commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+  "manifest": "/home/oldjobobo/Projects/splinterm/tools/foot-oracle/final-buffer-fixtures.json",
+  "provenance_schema": 3,
+  "schema": "splinterm.final-buffer-matrix.v1"
+}

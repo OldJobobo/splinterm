@@ -1,0 +1,202 @@
+{
+  "active_workspace_after": {
+    "hasfullscreen": false,
+    "id": 1,
+    "ispersistent": false,
+    "lastwindow": "0x558680da25a0",
+    "lastwindowtitle": "oldjobobo@wintermute:~",
+    "monitor": "DP-1",
+    "monitorID": 0,
+    "name": "1",
+    "tiledLayout": "scrolling",
+    "windows": 2
+  },
+  "active_workspace_before": {
+    "hasfullscreen": false,
+    "id": 1,
+    "ispersistent": false,
+    "lastwindow": "0x558680da25a0",
+    "lastwindowtitle": "oldjobobo@wintermute:~",
+    "monitor": "DP-1",
+    "monitorID": 0,
+    "name": "1",
+    "tiledLayout": "scrolling",
+    "windows": 2
+  },
+  "captures": {
+    "alternate": {
+      "file": "alternate.png",
+      "height": 460,
+      "sha256": "ffde802f7e55f2f795d4e7f7b126498e730a9f578306516ff135e8dbaf0463c5",
+      "width": 700
+    },
+    "clear": {
+      "file": "clear.png",
+      "height": 460,
+      "sha256": "930cb99de6e85b9f2c6828460f8950a435ea3532134e41ceb12a9f5750a7d98c",
+      "width": 700
+    },
+    "interaction": {
+      "file": "interaction.png",
+      "height": 480,
+      "sha256": "14a1723e278576a99e759d781d97098fe8ffd20ef9674d97dea22556fa67c8ce",
+      "width": 720
+    },
+    "reattached": {
+      "file": "reattached.png",
+      "height": 480,
+      "sha256": "66d30a8481f95c1c52484bba088d7e6b2687888a6a1ae1d2548539dfeb030d16",
+      "width": 720
+    },
+    "resync": {
+      "file": "resync.png",
+      "height": 460,
+      "sha256": "474af9e109b97300e3594f26498df1ffd24d424f5817154ab9573eb7c2347805",
+      "width": 700
+    }
+  },
+  "cleanup": {
+    "focus_untouched": true,
+    "monitor_restored": true,
+    "workspace_empty": true
+  },
+  "exact": true,
+  "host": {
+    "architecture": "x86_64",
+    "git_commit": "0bd981e92240753c58f79beb30ecf74354b618f0",
+    "hyprland": "Hyprland 0.55.4 built from branch v0.55.4 at commit a0136d8c04687bb36eb8a28eb9d1ff92aea99704 clean ([gha] Nix: update inputs).\nDate: Thu Jun 11 17:10:04 2026\nTag: v0.55.4, commits: 7378\n\nLibraries:\nHyprgraphics: built against 0.5.1, system has 0.5.1\nHyprutils: built against 0.13.1, system has 0.13.1\nHyprcursor: built against 0.1.13, system has 0.1.13\nHyprlang: built against 0.6.8, system has 0.6.8\nAquamarine: built against 0.12.0, system has 0.12.1\n\nVersion ABI string: a0136d8c04687bb36eb8a28eb9d1ff92aea99704_aq_0.12_hu_0.13_hg_0.5_hc_0.1_hlg_0.6\nno flags were set",
+    "os": "Linux-7.1.3-arch2-1-x86_64-with-glibc2.43",
+    "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)"
+  },
+  "interactions": {
+    "elapsed_ms": 29462,
+    "error": null,
+    "evidence": [
+      {
+        "anchor_row_id": 14526,
+        "check": "cross_page_selection",
+        "end_row_id": 15578,
+        "row_id_span": 1052
+      },
+      {
+        "check": "selection_during_detached_output",
+        "retained": true,
+        "revision_after": 63028,
+        "revision_before": 63002,
+        "unseen_rows": 2
+      },
+      {
+        "check": "cross_page_copy",
+        "content_recorded": false,
+        "copied_bytes": 4215
+      },
+      {
+        "after": 143,
+        "before": 146,
+        "check": "local_history_wheel"
+      },
+      {
+        "available_rows": 6988,
+        "bounded": true,
+        "bounded_eviction_observed": false,
+        "byte_capacity_hit": false,
+        "check": "client_history_cache",
+        "loaded_bytes": 14053376,
+        "loaded_rows": 4096,
+        "offset": 4096,
+        "omitted_oldest_rows": 3921,
+        "row_capacity_hit": true
+      },
+      {
+        "bytes": 10,
+        "check": "application_mouse_wheel",
+        "content_recorded": false,
+        "reports": 1,
+        "sgr": true,
+        "tracking": "Normal"
+      },
+      {
+        "check": "return_to_live",
+        "offset": 0
+      }
+    ],
+    "exact": true,
+    "schema": "splinterm.signoff.interactions.v1",
+    "state": {
+      "available_history_rows": 7011,
+      "first_loaded_row_id": 7562,
+      "history_page_pending": false,
+      "loaded_history_bytes": 14053420,
+      "loaded_history_rows": 4096,
+      "mouse_tracking": "Normal",
+      "omitted_oldest_rows": 2915,
+      "revision": 63340,
+      "selection_active": false,
+      "viewport_offset": 0
+    },
+    "step": "Complete"
+  },
+  "lifecycle": {
+    "child_pids_after": [
+      2725458
+    ],
+    "child_pids_before": [
+      2725458,
+      2729489
+    ],
+    "daemon_pid": 2725392,
+    "forced_resync_trace_count": 2,
+    "initial_window_pid": 2725434,
+    "process_continuity": true
+  },
+  "performance": {
+    "after": {
+      "cpu_ticks": 209,
+      "rss_bytes": 108949504
+    },
+    "before": {
+      "cpu_ticks": 5,
+      "rss_bytes": 60067840
+    }
+  },
+  "scales": [
+    {
+      "file": "scale-120.png",
+      "scale_120": 120,
+      "sha256": "a781b253f1c90c1fd6e7326bc46e03be286326ac247a8cf706a12b6b8b6cdf56"
+    },
+    {
+      "file": "scale-150.png",
+      "scale_120": 150,
+      "sha256": "201a31361f9153279e0a70f2711bb19330ee71bc59452a1f707e09189e322bd7"
+    },
+    {
+      "file": "scale-180.png",
+      "scale_120": 180,
+      "sha256": "3c7ec8c8693350b45b9dcb42409dfa192de82f6738fa7582097c32ce9cdc28d6"
+    },
+    {
+      "file": "scale-240.png",
+      "scale_120": 240,
+      "sha256": "3c571cfdc759bf22623cbd871c05dd1eacc0e2f8264076a0942d0fdd5048c25a"
+    }
+  ],
+  "schema": "splinterm.signoff.slice10.v1",
+  "window": {
+    "app_id": "com.oldjobobo.splinterm",
+    "monitor": "DP-2",
+    "workspace": 8
+  },
+  "xdg": {
+    "desktop": "com.oldjobobo.splinterm.desktop",
+    "print_cmd": [
+      "splinterm-xdg-terminal-exec",
+      "--working-directory=/tmp",
+      "--",
+      "/bin/sh",
+      "-c",
+      "printf '\\033]0;Slice 10 Interaction\\007'; yes history | head -n 7000; while [ ! -e /tmp/splinterm-slice10-closure/start-stream ]; do sleep 0.02; done; i=0; while [ $i -lt 25 ]; do printf 'stream-%04d\\n' $i; i=$((i+1)); sleep 1; done; while [ ! -e /tmp/splinterm-slice10-closure/enable-mouse ]; do sleep 0.02; done; printf '\\033[?1000h\\033[?1006h'; while [ ! -e /tmp/splinterm-slice10-closure/clear ]; do sleep 0.02; done; printf '\\033[?1000l\\033[?1006l\\033[3J\\033[H\\033[2J\\033]0;Slice 10 Clear\\007CLEAR_OK\\n'; while [ ! -e /tmp/splinterm-slice10-closure/alt ]; do sleep 0.02; done; printf '\\033[?1049h\\033]0;Slice 10 Alternate\\007ALTERNATE_OK\\n'; while [ ! -e /tmp/splinterm-slice10-closure/normal ]; do sleep 0.02; done; printf '\\033[?1049l\\033]0;Slice 10 Normal\\007NORMAL_OK\\n'; while [ ! -e /tmp/splinterm-slice10-closure/burst ]; do sleep 0.02; done; yes forced-resync | head -n 2000; printf '\\033]0;Slice 10 Resync Recovered\\007FORCED_RESYNC_RECOVERED\\n'; while [ ! -e /tmp/splinterm-slice10-closure/detached ]; do sleep 0.02; done; yes detached | head -n 500; printf '\\033]0;Slice 10 Reattached\\007DETACHED_OUTPUT_READY\\n'; sleep 60"
+    ],
+    "working_directory": "/tmp"
+  }
+}
