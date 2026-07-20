@@ -930,6 +930,7 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
 struct Connection {
     stream: UnixStream,
     next_request: u64,
+    read_buffer: Vec<u8>,
 }
 
 impl Connection {
@@ -954,6 +955,7 @@ impl Connection {
         Ok(Self {
             stream,
             next_request: 1,
+            read_buffer: Vec::new(),
         })
     }
 
@@ -969,7 +971,7 @@ impl Connection {
         )
         .await?;
         loop {
-            match read_frame(&mut self.stream).await? {
+            match self.read_server_frame().await? {
                 ServerFrame::Response {
                     request_id: response_id,
                     result,
@@ -997,7 +999,35 @@ impl Connection {
     }
 
     async fn next_server_frame(&mut self) -> Result<ServerFrame> {
-        read_frame(&mut self.stream).await
+        self.read_server_frame().await
+    }
+
+    async fn read_server_frame(&mut self) -> Result<ServerFrame> {
+        loop {
+            if self.read_buffer.len() >= 4 {
+                let length = u32::from_be_bytes(
+                    self.read_buffer[..4]
+                        .try_into()
+                        .expect("four-byte frame prefix"),
+                ) as usize;
+                if length == 0 || length > MAX_FRAME_BYTES {
+                    bail!("splinterd sent an invalid frame length: {length} bytes");
+                }
+                let frame_length = length + 4;
+                if self.read_buffer.len() >= frame_length {
+                    let frame = serde_json::from_slice(&self.read_buffer[4..frame_length])
+                        .context("splinterd sent invalid JSON")?;
+                    self.read_buffer.drain(..frame_length);
+                    return Ok(frame);
+                }
+            }
+            let mut chunk = Box::new([0_u8; 16 * 1024]);
+            let read = self.stream.read(chunk.as_mut_slice()).await?;
+            if read == 0 {
+                bail!("splinterd closed a partial frame");
+            }
+            self.read_buffer.extend_from_slice(&chunk[..read]);
+        }
     }
 
     async fn live_identity(&mut self) -> Result<(SplintId, u64)> {
@@ -1046,7 +1076,7 @@ async fn read_frame(stream: &mut UnixStream) -> Result<ServerFrame> {
     stream.read_exact(&mut length).await?;
     let length = u32::from_be_bytes(length) as usize;
     if length == 0 || length > MAX_FRAME_BYTES {
-        bail!("splinterd sent an oversized frame");
+        bail!("splinterd sent an invalid frame length: {length} bytes");
     }
     let mut body = vec![0_u8; length];
     stream.read_exact(&mut body).await.map_err(|error| {
@@ -1160,6 +1190,45 @@ fn socket_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use splinterm_protocol::{ActiveScreen, TerminalInputModes};
+
+    #[tokio::test]
+    async fn subscribed_frame_read_resumes_after_cancellation() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let expected = ServerFrame::Hello {
+            version: PROTOCOL_VERSION,
+            limits: splinterm_protocol::ServerLimits::default(),
+            development_terminal_access: true,
+        };
+        let encoded = encode_frame(&expected).unwrap();
+        let (prefix_sent, prefix_received) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            server.write_all(&encoded[..4]).await.unwrap();
+            prefix_sent.send(()).unwrap();
+            resume_rx.await.unwrap();
+            server.write_all(&encoded[4..]).await.unwrap();
+        });
+        prefix_received.await.unwrap();
+        let mut connection = Connection {
+            stream: client,
+            next_request: 1,
+            read_buffer: Vec::new(),
+        };
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                connection.next_server_frame()
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(connection.read_buffer.len(), 4);
+        resume_tx.send(()).unwrap();
+        assert_eq!(connection.next_server_frame().await.unwrap(), expected);
+        assert!(connection.read_buffer.is_empty());
+        writer.await.unwrap();
+    }
 
     fn snapshot(revision: u64) -> TerminalSnapshot {
         TerminalSnapshot {
