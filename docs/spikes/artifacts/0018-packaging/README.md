@@ -1,6 +1,6 @@
 # Phase 9 private packaging evidence
 
-The private `0.1.0.pre-1` Arch package was rebuilt from commit `be43e93` with
+The private `0.1.0.pre-1` Arch package was rebuilt from commit `fbfab4a` with
 `tools/package/build-local-package.sh`. `makepkg` compiled release binaries and
 ran workspace tests inside the committed source archive. The package was not
 installed or published.
