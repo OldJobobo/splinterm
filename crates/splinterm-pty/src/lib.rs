@@ -136,7 +136,7 @@ impl PtyCommand {
             environment: BTreeMap::new(),
             inherit_environment: true,
             login_shell: false,
-            term: OsString::from("foot"),
+            term: OsString::from("xterm-256color"),
         }
     }
 
@@ -500,6 +500,12 @@ mod tests {
     }
 
     use std::ffi::OsStr;
+
+    #[test]
+    fn default_terminal_type_matches_the_supported_keyboard_contract() {
+        let spec = PtyCommand::new("/bin/sh", "/tmp");
+        assert_eq!(spec.term, OsStr::new("xterm-256color"));
+    }
 
     #[test]
     fn environment_cleanup_and_last_override_are_explicit() {

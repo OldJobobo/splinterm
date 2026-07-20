@@ -63,13 +63,12 @@ fn command(mode: &str, cwd: &Path) -> PtyCommand {
 }
 
 #[test]
-fn child_has_foot_style_session_terminal_environment_and_cwd() {
+fn child_has_compatible_session_terminal_environment_and_cwd() {
     let cwd = test_directory();
     fs::create_dir(&cwd).unwrap();
     let spec = command("inspect", &cwd)
         .inherit_environment(false)
-        .env("SPLINTERM_PTY_TEST", "present")
-        .term("foot-test");
+        .env("SPLINTERM_PTY_TEST", "present");
     let mut session = backend().spawn(&spec, PtySize::cells(80, 24)).unwrap();
     let output = read_until(&mut session, "FDS=");
     let status = session.wait().unwrap();
@@ -87,7 +86,7 @@ fn child_has_foot_style_session_terminal_environment_and_cwd() {
     assert_eq!(value("TTY="), "111");
     assert_eq!(value("IUTF8="), "1");
     assert_eq!(value("CWD="), cwd.to_str().unwrap());
-    assert_eq!(value("TERM="), "foot-test");
+    assert_eq!(value("TERM="), "xterm-256color");
     assert_eq!(value("COLORTERM="), "truecolor");
     assert_eq!(value("CUSTOM="), "present");
     assert_eq!(value("FOREIGN="), "");

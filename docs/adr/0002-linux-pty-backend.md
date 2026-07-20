@@ -61,13 +61,20 @@ without coupling this crate to an async runtime.
 
 ## Foot compatibility and intentional differences
 
-The backend preserves Foot's default `TERM=foot`, `COLORTERM=truecolor`, `PWD`,
-foreign-terminal environment cleanup, last-wins environment overrides,
-valid-shell `SHELL` assignment, `IUTF8`, session/process-group creation,
-controlling terminal, close-on-exec on every PTY-owned non-stdio descriptor,
-master-side resize, nonblocking I/O, exit polling, and process-group signaling.
+The backend preserves Foot's `COLORTERM=truecolor`, `PWD`, foreign-terminal
+environment cleanup, last-wins environment overrides, valid-shell `SHELL`
+assignment, `IUTF8`, session/process-group creation, controlling terminal,
+close-on-exec on every PTY-owned non-stdio descriptor, master-side resize,
+nonblocking I/O, exit polling, and process-group signaling.
 
 The spike deliberately differs in these areas:
+
+- the default is `TERM=xterm-256color`, not Foot's `TERM=foot`. Splinterm does
+  not yet implement Foot's complete advertised keyboard contract; claiming the
+  Foot terminfo entry causes applications such as Neovim to select input modes
+  that Splinterm cannot encode. A project-owned `TERM=splinterm` remains blocked
+  on an accurate installed terminfo entry and the compatibility matrix in
+  `pre-planning-research.md`;
 
 - target exec failure is reported on the PTY and exits the helper with status
   126 rather than being synchronously returned through Foot's close-on-exec
