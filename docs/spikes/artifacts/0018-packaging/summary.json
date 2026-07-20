@@ -4,14 +4,14 @@
   "private_prerelease": true,
   "published": false,
   "installed": false,
-  "git_commit": "4bad8e6da9648b9934e48756d37213820ce5b80c",
+  "git_commit": "d1622e93eb87555978c06c3157a23e1088fa8ec4",
   "package": {
     "name": "splinterm",
     "version": "0.1.0.pre-1",
     "architecture": "x86_64",
     "file": "splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst",
-    "size_bytes": 3342281,
-    "sha256": "9930834e7c6097d7db7514707958efaaa1ef1baf536e44824bc50bdca844e19c"
+    "size_bytes": 3340000,
+    "sha256": "31c69b4516856c820bf116db11af2d879d37daad14c5d3b1593a5e828122b222"
   },
   "checks": {
     "makepkg_committed_archive": true,
