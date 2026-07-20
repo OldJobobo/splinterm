@@ -71,6 +71,7 @@ pub struct RendererOptions {
     pub font_sizing_policy: FontSizingPolicy,
     pub physical_dpi: f32,
     pub padding: TerminalPadding,
+    pub background_alpha: u16,
 }
 
 impl Default for RendererOptions {
@@ -81,6 +82,7 @@ impl Default for RendererOptions {
             font_sizing_policy: FontSizingPolicy::OutputScale,
             physical_dpi: 96.0,
             padding: TerminalPadding::DEFAULT,
+            background_alpha: u16::MAX,
         }
     }
 }
@@ -1580,6 +1582,28 @@ fn pixman_multiply_unorm8(value: u8, alpha: u32) -> u32 {
     ((product >> 8) + product) >> 8
 }
 
+fn alpha_u8(alpha: u16) -> u8 {
+    u8::try_from(u32::from(alpha) * 255 / u32::from(u16::MAX)).expect("16-bit alpha maps to u8")
+}
+
+fn background_alpha_u8() -> u8 {
+    alpha_u8(renderer_options().background_alpha)
+}
+
+fn premultiplied_rgba(rgb: [u8; 3], alpha: u8) -> [u8; 4] {
+    [
+        u8::try_from(pixman_multiply_unorm8(rgb[0], u32::from(alpha))).unwrap(),
+        u8::try_from(pixman_multiply_unorm8(rgb[1], u32::from(alpha))).unwrap(),
+        u8::try_from(pixman_multiply_unorm8(rgb[2], u32::from(alpha))).unwrap(),
+        alpha,
+    ]
+}
+
+pub(crate) fn configured_background_bgra(rgb: [u8; 3]) -> [u8; 4] {
+    let rgba = premultiplied_rgba(rgb, background_alpha_u8());
+    [rgba[2], rgba[1], rgba[0], rgba[3]]
+}
+
 fn blend_premultiplied_pixel(
     canvas: &mut [u8],
     width: u32,
@@ -1603,7 +1627,12 @@ fn blend_premultiplied_pixel(
         )
         .expect("premultiplied channel fits u8");
     }
-    canvas[index + 3] = 0xff;
+    canvas[index + 3] = u8::try_from(
+        u32::from(rgba[3])
+            .saturating_add(pixman_multiply_unorm8(canvas[index + 3], inverse))
+            .min(255),
+    )
+    .expect("composited alpha fits u8");
 }
 
 fn blend_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba: [u8; 4]) {
@@ -1623,7 +1652,12 @@ fn blend_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba:
         )
         .expect("blended channel fits u8");
     }
-    canvas[index + 3] = 0xff;
+    canvas[index + 3] = u8::try_from(
+        alpha
+            .saturating_add(pixman_multiply_unorm8(canvas[index + 3], inverse))
+            .min(255),
+    )
+    .expect("composited alpha fits u8");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1676,6 +1710,7 @@ pub(crate) struct SnapshotFrame {
     decorations: Vec<DecorationSpan>,
     cache: HashMap<GlyphKey, Arc<CachedGlyph>>,
     backgrounds: Vec<[u8; 3]>,
+    default_backgrounds: Vec<bool>,
     foregrounds: Vec<[u8; 3]>,
     cell_metrics: Vec<DecorationMetrics>,
     cell_spans: Vec<u32>,
@@ -1869,6 +1904,7 @@ impl SnapshotFrame {
         let cursor_color = packed_rgb(snapshot.default_colors[2]);
         let default_metrics = DecorationMetrics::from(metrics);
         let mut backgrounds = vec![default_background; background_len];
+        let mut default_backgrounds = vec![true; background_len];
         let mut foregrounds = vec![default_foreground; background_len];
         let mut cell_metrics = vec![default_metrics; background_len];
         let mut cell_spans = vec![1; background_len];
@@ -1893,6 +1929,7 @@ impl SnapshotFrame {
                 &primary_metrics,
                 &mut shape_context,
                 &mut backgrounds,
+                &mut default_backgrounds,
                 &mut foregrounds,
                 &mut cell_metrics,
                 &mut cell_spans,
@@ -1907,6 +1944,7 @@ impl SnapshotFrame {
             decorations,
             cache,
             backgrounds,
+            default_backgrounds,
             foregrounds,
             cell_metrics,
             cell_spans,
@@ -1963,6 +2001,7 @@ impl SnapshotFrame {
                 .checked_add(snapshot.columns)
                 .context("snapshot row end overflow")?;
             self.backgrounds[start..end].fill(default_background);
+            self.default_backgrounds[start..end].fill(true);
             self.foregrounds[start..end].fill(default_foreground);
             prepare_snapshot_row(
                 snapshot,
@@ -1978,6 +2017,7 @@ impl SnapshotFrame {
                 &primary_metrics,
                 &mut shape_context,
                 &mut self.backgrounds,
+                &mut self.default_backgrounds,
                 &mut self.foregrounds,
                 &mut self.cell_metrics,
                 &mut self.cell_spans,
@@ -2012,6 +2052,8 @@ impl SnapshotFrame {
             let source = 0..(rows - count) * columns;
             let destination = count * columns;
             self.backgrounds.copy_within(source.clone(), destination);
+            self.default_backgrounds
+                .copy_within(source.clone(), destination);
             self.foregrounds.copy_within(source.clone(), destination);
             self.cell_metrics.copy_within(source.clone(), destination);
             self.cell_spans.copy_within(source, destination);
@@ -2031,6 +2073,7 @@ impl SnapshotFrame {
         } else {
             let source = count * columns..rows * columns;
             self.backgrounds.copy_within(source.clone(), 0);
+            self.default_backgrounds.copy_within(source.clone(), 0);
             self.foregrounds.copy_within(source.clone(), 0);
             self.cell_metrics.copy_within(source.clone(), 0);
             self.cell_spans.copy_within(source, 0);
@@ -2267,12 +2310,10 @@ fn capture_prepared_frame(
         origin_x,
         origin_y,
         cursor: show_cursor.then_some(frame.cursor).flatten(),
-        background_bgra: [
-            frame.canvas_background[2],
-            frame.canvas_background[1],
-            frame.canvas_background[0],
-            u8::MAX,
-        ],
+        background_bgra: {
+            let background = premultiplied_rgba(frame.canvas_background, background_alpha_u8());
+            [background[2], background[1], background[0], background[3]]
+        },
     })
 }
 
@@ -2320,6 +2361,7 @@ fn prepare_snapshot_row(
     primary_metrics: &[DecorationMetrics; 4],
     shape_context: &mut ShapeContext,
     backgrounds: &mut [[u8; 3]],
+    default_backgrounds: &mut [bool],
     foregrounds: &mut [[u8; 3]],
     cell_metrics_by_cell: &mut [DecorationMetrics],
     cell_spans: &mut [u32],
@@ -2342,6 +2384,8 @@ fn prepare_snapshot_row(
             .and_then(|index| index.checked_add(column_index))
             .context("snapshot cell index overflow")?;
         backgrounds[background_index] = background;
+        default_backgrounds[background_index] =
+            cell.attributes.background_source == ColorSource::Default && !cell.attributes.reverse;
         foregrounds[background_index] = foreground;
         let face_index = primary_face_index(&cell.attributes);
         let metrics = primary_metrics[face_index];
@@ -3510,6 +3554,11 @@ fn compose_snapshot_rows(
             };
             let background = frame.backgrounds[index];
             let foreground = frame.foregrounds[index];
+            let alpha = if frame.default_backgrounds[index] {
+                background_alpha_u8()
+            } else {
+                u8::MAX
+            };
             let background_span = frame.cell_spans[index].max(1);
             fill_rect(
                 canvas,
@@ -3521,7 +3570,7 @@ fn compose_snapshot_rows(
                     cell_width.saturating_mul(background_span),
                     cell_height,
                 ),
-                [background[0], background[1], background[2], 0xff],
+                premultiplied_rgba(background, alpha),
             );
             let has_cursor = frame.cursor == Some((column, row));
             let span = cursor_span(frame, column, row);
@@ -3594,13 +3643,9 @@ pub(crate) fn paint_snapshot_presented(
     cursor_style: CursorStyle,
     presentation: CursorPresentation,
 ) {
+    let background = premultiplied_rgba(frame.canvas_background, background_alpha_u8());
     for pixel in canvas.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[
-            frame.canvas_background[2],
-            frame.canvas_background[1],
-            frame.canvas_background[0],
-            0xff,
-        ]);
+        pixel.copy_from_slice(&[background[2], background[1], background[0], background[3]]);
     }
     compose_snapshot_rows(
         canvas,
@@ -5644,6 +5689,22 @@ mod tests {
     }
 
     #[test]
+    fn default_alpha_tracks_color_source_and_uses_premultiplied_argb() {
+        let mut snapshot = incremental_snapshot();
+        snapshot.visible_rows[0].cells[1]
+            .attributes
+            .background_source = ColorSource::Rgb;
+        snapshot.visible_rows[0].cells[1].attributes.background = snapshot.default_colors[1];
+        snapshot.visible_rows[1].cells[0].attributes.reverse = true;
+        let frame = SnapshotFrame::load_scaled(&snapshot, 120).expect("alpha frame");
+        assert_eq!(frame.default_backgrounds, [true, false, false, true]);
+
+        let alpha = alpha_u8(u16::MAX / 2);
+        assert_eq!(alpha, 127);
+        assert_eq!(premultiplied_rgba([128, 64, 32], alpha), [64, 32, 16, 127]);
+    }
+
+    #[test]
     fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
         let key = GlyphKey { face: 0, glyph: 1 };
         let frame = SnapshotFrame {
@@ -5682,6 +5743,7 @@ mod tests {
                 }),
             )]),
             backgrounds: vec![[1, 2, 3], [4, 5, 6]],
+            default_backgrounds: vec![false; 2],
             foregrounds: vec![[200, 100, 50]; 2],
             cell_metrics: vec![
                 DecorationMetrics {
@@ -5734,6 +5796,7 @@ mod tests {
             decorations: Vec::new(),
             cache: HashMap::new(),
             backgrounds: vec![[1, 0, 0], [2, 0, 0], [3, 0, 0]],
+            default_backgrounds: vec![false; 3],
             foregrounds: vec![[255, 255, 255]; 3],
             cell_metrics: vec![
                 DecorationMetrics {
@@ -5845,6 +5908,7 @@ mod tests {
             decorations: Vec::new(),
             cache: HashMap::new(),
             backgrounds: Vec::new(),
+            default_backgrounds: Vec::new(),
             foregrounds: Vec::new(),
             cell_metrics: Vec::new(),
             cell_spans: Vec::new(),

@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub resize_delay_ms: u64,
+    /// Foot-compatible 16-bit background alpha (`[colors] alpha`).
+    pub background_alpha: u16,
     pub theme_path: PathBuf,
 }
 
@@ -64,6 +66,7 @@ impl Default for AppConfig {
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             resize_delay_ms: 0,
+            background_alpha: u16::MAX,
             theme_path: default_config_dir().join("theme.json"),
         }
     }
@@ -266,6 +269,11 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
                 config.theme_path = expand_path(value);
                 false
             }
+            "colors.alpha" => {
+                let alpha = parse_range(value, 0.0_f32, 1.0_f32, index)?;
+                config.background_alpha = foot_alpha(alpha);
+                false
+            }
             "scrollback.lines" => {
                 config.scrollback_lines = parse_range(value, 0, 1_000_000, index)?;
                 false
@@ -429,6 +437,15 @@ pub fn load_theme(path: &Path) -> Result<ResolvedTheme> {
         .resolve()
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the caller validates Foot alpha in the closed 0.0..=1.0 range"
+)]
+fn foot_alpha(alpha: f32) -> u16 {
+    (alpha * f32::from(u16::MAX)) as u16
+}
+
 fn parse_color(value: &str) -> Result<u32> {
     let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
     if hex.len() != 6 {
@@ -511,6 +528,19 @@ mod tests {
                 .to_string()
                 .contains("face/style")
         );
+    }
+
+    #[test]
+    fn foot_background_alpha_is_bounded_and_exact() {
+        assert_eq!(
+            parse("[colors]\nalpha=0.888\n")
+                .unwrap()
+                .config
+                .background_alpha,
+            foot_alpha(0.888)
+        );
+        assert!(parse("[colors]\nalpha=-0.1\n").is_err());
+        assert!(parse("[colors]\nalpha=1.1\n").is_err());
     }
 
     #[test]

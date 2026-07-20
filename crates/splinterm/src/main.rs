@@ -746,6 +746,7 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
         font_sizing_policy: config.font_sizing_policy,
         physical_dpi: 96.0,
         padding: config.padding,
+        background_alpha: config.background_alpha,
     })?;
     let theme = load_theme(&config.theme_path).unwrap_or_else(|error| {
         eprintln!("splinterm theme: {error:#}; using safe fallback palette");

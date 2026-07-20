@@ -99,9 +99,9 @@ use crate::config::{APP_ID, CursorStyle, ResolvedTheme};
 use crate::geometry::{OutputDpiObservation, SurfaceGeometry};
 use crate::renderer::{
     CursorPresentation, HistoryOverlayStatus, SnapshotFrame, SnapshotOverlays, TextRow,
-    history_overlay_layout, paint, paint_history_overlay, paint_snapshot_overlays,
-    paint_snapshot_presented, paint_snapshot_rows_presented, scroll_snapshot_pixels,
-    snapshot_row_rect, update_output_dpi, write_ppm,
+    configured_background_bgra, history_overlay_layout, paint, paint_history_overlay,
+    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_rows_presented,
+    scroll_snapshot_pixels, snapshot_row_rect, update_output_dpi, write_ppm,
 };
 use crate::viewport::ScrollbackViewport;
 
@@ -3390,8 +3390,9 @@ impl App {
             }
         } else if self.snapshot_frame.is_some() {
             let [_, red, green, blue] = self.theme.background.to_be_bytes();
+            let background = configured_background_bgra([red, green, blue]);
             for pixel in self.backing.chunks_exact_mut(4) {
-                pixel.copy_from_slice(&[blue, green, red, u8::MAX]);
+                pixel.copy_from_slice(&background);
             }
             canvas.copy_from_slice(&self.backing);
         } else if let Some(row) = &self.text_row {

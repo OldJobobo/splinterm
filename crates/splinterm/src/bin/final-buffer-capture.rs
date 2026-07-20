@@ -330,6 +330,7 @@ fn main() -> Result<()> {
         font_sizing_policy,
         physical_dpi: arguments.physical_dpi,
         padding,
+        background_alpha: u16::MAX,
     })?;
     let style = cursor_style(&arguments.cursor_shape)?;
     let presentation = cursor_presentation(&arguments)?;
