@@ -50,6 +50,19 @@
     "anonymous_mappings_over_1_mib": 0,
     "large_anonymous_mapping_rss_kib": 0
   },
+  "post_file_mapping_observation": {
+    "window_logical_size": [1187, 1332],
+    "threads": 4,
+    "rss_kib": 74232,
+    "pss_kib": 49121,
+    "anonymous_kib": 40776,
+    "file_kib": 27272,
+    "shm_kib": 6184,
+    "anonymous_huge_pages_kib": 4096,
+    "comparable_pre_mapping_rss_kib": 92332,
+    "comparable_pre_mapping_pss_kib": 79013,
+    "comparable_pre_mapping_anonymous_kib": 71336
+  },
   "heaptrack": {
     "fresh_client_peak_heap_mib": 57.3,
     "fresh_client_font_byte_buffers_mib": 35.1,
@@ -71,7 +84,7 @@
   },
   "limitations": [
     "The installed daemon was not restarted because doing so would terminate its live shell.",
-    "Post-install client RSS with file-mapped fonts remains to be measured in the user's real window.",
+    "RSS includes reclaimable file-backed font pages; PSS better reflects this client's effective ownership.",
     "The isolated daemon smoke is bounded diagnostic evidence, not a replacement for the committed Phase 9 baseline.",
     "The fresh Heaptrack window escaped workspace 8 and briefly took focus despite pre-map placement; it was immediately closed, focus returned to Foot, the pointer remained unchanged, and the launch method was not retried."
   ]

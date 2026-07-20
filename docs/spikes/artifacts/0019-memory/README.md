@@ -24,7 +24,10 @@ Heaptrack profile then showed that real shell content activates those fallbacks:
 14.5 MiB was JSON deserialization. Commit `7a9e382` moves immutable font bytes to
 a bounded read-only file-mapping leaf. A non-graphical ASCII/CJK/emoji renderer
 profile subsequently peaked at 1.11 MiB tracked heap with no copied font-file
-allocation.
+allocation. In the user's real 1187×1332 window after installation, the client
+used 72.5 MiB RSS, 48.0 MiB PSS, and 39.8 MiB anonymous memory. Against the
+comparably sized pre-mapping window, anonymous residency fell by 29.8 MiB and PSS
+fell by 29.2 MiB. Remaining resident font pages are file-backed and reclaimable.
 
 The attempted fresh graphical profile escaped workspace 8 and briefly took focus
 despite pre-map placement. It was immediately closed, focus returned to Foot, the
