@@ -200,6 +200,7 @@ pub(crate) fn set_font_zoom_steps(steps: i16, surface_scale_120: u32) -> Result<
         return Ok(None);
     }
     FONT_ZOOM_STEPS.store(i32::from(steps), Ordering::Relaxed);
+    clear_snapshot_caches();
     Ok(Some(
         previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6,
     ))
@@ -235,7 +236,7 @@ pub fn update_output_dpi(
     let changed = previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6;
     drop(current);
     if changed {
-        SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+        clear_snapshot_caches();
     }
     Ok(changed)
 }
@@ -316,6 +317,10 @@ impl PersistentGlyphCache {
 thread_local! {
     static SNAPSHOT_GLYPH_CACHE: RefCell<PersistentGlyphCache> =
         RefCell::new(PersistentGlyphCache::default());
+}
+
+fn clear_snapshot_caches() {
+    SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
 }
 
 const CORPUS: &[(CorpusKind, &str)] = &[
@@ -5494,6 +5499,12 @@ mod tests {
             Some(u64::try_from(SNAPSHOT_RASTER_FACE_BUDGET).unwrap())
         );
         assert_eq!(metrics["raster_face_evictions"].as_u64(), Some(1));
+
+        clear_snapshot_caches();
+        let cleared = snapshot_cache_metrics();
+        assert_eq!(cleared["raster_faces"].as_u64(), Some(0));
+        assert_eq!(cleared["entries"].as_u64(), Some(0));
+        assert_eq!(cleared["approximate_bytes"].as_u64(), Some(0));
     }
 
     #[test]
