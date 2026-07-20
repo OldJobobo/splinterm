@@ -2,7 +2,10 @@ use std::{
     collections::VecDeque,
     io::{self, Read, Write},
     os::unix::process::ExitStatusExt,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -227,6 +230,41 @@ enum Command {
     Shutdown(oneshot::Sender<()>),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct LiveRuntimeMetrics {
+    pub command_queue_high_water: usize,
+    pub user_write_queue_high_water_bytes: usize,
+    pub reply_write_queue_high_water_bytes: usize,
+    pub pty_read_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeMetrics {
+    command_queue_high_water: AtomicUsize,
+    user_write_queue_high_water_bytes: AtomicUsize,
+    reply_write_queue_high_water_bytes: AtomicUsize,
+    pty_read_bytes: AtomicU64,
+}
+
+impl RuntimeMetrics {
+    fn observe_max(value: &AtomicUsize, candidate: usize) {
+        value.fetch_max(candidate, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LiveRuntimeMetrics {
+        LiveRuntimeMetrics {
+            command_queue_high_water: self.command_queue_high_water.load(Ordering::Relaxed),
+            user_write_queue_high_water_bytes: self
+                .user_write_queue_high_water_bytes
+                .load(Ordering::Relaxed),
+            reply_write_queue_high_water_bytes: self
+                .reply_write_queue_high_water_bytes
+                .load(Ordering::Relaxed),
+            pty_read_bytes: self.pty_read_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveSplintHandle {
     pub splint_id: SplintId,
@@ -235,6 +273,7 @@ pub struct LiveSplintHandle {
     default_snapshot_rows: usize,
     default_subscriber_capacity: usize,
     max_input_message_bytes: usize,
+    metrics: Arc<RuntimeMetrics>,
     exit: watch::Receiver<Option<ProcessExit>>,
 }
 
@@ -319,6 +358,11 @@ impl LiveSplintHandle {
         *self.exit.borrow()
     }
 
+    #[must_use]
+    pub fn metrics(&self) -> LiveRuntimeMetrics {
+        self.metrics.snapshot()
+    }
+
     pub async fn wait_for_exit(&self) -> Option<ProcessExit> {
         let mut exit = self.exit.clone();
         loop {
@@ -341,6 +385,12 @@ impl LiveSplintHandle {
     }
 
     async fn request<T>(&self, build: impl FnOnce(Reply<T>) -> Command) -> Result<T, LiveError> {
+        let queued = self
+            .commands
+            .max_capacity()
+            .saturating_sub(self.commands.capacity())
+            .saturating_add(1);
+        RuntimeMetrics::observe_max(&self.metrics.command_queue_high_water, queued);
         let (sender, receiver) = oneshot::channel();
         self.commands
             .send(build(sender))
@@ -409,6 +459,7 @@ impl LiveSplintRuntime {
         );
         let (sender, receiver) = mpsc::channel(config.command_capacity.max(1));
         let (exit_sender, exit) = watch::channel(None);
+        let metrics = Arc::new(RuntimeMetrics::default());
         let handle = LiveSplintHandle {
             splint_id,
             incarnation,
@@ -416,6 +467,7 @@ impl LiveSplintRuntime {
             default_snapshot_rows: config.max_scrollback_snapshot_rows,
             default_subscriber_capacity: config.subscriber_capacity,
             max_input_message_bytes: config.input_byte_limit / config.command_capacity.max(1),
+            metrics: Arc::clone(&metrics),
             exit,
         };
         let task = tokio::spawn(run_actor(
@@ -426,6 +478,7 @@ impl LiveSplintRuntime {
             terminal,
             receiver,
             config,
+            metrics,
             exit_sender,
         ));
         Self { handle, task }
@@ -516,6 +569,7 @@ async fn run_actor(
     terminal: Terminal,
     commands: mpsc::Receiver<Command>,
     config: LiveSplintConfig,
+    metrics: Arc<RuntimeMetrics>,
     exit_sender: watch::Sender<Option<ProcessExit>>,
 ) -> Result<ProcessExit, LiveError> {
     let result = run_actor_body(
@@ -526,6 +580,7 @@ async fn run_actor(
         terminal,
         commands,
         config,
+        &metrics,
     )
     .await;
     let forced_status = if result.is_err() {
@@ -552,6 +607,7 @@ async fn run_actor_body(
     mut terminal: Terminal,
     mut commands: mpsc::Receiver<Command>,
     config: LiveSplintConfig,
+    metrics: &RuntimeMetrics,
 ) -> Result<ProcessExit, LiveError> {
     let mut subscribers = Vec::<Subscriber>::new();
     let mut user_writes = WriteQueue::default();
@@ -592,6 +648,10 @@ async fn run_actor_body(
                         &config,
                         child_exit,
                     );
+                    RuntimeMetrics::observe_max(
+                        &metrics.user_write_queue_high_water_bytes,
+                        user_writes.bytes,
+                    );
                 } else {
                     commands_open = false;
                     if shutdown.is_none() {
@@ -607,6 +667,10 @@ async fn run_actor_body(
                     match result {
                         Ok(0) => eof = true,
                         Ok(count) => {
+                            metrics.pty_read_bytes.fetch_add(
+                                u64::try_from(count).unwrap_or(u64::MAX),
+                                Ordering::Relaxed,
+                            );
                             process_output(
                                 &read_buffer[..count],
                                 incarnation,
@@ -615,6 +679,10 @@ async fn run_actor_body(
                                 &mut subscribers,
                                 config.reply_byte_limit,
                             )?;
+                            RuntimeMetrics::observe_max(
+                                &metrics.reply_write_queue_high_water_bytes,
+                                reply_writes.bytes,
+                            );
                             if child_exit.is_some() {
                                 drain_deadline = Some(Instant::now() + config.exit_drain_timeout);
                             }
@@ -1060,6 +1128,10 @@ mod tests {
             panic!("expected an ordered terminal update")
         };
         assert!(update.revision() > snapshot.revision);
+        let metrics = handle.metrics();
+        assert!(metrics.command_queue_high_water >= 1);
+        assert!(metrics.user_write_queue_high_water_bytes >= b"after-attach\n".len());
+        assert!(metrics.pty_read_bytes > 0);
         runtime.wait().await.unwrap();
     }
 
