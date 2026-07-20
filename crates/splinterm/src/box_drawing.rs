@@ -15,6 +15,22 @@ pub(crate) struct BoxMask {
     pub(crate) data: Vec<u8>,
 }
 
+/// Returns Foot's default scale- and cell-relative light-line thickness.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bounded positive Foot formula intentionally truncates before clamping"
+)]
+pub(crate) fn default_thickness(width: u32, height: u32, scale_120: u16) -> u32 {
+    if width == 0 || height == 0 || scale_120 == 0 {
+        return 1;
+    }
+    let width = f64::from(width);
+    let height = f64::from(height);
+    let scale = f64::from(scale_120) / 120.0;
+    ((0.04 * scale * width.hypot(height) * 96.0 / 72.0) as u32).max(1)
+}
+
 /// Generates a translated box or Braille glyph.
 pub(crate) fn generate(
     character: char,
@@ -324,6 +340,14 @@ mod tests {
 
     fn pixel(mask: &BoxMask, x: u32, y: u32) -> u8 {
         mask.data[usize::try_from(y * mask.width + x).expect("index fits")]
+    }
+
+    #[test]
+    fn default_thickness_matches_foot_scale_and_cell_vectors() {
+        assert_eq!(default_thickness(7, 17, 120), 1);
+        assert_eq!(default_thickness(9, 21, 150), 1);
+        assert_eq!(default_thickness(11, 26, 180), 2);
+        assert_eq!(default_thickness(14, 34, 240), 3);
     }
 
     #[test]

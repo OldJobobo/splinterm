@@ -2246,7 +2246,7 @@ fn prepare_snapshot_row(
         }
         if cell.content.chars().count() == 1 {
             let character = cell.content.chars().next().context("cell has content")?;
-            let thickness = u32::from(scale).div_ceil(120).max(1);
+            let thickness = box_drawing::default_thickness(cell_width, cell_height, scale);
             if let Some(mask) = box_drawing::generate(character, cell_width, cell_height, thickness)
             {
                 let key = GlyphKey {
