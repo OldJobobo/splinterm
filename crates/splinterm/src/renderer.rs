@@ -12,7 +12,10 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicI32, Ordering},
+    },
     time::Instant,
 };
 
@@ -63,6 +66,8 @@ const SNAPSHOT_EMOJI: usize = 5;
 static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 6], String>> = OnceLock::new();
 static RENDERER_OPTIONS: OnceLock<RendererOptions> = OnceLock::new();
 static OUTPUT_DPI: OnceLock<Mutex<OutputDpiObservation>> = OnceLock::new();
+static FONT_ZOOM_STEPS: AtomicI32 = AtomicI32::new(0);
+const FONT_ZOOM_STEP_POINTS: f32 = 0.5;
 
 #[derive(Clone, Debug)]
 pub struct RendererOptions {
@@ -112,6 +117,33 @@ fn renderer_options() -> &'static RendererOptions {
     RENDERER_OPTIONS.get_or_init(RendererOptions::default)
 }
 
+fn zoomed_font_size(
+    options: &RendererOptions,
+    steps: i16,
+    observation: &OutputDpiObservation,
+) -> Result<FontSize> {
+    if steps == 0 {
+        return Ok(options.font_size);
+    }
+    let sizing_dpi = match options.font_sizing_policy {
+        FontSizingPolicy::OutputScale => 96.0,
+        FontSizingPolicy::PhysicalDpi => observation.dpi,
+    };
+    let base_points = match options.font_size {
+        FontSize::Points(points) => points,
+        FontSize::Pixels(pixels) => pixels * 72.0 / sizing_dpi,
+    };
+    let points = base_points + f32::from(steps) * FONT_ZOOM_STEP_POINTS;
+    if !points.is_finite() || !(1.0..=96.0).contains(&points) {
+        bail!("runtime font size must remain between 1 and 96 points");
+    }
+    Ok(FontSize::Points(points))
+}
+
+fn configured_zoom_steps() -> Result<i16> {
+    i16::try_from(FONT_ZOOM_STEPS.load(Ordering::Relaxed)).context("font zoom steps fit i16")
+}
+
 fn output_dpi() -> Result<OutputDpiObservation> {
     let default = || {
         OutputDpiObservation::provided(renderer_options().physical_dpi)
@@ -132,12 +164,37 @@ pub fn effective_font_resolution(
     surface_scale_120: u32,
 ) -> Result<crate::geometry::ResolvedFontSize> {
     let options = renderer_options();
+    let observation = output_dpi()?;
     resolve_font_size_with_output(
-        options.font_size,
+        zoomed_font_size(options, configured_zoom_steps()?, &observation)?,
         options.font_sizing_policy,
         surface_scale_120,
-        &output_dpi()?,
+        &observation,
     )
+}
+
+/// Applies Foot's default 0.5-point runtime zoom offset.
+/// Returns true when the effective raster size changed.
+///
+/// # Errors
+/// Returns an error if the adjusted size leaves the bounded renderer range.
+pub(crate) fn set_font_zoom_steps(steps: i16, surface_scale_120: u32) -> Result<Option<bool>> {
+    let previous = effective_font_resolution(surface_scale_120)?;
+    let options = renderer_options();
+    let observation = output_dpi()?;
+    let Ok(size) = zoomed_font_size(options, steps, &observation) else {
+        return Ok(None);
+    };
+    let next = resolve_font_size_with_output(
+        size,
+        options.font_sizing_policy,
+        surface_scale_120,
+        &observation,
+    )?;
+    FONT_ZOOM_STEPS.store(i32::from(steps), Ordering::Relaxed);
+    Ok(Some(
+        previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6,
+    ))
 }
 
 fn effective_font_size(surface_scale_120: u32) -> Result<f32> {
@@ -157,7 +214,7 @@ pub fn update_output_dpi(
     // Validate and compare resolutions before publishing the observation.
     let previous = effective_font_resolution(surface_scale_120)?;
     let next = resolve_font_size_with_output(
-        options.font_size,
+        zoomed_font_size(options, configured_zoom_steps()?, &observation)?,
         options.font_sizing_policy,
         surface_scale_120,
         &observation,
@@ -5686,6 +5743,35 @@ mod tests {
             ),
             ([0xaa, 0, 0], [0x80, 0x40, 0x20])
         );
+    }
+
+    #[test]
+    fn foot_runtime_zoom_uses_half_points_and_converts_pixel_bases() {
+        let observation = OutputDpiObservation::provided(144.0).unwrap();
+        let mut options = RendererOptions {
+            font_size: FontSize::Points(10.3),
+            ..RendererOptions::default()
+        };
+        assert_eq!(
+            zoomed_font_size(&options, 1, &observation).unwrap(),
+            FontSize::Points(10.8)
+        );
+        assert_eq!(
+            zoomed_font_size(&options, 0, &observation).unwrap(),
+            FontSize::Points(10.3)
+        );
+
+        options.font_size = FontSize::Pixels(22.0);
+        assert_eq!(
+            zoomed_font_size(&options, 1, &observation).unwrap(),
+            FontSize::Points(17.0)
+        );
+        options.font_sizing_policy = FontSizingPolicy::PhysicalDpi;
+        assert_eq!(
+            zoomed_font_size(&options, 1, &observation).unwrap(),
+            FontSize::Points(11.5)
+        );
+        assert!(zoomed_font_size(&options, -22, &observation).is_err());
     }
 
     #[test]

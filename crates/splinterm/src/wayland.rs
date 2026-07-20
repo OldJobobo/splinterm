@@ -101,7 +101,7 @@ use crate::renderer::{
     CursorPresentation, HistoryOverlayStatus, SnapshotFrame, SnapshotOverlays, TextRow,
     configured_background_bgra, history_overlay_layout, paint, paint_history_overlay,
     paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_rows_presented,
-    scroll_snapshot_pixels, snapshot_row_rect, update_output_dpi, write_ppm,
+    scroll_snapshot_pixels, set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
 };
 use crate::viewport::ScrollbackViewport;
 
@@ -548,6 +548,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         evidence_close_shortcuts: options.evidence_close_shortcuts,
         modifiers: Modifiers::default(),
         last_resize: None,
+        font_zoom_steps: 0,
         capture: options.capture,
         capture_scale: options.capture_scale,
         buffer: None,
@@ -745,6 +746,7 @@ struct App {
     evidence_close_shortcuts: bool,
     modifiers: Modifiers,
     last_resize: Option<(u16, u16, u16, u16)>,
+    font_zoom_steps: i16,
     capture: Option<PathBuf>,
     capture_scale: Option<u32>,
     buffer: Option<Buffer>,
@@ -1715,6 +1717,25 @@ fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Opt
     Some(row)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FontZoomAction {
+    Increase,
+    Decrease,
+    Reset,
+}
+
+fn font_zoom_action(keysym: Keysym, modifiers: Modifiers) -> Option<FontZoomAction> {
+    if !modifiers.ctrl || modifiers.alt || modifiers.logo {
+        return None;
+    }
+    match keysym {
+        Keysym::plus | Keysym::equal | Keysym::KP_Add => Some(FontZoomAction::Increase),
+        Keysym::minus | Keysym::KP_Subtract => Some(FontZoomAction::Decrease),
+        Keysym::_0 | Keysym::KP_0 => Some(FontZoomAction::Reset),
+        _ => None,
+    }
+}
+
 fn cursor_blink_enabled(reduced_motion: bool, focused: bool, modes: TerminalInputModes) -> bool {
     !reduced_motion && focused && modes.cursor_visible && modes.cursor_blink
 }
@@ -2681,6 +2702,46 @@ impl App {
             },
             |snapshot| snapshot.input_modes,
         )
+    }
+
+    fn apply_font_zoom(
+        &mut self,
+        action: FontZoomAction,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<bool> {
+        let next = match action {
+            FontZoomAction::Increase => self.font_zoom_steps.saturating_add(1),
+            FontZoomAction::Decrease => self.font_zoom_steps.saturating_sub(1),
+            FontZoomAction::Reset => 0,
+        };
+        if next == self.font_zoom_steps {
+            return Ok(true);
+        }
+        let Some(raster_changed) = set_font_zoom_steps(next, self.scale_120)? else {
+            return Ok(true);
+        };
+        self.font_zoom_steps = next;
+        if !raster_changed {
+            return Ok(true);
+        }
+        if let Some(display) = self.display_snapshot() {
+            self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+            self.rendered_viewport_offset = self.scrollback_viewport.offset_from_bottom();
+            self.viewport_dirty = false;
+        }
+        self.buffer = None;
+        self.backing.clear();
+        self.pending_scrolls.clear();
+        self.full_redraw = true;
+        self.cursor_blink_visible = true;
+        self.last_cursor_blink = Instant::now();
+        self.refresh_ime_preedit()?;
+        self.update_ime_cursor_rectangle();
+        if self.configured {
+            self.emit_resize()?;
+            self.schedule_draw(queue_handle)?;
+        }
+        Ok(true)
     }
 
     fn decide_consent(&mut self, granted: bool) {
@@ -3811,6 +3872,12 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
+        if let Some(action) = font_zoom_action(event.keysym, self.modifiers) {
+            if let Err(error) = self.apply_font_zoom(action, queue_handle) {
+                self.fail(error);
+            }
+            return;
+        }
         if self.modifiers.ctrl
             && self.modifiers.shift
             && matches!(event.keysym, Keysym::c | Keysym::C)
@@ -3838,6 +3905,12 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
+        if let Some(action) = font_zoom_action(event.keysym, self.modifiers) {
+            if let Err(error) = self.apply_font_zoom(action, queue_handle) {
+                self.fail(error);
+            }
+            return;
+        }
         match self.handle_history_key(&event, queue_handle) {
             Ok(true) => {}
             Ok(false) => self.handle_key(&event),
@@ -4739,6 +4812,45 @@ mod tests {
         assert_eq!(
             history_navigation(Keysym::End, true, true),
             Some(HistoryNavigation::ReturnToLive)
+        );
+    }
+
+    #[test]
+    fn foot_font_zoom_bindings_require_control_and_cover_reset() {
+        let control = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            font_zoom_action(Keysym::plus, control),
+            Some(FontZoomAction::Increase)
+        );
+        assert_eq!(
+            font_zoom_action(Keysym::equal, control),
+            Some(FontZoomAction::Increase)
+        );
+        assert_eq!(
+            font_zoom_action(Keysym::KP_Add, control),
+            Some(FontZoomAction::Increase)
+        );
+        assert_eq!(
+            font_zoom_action(Keysym::minus, control),
+            Some(FontZoomAction::Decrease)
+        );
+        assert_eq!(
+            font_zoom_action(Keysym::_0, control),
+            Some(FontZoomAction::Reset)
+        );
+        assert_eq!(font_zoom_action(Keysym::plus, Modifiers::default()), None);
+        assert_eq!(
+            font_zoom_action(
+                Keysym::plus,
+                Modifiers {
+                    alt: true,
+                    ..control
+                }
+            ),
+            None
         );
     }
 

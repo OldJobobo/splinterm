@@ -38,7 +38,9 @@ avoids claiming arbitrary `foot.ini` compatibility.
 
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste,
 Ctrl+Shift+R to revoke active access, and Ctrl+Shift+L to release control.
-Terminal key mappings otherwise follow the implemented Foot/xterm behavior.
+Foot-compatible runtime zoom uses Ctrl+plus/equal/KP_Add and
+Ctrl+minus/KP_Subtract in 0.5-point steps; Ctrl+0/KP_0 resets the configured
+size. Terminal key mappings otherwise follow the implemented Foot/xterm behavior.
 
 ## Migrating from Foot
 
