@@ -840,6 +840,9 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
                 return window_result;
             }
             Some(()) = resyncs.recv() => {
+                if std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some() {
+                    eprintln!("scroll-trace resync=controller_page");
+                }
                 attachment = resynchronize(
                     &mut connection,
                     attachment.subscription_id,
@@ -892,7 +895,37 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
                             }
                             last_sequence = sequence;
                         }
-                        EventAction::Update { .. } | EventAction::Resynchronize => {
+                        EventAction::Update { update, .. } => {
+                            if std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some() {
+                                eprintln!(
+                                    "scroll-trace resync=revision last={} base={} final={}",
+                                    last_revision, update.base_revision, update.revision
+                                );
+                            }
+                            attachment = resynchronize(
+                                &mut connection,
+                                attachment.subscription_id,
+                                splint_id,
+                                incarnation,
+                            ).await?;
+                            if updates
+                                .send(WindowUpdate::Snapshot(attachment.snapshot.clone()))
+                                .await
+                                .is_err()
+                            {
+                                let window_result = window.await.context("Wayland window task failed")?;
+                                controller.await.context("window controller task failed")??;
+                                return window_result;
+                            }
+                            last_revision = attachment.snapshot.revision;
+                            last_sequence = 0;
+                        }
+                        EventAction::Resynchronize => {
+                            if std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some() {
+                                eprintln!(
+                                    "scroll-trace resync=subscription_sequence last_sequence={last_sequence} received_sequence={sequence}"
+                                );
+                            }
                             attachment = resynchronize(
                                 &mut connection,
                                 attachment.subscription_id,
