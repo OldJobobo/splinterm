@@ -1,6 +1,6 @@
 # Spike 0017: Renderer path equivalence and scrollback viewport foundation
 
-- **Status:** Stable history identity implemented; bounded paging remains
+- **Status:** Closed — renderer paths and graphical scrollback accepted
 - **Roadmap:** Phase 8.1
 
 ## Renderer path equivalence
@@ -157,11 +157,28 @@ two-thirds, and focused block/underline cursors are opaque with Foot's one-pixel
 underline geometry. The Foot patch now uses contextual hunks, a capture marker,
 and a clean disposable build; stale patched binaries are not closure evidence.
 
-## Remaining work
+## Evidence archive
 
-1. Add a visible unseen-output indication and explicit clickable return-to-live
-   affordance.
-2. Define resize/reflow anchors and selection persistence across history-page
-   boundaries.
-3. Add injected Wayland wheel/key end-to-end tests plus detach/reattach and
-   history-capacity overflow coverage.
+Machine-readable summaries and per-case capture metadata for the Plan 0003
+Slice 1–4 closure runs are committed under
+[`artifacts/0017/`](artifacts/0017/README.md). The original `/tmp` run
+directories (raw ARGB buffers, heatmaps, per-glyph JSONL) are volatile and
+reproducible from the documented per-slice commands.
+
+## Phase 8.1 closure
+
+Plan 0003 completed the remaining work with trusted bounded detached-history
+status and keyboard/pointer return-to-live controls; generation/row-ID/column
+selection identity across pages; explicit selection cancellation on reflow;
+row/byte-bounded paging and endpoint retention; exact renderer-path/cache
+output; forced resync and detach/reattach continuity; release performance
+budgets; and guarded Hyprland/Omarchy sign-off. Machine-readable Slice 9 and 10
+reports are archived beside the earlier parity summaries under
+[`artifacts/0017/`](artifacts/0017/README.md).
+
+Post-sign-off user validation also fixed and covered focus-loss history repaint,
+application-keypad text input used by Neovim, `TERM=xterm-256color`, Omarchy 4
+native theme hooks, and Foot-compatible default-background alpha. Fcitx5/Mozc
+provided a live `text-input-v3` preedit, candidate selection, PTY commit, and
+return to US input. Search and durable scrollback across daemon restart remain
+Roadmap Phase 3 work, not Phase 8.1 gaps.

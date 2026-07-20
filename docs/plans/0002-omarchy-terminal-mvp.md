@@ -1,7 +1,7 @@
 # Plan 0002: Omarchy-native Wayland terminal MVP
 
-- **Status:** Phase 8.1 reopened — Foot visual parity and graphical scrollback block Phase 2 completion
-- **Roadmap:** Phase 8.1 renderer-parity and scrollback completion
+- **Status:** Phase 8.1 complete — Phase 9 packaging/release validation remains
+- **Roadmap:** Phase 2 Omarchy-native terminal MVP
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -19,7 +19,8 @@
 - [x] Record the initial allocate-vs-reuse CPU canvas baseline at 80×24,
   120×40, and 240×80 equivalents in
   [Spike 0002](../spikes/0002-cpu-shm-paint-baseline.md).
-- [ ] Benchmark actual Wayland SHM slot release and resize churn.
+- [x] Benchmark actual Wayland SHM slot release and resize churn in
+  [Plan 0003 Slice 9](0003-phase8.1-closure-execution.md#slice-9--e2-performance-and-memory-baseline).
 - [x] Record initial `fontdb`/Swash discovery, metrics, and fallback coverage
   evidence in [Spike 0003](../spikes/0003-font-stack-inventory.md).
 - [x] Render, shape, cache, capture, and compare the first deterministic corpus
@@ -59,8 +60,10 @@
   preedit/commit, inactive-IME compose fallback, focus indication, and reduced
   motion behavior in
   [Spike 0013](../spikes/0013-fractional-scale-ime-accessibility.md).
-- [ ] Validate active IME and live 1.25×/1.5×/2× output transitions when the
-  compositor setup exposes those states; trusted consent UI remains Phase 7.
+- [x] Validate live 1.25×/1.5×/2× output transitions in
+  [Plan 0003 Slice 10](0003-phase8.1-closure-execution.md#slice-10--f1-hyprlandomarchy-sign-off)
+  and active Fcitx5/Mozc `text-input-v3` preedit, candidate selection, PTY
+  commit, and return to US input during Slice 11 closure.
 - [x] Replace full-snapshot/full-frame updates with protocol v5 semantic damage,
   incremental row preparation, scroll-copy, row damage submission, frame
   callback coalescing, local cursor blink, and bounded scale-specific glyph
@@ -77,20 +80,21 @@
   launch contracts, project-owned Omarchy theme generation and live reload,
   and the documented Foot configuration subset in
   [Spike 0015](../spikes/0015-omarchy-integration-and-configuration.md).
-- [ ] Record the full Phase 4 baseline matrix with host/software context,
-  including continuous `yes`, large colored-file `cat`, measured resize and
-  detach/reattach costs, and total renderer-memory metrics.
+- [x] Record the full release renderer/daemon/graphical baseline with
+  host/software context, output, resize, detach/reattach, idle, SHM, cache, and
+  RSS metrics in [Plan 0003 Slice 9](0003-phase8.1-closure-execution.md#slice-9--e2-performance-and-memory-baseline).
 - [x] Build a reproducible pre-compositor Foot/fcft oracle for all 95 printable
   ASCII characters, with exact face, metrics, bitmap, placement, and environment
   provenance, plus the 16-case final-buffer matrix closed by Plan 0003 Slice 1.
-- [ ] Replace approximate font/cell placement with an explicit Foot-derived cell
-  geometry contract and verify ink clearance and terminal padding on all sides.
-- [ ] Make full-frame, row-damage, scroll-copy, cold-cache, and warm-cache paths
+- [x] Replace approximate font/cell placement with an explicit Foot-derived cell
+  geometry contract and verify ink clearance and terminal padding on all sides
+  (closed by [Plan 0003 Slice 2](0003-phase8.1-closure-execution.md#slice-2--a4-four-sided-geometry)).
+- [x] Make full-frame, row-damage, scroll-copy, cold-cache, and warm-cache paths
   produce equivalent final pixels for equivalent terminal state.
-- [ ] Implement a bounded graphical scrollback viewport, navigation, follow-live,
+- [x] Implement a bounded graphical scrollback viewport, navigation, follow-live,
   unseen-output, selection, resize, clear-history, resync, and reattach behavior.
-- [ ] Amend ADR 0004 with measured tolerances, renderer-stack consequences, and
-  every intentional Foot divergence before resuming packaging/release work.
+- [x] Amend ADR 0004 with exact tolerances, renderer-stack consequences,
+  environment/cache/performance policy, and every intentional Foot divergence.
 
 ## Goal
 
@@ -1087,7 +1091,7 @@ and no silent fixture regeneration.
 
 ### 8.1 exit gate
 
-Phase 2 may resume packaging/release validation only when:
+Phase 8.1 is complete and Phase 2 may proceed to packaging/release validation because:
 
 - all 95 printable ASCII characters pass final-buffer pixel and placement gates
   at the pinned default configuration;
@@ -1269,15 +1273,8 @@ Do not call Roadmap Phase 2 complete until:
 
 ## Immediate next task
 
-Continue Phase 8.1 from the exact 95/95 default-ASCII production raster gate:
-
-1. add pinned style/size/scale matrices and final cell-composited Foot buffer
-   comparisons, including decoration and four-sided spacing geometry;
-2. complete scroll-copy/cache-eviction/theme-reload renderer-path equivalence;
-3. add revision-bound history paging or stable row identities plus scrollback
-   append/trim/clear update metadata; and
-4. wire the tested client viewport into Wayland wheel/keyboard input, rendering,
-   selection, unseen-output indication, resize, resync, and reattach behavior.
-
-Do not resume packaging or declare Roadmap Phase 2 complete until the Phase 8.1
-exit gate passes.
+Execute Phase 9 packaging and release validation: add the Arch package/install
+path, package-owned desktop/helper/theme-hook artifacts, dependency and license
+manifests, install/uninstall/upgrade documentation, upgrade-mismatch checks, and
+package-level validation. Phase 8.1 no longer blocks that work. Do not declare
+Roadmap Phase 2 complete until the packaging review gates above pass.

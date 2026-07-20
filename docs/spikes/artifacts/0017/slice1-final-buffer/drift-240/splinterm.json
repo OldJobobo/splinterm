@@ -1,0 +1,50 @@
+{
+  "background_bgra": [
+    22,
+    18,
+    14,
+    255
+  ],
+  "byte_order": "bgra",
+  "cell": {
+    "baseline": 13,
+    "height": 17,
+    "width": 7
+  },
+  "composition": [
+    "terminal-backgrounds",
+    "glyphs",
+    "decorations",
+    "cursor"
+  ],
+  "cursor": null,
+  "endianness": "little",
+  "fixture": "drift-240",
+  "format": "argb8888",
+  "frame_id": "drift-240",
+  "grid": {
+    "columns": 240,
+    "rows": 1
+  },
+  "height": 41,
+  "origin": {
+    "x": 12,
+    "y": 12
+  },
+  "padding": {
+    "bottom": 12,
+    "left": 12,
+    "right": 12,
+    "top": 12
+  },
+  "provenance": {
+    "cargo_lock": "Cargo.lock",
+    "font_pattern": "JetBrains Mono Nerd Font:style=Regular",
+    "implementation": "splinterm",
+    "logical_font_size_px": 12.0
+  },
+  "scale_120": 120,
+  "schema": "splinterm.final-buffer.v1",
+  "stride": 6816,
+  "width": 1704
+}

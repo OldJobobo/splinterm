@@ -1,0 +1,16 @@
+{
+  "schema": "splinterm.final-buffer.slice3.v2",
+  "width": 62, "height": 84, "stride": 256,
+  "format": "argb8888", "byte_order": "bgra", "endianness": "little",
+  "scale_120": 240,
+  "grid": {"columns": 1, "rows": 1},
+  "cell": {"width": 14, "height": 33, "baseline": 25},
+  "padding": {"left": 24, "right": 24, "top": 24, "bottom": 27},
+  "origin": {"x": 24, "y": 24},
+  "cursor": {"position": null, "configured_shape": "block", "effective_shape": "none", "target_focus_semantics": "focused-steady"},
+  "capture_context": {"actual_keyboard_focus": false, "unfocused_style": "unchanged"},
+  "fixture": "underline-dotted", "frame_id": "underline-dotted",
+  "background_bgra": [22, 18, 14, 255],
+  "composition": "foot-cell-rtl-v1",
+  "provenance": {"implementation": "foot", "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e", "fcft_version": "3.3.3", "font_file": "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf", "font_index": 0, "font_sha256": "0ec29a68b539ece7078fc714cebff0c0accb2f4948f8f7963d9f5e86633b12d9"}
+}

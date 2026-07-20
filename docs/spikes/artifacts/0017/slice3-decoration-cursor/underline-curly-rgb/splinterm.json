@@ -1,0 +1,131 @@
+{
+  "background_bgra": [
+    22,
+    18,
+    14,
+    255
+  ],
+  "byte_order": "bgra",
+  "capture_context": {
+    "actual_keyboard_focus": false,
+    "unfocused_style": "unchanged"
+  },
+  "cell": {
+    "baseline": 19,
+    "height": 25,
+    "width": 11
+  },
+  "composition": "foot-cell-rtl-v1",
+  "cursor": {
+    "configured_shape": "block",
+    "effective_shape": "none",
+    "position": null,
+    "target_focus_semantics": "focused-steady"
+  },
+  "endianness": "little",
+  "fixture": "underline-curly-rgb",
+  "format": "argb8888",
+  "frame_id": "underline-curly-rgb",
+  "grid": {
+    "columns": 1,
+    "rows": 1
+  },
+  "height": 63,
+  "origin": {
+    "x": 18,
+    "y": 18
+  },
+  "padding": {
+    "bottom": 20,
+    "left": 18,
+    "right": 19,
+    "top": 18
+  },
+  "provenance": {
+    "cargo_lock": "Cargo.lock",
+    "font_pattern": "JetBrains Mono Nerd Font:style=Regular",
+    "font_resolution": {
+      "configured_size": {
+        "unit": "pixels",
+        "value": 12.0
+      },
+      "effective_pixel_size": 18.0,
+      "effective_pixel_size_26_6": 1152,
+      "observed_dpi_fallback_reason": null,
+      "observed_dpi_source": "provided-physical-dpi",
+      "observed_output_dpi": 96.0,
+      "observed_output_id": null,
+      "observed_output_name": null,
+      "policy": "output-scale",
+      "sizing_dpi": 144.0,
+      "sizing_dpi_source": "output-scale",
+      "surface_scale_120": 180
+    },
+    "font_size": {
+      "unit": "pixels",
+      "value": 12.0
+    },
+    "font_sizing_policy": "output-scale",
+    "implementation": "splinterm",
+    "window_geometry": {
+      "actual_padding": {
+        "bottom": 20,
+        "left": 18,
+        "right": 19,
+        "top": 18
+      },
+      "cell": {
+        "advance_policy": "integer-primary-advance",
+        "ascent": 19,
+        "baseline_from_top": 19,
+        "descent": 6,
+        "height": 25,
+        "width": 11
+      },
+      "effective_base_padding": {
+        "bottom": 18,
+        "left": 18,
+        "right": 18,
+        "top": 18
+      },
+      "grid": {
+        "columns": 1,
+        "rows": 1
+      },
+      "grid_rect": {
+        "height": 25,
+        "width": 11,
+        "x": 18,
+        "y": 18
+      },
+      "requested_padding": {
+        "bottom": 12,
+        "left": 12,
+        "right": 12,
+        "top": 12
+      },
+      "residual_bottom": 2,
+      "residual_policy": "trailing-edges",
+      "residual_right": 1,
+      "surface_buffer_size": {
+        "height": 63,
+        "width": 48
+      },
+      "surface_logical_size": {
+        "height": 42,
+        "width": 32
+      },
+      "surface_scale_120": 180,
+      "visible_grid_rect": {
+        "height": 25,
+        "width": 11,
+        "x": 18,
+        "y": 18
+      }
+    }
+  },
+  "scale_120": 180,
+  "schema": "splinterm.final-buffer.slice3.v2",
+  "stride": 192,
+  "width": 48
+}

@@ -1,6 +1,6 @@
 # ADR 0004: Use narrow fontconfig discovery with Swash and CPU SHM rendering
 
-- **Status:** Amended — discovery/shaping accepted; production rasterizer reopened by Phase 8.1
+- **Status:** Accepted — Phase 8.1 renderer and oracle policy closed
 - **Date:** 2026-07-18
 
 ## Context
@@ -38,7 +38,8 @@ Use a client-owned CPU renderer backed by:
 - fixed terminal cell spans independent of fractional glyph advances;
 - scale-specific glyph-image caches;
 - Foot-derived custom geometry for supported box-drawing characters; and
-- direct blending into opaque ARGB8888 SHM buffers.
+- direct blending into premultiplied ARGB8888 SHM buffers, opaque by default
+  with Foot-compatible default-background alpha when configured.
 
 The current discovery adapter invokes `fc-match` for explicit patterns and
 validates the resolved family/style before reading only the selected files. It
@@ -86,10 +87,63 @@ no native pointers. No first-party unsafe code is required. Its initial pinned
 U+0020–U+007E differential passes 95/95 with exact geometry and alpha bytes.
 
 The bridge now backs the production scale/face-keyed snapshot cache for
-non-color faces; the real production-cache exporter also passes the pinned
-95/95 ASCII gate. Swash remains responsible for shaping and the color-emoji
-path. Style/size/scale expansion, final-buffer placement, and performance
-measurement remain required before Phase 8.1 can close.
+non-color faces; the real production-cache exporter passes the pinned 95/95
+ASCII gate. Swash remains responsible for shaping. Color emoji uses the
+FreeType fixed strike selected by fcft and Foot's pixman Lanczos3 scaling path.
+
+## Phase 8.1 closure decision
+
+The accepted observable tolerance is zero for every closure lane: final ARGB
+bytes, grayscale masks, cell metrics, advances, placement, four-sided ink and
+padding geometry, decoration vectors, cursor composition, renderer-path output,
+and accepted source-first scale cases. Comparators may not translate images,
+widen tolerances, or regenerate references during CI. The pinned authority is
+Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
+
+Strict reference generation is supported only when provenance matches the
+recorded Linux x86_64 font files/indices and hashes, fontconfig/FreeType/fcft/
+pixman versions and policy, Foot patch/build options, palette, geometry,
+scales, and Rust lockfile recorded by schema-v3
+`tools/foot-oracle/provenance.json`. Portable CI validates fixtures and tools;
+a supported reference-host drift fails rather than rewriting evidence, and an
+unsupported host is reported explicitly.
+
+The production cache policy is output-independent and bounded: 2,048 persistent
+glyph entries, 64 MiB of glyph data, 24 raster faces, and a 4,096-entry active
+frame warm-cache target that may retain only currently referenced overflow.
+The client history window is separately bounded to 4,096 rows and 16 MiB.
+Scale, face identity, raster size, theme, and output-DPI changes use explicit
+cache keys or invalidation; cold/warm and full/damage/scroll-copy paths must
+produce identical pixels.
+
+Release budgets are enforced by `tools/performance/phase9-thresholds.json`.
+Notable limits are 10/300 ms full-paint p95 at 80×24/240×80, 1/10 ms one-row
+paint p95, 128/256 MiB renderer RSS, 256 MiB graphical RSS, 128 MiB SHM, five
+idle CPU ticks over two seconds, 100 ms post-output input response, two seconds
+for twelve resizes, and three seconds for reattach. The accepted reference-host
+measurements and host manifest are archived under
+`docs/spikes/artifacts/0017/slice9-performance/`.
+
+Intentional or deferred Foot divergences are:
+
+- Swash shapes text while safe FreeType/fcft-compatible paths rasterize
+  grayscale and color glyphs; engine identity may differ but accepted output
+  lanes do not.
+- Splinterm translates the supported Foot box-drawing geometry into safe Rust.
+- Configuration is a documented subset. Background `alpha` supports Foot's
+  default mode; `alpha-mode=matching/all` and blur remain unsupported.
+- `TERM=xterm-256color` is advertised until a tested project terminfo and full
+  Foot keyboard contract exist; claiming `TERM=foot` broke Neovim input.
+- The extra exploratory `underline-double-indexed` 1.25× case is recorded as
+  non-exact outside the reviewed closure set; no tolerance/reference changed.
+- Sixels, synthetic styled fallback, advanced URL/configuration behavior, and
+  other declared MVP non-goals remain deferred.
+
+The accepted evidence is indexed in
+`docs/spikes/artifacts/0017/README.md`; Slice 10 additionally proved real
+Hyprland/Omarchy lifecycle behavior, Fcitx5/Mozc preedit/commit, clipboard
+paths, live theme integration, focus-safe history, and application-keypad text
+input.
 
 ## Consequences
 

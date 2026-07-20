@@ -1,0 +1,40 @@
+{
+  "actual_edge_clearance": {
+    "bottom": 17,
+    "left": 18,
+    "right": 16,
+    "top": 15
+  },
+  "actual_frame_id": "cursor-beam-reverse",
+  "cursor": {
+    "configured_shape": "beam",
+    "effective_shape": "beam",
+    "position": {
+      "column": 0,
+      "row": 0
+    },
+    "target_focus_semantics": "focused-steady"
+  },
+  "edge_clearance_delta": {
+    "bottom": 0,
+    "left": 0,
+    "right": 0,
+    "top": 0
+  },
+  "exact": true,
+  "first_divergent_cell": null,
+  "height": 53,
+  "maximum_channel_delta": 0,
+  "mismatch_bounds": null,
+  "mismatch_pixels": 0,
+  "per_cell_mismatch_pixels": {},
+  "reference_edge_clearance": {
+    "bottom": 17,
+    "left": 18,
+    "right": 16,
+    "top": 15
+  },
+  "reference_frame_id": "cursor-beam-reverse",
+  "schema": "splinterm.final-buffer.slice3-comparison.v2",
+  "width": 40
+}
