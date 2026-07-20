@@ -95,17 +95,18 @@ use smithay_client_toolkit::reexports::protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::config::{APP_ID, CursorStyle, ResolvedTheme};
+use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
 use crate::geometry::{
-    OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, logical_extent_to_buffer,
+    OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
+    logical_extent_to_buffer,
 };
-use crate::pane::{FocusDirection, PaneLayout};
+use crate::pane::{FocusDirection, PaneChrome, PaneDivider, PaneLayout};
 use crate::renderer::{
-    CursorPresentation, HistoryOverlayStatus, SnapshotFrame, SnapshotOverlays, TextRow,
-    configured_background_bgra, history_overlay_layout, paint, paint_history_overlay,
-    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
-    paint_snapshot_rows_presented, scroll_snapshot_pixels, set_font_zoom_steps, snapshot_row_rect,
-    update_output_dpi, write_ppm,
+    ChromeText, CursorPresentation, HistoryOverlayStatus, SnapshotFrame, SnapshotOverlays, TextRow,
+    configured_background_bgra, history_overlay_layout, paint, paint_box_drawing_cell,
+    paint_history_overlay, paint_snapshot_overlays, paint_snapshot_presented,
+    paint_snapshot_region_presented, paint_snapshot_rows_presented, scroll_snapshot_pixels,
+    set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
 };
 use crate::viewport::ScrollbackViewport;
 
@@ -421,6 +422,8 @@ pub struct WindowOptions {
     pub title: Option<String>,
     /// Current project-owned Omarchy role mapping.
     pub theme: ResolvedTheme,
+    pub pane_divider_style: PaneDividerStyle,
+    pub frame_title_mode: FrameTitleMode,
     /// Multi-pane input. Empty retains the legacy one-pane fields above.
     pub panes: Vec<WindowPaneOptions>,
     pub layout: Option<LayoutNode>,
@@ -498,6 +501,8 @@ impl Default for WindowOptions {
             cursor_blink: true,
             title: None,
             theme: ResolvedTheme::default(),
+            pane_divider_style: PaneDividerStyle::Line,
+            frame_title_mode: FrameTitleMode::Splint,
             panes: Vec::new(),
             layout: None,
             active_splint: None,
@@ -673,6 +678,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         cursor_blink: options.cursor_blink,
         title_override: options.title,
         theme: options.theme,
+        pane_divider_style: options.pane_divider_style,
+        frame_title_mode: options.frame_title_mode,
+        frame_titles: HashMap::new(),
         evidence_close_shortcuts: options.evidence_close_shortcuts,
         modifiers: Modifiers::default(),
         font_zoom_steps: 0,
@@ -784,6 +792,418 @@ fn paint_trusted_consent_chrome(canvas: &mut [u8], width: u32, height: u32) {
         height.saturating_sub(border),
         0x0020_7040,
     );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bounded box cells require explicit canvas, clip, metrics, color, scale, and direction"
+)]
+fn paint_box_sequence(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    character: char,
+    clip: Rect,
+    cell_width: u32,
+    cell_height: u32,
+    color: u32,
+    scale_120: u16,
+    horizontal: bool,
+) {
+    let step = if horizontal { cell_width } else { cell_height };
+    if step == 0 {
+        return;
+    }
+    let end = if horizontal {
+        clip.x.saturating_add(clip.width)
+    } else {
+        clip.y.saturating_add(clip.height)
+    };
+    let mut position = if horizontal { clip.x } else { clip.y };
+    while position < end {
+        let cell = if horizontal {
+            Rect {
+                x: position,
+                y: clip.y,
+                width: cell_width,
+                height: cell_height,
+            }
+        } else {
+            Rect {
+                x: clip.x,
+                y: position,
+                width: cell_width,
+                height: cell_height,
+            }
+        };
+        paint_box_drawing_cell(
+            canvas, width, height, character, cell, clip, color, scale_120,
+        );
+        position = position.saturating_add(step);
+    }
+}
+
+fn sanitize_frame_title(title: &str, maximum_cells: u32) -> String {
+    let mut output = String::new();
+    let mut cells = 0_u32;
+    let mut previous_space = false;
+    for character in title.chars() {
+        let character = if character.is_control() || character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if character == ' ' && (previous_space || output.is_empty()) {
+            continue;
+        }
+        let width = u32::try_from(character.width().unwrap_or(0)).unwrap_or(0);
+        if width > 0 && cells.saturating_add(width) > maximum_cells {
+            break;
+        }
+        output.push(character);
+        cells = cells.saturating_add(width);
+        previous_space = character == ' ';
+    }
+    output.trim_end().to_owned()
+}
+
+fn fill_chrome_background(canvas: &mut [u8], width: u32, height: u32, rect: Rect, color: u32) {
+    let [_, red, green, blue] = color.to_be_bytes();
+    let pixel = configured_background_bgra([red, green, blue]);
+    let right = rect.x.saturating_add(rect.width).min(width);
+    let bottom = rect.y.saturating_add(rect.height).min(height);
+    for y in rect.y.min(height)..bottom {
+        for x in rect.x.min(width)..right {
+            let Ok(index) = usize::try_from((y * width + x) * 4) else {
+                continue;
+            };
+            if let Some(target) = canvas.get_mut(index..index + 4) {
+                target.copy_from_slice(&pixel);
+            }
+        }
+    }
+}
+
+fn divider_touches_pane(divider: PaneDivider, pane: Rect) -> bool {
+    let divider_right = divider.rect.x.saturating_add(divider.rect.width);
+    let divider_bottom = divider.rect.y.saturating_add(divider.rect.height);
+    let pane_right = pane.x.saturating_add(pane.width);
+    let pane_bottom = pane.y.saturating_add(pane.height);
+    match divider.axis {
+        splinterm_core::Axis::Horizontal => {
+            (pane_right == divider.rect.x || pane.x == divider_right)
+                && pane.y < divider_bottom
+                && divider.rect.y < pane_bottom
+        }
+        splinterm_core::Axis::Vertical => {
+            (pane_bottom == divider.rect.y || pane.y == divider_bottom)
+                && pane.x < divider_right
+                && divider.rect.x < pane_right
+        }
+    }
+}
+
+fn divider_junction(first: PaneDivider, second: PaneDivider) -> Option<(char, Rect)> {
+    let (vertical, horizontal) = match (first.axis, second.axis) {
+        (splinterm_core::Axis::Horizontal, splinterm_core::Axis::Vertical) => (first, second),
+        (splinterm_core::Axis::Vertical, splinterm_core::Axis::Horizontal) => (second, first),
+        _ => return None,
+    };
+    let vertical_right = vertical.rect.x.checked_add(vertical.rect.width)?;
+    let vertical_bottom = vertical.rect.y.checked_add(vertical.rect.height)?;
+    let horizontal_right = horizontal.rect.x.checked_add(horizontal.rect.width)?;
+    let horizontal_bottom = horizontal.rect.y.checked_add(horizontal.rect.height)?;
+    if horizontal_right == vertical.rect.x
+        && horizontal.rect.y < vertical_bottom
+        && vertical.rect.y < horizontal_bottom
+    {
+        return Some((
+            '┤',
+            Rect {
+                x: vertical.rect.x,
+                y: horizontal.rect.y,
+                width: vertical.rect.width,
+                height: horizontal.rect.height,
+            },
+        ));
+    }
+    if horizontal.rect.x == vertical_right
+        && horizontal.rect.y < vertical_bottom
+        && vertical.rect.y < horizontal_bottom
+    {
+        return Some((
+            '├',
+            Rect {
+                x: vertical.rect.x,
+                y: horizontal.rect.y,
+                width: vertical.rect.width,
+                height: horizontal.rect.height,
+            },
+        ));
+    }
+    if vertical_bottom == horizontal.rect.y
+        && vertical.rect.x < horizontal_right
+        && horizontal.rect.x < vertical_right
+    {
+        return Some((
+            '┴',
+            Rect {
+                x: vertical.rect.x,
+                y: horizontal.rect.y,
+                width: vertical.rect.width,
+                height: horizontal.rect.height,
+            },
+        ));
+    }
+    if vertical.rect.y == horizontal_bottom
+        && vertical.rect.x < horizontal_right
+        && horizontal.rect.x < vertical_right
+    {
+        return Some((
+            '┬',
+            Rect {
+                x: vertical.rect.x,
+                y: horizontal.rect.y,
+                width: vertical.rect.width,
+                height: horizontal.rect.height,
+            },
+        ));
+    }
+    None
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "line junctions and complete framed panels share one trusted clipped chrome pass"
+)]
+fn paint_pane_chrome(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    layout: &PaneLayout,
+    active_splint: Option<SplintId>,
+    theme: ResolvedTheme,
+    cell_width: u32,
+    cell_height: u32,
+    scale_120: u32,
+    frame_titles: &HashMap<SplintId, CachedFrameTitle>,
+) -> Result<()> {
+    let scale = u16::try_from(scale_120).context("pane chrome scale fits u16")?;
+    match layout.chrome {
+        PaneChrome::None => {}
+        PaneChrome::Line { .. } => {
+            let active_rect = active_splint.and_then(|id| layout.rect(id));
+            for divider in &layout.separators {
+                let clip = App::buffer_rect(divider.rect, scale_120)?;
+                let active = active_rect.is_some_and(|pane| divider_touches_pane(*divider, pane));
+                let color = if active {
+                    theme.pane_border_active
+                } else {
+                    theme.pane_border
+                };
+                let horizontal = divider.axis == splinterm_core::Axis::Vertical;
+                paint_box_sequence(
+                    canvas,
+                    width,
+                    height,
+                    if horizontal { '─' } else { '│' },
+                    clip,
+                    cell_width,
+                    cell_height,
+                    color,
+                    scale,
+                    horizontal,
+                );
+            }
+            for (index, first) in layout.separators.iter().copied().enumerate() {
+                for second in layout.separators[index + 1..].iter().copied() {
+                    let Some((character, logical_cell)) = divider_junction(first, second) else {
+                        continue;
+                    };
+                    let clip = App::buffer_rect(logical_cell, scale_120)?;
+                    let active = active_rect.is_some_and(|pane| {
+                        divider_touches_pane(first, pane) || divider_touches_pane(second, pane)
+                    });
+                    let color = if active {
+                        theme.pane_border_active
+                    } else {
+                        theme.pane_border
+                    };
+                    paint_box_drawing_cell(
+                        canvas,
+                        width,
+                        height,
+                        character,
+                        Rect {
+                            x: clip.x,
+                            y: clip.y,
+                            width: cell_width,
+                            height: cell_height,
+                        },
+                        clip,
+                        color,
+                        scale,
+                    );
+                }
+            }
+        }
+        PaneChrome::Frame { .. } => {
+            for pane in &layout.panes {
+                let allocation = App::buffer_rect(pane.allocation, scale_120)?;
+                let content = App::buffer_rect(pane.rect, scale_120)?;
+                let right = allocation.x.saturating_add(allocation.width);
+                let bottom = allocation.y.saturating_add(allocation.height);
+                let content_right = content.x.saturating_add(content.width);
+                let content_bottom = content.y.saturating_add(content.height);
+                let color = if Some(pane.splint_id) == active_splint {
+                    theme.pane_border_active
+                } else {
+                    theme.pane_border
+                };
+                let top = Rect {
+                    x: allocation.x.saturating_add(cell_width),
+                    y: allocation.y,
+                    width: allocation
+                        .width
+                        .saturating_sub(cell_width.saturating_mul(2)),
+                    height: content.y.saturating_sub(allocation.y),
+                };
+                let bottom_edge = Rect {
+                    x: allocation.x.saturating_add(cell_width),
+                    y: content_bottom,
+                    width: allocation
+                        .width
+                        .saturating_sub(cell_width.saturating_mul(2)),
+                    height: bottom.saturating_sub(content_bottom),
+                };
+                let left = Rect {
+                    x: allocation.x,
+                    y: allocation.y.saturating_add(cell_height),
+                    width: content.x.saturating_sub(allocation.x),
+                    height: allocation
+                        .height
+                        .saturating_sub(cell_height.saturating_mul(2)),
+                };
+                let right_edge = Rect {
+                    x: content_right,
+                    y: allocation.y.saturating_add(cell_height),
+                    width: right.saturating_sub(content_right),
+                    height: allocation
+                        .height
+                        .saturating_sub(cell_height.saturating_mul(2)),
+                };
+                paint_box_sequence(
+                    canvas,
+                    width,
+                    height,
+                    '─',
+                    top,
+                    cell_width,
+                    cell_height,
+                    color,
+                    scale,
+                    true,
+                );
+                paint_box_sequence(
+                    canvas,
+                    width,
+                    height,
+                    '─',
+                    bottom_edge,
+                    cell_width,
+                    cell_height,
+                    color,
+                    scale,
+                    true,
+                );
+                paint_box_sequence(
+                    canvas,
+                    width,
+                    height,
+                    '│',
+                    left,
+                    cell_width,
+                    cell_height,
+                    color,
+                    scale,
+                    false,
+                );
+                paint_box_sequence(
+                    canvas,
+                    width,
+                    height,
+                    '│',
+                    right_edge,
+                    cell_width,
+                    cell_height,
+                    color,
+                    scale,
+                    false,
+                );
+                let top_left = Rect {
+                    x: allocation.x,
+                    y: allocation.y,
+                    width: cell_width,
+                    height: cell_height,
+                };
+                let top_right = Rect {
+                    x: right.saturating_sub(cell_width),
+                    y: allocation.y,
+                    width: cell_width,
+                    height: cell_height,
+                };
+                let bottom_left = Rect {
+                    x: allocation.x,
+                    y: bottom.saturating_sub(cell_height),
+                    width: cell_width,
+                    height: cell_height,
+                };
+                let bottom_right = Rect {
+                    x: right.saturating_sub(cell_width),
+                    y: bottom.saturating_sub(cell_height),
+                    width: cell_width,
+                    height: cell_height,
+                };
+                for (character, cell) in [
+                    ('┌', top_left),
+                    ('┐', top_right),
+                    ('└', bottom_left),
+                    ('┘', bottom_right),
+                ] {
+                    let clip = cell;
+                    paint_box_drawing_cell(
+                        canvas, width, height, character, cell, clip, color, scale,
+                    );
+                }
+                if let Some(title) = frame_titles.get(&pane.splint_id) {
+                    let clear = Rect {
+                        x: allocation.x.saturating_add(cell_width.saturating_mul(2)),
+                        y: allocation.y,
+                        width: title
+                            .text
+                            .cells()
+                            .saturating_add(2)
+                            .saturating_mul(cell_width),
+                        height: cell_height,
+                    };
+                    fill_chrome_background(canvas, width, height, clear, theme.background);
+                    title.text.paint(
+                        canvas,
+                        width,
+                        height,
+                        (
+                            allocation.x.saturating_add(cell_width.saturating_mul(3)),
+                            allocation.y,
+                        ),
+                        clear,
+                        color,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_theme(snapshot: &mut TerminalSnapshot, theme: ResolvedTheme) {
@@ -1079,6 +1499,13 @@ impl PaneView {
     }
 }
 
+struct CachedFrameTitle {
+    source: String,
+    maximum_cells: u32,
+    scale_120: u32,
+    text: ChromeText,
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent Wayland lifecycle and evidence-mode flags are not one state machine"
@@ -1113,6 +1540,9 @@ struct App {
     cursor_blink: bool,
     title_override: Option<String>,
     theme: ResolvedTheme,
+    pane_divider_style: PaneDividerStyle,
+    frame_title_mode: FrameTitleMode,
+    frame_titles: HashMap<SplintId, CachedFrameTitle>,
     evidence_close_shortcuts: bool,
     modifiers: Modifiers,
     font_zoom_steps: i16,
@@ -2414,11 +2844,92 @@ impl App {
             .is_some_and(|next| self.focus_splint(next))
     }
 
+    fn prepare_frame_titles(
+        &mut self,
+        pane_layout: Option<&PaneLayout>,
+        cell_width: u32,
+    ) -> Result<()> {
+        if self.pane_divider_style != PaneDividerStyle::Frame
+            || self.frame_title_mode != FrameTitleMode::Splint
+        {
+            self.frame_titles.clear();
+            return Ok(());
+        }
+        let (Some(pane_layout), Some(topology)) = (pane_layout, self.layout.as_ref()) else {
+            self.frame_titles.clear();
+            return Ok(());
+        };
+        let mut requested = Vec::new();
+        for pane in &pane_layout.panes {
+            let allocation = Self::buffer_rect(pane.allocation, self.scale_120)?;
+            let columns = allocation.width / cell_width.max(1);
+            let Some(maximum_cells) = columns.checked_sub(6).filter(|cells| *cells > 0) else {
+                continue;
+            };
+            let Some(splint) = topology.find_splint(pane.splint_id) else {
+                continue;
+            };
+            let title = sanitize_frame_title(&splint.title, maximum_cells);
+            if !title.is_empty() {
+                requested.push((pane.splint_id, title, maximum_cells));
+            }
+        }
+        let requested_ids = requested
+            .iter()
+            .map(|(splint_id, _, _)| *splint_id)
+            .collect::<HashSet<_>>();
+        self.frame_titles
+            .retain(|splint_id, _| requested_ids.contains(splint_id));
+        for (splint_id, source, maximum_cells) in requested {
+            let current = self.frame_titles.get(&splint_id).is_some_and(|cached| {
+                cached.source == source
+                    && cached.maximum_cells == maximum_cells
+                    && cached.scale_120 == self.scale_120
+            });
+            if !current {
+                self.frame_titles.insert(
+                    splint_id,
+                    CachedFrameTitle {
+                        text: ChromeText::load(&source, self.scale_120)?,
+                        source,
+                        maximum_cells,
+                        scale_120: self.scale_120,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn computed_pane_layout(&self) -> Result<Option<PaneLayout>> {
         self.layout
             .as_ref()
             .map(|layout| {
-                PaneLayout::compute(
+                let frame = self
+                    .pane
+                    .snapshot_frame
+                    .as_ref()
+                    .context("multi-pane layout requires an active snapshot frame")?;
+                let cell_width = buffer_to_logical_ceil(frame.cell_width(), self.scale_120)?;
+                let cell_height = buffer_to_logical_ceil(frame.cell_height(), self.scale_120)?;
+                let chrome = match self.pane_divider_style {
+                    PaneDividerStyle::None => PaneChrome::None,
+                    PaneDividerStyle::Line => PaneChrome::Line {
+                        vertical_width: cell_width,
+                        horizontal_height: cell_height,
+                    },
+                    PaneDividerStyle::Frame => PaneChrome::Frame {
+                        vertical_width: cell_width,
+                        horizontal_height: cell_height,
+                    },
+                };
+                let minimum_width = cell_width
+                    .checked_mul(2)
+                    .context("minimum pane width overflow")?;
+                let minimum_height = cell_height
+                    .checked_mul(2)
+                    .context("minimum pane height overflow")?;
+                PaneLayout::compute_with_chrome(
                     layout,
                     Rect {
                         x: 0,
@@ -2426,11 +2937,10 @@ impl App {
                         width: self.logical_width,
                         height: self.logical_height,
                     },
-                    1,
-                    1,
-                    1,
+                    chrome,
+                    minimum_width,
+                    minimum_height,
                 )
-                .map_err(anyhow::Error::msg)
             })
             .transpose()
     }
@@ -4100,7 +4610,14 @@ impl App {
             self.pane.viewport_dirty = false;
         }
         let pane_layout = self.computed_pane_layout()?;
-        let active_rect = self.focused_splint().and_then(|splint_id| {
+        let pane_cell_width = self
+            .pane
+            .snapshot_frame
+            .as_ref()
+            .map_or(1, SnapshotFrame::cell_width);
+        self.prepare_frame_titles(pane_layout.as_ref(), pane_cell_width)?;
+        let active_splint = self.focused_splint();
+        let active_rect = active_splint.and_then(|splint_id| {
             pane_layout
                 .as_ref()
                 .and_then(|layout| layout.rect(splint_id))
@@ -4277,6 +4794,20 @@ impl App {
                     accent_color: self.theme.ui_accent,
                 },
             );
+            if let Some(layout) = pane_layout.as_ref() {
+                paint_pane_chrome(
+                    canvas,
+                    width,
+                    height,
+                    layout,
+                    active_splint,
+                    self.theme,
+                    frame.cell_width(),
+                    frame.cell_height(),
+                    self.scale_120,
+                    &self.frame_titles,
+                )?;
+            }
             if let Some(status) =
                 history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref())
             {
@@ -5463,6 +5994,142 @@ mod tests {
             authority: AuthorityStatus::default(),
             controlled: false,
         }
+    }
+
+    #[test]
+    fn frame_corner_cells_contain_only_corner_masks() {
+        let splint = Splint::shell(PathBuf::from("/tmp"));
+        let splint_id = splint.id;
+        let layout = PaneLayout::compute_with_chrome(
+            &LayoutNode::Leaf(splint),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 64,
+            },
+            PaneChrome::Frame {
+                vertical_width: 8,
+                horizontal_height: 16,
+            },
+            2,
+            2,
+        )
+        .unwrap();
+        let mut actual = vec![0; 80 * 64 * 4];
+        let theme = ResolvedTheme::default();
+        paint_pane_chrome(
+            &mut actual,
+            80,
+            64,
+            &layout,
+            Some(splint_id),
+            theme,
+            8,
+            16,
+            120,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let corner = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 16,
+        };
+        let mut expected = vec![0; 80 * 64 * 4];
+        paint_box_drawing_cell(
+            &mut expected,
+            80,
+            64,
+            '┌',
+            corner,
+            corner,
+            theme.pane_border_active,
+            120,
+        );
+        let region = |canvas: &[u8]| {
+            (0_usize..16)
+                .flat_map(|y| {
+                    let start = y * 80 * 4;
+                    canvas[start..start + 8 * 4].to_vec()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(region(&actual), region(&expected));
+    }
+
+    #[test]
+    fn frame_titles_sanitize_controls_collapse_space_and_keep_complete_widths() {
+        assert_eq!(
+            sanitize_frame_title("  editor\n\t logs  ", 20),
+            "editor logs"
+        );
+        assert_eq!(sanitize_frame_title("界 shell", 4), "界 s");
+        assert_eq!(sanitize_frame_title("e\u{301}ditor", 1), "e\u{301}");
+        assert_eq!(sanitize_frame_title("ignored", 0), "");
+    }
+
+    #[test]
+    fn nested_line_dividers_resolve_all_tee_orientations() {
+        let vertical = PaneDivider {
+            axis: Axis::Horizontal,
+            rect: Rect {
+                x: 40,
+                y: 0,
+                width: 8,
+                height: 100,
+            },
+        };
+        let from_right = PaneDivider {
+            axis: Axis::Vertical,
+            rect: Rect {
+                x: 48,
+                y: 30,
+                width: 52,
+                height: 16,
+            },
+        };
+        let from_left = PaneDivider {
+            rect: Rect {
+                x: 0,
+                width: 40,
+                ..from_right.rect
+            },
+            ..from_right
+        };
+        assert_eq!(divider_junction(vertical, from_right).unwrap().0, '├');
+        assert_eq!(divider_junction(vertical, from_left).unwrap().0, '┤');
+
+        let horizontal = PaneDivider {
+            axis: Axis::Vertical,
+            rect: Rect {
+                x: 0,
+                y: 40,
+                width: 100,
+                height: 16,
+            },
+        };
+        let from_bottom = PaneDivider {
+            axis: Axis::Horizontal,
+            rect: Rect {
+                x: 30,
+                y: 56,
+                width: 8,
+                height: 44,
+            },
+        };
+        let from_top = PaneDivider {
+            rect: Rect {
+                y: 0,
+                height: 40,
+                ..from_bottom.rect
+            },
+            ..from_bottom
+        };
+        assert_eq!(divider_junction(horizontal, from_bottom).unwrap().0, '┬');
+        assert_eq!(divider_junction(horizontal, from_top).unwrap().0, '┴');
     }
 
     #[test]

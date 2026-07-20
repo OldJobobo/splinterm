@@ -27,6 +27,8 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | block |
 | `cursor.blink` | permit cursor blink | yes |
+| `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
+| `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 
 Malformed supported values fail startup. Unknown sections and keys print
 line-numbered diagnostics. `[colors] alpha` follows Foot's default alpha mode:
@@ -81,12 +83,15 @@ this MVP and produce diagnostics when represented as unknown keys.
 ## Theme role bridge
 
 `tools/generate-omarchy-theme.py THEME/colors.toml` maps Omarchy `bg`, `fg`,
-ANSI roles, accent, selection, and blue URL roles into a strict project-owned
-JSON file. Writes are atomic. Splinterm polls that file every 500 ms, validates
-all roles and colors, and repaints the terminal palette, cursor, selection, URL,
-and focus chrome without restarting the daemon or shell. Invalid changes are
-rejected and the last valid palette remains active; a missing startup file uses
-the documented safe fallback in `config/splinterm/theme.json`.
+ANSI roles, accent, selection, muted pane border, active pane border, and blue
+URL roles into a strict project-owned JSON file. Writes are atomic. Splinterm
+polls that file every 500 ms, validates all roles and colors, and repaints the
+terminal palette, cursor, selection, URL, and focus chrome without restarting
+the daemon or shell. The optional `pane_border` role defaults to a midpoint of
+background and foreground, while `pane_border_active` defaults to `ui_accent`,
+so older generated themes remain valid. Invalid changes are rejected and the
+last valid palette remains active; a missing startup file uses the documented
+safe fallback in `config/splinterm/theme.json`.
 
 After installing the generator, Omarchy 4 users should copy
 `config/omarchy/hooks/theme-set.d/10-splinterm.sh` into

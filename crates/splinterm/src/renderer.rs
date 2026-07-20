@@ -43,6 +43,7 @@ use swash::{
     shape::ShapeContext,
     zeno::Format,
 };
+use unicode_width::UnicodeWidthChar;
 
 const BASE_FONT_SIZE: f32 = 22.0;
 const BASE_ROW_X: i32 = 32;
@@ -1741,6 +1742,210 @@ fn blend_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba:
     .expect("composited alpha fits u8");
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "canvas bounds, glyph cell, clip, color, and scale are independent raster inputs"
+)]
+pub(crate) fn paint_box_drawing_cell(
+    canvas: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    character: char,
+    cell: Rect,
+    clip: Rect,
+    color: u32,
+    scale_120: u16,
+) {
+    let thickness = box_drawing::default_thickness(cell.width, cell.height, scale_120);
+    let Some(mask) = box_drawing::generate(character, cell.width, cell.height, thickness) else {
+        return;
+    };
+    let red = u8::try_from(color >> 16 & 0xff).expect("red channel fits");
+    let green = u8::try_from(color >> 8 & 0xff).expect("green channel fits");
+    let blue = u8::try_from(color & 0xff).expect("blue channel fits");
+    for y in 0..mask.height {
+        for x in 0..mask.width {
+            let index = usize::try_from(y * mask.width + x).expect("box mask index fits");
+            let coverage = mask.data[index];
+            if coverage == 0 {
+                continue;
+            }
+            let Some(x) = cell.x.checked_add(x) else {
+                continue;
+            };
+            let Some(y) = cell.y.checked_add(y) else {
+                continue;
+            };
+            if x < clip.x
+                || y < clip.y
+                || x >= clip.x.saturating_add(clip.width)
+                || y >= clip.y.saturating_add(clip.height)
+            {
+                continue;
+            }
+            let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
+                continue;
+            };
+            blend_pixel(
+                canvas,
+                canvas_width,
+                canvas_height,
+                x,
+                y,
+                [red, green, blue, coverage],
+            );
+        }
+    }
+}
+
+pub(crate) struct ChromeText {
+    frame: SnapshotFrame,
+    cells: u32,
+}
+
+impl ChromeText {
+    pub(crate) fn load(text: &str, scale_120: u32) -> Result<Self> {
+        let attributes = CellAttributes {
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: UnderlineStyle::None,
+            underline_color_source: ColorSource::Default,
+            underline_color: 0,
+            strikethrough: false,
+            blink: false,
+            conceal: false,
+            reverse: false,
+            foreground_source: ColorSource::Default,
+            foreground: 0,
+            background_source: ColorSource::Default,
+            background: 0,
+        };
+        let mut cell_row: Vec<TerminalCell> = Vec::new();
+        for character in text.chars() {
+            let width = character.width().unwrap_or(0).min(2);
+            if width == 0 {
+                if let Some(leader) = cell_row
+                    .iter_mut()
+                    .rev()
+                    .find(|cell| cell.spacer_remaining.is_none())
+                {
+                    leader.content.push(character);
+                }
+                continue;
+            }
+            cell_row.push(TerminalCell {
+                content: character.to_string(),
+                spacer_remaining: None,
+                attributes,
+            });
+            if width == 2 {
+                cell_row.push(TerminalCell {
+                    content: String::new(),
+                    spacer_remaining: Some(1),
+                    attributes,
+                });
+            }
+        }
+        let cell_count = u32::try_from(cell_row.len()).context("chrome title width fits u32")?;
+        let columns = cell_count.max(1);
+        let snapshot = TerminalSnapshot {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            revision: 1,
+            columns: usize::try_from(columns).context("chrome title columns fit usize")?,
+            rows: 1,
+            cursor_column: 0,
+            cursor_row: 0,
+            cursor_deferred_wrap: false,
+            active_screen: ActiveScreen::Normal,
+            input_modes: TerminalInputModes {
+                application_cursor: false,
+                application_keypad: false,
+                focus_reporting: false,
+                bracketed_paste: false,
+                cursor_visible: false,
+                cursor_blink: false,
+                mouse_tracking: splinterm_protocol::MouseTracking::None,
+                sgr_mouse: false,
+            },
+            palette: vec![0; 256],
+            default_colors: [0x00ff_ffff, 0, 0],
+            title: String::new(),
+            visible_rows: vec![TerminalRow {
+                row_id: None,
+                linebreak: false,
+                cells: {
+                    cell_row.resize(
+                        usize::try_from(columns).context("chrome title row width fits usize")?,
+                        TerminalCell {
+                            content: String::new(),
+                            spacer_remaining: None,
+                            attributes,
+                        },
+                    );
+                    cell_row
+                },
+            }],
+            history_generation: 1,
+            oldest_available_scrollback_row_id: None,
+            newest_available_scrollback_row_id: None,
+            scrollback_rows: Vec::new(),
+            available_scrollback_rows: 0,
+            omitted_oldest_scrollback_rows: 0,
+            exited_code: None,
+            exited_signal: None,
+        };
+        Ok(Self {
+            frame: SnapshotFrame::load_scaled(&snapshot, scale_120)?,
+            cells: cell_count,
+        })
+    }
+
+    pub(crate) const fn cells(&self) -> u32 {
+        self.cells
+    }
+
+    pub(crate) fn paint(
+        &self,
+        canvas: &mut [u8],
+        width: u32,
+        height: u32,
+        origin: (u32, u32),
+        clip: Rect,
+        color: u32,
+    ) {
+        let foreground = packed_rgb(color);
+        let clip = (
+            i32::try_from(clip.x).unwrap_or(i32::MAX),
+            i32::try_from(clip.y).unwrap_or(i32::MAX),
+            i32::try_from(clip.x.saturating_add(clip.width)).unwrap_or(i32::MAX),
+            i32::try_from(clip.y.saturating_add(clip.height)).unwrap_or(i32::MAX),
+        );
+        for placed in &self.frame.glyphs {
+            let glyph = &self.frame.cache[&placed.key];
+            let x = origin
+                .0
+                .saturating_add(placed.column.saturating_mul(self.frame.cell_width));
+            let baseline = origin
+                .1
+                .saturating_add(u32::try_from(self.frame.baseline).unwrap_or(0));
+            blend_glyph(
+                canvas,
+                width,
+                height,
+                i32::try_from(x).unwrap_or(i32::MAX) + round_to_i32(placed.x_offset) + glyph.left,
+                i32::try_from(baseline).unwrap_or(i32::MAX)
+                    - round_to_i32(placed.y_offset)
+                    - glyph.top,
+                glyph,
+                foreground,
+                Some(clip),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SnapshotGlyph {
     key: GlyphKey,
@@ -1818,6 +2023,10 @@ pub(crate) struct SnapshotFrame {
 }
 
 impl SnapshotFrame {
+    pub(crate) const fn cell_width(&self) -> u32 {
+        self.cell_width
+    }
+
     pub(crate) const fn cell_height(&self) -> u32 {
         self.cell_height
     }
@@ -4285,6 +4494,27 @@ mod tests {
             origin_x: BASE_ROW_X,
             origin_y: BASE_ROW_Y,
         }
+    }
+
+    #[test]
+    fn chrome_text_keeps_combining_clusters_and_wide_cell_spans() {
+        let text = ChromeText::load("e\u{301}界", 120).unwrap();
+        assert_eq!(text.cells(), 3);
+        let mut canvas = vec![0; 256 * 64 * 4];
+        text.paint(
+            &mut canvas,
+            256,
+            64,
+            (8, 0),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 256,
+                height: 64,
+            },
+            0x12_34_56,
+        );
+        assert!(canvas.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 
     #[test]

@@ -1721,6 +1721,17 @@ async fn run_topology_manager(
     Ok(())
 }
 
+fn pane_chrome_capture() -> Result<Option<PathBuf>> {
+    let Some(path) = env::var_os("SPLINTERM_PANE_CHROME_CAPTURE") else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").is_some(),
+        "SPLINTERM_PANE_CHROME_CAPTURE requires development attach"
+    );
+    Ok(Some(PathBuf::from(path)))
+}
+
 fn spawn_topology_smoke(
     commands: mpsc::Sender<WindowTopologyCommand>,
     target: SplintId,
@@ -1813,6 +1824,7 @@ async fn run_live_multipane_window(
     ));
     let result = tokio::task::spawn_blocking(move || {
         run_window(WindowOptions {
+            capture: pane_chrome_capture()?,
             panes,
             layout: Some(root),
             active_splint: Some(active_splint),
@@ -1824,6 +1836,8 @@ async fn run_live_multipane_window(
             cursor_blink: window_config.cursor_blink,
             title: window_config.title,
             theme,
+            pane_divider_style: window_config.pane_divider_style,
+            frame_title_mode: window_config.frame_title_mode,
             ..WindowOptions::default()
         })
     })
@@ -1920,6 +1934,8 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
             cursor_blink: window_config.cursor_blink,
             title: window_config.title,
             theme,
+            pane_divider_style: window_config.pane_divider_style,
+            frame_title_mode: window_config.frame_title_mode,
             ..WindowOptions::default()
         })
     });

@@ -40,6 +40,8 @@ pub struct AppConfig {
     /// Foot-compatible 16-bit background alpha (`[colors] alpha`).
     pub background_alpha: u16,
     pub theme_path: PathBuf,
+    pub pane_divider_style: PaneDividerStyle,
+    pub frame_title_mode: FrameTitleMode,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -48,6 +50,21 @@ pub enum CursorStyle {
     Block,
     Beam,
     Underline,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PaneDividerStyle {
+    None,
+    #[default]
+    Line,
+    Frame,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FrameTitleMode {
+    None,
+    #[default]
+    Splint,
 }
 
 impl Default for AppConfig {
@@ -68,6 +85,8 @@ impl Default for AppConfig {
             resize_delay_ms: 0,
             background_alpha: u16::MAX,
             theme_path: default_config_dir().join("theme.json"),
+            pane_divider_style: PaneDividerStyle::Line,
+            frame_title_mode: FrameTitleMode::Splint,
         }
     }
 }
@@ -128,7 +147,7 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
             section = line[1..line.len() - 1].trim().to_ascii_lowercase();
             if !matches!(
                 section.as_str(),
-                "main" | "scrollback" | "cursor" | "colors" | "key-bindings"
+                "main" | "scrollback" | "cursor" | "colors" | "key-bindings" | "multiplexer"
             ) {
                 diagnostics.push(format!(
                     "line {}: unsupported section [{section}]",
@@ -278,6 +297,26 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
                 config.scrollback_lines = parse_range(value, 0, 1_000_000, index)?;
                 false
             }
+            "multiplexer.divider-style" => {
+                config.pane_divider_style = match value.to_ascii_lowercase().as_str() {
+                    "none" => PaneDividerStyle::None,
+                    "line" => PaneDividerStyle::Line,
+                    "frame" => PaneDividerStyle::Frame,
+                    _ => bail!(
+                        "line {}: divider-style must be none, line, or frame",
+                        index + 1
+                    ),
+                };
+                false
+            }
+            "multiplexer.frame-title" => {
+                config.frame_title_mode = match value.to_ascii_lowercase().as_str() {
+                    "none" => FrameTitleMode::None,
+                    "splint" => FrameTitleMode::Splint,
+                    _ => bail!("line {}: frame-title must be none or splint", index + 1),
+                };
+                false
+            }
             "cursor.style" => {
                 config.cursor_style = match value.to_ascii_lowercase().as_str() {
                     "block" => CursorStyle::Block,
@@ -370,6 +409,10 @@ pub struct ThemePalette {
     pub selection: String,
     pub url: String,
     pub ui_accent: String,
+    #[serde(default)]
+    pub pane_border: Option<String>,
+    #[serde(default)]
+    pub pane_border_active: Option<String>,
     pub ansi: [String; 16],
 }
 
@@ -381,6 +424,8 @@ pub struct ResolvedTheme {
     pub selection: u32,
     pub url: u32,
     pub ui_accent: u32,
+    pub pane_border: u32,
+    pub pane_border_active: u32,
     pub ansi: [u32; 16],
 }
 
@@ -393,6 +438,8 @@ impl Default for ResolvedTheme {
             selection: 0x354a60,
             url: 0x78beff,
             ui_accent: 0x78d2ff,
+            pane_border: 0x7c7e80,
+            pane_border_active: 0x78d2ff,
             ansi: [
                 0x1d2021, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
                 0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
@@ -411,13 +458,28 @@ impl ThemePalette {
         for (out, value) in ansi.iter_mut().zip(&self.ansi) {
             *out = parse_color(value)?;
         }
+        let background = parse_color(&self.background)?;
+        let foreground = parse_color(&self.foreground)?;
+        let ui_accent = parse_color(&self.ui_accent)?;
         Ok(ResolvedTheme {
-            background: parse_color(&self.background)?,
-            foreground: parse_color(&self.foreground)?,
+            background,
+            foreground,
             cursor: parse_color(&self.cursor)?,
             selection: parse_color(&self.selection)?,
             url: parse_color(&self.url)?,
-            ui_accent: parse_color(&self.ui_accent)?,
+            ui_accent,
+            pane_border: self
+                .pane_border
+                .as_deref()
+                .map(parse_color)
+                .transpose()?
+                .unwrap_or_else(|| blend_rgb(background, foreground)),
+            pane_border_active: self
+                .pane_border_active
+                .as_deref()
+                .map(parse_color)
+                .transpose()?
+                .unwrap_or(ui_accent),
             ansi,
         })
     }
@@ -452,6 +514,13 @@ fn parse_color(value: &str) -> Result<u32> {
         bail!("color {value:?} must be #RRGGBB");
     }
     u32::from_str_radix(hex, 16).with_context(|| format!("invalid color {value:?}"))
+}
+
+fn blend_rgb(first: u32, second: u32) -> u32 {
+    let red = u32::midpoint(first >> 16 & 0xff, second >> 16 & 0xff);
+    let green = u32::midpoint(first >> 8 & 0xff, second >> 8 & 0xff);
+    let blue = u32::midpoint(first & 0xff, second & 0xff);
+    red << 16 | green << 8 | blue
 }
 
 #[cfg(test)]
@@ -550,12 +619,49 @@ mod tests {
         assert!(parse("login-shell=perhaps").is_err());
     }
     #[test]
-    fn theme_maps_every_omarchy_role() {
-        let json = r##"{"background":"#000001","foreground":"#000002","cursor":"#000003","selection":"#000004","url":"#000005","ui_accent":"#000006","ansi":["#000000","#000001","#000002","#000003","#000004","#000005","#000006","#000007","#000008","#000009","#00000a","#00000b","#00000c","#00000d","#00000e","#00000f"]}"##;
+    fn pane_divider_configuration_is_explicit_and_bounded() {
+        let defaults = parse("").unwrap().config;
+        assert_eq!(defaults.pane_divider_style, PaneDividerStyle::Line);
+        assert_eq!(defaults.frame_title_mode, FrameTitleMode::Splint);
+        for (value, expected) in [
+            ("none", PaneDividerStyle::None),
+            ("line", PaneDividerStyle::Line),
+            ("frame", PaneDividerStyle::Frame),
+        ] {
+            let loaded = parse(&format!("[multiplexer]\ndivider-style={value}\n")).unwrap();
+            assert_eq!(loaded.config.pane_divider_style, expected);
+        }
+        for (value, expected) in [
+            ("none", FrameTitleMode::None),
+            ("splint", FrameTitleMode::Splint),
+        ] {
+            let loaded = parse(&format!("[multiplexer]\nframe-title={value}\n")).unwrap();
+            assert_eq!(loaded.config.frame_title_mode, expected);
+        }
+        assert!(parse("[multiplexer]\ndivider-style=tmux\n").is_err());
+        assert!(parse("[multiplexer]\nframe-title=osc\n").is_err());
+    }
+
+    #[test]
+    fn theme_maps_every_omarchy_role_and_defaults_new_pane_roles() {
+        let json = r##"{"background":"#000001","foreground":"#000003","cursor":"#000003","selection":"#000004","url":"#000005","ui_accent":"#000006","ansi":["#000000","#000001","#000002","#000003","#000004","#000005","#000006","#000007","#000008","#000009","#00000a","#00000b","#00000c","#00000d","#00000e","#00000f"]}"##;
         let theme: ThemePalette = serde_json::from_str(json).unwrap();
         let resolved = theme.resolve().unwrap();
         assert_eq!(resolved.background, 1);
         assert_eq!(resolved.ui_accent, 6);
+        assert_eq!(resolved.pane_border, 2);
+        assert_eq!(resolved.pane_border_active, 6);
         assert_eq!(resolved.ansi[15], 15);
+
+        let explicit = json.replace(
+            "\"ansi\"",
+            "\"pane_border\":\"#000007\",\"pane_border_active\":\"#000008\",\"ansi\"",
+        );
+        let resolved = serde_json::from_str::<ThemePalette>(&explicit)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(resolved.pane_border, 7);
+        assert_eq!(resolved.pane_border_active, 8);
     }
 }

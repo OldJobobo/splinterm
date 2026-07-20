@@ -140,7 +140,12 @@ active-authority/controller indication. Ctrl+Shift+R revokes active grants and
 Ctrl+Shift+L releases the local controller. Pane focus uses Ctrl+Shift+Arrow or
 Ctrl+Shift+Tab (Shift+Tab reverses traversal). Ctrl+Shift+Enter splits
 horizontally, Ctrl+Shift+\\ splits vertically, Ctrl+Shift+W closes an exited
-pane, and Ctrl+Shift+[ / ] adjusts its parent ratio. The
+pane, and Ctrl+Shift+[ / ] adjusts its parent ratio. Multi-Splint windows use
+trusted box-drawing chrome configured by `[multiplexer] divider-style=line`,
+`frame`, or `none`. Frame mode optionally displays the sanitized daemon-owned
+Splint title with `frame-title=splint`; terminal OSC titles cannot spoof it.
+Active and inactive borders follow the live-reloaded `pane_border_active` and
+`pane_border` theme roles. The
 `SPLINTERM_ENABLE_DEV_ATTACH=1` bypass remains available only for isolated
 development and is prominently labeled in the window title.
 

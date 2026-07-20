@@ -34,6 +34,8 @@ def generate(colors: dict[str, object]) -> dict[str, object]:
         "selection": colors["selection"],
         "url": colors["blue"],
         "ui_accent": colors["accent"],
+        "pane_border": colors["muted"],
+        "pane_border_active": colors["accent"],
         "ansi": [
             colors["darker_bg"], colors["red"], colors["green"], colors["yellow"],
             colors["blue"], colors["magenta"], colors["cyan"], colors["fg"],

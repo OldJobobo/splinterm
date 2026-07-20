@@ -12,13 +12,36 @@ use crate::geometry::Rect;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaneGeometry {
     pub splint_id: SplintId,
+    /// Terminal content; input, selection, IME, and PTY sizing use this rectangle.
     pub rect: Rect,
+    /// Complete leaf allocation; frame chrome occupies its inset edges.
+    pub allocation: Rect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneDivider {
+    pub axis: Axis,
+    pub rect: Rect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneChrome {
+    None,
+    Line {
+        vertical_width: u32,
+        horizontal_height: u32,
+    },
+    Frame {
+        vertical_width: u32,
+        horizontal_height: u32,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaneLayout {
     pub panes: Vec<PaneGeometry>,
-    pub separators: Vec<Rect>,
+    pub separators: Vec<PaneDivider>,
+    pub chrome: PaneChrome,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +70,31 @@ impl PaneLayout {
         minimum_width: u32,
         minimum_height: u32,
     ) -> Result<Self> {
+        Self::compute_with_chrome(
+            root,
+            area,
+            PaneChrome::Line {
+                vertical_width: separator,
+                horizontal_height: separator,
+            },
+            minimum_width,
+            minimum_height,
+        )
+    }
+
+    /// Computes terminal content, leaf allocations, and trusted chrome lanes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty areas, zero minimums, arithmetic overflow, or
+    /// any layout whose style-specific chrome leaves undersized pane content.
+    pub fn compute_with_chrome(
+        root: &LayoutNode,
+        area: Rect,
+        chrome: PaneChrome,
+        minimum_width: u32,
+        minimum_height: u32,
+    ) -> Result<Self> {
         if area.width == 0 || area.height == 0 {
             bail!("pane area must be nonempty");
         }
@@ -56,8 +104,9 @@ impl PaneLayout {
         let mut layout = Self {
             panes: Vec::with_capacity(root.splint_count()),
             separators: Vec::with_capacity(root.splint_count().saturating_sub(1)),
+            chrome,
         };
-        layout.visit(root, area, separator, minimum_width, minimum_height)?;
+        layout.visit(root, area, minimum_width, minimum_height)?;
         Ok(layout)
     }
 
@@ -69,22 +118,33 @@ impl PaneLayout {
             .map(|pane| pane.rect)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "binary-tree partition and style-specific chrome remain one recursive transaction"
+    )]
     fn visit(
         &mut self,
         node: &LayoutNode,
         area: Rect,
-        separator: u32,
         minimum_width: u32,
         minimum_height: u32,
     ) -> Result<()> {
         match node {
             LayoutNode::Leaf(splint) => {
-                if area.width < minimum_width || area.height < minimum_height {
+                let content = match self.chrome {
+                    PaneChrome::Frame {
+                        vertical_width,
+                        horizontal_height,
+                    } => inset_frame(area, vertical_width, horizontal_height)?,
+                    PaneChrome::None | PaneChrome::Line { .. } => area,
+                };
+                if content.width < minimum_width || content.height < minimum_height {
                     bail!("surface cannot fit every pane at its minimum dimensions");
                 }
                 self.panes.push(PaneGeometry {
                     splint_id: splint.id,
-                    rect: area,
+                    rect: content,
+                    allocation: area,
                 });
             }
             LayoutNode::Branch {
@@ -94,6 +154,16 @@ impl PaneLayout {
                 second,
             } => {
                 let ratio = u64::from(ratio.get());
+                let separator = match (self.chrome, axis) {
+                    (PaneChrome::Line { vertical_width, .. }, Axis::Horizontal) => vertical_width,
+                    (
+                        PaneChrome::Line {
+                            horizontal_height, ..
+                        },
+                        Axis::Vertical,
+                    ) => horizontal_height,
+                    (PaneChrome::None | PaneChrome::Frame { .. }, _) => 0,
+                };
                 let (first_rect, separator_rect, second_rect) = match axis {
                     Axis::Horizontal => {
                         let available = area
@@ -162,15 +232,14 @@ impl PaneLayout {
                         )
                     }
                 };
-                self.separators.push(separator_rect);
-                self.visit(first, first_rect, separator, minimum_width, minimum_height)?;
-                self.visit(
-                    second,
-                    second_rect,
-                    separator,
-                    minimum_width,
-                    minimum_height,
-                )?;
+                if separator > 0 {
+                    self.separators.push(PaneDivider {
+                        axis: *axis,
+                        rect: separator_rect,
+                    });
+                }
+                self.visit(first, first_rect, minimum_width, minimum_height)?;
+                self.visit(second, second_rect, minimum_width, minimum_height)?;
             }
         }
         Ok(())
@@ -204,6 +273,36 @@ impl PaneLayout {
             .min_by_key(|(score, index, _)| (*score, *index))
             .map(|(_, _, id)| id)
     }
+}
+
+fn inset_frame(area: Rect, vertical_width: u32, horizontal_height: u32) -> Result<Rect> {
+    if vertical_width == 0 || horizontal_height == 0 {
+        bail!("frame edges must be nonzero");
+    }
+    let horizontal_chrome = vertical_width
+        .checked_mul(2)
+        .ok_or_else(|| anyhow::anyhow!("frame width overflow"))?;
+    let vertical_chrome = horizontal_height
+        .checked_mul(2)
+        .ok_or_else(|| anyhow::anyhow!("frame height overflow"))?;
+    Ok(Rect {
+        x: area
+            .x
+            .checked_add(vertical_width)
+            .ok_or_else(|| anyhow::anyhow!("frame x overflow"))?,
+        y: area
+            .y
+            .checked_add(horizontal_height)
+            .ok_or_else(|| anyhow::anyhow!("frame y overflow"))?,
+        width: area
+            .width
+            .checked_sub(horizontal_chrome)
+            .ok_or_else(|| anyhow::anyhow!("surface cannot fit pane frame width"))?,
+        height: area
+            .height
+            .checked_sub(vertical_chrome)
+            .ok_or_else(|| anyhow::anyhow!("surface cannot fit pane frame height"))?,
+    })
 }
 
 fn directional_score(
@@ -265,6 +364,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the nested layout's pane and divider rectangles form one exact geometry table"
+    )]
     fn nested_layout_owns_every_pixel_once_with_stable_rounding() {
         let (first, first_id) = leaf();
         let (second, second_id) = leaf();
@@ -306,6 +409,12 @@ mod tests {
                     width: 33,
                     height: 81
                 },
+                allocation: Rect {
+                    x: 10,
+                    y: 20,
+                    width: 33,
+                    height: 81
+                },
             }
         );
         assert_eq!(
@@ -313,6 +422,12 @@ mod tests {
             PaneGeometry {
                 splint_id: second_id,
                 rect: Rect {
+                    x: 44,
+                    y: 20,
+                    width: 67,
+                    height: 40
+                },
+                allocation: Rect {
                     x: 44,
                     y: 20,
                     width: 67,
@@ -330,25 +445,126 @@ mod tests {
                     width: 67,
                     height: 40
                 },
+                allocation: Rect {
+                    x: 44,
+                    y: 61,
+                    width: 67,
+                    height: 40
+                },
             }
         );
         assert_eq!(
             layout.separators[0],
-            Rect {
-                x: 43,
-                y: 20,
-                width: 1,
-                height: 81
+            PaneDivider {
+                axis: Axis::Horizontal,
+                rect: Rect {
+                    x: 43,
+                    y: 20,
+                    width: 1,
+                    height: 81
+                }
             }
         );
         assert_eq!(
             layout.separators[1],
-            Rect {
-                x: 44,
-                y: 60,
-                width: 67,
-                height: 1
+            PaneDivider {
+                axis: Axis::Vertical,
+                rect: Rect {
+                    x: 44,
+                    y: 60,
+                    width: 67,
+                    height: 1
+                }
             }
+        );
+    }
+
+    #[test]
+    fn line_chrome_uses_orientation_specific_cell_lanes() {
+        let (first, _) = leaf();
+        let (second, _) = leaf();
+        let root = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+        let layout = PaneLayout::compute_with_chrome(
+            &root,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 80,
+            },
+            PaneChrome::Line {
+                vertical_width: 8,
+                horizontal_height: 16,
+            },
+            10,
+            10,
+        )
+        .unwrap();
+        assert_eq!(layout.separators[0].rect.width, 8);
+        assert_eq!(layout.panes[0].rect.width, 46);
+        assert_eq!(layout.panes[1].rect.x, 54);
+    }
+
+    #[test]
+    fn frame_chrome_insets_each_leaf_without_a_shared_separator() {
+        let (first, _) = leaf();
+        let (second, _) = leaf();
+        let root = LayoutNode::Branch {
+            axis: Axis::Vertical,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+        let layout = PaneLayout::compute_with_chrome(
+            &root,
+            Rect {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 80,
+            },
+            PaneChrome::Frame {
+                vertical_width: 8,
+                horizontal_height: 16,
+            },
+            10,
+            5,
+        )
+        .unwrap();
+        assert!(layout.separators.is_empty());
+        assert_eq!(layout.panes[0].allocation.height, 40);
+        assert_eq!(layout.panes[0].rect.x, 18);
+        assert_eq!(layout.panes[0].rect.y, 36);
+        assert_eq!(layout.panes[0].rect.width, 84);
+        assert_eq!(layout.panes[0].rect.height, 8);
+        assert_eq!(layout.panes[1].rect.y, 76);
+    }
+
+    #[test]
+    fn frame_chrome_rejects_content_below_the_minimum() {
+        let (root, _) = leaf();
+        assert!(
+            PaneLayout::compute_with_chrome(
+                &root,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 19,
+                    height: 39,
+                },
+                PaneChrome::Frame {
+                    vertical_width: 5,
+                    horizontal_height: 10,
+                },
+                10,
+                20,
+            )
+            .is_err()
         );
     }
 

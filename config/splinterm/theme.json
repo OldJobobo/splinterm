@@ -5,6 +5,8 @@
   "selection": "#354a60",
   "url": "#78beff",
   "ui_accent": "#78d2ff",
+  "pane_border": "#928374",
+  "pane_border_active": "#78d2ff",
   "ansi": [
     "#1d2021", "#cc241d", "#98971a", "#d79921",
     "#458588", "#b16286", "#689d6a", "#a89984",

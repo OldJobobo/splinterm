@@ -295,7 +295,9 @@ pointer movement. Evidence is recorded under
 `docs/spikes/artifacts/phase3-slice5-dynamic/`, and
 `docs/spikes/artifacts/phase3-slice5-final/`. A read-only review found lazy-control,
 stale-topology, IME-origin, and inactive-scrollback defects; all received targeted
-fixes and regression coverage before final workspace validation.
+fixes and regression coverage before final workspace validation. Visible
+box-drawing pane chrome is specified separately in
+[Plan 0005](0005-pane-divider-styles.md) as a bounded Slice 5 follow-up.
 
 ### Slice 6 — simultaneous clients and explicit control transfer
 
