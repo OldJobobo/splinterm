@@ -6,7 +6,14 @@ source or packages.
 
 ## Build without installing
 
-The package source must be an exact committed snapshot. From a clean checkout:
+The package source must be an exact committed snapshot. The guarded build and
+validation entry point is:
+
+```bash
+tools/package/build-local-package.sh
+```
+
+Its equivalent manual build from a clean checkout is:
 
 ```bash
 git archive --format=tar.gz --prefix=splinterm-0.1.0.pre/ \
