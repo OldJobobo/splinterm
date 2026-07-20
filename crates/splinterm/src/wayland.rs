@@ -482,6 +482,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         scrollback_viewport: ScrollbackViewport::default(),
         painted_history_status: None,
         history_page_pending: false,
+        history_selection_pin_blocked: false,
         scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
         scroll_started_at: None,
         rendered_viewport_offset: 0,
@@ -676,6 +677,7 @@ struct App {
     scrollback_viewport: ScrollbackViewport,
     painted_history_status: Option<HistoryOverlayStatus>,
     history_page_pending: bool,
+    history_selection_pin_blocked: bool,
     scroll_trace: bool,
     scroll_started_at: Option<Instant>,
     rendered_viewport_offset: usize,
@@ -1828,7 +1830,7 @@ impl App {
     }
 
     fn request_older_history(&mut self) -> Result<()> {
-        if self.history_page_pending {
+        if self.history_page_pending || self.history_selection_pin_blocked {
             return Ok(());
         }
         let Some(snapshot) = self.snapshot.as_ref() else {
@@ -1984,6 +1986,7 @@ impl App {
         self.dirty_selection(self.selection);
         self.selection = None;
         self.selecting = false;
+        self.history_selection_pin_blocked = false;
         self.invalidate_viewport_local_state();
     }
 
@@ -1996,6 +1999,7 @@ impl App {
         if !retained {
             self.selection = None;
             self.selecting = false;
+            self.history_selection_pin_blocked = false;
         }
         self.invalidate_viewport_local_state();
     }
@@ -2576,11 +2580,15 @@ impl App {
                                 snapshot.oldest_available_scrollback_row_id = oldest;
                                 snapshot.newest_available_scrollback_row_id = newest;
                             }
+                        } else {
+                            self.history_selection_pin_blocked = true;
                         }
                     }
                 }
                 WindowUpdate::ScrollbackResyncRequired => {
                     self.history_page_pending = false;
+                    self.invalidate_local_content_state();
+                    visual_changed = true;
                 }
                 WindowUpdate::Authority(authority) => {
                     self.authority = authority;
@@ -3576,6 +3584,7 @@ impl PointerHandler for App {
                                     };
                                     self.selection = Some(selection);
                                     self.selecting = true;
+                                    self.history_selection_pin_blocked = false;
                                     self.dirty_selection(Some(selection));
                                 }
                             }
