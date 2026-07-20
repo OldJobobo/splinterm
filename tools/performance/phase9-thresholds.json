@@ -29,5 +29,17 @@
     "resize_ns_max": 100000000,
     "post_output_input_response_ns_max": 100000000,
     "rss_bytes_max": 134217728
+  },
+  "graphical": {
+    "warmup_seconds": 2,
+    "idle_seconds": 2,
+    "idle_cpu_ticks_max": 5,
+    "idle_context_switches_max": 50,
+    "rss_bytes_max": 268435456,
+    "shm_bytes_max": 134217728,
+    "output_ns_max": 10000000000,
+    "output_rss_growth_bytes_max": 134217728,
+    "resize_sequence_ns_max": 2000000000,
+    "reattach_ns_max": 3000000000
   }
 }

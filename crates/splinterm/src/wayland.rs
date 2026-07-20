@@ -122,6 +122,7 @@ const SCALE_DENOMINATOR: u32 = 120;
 const MIN_SCALE_120: u32 = 120;
 const MAX_SCALE_120: u32 = 960;
 const MAX_PREEDIT_BYTES: usize = 4 * 1024;
+const IDLE_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const BTN_RIGHT: u32 = 0x111;
 static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -551,7 +552,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         app.apply_clipboard_reads()?;
         app.tick_cursor_blink(&queue_handle)?;
         event_loop
-            .dispatch(Duration::from_millis(16), &mut app)
+            .dispatch(IDLE_EVENT_POLL_INTERVAL, &mut app)
             .context("dispatch Wayland events")?;
     }
     if let Some(error) = app.failure {
