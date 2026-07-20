@@ -79,7 +79,9 @@ enum Command {
     Consent,
 }
 
-#[tokio::main]
+// The client needs concurrent local IPC and theme watching, not one allocator
+// arena per CPU. Wayland rendering already runs on a bounded blocking worker.
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let command = Cli::parse().command;
     let ConfigLoad {
