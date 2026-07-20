@@ -82,6 +82,8 @@ and focus chrome without restarting the daemon or shell. Invalid changes are
 rejected and the last valid palette remains active; a missing startup file uses
 the documented safe fallback in `config/splinterm/theme.json`.
 
-The hook template at `config/omarchy/hooks/theme-set` can be copied into the
-user hook directory after installing the generator. It reads Omarchy data but
-does not modify `/usr/share/omarchy/` or any stock theme.
+After installing the generator, Omarchy 4 users should copy
+`config/omarchy/hooks/theme-set.d/10-splinterm.sh` into
+`~/.config/omarchy/hooks/theme-set.d/`. The legacy single-hook template remains
+at `config/omarchy/hooks/theme-set`. Both read the active Omarchy state/theme
+directory and never modify `/usr/share/omarchy/` or a stock theme.

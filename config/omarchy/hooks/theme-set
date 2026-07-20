@@ -8,6 +8,7 @@ CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
 # Omarchy installations expose the current theme through a theme directory or
 # a stock/custom named directory. Resolve without modifying Omarchy-owned data.
 for source in \
+  "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/current/theme/colors.toml" \
   "$CONFIG_HOME/omarchy/current/theme/colors.toml" \
   "$CONFIG_HOME/omarchy/themes/$THEME_NAME/colors.toml" \
   "/usr/share/omarchy/themes/$THEME_NAME/colors.toml"
