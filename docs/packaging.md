@@ -49,8 +49,9 @@ versioned immutable source URL and checksum.
 
 The package does not modify a user's home, enable a service, replace their
 terminal preference, or edit `/usr/share/omarchy`. The desktop launcher starts
-`splinterd.service` on demand. If protocol negotiation fails after an upgrade,
-it restarts the user daemon once and waits a bounded 2.5 seconds. This ends old
+`splinterd.service` on demand. The unit stops with SIGINT so the daemon can reap
+its shell and remove its socket cleanly. If protocol negotiation fails after an
+upgrade, it restarts the user daemon once and waits a bounded 2.5 seconds. This ends old
 daemon-owned shells because cross-version process migration is not promised.
 
 ## Optional user integration
