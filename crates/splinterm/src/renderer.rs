@@ -50,6 +50,8 @@ const PRIMARY_BOLD_ITALIC_FONT: &str = "JetBrains Mono Nerd Font:style=Bold Ital
 const CJK_FONT: &str = "Noto Sans CJK JP:style=Regular";
 const EMOJI_FONT: &str = "Noto Color Emoji";
 const SNAPSHOT_GLYPH_CACHE_BUDGET: usize = 2_048;
+const SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+const SNAPSHOT_RASTER_FACE_BUDGET: usize = 24;
 
 const SNAPSHOT_PRIMARY_REGULAR: usize = 0;
 const SNAPSHOT_PRIMARY_BOLD: usize = 1;
@@ -174,12 +176,74 @@ pub fn update_output_dpi(
 #[derive(Default)]
 struct PersistentGlyphCache {
     raster_faces: HashMap<(isize, usize), RasterFace>,
+    raster_face_order: VecDeque<(isize, usize)>,
     glyphs: HashMap<(isize, GlyphKey), Arc<CachedGlyph>>,
     advances: HashMap<(isize, GlyphKey), i32>,
     order: VecDeque<(isize, GlyphKey)>,
+    glyph_bytes: usize,
     hits: u64,
     misses: u64,
     evictions: u64,
+    raster_face_evictions: u64,
+}
+
+impl PersistentGlyphCache {
+    fn insert_glyph(
+        &mut self,
+        cache_key: (isize, GlyphKey),
+        glyph: Arc<CachedGlyph>,
+        color_advance: Option<i32>,
+    ) {
+        self.insert_glyph_bounded(
+            cache_key,
+            glyph,
+            color_advance,
+            SNAPSHOT_GLYPH_CACHE_BUDGET,
+            SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET,
+        );
+    }
+
+    fn insert_glyph_bounded(
+        &mut self,
+        cache_key: (isize, GlyphKey),
+        glyph: Arc<CachedGlyph>,
+        color_advance: Option<i32>,
+        entry_budget: usize,
+        byte_budget: usize,
+    ) {
+        let incoming_bytes = glyph.data.len();
+        while !self.glyphs.is_empty()
+            && (self.glyphs.len() >= entry_budget
+                || self.glyph_bytes.saturating_add(incoming_bytes) > byte_budget)
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.glyphs.remove(&oldest) {
+                self.glyph_bytes = self.glyph_bytes.saturating_sub(evicted.data.len());
+                self.advances.remove(&oldest);
+                self.evictions = self.evictions.saturating_add(1);
+            }
+        }
+        self.order.push_back(cache_key);
+        if let Some(advance) = color_advance {
+            self.advances.insert(cache_key, advance);
+        }
+        self.glyph_bytes = self.glyph_bytes.saturating_add(incoming_bytes);
+        self.glyphs.insert(cache_key, glyph);
+    }
+
+    fn prepare_raster_face_insert(&mut self, raster_key: (isize, usize)) {
+        while self.raster_faces.len() >= SNAPSHOT_RASTER_FACE_BUDGET {
+            let Some(oldest) = self.raster_face_order.pop_front() else {
+                break;
+            };
+            if self.raster_faces.remove(&oldest).is_some() {
+                self.raster_face_evictions = self.raster_face_evictions.saturating_add(1);
+            }
+        }
+        self.raster_face_order.push_back(raster_key);
+    }
 }
 
 thread_local! {
@@ -609,9 +673,7 @@ fn snapshot_glyph(
             )
         } else {
             let raster_key = (effective_size_26_6, face_index);
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                cache.raster_faces.entry(raster_key)
-            {
+            if !cache.raster_faces.contains_key(&raster_key) {
                 let raster_face = RasterFace::open(
                     &faces[face_index].path,
                     u32::try_from(faces[face_index].index).context("face index fits u32")?,
@@ -620,7 +682,8 @@ fn snapshot_glyph(
                 .with_context(|| {
                     format!("open FreeType raster face {}", faces[face_index].label)
                 })?;
-                entry.insert(raster_face);
+                cache.prepare_raster_face_insert(raster_key);
+                cache.raster_faces.insert(raster_key, raster_face);
             }
             let raster = cache
                 .raster_faces
@@ -641,22 +704,11 @@ fn snapshot_glyph(
             )
         };
         let glyph = Arc::new(glyph);
-        while cache.glyphs.len() >= SNAPSHOT_GLYPH_CACHE_BUDGET {
-            let Some(oldest) = cache.order.pop_front() else {
-                break;
-            };
-            if cache.glyphs.remove(&oldest).is_some() {
-                cache.advances.remove(&oldest);
-                cache.evictions = cache.evictions.saturating_add(1);
-            }
-        }
-        cache.order.push_back((effective_size_26_6, key));
-        if let Some(advance) = color_advance {
-            cache.advances.insert((effective_size_26_6, key), advance);
-        }
-        cache
-            .glyphs
-            .insert((effective_size_26_6, key), Arc::clone(&glyph));
+        cache.insert_glyph(
+            (effective_size_26_6, key),
+            Arc::clone(&glyph),
+            color_advance,
+        );
         Ok(glyph)
     })
 }
@@ -700,10 +752,14 @@ pub fn snapshot_cache_metrics() -> serde_json::Value {
             "entries": cache.glyphs.len(),
             "raster_faces": cache.raster_faces.len(),
             "budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
+            "glyph_budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
+            "glyph_byte_budget": SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET,
+            "raster_face_budget": SNAPSHOT_RASTER_FACE_BUDGET,
             "hits": cache.hits,
             "misses": cache.misses,
             "evictions": cache.evictions,
-            "approximate_bytes": cache.glyphs.values().map(|glyph| glyph.data.len()).sum::<usize>(),
+            "raster_face_evictions": cache.raster_face_evictions,
+            "approximate_bytes": cache.glyph_bytes,
         })
     })
 }
@@ -4782,66 +4838,281 @@ mod tests {
     }
 
     #[test]
-    fn local_viewport_scroll_copy_matches_clean_full_repaint() {
-        let mut initial = incremental_snapshot();
-        initial.input_modes.cursor_visible = false;
-        let mut shifted = initial.clone();
-        shifted.visible_rows = ["xy", "ab"]
-            .into_iter()
-            .map(|text| TerminalRow {
-                row_id: None,
-                linebreak: false,
-                cells: text
-                    .chars()
-                    .map(|character| TerminalCell {
-                        content: character.to_string(),
-                        spacer_remaining: None,
-                        attributes: default_attributes(),
-                    })
-                    .collect(),
-            })
-            .collect();
-        let mut incremental = SnapshotFrame::load_scaled(&initial, 120).expect("initial frame");
-        let reference = SnapshotFrame::load_scaled(&shifted, 120).expect("shifted frame");
-        let geometry = incremental.tight_geometry().unwrap();
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Slice 5 intentionally exercises every path from one semantic-state harness"
+    )]
+    fn equivalent_semantic_state_survives_cursor_cache_scale_and_theme_paths() {
+        fn render(
+            snapshot: &TerminalSnapshot,
+            scale_120: u32,
+            cursor_visible: bool,
+            cursor_style: CursorStyle,
+        ) -> Vec<u8> {
+            let frame = SnapshotFrame::load_scaled(snapshot, scale_120).expect("frame");
+            let geometry = frame.tight_geometry().unwrap();
+            let mut pixels =
+                vec![
+                    0;
+                    usize::try_from(geometry.buffer_width() * geometry.buffer_height() * 4)
+                        .unwrap()
+                ];
+            paint_snapshot_presented(
+                &mut pixels,
+                geometry.buffer_width(),
+                geometry.buffer_height(),
+                &frame,
+                &geometry,
+                cursor_visible,
+                cursor_style,
+                CursorPresentation::FOCUSED_STEADY,
+            );
+            pixels
+        }
+
+        let mut semantic_state = incremental_snapshot();
+        semantic_state.visible_rows[0].cells[0].attributes.underline = UnderlineStyle::Curly;
+        semantic_state.visible_rows[0].cells[1]
+            .attributes
+            .strikethrough = true;
+        semantic_state.visible_rows[1].cells[0]
+            .attributes
+            .foreground_source = ColorSource::Base16;
+        semantic_state.visible_rows[1].cells[0]
+            .attributes
+            .foreground = 1;
+        semantic_state.palette[1] = 0x0035_4a60;
+        let reference = render(&semantic_state, 120, true, CursorStyle::Block);
+
+        SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+        let cold = render(&semantic_state, 120, true, CursorStyle::Block);
+        let cold_metrics = snapshot_cache_metrics();
+        let warm = render(&semantic_state, 120, true, CursorStyle::Block);
+        let warm_metrics = snapshot_cache_metrics();
+        assert_eq!(cold, reference);
+        assert_eq!(warm, reference);
+        assert!(warm_metrics["hits"].as_u64() > cold_metrics["hits"].as_u64());
+
+        SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+        let repopulated = render(&semantic_state, 120, true, CursorStyle::Block);
+        assert_eq!(repopulated, reference);
+        assert!(snapshot_cache_metrics()["entries"].as_u64().unwrap() > 0);
+
+        let scaled = render(&semantic_state, 150, true, CursorStyle::Block);
+        assert_ne!(scaled.len(), reference.len());
+        assert_eq!(
+            render(&semantic_state, 120, true, CursorStyle::Block),
+            reference
+        );
+
+        let mut alternate_theme = semantic_state.clone();
+        alternate_theme.palette[1] = 0x00f0_8040;
+        alternate_theme.default_colors = [0x0011_2233, 0x0044_5566, 0x0077_8899];
+        assert_ne!(
+            render(&alternate_theme, 120, true, CursorStyle::Block),
+            reference
+        );
+        assert_eq!(
+            render(&semantic_state, 120, true, CursorStyle::Block),
+            reference
+        );
+
+        let frame = SnapshotFrame::load_scaled(&semantic_state, 120).expect("cursor frame");
+        let geometry = frame.tight_geometry().unwrap();
         let width = geometry.buffer_width();
         let height = geometry.buffer_height();
-        let mut actual = vec![0; usize::try_from(width * height * 4).unwrap()];
-        paint_snapshot(
-            &mut actual,
+        let dirty_cursor_row = [true, false];
+        let mut pixels = reference.clone();
+        paint_snapshot_rows_presented(
+            &mut pixels,
             width,
             height,
-            &incremental,
+            &frame,
             &geometry,
+            &dirty_cursor_row,
             false,
             CursorStyle::Block,
+            CursorPresentation::FOCUSED_STEADY,
         );
-        let scroll = incremental
-            .scroll_viewport_rows(&shifted, 1)
-            .expect("viewport shift")
-            .expect("incremental scroll");
-        scroll_snapshot_pixels(&mut actual, width, &incremental, &geometry, scroll);
-        paint_snapshot_rows(
-            &mut actual,
+        assert_eq!(
+            pixels,
+            render(&semantic_state, 120, false, CursorStyle::Block)
+        );
+        paint_snapshot_rows_presented(
+            &mut pixels,
             width,
             height,
-            &incremental,
+            &frame,
             &geometry,
-            &[true, false],
-            false,
-            CursorStyle::Block,
+            &dirty_cursor_row,
+            true,
+            CursorStyle::Beam,
+            CursorPresentation::FOCUSED_STEADY,
         );
-        let mut expected = vec![0; actual.len()];
-        paint_snapshot(
-            &mut expected,
+        assert_eq!(
+            pixels,
+            render(&semantic_state, 120, true, CursorStyle::Beam)
+        );
+
+        let mut moved = semantic_state.clone();
+        moved.cursor_column = 1;
+        let mut moved_frame = frame;
+        moved_frame.refresh_cursor(&moved);
+        paint_snapshot_rows_presented(
+            &mut pixels,
             width,
             height,
-            &reference,
+            &moved_frame,
             &geometry,
-            false,
-            CursorStyle::Block,
+            &dirty_cursor_row,
+            true,
+            CursorStyle::Underline,
+            CursorPresentation::FOCUSED_STEADY,
         );
-        assert_eq!(actual, expected);
+        assert_eq!(pixels, render(&moved, 120, true, CursorStyle::Underline));
+    }
+
+    #[test]
+    fn forward_and_reverse_viewport_scroll_copy_match_clean_full_repaint() {
+        let mut initial = incremental_snapshot();
+        initial.input_modes.cursor_visible = false;
+        for (offset_delta, rows, dirty_rows) in [
+            (1, ["xy", "ab"], [true, false]),
+            (-1, ["cd", "xy"], [false, true]),
+        ] {
+            let mut shifted = initial.clone();
+            shifted.visible_rows = rows
+                .into_iter()
+                .map(|text| TerminalRow {
+                    row_id: None,
+                    linebreak: false,
+                    cells: text
+                        .chars()
+                        .map(|character| TerminalCell {
+                            content: character.to_string(),
+                            spacer_remaining: None,
+                            attributes: default_attributes(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            let mut incremental = SnapshotFrame::load_scaled(&initial, 120).expect("initial frame");
+            let reference = SnapshotFrame::load_scaled(&shifted, 120).expect("shifted frame");
+            let geometry = incremental.tight_geometry().unwrap();
+            let width = geometry.buffer_width();
+            let height = geometry.buffer_height();
+            let mut actual = vec![0; usize::try_from(width * height * 4).unwrap()];
+            paint_snapshot(
+                &mut actual,
+                width,
+                height,
+                &incremental,
+                &geometry,
+                false,
+                CursorStyle::Block,
+            );
+            let scroll = incremental
+                .scroll_viewport_rows(&shifted, offset_delta)
+                .expect("viewport shift")
+                .expect("incremental scroll");
+            scroll_snapshot_pixels(&mut actual, width, &incremental, &geometry, scroll);
+            paint_snapshot_rows(
+                &mut actual,
+                width,
+                height,
+                &incremental,
+                &geometry,
+                &dirty_rows,
+                false,
+                CursorStyle::Block,
+            );
+            let mut expected = vec![0; actual.len()];
+            paint_snapshot(
+                &mut expected,
+                width,
+                height,
+                &reference,
+                &geometry,
+                false,
+                CursorStyle::Block,
+            );
+            assert_eq!(actual, expected, "scroll delta {offset_delta}");
+        }
+    }
+
+    #[test]
+    fn persistent_glyph_cache_evicts_fifo_and_removes_color_advance() {
+        let mut cache = PersistentGlyphCache::default();
+        for glyph in 0..=SNAPSHOT_GLYPH_CACHE_BUDGET {
+            let key = (
+                768,
+                GlyphKey {
+                    face: SNAPSHOT_EMOJI,
+                    glyph: u16::try_from(glyph).expect("test glyph fits u16"),
+                },
+            );
+            cache.insert_glyph(
+                key,
+                Arc::new(CachedGlyph {
+                    content: Content::Color,
+                    left: 0,
+                    top: 0,
+                    width: 1,
+                    height: 1,
+                    data: vec![0; 4],
+                }),
+                Some(1),
+            );
+        }
+        let first = (
+            768,
+            GlyphKey {
+                face: SNAPSHOT_EMOJI,
+                glyph: 0,
+            },
+        );
+        assert_eq!(cache.glyphs.len(), SNAPSHOT_GLYPH_CACHE_BUDGET);
+        assert_eq!(cache.advances.len(), SNAPSHOT_GLYPH_CACHE_BUDGET);
+        assert!(!cache.glyphs.contains_key(&first));
+        assert!(!cache.advances.contains_key(&first));
+        assert_eq!(cache.glyph_bytes, SNAPSHOT_GLYPH_CACHE_BUDGET * 4);
+        assert_eq!(cache.evictions, 1);
+
+        let mut byte_bounded = PersistentGlyphCache::default();
+        for glyph in 0..3 {
+            byte_bounded.insert_glyph_bounded(
+                (768, GlyphKey { face: 0, glyph }),
+                Arc::new(CachedGlyph {
+                    content: Content::Mask,
+                    left: 0,
+                    top: 0,
+                    width: 8,
+                    height: 1,
+                    data: vec![0; 8],
+                }),
+                None,
+                10,
+                16,
+            );
+        }
+        assert_eq!(byte_bounded.glyphs.len(), 2);
+        assert_eq!(byte_bounded.glyph_bytes, 16);
+        assert_eq!(byte_bounded.evictions, 1);
+    }
+
+    #[test]
+    fn persistent_raster_face_cache_is_bounded_across_scale_churn() {
+        SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+        let snapshot = incremental_snapshot();
+        for scale_120 in 120..=u32::try_from(120 + SNAPSHOT_RASTER_FACE_BUDGET).unwrap() {
+            SnapshotFrame::load_scaled(&snapshot, scale_120).expect("scaled frame");
+        }
+        let metrics = snapshot_cache_metrics();
+        assert_eq!(
+            metrics["raster_faces"].as_u64(),
+            Some(u64::try_from(SNAPSHOT_RASTER_FACE_BUDGET).unwrap())
+        );
+        assert_eq!(metrics["raster_face_evictions"].as_u64(), Some(1));
     }
 
     #[test]
