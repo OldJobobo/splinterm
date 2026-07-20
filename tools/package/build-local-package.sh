@@ -11,8 +11,9 @@ if [[ -n $(git -C "$root" status --porcelain --untracked-files=no -- . ':(exclud
   exit 1
 fi
 
-required=(cargo fontconfig freetype2 gcc-libs glibc libxkbcommon noto-fonts-cjk
-  noto-fonts-emoji pixman pkgconf rust ttf-jetbrains-mono-nerd-basic wayland
+required=(cargo fontconfig freetype2 gcc-libs glibc hicolor-icon-theme libxkbcommon
+  noto-fonts-cjk noto-fonts-emoji pixman pkgconf python rust
+  ttf-jetbrains-mono-nerd-basic wayland
   xdg-terminal-exec)
 missing=$(pacman -T "${required[@]}" || true)
 if [[ -n "$missing" ]]; then
