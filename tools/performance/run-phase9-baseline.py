@@ -41,12 +41,20 @@ def host_context() -> dict[str, Any]:
         if "=" in line:
             key, value = line.split("=", 1)
             os_release[key] = value.strip().strip('"')
+    cpu = next(
+        (
+            line.split(":", 1)[1].strip()
+            for line in pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
+            if line.startswith("model name")
+        ),
+        platform.processor() or "unknown",
+    )
     return {
         "recorded_at": datetime.datetime.now(datetime.UTC).isoformat(),
         "os": os_release.get("PRETTY_NAME"),
         "kernel": platform.release(),
         "architecture": platform.machine(),
-        "cpu": platform.processor() or output(["uname", "-p"]),
+        "cpu": cpu,
         "rustc": output(["rustc", "--version"]),
         "cargo": output(["cargo", "--version"]),
         "git_commit": output(["git", "rev-parse", "HEAD"]),
