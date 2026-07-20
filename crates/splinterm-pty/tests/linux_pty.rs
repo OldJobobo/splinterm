@@ -191,16 +191,12 @@ fn invalid_cwd_and_program_fail_without_affecting_the_daemon() {
     let invalid_cwd = backend().spawn(&command("inspect", &cwd), PtySize::cells(80, 24));
     assert!(invalid_cwd.is_err());
 
-    let mut invalid_program = backend()
-        .spawn(
-            &PtyCommand::new(
-                "/definitely/missing/splinterm-command",
-                std::env::current_dir().unwrap(),
-            ),
-            PtySize::cells(80, 24),
-        )
-        .unwrap();
-    let output = read_until(&mut invalid_program, "executing");
-    assert!(output.contains("failed"));
-    assert_eq!(invalid_program.wait().unwrap().code(), Some(126));
+    let invalid_program = backend().spawn(
+        &PtyCommand::new(
+            "/definitely/missing/splinterm-command",
+            std::env::current_dir().unwrap(),
+        ),
+        PtySize::cells(80, 24),
+    );
+    assert!(matches!(invalid_program, Err(PtyError::TargetExec)));
 }

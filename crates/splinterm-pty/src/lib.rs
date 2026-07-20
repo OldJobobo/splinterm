@@ -19,7 +19,11 @@ use std::{
     ffi::OsString,
     fs::File,
     io::{self, Read, Write},
-    os::fd::{AsRawFd, OwnedFd},
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        linux::net::SocketAddrExt,
+        unix::net::{SocketAddr, UnixListener, UnixStream},
+    },
     path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
     thread,
@@ -199,6 +203,8 @@ pub enum PtyError {
     InvalidChildId,
     #[error("PTY child helper did not complete session setup")]
     HelperHandshake,
+    #[error("target command could not be executed")]
+    TargetExec,
 }
 
 impl PtyError {
@@ -286,8 +292,11 @@ impl LinuxPtyBackend {
         let stdin = duplicate_file(&slave)?;
         let stdout = duplicate_file(&slave)?;
         let stderr = File::from(slave);
+        let (status_listener, status_name) = exec_status_listener()?;
         let mut child_command = Command::new(&self.helper);
         child_command
+            .arg("--exec-status")
+            .arg(status_name)
             .arg(if command.login_shell {
                 "--login"
             } else {
@@ -315,11 +324,21 @@ impl LinuxPtyBackend {
             let _ = child.wait();
             return Err(PtyError::InvalidChildId);
         };
+        let Ok(mut exec_status) = accept_exec_status(&status_listener) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PtyError::HelperHandshake);
+        };
         let mut master = File::from(master);
         if !wait_for_child_ready(&mut master) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(PtyError::HelperHandshake);
+        }
+        if !target_exec_succeeded(&mut exec_status) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PtyError::TargetExec);
         }
 
         Ok(LinuxPtySession {
@@ -404,6 +423,63 @@ impl PtySession for LinuxPtySession {
         self.child
             .try_wait()
             .map_err(|error| PtyError::io("poll child", error))
+    }
+}
+
+fn exec_status_listener() -> Result<(UnixListener, String)> {
+    let mut nonce = [0_u8; 16];
+    rustix::rand::getrandom(&mut nonce, rustix::rand::GetRandomFlags::empty())
+        .map_err(|error| PtyError::io("generate exec status capability", error))?;
+    let mut name = String::from("splinterm-pty-");
+    for byte in nonce {
+        std::fmt::Write::write_fmt(&mut name, format_args!("{byte:02x}")).map_err(|error| {
+            PtyError::io("format exec status capability", io::Error::other(error))
+        })?;
+    }
+    let address = SocketAddr::from_abstract_name(name.as_bytes())
+        .map_err(|error| PtyError::io("create exec status address", error))?;
+    let listener = UnixListener::bind_addr(&address)
+        .map_err(|error| PtyError::io("bind exec status socket", error))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| PtyError::io("configure exec status socket", error))?;
+    Ok((listener, name))
+}
+
+fn accept_exec_status(listener: &UnixListener) -> io::Result<UnixStream> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return Ok(stream),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "exec status helper connection timed out",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn target_exec_succeeded(status: &mut UnixStream) -> bool {
+    if status
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .is_err()
+    {
+        return false;
+    }
+    let mut marker = [0_u8; 1];
+    loop {
+        match status.read(&mut marker) {
+            Ok(0) => return true,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Ok(_) | Err(_) => return false,
+        }
     }
 }
 

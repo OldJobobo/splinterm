@@ -47,6 +47,8 @@ public/AUR publication remain optional post-milestone decisions.
 
 ## Phase 3 — multiplexing
 
+Detailed plan: [`plans/0004-phase3-multiplexing.md`](plans/0004-phase3-multiplexing.md)
+
 - Splint-tree editing and focus navigation
 - Multiple windows per dojo
 - Detach, reattach, rename, kill, and restore workflows

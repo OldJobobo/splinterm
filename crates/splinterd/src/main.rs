@@ -1,14 +1,12 @@
 mod consent;
+mod persistence;
 
 use std::{
     collections::HashMap,
     env,
     ffi::OsString,
     io::ErrorKind,
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
-    },
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -19,20 +17,26 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use consent::{GrantStore, PeerIdentity};
+use persistence::MetadataStore;
 use splinterd::{
     LiveEvent, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, Subscription,
     SubscriptionReceive,
 };
-use splinterm_core::{Lair, LayoutNode, SplintId, SplintState};
+use splinterm_core::{
+    Dojo, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId, SplintLaunchMetadata,
+    SplintState, Window,
+};
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
     ColorSource, ErrorCode, HistoryTransition, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES,
     MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
-    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, ProtocolError, Request, Response,
-    ScrollDirection as WireScrollDirection, ScrollbackPage as WireScrollbackPage, ServerFrame,
-    ServerLimits, SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalRow,
-    TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
-    TerminalUpdate as WireTerminalUpdate, UnderlineStyle as WireUnderlineStyle, encode_frame,
+    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, ProcessExitStatus, ProtocolError,
+    Request, Response, RestoreLeafResult, ScrollDirection as WireScrollDirection,
+    ScrollbackPage as WireScrollbackPage, ServerFrame, ServerLimits, SplintLifecycle,
+    SplintRuntimeSummary, SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes,
+    TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
+    TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind, TopologySnapshot,
+    UnderlineStyle as WireUnderlineStyle, encode_frame,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
@@ -55,6 +59,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const CONNECTION_LIMIT: usize = 32;
+const MAX_LIVE_SPLINTS: usize = 256;
+const TOPOLOGY_QUEUE: usize = 16;
 const OUTBOUND_QUEUE: usize = 32;
 const CONTROL_QUEUE: usize = 4;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -72,14 +78,16 @@ struct ControllerLease {
 #[derive(Debug)]
 struct ControllerState {
     next_id: u64,
-    active: Option<ControllerLease>,
+    by_id: HashMap<u64, ControllerLease>,
+    by_splint: HashMap<SplintId, u64>,
 }
 
 impl Default for ControllerState {
     fn default() -> Self {
         Self {
             next_id: 1,
-            active: None,
+            by_id: HashMap::new(),
+            by_splint: HashMap::new(),
         }
     }
 }
@@ -91,7 +99,7 @@ impl ControllerState {
         incarnation: u64,
         grant_id: Option<u64>,
     ) -> Result<ControllerLease, ProtocolError> {
-        if self.active.is_some() {
+        if self.by_splint.contains_key(&splint_id) {
             return Err(ProtocolError::new(
                 ErrorCode::ControllerUnavailable,
                 "live Splint already has a controller",
@@ -107,7 +115,8 @@ impl ControllerState {
             incarnation,
             grant_id,
         };
-        self.active = Some(lease);
+        self.by_id.insert(id, lease);
+        self.by_splint.insert(splint_id, id);
         Ok(lease)
     }
 
@@ -117,12 +126,8 @@ impl ControllerState {
         splint_id: SplintId,
         incarnation: u64,
     ) -> Result<(), ProtocolError> {
-        match self.active {
-            Some(lease)
-                if lease.id == controller_id
-                    && lease.splint_id == splint_id
-                    && lease.incarnation == incarnation =>
-            {
+        match self.by_id.get(&controller_id) {
+            Some(lease) if lease.splint_id == splint_id && lease.incarnation == incarnation => {
                 Ok(())
             }
             _ => Err(ProtocolError::new(
@@ -133,29 +138,34 @@ impl ControllerState {
     }
 
     fn release(&mut self, controller_id: u64) -> bool {
-        if self.active.is_some_and(|lease| lease.id == controller_id) {
-            self.active = None;
-            true
-        } else {
-            false
-        }
+        let Some(lease) = self.by_id.remove(&controller_id) else {
+            return false;
+        };
+        self.by_splint.remove(&lease.splint_id);
+        true
     }
 
     fn release_grant(&mut self, grant_id: u64) {
-        if self
-            .active
-            .is_some_and(|lease| lease.grant_id == Some(grant_id))
-        {
-            self.active = None;
+        let ids: Vec<_> = self
+            .by_id
+            .values()
+            .filter(|lease| lease.grant_id == Some(grant_id))
+            .map(|lease| lease.id)
+            .collect();
+        for id in ids {
+            self.release(id);
         }
     }
 
     fn release_identity(&mut self, splint_id: SplintId, incarnation: u64) {
-        if self
-            .active
-            .is_some_and(|lease| lease.splint_id == splint_id && lease.incarnation == incarnation)
-        {
-            self.active = None;
+        let id = self
+            .by_splint
+            .get(&splint_id)
+            .and_then(|id| self.by_id.get(id))
+            .filter(|lease| lease.incarnation == incarnation)
+            .map(|lease| lease.id);
+        if let Some(id) = id {
+            self.release(id);
         }
     }
 }
@@ -165,9 +175,94 @@ struct Revocation {
     grant_id: u64,
 }
 
+#[derive(Default)]
+struct RuntimeRegistry {
+    entries: HashMap<SplintId, LiveSplintRuntime>,
+}
+
+impl RuntimeRegistry {
+    fn insert(&mut self, runtime: LiveSplintRuntime) -> Result<(), LiveSplintRuntime> {
+        let id = runtime.handle().splint_id;
+        if self.entries.len() >= MAX_LIVE_SPLINTS || self.entries.contains_key(&id) {
+            return Err(runtime);
+        }
+        self.entries.insert(id, runtime);
+        Ok(())
+    }
+
+    fn handle(&self, id: SplintId) -> Option<LiveSplintHandle> {
+        self.entries.get(&id).map(LiveSplintRuntime::handle)
+    }
+
+    fn handles(&self) -> HashMap<SplintId, LiveSplintHandle> {
+        self.entries
+            .iter()
+            .map(|(id, runtime)| (*id, runtime.handle()))
+            .collect()
+    }
+
+    fn remove(&mut self, id: SplintId) -> Option<LiveSplintRuntime> {
+        self.entries.remove(&id)
+    }
+
+    fn drain(&mut self) -> Vec<LiveSplintRuntime> {
+        self.entries.drain().map(|(_, runtime)| runtime).collect()
+    }
+}
+
+struct TopologySubscriber {
+    changes: mpsc::Sender<Arc<TopologyChange>>,
+    resync: tokio::sync::watch::Sender<Option<splinterm_core::TopologyRevision>>,
+}
+
+#[derive(Default)]
+struct TopologyHub {
+    subscribers: HashMap<u64, TopologySubscriber>,
+}
+
+#[derive(Debug)]
+struct TopologySubscription {
+    changes: mpsc::Receiver<Arc<TopologyChange>>,
+    resync: tokio::sync::watch::Receiver<Option<splinterm_core::TopologyRevision>>,
+}
+
+impl TopologyHub {
+    fn subscribe(&mut self, id: u64) -> TopologySubscription {
+        let (changes, receiver) = mpsc::channel(TOPOLOGY_QUEUE);
+        let (resync, resync_receiver) = tokio::sync::watch::channel(None);
+        self.subscribers
+            .insert(id, TopologySubscriber { changes, resync });
+        TopologySubscription {
+            changes: receiver,
+            resync: resync_receiver,
+        }
+    }
+
+    fn remove(&mut self, id: u64) {
+        self.subscribers.remove(&id);
+    }
+
+    fn publish(&mut self, change: &TopologyChange) {
+        let change = Arc::new(change.clone());
+        self.subscribers.retain(|_, subscriber| {
+            match subscriber.changes.try_send(Arc::clone(&change)) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    subscriber.resync.send_replace(Some(change.revision));
+                    true
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            }
+        });
+    }
+}
+
 struct DaemonState {
     lair: RwLock<Lair>,
-    live_splint: Mutex<Option<LiveSplintRuntime>>,
+    runtimes: Mutex<RuntimeRegistry>,
+    topology: Mutex<TopologyHub>,
+    topology_transactions: Semaphore,
+    metadata: Option<MetadataStore>,
     controller: Mutex<ControllerState>,
     grants: Mutex<GrantStore>,
     revocations: broadcast::Sender<Revocation>,
@@ -183,6 +278,22 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    let metadata = MetadataStore::discover()?;
+    let loaded = tokio::task::spawn_blocking({
+        let metadata = metadata.clone();
+        move || metadata.load()
+    })
+    .await
+    .context("metadata load task failed")?;
+    let lair = match loaded {
+        Ok(Some(document)) => document.into_lair().context("invalid restored Lair")?,
+        Ok(None) => Lair::new(),
+        Err(error) => {
+            warn!(%error, "metadata recovery failed; starting with an empty Lair");
+            Lair::new()
+        }
+    };
+
     let socket = socket_path()?;
     prepare_socket_parent(&socket).await?;
     remove_stale_socket(&socket).await?;
@@ -193,8 +304,11 @@ async fn main() -> Result<()> {
 
     let (revocations, _) = broadcast::channel(32);
     let state = Arc::new(DaemonState {
-        lair: RwLock::new(Lair::new()),
-        live_splint: Mutex::new(None),
+        lair: RwLock::new(lair),
+        runtimes: Mutex::new(RuntimeRegistry::default()),
+        topology: Mutex::new(TopologyHub::default()),
+        topology_transactions: Semaphore::new(1),
+        metadata: Some(metadata),
         controller: Mutex::new(ControllerState::default()),
         grants: Mutex::new(GrantStore::default()),
         revocations,
@@ -228,11 +342,30 @@ async fn main() -> Result<()> {
         }
     }
 
-    if let Some(runtime) = state.live_splint.lock().await.take() {
-        if let Err(error) = runtime.shutdown().await {
-            error!(%error, "failed to shut down live Splint cleanly");
+    let runtimes = state.runtimes.lock().await.drain();
+    let shutdown = async {
+        let mut tasks = tokio::task::JoinSet::new();
+        for runtime in runtimes {
+            tasks.spawn(runtime.shutdown());
         }
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => error!(%error, "failed to shut down live Splint cleanly"),
+                Err(error) => error!(%error, "live Splint shutdown task failed"),
+            }
+        }
+    };
+    if time::timeout(Duration::from_secs(10), shutdown)
+        .await
+        .is_err()
+    {
+        error!("timed out while shutting down live Splints");
     }
+    let final_lair = state.lair.read().await.clone();
+    persist_lair(&state, &final_lair)
+        .await
+        .map_err(|_| anyhow::anyhow!("failed to persist final Lair metadata"))?;
     fs::remove_file(&socket).await?;
     Ok(())
 }
@@ -355,6 +488,7 @@ async fn serve_authenticated(
                     if let Some(task) = subscriptions.remove(subscription_id) {
                         task.abort();
                     }
+                    state.topology.lock().await.remove(*subscription_id);
                     send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
@@ -364,7 +498,7 @@ async fn serve_authenticated(
                         response,
                         subscription,
                     }) => {
-                        if let Some((id, stream, handle, access)) = subscription {
+                        if let Some(subscription) = subscription {
                             if subscriptions.len() >= MAX_SUBSCRIPTIONS {
                                 send_response(
                                     outbound,
@@ -378,15 +512,29 @@ async fn serve_authenticated(
                                 continue;
                             }
                             send_response(outbound, request_id, Ok(response)).await?;
-                            let task = spawn_subscription(
-                                id,
-                                stream,
-                                handle,
-                                outbound.clone(),
-                                control.clone(),
-                                state.revocations.subscribe(),
-                                access,
-                            );
+                            let (id, task) = match subscription {
+                                PendingSubscription::Terminal {
+                                    id,
+                                    stream,
+                                    handle,
+                                    access,
+                                } => (
+                                    id,
+                                    spawn_subscription(
+                                        id,
+                                        stream,
+                                        handle,
+                                        outbound.clone(),
+                                        control.clone(),
+                                        state.revocations.subscribe(),
+                                        access,
+                                    ),
+                                ),
+                                PendingSubscription::Topology { id, stream } => (
+                                    id,
+                                    spawn_topology_subscription(id, stream, outbound.clone()),
+                                ),
+                            };
                             subscriptions.insert(id, task);
                         } else {
                             send_response(outbound, request_id, Ok(response)).await?;
@@ -409,7 +557,21 @@ async fn serve_authenticated(
 #[derive(Debug)]
 struct Handled {
     response: Response,
-    subscription: Option<(u64, Subscription, LiveSplintHandle, SubscriptionAccess)>,
+    subscription: Option<PendingSubscription>,
+}
+
+#[derive(Debug)]
+enum PendingSubscription {
+    Terminal {
+        id: u64,
+        stream: Subscription,
+        handle: LiveSplintHandle,
+        access: SubscriptionAccess,
+    },
+    Topology {
+        id: u64,
+        stream: TopologySubscription,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -524,6 +686,318 @@ fn development_grant(
     }
 }
 
+fn model_error(error: LairError) -> ProtocolError {
+    match error {
+        LairError::StaleTopology { current, .. } => ProtocolError {
+            code: ErrorCode::StaleTopology,
+            message: "topology revision is stale".into(),
+            current_topology_revision: Some(current),
+        },
+        LairError::SplintNotFound(_)
+        | LairError::DojoNotFound(_)
+        | LairError::WindowNotFound(_) => not_found(),
+        other => invalid(&other.to_string()),
+    }
+}
+
+async fn persist_lair(state: &DaemonState, lair: &Lair) -> Result<(), ProtocolError> {
+    if let Some(metadata) = &state.metadata {
+        let document = LairDocument::from_lair(lair).map_err(|error| {
+            error!(%error, "refusing invalid durable Lair candidate");
+            internal()
+        })?;
+        let metadata = metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.save(&document))
+            .await
+            .map_err(|error| {
+                error!(%error, "metadata save task failed");
+                internal()
+            })?
+            .map_err(|error| {
+                error!(%error, "durable Lair commit failed");
+                internal()
+            })?;
+    }
+    Ok(())
+}
+
+async fn durable_lair_candidate<T>(
+    state: &DaemonState,
+    mutate: impl FnOnce(&mut Lair) -> Result<T, LairError>,
+) -> Result<(Lair, T), ProtocolError> {
+    let mut candidate = state.lair.read().await.clone();
+    let result = mutate(&mut candidate).map_err(model_error)?;
+    persist_lair(state, &candidate).await?;
+    Ok((candidate, result))
+}
+
+async fn install_lair(state: &DaemonState, candidate: Lair) {
+    *state.lair.write().await = candidate;
+}
+
+async fn publish_topology(
+    state: &DaemonState,
+    revision: splinterm_core::TopologyRevision,
+    kind: TopologyChangeKind,
+) {
+    let snapshot = topology_snapshot(state).await;
+    debug_assert_eq!(snapshot.revision, revision);
+    state.topology.lock().await.publish(&TopologyChange {
+        revision,
+        kind,
+        snapshot,
+    });
+}
+
+async fn spawn_runtime(
+    state: &DaemonState,
+    splint_id: SplintId,
+    launch: &splinterm_protocol::LaunchParameters,
+) -> Result<LiveSplintRuntime, ProtocolError> {
+    launch.validate()?;
+    let pty_command = if let Some((program, arguments)) = launch.command.split_first() {
+        PtyCommand::new(program, launch.cwd.clone())
+            .args(arguments.iter())
+            .login_shell(false)
+    } else {
+        PtyCommand::new(
+            launch
+                .shell
+                .as_ref()
+                .map_or_else(default_shell, OsString::from),
+            launch.cwd.clone(),
+        )
+        .login_shell(launch.login_shell)
+    };
+    let mut config = LiveSplintConfig::default();
+    config.terminal.scrollback_lines = launch.scrollback_lines;
+    LiveSplintRuntime::spawn(splint_id, state.pty_backend.clone(), pty_command, config)
+        .await
+        .map_err(|error| {
+            error!(%error, ?splint_id, "failed to spawn live Splint");
+            internal()
+        })
+}
+
+fn durable_launch(launch: &splinterm_protocol::LaunchParameters) -> SplintLaunchMetadata {
+    SplintLaunchMetadata {
+        shell: launch.shell.clone(),
+        login_shell: launch.login_shell,
+        scrollback_lines: launch.scrollback_lines,
+        ..SplintLaunchMetadata::default()
+    }
+}
+
+fn saved_launch(splint: &Splint) -> splinterm_protocol::LaunchParameters {
+    splinterm_protocol::LaunchParameters {
+        cwd: splint.cwd.clone(),
+        command: splint.command.clone(),
+        shell: splint.launch.shell.clone(),
+        login_shell: splint.launch.login_shell,
+        scrollback_lines: splint.launch.scrollback_lines,
+    }
+}
+
+async fn start_exited_splint(
+    state: &Arc<DaemonState>,
+    splint_id: SplintId,
+    launch: &splinterm_protocol::LaunchParameters,
+) -> Result<(u64, splinterm_core::TopologyRevision), ProtocolError> {
+    launch.validate()?;
+    {
+        let lair = state.lair.read().await;
+        let splint = lair.find_splint(splint_id).ok_or_else(not_found)?;
+        if !matches!(splint.state, SplintState::Exited(_)) {
+            return Err(invalid("only an exited Splint can be restored"));
+        }
+    }
+    if let Some(runtime) = state.runtimes.lock().await.remove(splint_id) {
+        let handle = runtime.handle();
+        let incarnation = handle.incarnation.value();
+        state
+            .controller
+            .lock()
+            .await
+            .release_identity(splint_id, incarnation);
+        let revoked =
+            state
+                .grants
+                .lock()
+                .await
+                .revoke_identity(splint_id, incarnation, "process restored");
+        for grant_id in revoked {
+            let _ = state.revocations.send(Revocation { grant_id });
+        }
+        runtime.shutdown().await.map_err(|_| internal())?;
+    }
+
+    let runtime = spawn_runtime(state, splint_id, launch).await?;
+    let handle = runtime.handle();
+    let incarnation = handle.incarnation.value();
+    let previous_lair = state.lair.read().await.clone();
+    let prepared = durable_lair_candidate(state, |lair| {
+        lair.commit_relaunch(splint_id, launch.cwd.clone(), launch.command.clone())?;
+        if !lair.set_splint_launch_metadata(splint_id, durable_launch(launch)) {
+            return Err(LairError::SplintNotFound(splint_id));
+        }
+        Ok(lair.revision())
+    })
+    .await;
+    let (candidate, topology_revision) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = runtime.shutdown().await;
+            return Err(error);
+        }
+    };
+    let rejected = {
+        let mut lair = state.lair.write().await;
+        let mut runtimes = state.runtimes.lock().await;
+        match runtimes.insert(runtime) {
+            Ok(()) => {
+                *lair = candidate;
+                None
+            }
+            Err(runtime) => Some(runtime),
+        }
+    };
+    if let Some(runtime) = rejected {
+        if persist_lair(state, &previous_lair).await.is_err() {
+            error!("failed to roll back durable restore after registry rejection");
+        }
+        let _ = runtime.shutdown().await;
+        return Err(ProtocolError::new(
+            ErrorCode::ControllerUnavailable,
+            "another restore won the Splint runtime race",
+        ));
+    }
+    observe_process_exit(state, handle);
+    Ok((incarnation, topology_revision))
+}
+
+async fn restore_targets(
+    state: &Arc<DaemonState>,
+    splint_ids: Vec<SplintId>,
+) -> (splinterm_core::TopologyRevision, Vec<RestoreLeafResult>) {
+    let mut results = Vec::with_capacity(splint_ids.len());
+    for splint_id in splint_ids {
+        let launch = state
+            .lair
+            .read()
+            .await
+            .find_splint(splint_id)
+            .map(|splint| {
+                (
+                    saved_launch(splint),
+                    splint.launch.columns,
+                    splint.launch.rows,
+                )
+            });
+        let result = match launch {
+            Some((launch, columns, rows)) => {
+                match start_exited_splint(state, splint_id, &launch).await {
+                    Ok((incarnation, revision)) => {
+                        let handle = state.runtimes.lock().await.handle(splint_id);
+                        if let Some(handle) = handle {
+                            let _ = handle
+                                .resize(PtySize {
+                                    columns,
+                                    rows,
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                })
+                                .await;
+                        }
+                        publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+                        RestoreLeafResult {
+                            splint_id,
+                            incarnation: Some(incarnation),
+                            error: None,
+                        }
+                    }
+                    Err(error) => RestoreLeafResult {
+                        splint_id,
+                        incarnation: None,
+                        error: Some(error),
+                    },
+                }
+            }
+
+            None => RestoreLeafResult {
+                splint_id,
+                incarnation: None,
+                error: Some(not_found()),
+            },
+        };
+        results.push(result);
+    }
+    (state.lair.read().await.revision(), results)
+}
+
+async fn finalize_exit_if_current(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+    code: i32,
+) -> bool {
+    let Ok(_transaction) = state.topology_transactions.acquire().await else {
+        return false;
+    };
+    let current = state
+        .runtimes
+        .lock()
+        .await
+        .handle(splint_id)
+        .map(|handle| handle.incarnation.value());
+    if current.is_some_and(|current| current != incarnation) {
+        return false;
+    }
+    state
+        .controller
+        .lock()
+        .await
+        .release_identity(splint_id, incarnation);
+    let revoked =
+        state
+            .grants
+            .lock()
+            .await
+            .revoke_identity(splint_id, incarnation, "process exited");
+    for grant_id in revoked {
+        let _ = state.revocations.send(Revocation { grant_id });
+    }
+    let mut candidate = state.lair.read().await.clone();
+    if !candidate.set_splint_state(splint_id, SplintState::Exited(code)) {
+        return false;
+    }
+    let revision = candidate.revision();
+    if persist_lair(state, &candidate).await.is_err() {
+        error!(
+            ?splint_id,
+            incarnation, "failed to persist process exit state"
+        );
+        return false;
+    }
+    install_lair(state, candidate).await;
+    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+    true
+}
+
+fn observe_process_exit(state: &Arc<DaemonState>, handle: LiveSplintHandle) {
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let splint_id = handle.splint_id;
+        let incarnation = handle.incarnation.value();
+        if let Some(status) = handle.wait_for_exit().await {
+            let code = status
+                .code
+                .or_else(|| status.signal.map(|signal| 128 + signal))
+                .unwrap_or(1);
+            finalize_exit_if_current(&state, splint_id, incarnation, code).await;
+        }
+    });
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "authorization remains adjacent to every sensitive operation"
@@ -539,13 +1013,27 @@ async fn handle_request(
         Request::ListDojos => Response::Dojos {
             dojos: state.lair.read().await.dojos().cloned().collect(),
         },
-        Request::InspectLiveSplint => {
-            let live = state.live_splint.lock().await;
-            let handle = live.as_ref().ok_or_else(not_found)?.handle();
-            Response::LiveSplint {
-                splint_id: handle.splint_id,
-                incarnation: handle.incarnation.value(),
-            }
+        Request::InspectTopology => Response::Topology {
+            snapshot: topology_snapshot(state).await,
+        },
+        Request::SubscribeTopology => {
+            let (id, snapshot, stream) = subscribe_topology(state).await;
+            return Ok(Handled {
+                response: Response::TopologySubscribed {
+                    subscription_id: id,
+                    snapshot,
+                },
+                subscription: Some(PendingSubscription::Topology { id, stream }),
+            });
+        }
+        Request::InspectSplint { splint_id } => {
+            let snapshot = topology_snapshot(state).await;
+            let runtime = snapshot
+                .runtimes
+                .into_iter()
+                .find(|runtime| runtime.splint_id == splint_id)
+                .ok_or_else(not_found)?;
+            Response::Splint { runtime }
         }
         Request::RequestAccess {
             splint_id,
@@ -652,108 +1140,467 @@ async fn handle_request(
             Response::Acknowledged
         }
         Request::CreateDojo {
+            expected_topology_revision,
             name,
-            cwd,
-            command,
-            shell,
-            login_shell,
-            scrollback_lines,
+            launch,
         } => {
-            let command_bytes = command
-                .iter()
-                .try_fold(0_usize, |total, item| total.checked_add(item.len()));
-            if name.len() > 128
-                || cwd.as_os_str().as_bytes().len() > 4096
-                || command.len() > 256
-                || command_bytes.is_none_or(|bytes| bytes > MAX_INPUT_BYTES)
-                || shell
-                    .as_ref()
-                    .is_some_and(|shell| shell.is_empty() || shell.len() > 4096)
-                || scrollback_lines > 1_000_000
-            {
-                return Err(invalid("dojo launch parameters exceed limits"));
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            launch.validate()?;
+            let current = state.lair.read().await.revision();
+            if current != expected_topology_revision {
+                return Err(model_error(LairError::StaleTopology {
+                    expected: expected_topology_revision,
+                    current,
+                }));
             }
-            let mut live = state.live_splint.lock().await;
-            if live.is_some() {
-                return Err(invalid("exactly one live Splint is supported"));
+            if name.len() > 128 {
+                return Err(invalid("dojo name exceeds protocol limits"));
             }
-            let dojo = {
-                let mut lair = state.lair.write().await;
-                lair.create_dojo(name, cwd.clone())
-                    .cloned()
-                    .map_err(|_| invalid("dojo could not be created"))?
-            };
-            let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            let mut dojo = Dojo::new(name, launch.cwd.clone());
+            let LayoutNode::Leaf(splint) = &mut dojo.windows[0].root else {
                 unreachable!()
             };
+            splint.command.clone_from(&launch.command);
+            splint.launch = Box::new(durable_launch(&launch));
             let splint_id = splint.id;
-            let pty_command = if let Some((program, arguments)) = command.split_first() {
-                PtyCommand::new(program, cwd)
-                    .args(arguments.iter())
-                    .login_shell(false)
-            } else {
-                PtyCommand::new(shell.map_or_else(default_shell, OsString::from), cwd)
-                    .login_shell(login_shell)
-            };
-            let mut live_config = LiveSplintConfig::default();
-            live_config.terminal.scrollback_lines = scrollback_lines;
-            let runtime = match LiveSplintRuntime::spawn(
-                splint_id,
-                state.pty_backend.clone(),
-                pty_command,
-                live_config,
-            )
-            .await
-            {
-                Ok(runtime) => runtime,
+            let runtime = spawn_runtime(state, splint_id, &launch).await?;
+            let handle = runtime.handle();
+            splint.state = SplintState::Running;
+            let previous = state.lair.read().await.clone();
+            let prepared = durable_lair_candidate(state, |lair| {
+                lair.insert_dojo_at(expected_topology_revision, dojo.clone())
+            })
+            .await;
+            let (candidate, topology_revision) = match prepared {
+                Ok(prepared) => prepared,
                 Err(error) => {
-                    error!(%error, "failed to spawn live Splint");
-                    state.lair.write().await.remove_dojo(dojo.id);
-                    return Err(internal());
+                    let _ = runtime.shutdown().await;
+                    return Err(error);
                 }
             };
-            let handle = runtime.handle();
-            let process_incarnation = handle.incarnation.value();
-            state
-                .lair
-                .write()
+            let rejected = {
+                let mut lair = state.lair.write().await;
+                let mut runtimes = state.runtimes.lock().await;
+                match runtimes.insert(runtime) {
+                    Ok(()) => {
+                        *lair = candidate;
+                        None
+                    }
+                    Err(runtime) => Some(runtime),
+                }
+            };
+            if let Some(runtime) = rejected {
+                if persist_lair(state, &previous).await.is_err() {
+                    error!("failed to roll back durable create after runtime registry rejection");
+                }
+                let _ = runtime.shutdown().await;
+                return Err(ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "live Splint registry rejected the process",
+                ));
+            }
+            observe_process_exit(state, handle);
+            publish_topology(state, topology_revision, TopologyChangeKind::DojoCreated).await;
+            Response::DojoCreated { dojo }
+        }
+        Request::SplitSplint {
+            expected_topology_revision,
+            target_splint_id,
+            axis,
+            side,
+            ratio,
+            launch,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
                 .await
-                .set_splint_state(splint_id, SplintState::Running);
-            let updated = state
+                .map_err(|_| internal())?;
+            launch.validate()?;
+            {
+                let lair = state.lair.read().await;
+                if lair.revision() != expected_topology_revision {
+                    return Err(model_error(LairError::StaleTopology {
+                        expected: expected_topology_revision,
+                        current: lair.revision(),
+                    }));
+                }
+                if lair.find_splint(target_splint_id).is_none() {
+                    return Err(not_found());
+                }
+            }
+            if state.runtimes.lock().await.entries.len() >= MAX_LIVE_SPLINTS {
+                return Err(ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "live Splint registry is full",
+                ));
+            }
+
+            let mut splint = Splint::shell(launch.cwd.clone());
+            splint.command.clone_from(&launch.command);
+            splint.launch = Box::new(durable_launch(&launch));
+            let splint_id = splint.id;
+            let runtime = spawn_runtime(state, splint_id, &launch).await?;
+            let handle = runtime.handle();
+            let incarnation = handle.incarnation.value();
+
+            splint.state = SplintState::Running;
+            let previous = state.lair.read().await.clone();
+            let prepared = durable_lair_candidate(state, |lair| {
+                lair.split_splint_at(
+                    expected_topology_revision,
+                    target_splint_id,
+                    splint,
+                    axis,
+                    side,
+                    ratio,
+                )
+            })
+            .await;
+            let (candidate, topology_revision) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let _ = runtime.shutdown().await;
+                    return Err(error);
+                }
+            };
+            let rejected = {
+                let mut lair = state.lair.write().await;
+                let mut runtimes = state.runtimes.lock().await;
+                match runtimes.insert(runtime) {
+                    Ok(()) => {
+                        *lair = candidate;
+                        None
+                    }
+                    Err(runtime) => Some(runtime),
+                }
+            };
+            if let Some(runtime) = rejected {
+                if persist_lair(state, &previous).await.is_err() {
+                    error!("failed to roll back durable split after runtime registry rejection");
+                }
+                let _ = runtime.shutdown().await;
+                return Err(ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "live Splint registry rejected the process",
+                ));
+            }
+            observe_process_exit(state, handle);
+            publish_topology(state, topology_revision, TopologyChangeKind::SplintSplit).await;
+            Response::SplintStarted {
+                splint_id,
+                incarnation,
+                topology_revision,
+            }
+        }
+        Request::RelaunchSplint { splint_id, launch } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (incarnation, topology_revision) =
+                start_exited_splint(state, splint_id, &launch).await?;
+            publish_topology(state, topology_revision, TopologyChangeKind::RuntimeChanged).await;
+            Response::SplintStarted {
+                splint_id,
+                incarnation,
+                topology_revision,
+            }
+        }
+        Request::RestoreSplint { splint_id } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            if state.lair.read().await.find_splint(splint_id).is_none() {
+                return Err(not_found());
+            }
+            let (topology_revision, results) = restore_targets(state, vec![splint_id]).await;
+            Response::RestoreCompleted {
+                topology_revision,
+                results,
+            }
+        }
+        Request::RestoreWindow { window_id } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let splint_ids = state
+                .lair
+                .read()
+                .await
+                .find_window(window_id)
+                .map(|window| layout_splint_ids(&window.root))
+                .ok_or_else(not_found)?;
+            let (topology_revision, results) = restore_targets(state, splint_ids).await;
+            Response::RestoreCompleted {
+                topology_revision,
+                results,
+            }
+        }
+        Request::RestoreDojo { dojo_id } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let splint_ids = state
                 .lair
                 .read()
                 .await
                 .dojos()
-                .find(|candidate| candidate.id == dojo.id)
-                .cloned()
-                .unwrap();
-            let lair = Arc::clone(state);
-            tokio::spawn(async move {
-                if let Some(status) = handle.wait_for_exit().await {
-                    lair.controller
-                        .lock()
-                        .await
-                        .release_identity(splint_id, process_incarnation);
-                    let revoked = lair.grants.lock().await.revoke_identity(
-                        splint_id,
-                        process_incarnation,
-                        "process exited",
-                    );
-                    for grant_id in revoked {
-                        let _ = lair.revocations.send(Revocation { grant_id });
-                    }
-                    let code = status
-                        .code
-                        .or_else(|| status.signal.map(|signal| 128 + signal))
-                        .unwrap_or(1);
-                    lair.lair
-                        .write()
-                        .await
-                        .set_splint_state(splint_id, SplintState::Exited(code));
+                .find(|dojo| dojo.id == dojo_id)
+                .map(|dojo| {
+                    dojo.windows
+                        .iter()
+                        .flat_map(|window| layout_splint_ids(&window.root))
+                        .collect::<Vec<_>>()
+                })
+                .ok_or_else(not_found)?;
+            let (topology_revision, results) = restore_targets(state, splint_ids).await;
+            Response::RestoreCompleted {
+                topology_revision,
+                results,
+            }
+        }
+        Request::CloseSplint {
+            expected_topology_revision,
+            splint_id,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (candidate, topology_revision) = durable_lair_candidate(state, |lair| {
+                lair.close_splint_at(expected_topology_revision, splint_id)
+            })
+            .await?;
+            let runtime = {
+                let mut lair = state.lair.write().await;
+                let mut runtimes = state.runtimes.lock().await;
+                *lair = candidate;
+                runtimes.remove(splint_id)
+            };
+            if let Some(runtime) = runtime {
+                runtime.shutdown().await.map_err(|_| internal())?;
+            }
+            publish_topology(state, topology_revision, TopologyChangeKind::SplintClosed).await;
+            Response::TopologyCommitted { topology_revision }
+        }
+        Request::SetSplitRatio {
+            expected_topology_revision,
+            target_splint_id,
+            ratio,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (candidate, topology_revision) = durable_lair_candidate(state, |lair| {
+                lair.set_split_ratio_at(expected_topology_revision, target_splint_id, ratio)
+            })
+            .await?;
+            install_lair(state, candidate).await;
+            publish_topology(
+                state,
+                topology_revision,
+                TopologyChangeKind::SplitRatioChanged,
+            )
+            .await;
+            Response::TopologyCommitted { topology_revision }
+        }
+        Request::NewWindow {
+            expected_topology_revision,
+            dojo_id,
+            title,
+            launch,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            launch.validate()?;
+            let current = state.lair.read().await.revision();
+            if current != expected_topology_revision {
+                return Err(model_error(LairError::StaleTopology {
+                    expected: expected_topology_revision,
+                    current,
+                }));
+            }
+            let mut window = Window::with_shell(launch.cwd.clone());
+            window.title = title;
+            let LayoutNode::Leaf(splint) = &mut window.root else {
+                unreachable!()
+            };
+            splint.command.clone_from(&launch.command);
+            splint.launch = Box::new(durable_launch(&launch));
+            let splint_id = splint.id;
+            let window_id = window.id;
+            let runtime = spawn_runtime(state, splint_id, &launch).await?;
+            let handle = runtime.handle();
+            let incarnation = handle.incarnation.value();
+            splint.state = SplintState::Running;
+            let previous = state.lair.read().await.clone();
+            let prepared = durable_lair_candidate(state, |lair| {
+                lair.new_window_at(expected_topology_revision, dojo_id, window)
+            })
+            .await;
+            let (candidate, topology_revision) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let _ = runtime.shutdown().await;
+                    return Err(error);
                 }
-            });
-            *live = Some(runtime);
-            Response::DojoCreated { dojo: updated }
+            };
+            let rejected = {
+                let mut lair = state.lair.write().await;
+                let mut runtimes = state.runtimes.lock().await;
+                match runtimes.insert(runtime) {
+                    Ok(()) => {
+                        *lair = candidate;
+                        None
+                    }
+                    Err(runtime) => Some(runtime),
+                }
+            };
+            if let Some(runtime) = rejected {
+                if persist_lair(state, &previous).await.is_err() {
+                    error!("failed to roll back durable window creation after registry rejection");
+                }
+                let _ = runtime.shutdown().await;
+                return Err(ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "live Splint registry rejected the process",
+                ));
+            }
+            observe_process_exit(state, handle);
+            publish_topology(state, topology_revision, TopologyChangeKind::WindowCreated).await;
+            Response::WindowStarted {
+                window_id,
+                splint_id,
+                incarnation,
+                topology_revision,
+            }
+        }
+        Request::CloseWindow {
+            expected_topology_revision,
+            window_id,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (candidate, (topology_revision, ids)) = durable_lair_candidate(state, |lair| {
+                let ids = lair
+                    .find_window(window_id)
+                    .map(|window| layout_splint_ids(&window.root))
+                    .ok_or(LairError::WindowNotFound(window_id))?;
+                let revision = lair.close_window_at(expected_topology_revision, window_id)?;
+                Ok((revision, ids))
+            })
+            .await?;
+            let runtimes = {
+                let mut lair = state.lair.write().await;
+                let mut registry = state.runtimes.lock().await;
+                *lair = candidate;
+                ids.into_iter()
+                    .filter_map(|id| registry.remove(id))
+                    .collect::<Vec<_>>()
+            };
+            for runtime in runtimes {
+                runtime.shutdown().await.map_err(|_| internal())?;
+            }
+            publish_topology(state, topology_revision, TopologyChangeKind::WindowClosed).await;
+            Response::TopologyCommitted { topology_revision }
+        }
+        Request::RenameDojo {
+            expected_topology_revision,
+            dojo_id,
+            name,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (candidate, topology_revision) = durable_lair_candidate(state, |lair| {
+                lair.rename_dojo_at(expected_topology_revision, dojo_id, name)
+            })
+            .await?;
+            install_lair(state, candidate).await;
+            publish_topology(state, topology_revision, TopologyChangeKind::DojoRenamed).await;
+            Response::TopologyCommitted { topology_revision }
+        }
+        Request::RenameWindow {
+            expected_topology_revision,
+            window_id,
+            title,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (candidate, topology_revision) = durable_lair_candidate(state, |lair| {
+                lair.rename_window_at(expected_topology_revision, window_id, title)
+            })
+            .await?;
+            install_lair(state, candidate).await;
+            publish_topology(state, topology_revision, TopologyChangeKind::WindowRenamed).await;
+            Response::TopologyCommitted { topology_revision }
+        }
+        Request::SetWindowDefaultFocus {
+            expected_topology_revision,
+            window_id,
+            splint_id,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (candidate, topology_revision) = durable_lair_candidate(state, |lair| {
+                lair.set_window_default_focus_at(expected_topology_revision, window_id, splint_id)
+            })
+            .await?;
+            install_lair(state, candidate).await;
+            publish_topology(
+                state,
+                topology_revision,
+                TopologyChangeKind::WindowDefaultFocusChanged,
+            )
+            .await;
+            Response::TopologyCommitted { topology_revision }
+        }
+        Request::RenameSplint {
+            expected_topology_revision,
+            splint_id,
+            title,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (candidate, topology_revision) = durable_lair_candidate(state, |lair| {
+                lair.rename_splint_at(expected_topology_revision, splint_id, title)
+            })
+            .await?;
+            install_lair(state, candidate).await;
+            publish_topology(state, topology_revision, TopologyChangeKind::SplintRenamed).await;
+            Response::TopologyCommitted { topology_revision }
         }
         Request::Attach {
             splint_id,
@@ -779,16 +1626,16 @@ async fn handle_request(
                     subscription_id: id,
                     snapshot: wire_snapshot(snapshot),
                 },
-                subscription: Some((
+                subscription: Some(PendingSubscription::Terminal {
                     id,
-                    subscription,
+                    stream: subscription,
                     handle,
-                    SubscriptionAccess {
+                    access: SubscriptionAccess {
                         grant_id,
                         scrollback_rows,
                         history,
                     },
-                )),
+                }),
             });
         }
         Request::ScrollbackPage {
@@ -963,10 +1810,20 @@ async fn handle_request(
             })
             .await
             .map_err(|_| invalid("resize rejected"))?;
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let mut candidate = state.lair.read().await.clone();
+            if candidate.set_splint_dimensions(splint_id, columns, rows) {
+                persist_lair(state, &candidate).await?;
+                install_lair(state, candidate).await;
+            }
             Response::Acknowledged
         }
         Request::Detach { .. } => Response::Acknowledged,
-        Request::Terminate {
+        Request::KillSplint {
             splint_id,
             incarnation,
         } => {
@@ -978,15 +1835,15 @@ async fn handle_request(
                 &[AccessScope::Terminate],
             )
             .await?;
-            let mut live = state.live_splint.lock().await;
-            let runtime = live.take().ok_or_else(not_found)?;
+            let runtime = state
+                .runtimes
+                .lock()
+                .await
+                .remove(splint_id)
+                .ok_or_else(not_found)?;
             let handle = runtime.handle();
-            if handle.splint_id != splint_id {
-                *live = Some(runtime);
-                return Err(not_found());
-            }
             if handle.incarnation.value() != incarnation {
-                *live = Some(runtime);
+                let _ = state.runtimes.lock().await.insert(runtime);
                 return Err(ProtocolError::new(
                     ErrorCode::StaleIncarnation,
                     "process incarnation is stale",
@@ -1007,9 +1864,18 @@ async fn handle_request(
             }
             *owned_controller = None;
             let status = runtime.shutdown().await.map_err(|_| internal())?;
-            Response::Terminated {
-                code: status.code,
-                signal: status.signal,
+            let code = status
+                .code
+                .or_else(|| status.signal.map(|signal| 128 + signal))
+                .unwrap_or(1);
+            finalize_exit_if_current(state, splint_id, incarnation, code).await;
+            Response::SplintKilled {
+                splint_id,
+                incarnation,
+                exit_status: ProcessExitStatus {
+                    code: status.code,
+                    signal: status.signal,
+                },
             }
         }
     };
@@ -1019,16 +1885,99 @@ async fn handle_request(
     })
 }
 
+async fn subscribe_topology(state: &DaemonState) -> (u64, TopologySnapshot, TopologySubscription) {
+    let lair_guard = state.lair.read().await;
+    let lair = lair_guard.clone();
+    let live = state.runtimes.lock().await.handles();
+    let snapshot = topology_snapshot_from(lair, &live);
+    let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
+    let subscription = state.topology.lock().await.subscribe(id);
+    drop(lair_guard);
+    (id, snapshot, subscription)
+}
+
+async fn topology_snapshot(state: &DaemonState) -> TopologySnapshot {
+    let lair = state.lair.read().await.clone();
+    let live = state.runtimes.lock().await.handles();
+    topology_snapshot_from(lair, &live)
+}
+
+fn topology_snapshot_from(
+    lair: Lair,
+    live: &HashMap<SplintId, LiveSplintHandle>,
+) -> TopologySnapshot {
+    let mut runtimes = Vec::new();
+    for dojo in lair.dojos() {
+        for window in &dojo.windows {
+            collect_runtime_summaries(&window.root, live, &mut runtimes);
+        }
+    }
+    TopologySnapshot {
+        revision: lair.revision(),
+        lair,
+        runtimes,
+    }
+}
+
+fn layout_splint_ids(node: &LayoutNode) -> Vec<SplintId> {
+    match node {
+        LayoutNode::Leaf(splint) => vec![splint.id],
+        LayoutNode::Branch { first, second, .. } => {
+            let mut ids = layout_splint_ids(first);
+            ids.extend(layout_splint_ids(second));
+            ids
+        }
+    }
+}
+
+fn collect_runtime_summaries(
+    node: &LayoutNode,
+    live: &HashMap<SplintId, LiveSplintHandle>,
+    summaries: &mut Vec<SplintRuntimeSummary>,
+) {
+    match node {
+        LayoutNode::Leaf(splint) => {
+            let matching_live = live.get(&splint.id);
+            let (lifecycle, exit_status) = match splint.state {
+                SplintState::Starting => (SplintLifecycle::Starting, None),
+                SplintState::Running => (SplintLifecycle::Running, None),
+                SplintState::Exited(code) => (
+                    SplintLifecycle::Exited,
+                    Some(ProcessExitStatus {
+                        code: Some(code),
+                        signal: None,
+                    }),
+                ),
+            };
+            summaries.push(SplintRuntimeSummary {
+                splint_id: splint.id,
+                live_incarnation: if matches!(lifecycle, SplintLifecycle::Exited) {
+                    None
+                } else {
+                    matching_live.map(|handle| handle.incarnation.value())
+                },
+                lifecycle,
+                exit_status,
+            });
+        }
+        LayoutNode::Branch { first, second, .. } => {
+            collect_runtime_summaries(first, live, summaries);
+            collect_runtime_summaries(second, live, summaries);
+        }
+    }
+}
+
 async fn current_handle(
     state: &DaemonState,
     splint_id: SplintId,
     incarnation: u64,
 ) -> Result<LiveSplintHandle, ProtocolError> {
-    let live = state.live_splint.lock().await;
-    let handle = live.as_ref().ok_or_else(not_found)?.handle();
-    if handle.splint_id != splint_id {
-        return Err(not_found());
-    }
+    let handle = state
+        .runtimes
+        .lock()
+        .await
+        .handle(splint_id)
+        .ok_or_else(not_found)?;
     if handle.incarnation.value() != incarnation {
         return Err(ProtocolError::new(
             ErrorCode::StaleIncarnation,
@@ -1036,6 +1985,57 @@ async fn current_handle(
         ));
     }
     Ok(handle)
+}
+
+fn spawn_topology_subscription(
+    id: u64,
+    mut subscription: TopologySubscription,
+    outbound: mpsc::Sender<ServerFrame>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut sequence = 1_u64;
+        loop {
+            let (event, resync_required) = tokio::select! {
+                biased;
+                changed = subscription.resync.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let Some(current_revision) = *subscription.resync.borrow_and_update() else {
+                        continue;
+                    };
+                    (
+                        SubscriptionEvent::TopologyResyncRequired { current_revision },
+                        true,
+                    )
+                }
+                change = subscription.changes.recv() => {
+                    let Some(change) = change else { break; };
+                    (
+                        SubscriptionEvent::TopologyChanged {
+                            change: (*change).clone(),
+                        },
+                        false,
+                    )
+                }
+            };
+            if outbound
+                .send(ServerFrame::Event {
+                    subscription_id: id,
+                    sequence,
+                    event,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            if resync_required {
+                break;
+            }
+            sequence = sequence.saturating_add(1);
+        }
+    })
 }
 
 fn spawn_subscription(
@@ -1587,7 +2587,10 @@ mod tests {
         let (revocations, _) = broadcast::channel(32);
         Arc::new(DaemonState {
             lair: RwLock::new(Lair::new()),
-            live_splint: Mutex::new(None),
+            runtimes: Mutex::new(RuntimeRegistry::default()),
+            topology: Mutex::new(TopologyHub::default()),
+            topology_transactions: Semaphore::new(1),
+            metadata: None,
             controller: Mutex::new(ControllerState::default()),
             grants: Mutex::new(GrantStore::default()),
             revocations,
@@ -1713,6 +2716,62 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidArgument);
     }
 
+    #[tokio::test]
+    async fn failed_durable_write_does_not_install_topology_edit() {
+        let mut state = test_state(false);
+        let base = std::env::temp_dir().join(format!(
+            "splinterd-durable-failure-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, base.join("splinterm")).unwrap();
+        Arc::get_mut(&mut state).unwrap().metadata = Some(MetadataStore::from_base(&base));
+        let dojo_id = state
+            .lair
+            .write()
+            .await
+            .create_dojo("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let before = state.lair.read().await.clone();
+        assert!(
+            durable_lair_candidate(&state, |lair| {
+                lair.rename_dojo_at(lair.revision(), dojo_id, "renamed")
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(*state.lair.read().await, before);
+        std::fs::remove_file(base.join("splinterm")).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn topology_subscription_overflow_requires_resync() {
+        let mut hub = TopologyHub::default();
+        let subscription = hub.subscribe(1);
+        for _ in 1..=TOPOLOGY_QUEUE + 2 {
+            hub.publish(&TopologyChange {
+                revision: splinterm_core::TopologyRevision::default(),
+                kind: TopologyChangeKind::SplintRenamed,
+                snapshot: TopologySnapshot {
+                    revision: splinterm_core::TopologyRevision::default(),
+                    lair: Lair::new(),
+                    runtimes: Vec::new(),
+                },
+            });
+        }
+        assert_eq!(
+            *subscription.resync.borrow(),
+            Some(splinterm_core::TopologyRevision::default())
+        );
+    }
+
     #[test]
     fn queued_update_uses_delta_only_for_its_exact_snapshot_revision() {
         let terminal = splinterm_terminal::Terminal::new(
@@ -1733,29 +2792,37 @@ mod tests {
     }
 
     #[test]
-    fn controller_state_is_exclusive_authorized_and_releasable() {
-        let splint_id = SplintId::new();
+    fn controller_state_is_per_splint_authorized_and_releasable() {
+        let first_id = SplintId::new();
+        let second_id = SplintId::new();
         let mut controllers = ControllerState::default();
-        let lease = controllers
-            .acquire(splint_id, 7, Some(4))
+        let first = controllers
+            .acquire(first_id, 7, Some(4))
             .expect("first controller");
+        let second = controllers
+            .acquire(second_id, 3, Some(5))
+            .expect("different Splint controller");
         assert_eq!(
-            controllers.acquire(splint_id, 7, Some(4)).unwrap_err().code,
+            controllers.acquire(first_id, 7, Some(4)).unwrap_err().code,
             ErrorCode::ControllerUnavailable
         );
-        assert!(controllers.authorize(lease.id, splint_id, 7).is_ok());
+        assert!(controllers.authorize(first.id, first_id, 7).is_ok());
+        assert!(controllers.authorize(second.id, second_id, 3).is_ok());
         assert_eq!(
             controllers
-                .authorize(lease.id + 1, splint_id, 7)
+                .authorize(first.id, second_id, 3)
                 .unwrap_err()
                 .code,
             ErrorCode::Unauthorized
         );
-        controllers.release_identity(splint_id, 8);
-        assert_eq!(controllers.active, Some(lease));
-        controllers.release_identity(splint_id, 7);
-        assert_eq!(controllers.active, None);
-        assert!(controllers.acquire(splint_id, 8, None).is_ok());
+        controllers.release_identity(first_id, 8);
+        assert!(controllers.authorize(first.id, first_id, 7).is_ok());
+        controllers.release_identity(first_id, 7);
+        assert!(controllers.authorize(first.id, first_id, 7).is_err());
+        assert!(controllers.authorize(second.id, second_id, 3).is_ok());
+        controllers.release_grant(5);
+        assert!(controllers.authorize(second.id, second_id, 3).is_err());
+        assert!(controllers.acquire(first_id, 8, None).is_ok());
     }
 
     #[test]

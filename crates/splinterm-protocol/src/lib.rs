@@ -6,13 +6,19 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use splinterm_core::{Dojo, SplintId};
+use splinterm_core::{
+    Axis, Dojo, DojoId, Lair, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
+};
 
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 16;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
+pub const MAX_LAUNCH_ARGUMENTS: usize = 64;
+pub const MAX_LAUNCH_ARGUMENT_BYTES: usize = 4096;
+pub const MAX_CWD_BYTES: usize = 4096;
+pub const MAX_SCROLLBACK_LINES: usize = 1_000_000;
 pub const MAX_COLUMNS: u16 = 240;
 pub const MAX_ROWS: u16 = 80;
 pub const MAX_OUTSTANDING_REQUESTS: usize = 1;
@@ -92,7 +98,11 @@ impl Default for ServerLimits {
 pub enum Request {
     Ping,
     ListDojos,
-    InspectLiveSplint,
+    InspectTopology,
+    SubscribeTopology,
+    InspectSplint {
+        splint_id: SplintId,
+    },
     RequestAccess {
         splint_id: SplintId,
         incarnation: u64,
@@ -106,13 +116,69 @@ pub enum Request {
         grant_id: u64,
     },
     CreateDojo {
+        expected_topology_revision: TopologyRevision,
         name: String,
-        cwd: PathBuf,
-        /// Direct executable plus argv. Empty selects the configured/default shell.
-        command: Vec<String>,
-        shell: Option<String>,
-        login_shell: bool,
-        scrollback_lines: usize,
+        launch: LaunchParameters,
+    },
+    SplitSplint {
+        expected_topology_revision: TopologyRevision,
+        target_splint_id: SplintId,
+        axis: Axis,
+        side: SplitSide,
+        ratio: SplitRatio,
+        launch: LaunchParameters,
+    },
+    RelaunchSplint {
+        splint_id: SplintId,
+        launch: LaunchParameters,
+    },
+    RestoreSplint {
+        splint_id: SplintId,
+    },
+    RestoreWindow {
+        window_id: WindowId,
+    },
+    RestoreDojo {
+        dojo_id: DojoId,
+    },
+    CloseSplint {
+        expected_topology_revision: TopologyRevision,
+        splint_id: SplintId,
+    },
+    SetSplitRatio {
+        expected_topology_revision: TopologyRevision,
+        target_splint_id: SplintId,
+        ratio: SplitRatio,
+    },
+    NewWindow {
+        expected_topology_revision: TopologyRevision,
+        dojo_id: DojoId,
+        title: String,
+        launch: LaunchParameters,
+    },
+    CloseWindow {
+        expected_topology_revision: TopologyRevision,
+        window_id: WindowId,
+    },
+    RenameDojo {
+        expected_topology_revision: TopologyRevision,
+        dojo_id: DojoId,
+        name: String,
+    },
+    RenameWindow {
+        expected_topology_revision: TopologyRevision,
+        window_id: WindowId,
+        title: String,
+    },
+    SetWindowDefaultFocus {
+        expected_topology_revision: TopologyRevision,
+        window_id: WindowId,
+        splint_id: SplintId,
+    },
+    RenameSplint {
+        expected_topology_revision: TopologyRevision,
+        splint_id: SplintId,
+        title: String,
     },
     Attach {
         splint_id: SplintId,
@@ -152,7 +218,7 @@ pub enum Request {
     Detach {
         subscription_id: u64,
     },
-    Terminate {
+    KillSplint {
         splint_id: SplintId,
         incarnation: u64,
     },
@@ -168,9 +234,33 @@ pub enum Response {
     DojoCreated {
         dojo: Dojo,
     },
-    LiveSplint {
+    SplintStarted {
         splint_id: SplintId,
         incarnation: u64,
+        topology_revision: TopologyRevision,
+    },
+    WindowStarted {
+        window_id: WindowId,
+        splint_id: SplintId,
+        incarnation: u64,
+        topology_revision: TopologyRevision,
+    },
+    TopologyCommitted {
+        topology_revision: TopologyRevision,
+    },
+    RestoreCompleted {
+        topology_revision: TopologyRevision,
+        results: Vec<RestoreLeafResult>,
+    },
+    Topology {
+        snapshot: TopologySnapshot,
+    },
+    TopologySubscribed {
+        subscription_id: u64,
+        snapshot: TopologySnapshot,
+    },
+    Splint {
+        runtime: SplintRuntimeSummary,
     },
     AccessGranted {
         grant: AccessGrant,
@@ -194,9 +284,10 @@ pub enum Response {
         controller_id: u64,
     },
     Acknowledged,
-    Terminated {
-        code: Option<i32>,
-        signal: Option<i32>,
+    SplintKilled {
+        splint_id: SplintId,
+        incarnation: u64,
+        exit_status: ProcessExitStatus,
     },
 }
 
@@ -215,6 +306,12 @@ pub enum SubscriptionEvent {
     AccessRevoked {
         grant_id: u64,
     },
+    TopologyChanged {
+        change: TopologyChange,
+    },
+    TopologyResyncRequired {
+        current_revision: TopologyRevision,
+    },
     Exited {
         code: Option<i32>,
         signal: Option<i32>,
@@ -222,9 +319,179 @@ pub enum SubscriptionEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyChange {
+    pub revision: TopologyRevision,
+    pub kind: TopologyChangeKind,
+    pub snapshot: TopologySnapshot,
+}
+
+impl TopologyChange {
+    /// Validates the change/snapshot correlation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when revisions or snapshot identities disagree.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.snapshot.validate()?;
+        if self.revision != self.snapshot.revision {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "topology change revision does not match its snapshot",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyChangeKind {
+    DojoCreated,
+    SplintSplit,
+    SplintClosed,
+    SplitRatioChanged,
+    WindowCreated,
+    WindowClosed,
+    DojoRenamed,
+    WindowRenamed,
+    WindowDefaultFocusChanged,
+    SplintRenamed,
+    RuntimeChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchParameters {
+    pub cwd: PathBuf,
+    /// Direct executable plus argv. Empty selects `shell` or the default shell.
+    pub command: Vec<String>,
+    pub shell: Option<String>,
+    pub login_shell: bool,
+    pub scrollback_lines: usize,
+}
+
+impl LaunchParameters {
+    /// Validates wire allocation and launch-policy bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when any field exceeds protocol limits.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let command_bytes = self
+            .command
+            .iter()
+            .try_fold(0_usize, |total, item| total.checked_add(item.len()));
+        let valid = !self.cwd.as_os_str().is_empty()
+            && self.cwd.as_os_str().as_encoded_bytes().len() <= MAX_CWD_BYTES
+            && self.command.len() <= MAX_LAUNCH_ARGUMENTS
+            && self
+                .command
+                .iter()
+                .all(|item| !item.is_empty() && item.len() <= MAX_LAUNCH_ARGUMENT_BYTES)
+            && command_bytes.is_some_and(|bytes| bytes <= MAX_INPUT_BYTES)
+            && self
+                .shell
+                .as_ref()
+                .is_none_or(|shell| !shell.is_empty() && shell.len() <= MAX_LAUNCH_ARGUMENT_BYTES)
+            && self.scrollback_lines <= MAX_SCROLLBACK_LINES;
+        if !valid {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "launch parameters exceed protocol limits",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologySnapshot {
+    pub revision: TopologyRevision,
+    pub lair: Lair,
+    pub runtimes: Vec<SplintRuntimeSummary>,
+}
+
+impl TopologySnapshot {
+    /// Validates topology/runtime identity correlation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` for duplicate, stale, or unreachable runtime entries.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let mut identities = std::collections::HashSet::new();
+        let runtime_count = self
+            .lair
+            .dojos()
+            .flat_map(|dojo| &dojo.windows)
+            .map(|window| window.root.splint_count())
+            .sum::<usize>();
+        let valid = self.revision == self.lair.revision()
+            && runtime_count == self.runtimes.len()
+            && self.runtimes.iter().all(|runtime| {
+                identities.insert(runtime.splint_id)
+                    && self.lair.find_splint(runtime.splint_id).is_some()
+                    && runtime.validate()
+            });
+        if !valid {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "topology runtime metadata is inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreLeafResult {
+    pub splint_id: SplintId,
+    pub incarnation: Option<u64>,
+    pub error: Option<ProtocolError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplintRuntimeSummary {
+    pub splint_id: SplintId,
+    pub live_incarnation: Option<u64>,
+    pub lifecycle: SplintLifecycle,
+    pub exit_status: Option<ProcessExitStatus>,
+}
+
+impl SplintRuntimeSummary {
+    #[must_use]
+    pub fn validate(&self) -> bool {
+        match self.lifecycle {
+            SplintLifecycle::Starting => {
+                self.live_incarnation.is_none_or(|value| value > 0) && self.exit_status.is_none()
+            }
+            SplintLifecycle::Running => {
+                self.live_incarnation.is_some_and(|value| value > 0) && self.exit_status.is_none()
+            }
+            SplintLifecycle::Exited => self.live_incarnation.is_none(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplintLifecycle {
+    Starting,
+    Running,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessExitStatus {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolError {
     pub code: ErrorCode,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_topology_revision: Option<TopologyRevision>,
 }
 
 impl ProtocolError {
@@ -233,6 +500,7 @@ impl ProtocolError {
         Self {
             code,
             message: message.into(),
+            current_topology_revision: None,
         }
     }
 }
@@ -303,10 +571,12 @@ pub enum ErrorCode {
     DuplicateRequestId,
     TooManyOutstandingRequests,
     DevelopmentFeatureDisabled,
+    UnsupportedOperation,
     ConsentUnavailable,
     ConsentDenied,
     Unauthorized,
     ControllerUnavailable,
+    StaleTopology,
     NotFound,
     StaleIncarnation,
     InvalidArgument,
@@ -916,6 +1186,83 @@ mod tests {
         assert!(limits.maximum_input_bytes < limits.maximum_frame_bytes);
         assert!(limits.maximum_outstanding_requests > 0);
         assert!(limits.maximum_subscriptions > 0);
+    }
+
+    #[test]
+    fn launch_parameters_and_lifecycle_requests_are_bounded() {
+        let launch = LaunchParameters {
+            cwd: PathBuf::from("/tmp"),
+            command: vec!["printf".into(), "%s".into()],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 1_000,
+        };
+        assert!(launch.validate().is_ok());
+        let request = Request::SplitSplint {
+            expected_topology_revision: TopologyRevision::default(),
+            target_splint_id: SplintId::new(),
+            axis: Axis::Horizontal,
+            side: SplitSide::Second,
+            ratio: SplitRatio::new(500).unwrap(),
+            launch: launch.clone(),
+        };
+        assert!(
+            serde_json::to_string(&request)
+                .unwrap()
+                .contains("split_splint")
+        );
+
+        let mut invalid = launch.clone();
+        invalid.command = vec!["x".into(); MAX_LAUNCH_ARGUMENTS + 1];
+        assert!(invalid.validate().is_err());
+        let mut invalid = launch.clone();
+        invalid.command.push(String::new());
+        assert!(invalid.validate().is_err());
+        let mut invalid = launch;
+        invalid.scrollback_lines = MAX_SCROLLBACK_LINES + 1;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn targeted_inspection_and_topology_runtime_correlation_are_explicit() {
+        let splint_id = SplintId::new();
+        let request = Request::InspectSplint { splint_id };
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains("inspect_splint"));
+        assert!(encoded.contains("splint_id"));
+
+        let mut lair = Lair::new();
+        let dojo = lair
+            .create_dojo("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .clone();
+        let splint_id = match &dojo.windows[0].root {
+            splinterm_core::LayoutNode::Leaf(splint) => splint.id,
+            splinterm_core::LayoutNode::Branch { .. } => unreachable!(),
+        };
+        assert!(lair.set_splint_state(splint_id, splinterm_core::SplintState::Exited(0)));
+        let runtime = SplintRuntimeSummary {
+            splint_id,
+            live_incarnation: None,
+            lifecycle: SplintLifecycle::Exited,
+            exit_status: Some(ProcessExitStatus {
+                code: Some(0),
+                signal: None,
+            }),
+        };
+        let snapshot = TopologySnapshot {
+            revision: lair.revision(),
+            lair,
+            runtimes: vec![runtime],
+        };
+        assert!(snapshot.validate().is_ok());
+
+        let mut invalid = snapshot.clone();
+        invalid.runtimes.push(invalid.runtimes[0].clone());
+        assert!(invalid.validate().is_err());
+        let mut invalid = snapshot;
+        invalid.runtimes[0].lifecycle = SplintLifecycle::Running;
+        assert!(invalid.validate().is_err());
     }
 
     fn update() -> TerminalUpdate {

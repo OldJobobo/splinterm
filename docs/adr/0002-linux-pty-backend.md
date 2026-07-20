@@ -43,16 +43,19 @@ The daemon-side backend:
 3. sets the initial cell and pixel size;
 4. opens the slave close-on-exec, enables `IUTF8`, and supplies duplicates as
    the helper's standard streams;
-5. uses `std::process::Command` to start the helper with explicit cwd and
+5. binds a random-capability Linux abstract Unix socket for exec status;
+6. uses `std::process::Command` to start the helper with explicit cwd and
    environment policy; and
-6. makes the retained master nonblocking.
+7. makes the retained master nonblocking.
 
 The helper is already a newly executed, single-threaded process before it calls
-`setsid` and `TIOCSCTTY`. It verifies all standard streams are terminals and
-writes a fixed readiness marker that the parent consumes before returning the
-session. It then replaces itself with the target
-using `CommandExt::exec`. Login-shell mode changes only `argv[0]` by prefixing
-the supplied value with a hyphen, matching Foot.
+`setsid` and `TIOCSCTTY`. It connects to the capability-named abstract socket,
+verifies all standard streams are terminals, and writes a fixed readiness
+marker. Its status stream is close-on-exec: replacing itself with the target via
+`CommandExt::exec` gives the parent EOF, while setup or exec failure writes a
+bounded failure marker before status 126. The backend returns a session only
+after readiness and successful exec are both proven. Login-shell mode changes
+only `argv[0]` by prefixing the supplied value with a hyphen, matching Foot.
 
 The public API exposes project-owned command, size, signal, session, and error
 types. Dependency types do not become the Splinterm contract. Read integration
@@ -76,9 +79,6 @@ The spike deliberately differs in these areas:
   on an accurate installed terminfo entry and the compatibility matrix in
   `pre-planning-research.md`;
 
-- target exec failure is reported on the PTY and exits the helper with status
-  126 rather than being synchronously returned through Foot's close-on-exec
-  error pipe;
 - shutdown escalation timing and detached reaping belong to the Phase 6 daemon
   actor rather than `Drop` in the PTY crate;
 - the original child process group is signaled, matching Foot; descendants that
@@ -90,8 +90,8 @@ The spike deliberately differs in these areas:
   descriptors because doing so has no safe owned-descriptor API.
 
 These differences are kept behind the Splinterm-owned interface. The exec
-failure handshake may be strengthened without changing terminal or protocol
-APIs.
+failure handshake remains an internal PTY contract and does not expose
+terminal or protocol dependency types.
 
 ## Consequences
 
@@ -119,4 +119,4 @@ Integration probes assert:
 - bidirectional byte flow and nonblocking child polling;
 - login-shell `argv[0]` behavior;
 - process-group signal delivery and observable signal exit status; and
-- invalid cwd and target-exec failures.
+- invalid cwd and synchronously rejected target-exec failures.

@@ -1,25 +1,25 @@
 use std::{
     env,
-    io::{self, ErrorKind, Read, Write},
+    io::{self, ErrorKind, IsTerminal, Read, Write},
     path::PathBuf,
     sync::mpsc as std_mpsc,
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use splinterm::{
     AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowUpdate,
     config::{AppConfig, ConfigLoad, ResolvedTheme, load_default, load_theme},
     renderer::{self, RendererOptions},
     run_window,
 };
-use splinterm_core::SplintId;
+use splinterm_core::{Axis, DojoId, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId};
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen, CellAttributes, ClientFrame, ColorSource,
-    ConsentPrompt, ConsentReply, ErrorCode, MAX_CONSENT_FRAME_BYTES, MAX_FRAME_BYTES,
-    PROTOCOL_VERSION, Request, Response, ServerFrame, SubscriptionEvent, TerminalCell,
-    TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
-    encode_frame,
+    ConsentPrompt, ConsentReply, ErrorCode, LaunchParameters, MAX_CONSENT_FRAME_BYTES,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ServerFrame, SubscriptionEvent,
+    TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate,
+    UnderlineStyle, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -37,12 +37,53 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl From<SplitAxis> for Axis {
+    fn from(value: SplitAxis) -> Self {
+        match value {
+            SplitAxis::Horizontal => Self::Horizontal,
+            SplitAxis::Vertical => Self::Vertical,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum NewSplintSide {
+    First,
+    Second,
+}
+
+impl From<NewSplintSide> for SplitSide {
+    fn from(value: NewSplintSide) -> Self {
+        match value {
+            NewSplintSide::First => Self::First,
+            NewSplintSide::Second => Self::Second,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Render ordered snapshots of the daemon-owned live terminal.
-    Window,
+    /// Render ordered snapshots of one explicitly selected terminal.
+    Window {
+        /// Select a Dojo by stable identity (required with --window-id).
+        #[arg(long, requires = "window_id")]
+        dojo_id: Option<DojoId>,
+        /// Select one daemon-owned window (required with --dojo-id).
+        #[arg(long, requires = "dojo_id")]
+        window_id: Option<WindowId>,
+    },
     Ping,
     List,
+    /// Inspect one Splint by stable identity.
+    Inspect {
+        splint_id: SplintId,
+    },
     New {
         name: String,
         #[arg(long)]
@@ -57,26 +98,139 @@ enum Command {
         cwd: Option<PathBuf>,
         #[arg(long, default_value = "main")]
         name: String,
+        /// Attach an existing Splint by stable identity.
+        #[arg(long)]
+        splint_id: Option<SplintId>,
+        /// Create a new Dojo even when saved sessions exist.
+        #[arg(long, conflicts_with = "splint_id")]
+        new: bool,
         /// Executable and arguments passed directly, never through a shell.
         #[arg(last = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
-    /// Show the current live terminal snapshot (development mode only).
-    Snapshot,
-    /// Send literal UTF-8 text to the live shell (development mode only).
+    /// Split a target leaf and launch a new sibling.
+    Split {
+        target_splint_id: SplintId,
+        #[arg(long, value_enum)]
+        axis: SplitAxis,
+        #[arg(long, value_enum)]
+        side: NewSplintSide,
+        /// Thousandths assigned to the first child (1..=999).
+        #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u16).range(1..=999))]
+        ratio: u16,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Executable and arguments passed directly, never through a shell.
+        #[arg(last = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Close an exited Splint leaf and collapse its parent branch.
+    Close {
+        splint_id: SplintId,
+    },
+    /// Change the ratio of the selected Splint's parent branch.
+    Ratio {
+        target_splint_id: SplintId,
+        #[arg(value_parser = clap::value_parser!(u16).range(1..=999))]
+        ratio: u16,
+    },
+    /// Create a daemon-owned window with one live Splint.
+    NewWindow {
+        dojo_id: DojoId,
+        #[arg(long, default_value = "terminal")]
+        title: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(last = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Close a window whose Splints have all exited.
+    CloseWindow {
+        window_id: WindowId,
+    },
+    RenameDojo {
+        dojo_id: DojoId,
+        name: String,
+    },
+    RenameWindow {
+        window_id: WindowId,
+        title: String,
+    },
+    /// Set a persisted convenience hint without changing any client's actual focus.
+    WindowFocusHint {
+        window_id: WindowId,
+        splint_id: SplintId,
+    },
+    RenameSplint {
+        splint_id: SplintId,
+        title: String,
+    },
+    /// Relaunch an exited Splint under a new process incarnation.
+    Relaunch {
+        splint_id: SplintId,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Executable and arguments passed directly, never through a shell.
+        #[arg(last = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Restore one exited Splint using its saved launch metadata.
+    Restore {
+        splint_id: SplintId,
+    },
+    /// Restore every exited Splint in a saved window.
+    RestoreWindow {
+        window_id: WindowId,
+    },
+    /// Restore every exited Splint in a saved Dojo.
+    RestoreDojo {
+        dojo_id: DojoId,
+    },
+    /// Show one live terminal snapshot (development mode only).
+    Snapshot {
+        splint_id: SplintId,
+    },
+    /// Send literal UTF-8 text to one live shell (development mode only).
     Send {
+        splint_id: SplintId,
         text: String,
     },
-    /// Resize the live terminal (development mode only).
+    /// Resize one live terminal (development mode only).
     Resize {
+        splint_id: SplintId,
         columns: u16,
         rows: u16,
     },
-    /// Terminate the live shell (development mode only).
-    Terminate,
+    /// Kill one live process while retaining its Splint leaf.
+    Kill {
+        splint_id: SplintId,
+        /// Confirm process termination without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Private daemon-launched trusted consent surface.
     #[command(hide = true)]
     Consent,
+}
+
+fn confirm_kill(splint_id: SplintId) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        bail!(
+            "refusing to kill {splint_id} without an interactive terminal; pass --yes to confirm"
+        );
+    }
+    eprint!("Kill Splint {splint_id} and its live process? [y/N] ");
+    io::stderr()
+        .flush()
+        .context("failed to display confirmation")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("failed to read confirmation")?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 // The client needs concurrent local IPC and theme watching, not one allocator
@@ -91,14 +245,22 @@ async fn main() -> Result<()> {
     for diagnostic in diagnostics {
         eprintln!("splinterm config: {diagnostic}");
     }
-    if matches!(command, Command::Window) {
-        return run_live_window(config).await;
+    if let Command::Window { dojo_id, window_id } = command {
+        let splint_id = select_window(dojo_id.zip(window_id)).await?;
+        return run_live_window(config, splint_id).await;
     }
-    if let Command::Launch { cwd, name, command } = &command {
+    if let Command::Launch {
+        cwd,
+        name,
+        splint_id,
+        new,
+        command,
+    } = &command
+    {
         let cwd = cwd
             .clone()
             .unwrap_or(env::current_dir().context("failed to read current directory")?);
-        launch(name.clone(), cwd, command.clone(), config).await?;
+        launch(name.clone(), cwd, *splint_id, *new, command.clone(), config).await?;
         return Ok(());
     }
     if matches!(command, Command::Consent) {
@@ -107,25 +269,219 @@ async fn main() -> Result<()> {
             .context("trusted consent task failed")?;
     }
 
+    run_headless(command, &config).await
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "explicit-ID lifecycle command construction stays adjacent for auditability"
+)]
+async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
     let mut connection = Connection::connect().await?;
     match command {
-        Command::Window | Command::Launch { .. } | Command::Consent => {
+        Command::Window { .. } | Command::Launch { .. } | Command::Consent => {
             unreachable!("graphical command returned before daemon connection")
         }
         Command::Ping => print_response(connection.request(Request::Ping).await?),
         Command::List => print_response(connection.request(Request::ListDojos).await?),
-        Command::New { name, cwd, command } => print_response(
+        Command::Inspect { splint_id } => print_response(
             connection
-                .request(create_request(
-                    name,
-                    cwd.unwrap_or(env::current_dir().context("failed to read current directory")?),
-                    command,
-                    &config,
-                ))
+                .request(Request::InspectSplint { splint_id })
                 .await?,
         ),
-        Command::Snapshot => {
-            let (splint_id, incarnation) = connection.live_identity().await?;
+        Command::New { name, cwd, command } => {
+            let expected = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(create_request(
+                        expected,
+                        name,
+                        cwd.unwrap_or(
+                            env::current_dir().context("failed to read current directory")?,
+                        ),
+                        command,
+                        config,
+                    ))
+                    .await?,
+            )
+        }
+        Command::Split {
+            target_splint_id,
+            axis,
+            side,
+            ratio,
+            cwd,
+            command,
+        } => {
+            let ratio = SplitRatio::new(ratio)
+                .map_err(|_| anyhow::anyhow!("split ratio must be between 1 and 999"))?;
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::SplitSplint {
+                        expected_topology_revision,
+                        target_splint_id,
+                        axis: axis.into(),
+                        side: side.into(),
+                        ratio,
+                        launch: launch_parameters(
+                            cwd.unwrap_or(
+                                env::current_dir().context("failed to read current directory")?,
+                            ),
+                            command,
+                            config,
+                        ),
+                    })
+                    .await?,
+            )
+        }
+        Command::Close { splint_id } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::CloseSplint {
+                        expected_topology_revision,
+                        splint_id,
+                    })
+                    .await?,
+            )
+        }
+        Command::Ratio {
+            target_splint_id,
+            ratio,
+        } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            let ratio = SplitRatio::new(ratio)
+                .map_err(|_| anyhow::anyhow!("split ratio must be between 1 and 999"))?;
+            print_response(
+                connection
+                    .request(Request::SetSplitRatio {
+                        expected_topology_revision,
+                        target_splint_id,
+                        ratio,
+                    })
+                    .await?,
+            )
+        }
+        Command::NewWindow {
+            dojo_id,
+            title,
+            cwd,
+            command,
+        } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::NewWindow {
+                        expected_topology_revision,
+                        dojo_id,
+                        title,
+                        launch: launch_parameters(
+                            cwd.unwrap_or(
+                                env::current_dir().context("failed to read current directory")?,
+                            ),
+                            command,
+                            config,
+                        ),
+                    })
+                    .await?,
+            )
+        }
+        Command::CloseWindow { window_id } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::CloseWindow {
+                        expected_topology_revision,
+                        window_id,
+                    })
+                    .await?,
+            )
+        }
+        Command::RenameDojo { dojo_id, name } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::RenameDojo {
+                        expected_topology_revision,
+                        dojo_id,
+                        name,
+                    })
+                    .await?,
+            )
+        }
+        Command::RenameWindow { window_id, title } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::RenameWindow {
+                        expected_topology_revision,
+                        window_id,
+                        title,
+                    })
+                    .await?,
+            )
+        }
+        Command::WindowFocusHint {
+            window_id,
+            splint_id,
+        } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::SetWindowDefaultFocus {
+                        expected_topology_revision,
+                        window_id,
+                        splint_id,
+                    })
+                    .await?,
+            )
+        }
+        Command::RenameSplint { splint_id, title } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::RenameSplint {
+                        expected_topology_revision,
+                        splint_id,
+                        title,
+                    })
+                    .await?,
+            )
+        }
+        Command::Relaunch {
+            splint_id,
+            cwd,
+            command,
+        } => print_response(
+            connection
+                .request(Request::RelaunchSplint {
+                    splint_id,
+                    launch: launch_parameters(
+                        cwd.unwrap_or(
+                            env::current_dir().context("failed to read current directory")?,
+                        ),
+                        command,
+                        config,
+                    ),
+                })
+                .await?,
+        ),
+        Command::Restore { splint_id } => print_response(
+            connection
+                .request(Request::RestoreSplint { splint_id })
+                .await?,
+        ),
+        Command::RestoreWindow { window_id } => print_response(
+            connection
+                .request(Request::RestoreWindow { window_id })
+                .await?,
+        ),
+        Command::RestoreDojo { dojo_id } => {
+            print_response(connection.request(Request::RestoreDojo { dojo_id }).await?)
+        }
+        Command::Snapshot { splint_id } => {
+            let incarnation = connection.live_incarnation(splint_id).await?;
             print_response(
                 connection
                     .request(Request::Attach {
@@ -136,8 +492,8 @@ async fn main() -> Result<()> {
                     .await?,
             )
         }
-        Command::Send { text } => {
-            let (splint_id, incarnation) = connection.live_identity().await?;
+        Command::Send { splint_id, text } => {
+            let incarnation = connection.live_incarnation(splint_id).await?;
             let controller_id = connection.acquire_control(splint_id, incarnation).await?;
             let response = connection
                 .request(Request::Input {
@@ -150,8 +506,12 @@ async fn main() -> Result<()> {
             connection.release_control(controller_id).await?;
             print_response(response)
         }
-        Command::Resize { columns, rows } => {
-            let (splint_id, incarnation) = connection.live_identity().await?;
+        Command::Resize {
+            splint_id,
+            columns,
+            rows,
+        } => {
+            let incarnation = connection.live_incarnation(splint_id).await?;
             let controller_id = connection.acquire_control(splint_id, incarnation).await?;
             let response = connection
                 .request(Request::Resize {
@@ -167,11 +527,15 @@ async fn main() -> Result<()> {
             connection.release_control(controller_id).await?;
             print_response(response)
         }
-        Command::Terminate => {
-            let (splint_id, incarnation) = connection.live_identity().await?;
+        Command::Kill { splint_id, yes } => {
+            if !yes && !confirm_kill(splint_id)? {
+                println!("Kill cancelled.");
+                return Ok(());
+            }
+            let incarnation = connection.live_incarnation(splint_id).await?;
             print_response(
                 connection
-                    .request(Request::Terminate {
+                    .request(Request::KillSplint {
                         splint_id,
                         incarnation,
                     })
@@ -181,9 +545,8 @@ async fn main() -> Result<()> {
     }
 }
 
-fn create_request(name: String, cwd: PathBuf, command: Vec<String>, config: &AppConfig) -> Request {
-    Request::CreateDojo {
-        name,
+fn launch_parameters(cwd: PathBuf, command: Vec<String>, config: &AppConfig) -> LaunchParameters {
+    LaunchParameters {
         cwd,
         command,
         shell: config.shell.clone(),
@@ -192,28 +555,162 @@ fn create_request(name: String, cwd: PathBuf, command: Vec<String>, config: &App
     }
 }
 
-async fn launch(name: String, cwd: PathBuf, command: Vec<String>, config: AppConfig) -> Result<()> {
+fn create_request(
+    expected_topology_revision: TopologyRevision,
+    name: String,
+    cwd: PathBuf,
+    command: Vec<String>,
+    config: &AppConfig,
+) -> Request {
+    Request::CreateDojo {
+        expected_topology_revision,
+        name,
+        launch: launch_parameters(cwd, command, config),
+    }
+}
+
+fn collect_choices(
+    node: &splinterm_core::LayoutNode,
+    dojo: &str,
+    window: &str,
+    choices: &mut Vec<(SplintId, String)>,
+) {
+    match node {
+        splinterm_core::LayoutNode::Leaf(splint) => choices.push((
+            splint.id,
+            format!("{dojo} / {window} / {} ({:?})", splint.title, splint.state),
+        )),
+        splinterm_core::LayoutNode::Branch { first, second, .. } => {
+            collect_choices(first, dojo, window, choices);
+            collect_choices(second, dojo, window, choices);
+        }
+    }
+}
+
+fn choose_session(dojos: &[splinterm_core::Dojo], allow_new: bool) -> Result<Option<SplintId>> {
+    if !io::stdin().is_terminal() {
+        let guidance = if allow_new {
+            "pass --splint-id <UUID> to attach or --new to create"
+        } else {
+            "pass a Splint UUID explicitly"
+        };
+        bail!("session selection requires an interactive terminal; {guidance}");
+    }
+    let mut choices = Vec::new();
+    for dojo in dojos {
+        for window in &dojo.windows {
+            collect_choices(&window.root, &dojo.name, &window.title, &mut choices);
+        }
+    }
+    eprintln!("Saved Splints:");
+    for (id, label) in &choices {
+        eprintln!("  {id}  {label}");
+    }
+    if allow_new {
+        eprintln!("  new  create a new Dojo");
+    }
+    eprint!(
+        "Enter an exact Splint UUID{}: ",
+        if allow_new { " or 'new'" } else { "" }
+    );
+    io::stderr()
+        .flush()
+        .context("failed to display session chooser")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("failed to read session selection")?;
+    let answer = answer.trim();
+    if allow_new && answer.eq_ignore_ascii_case("new") {
+        return Ok(None);
+    }
+    let selected: SplintId = answer.parse().context("selection is not a Splint UUID")?;
+    choices
+        .iter()
+        .any(|(id, _)| *id == selected)
+        .then_some(Some(selected))
+        .context("selected Splint is not present in the current Lair")
+}
+
+fn select_window_from(
+    dojos: &[splinterm_core::Dojo],
+    selection: (DojoId, WindowId),
+) -> Result<SplintId> {
+    let (dojo_id, window_id) = selection;
+    let dojo = dojos
+        .iter()
+        .find(|dojo| dojo.id == dojo_id)
+        .context("selected Dojo is not present in the current Lair")?;
+    let window = dojo
+        .windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .context("selected window does not belong to the selected Dojo")?;
+    window
+        .root
+        .find_splint(window.default_focus)
+        .map(|splint| splint.id)
+        .context("selected window has an invalid default-focus hint")
+}
+
+async fn select_window(selection: Option<(DojoId, WindowId)>) -> Result<SplintId> {
+    let mut connection = Connection::connect().await?;
+    let Response::Dojos { dojos } = connection.request(Request::ListDojos).await? else {
+        bail!("splinterd did not return its session list");
+    };
+    match selection {
+        Some(selection) => select_window_from(&dojos, selection),
+        None => choose_session(&dojos, false)?.context("no Splint was selected"),
+    }
+}
+
+async fn launch(
+    name: String,
+    cwd: PathBuf,
+    splint_id: Option<SplintId>,
+    create_new: bool,
+    command: Vec<String>,
+    config: AppConfig,
+) -> Result<()> {
     let mut connection = Connection::connect().await.context(
         "splinterd is unavailable; start com.oldjobobo.splinterm-daemon.service or run splinterd",
     )?;
     let Response::Dojos { dojos } = connection.request(Request::ListDojos).await? else {
         bail!("splinterd did not return its session list");
     };
-    let requested_command = !command.is_empty();
-    if dojos.is_empty() {
-        if !matches!(
-            connection
-                .request(create_request(name, cwd, command, &config))
-                .await?,
-            Response::DojoCreated { .. }
-        ) {
-            bail!("splinterd did not create the requested terminal");
+    let attach = if let Some(splint_id) = splint_id {
+        Some(splint_id)
+    } else if create_new || dojos.is_empty() || !command.is_empty() {
+        None
+    } else {
+        choose_session(&dojos, true)?
+    };
+    let selected = if let Some(splint_id) = attach {
+        if !command.is_empty() {
+            bail!("cannot execute a new command while attaching an existing Splint");
         }
-    } else if requested_command {
-        bail!("cannot execute a new command while the MVP's single Splint is already live");
-    }
+        splint_id
+    } else {
+        let expected = connection.topology_revision().await?;
+        let Response::DojoCreated { dojo } = connection
+            .request(create_request(expected, name, cwd, command, &config))
+            .await?
+        else {
+            bail!("splinterd did not create the requested terminal");
+        };
+        let window = dojo
+            .windows
+            .first()
+            .context("new dojo did not contain a window")?;
+        match &window.root {
+            splinterm_core::LayoutNode::Leaf(splint) => splint.id,
+            splinterm_core::LayoutNode::Branch { .. } => {
+                bail!("new dojo did not contain exactly one Splint")
+            }
+        }
+    };
     drop(connection);
-    run_live_window(config).await
+    run_live_window(config, selected).await
 }
 
 fn read_private_frame<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
@@ -419,6 +916,8 @@ fn classify_subscription_event(
         SubscriptionEvent::AccessRevoked { .. } | SubscriptionEvent::Exited { .. } => {
             EventAction::Shutdown
         }
+        SubscriptionEvent::TopologyChanged { .. }
+        | SubscriptionEvent::TopologyResyncRequired { .. } => EventAction::Ignore,
     }
 }
 
@@ -741,7 +1240,7 @@ async fn watch_theme(
     clippy::too_many_lines,
     reason = "subscription resync, controller ownership, and window task shutdown are one lifecycle"
 )]
-async fn run_live_window(config: AppConfig) -> Result<()> {
+async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_size: config.font_size,
@@ -755,7 +1254,7 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
         ResolvedTheme::default()
     });
     let mut connection = Connection::connect().await?;
-    let (splint_id, incarnation) = connection.live_identity().await?;
+    let incarnation = connection.live_incarnation(splint_id).await?;
     let requested_scopes = vec![
         AccessScope::Observe,
         AccessScope::Scrollback,
@@ -777,9 +1276,9 @@ async fn run_live_window(config: AppConfig) -> Result<()> {
     let authority = load_authority_status(&mut connection, splint_id, incarnation).await?;
     let mut attachment = attach(&mut connection, splint_id, incarnation).await?;
     let mut control = Connection::connect().await?;
-    let control_identity = control.live_identity().await?;
-    if control_identity != (splint_id, incarnation) {
-        bail!("control connection resolved a different live Splint identity");
+    let control_incarnation = control.live_incarnation(splint_id).await?;
+    if control_incarnation != incarnation {
+        bail!("control connection observed a different process incarnation");
     }
     let controller_id = control.acquire_control(splint_id, incarnation).await?;
     println!("Controller lease {controller_id} granted for live Splint");
@@ -1069,13 +1568,19 @@ impl Connection {
         }
     }
 
-    async fn live_identity(&mut self) -> Result<(SplintId, u64)> {
-        match self.request(Request::InspectLiveSplint).await? {
-            Response::LiveSplint {
-                splint_id,
-                incarnation,
-            } => Ok((splint_id, incarnation)),
-            _ => bail!("splinterd did not return a live Splint identity"),
+    async fn topology_revision(&mut self) -> Result<TopologyRevision> {
+        match self.request(Request::InspectTopology).await? {
+            Response::Topology { snapshot } => Ok(snapshot.revision),
+            _ => bail!("splinterd did not return topology"),
+        }
+    }
+
+    async fn live_incarnation(&mut self, splint_id: SplintId) -> Result<u64> {
+        match self.request(Request::InspectSplint { splint_id }).await? {
+            Response::Splint { runtime } if runtime.splint_id == splint_id => runtime
+                .live_incarnation
+                .context("selected Splint does not have a live process"),
+            _ => bail!("splinterd did not return the selected Splint identity"),
         }
     }
 
@@ -1132,25 +1637,76 @@ async fn read_frame(stream: &mut UnixStream) -> Result<ServerFrame> {
     clippy::unnecessary_wraps,
     reason = "response rendering retains a fallible CLI boundary for future output modes"
 )]
+fn print_restore_results(
+    topology_revision: TopologyRevision,
+    results: Vec<splinterm_protocol::RestoreLeafResult>,
+) {
+    println!(
+        "Restore completed at topology revision {}.",
+        topology_revision.get()
+    );
+    for result in results {
+        match (result.incarnation, result.error) {
+            (Some(incarnation), None) => {
+                println!(
+                    "  {}: started as incarnation {incarnation}",
+                    result.splint_id
+                );
+            }
+            (_, Some(error)) => {
+                println!("  {}: failed: {}", result.splint_id, error.message);
+            }
+            _ => println!("  {}: failed without a result", result.splint_id),
+        }
+    }
+}
+
+fn print_dojos(dojos: Vec<splinterm_core::Dojo>) {
+    for dojo in dojos {
+        let splints: usize = dojo
+            .windows
+            .iter()
+            .map(|window| window.root.splint_count())
+            .sum();
+        println!(
+            "{}  {}  {} window(s)  {splints} Splint(s)",
+            dojo.id,
+            dojo.name,
+            dojo.windows.len()
+        );
+        for window in &dojo.windows {
+            println!(
+                "  window {}  {}  default-focus {}",
+                window.id, window.title, window.default_focus
+            );
+            print_splint_ids(&window.root);
+        }
+    }
+}
+
 fn print_response(response: Response) -> Result<()> {
     match response {
         Response::Pong => println!("splinterd is awake"),
         Response::Dojos { dojos } if dojos.is_empty() => println!("No dojos in the lair."),
-        Response::Dojos { dojos } => {
-            for dojo in dojos {
-                let splints: usize = dojo
-                    .windows
-                    .iter()
-                    .map(|window| window.root.splint_count())
-                    .sum();
-                println!(
-                    "{}  {} window(s)  {splints} splint(s)",
-                    dojo.name,
-                    dojo.windows.len()
-                );
-            }
-        }
+        Response::Dojos { dojos } => print_dojos(dojos),
         Response::DojoCreated { dojo } => println!("Created dojo '{}'.", dojo.name),
+        Response::Topology { snapshot } => println!(
+            "Topology revision {}: {} dojo(s), {} Splint(s)",
+            snapshot.revision.get(),
+            snapshot.lair.dojos().count(),
+            snapshot.runtimes.len()
+        ),
+        Response::TopologySubscribed {
+            subscription_id,
+            snapshot,
+        } => println!(
+            "Topology subscription {subscription_id} started at revision {}.",
+            snapshot.revision.get()
+        ),
+        Response::Splint { runtime } => println!(
+            "Splint {:?}: {:?}, incarnation={:?}, exit={:?}",
+            runtime.splint_id, runtime.lifecycle, runtime.live_incarnation, runtime.exit_status
+        ),
         Response::Attached { snapshot, .. } => print_snapshot(&snapshot),
         Response::ScrollbackPage { page } => println!(
             "Scrollback page: {} row(s), has_older={}",
@@ -1179,15 +1735,54 @@ fn print_response(response: Response) -> Result<()> {
             println!("Controller lease {controller_id} granted.");
         }
         Response::Acknowledged => println!("Acknowledged."),
-        Response::Terminated { code, signal } => {
-            println!("Shell terminated (code={code:?}, signal={signal:?}).");
-        }
-        Response::LiveSplint {
+        Response::SplintStarted {
             splint_id,
             incarnation,
-        } => println!("Live Splint {splint_id:?}, incarnation {incarnation}"),
+            topology_revision,
+        } => println!(
+            "Splint {splint_id} started as incarnation {incarnation} at topology revision {}.",
+            topology_revision.get()
+        ),
+        Response::WindowStarted {
+            window_id,
+            splint_id,
+            incarnation,
+            topology_revision,
+        } => println!(
+            "Window {window_id:?} started with Splint {splint_id} incarnation {incarnation} at revision {}.",
+            topology_revision.get()
+        ),
+        Response::TopologyCommitted { topology_revision } => {
+            println!("Topology revision {} committed.", topology_revision.get());
+        }
+        Response::RestoreCompleted {
+            topology_revision,
+            results,
+        } => print_restore_results(topology_revision, results),
+        Response::SplintKilled {
+            splint_id,
+            incarnation,
+            exit_status,
+        } => println!(
+            "Splint {splint_id} incarnation {incarnation} exited (code={:?}, signal={:?}).",
+            exit_status.code, exit_status.signal
+        ),
     }
-    Ok(())
+    io::stdout()
+        .flush()
+        .context("failed to flush command output")
+}
+
+fn print_splint_ids(node: &splinterm_core::LayoutNode) {
+    match node {
+        splinterm_core::LayoutNode::Leaf(splint) => {
+            println!("  {}  {}  {:?}", splint.id, splint.title, splint.state);
+        }
+        splinterm_core::LayoutNode::Branch { first, second, .. } => {
+            print_splint_ids(first);
+            print_splint_ids(second);
+        }
+    }
 }
 
 fn print_snapshot(snapshot: &TerminalSnapshot) {
@@ -1310,6 +1905,111 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_commands_parse_explicit_ids_and_bounded_ratios() {
+        let id = SplintId::new();
+        let cli = Cli::try_parse_from([
+            "splinterm",
+            "split",
+            &id.to_string(),
+            "--axis",
+            "vertical",
+            "--side",
+            "first",
+            "--ratio",
+            "400",
+            "--",
+            "printf",
+            "ready",
+        ])
+        .unwrap();
+        let Command::Split {
+            target_splint_id,
+            axis: SplitAxis::Vertical,
+            side: NewSplintSide::First,
+            ratio: 400,
+            command,
+            ..
+        } = cli.command
+        else {
+            panic!("expected parsed split command");
+        };
+        assert_eq!(target_splint_id, id);
+        assert_eq!(command, vec!["printf", "ready"]);
+
+        assert!(
+            Cli::try_parse_from([
+                "splinterm",
+                "split",
+                &id.to_string(),
+                "--axis",
+                "horizontal",
+                "--side",
+                "second",
+                "--ratio",
+                "0",
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "kill", &id.to_string(), "--yes"])
+                .unwrap()
+                .command,
+            Command::Kill {
+                splint_id,
+                yes: true,
+            } if splint_id == id
+        ));
+    }
+
+    #[test]
+    fn window_command_requires_exact_paired_resource_ids() {
+        let dojo_id = DojoId::new();
+        let window_id = WindowId::new();
+        let parsed = Cli::try_parse_from([
+            "splinterm",
+            "window",
+            "--dojo-id",
+            &dojo_id.to_string(),
+            "--window-id",
+            &window_id.to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Window {
+                dojo_id: Some(parsed_dojo),
+                window_id: Some(parsed_window),
+            } if parsed_dojo == dojo_id && parsed_window == window_id
+        ));
+        assert!(
+            Cli::try_parse_from(["splinterm", "window", "--window-id", &window_id.to_string(),])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn window_selection_uses_only_its_local_hint() {
+        let mut first = splinterm_core::Dojo::new("first", PathBuf::from("/tmp"));
+        let first_dojo = first.id;
+        let first_window = first.windows[0].id;
+        let first_hint = first.windows[0].default_focus;
+        let second = splinterm_core::Dojo::new("second", PathBuf::from("/tmp"));
+        let second_window = second.windows[0].id;
+        let second_hint = second.windows[0].default_focus;
+
+        assert_eq!(
+            select_window_from(&[first.clone(), second.clone()], (first_dojo, first_window))
+                .unwrap(),
+            first_hint
+        );
+        assert_ne!(first_hint, second_hint);
+        assert!(select_window_from(&[first.clone(), second], (first_dojo, second_window)).is_err());
+
+        first.windows[0].default_focus = SplintId::new();
+        assert!(select_window_from(&[first], (first_dojo, first_window)).is_err());
+    }
+
+    #[test]
     fn create_request_preserves_direct_argv_without_shell_interpolation() {
         let argv = vec![
             "/usr/bin/printf".to_owned(),
@@ -1317,15 +2017,16 @@ mod tests {
             "$(touch /tmp/must-not-run); spaced argument".to_owned(),
         ];
         let request = create_request(
+            TopologyRevision::default(),
             "argv".to_owned(),
             PathBuf::from("/tmp"),
             argv.clone(),
             &AppConfig::default(),
         );
-        let Request::CreateDojo { command, .. } = request else {
+        let Request::CreateDojo { launch, .. } = request else {
             panic!("expected create request");
         };
-        assert_eq!(command, argv);
+        assert_eq!(launch.command, argv);
     }
 
     #[test]

@@ -11,9 +11,10 @@ persistent multiplexing built in.
 - **Splints** — individual terminal surfaces
 
 > [!IMPORTANT]
-> Splinterm is a private prerelease. The single-Splint Omarchy-native terminal
-> MVP is usable and validated, but multiplexing, durable restart persistence,
-> supported third-party automation, and public distribution remain future work.
+> Splinterm is a private prerelease. The Omarchy-native terminal MVP, headless
+> multi-Splint lifecycle, and explicit durable metadata restore are validated.
+> Split-pane rendering, supported third-party automation, and public distribution
+> remain future work.
 
 ## Workspace
 
@@ -40,15 +41,16 @@ The initial daemon uses newline-delimited JSON over a Unix socket.
 `splinterm-terminal` contains the Foot-derived cell/grid model, streaming VT
 kernel, borrowed semantic snapshots, monotonic revisions, and bounded update
 replay. `splinterm-pty` provides the tested Linux PTY/process boundary.
-`splinterd` now owns one live shell actor that continuously consumes its PTY,
-tracks terminal state, and survives client disconnection. The local protocol
+`splinterd` owns a bounded registry of live shell actors that continuously consume
+independent PTYs, track terminal state, and survive client disconnection. The local protocol
 uses bounded framed messages, version negotiation, request IDs, peer-UID
 verification, owner-only socket permissions, and explicit resynchronization.
 The complete headless lifecycle is covered by an isolated real-daemon test.
 Roadmap Phases 1 and 2 are complete; the
 [Omarchy-native terminal MVP plan](docs/plans/0002-omarchy-terminal-mvp.md)
 links exact renderer, graphical sign-off, and private package evidence.
-Multiplexing and durable restart persistence remain later work.
+Headless multiplexing, crash-safe metadata restore, and independently attachable
+Dojo windows are implemented; graphical multi-pane composition remains later work.
 
 ## Try the scaffold
 
@@ -76,13 +78,43 @@ cargo run -p splinterd
 # Terminal 2
 cargo run -p splinterm -- ping
 cargo run -p splinterm -- new main
-cargo run -p splinterm -- list
-cargo run -p splinterm -- send $'printf "hello from the PTY\\n"\n'
-cargo run -p splinterm -- snapshot
+cargo run -p splinterm -- list       # shows stable Dojo, window, and Splint UUIDs
+DOJO_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+WINDOW_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+SPLINT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+cargo run -p splinterm -- send "$SPLINT_ID" $'printf "hello from the PTY\\n"\n'
+cargo run -p splinterm -- snapshot "$SPLINT_ID"
+cargo run -p splinterm -- split "$SPLINT_ID" --axis horizontal --side second
+cargo run -p splinterm -- ratio "$SPLINT_ID" 650
+cargo run -p splinterm -- rename-dojo "$DOJO_ID" work
+cargo run -p splinterm -- rename-window "$WINDOW_ID" editor
+# Convenience metadata only; connected clients retain their own actual focus.
+cargo run -p splinterm -- window-focus-hint "$WINDOW_ID" "$SPLINT_ID"
+cargo run -p splinterm -- rename-splint "$SPLINT_ID" shell
+cargo run -p splinterm -- new-window "$DOJO_ID" --title logs
+cargo run -p splinterm -- kill "$SPLINT_ID"       # prompts before termination
+cargo run -p splinterm -- relaunch "$SPLINT_ID"   # replacement launch parameters
+cargo run -p splinterm -- restore "$SPLINT_ID"    # saved launch metadata
+cargo run -p splinterm -- restore-window "$WINDOW_ID"
+cargo run -p splinterm -- restore-dojo "$DOJO_ID"
+# `close` and `close-window` require every affected Splint to have exited.
+cargo run -p splinterm -- kill "$SPLINT_ID" --yes # required for non-interactive use
+cargo run -p splinterm -- close "$SPLINT_ID"
+cargo run -p splinterm -- close-window "$WINDOW_ID"
 
-# Native live window (opens a trusted grant-once/deny prompt)
-cargo run -p splinterm -- window
+# Exactly one native toplevel for the selected daemon window.
+# Opening/closing the UI only attaches/detaches; it does not create, kill, restore,
+# focus, or otherwise alter another daemon window.
+cargo run -p splinterm -- window --dojo-id "$DOJO_ID" --window-id "$WINDOW_ID"
 ```
+
+Durable metadata is stored under `$XDG_STATE_HOME/splinterm/`, falling back to
+`$HOME/.local/state/splinterm/`. Writes use an owner-only atomic primary plus a
+previous-generation backup. Startup quarantines malformed metadata and never
+runs a saved command automatically. Restored layouts retain their stable IDs,
+but every explicitly restored process receives a new incarnation. Terminal and
+scrollback bodies, clipboard data, PTY handles, grants, and controller tokens
+are never persisted.
 
 The `window` command keeps an ordered daemon subscription, renders current
 terminal snapshots, sends UTF-8 and essential terminal keys, and owns the
@@ -90,7 +122,7 @@ configure-derived PTY/grid size through a separate authenticated control
 connection. Input and resize require one exclusive connection-owned controller
 lease, released when the window disconnects. Function/navigation/keypad keys,
 xterm modifiers, application cursor/keypad modes, xkb compose, focus reporting,
-and exact snapshot colors are supported. Protocol v6 streams bounded semantic
+and exact snapshot colors are supported. Protocol v16 streams bounded semantic
 row, scroll, cursor, mode, palette, dimension, and title updates. The client
 coalesces damage to Wayland frame callbacks, incrementally prepares changed
 rows, scroll-copies reusable backing pixels, submits row damage, and uses a

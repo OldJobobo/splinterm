@@ -5,10 +5,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use splinterm_core::{LayoutNode, SplintId};
+use splinterm_core::{Axis, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
-    ClientFrame, ColorSource, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ServerFrame,
-    SubscriptionEvent, TerminalSnapshot, encode_frame,
+    ClientFrame, ColorSource, ErrorCode, LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS,
+    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SubscriptionEvent,
+    TerminalSnapshot, TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -26,6 +27,26 @@ struct Daemon {
 }
 
 impl Daemon {
+    fn spawn_child(runtime: &Path, socket: &Path) -> Child {
+        Command::new(DAEMON)
+            .env("SPLINTERM_SOCKET", socket)
+            .env("XDG_STATE_HOME", runtime.join("state"))
+            .env("SPLINTERM_ENABLE_DEV_ATTACH", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    async fn wait_until_ready(socket: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() {
+            assert!(Instant::now() < deadline, "daemon socket did not appear");
+            time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn start() -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -35,19 +56,8 @@ impl Daemon {
             std::env::temp_dir().join(format!("splinterm-phase8-{}-{nonce}", std::process::id()));
         fs::create_dir(&runtime).unwrap();
         let socket = runtime.join("splinterd.sock");
-        let child = Command::new(DAEMON)
-            .env("SPLINTERM_SOCKET", &socket)
-            .env("SPLINTERM_ENABLE_DEV_ATTACH", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !socket.exists() {
-            assert!(Instant::now() < deadline, "daemon socket did not appear");
-            time::sleep(Duration::from_millis(10)).await;
-        }
+        let child = Self::spawn_child(&runtime, &socket);
+        Self::wait_until_ready(&socket).await;
         Self {
             child,
             runtime,
@@ -59,13 +69,26 @@ impl Daemon {
         Connection::connect(&self.socket).await
     }
 
+    fn stop_preserving_state(&mut self) {
+        let pid = rustix::process::Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+        let status = self.child.wait().unwrap();
+        assert!(status.success(), "daemon exited as {status:?}");
+        assert!(!self.socket.exists());
+    }
+
+    async fn start_again(&mut self) {
+        self.child = Self::spawn_child(&self.runtime, &self.socket);
+        Self::wait_until_ready(&self.socket).await;
+    }
+
     fn shutdown(mut self) {
         let pid = rustix::process::Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
         rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
         let status = self.child.wait().unwrap();
         assert!(status.success(), "daemon exited as {status:?}");
         assert!(!self.socket.exists());
-        fs::remove_dir(&self.runtime).unwrap();
+        fs::remove_dir_all(&self.runtime).unwrap();
     }
 }
 
@@ -112,6 +135,12 @@ impl Connection {
     }
 
     async fn request(&mut self, request: Request) -> Response {
+        self.request_result(request).await.unwrap_or_else(|error| {
+            panic!("request failed with {:?}: {}", error.code, error.message)
+        })
+    }
+
+    async fn request_result(&mut self, request: Request) -> Result<Response, ProtocolError> {
         let request_id = self.request_id;
         self.request_id += 1;
         write_frame(
@@ -127,26 +156,37 @@ impl Connection {
                 ServerFrame::Response {
                     request_id: response_id,
                     result,
-                } if response_id == request_id => return result,
+                } if response_id == request_id => return Ok(result),
                 ServerFrame::Error {
                     request_id: Some(response_id),
                     error,
-                } if response_id == request_id => {
-                    panic!("request failed with {:?}: {}", error.code, error.message)
-                }
+                } if response_id == request_id => return Err(error),
                 ServerFrame::Event { .. } => {}
                 frame => panic!("unexpected response: {frame:?}"),
             }
         }
     }
 
-    async fn live_identity(&mut self) -> (SplintId, u64) {
-        match self.request(Request::InspectLiveSplint).await {
-            Response::LiveSplint {
-                splint_id,
-                incarnation,
-            } => (splint_id, incarnation),
-            response => panic!("unexpected live identity response: {response:?}"),
+    async fn next_event(&mut self, subscription_id: u64) -> (u64, SubscriptionEvent) {
+        loop {
+            match read_frame(&mut self.stream).await {
+                ServerFrame::Event {
+                    subscription_id: event_subscription,
+                    sequence,
+                    event,
+                } if event_subscription == subscription_id => return (sequence, event),
+                ServerFrame::Event { .. } => {}
+                frame => panic!("unexpected subscription frame: {frame:?}"),
+            }
+        }
+    }
+
+    async fn live_incarnation(&mut self, splint_id: SplintId) -> u64 {
+        match self.request(Request::InspectSplint { splint_id }).await {
+            Response::Splint { runtime } if runtime.splint_id == splint_id => runtime
+                .live_incarnation
+                .expect("created Splint must have a live incarnation"),
+            response => panic!("unexpected targeted identity response: {response:?}"),
         }
     }
 
@@ -184,6 +224,23 @@ impl Connection {
                 splint_id,
                 incarnation,
                 bytes: bytes.to_vec(),
+            })
+            .await,
+            Response::Acknowledged
+        );
+    }
+
+    async fn resize(&mut self, splint_id: SplintId, incarnation: u64, columns: u16, rows: u16) {
+        let controller_id = self.acquire_control(splint_id, incarnation).await;
+        assert_eq!(
+            self.request(Request::Resize {
+                controller_id,
+                splint_id,
+                incarnation,
+                columns,
+                rows,
+                pixel_width: 0,
+                pixel_height: 0,
             })
             .await,
             Response::Acknowledged
@@ -268,6 +325,639 @@ async fn snapshot_until(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_restores_ids_without_running_saved_commands() {
+    time::timeout(TEST_TIMEOUT, async {
+        let mut daemon = Daemon::start().await;
+        let marker = daemon.runtime.join("launch-count");
+        let launch = LaunchParameters {
+            cwd: std::env::current_dir().unwrap(),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("printf 'run\\n' >> {}; exec sleep 30", marker.display()),
+            ],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let mut connection = daemon.connect().await;
+        let Response::DojoCreated { dojo } = connection
+            .request(Request::CreateDojo {
+                expected_topology_revision: splinterm_core::TopologyRevision::default(),
+                name: "durable".into(),
+                launch,
+            })
+            .await
+        else {
+            panic!("dojo was not created");
+        };
+        let dojo_id = dojo.id;
+        let window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("created dojo was not a leaf");
+        };
+        let splint_id = splint.id;
+        while !marker.exists() {
+            time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "run\n");
+        drop(connection);
+
+        daemon.stop_preserving_state();
+        let primary = daemon.runtime.join("state/splinterm/lair.json");
+        fs::write(&primary, b"{truncated").unwrap();
+        daemon.start_again().await;
+        time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            fs::read_dir(primary.parent().unwrap())
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("lair.invalid-"))
+        );
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "run\n");
+        let mut restored = daemon.connect().await;
+        let Response::Topology { snapshot } = restored.request(Request::InspectTopology).await
+        else {
+            panic!("restored topology was not returned");
+        };
+        snapshot.validate().unwrap();
+        assert_eq!(snapshot.revision.get(), 1);
+        let restored_dojo = snapshot.lair.dojos().next().unwrap();
+        assert_eq!(restored_dojo.id, dojo_id);
+        assert_eq!(restored_dojo.windows[0].id, window_id);
+        let LayoutNode::Leaf(restored_splint) = &restored_dojo.windows[0].root else {
+            panic!("restored dojo was not a leaf");
+        };
+        assert_eq!(restored_splint.id, splint_id);
+        assert!(matches!(
+            restored_splint.state,
+            splinterm_core::SplintState::Exited(_)
+        ));
+        assert_eq!(snapshot.runtimes[0].live_incarnation, None);
+
+        let Response::RestoreCompleted { results, .. } =
+            restored.request(Request::RestoreSplint { splint_id }).await
+        else {
+            panic!("restore result was not returned");
+        };
+        assert_eq!(results.len(), 1);
+        assert!(results[0].incarnation.is_some());
+        assert!(results[0].error.is_none());
+        while fs::read_to_string(&marker).unwrap() != "run\nrun\n" {
+            time::sleep(Duration::from_millis(10)).await;
+        }
+        daemon.shutdown();
+    })
+    .await
+    .expect("restart persistence scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario covers restore-one, restore-window, restore-dojo, and partial results"
+)]
+async fn explicit_restore_scopes_report_per_leaf_results() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let launch = LaunchParameters {
+            cwd: std::env::current_dir().unwrap(),
+            command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let mut connection = daemon.connect().await;
+        let Response::DojoCreated { dojo } = connection
+            .request(Request::CreateDojo {
+                expected_topology_revision: splinterm_core::TopologyRevision::default(),
+                name: "restore-scopes".into(),
+                launch: launch.clone(),
+            })
+            .await
+        else {
+            panic!("dojo was not created");
+        };
+        let dojo_id = dojo.id;
+        let window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(first) = &dojo.windows[0].root else {
+            panic!("created dojo was not a leaf");
+        };
+        let first_id = first.id;
+        let first_incarnation = connection.live_incarnation(first_id).await;
+        let Response::SplintStarted {
+            splint_id: second_id,
+            incarnation: second_incarnation,
+            topology_revision,
+        } = connection
+            .request(Request::SplitSplint {
+                expected_topology_revision: splinterm_core::TopologyRevision::new(1),
+                target_splint_id: first_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: launch.clone(),
+            })
+            .await
+        else {
+            panic!("second Splint was not created");
+        };
+        let Response::WindowStarted {
+            splint_id: third_id,
+            incarnation: third_incarnation,
+            ..
+        } = connection
+            .request(Request::NewWindow {
+                expected_topology_revision: topology_revision,
+                dojo_id,
+                title: "second".into(),
+                launch,
+            })
+            .await
+        else {
+            panic!("second window was not created");
+        };
+        for (splint_id, incarnation) in [
+            (first_id, first_incarnation),
+            (second_id, second_incarnation),
+            (third_id, third_incarnation),
+        ] {
+            assert!(matches!(
+                connection
+                    .request(Request::KillSplint {
+                        splint_id,
+                        incarnation,
+                    })
+                    .await,
+                Response::SplintKilled { .. }
+            ));
+        }
+
+        let Response::RestoreCompleted { results, .. } = connection
+            .request(Request::RestoreSplint {
+                splint_id: first_id,
+            })
+            .await
+        else {
+            panic!("single restore failed");
+        };
+        assert_eq!(results.len(), 1);
+        assert!(results[0].incarnation.is_some());
+
+        let Response::RestoreCompleted { results, .. } = connection
+            .request(Request::RestoreWindow { window_id })
+            .await
+        else {
+            panic!("window restore failed");
+        };
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.error.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.incarnation.is_some())
+                .count(),
+            1
+        );
+
+        let Response::RestoreCompleted { results, .. } =
+            connection.request(Request::RestoreDojo { dojo_id }).await
+        else {
+            panic!("dojo restore failed");
+        };
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.error.is_some())
+                .count(),
+            2
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.incarnation.is_some())
+                .count(),
+            1
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("explicit restore scope scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario proves topology CAS, ordered events, and all headless edit types"
+)]
+async fn topology_cas_stream_and_complete_edits() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let cwd = std::env::current_dir().unwrap();
+        let launch = LaunchParameters {
+            cwd: cwd.clone(),
+            command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let mut subscriber = daemon.connect().await;
+        let Response::TopologySubscribed {
+            subscription_id,
+            snapshot,
+        } = subscriber.request(Request::SubscribeTopology).await
+        else {
+            panic!("topology subscription was not created");
+        };
+        assert_eq!(snapshot.revision.get(), 0);
+
+        let mut first = daemon.connect().await;
+        let mut second = daemon.connect().await;
+        let first_request = Request::CreateDojo {
+            expected_topology_revision: snapshot.revision,
+            name: "race-first".into(),
+            launch: launch.clone(),
+        };
+        let second_request = Request::CreateDojo {
+            expected_topology_revision: snapshot.revision,
+            name: "race-second".into(),
+            launch: launch.clone(),
+        };
+        let (first_result, second_result) = tokio::join!(
+            first.request_result(first_request),
+            second.request_result(second_request)
+        );
+        let (dojo, stale) = match (first_result, second_result) {
+            (Ok(Response::DojoCreated { dojo }), Err(stale))
+            | (Err(stale), Ok(Response::DojoCreated { dojo })) => (dojo, stale),
+            results => panic!("exactly one racing create must commit: {results:?}"),
+        };
+        assert_eq!(stale.code, ErrorCode::StaleTopology);
+        assert_eq!(
+            stale.current_topology_revision,
+            Some(splinterm_core::TopologyRevision::new(1))
+        );
+        let (sequence, event) = subscriber.next_event(subscription_id).await;
+        assert_eq!(sequence, 1);
+        let SubscriptionEvent::TopologyChanged { change } = &event else {
+            panic!("first topology event was not a change");
+        };
+        change.validate().unwrap();
+        assert!(matches!(
+            event,
+            SubscriptionEvent::TopologyChanged { change }
+                if change.revision.get() == 1 && change.kind == TopologyChangeKind::DojoCreated
+        ));
+
+        let dojo_id = dojo.id;
+        let window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(initial) = &dojo.windows[0].root else {
+            panic!("created dojo was not a leaf");
+        };
+        let initial_id = initial.id;
+        let mut editor = daemon.connect().await;
+        let Response::SplintStarted {
+            splint_id: sibling_id,
+            incarnation: sibling_incarnation,
+            topology_revision,
+        } = editor
+            .request(Request::SplitSplint {
+                expected_topology_revision: splinterm_core::TopologyRevision::new(1),
+                target_splint_id: initial_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: launch.clone(),
+            })
+            .await
+        else {
+            panic!("split did not commit");
+        };
+        assert_eq!(topology_revision.get(), 2);
+        assert!(matches!(
+            editor
+                .request(Request::SetSplitRatio {
+                    expected_topology_revision: topology_revision,
+                    target_splint_id: sibling_id,
+                    ratio: SplitRatio::new(650).unwrap(),
+                })
+                .await,
+            Response::TopologyCommitted { topology_revision } if topology_revision.get() == 3
+        ));
+        assert!(matches!(
+            editor
+                .request(Request::RenameDojo {
+                    expected_topology_revision: splinterm_core::TopologyRevision::new(3),
+                    dojo_id,
+                    name: "renamed-dojo".into(),
+                })
+                .await,
+            Response::TopologyCommitted { topology_revision } if topology_revision.get() == 4
+        ));
+        assert!(matches!(
+            editor
+                .request(Request::RenameWindow {
+                    expected_topology_revision: splinterm_core::TopologyRevision::new(4),
+                    window_id,
+                    title: "main-window".into(),
+                })
+                .await,
+            Response::TopologyCommitted { topology_revision } if topology_revision.get() == 5
+        ));
+        assert!(matches!(
+            editor
+                .request(Request::RenameSplint {
+                    expected_topology_revision: splinterm_core::TopologyRevision::new(5),
+                    splint_id: initial_id,
+                    title: "primary".into(),
+                })
+                .await,
+            Response::TopologyCommitted { topology_revision } if topology_revision.get() == 6
+        ));
+        let Response::WindowStarted {
+            window_id: extra_window,
+            splint_id: extra_splint,
+            incarnation: extra_incarnation,
+            topology_revision,
+        } = editor
+            .request(Request::NewWindow {
+                expected_topology_revision: splinterm_core::TopologyRevision::new(6),
+                dojo_id,
+                title: "extra-window".into(),
+                launch,
+            })
+            .await
+        else {
+            panic!("new window did not commit");
+        };
+        assert_eq!(topology_revision.get(), 7);
+        let invalid_focus = editor
+            .request_result(Request::SetWindowDefaultFocus {
+                expected_topology_revision: topology_revision,
+                window_id,
+                splint_id: extra_splint,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(invalid_focus.code, ErrorCode::InvalidArgument);
+        let Response::TopologyCommitted { topology_revision } = editor
+            .request(Request::SetWindowDefaultFocus {
+                expected_topology_revision: topology_revision,
+                window_id,
+                splint_id: sibling_id,
+            })
+            .await
+        else {
+            panic!("window focus hint did not commit");
+        };
+        assert_eq!(topology_revision.get(), 8);
+        assert!(matches!(
+            editor
+                .request(Request::KillSplint {
+                    splint_id: extra_splint,
+                    incarnation: extra_incarnation,
+                })
+                .await,
+            Response::SplintKilled { .. }
+        ));
+        assert!(matches!(
+            editor
+                .request(Request::CloseWindow {
+                    expected_topology_revision: topology_revision,
+                    window_id: extra_window,
+                })
+                .await,
+            Response::TopologyCommitted { topology_revision } if topology_revision.get() == 9
+        ));
+
+        assert!(matches!(
+            editor
+                .request(Request::KillSplint {
+                    splint_id: sibling_id,
+                    incarnation: sibling_incarnation,
+                })
+                .await,
+            Response::SplintKilled { .. }
+        ));
+        assert!(matches!(
+            editor
+                .request(Request::CloseSplint {
+                    expected_topology_revision: splinterm_core::TopologyRevision::new(9),
+                    splint_id: sibling_id,
+                })
+                .await,
+            Response::TopologyCommitted { topology_revision } if topology_revision.get() == 10
+        ));
+        let Response::Topology { snapshot } = editor.request(Request::InspectTopology).await else {
+            panic!("topology inspection failed");
+        };
+        snapshot.validate().unwrap();
+        assert_eq!(snapshot.revision.get(), 10);
+        assert_eq!(
+            snapshot.lair.find_window(window_id).unwrap().default_focus,
+            initial_id
+        );
+        assert_eq!(snapshot.runtimes.len(), 1);
+        daemon.shutdown();
+    })
+    .await
+    .expect("topology CAS scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one isolated scenario proves split, independent output, kill, relaunch, and stale rejection"
+)]
+async fn two_splints_spawn_and_preserve_independent_output() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let cwd = std::env::current_dir().unwrap();
+        let shell_launch = || LaunchParameters {
+            cwd: cwd.clone(),
+            command: vec!["/bin/sh".into()],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let mut admin = daemon.connect().await;
+        let Response::DojoCreated { dojo } = admin
+            .request(Request::CreateDojo {
+                expected_topology_revision: splinterm_core::TopologyRevision::default(),
+                name: "multiplex".into(),
+                launch: shell_launch(),
+            })
+            .await
+        else {
+            panic!("daemon did not create initial Splint");
+        };
+        let LayoutNode::Leaf(first) = &dojo.windows[0].root else {
+            panic!("new dojo was not a leaf");
+        };
+        let first_id = first.id;
+        let first_incarnation = admin.live_incarnation(first_id).await;
+
+        let Response::SplintStarted {
+            splint_id: second_id,
+            incarnation: second_incarnation,
+            topology_revision,
+        } = admin
+            .request(Request::SplitSplint {
+                expected_topology_revision: splinterm_core::TopologyRevision::new(1),
+                target_splint_id: first_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: shell_launch(),
+            })
+            .await
+        else {
+            panic!("daemon did not split initial Splint");
+        };
+        assert_eq!(topology_revision.get(), 2);
+        assert_ne!(first_id, second_id);
+
+        let Response::Topology { snapshot: before } = admin.request(Request::InspectTopology).await
+        else {
+            panic!("daemon did not return topology");
+        };
+        let failed = admin
+            .request_result(Request::SplitSplint {
+                expected_topology_revision: topology_revision,
+                target_splint_id: first_id,
+                axis: Axis::Vertical,
+                side: SplitSide::First,
+                ratio: SplitRatio::new(400).unwrap(),
+                launch: LaunchParameters {
+                    command: vec!["/definitely/missing/splinterm-command".into()],
+                    ..shell_launch()
+                },
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failed.code, ErrorCode::Internal);
+        let Response::Topology { snapshot: after } = admin.request(Request::InspectTopology).await
+        else {
+            panic!("daemon did not return topology after failed split");
+        };
+        assert_eq!(after, before);
+        after.validate().unwrap();
+
+        let mut first_client = daemon.connect().await;
+        let mut second_client = daemon.connect().await;
+        let first_controller = first_client
+            .acquire_control(first_id, first_incarnation)
+            .await;
+        let second_controller = second_client
+            .acquire_control(second_id, second_incarnation)
+            .await;
+        assert_ne!(first_controller, second_controller);
+        first_client
+            .input(first_id, first_incarnation, b"printf 'first-ready\\n'\n")
+            .await;
+        second_client
+            .input(second_id, second_incarnation, b"printf 'second-ready\\n'\n")
+            .await;
+        first_client
+            .resize(first_id, first_incarnation, 90, 30)
+            .await;
+        second_client
+            .resize(second_id, second_incarnation, 100, 40)
+            .await;
+
+        let first_snapshot =
+            snapshot_until(&mut admin, first_id, first_incarnation, "first-ready").await;
+        let second_snapshot =
+            snapshot_until(&mut admin, second_id, second_incarnation, "second-ready").await;
+        assert_eq!((first_snapshot.columns, first_snapshot.rows), (90, 30));
+        assert_eq!((second_snapshot.columns, second_snapshot.rows), (100, 40));
+        assert!(!snapshot_text(&first_snapshot).contains("second-ready"));
+        assert!(!snapshot_text(&second_snapshot).contains("first-ready"));
+
+        assert!(matches!(
+            admin
+                .request(Request::KillSplint {
+                    splint_id: first_id,
+                    incarnation: first_incarnation,
+                })
+                .await,
+            Response::SplintKilled { .. }
+        ));
+        second_client
+            .input(
+                second_id,
+                second_incarnation,
+                b"printf 'second-after-kill\\n'\n",
+            )
+            .await;
+        snapshot_until(
+            &mut admin,
+            second_id,
+            second_incarnation,
+            "second-after-kill",
+        )
+        .await;
+
+        let Response::SplintStarted {
+            splint_id: relaunched_id,
+            incarnation: relaunched_incarnation,
+            topology_revision,
+        } = admin
+            .request(Request::RelaunchSplint {
+                splint_id: first_id,
+                launch: LaunchParameters {
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "printf first-relaunched; exec sleep 30".into(),
+                    ],
+                    ..shell_launch()
+                },
+            })
+            .await
+        else {
+            panic!("daemon did not relaunch exited Splint");
+        };
+        assert_eq!(relaunched_id, first_id);
+        assert_ne!(relaunched_incarnation, first_incarnation);
+        assert_eq!(topology_revision.get(), 2);
+        let stale = first_client
+            .request_result(Request::Input {
+                controller_id: first_controller,
+                splint_id: first_id,
+                incarnation: first_incarnation,
+                bytes: b"stale".to_vec(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, ErrorCode::StaleIncarnation);
+        snapshot_until(
+            &mut admin,
+            first_id,
+            relaunched_incarnation,
+            "first-relaunched",
+        )
+        .await;
+
+        // Both remaining live processes are intentionally left to daemon shutdown,
+        // which must drain the registry, reap them, and remove the socket.
+        daemon.shutdown();
+    })
+    .await
+    .expect("two-Splint scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
     reason = "the single scenario intentionally records the complete Phase 8 lifecycle"
@@ -279,12 +969,15 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         let cwd = std::env::current_dir().unwrap();
         let dojo = match creator
             .request(Request::CreateDojo {
+                expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "phase8".into(),
-                cwd: cwd.clone(),
-                command: Vec::new(),
-                shell: None,
-                login_shell: true,
-                scrollback_lines: 1_000,
+                launch: LaunchParameters {
+                    cwd: cwd.clone(),
+                    command: Vec::new(),
+                    shell: None,
+                    login_shell: true,
+                    scrollback_lines: 1_000,
+                },
             })
             .await
         {
@@ -294,8 +987,8 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         let LayoutNode::Leaf(model_splint) = &dojo.windows[0].root else {
             unreachable!()
         };
-        let (splint_id, incarnation) = creator.live_identity().await;
-        assert_eq!(splint_id, model_splint.id);
+        let splint_id = model_splint.id;
+        let incarnation = creator.live_incarnation(splint_id).await;
 
         time::sleep(Duration::from_millis(200)).await;
         creator
@@ -382,15 +1075,24 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         );
         reattached.release_control().await;
         let mut slow = daemon.connect().await;
-        let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
+        for _ in 0..MAX_SUBSCRIPTIONS {
+            let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
+        }
         let mut producer = daemon.connect().await;
         producer
             .input(
                 splint_id,
                 incarnation,
-                b"i=0; while [ $i -lt 300 ]; do printf 'overflow-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); sleep 0.002; done; printf 'overflow-finished\\n'\n",
+                b"i=0; while [ $i -lt 1000 ]; do printf 'overflow-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); sleep 0.001; done; printf 'overflow-finished\\n'\n",
             )
             .await;
+        let _completion_snapshot = snapshot_until(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "overflow-finished",
+        )
+        .await;
 
         let mut saw_resync = false;
         for _ in 0..128 {
@@ -504,14 +1206,14 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         ));
 
         match reattached
-            .request(Request::Terminate {
+            .request(Request::KillSplint {
                 splint_id,
                 incarnation,
             })
             .await
         {
-            Response::Terminated { code, signal } => {
-                assert!(code.is_some() || signal.is_some());
+            Response::SplintKilled { exit_status, .. } => {
+                assert!(exit_status.code.is_some() || exit_status.signal.is_some());
             }
             response => panic!("unexpected terminate response: {response:?}"),
         }

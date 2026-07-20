@@ -9,19 +9,49 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     io::{self, IsTerminal, Write},
-    os::unix::{ffi::OsStrExt, process::CommandExt},
+    os::{
+        linux::net::SocketAddrExt,
+        unix::{ffi::OsStrExt, net::SocketAddr, net::UnixStream, process::CommandExt},
+    },
     process::{self, Command},
 };
 
 fn main() {
-    if let Err(error) = run() {
+    let mut arguments = env::args_os().skip(1);
+    let mut exec_status = match connect_exec_status(&mut arguments) {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("splinterm-pty-child: {error}");
+            process::exit(126);
+        }
+    };
+    if let Err(error) = run(arguments) {
+        let _ = exec_status.write_all(&[1]);
+        let _ = exec_status.flush();
         eprintln!("splinterm-pty-child: {error}");
         process::exit(126);
     }
 }
 
-fn run() -> Result<(), String> {
-    let mut arguments = env::args_os().skip(1);
+fn connect_exec_status(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<UnixStream, String> {
+    if arguments.next().as_deref() != Some(OsStr::new("--exec-status")) {
+        return Err("expected --exec-status".into());
+    }
+    let name = arguments
+        .next()
+        .ok_or_else(|| "exec status capability is missing".to_owned())?;
+    let name = name
+        .to_str()
+        .ok_or_else(|| "exec status capability is not UTF-8".to_owned())?;
+    let address = SocketAddr::from_abstract_name(name.as_bytes())
+        .map_err(|error| format!("invalid exec status capability: {error}"))?;
+    UnixStream::connect_addr(&address)
+        .map_err(|error| format!("connecting exec status socket failed: {error}"))
+}
+
+fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
     let login = match arguments.next().as_deref() {
         Some(value) if value == OsStr::new("--login") => true,
         Some(value) if value == OsStr::new("--no-login") => false,
