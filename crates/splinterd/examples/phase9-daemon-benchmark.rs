@@ -3,7 +3,10 @@
 use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use splinterd::{LiveSnapshot, LiveSplintConfig, LiveSplintRuntime, SubscriptionReceive};
+use splinterd::{
+    LiveCell, LiveRow, LiveScrollbackPage, LiveSnapshot, LiveSplintConfig, LiveSplintRuntime,
+    SubscriptionReceive,
+};
 use splinterm_core::SplintId;
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize};
 use tokio::time::{Instant, sleep, timeout};
@@ -55,6 +58,23 @@ fn timing_summary(samples: &mut [u64]) -> serde_json::Value {
         "p95": percentile(95),
         "max": samples[samples.len() - 1],
     })
+}
+
+fn approximate_page_bytes(page: &LiveScrollbackPage) -> usize {
+    size_of::<LiveScrollbackPage>()
+        + page.rows.capacity() * size_of::<LiveRow>()
+        + page
+            .rows
+            .iter()
+            .map(|row| {
+                row.cells.capacity() * size_of::<LiveCell>()
+                    + row
+                        .cells
+                        .iter()
+                        .map(|cell| cell.content.capacity())
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
 }
 
 fn elapsed_ns(started: Instant) -> Result<u64> {
@@ -150,6 +170,7 @@ async fn main() -> Result<()> {
 
     let mut page_samples = Vec::new();
     let mut page_rows = 0_usize;
+    let mut page_bytes = 0_usize;
     let mut before = completed
         .scrollback
         .newest_available_row_id
@@ -160,6 +181,7 @@ async fn main() -> Result<()> {
         let page = handle.scrollback_page(cursor, 16).await?;
         page_samples.push(elapsed_ns(started)?);
         page_rows = page_rows.saturating_add(page.rows.len());
+        page_bytes = page_bytes.saturating_add(approximate_page_bytes(&page));
         before = page.rows.first().and_then(|row| row.row_id);
         if !page.has_older {
             break;
@@ -204,7 +226,12 @@ async fn main() -> Result<()> {
             "output_ns": output_ns,
             "subscriber_resnapshot_required": subscriber_resnapshot_required,
             "snapshot_ns": timing_summary(&mut snapshot_samples),
-            "paging": { "pages": page_samples.len(), "rows": page_rows, "fetch_ns": page_timing },
+            "paging": {
+                "pages": page_samples.len(),
+                "rows": page_rows,
+                "approximate_retained_bytes": page_bytes,
+                "fetch_ns": page_timing
+            },
             "resize": {
                 "ns": resize_ns,
                 "columns": resized.dimensions.columns,

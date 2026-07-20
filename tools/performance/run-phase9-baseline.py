@@ -147,6 +147,12 @@ def validate_daemon(
         report.get("paging", {}).get("fetch_ns", {}).get("p95"),
         thresholds["page_fetch_p95_ns_max"],
     )
+    check_max(
+        failures,
+        "daemon.page_bytes",
+        report.get("paging", {}).get("approximate_retained_bytes"),
+        thresholds["page_bytes_max"],
+    )
     check_max(failures, "daemon.resize", report.get("resize", {}).get("ns"), thresholds["resize_ns_max"])
     check_max(
         failures,

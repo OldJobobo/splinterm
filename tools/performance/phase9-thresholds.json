@@ -26,6 +26,7 @@
     "output_ns_max": 10000000000,
     "snapshot_p95_ns_max": 1000000,
     "page_fetch_p95_ns_max": 1000000,
+    "page_bytes_max": 8388608,
     "resize_ns_max": 100000000,
     "post_output_input_response_ns_max": 100000000,
     "rss_bytes_max": 134217728
