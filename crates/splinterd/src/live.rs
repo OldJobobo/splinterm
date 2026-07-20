@@ -137,7 +137,11 @@ impl Subscription {
     }
 
     pub async fn recv(&mut self) -> SubscriptionReceive {
+        if *self.resnapshot.borrow() {
+            return SubscriptionReceive::ResnapshotRequired;
+        }
         tokio::select! {
+            biased;
             changed = self.resnapshot.changed() => {
                 if changed.is_ok() && *self.resnapshot.borrow() {
                     SubscriptionReceive::ResnapshotRequired
@@ -1022,6 +1026,29 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[tokio::test]
+    async fn resnapshot_state_wins_over_an_already_queued_event() {
+        let (event_tx, events) = mpsc::channel(1);
+        event_tx
+            .send(LiveEvent::Exited {
+                incarnation: ProcessIncarnation::new(),
+                status: ProcessExit {
+                    code: Some(0),
+                    signal: None,
+                },
+            })
+            .await
+            .unwrap();
+        let (resnapshot_tx, resnapshot) = watch::channel(false);
+        resnapshot_tx.send(true).unwrap();
+        let mut subscription = Subscription { events, resnapshot };
+
+        assert!(matches!(
+            subscription.recv().await,
+            SubscriptionReceive::ResnapshotRequired
+        ));
+    }
 
     fn backend() -> LinuxPtyBackend {
         let test_binary = std::env::current_exe().unwrap();
