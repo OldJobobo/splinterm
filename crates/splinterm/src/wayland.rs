@@ -171,6 +171,49 @@ struct ClipboardRead {
     bytes: io::Result<Vec<u8>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SignoffStep {
+    WaitHistory,
+    LoadClientCache,
+    BeginSelection,
+    ExtendSelection,
+    WaitSelectedOutput,
+    FinishSelection,
+    LocalWheel,
+    WaitMouseTracking,
+    ApplicationWheel,
+    ReturnLive,
+    Complete,
+}
+
+struct SignoffProbe {
+    report_path: PathBuf,
+    started_at: Instant,
+    step: SignoffStep,
+    selection_revision: u64,
+    evidence: Vec<serde_json::Value>,
+}
+
+impl SignoffProbe {
+    fn from_environment(development_bypass: bool) -> Result<Option<Self>> {
+        let Some(path) = std::env::var_os("SPLINTERM_SIGNOFF_REPORT") else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            development_bypass,
+            "SPLINTERM_SIGNOFF_REPORT requires SPLINTERM_ENABLE_DEV_ATTACH=1"
+        );
+        anyhow::ensure!(!path.is_empty(), "SPLINTERM_SIGNOFF_REPORT is empty");
+        Ok(Some(Self {
+            report_path: PathBuf::from(path),
+            started_at: Instant::now(),
+            step: SignoffStep::WaitHistory,
+            selection_revision: 0,
+            evidence: Vec::new(),
+        }))
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 enum PendingPreedit {
     #[default]
@@ -460,6 +503,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     )
     .context("initial SHM pool size fits usize")?;
     let pool = SlotPool::new(pool_size, &shm).context("create SHM pool")?;
+    let signoff = SignoffProbe::from_environment(options.authority.development_bypass)?;
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &queue_handle),
@@ -484,6 +528,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         painted_history_status: None,
         history_page_pending: false,
         history_selection_pin_blocked: false,
+        signoff,
         scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
         scroll_started_at: None,
         rendered_viewport_offset: 0,
@@ -549,6 +594,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
 
     while !app.exit {
         app.apply_updates(&queue_handle)?;
+        app.tick_signoff(&queue_handle)?;
         app.apply_clipboard_reads()?;
         app.tick_cursor_blink(&queue_handle)?;
         event_loop
@@ -679,6 +725,7 @@ struct App {
     painted_history_status: Option<HistoryOverlayStatus>,
     history_page_pending: bool,
     history_selection_pin_blocked: bool,
+    signoff: Option<SignoffProbe>,
     scroll_trace: bool,
     scroll_started_at: Option<Instant>,
     rendered_viewport_offset: usize,
@@ -1900,6 +1947,208 @@ impl App {
         // fast scrolling stall the Wayland dispatch loop.
         self.viewport_dirty = true;
         Ok(true)
+    }
+
+    fn tick_signoff(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
+        let Some(mut probe) = self.signoff.take() else {
+            return Ok(());
+        };
+        let result = self.advance_signoff(&mut probe);
+        if let Err(error) = &result {
+            self.write_signoff_report(&probe, false, Some(&error.to_string()))?;
+        } else {
+            self.write_signoff_report(&probe, probe.step == SignoffStep::Complete, None)?;
+        }
+        self.signoff = Some(probe);
+        result?;
+        if self.configured && self.viewport_dirty {
+            self.schedule_draw(queue_handle)?;
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the development-only sign-off state machine is one auditable scenario"
+    )]
+    fn advance_signoff(&mut self, probe: &mut SignoffProbe) -> Result<()> {
+        anyhow::ensure!(
+            probe.started_at.elapsed() < Duration::from_secs(30),
+            "sign-off probe timed out at {:?}",
+            probe.step
+        );
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Ok(());
+        };
+        match probe.step {
+            SignoffStep::WaitHistory => {
+                if snapshot.available_scrollback_rows >= 5_000 {
+                    probe.step = SignoffStep::LoadClientCache;
+                }
+            }
+            SignoffStep::LoadClientCache => {
+                self.scroll_history(MouseAction::WheelUp, usize::MAX)?;
+                let snapshot = self.snapshot.as_ref().context("sign-off snapshot")?;
+                if snapshot.scrollback_rows.len() >= MAX_CACHED_HISTORY_ROWS
+                    && self.scrollback_viewport.offset_from_bottom()
+                        >= MAX_CACHED_HISTORY_ROWS.saturating_sub(snapshot.rows)
+                {
+                    probe.evidence.push(serde_json::json!({
+                        "check": "client_history_cache",
+                        "loaded_rows": snapshot.scrollback_rows.len(),
+                        "available_rows": snapshot.available_scrollback_rows,
+                        "omitted_oldest_rows": snapshot.omitted_oldest_scrollback_rows,
+                        "offset": self.scrollback_viewport.offset_from_bottom(),
+                        "bounded": snapshot.scrollback_rows.len() <= MAX_CACHED_HISTORY_ROWS,
+                    }));
+                    probe.step = SignoffStep::BeginSelection;
+                }
+            }
+            SignoffStep::BeginSelection => {
+                if self.begin_selection(CellPosition { row: 0, column: 0 }) {
+                    probe.selection_revision = self
+                        .snapshot
+                        .as_ref()
+                        .context("selection snapshot")?
+                        .revision;
+                    probe.step = SignoffStep::ExtendSelection;
+                }
+            }
+            SignoffStep::ExtendSelection => {
+                self.scroll_history(MouseAction::WheelDown, 512)?;
+                let row = self
+                    .display_snapshot()
+                    .context("selection display")?
+                    .rows
+                    .saturating_sub(1);
+                anyhow::ensure!(
+                    self.extend_selection(CellPosition { row, column: 8 }),
+                    "could not extend cross-page selection"
+                );
+                let selection = self.selection.context("selection exists")?;
+                let row_span = selection.anchor.row_id.abs_diff(selection.end.row_id);
+                anyhow::ensure!(row_span > 256, "selection did not cross a history page");
+                probe.evidence.push(serde_json::json!({
+                    "check": "cross_page_selection",
+                    "anchor_row_id": selection.anchor.row_id,
+                    "end_row_id": selection.end.row_id,
+                    "row_id_span": row_span,
+                }));
+                probe.step = SignoffStep::WaitSelectedOutput;
+            }
+            SignoffStep::WaitSelectedOutput => {
+                if snapshot.revision >= probe.selection_revision.saturating_add(20) {
+                    let selection = self.selection.context("selection survived output")?;
+                    anyhow::ensure!(
+                        selection_is_retained(snapshot, selection),
+                        "selection endpoints were not retained during output"
+                    );
+                    probe.evidence.push(serde_json::json!({
+                        "check": "selection_during_detached_output",
+                        "revision_before": probe.selection_revision,
+                        "revision_after": snapshot.revision,
+                        "unseen_rows": self.scrollback_viewport.unseen_rows(),
+                        "retained": true,
+                    }));
+                    probe.step = SignoffStep::FinishSelection;
+                }
+            }
+            SignoffStep::FinishSelection => {
+                let copied_bytes = self.finish_selection().map_or(0, <[u8]>::len);
+                anyhow::ensure!(copied_bytes > 0, "cross-page copy was empty");
+                probe.evidence.push(serde_json::json!({
+                    "check": "cross_page_copy",
+                    "copied_bytes": copied_bytes,
+                    "content_recorded": false,
+                }));
+                probe.step = SignoffStep::LocalWheel;
+            }
+            SignoffStep::LocalWheel => {
+                let outcome = self.handle_vertical_wheel(None, 0.0, 1, 0)?;
+                let WheelOutcome::History { before, after } = outcome else {
+                    anyhow::bail!("wheel without mouse tracking did not scroll history");
+                };
+                anyhow::ensure!(
+                    after < before,
+                    "local wheel did not move toward live output"
+                );
+                probe.evidence.push(serde_json::json!({
+                    "check": "local_history_wheel",
+                    "before": before,
+                    "after": after,
+                }));
+                probe.step = SignoffStep::WaitMouseTracking;
+            }
+            SignoffStep::WaitMouseTracking => {
+                if snapshot.input_modes.mouse_tracking != MouseTracking::None {
+                    probe.step = SignoffStep::ApplicationWheel;
+                }
+            }
+            SignoffStep::ApplicationWheel => {
+                let tracking = snapshot.input_modes.mouse_tracking;
+                let sgr = snapshot.input_modes.sgr_mouse;
+                let outcome = self.handle_vertical_wheel(
+                    Some(CellPosition { row: 2, column: 2 }),
+                    0.0,
+                    0,
+                    -120,
+                )?;
+                let WheelOutcome::Application { reports, bytes } = outcome else {
+                    anyhow::bail!("tracked wheel did not emit an application report");
+                };
+                probe.evidence.push(serde_json::json!({
+                    "check": "application_mouse_wheel",
+                    "tracking": format!("{tracking:?}"),
+                    "sgr": sgr,
+                    "reports": reports,
+                    "bytes": bytes,
+                    "content_recorded": false,
+                }));
+                probe.step = SignoffStep::ReturnLive;
+            }
+            SignoffStep::ReturnLive => {
+                self.scroll_history(MouseAction::WheelDown, usize::MAX)?;
+                if self.scrollback_viewport.is_live() {
+                    probe.evidence.push(serde_json::json!({
+                        "check": "return_to_live",
+                        "offset": 0,
+                    }));
+                    probe.step = SignoffStep::Complete;
+                }
+            }
+            SignoffStep::Complete => {}
+        }
+        Ok(())
+    }
+
+    fn write_signoff_report(
+        &self,
+        probe: &SignoffProbe,
+        exact: bool,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let snapshot = self.snapshot.as_ref();
+        let report = serde_json::json!({
+            "schema": "splinterm.signoff.interactions.v1",
+            "exact": exact,
+            "step": format!("{:?}", probe.step),
+            "elapsed_ms": probe.started_at.elapsed().as_millis(),
+            "error": error,
+            "state": {
+                "revision": snapshot.map(|value| value.revision),
+                "available_history_rows": snapshot.map(|value| value.available_scrollback_rows),
+                "loaded_history_rows": snapshot.map(|value| value.scrollback_rows.len()),
+                "viewport_offset": self.scrollback_viewport.offset_from_bottom(),
+                "mouse_tracking": snapshot.map(|value| format!("{:?}", value.input_modes.mouse_tracking)),
+                "selection_active": self.selection.is_some(),
+            },
+            "evidence": probe.evidence,
+        });
+        let temporary = probe.report_path.with_extension("tmp");
+        let mut bytes = serde_json::to_vec_pretty(&report)?;
+        bytes.push(b'\n');
+        std::fs::write(&temporary, bytes).context("write sign-off report")?;
+        std::fs::rename(&temporary, &probe.report_path).context("publish sign-off report")
     }
 
     fn handle_history_key(
