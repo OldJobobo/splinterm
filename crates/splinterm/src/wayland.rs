@@ -174,12 +174,13 @@ struct ClipboardRead {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SignoffStep {
     WaitHistory,
-    LoadClientCache,
+    LoadSelectionWindow,
     BeginSelection,
     ExtendSelection,
     WaitSelectedOutput,
     FinishSelection,
     LocalWheel,
+    LoadClientCache,
     WaitMouseTracking,
     ApplicationWheel,
     ReturnLive,
@@ -191,6 +192,7 @@ struct SignoffProbe {
     started_at: Instant,
     step: SignoffStep,
     selection_revision: u64,
+    cache_window: Option<(usize, u64)>,
     evidence: Vec<serde_json::Value>,
 }
 
@@ -209,6 +211,7 @@ impl SignoffProbe {
             started_at: Instant::now(),
             step: SignoffStep::WaitHistory,
             selection_revision: 0,
+            cache_window: None,
             evidence: Vec::new(),
         }))
     }
@@ -861,6 +864,21 @@ fn history_cache_bytes(rows: &[TerminalRow]) -> usize {
     rows.iter().map(terminal_row_cache_bytes).sum()
 }
 
+fn omitted_rows_before_cache(
+    oldest_available_row_id: Option<u64>,
+    rows: &[TerminalRow],
+    available_rows: usize,
+) -> usize {
+    oldest_available_row_id
+        .zip(rows.first().and_then(|row| row.row_id))
+        .and_then(|(oldest, first)| first.checked_sub(oldest))
+        .and_then(|omitted| usize::try_from(omitted).ok())
+        .map_or_else(
+            || available_rows.saturating_sub(rows.len()),
+            |omitted| omitted.min(available_rows),
+        )
+}
+
 fn bound_history_cache(rows: &mut Vec<TerminalRow>, keep_oldest: bool) {
     while rows.len() > MAX_CACHED_HISTORY_ROWS
         || history_cache_bytes(rows) > MAX_CACHED_HISTORY_BYTES
@@ -881,7 +899,7 @@ fn bound_history_page_with_pins(
     pinned_selection_rows: Option<[u64; 2]>,
     visible_rows: &[TerminalRow],
 ) -> Option<Vec<TerminalRow>> {
-    bound_history_cache(&mut rows, false);
+    bound_history_cache(&mut rows, true);
     pinned_selection_rows
         .is_none_or(|pins| {
             pins.into_iter().all(|row_id| {
@@ -1891,10 +1909,7 @@ impl App {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Ok(());
         };
-        if snapshot.omitted_oldest_scrollback_rows == 0
-            || snapshot.scrollback_rows.len() >= MAX_CACHED_HISTORY_ROWS
-            || history_cache_bytes(&snapshot.scrollback_rows) >= MAX_CACHED_HISTORY_BYTES
-        {
+        if snapshot.omitted_oldest_scrollback_rows == 0 {
             return Ok(());
         }
         let Some(before_row_id) = snapshot.scrollback_rows.first().and_then(|row| row.row_id)
@@ -1973,7 +1988,7 @@ impl App {
     )]
     fn advance_signoff(&mut self, probe: &mut SignoffProbe) -> Result<()> {
         anyhow::ensure!(
-            probe.started_at.elapsed() < Duration::from_secs(30),
+            probe.started_at.elapsed() < Duration::from_secs(60),
             "sign-off probe timed out at {:?}",
             probe.step
         );
@@ -1983,25 +1998,57 @@ impl App {
         match probe.step {
             SignoffStep::WaitHistory => {
                 if snapshot.available_scrollback_rows >= 5_000 {
-                    probe.step = SignoffStep::LoadClientCache;
+                    probe.step = SignoffStep::LoadSelectionWindow;
+                }
+            }
+            SignoffStep::LoadSelectionWindow => {
+                self.scroll_history(MouseAction::WheelUp, usize::MAX)?;
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.scrollback_rows.len() >= 640)
+                {
+                    probe.step = SignoffStep::BeginSelection;
                 }
             }
             SignoffStep::LoadClientCache => {
                 self.scroll_history(MouseAction::WheelUp, usize::MAX)?;
                 let snapshot = self.snapshot.as_ref().context("sign-off snapshot")?;
-                if snapshot.scrollback_rows.len() >= MAX_CACHED_HISTORY_ROWS
+                let cache_bytes = history_cache_bytes(&snapshot.scrollback_rows);
+                let loaded_rows = snapshot.scrollback_rows.len();
+                let first_row_id = snapshot.scrollback_rows.first().and_then(|row| row.row_id);
+                let bounded_eviction_observed = probe.cache_window.zip(first_row_id).is_some_and(
+                    |((previous_rows, previous_first), current_first)| {
+                        loaded_rows <= previous_rows && current_first < previous_first
+                    },
+                );
+                if let Some(first_row_id) = first_row_id {
+                    probe.cache_window = Some((loaded_rows, first_row_id));
+                }
+                let row_capacity_hit = loaded_rows >= MAX_CACHED_HISTORY_ROWS;
+                let byte_capacity_hit = cache_bytes >= MAX_CACHED_HISTORY_BYTES;
+                if (row_capacity_hit || byte_capacity_hit || bounded_eviction_observed)
                     && self.scrollback_viewport.offset_from_bottom()
-                        >= MAX_CACHED_HISTORY_ROWS.saturating_sub(snapshot.rows)
+                        >= snapshot.scrollback_rows.len().saturating_sub(snapshot.rows)
                 {
+                    anyhow::ensure!(
+                        snapshot.scrollback_rows.len() <= MAX_CACHED_HISTORY_ROWS
+                            && cache_bytes <= MAX_CACHED_HISTORY_BYTES,
+                        "client history cache exceeded a bound"
+                    );
                     probe.evidence.push(serde_json::json!({
                         "check": "client_history_cache",
-                        "loaded_rows": snapshot.scrollback_rows.len(),
+                        "loaded_rows": loaded_rows,
+                        "loaded_bytes": cache_bytes,
                         "available_rows": snapshot.available_scrollback_rows,
                         "omitted_oldest_rows": snapshot.omitted_oldest_scrollback_rows,
                         "offset": self.scrollback_viewport.offset_from_bottom(),
-                        "bounded": snapshot.scrollback_rows.len() <= MAX_CACHED_HISTORY_ROWS,
+                        "row_capacity_hit": row_capacity_hit,
+                        "byte_capacity_hit": byte_capacity_hit,
+                        "bounded_eviction_observed": bounded_eviction_observed,
+                        "bounded": true,
                     }));
-                    probe.step = SignoffStep::BeginSelection;
+                    probe.step = SignoffStep::WaitMouseTracking;
                 }
             }
             SignoffStep::BeginSelection => {
@@ -2077,7 +2124,11 @@ impl App {
                     "before": before,
                     "after": after,
                 }));
-                probe.step = SignoffStep::WaitMouseTracking;
+                self.dirty_selection(self.selection);
+                self.selection = None;
+                self.selected_text = None;
+                self.history_selection_pin_blocked = false;
+                probe.step = SignoffStep::LoadClientCache;
             }
             SignoffStep::WaitMouseTracking => {
                 if snapshot.input_modes.mouse_tracking != MouseTracking::None {
@@ -2138,6 +2189,10 @@ impl App {
                 "revision": snapshot.map(|value| value.revision),
                 "available_history_rows": snapshot.map(|value| value.available_scrollback_rows),
                 "loaded_history_rows": snapshot.map(|value| value.scrollback_rows.len()),
+                "loaded_history_bytes": snapshot.map(|value| history_cache_bytes(&value.scrollback_rows)),
+                "first_loaded_row_id": snapshot.and_then(|value| value.scrollback_rows.first()).and_then(|row| row.row_id),
+                "omitted_oldest_rows": snapshot.map(|value| value.omitted_oldest_scrollback_rows),
+                "history_page_pending": self.history_page_pending,
                 "viewport_offset": self.scrollback_viewport.offset_from_bottom(),
                 "mouse_tracking": snapshot.map(|value| format!("{:?}", value.input_modes.mouse_tracking)),
                 "selection_active": self.selection.is_some(),
@@ -2927,9 +2982,11 @@ impl App {
                             &snapshot.visible_rows,
                         ) {
                             snapshot.scrollback_rows = older;
-                            snapshot.omitted_oldest_scrollback_rows = snapshot
-                                .available_scrollback_rows
-                                .saturating_sub(snapshot.scrollback_rows.len());
+                            snapshot.omitted_oldest_scrollback_rows = omitted_rows_before_cache(
+                                snapshot.oldest_available_scrollback_row_id,
+                                &snapshot.scrollback_rows,
+                                snapshot.available_scrollback_rows,
+                            );
                             if let Some((oldest, newest)) = metadata {
                                 snapshot.oldest_available_scrollback_row_id = oldest;
                                 snapshot.newest_available_scrollback_row_id = newest;
@@ -4452,6 +4509,22 @@ mod tests {
     }
 
     #[test]
+    fn omitted_history_tracks_the_stable_cache_window_position() {
+        let rows = |first| {
+            (first..first + 100)
+                .map(|id| history_row(id, 0))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            omitted_rows_before_cache(Some(100), &rows(1_000), 1_000),
+            900
+        );
+        assert_eq!(omitted_rows_before_cache(Some(100), &rows(500), 1_000), 400);
+        assert_eq!(omitted_rows_before_cache(Some(100), &rows(100), 1_000), 0);
+        assert_eq!(omitted_rows_before_cache(None, &rows(1_000), 1_000), 900);
+    }
+
+    #[test]
     fn same_generation_trim_discards_cached_rows_before_daemon_oldest() {
         let mut current = snapshot(SplintId::new(), 1, 10);
         current.columns = 1;
@@ -4942,11 +5015,15 @@ mod tests {
                 row
             })
             .collect::<Vec<_>>();
-        assert!(bound_history_page_with_pins(rows.clone(), Some([1, 2]), &[]).is_none());
+        let oldest = bound_history_page_with_pins(rows.clone(), Some([1, 2]), &[])
+            .expect("older paging retains selected oldest endpoints");
+        assert_eq!(oldest.len(), MAX_CACHED_HISTORY_ROWS);
+        assert_eq!(oldest.first().and_then(|row| row.row_id), Some(1));
         let newest = u64::try_from(MAX_CACHED_HISTORY_ROWS + 1).unwrap();
-        let bounded = bound_history_page_with_pins(rows, Some([newest - 1, newest]), &[])
-            .expect("newest endpoints survive normal oldest-edge eviction");
-        assert_eq!(bounded.len(), MAX_CACHED_HISTORY_ROWS);
+        assert!(
+            bound_history_page_with_pins(rows, Some([newest - 1, newest]), &[]).is_none(),
+            "older paging rejects a batch rather than evict selected newest endpoints"
+        );
     }
 
     #[test]
