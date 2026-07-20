@@ -344,6 +344,7 @@ def capture_foot(
         f"--override=pad={profile['padding']}x{profile['padding']}",
         f"--override=colors.background={profile['background']}",
         f"--override=colors.foreground={profile['foreground']}",
+        "--override=cursor.unfocused-style=unchanged",
         *(extra_overrides or []),
         f"--font={font_family}:pixelsize={profile['font_size']:g}",
         f"--window-size-chars={case['columns']}x{case['rows']}",

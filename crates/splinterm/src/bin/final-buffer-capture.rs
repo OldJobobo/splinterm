@@ -170,8 +170,9 @@ fn structured_rows(arguments: &Arguments) -> Result<Option<Vec<TerminalRow>>> {
     Ok(Some(
         grid.rows
             .into_iter()
-            .map(|cells| TerminalRow {
-                row_id: None,
+            .enumerate()
+            .map(|(row, cells)| TerminalRow {
+                row_id: u64::try_from(row).ok().and_then(|row| row.checked_add(1)),
                 linebreak: true,
                 cells,
             })
@@ -219,8 +220,8 @@ fn snapshot(arguments: &Arguments) -> Result<TerminalSnapshot> {
         let attributes = attributes(&arguments.style)?;
         let mut characters = text.chars();
         (0..arguments.rows)
-            .map(|_| TerminalRow {
-                row_id: None,
+            .map(|row| TerminalRow {
+                row_id: u64::try_from(row).ok().and_then(|row| row.checked_add(1)),
                 linebreak: true,
                 cells: (0..arguments.columns)
                     .map(|_| TerminalCell {

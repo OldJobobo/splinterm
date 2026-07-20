@@ -3525,8 +3525,8 @@ fn compose_snapshot_rows(
             );
             let has_cursor = frame.cursor == Some((column, row));
             let span = cursor_span(frame, column, row);
-            let (cursor_color, cursor_text) =
-                cursor_colors_for_cell(Some(frame.cursor_color), foreground, background);
+            let cursor_color =
+                cursor_colors_for_cell(Some(frame.cursor_color), foreground, background).0;
             if has_cursor && effective == EffectiveCursorShape::Block {
                 paint_effective_cursor(
                     canvas,
@@ -3540,6 +3540,7 @@ fn compose_snapshot_rows(
                     [cursor_color[0], cursor_color[1], cursor_color[2], 0xff],
                     effective,
                 );
+                continue;
             }
             for placed in frame
                 .glyphs
@@ -3554,11 +3555,7 @@ fn compose_snapshot_rows(
                     frame,
                     geometry,
                     placed,
-                    if has_cursor && effective == EffectiveCursorShape::Block {
-                        cursor_text
-                    } else {
-                        placed.foreground
-                    },
+                    placed.foreground,
                 );
             }
             for decoration in frame
@@ -3566,15 +3563,7 @@ fn compose_snapshot_rows(
                 .iter()
                 .filter(|span| span.row == row && span.column == column)
             {
-                paint_decoration_span(
-                    canvas,
-                    width,
-                    height,
-                    frame,
-                    geometry,
-                    decoration,
-                    (has_cursor && effective == EffectiveCursorShape::Block).then_some(cursor_text),
-                );
+                paint_decoration_span(canvas, width, height, frame, geometry, decoration, None);
             }
             if has_cursor && effective != EffectiveCursorShape::Block {
                 paint_effective_cursor(
@@ -4415,6 +4404,19 @@ mod tests {
                 .cursor_rectangle(&geometry)
                 .expect("visible cursor rectangle");
             assert!(width > 0 && height > 0);
+        }
+    }
+
+    #[test]
+    fn focused_block_cursor_is_an_opaque_cell() {
+        let capture =
+            capture_final_buffer(&incremental_snapshot(), 120, true, CursorStyle::Block).unwrap();
+        let expected = [0xeb, 0xeb, 0xeb, 0xff];
+        for y in capture.origin_y..capture.origin_y + capture.cell_height {
+            for x in capture.origin_x..capture.origin_x + capture.cell_width {
+                let index = usize::try_from(y * capture.stride + x * 4).unwrap();
+                assert_eq!(&capture.pixels[index..index + 4], &expected);
+            }
         }
     }
 
