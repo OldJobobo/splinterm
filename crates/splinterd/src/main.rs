@@ -1105,7 +1105,7 @@ fn spawn_subscription(
                     });
                     break;
                 }
-                SubscriptionReceive::Event(LiveEvent::Update { update, .. }) => {
+                SubscriptionReceive::Event(LiveEvent::Update { updates, .. }) => {
                     let Ok(snapshot) = handle
                         .snapshot_with_scrollback(access.scrollback_rows)
                         .await
@@ -1113,7 +1113,10 @@ fn spawn_subscription(
                         break;
                     };
                     let current_history = history_state(&snapshot);
-                    let event = subscription_update_event(&update, snapshot, previous_history);
+                    if !revision_advances(previous_history.revision, current_history.revision) {
+                        continue;
+                    }
+                    let event = subscription_update_event(&updates, snapshot, previous_history);
                     previous_history = current_history;
 
                     if outbound
@@ -1159,22 +1162,28 @@ fn history_state(snapshot: &LiveSnapshot) -> HistoryState {
     }
 }
 
-fn revisions_match(update_revision: u64, snapshot_revision: u64) -> bool {
-    update_revision == snapshot_revision
+fn revisions_match(updates: &[TerminalUpdate], snapshot_revision: u64) -> bool {
+    updates
+        .last()
+        .is_some_and(|update| update.revision().value() == snapshot_revision)
+}
+
+fn revision_advances(previous_revision: u64, current_revision: u64) -> bool {
+    current_revision > previous_revision
 }
 
 fn subscription_update_event(
-    update: &TerminalUpdate,
+    updates: &[TerminalUpdate],
     snapshot: LiveSnapshot,
     previous_history: HistoryState,
 ) -> SubscriptionEvent {
-    if !revisions_match(update.revision().value(), snapshot.revision.value()) {
+    if !revisions_match(updates, snapshot.revision.value()) {
         return SubscriptionEvent::Snapshot {
             snapshot: wire_snapshot(snapshot),
         };
     }
     match wire_update(
-        update,
+        updates,
         &snapshot,
         previous_history.revision,
         previous_history,
@@ -1266,7 +1275,7 @@ fn not_found() -> ProtocolError {
     reason = "wire conversion keeps one revision's bounded semantic damage atomic"
 )]
 fn wire_update(
-    update: &TerminalUpdate,
+    updates: &[TerminalUpdate],
     snapshot: &LiveSnapshot,
     previous_revision: u64,
     previous_history: HistoryState,
@@ -1281,7 +1290,7 @@ fn wire_update(
     let mut scrollback = false;
     let mut reflow = false;
     let mut appended_rows = 0_usize;
-    for damage in update.damage() {
+    for damage in updates.iter().flat_map(TerminalUpdate::damage) {
         match damage {
             TerminalDamage::FullSnapshot => {
                 damaged.fill(true);
@@ -1349,7 +1358,7 @@ fn wire_update(
         .collect();
     Ok(WireTerminalUpdate {
         base_revision: previous_revision,
-        revision: update.revision().value(),
+        revision: updates.last().ok_or_else(internal)?.revision().value(),
         rows,
         scrolls,
         cursor: cursor.then_some(TerminalCursor {
@@ -1704,9 +1713,21 @@ mod tests {
 
     #[test]
     fn queued_update_uses_delta_only_for_its_exact_snapshot_revision() {
-        assert!(revisions_match(41, 41));
-        assert!(!revisions_match(41, 42));
-        assert!(!revisions_match(42, 41));
+        let terminal = splinterm_terminal::Terminal::new(
+            80,
+            24,
+            splinterm_terminal::TerminalConfig::default(),
+        );
+        let empty = terminal
+            .updates_since(terminal.revision())
+            .unwrap()
+            .updates()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!revisions_match(&empty, terminal.revision().value()));
+        assert!(revision_advances(41, 52));
+        assert!(!revision_advances(41, 41));
+        assert!(!revision_advances(41, 40));
     }
 
     #[test]

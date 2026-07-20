@@ -105,7 +105,7 @@ pub struct LiveScrollbackPage {
 pub enum LiveEvent {
     Update {
         incarnation: ProcessIncarnation,
-        update: TerminalUpdate,
+        updates: Vec<TerminalUpdate>,
     },
     Exited {
         incarnation: ProcessIncarnation,
@@ -869,13 +869,16 @@ fn publish_updates(
 ) {
     let updates = terminal
         .updates_since(base)
-        .expect("immediate update history cannot have a revision gap");
-    for update in updates.updates().cloned() {
+        .expect("immediate update history cannot have a revision gap")
+        .updates()
+        .cloned()
+        .collect::<Vec<_>>();
+    if !updates.is_empty() {
         publish(
             subscribers,
             LiveEvent::Update {
                 incarnation,
-                update,
+                updates,
             },
         );
     }
@@ -1151,10 +1154,11 @@ mod tests {
         let event = time::timeout(Duration::from_secs(1), subscription.recv())
             .await
             .unwrap();
-        let SubscriptionReceive::Event(LiveEvent::Update { update, .. }) = event else {
-            panic!("expected an ordered terminal update")
+        let SubscriptionReceive::Event(LiveEvent::Update { updates, .. }) = event else {
+            panic!("expected an ordered terminal update batch")
         };
-        assert!(update.revision() > snapshot.revision);
+        assert!(!updates.is_empty());
+        assert!(updates.last().unwrap().revision() > snapshot.revision);
         let metrics = handle.metrics();
         assert!(metrics.command_queue_high_water >= 1);
         assert!(metrics.user_write_queue_high_water_bytes >= b"after-attach\n".len());
