@@ -130,9 +130,16 @@ async fn main() -> Result<()> {
     handle.input(b"start\n".to_vec()).await?;
     let completed = wait_for_marker(&handle, OUTPUT_DONE, Duration::from_secs(20)).await?;
     let output_ns = elapsed_ns(output_started)?;
-    let overflow = timeout(Duration::from_secs(1), stalled_subscription.recv()).await?;
-    let subscriber_resnapshot_required =
-        matches!(overflow, SubscriptionReceive::ResnapshotRequired);
+    let subscriber_resnapshot_required = timeout(Duration::from_secs(1), async {
+        loop {
+            match stalled_subscription.recv().await {
+                SubscriptionReceive::ResnapshotRequired => return true,
+                SubscriptionReceive::Closed => return false,
+                SubscriptionReceive::Event(_) => {}
+            }
+        }
+    })
+    .await?;
 
     let mut snapshot_samples = Vec::with_capacity(20);
     for _ in 0..20 {
