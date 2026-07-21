@@ -1,7 +1,8 @@
 # Plan 0007: required full-capability MCP adapter
 
-- **Status:** Planned; blocked on the stable JSON/NDJSON client boundary in
-  [Plan 0006](0006-phase4-headless-automation.md)
+- **Status:** Planned; stable JSON/NDJSON CLI implemented, blocked on the
+  future-descendant policy decision and reusable non-Wayland client extraction
+  in [Plan 0006](0006-phase4-headless-automation.md)
 - **Roadmap:** Phase 4 — Headless access and supported automation, Slice 6
 - **Foundation:** [Plan 0006](0006-phase4-headless-automation.md),
   [ADR 0007](../adr/0007-supported-automation-policy.md), and
@@ -16,9 +17,10 @@ parity with every operation supported for third-party automation through the
 same daemon capability checks as every other client.
 
 The adapter must make terminal-derived content useful without presenting it as
-instruction, consent, or authority. It must not turn MCP transport access into
-Splinterm access, expose the private daemon protocol, inherit graphical-client
-authority, or add a network listener.
+instruction, consent, or authority. It must not turn MCP transport access,
+inherited in-Splint context, or logical resource containment into Splinterm
+access; expose the private daemon protocol; inherit graphical-client authority;
+or add a network listener.
 
 ## Research baseline
 
@@ -68,7 +70,8 @@ It must not:
 
 Spawning the CLI would make `splinterm`, rather than `splinterm-mcp`, the peer
 whose executable path and digest the daemon authorizes. That would erase the
-adapter's independent least-privileged policy identity.
+adapter's independent least-privileged policy identity and delegate the selected
+scopes to any same-account process able to invoke that CLI.
 
 ### Extract the reusable non-Wayland client first
 
@@ -85,6 +88,51 @@ or graphical consent modules.
 The Rust API remains an internal implementation boundary. Compatibility is
 promised by the checked-in CLI and MCP JSON Schemas, not by Rust enum layouts or
 private protocol DTOs.
+
+### Logical resources, graphical windows, and agent context
+
+MCP window tools operate on daemon logical `Window` resources and Splint layout
+trees. They do not map, focus, move, resize, close, or assign a
+compositor-native Wayland window. `set_window_default_focus` remains a persisted
+logical presentation hint. A future compositor broker is a separate trusted UI
+surface and is not part of MCP v1.
+
+When an MCP host is launched from inside a Splint, it may inherit
+`SPLINTERM_DOJO_ID`, `SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
+`SPLINTERM_SPLINT_INCARNATION` after Plan 0006's launch-context slice lands.
+These optional values are initial-selection hints only. The adapter may validate
+them against an authorized topology read, but it must not use them as authority,
+consent, proof of ancestry, an implicit default mutation target, or a reason to
+broaden a policy. Missing, malformed, stale, or unauthorized hints are ignored
+and surfaced explicitly; the adapter never guesses another Splint.
+
+MCP provides terminal and topology primitives, not a semantic multi-agent
+supervisor. Agent readiness, task state, inter-agent messaging, completion, and
+result transport remain host/orchestrator responsibilities. Terminal output can
+be observed as untrusted data but cannot itself trigger a follow-up tool call in
+the server.
+
+### Future-descendant authority must be decided first
+
+ADR 0007 and `docs/automation.md` say Dojo/window selectors do not silently
+cover descendants created later. The current `ResourceSelector::matches`
+implementation lets a Dojo selector dynamically match later windows and Splints,
+and a window selector dynamically match later Splints. That mismatch is a
+release blocker for MCP lifecycle and control tools because it can turn
+authority over an existing logical container into unintended authority over
+agent-created children.
+
+Before MCP Slice 6 starts, either:
+
+1. repair matching to the accepted bounded snapshot semantics and require an
+   explicit policy update before controlling a newly created resource; or
+2. accept a new ADR defining conspicuous bounded future-descendant authority,
+   including selector syntax, creation lineage, limits, expiry, revocation,
+   audit representation, upgrade behavior, and adversarial tests.
+
+Do not preserve the current behavior accidentally. A Lair grant used to create a
+Dojo never implies later terminal authority over that Dojo, and context
+environment values never substitute for a resource selector.
 
 ### MCP version, SDK, and capabilities
 
@@ -418,6 +466,17 @@ catalog, escape its data fields, or broaden returned capabilities.
 
 ## Dependency-ordered implementation slices
 
+### Blocking precondition — reconcile descendant policy semantics
+
+Before production MCP code, add focused policy tests demonstrating the accepted
+behavior for: a Splint added to an existing window, a window added to an existing
+Dojo, a newly created Dojo, relaunch incarnation changes, selector expiry, and
+reload revocation. Update ADR 0007, the policy schema, automation documentation,
+and audit fixtures together if the decision changes the accepted v1 contract.
+
+**Gate:** code, ADR, schema, examples, and tests agree on whether each newly
+created descendant is authorized. No implicit containment behavior remains.
+
 ### Slice 0 — SDK and protocol spike
 
 **Work**
@@ -536,7 +595,8 @@ revocation, unsubscribe, resubscribe, and detach cleanup.
 **Work**
 
 - Implement structured create, split, new-window, relaunch, restore, close,
-  kill, ratio, rename, and default-focus tools.
+  kill, ratio, rename, and default-focus tools only after the descendant-policy
+  blocking gate is closed.
 - Reuse the CLI's topology compare-and-swap, exact affected-resource,
   incarnation, partial multi-restore, and committed-revision semantics.
 - Validate cwd and bounded argv without constructing a shell string.
@@ -545,11 +605,12 @@ revocation, unsubscribe, resubscribe, and detach cleanup.
 
 **Gate**
 
-Every lifecycle/topology operation has allow, deny, stale revision,
-not-found/incarnation, limit, partial-result, cancellation-before-commit,
-cancellation-after-commit, confirmation, and body/argv non-echo coverage.
-Successful mutations return only committed identities/revisions and produce
-resource-complete audit records.
+Every lifecycle/topology operation has allow, deny, newly-created-descendant,
+stale revision, not-found/incarnation, limit, partial-result,
+cancellation-before-commit, cancellation-after-commit, confirmation, and
+body/argv non-echo coverage. Successful mutations return only committed
+identities/revisions and produce resource-complete audit records. Creating a
+resource does not silently grant observation or control of it.
 
 ### Slice 7 — controller, input, resize, and transfer tools
 
@@ -611,7 +672,11 @@ A clean installed environment launches the adapter from documented client
 configuration, negotiates `2025-11-25`, lists exactly the 32 fixed tools and
 three resource forms, performs authorized read, mutation, controller, and
 subscription scenarios, denies each under-scoped counterpart, survives
-cancellation, and exits without residue when the host disconnects.
+cancellation, and exits without residue when the host disconnects. A reference
+in-Splint host uses non-authoritative context hints to select its starting
+resource, then demonstrates bounded split, structured child launch, observation,
+controller denial handling, and resync reconciliation without claiming native
+Wayland window focus or semantic agent supervision.
 
 ## Validation contract
 
@@ -668,7 +733,10 @@ bounded MCP stdio, covering every operation supported for third-party
 automation, while unconfigured and under-scoped processes fail closed. Reads,
 mutations, subscriptions, and controller operations preserve exact provenance,
 resource/incarnation identity, revisions, limits, confirmation, ownership,
-commit state, and audit outcomes. Every terminal result carries an
+commit state, descendant-authority semantics, and audit outcomes. An in-Splint
+coding-agent host can select its validated logical context and orchestrate a
+bounded child Splint flow without ambient authority, compositor-control claims,
+or server-side semantic agent supervision. Every terminal result carries an
 untrusted-data label. The adapter exposes no arbitrary shell, filesystem,
 network, prompt, sampling, elicitation, trusted forced-takeover, or policy-write
 capability; cancellation and disconnect leave no task, transfer, subscription,
@@ -681,6 +749,12 @@ gates pass.
 Stop and request a new architecture decision if implementation requires:
 
 - authorizing the spawned `splinterm` CLI instead of `splinterm-mcp`;
+- retaining dynamic descendant matching without an accepted explicit ADR and
+  closed policy/schema/audit contract;
+- treating inherited Dojo/window/Splint/incarnation hints as authority or an
+  implicit mutation target;
+- representing logical `new_window` or default-focus mutation as compositor
+  mapping or native focus control;
 - a network transport or OAuth flow for the required local adapter;
 - exposing raw daemon/protocol DTOs as MCP contracts;
 - treating terminal content as instructions, prompts, consent, or trusted

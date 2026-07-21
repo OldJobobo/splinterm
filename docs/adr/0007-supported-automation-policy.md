@@ -85,6 +85,16 @@ Limits include, where applicable, maximum returned rows/results/bytes, maximum
 live subscriptions, maximum spawn count, and deadline. Request protocol bounds
 remain hard ceilings. A rule can only narrow them.
 
+**Implementation conformance note:** the current
+`ResourceSelector::matches` implementation lets a Dojo selector dynamically
+match descendant windows and Splints, and a window selector dynamically match
+descendant Splints. That behavior contradicts the bounded snapshot decision
+above and is not accepted as an implicit future-resource grant. Before lifecycle
+MCP or autonomous coding-agent orchestration ships, the implementation must
+either be repaired to match this ADR or a superseding ADR must define a
+conspicuous bounded future-descendant selector with creation lineage, limits,
+expiry, revocation, audit, and adversarial-test semantics.
+
 Reload parses and validates a complete candidate before publication. Invalid,
 unsafe, expired, unreadable, or oversized policy produces a bounded diagnostic
 and installs a deny-all persistent-policy generation; it never retains a
