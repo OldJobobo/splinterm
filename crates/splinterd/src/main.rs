@@ -28,12 +28,12 @@ use splinterd::{
 };
 use splinterm_core::{
     Dojo, DojoId, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId,
-    SplintLaunchMetadata, SplintState, Window, WindowId,
+    SplintLaunchMetadata, SplintState, TopologyRevision, Window, WindowId,
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
-    ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome, ErrorCode,
-    HistoryTransition, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS,
+    ClientRole, ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome,
+    ErrorCode, HistoryTransition, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS,
     MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
     MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking,
     PROTOCOL_VERSION, ProcessExitStatus, ProtocolError, Request, Response, RestoreLeafResult,
@@ -911,6 +911,7 @@ async fn serve_authenticated(
     let ClientFrame::Hello {
         minimum_version,
         maximum_version,
+        role,
     } = hello
     else {
         send_control(
@@ -1009,9 +1010,12 @@ async fn serve_authenticated(
                             peer,
                             &request,
                             Some(&authorization),
-                            splinterm_protocol::AuditDecision::Denied,
-                            "subscription_not_owned",
-                            splinterm_protocol::AuditOutcome::Failed,
+                            RequestAuditDisposition {
+                                resource: None,
+                                decision: splinterm_protocol::AuditDecision::Denied,
+                                reason: "subscription_not_owned",
+                                outcome: splinterm_protocol::AuditOutcome::Failed,
+                            },
                         )
                         .await;
                         send_response(
@@ -1032,16 +1036,26 @@ async fn serve_authenticated(
                         peer,
                         &request,
                         Some(&authorization),
-                        splinterm_protocol::AuditDecision::Allowed,
-                        "owned_subscription",
-                        splinterm_protocol::AuditOutcome::Succeeded,
+                        RequestAuditDisposition {
+                            resource: None,
+                            decision: splinterm_protocol::AuditDecision::Allowed,
+                            reason: "owned_subscription",
+                            outcome: splinterm_protocol::AuditOutcome::Succeeded,
+                        },
                     )
                     .await;
                     send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
-                let handled =
-                    handle_request(request, state, peer, connection_id, subscriptions.len()).await;
+                let handled = handle_request(
+                    request,
+                    state,
+                    peer,
+                    connection_id,
+                    subscriptions.len(),
+                    role == ClientRole::TrustedUi,
+                )
+                .await;
                 match handled {
                     Ok(Handled {
                         response,
@@ -1247,6 +1261,34 @@ async fn controlled_handle(
     Ok(handle)
 }
 
+async fn terminal_action_acknowledgement(
+    state: &DaemonState,
+    handle: &LiveSplintHandle,
+) -> Result<Response, ProtocolError> {
+    let snapshot = handle.snapshot().await.map_err(|_| internal())?;
+    let splint_id = handle.splint_id;
+    let (dojo_id, window_id) = state
+        .lair
+        .read()
+        .await
+        .dojos()
+        .find_map(|dojo| {
+            dojo.windows
+                .iter()
+                .find(|window| window.root.find_splint(splint_id).is_some())
+                .map(|window| (dojo.id, window.id))
+        })
+        .ok_or_else(not_found)?;
+    Ok(Response::TerminalActionAcknowledged {
+        dojo_id,
+        window_id,
+        splint_id,
+        incarnation: handle.incarnation.value(),
+        terminal_revision: snapshot.revision.value(),
+        history_generation: snapshot.scrollback.history_generation,
+    })
+}
+
 fn first_party_ui_scopes(scopes: &[AccessScope]) -> bool {
     scopes.iter().all(|scope| {
         matches!(
@@ -1314,6 +1356,21 @@ fn development_grant(
             .unwrap_or_default()
             .as_secs(),
     }
+}
+
+async fn require_current_topology_revision(
+    state: &DaemonState,
+    expected: TopologyRevision,
+) -> Result<(), ProtocolError> {
+    let current = state.lair.read().await.revision();
+    if current == expected {
+        return Ok(());
+    }
+    Err(ProtocolError {
+        code: ErrorCode::StaleTopology,
+        message: "topology revision is stale".into(),
+        current_topology_revision: Some(current),
+    })
 }
 
 fn model_error(error: LairError) -> ProtocolError {
@@ -1701,6 +1758,14 @@ fn trusted_ui_request(request: &Request) -> bool {
     )
 }
 
+fn trusted_ui_bypass(
+    trusted_ui_client: bool,
+    matching_splinterm_executable: bool,
+    request: &Request,
+) -> bool {
+    trusted_ui_client && matching_splinterm_executable && trusted_ui_request(request)
+}
+
 fn consent_capable_request(request: &Request) -> bool {
     matches!(
         request,
@@ -1894,7 +1959,7 @@ async fn request_policy_resources(
         }
         Request::InspectSplint { splint_id }
         | Request::RelaunchSplint { splint_id, .. }
-        | Request::RestoreSplint { splint_id }
+        | Request::RestoreSplint { splint_id, .. }
         | Request::CloseSplint { splint_id, .. }
         | Request::RenameSplint { splint_id, .. }
         | Request::SetSplitRatio {
@@ -1954,10 +2019,10 @@ async fn request_policy_resources(
         Request::SplitSplint {
             target_splint_id, ..
         } => vec![splint(*target_splint_id, None)?],
-        Request::RestoreWindow { window_id } | Request::CloseWindow { window_id, .. } => {
+        Request::RestoreWindow { window_id, .. } | Request::CloseWindow { window_id, .. } => {
             window(*window_id, true)?
         }
-        Request::RestoreDojo { dojo_id } => dojo(*dojo_id, true)?,
+        Request::RestoreDojo { dojo_id, .. } => dojo(*dojo_id, true)?,
         Request::NewWindow { dojo_id, .. } | Request::RenameDojo { dojo_id, .. } => {
             dojo(*dojo_id, false)?
         }
@@ -1979,6 +2044,7 @@ async fn authorize_request(
     state: &DaemonState,
     peer: &PeerIdentity,
     active_subscriptions: usize,
+    trusted_ui_client: bool,
 ) -> Result<RequestAuthorizationContext, ProtocolError> {
     use authorization::RequestAuthorization;
 
@@ -1989,7 +2055,7 @@ async fn authorize_request(
             | RequestAuthorization::Owned(_)
             | RequestAuthorization::TrustedUiConsent
     ) || state.development_terminal_access
-        || (peer.is_matching_splinterm() && trusted_ui_request(request))
+        || trusted_ui_bypass(trusted_ui_client, peer.is_matching_splinterm(), request)
     {
         return Ok(RequestAuthorizationContext::default());
     }
@@ -2130,22 +2196,24 @@ fn spawn_audit_metadata(request: &Request) -> (Option<usize>, Option<String>) {
     (Some(launch.command.len().saturating_sub(1)), basename)
 }
 
+struct RequestAuditDisposition {
+    resource: Option<splinterm_protocol::AuditResource>,
+    decision: splinterm_protocol::AuditDecision,
+    reason: &'static str,
+    outcome: splinterm_protocol::AuditOutcome,
+}
+
 async fn append_request_audit(
     state: &DaemonState,
     peer: &PeerIdentity,
     request: &Request,
     authorization: Option<&RequestAuthorizationContext>,
-    decision: splinterm_protocol::AuditDecision,
-    reason: &'static str,
-    outcome: splinterm_protocol::AuditOutcome,
+    disposition: RequestAuditDisposition,
 ) {
     let Some(audit_peer) = peer.audit_peer() else {
         warn!(operation = ?audit::operation_for_request(request), "audit record omitted because stable peer identity is unavailable");
         return;
     };
-    let resources = request_policy_resources(request, state)
-        .await
-        .unwrap_or_default();
     let scopes = requested_operation_scopes(request).unwrap_or_default();
     let (argument_count, executable_basename) = spawn_audit_metadata(request);
     let policy_generation =
@@ -2166,11 +2234,11 @@ async fn append_request_audit(
         policy_rule_id,
         peer: audit_peer,
         operation: audit::operation_for_request(request),
-        resource: resources.first().copied().and_then(audit_resource),
+        resource: disposition.resource,
         requested_scopes: scopes,
-        decision,
-        reason,
-        outcome: Some(outcome),
+        decision: disposition.decision,
+        reason: disposition.reason,
+        outcome: Some(disposition.outcome),
         argument_count,
         executable_basename,
     });
@@ -2182,8 +2250,23 @@ async fn handle_request(
     peer: &PeerIdentity,
     connection_id: u64,
     active_subscriptions: usize,
+    trusted_ui_client: bool,
 ) -> Result<Handled, ProtocolError> {
-    let authorization = match authorize_request(&request, state, peer, active_subscriptions).await {
+    let audit_resource = request_policy_resources(&request, state)
+        .await
+        .unwrap_or_default()
+        .first()
+        .copied()
+        .and_then(audit_resource);
+    let authorization = match authorize_request(
+        &request,
+        state,
+        peer,
+        active_subscriptions,
+        trusted_ui_client,
+    )
+    .await
+    {
         Ok(authorization) => authorization,
         Err(error) => {
             append_request_audit(
@@ -2191,9 +2274,12 @@ async fn handle_request(
                 peer,
                 &request,
                 None,
-                splinterm_protocol::AuditDecision::Denied,
-                "policy_rejected",
-                splinterm_protocol::AuditOutcome::Failed,
+                RequestAuditDisposition {
+                    resource: audit_resource.clone(),
+                    decision: splinterm_protocol::AuditDecision::Denied,
+                    reason: "policy_rejected",
+                    outcome: splinterm_protocol::AuditOutcome::Failed,
+                },
             )
             .await;
             return Err(error);
@@ -2248,9 +2334,12 @@ async fn handle_request(
         peer,
         &request,
         Some(&authorization),
-        decision,
-        reason,
-        outcome,
+        RequestAuditDisposition {
+            resource: audit_resource,
+            decision,
+            reason,
+            outcome,
+        },
     )
     .await;
     result
@@ -2381,8 +2470,29 @@ async fn handle_authorized_request(
                 ));
             }
             let grants = state.grants.lock().await.status(splint_id, incarnation);
+            let resource = request_policy_resources(
+                &Request::AuthorizationStatus {
+                    splint_id,
+                    incarnation,
+                },
+                state,
+            )
+            .await
+            .and_then(|resources| resources.into_iter().next());
+            let persistent = match (peer.persistent_executable(), resource) {
+                (Some(executable), Some(resource)) => state.policy.lock().await.status(
+                    executable,
+                    resource,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                ),
+                _ => Vec::new(),
+            };
             Response::AuthorizationStatus {
                 grants,
+                persistent,
                 development_bypass: state.development_terminal_access,
             }
         }
@@ -2413,7 +2523,7 @@ async fn handle_authorized_request(
                 incarnation = revoked.incarnation,
                 "terminal access grant revoked"
             );
-            Response::Acknowledged
+            Response::AccessRevoked { grant: revoked }
         }
         Request::CreateDojo {
             expected_topology_revision,
@@ -2445,6 +2555,7 @@ async fn handle_authorized_request(
             let splint_id = splint.id;
             let runtime = spawn_runtime(state, splint_id, &launch).await?;
             let handle = runtime.handle();
+            let incarnation = handle.incarnation.value();
             splint.state = SplintState::Running;
             let previous = state.lair.read().await.clone();
             let prepared = durable_lair_candidate(state, |lair| {
@@ -2481,7 +2592,11 @@ async fn handle_authorized_request(
             }
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::DojoCreated).await;
-            Response::DojoCreated { dojo }
+            Response::DojoCreated {
+                dojo,
+                incarnation,
+                topology_revision,
+            }
         }
         Request::SplitSplint {
             expected_topology_revision,
@@ -2573,12 +2688,17 @@ async fn handle_authorized_request(
                 topology_revision,
             }
         }
-        Request::RelaunchSplint { splint_id, launch } => {
+        Request::RelaunchSplint {
+            expected_topology_revision,
+            splint_id,
+            launch,
+        } => {
             let _transaction = state
                 .topology_transactions
                 .acquire()
                 .await
                 .map_err(|_| internal())?;
+            require_current_topology_revision(state, expected_topology_revision).await?;
             let (incarnation, topology_revision) =
                 start_exited_splint(state, splint_id, &launch).await?;
             publish_topology(state, topology_revision, TopologyChangeKind::RuntimeChanged).await;
@@ -2588,12 +2708,16 @@ async fn handle_authorized_request(
                 topology_revision,
             }
         }
-        Request::RestoreSplint { splint_id } => {
+        Request::RestoreSplint {
+            expected_topology_revision,
+            splint_id,
+        } => {
             let _transaction = state
                 .topology_transactions
                 .acquire()
                 .await
                 .map_err(|_| internal())?;
+            require_current_topology_revision(state, expected_topology_revision).await?;
             if state.lair.read().await.find_splint(splint_id).is_none() {
                 return Err(not_found());
             }
@@ -2603,12 +2727,16 @@ async fn handle_authorized_request(
                 results,
             }
         }
-        Request::RestoreWindow { window_id } => {
+        Request::RestoreWindow {
+            expected_topology_revision,
+            window_id,
+        } => {
             let _transaction = state
                 .topology_transactions
                 .acquire()
                 .await
                 .map_err(|_| internal())?;
+            require_current_topology_revision(state, expected_topology_revision).await?;
             let splint_ids = state
                 .lair
                 .read()
@@ -2622,12 +2750,16 @@ async fn handle_authorized_request(
                 results,
             }
         }
-        Request::RestoreDojo { dojo_id } => {
+        Request::RestoreDojo {
+            expected_topology_revision,
+            dojo_id,
+        } => {
             let _transaction = state
                 .topology_transactions
                 .acquire()
                 .await
                 .map_err(|_| internal())?;
+            require_current_topology_revision(state, expected_topology_revision).await?;
             let splint_ids = state
                 .lair
                 .read()
@@ -3246,12 +3378,11 @@ async fn handle_authorized_request(
             if bytes.len() > MAX_INPUT_BYTES {
                 return Err(invalid("input exceeds limit"));
             }
-            controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
-                .await?
-                .input(bytes)
-                .await
-                .map_err(|_| internal())?;
-            Response::Acknowledged
+            let handle =
+                controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
+                    .await?;
+            handle.input(bytes).await.map_err(|_| internal())?;
+            terminal_action_acknowledgement(state, &handle).await?
         }
         Request::Resize {
             controller_id,
@@ -3270,8 +3401,10 @@ async fn handle_authorized_request(
             if columns == 0 || rows == 0 || columns > MAX_COLUMNS || rows > MAX_ROWS {
                 return Err(invalid("terminal dimensions exceed limits"));
             }
-            controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
-                .await?
+            let handle =
+                controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
+                    .await?;
+            handle
                 .resize(PtySize {
                     columns,
                     rows,
@@ -3290,7 +3423,7 @@ async fn handle_authorized_request(
                 persist_lair(state, &candidate).await?;
                 install_lair(state, candidate).await;
             }
-            Response::Acknowledged
+            terminal_action_acknowledgement(state, &handle).await?
         }
         Request::Detach { .. } => Response::Acknowledged,
         Request::KillSplint {
@@ -4274,6 +4407,21 @@ mod tests {
             .as_nanos();
         env::temp_dir().join(format!("splinterd-test-{}-{nonce}", std::process::id()))
     }
+    #[test]
+    fn automation_role_never_receives_trusted_ui_bypass() {
+        assert!(!trusted_ui_bypass(false, true, &Request::ListDojos));
+        assert!(trusted_ui_bypass(true, true, &Request::ListDojos));
+        assert!(!trusted_ui_bypass(true, false, &Request::ListDojos));
+        assert!(!trusted_ui_bypass(
+            true,
+            true,
+            &Request::AuditInspect {
+                after_audit_id: None,
+                max_records: 1,
+            }
+        ));
+    }
+
     #[tokio::test]
     async fn exact_policy_authorizes_only_its_declared_request_scope() {
         let state = test_state(false);
@@ -4282,7 +4430,7 @@ mod tests {
             .expect("snapshot test executable");
         peer.install_persistent_executable(executable.clone());
 
-        let denied = authorize_request(&Request::ListDojos, &state, &peer, 0)
+        let denied = authorize_request(&Request::ListDojos, &state, &peer, 0, false)
             .await
             .unwrap_err();
         assert_eq!(denied.code, ErrorCode::Unauthorized);
@@ -4315,15 +4463,15 @@ mod tests {
             .await
             .reload(Some(policy_path.as_path()));
 
-        let allowed = authorize_request(&Request::ListDojos, &state, &peer, 0)
+        let allowed = authorize_request(&Request::ListDojos, &state, &peer, 0, false)
             .await
             .unwrap();
         assert!(allowed.policy_authorized());
-        let oversized = handle_request(Request::ListDojos, &state, &peer, 1, 0)
+        let oversized = handle_request(Request::ListDojos, &state, &peer, 1, 0, false)
             .await
             .unwrap_err();
         assert_eq!(oversized.code, ErrorCode::ResourceLimit);
-        let wrong_scope = authorize_request(&Request::SubscribeTopology, &state, &peer, 0)
+        let wrong_scope = authorize_request(&Request::SubscribeTopology, &state, &peer, 0, false)
             .await
             .unwrap_err();
         assert_eq!(wrong_scope.code, ErrorCode::Unauthorized);
@@ -4410,10 +4558,69 @@ mod tests {
             &peer,
             1,
             0,
+            false,
         )
         .await
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn revoke_access_returns_exact_removed_grant() {
+        let state = test_state(true);
+        let peer = PeerIdentity::for_test();
+        let splint_id = SplintId::new();
+        let grant =
+            state
+                .grants
+                .lock()
+                .await
+                .grant(&peer, splint_id, 2, vec![AccessScope::Observe]);
+
+        let response = handle_request(
+            Request::RevokeAccess {
+                grant_id: grant.grant_id,
+            },
+            &state,
+            &peer,
+            1,
+            0,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.response,
+            Response::AccessRevoked {
+                grant: grant.clone()
+            }
+        );
+        assert!(state.grants.lock().await.status(splint_id, 2).is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_stale_topology_before_resource_lookup() {
+        let state = test_state(true);
+        let peer = PeerIdentity::for_test();
+        let error = handle_request(
+            Request::RestoreDojo {
+                expected_topology_revision: TopologyRevision::new(1),
+                dojo_id: DojoId::new(),
+            },
+            &state,
+            &peer,
+            1,
+            0,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleTopology);
+        assert_eq!(
+            error.current_topology_revision,
+            Some(TopologyRevision::new(0))
+        );
     }
 
     #[tokio::test]
@@ -4434,6 +4641,7 @@ mod tests {
             &peer,
             1,
             0,
+            false,
         )
         .await
         .unwrap_err();

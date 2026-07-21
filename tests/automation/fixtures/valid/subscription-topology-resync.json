@@ -1,0 +1,18 @@
+{
+  "$schema_file": "cli-event.schema.json",
+  "document": {
+    "schema": "splinterm.cli.event.v1",
+    "subscription_id": "1",
+    "sequence": 4,
+    "event_type": "resync_required",
+    "stream": "topology",
+    "resource": {
+      "topology_revision": 9
+    },
+    "data": {},
+    "truncated": false,
+    "resync": {
+      "reason": "revision_gap"
+    }
+  }
+}

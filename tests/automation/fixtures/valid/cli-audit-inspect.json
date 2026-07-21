@@ -1,0 +1,41 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v1",
+    "request_id": "10",
+    "operation": "audit_inspect",
+    "ok": true,
+    "truncated": false,
+    "data": {
+      "retention": "daemon_lifetime",
+      "records": [
+        {
+          "schema": "splinterm.audit.v1",
+          "retention": "daemon_lifetime",
+          "audit_id": "73",
+          "unix_seconds": 1721760000,
+          "peer": {
+            "uid": 1000,
+            "executable_path": "/usr/bin/editor",
+            "executable_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "operation": "input",
+          "resource": {
+            "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+            "incarnation": 2
+          },
+          "requested_scopes": [
+            "input"
+          ],
+          "decision": "allowed",
+          "reason": "policy_match",
+          "outcome": "succeeded"
+        }
+      ],
+      "retention_gap": false,
+      "oldest_available_audit_id": "1",
+      "newest_available_audit_id": "73",
+      "next_after_audit_id": null
+    }
+  }
+}

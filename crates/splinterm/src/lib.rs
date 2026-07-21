@@ -6,6 +6,8 @@
 //! client-owned. Live protocol snapshots are replaceable derived renderer state;
 //! the daemon remains the terminal-state and shell-lifetime authority.
 
+#[doc(hidden)]
+pub mod automation;
 mod box_drawing;
 pub mod config;
 pub mod geometry;

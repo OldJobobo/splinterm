@@ -36,7 +36,7 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 Request/response types shared by both processes. The current development
 protocol uses bounded length-prefixed JSON frames, version-range negotiation,
 request IDs, peer-UID verification, stable errors, and explicit subscription
-resynchronization. Protocol v17 carries closed access scopes, grant status,
+resynchronization. Protocol v18 carries closed access scopes, grant status,
 revocation events, bounded direct command argv/working-directory/shell launch
 fields, semantic terminal updates, topology and history generations, stable row
 IDs, revision-bound scrollback/search pages, visible-row identity, and bounded

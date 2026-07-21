@@ -1,0 +1,20 @@
+{
+  "$schema_file": "cli-event.schema.json",
+  "document": {
+    "schema": "splinterm.cli.event.v1",
+    "subscription_id": "1",
+    "sequence": 2,
+    "event_type": "update",
+    "resource": {
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77110",
+      "incarnation": 3,
+      "terminal_revision": 43,
+      "history_generation": 2
+    },
+    "data": {
+      "content_encoding": "unicode_scalars",
+      "changed": true
+    },
+    "truncated": false
+  }
+}

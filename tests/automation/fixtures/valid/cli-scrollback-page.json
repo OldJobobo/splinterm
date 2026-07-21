@@ -1,0 +1,36 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v1",
+    "request_id": "10",
+    "operation": "scrollback_page",
+    "ok": true,
+    "truncated": true,
+    "resource": {
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+      "incarnation": 2,
+      "terminal_revision": 9,
+      "history_generation": 3
+    },
+    "data": {
+      "kind": "page",
+      "content_encoding": "unicode_scalars",
+      "rows": [
+        {
+          "row_id": 1,
+          "linebreak": true,
+          "cells": [
+            {
+              "text": "ok",
+              "width": 1
+            }
+          ]
+        }
+      ],
+      "has_older": true,
+      "continuation_cursor": "Abcdefghijklmnop"
+    }
+  }
+}

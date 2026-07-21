@@ -1,0 +1,21 @@
+{
+  "$schema_file": "cli-event.schema.json",
+  "document": {
+    "schema": "splinterm.cli.event.v1",
+    "subscription_id": "1",
+    "sequence": 4,
+    "event_type": "resync_required",
+    "stream": "terminal",
+    "resource": {
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77110",
+      "incarnation": 3,
+      "terminal_revision": 45,
+      "history_generation": 2
+    },
+    "data": {},
+    "truncated": false,
+    "resync": {
+      "reason": "history_replaced"
+    }
+  }
+}

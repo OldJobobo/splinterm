@@ -20,6 +20,8 @@
       "type": "string",
       "enum": [
         "snapshot",
+        "topology_snapshot",
+        "control_snapshot",
         "update",
         "topology_changed",
         "control_status_changed",
@@ -30,10 +32,14 @@
         "resync_required"
       ]
     },
+    "stream": {
+      "type": "string",
+      "enum": ["terminal", "topology", "control"]
+    },
     "resource": { "$ref": "#/$defs/resource" },
     "data": { "type": "object" },
     "truncated": { "type": "boolean" },
-    "resync": { "$ref": "#/$defs/resync" }
+    "resync": { "type": "object" }
   },
   "allOf": [
     {
@@ -41,8 +47,200 @@
         "properties": { "event_type": { "const": "resync_required" } },
         "required": ["event_type"]
       },
-      "then": { "required": ["resync"] },
-      "else": { "not": { "required": ["resync"] } }
+      "then": {
+        "required": ["resource", "resync"],
+        "properties": {
+          "data": { "$ref": "#/$defs/empty_data" }
+        },
+        "allOf": [
+          {
+            "if": { "required": ["stream"] },
+            "then": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "stream": { "const": "terminal" },
+                    "resource": { "$ref": "#/$defs/terminal_resync_resource" },
+                    "resync": { "$ref": "#/$defs/terminal_resync" }
+                  },
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "resync": {
+                            "properties": { "reason": { "const": "history_replaced" } },
+                            "required": ["reason"]
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "resource": { "$ref": "#/$defs/terminal_history_resync_resource" }
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "properties": {
+                    "stream": { "const": "topology" },
+                    "resource": { "$ref": "#/$defs/topology_resync_resource" },
+                    "resync": { "$ref": "#/$defs/topology_or_control_resync" }
+                  }
+                },
+                {
+                  "properties": {
+                    "stream": { "const": "control" },
+                    "resource": { "$ref": "#/$defs/control_resync_resource" },
+                    "resync": { "$ref": "#/$defs/topology_or_control_resync" }
+                  }
+                }
+              ]
+            },
+            "else": {
+              "properties": { "resync": { "$ref": "#/$defs/legacy_resync" } }
+            }
+          }
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            { "required": ["stream"] },
+            { "required": ["resync"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "snapshot" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/terminal_resource" },
+          "data": { "$ref": "#/$defs/terminal_snapshot" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "topology_snapshot" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/topology_resource" },
+          "data": { "$ref": "#/$defs/topology_snapshot" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "control_snapshot" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/control_resource" },
+          "data": { "$ref": "#/$defs/control_snapshot" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "update" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/terminal_resource" },
+          "data": { "$ref": "#/$defs/terminal_update" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "topology_changed" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/topology_resource" },
+          "data": { "$ref": "#/$defs/topology_change" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "control_status_changed" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/control_resource" },
+          "data": { "$ref": "#/$defs/control_snapshot" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "control_transfer_requested" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/control_resource" },
+          "data": { "$ref": "#/$defs/control_transfer_requested" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "control_transfer_resolved" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/control_resource" },
+          "data": { "$ref": "#/$defs/control_transfer_resolved" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "access_revoked" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/control_resource" },
+          "data": { "$ref": "#/$defs/access_revoked" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "exited" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "required": ["resource"],
+        "properties": {
+          "resource": { "$ref": "#/$defs/control_resource" },
+          "data": { "$ref": "#/$defs/exited" }
+        }
+      }
     }
   ],
   "$defs": {
@@ -55,6 +253,7 @@
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "counter": { "type": "integer", "minimum": 1 },
+    "nonnegative": { "type": "integer", "minimum": 0 },
     "resource": {
       "type": "object",
       "additionalProperties": false,
@@ -63,13 +262,226 @@
         "window_id": { "$ref": "#/$defs/uuid" },
         "splint_id": { "$ref": "#/$defs/uuid" },
         "incarnation": { "$ref": "#/$defs/counter" },
-        "topology_revision": { "$ref": "#/$defs/counter" },
-        "terminal_revision": { "$ref": "#/$defs/counter" },
+        "topology_revision": { "$ref": "#/$defs/nonnegative" },
+        "terminal_revision": { "$ref": "#/$defs/nonnegative" },
         "history_generation": { "$ref": "#/$defs/counter" }
       },
       "minProperties": 1
     },
-    "resync": {
+    "terminal_resource": {
+      "allOf": [
+        { "$ref": "#/$defs/resource" },
+        { "required": ["splint_id", "incarnation", "terminal_revision"] }
+      ]
+    },
+    "topology_resource": {
+      "allOf": [
+        { "$ref": "#/$defs/resource" },
+        { "required": ["topology_revision"] }
+      ]
+    },
+    "control_resource": {
+      "allOf": [
+        { "$ref": "#/$defs/resource" },
+        { "required": ["splint_id", "incarnation"] }
+      ]
+    },
+    "empty_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "terminal_cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "width"],
+      "properties": {
+        "text": { "type": "string", "maxLength": 64 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 2 }
+      }
+    },
+    "terminal_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["linebreak", "cells"],
+      "properties": {
+        "linebreak": { "type": "boolean" },
+        "cells": {
+          "type": "array",
+          "maxItems": 240,
+          "items": { "$ref": "#/$defs/terminal_cell" }
+        }
+      }
+    },
+    "terminal_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_encoding",
+        "columns",
+        "rows",
+        "title",
+        "visible_rows"
+      ],
+      "properties": {
+        "content_encoding": { "const": "unicode_scalars" },
+        "columns": { "type": "integer", "minimum": 1, "maximum": 240 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 80 },
+        "title": { "type": "string", "maxLength": 1024 },
+        "visible_rows": {
+          "type": "array",
+          "maxItems": 80,
+          "items": { "$ref": "#/$defs/terminal_row" }
+        }
+      }
+    },
+    "topology_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dojo_count", "window_count", "splint_count"],
+      "properties": {
+        "dojo_count": { "type": "integer", "minimum": 0 },
+        "window_count": { "type": "integer", "minimum": 0 },
+        "splint_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "control_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controlled", "locally_owned"],
+      "properties": {
+        "controlled": { "type": "boolean" },
+        "locally_owned": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "locally_owned": { "const": true } },
+            "required": ["locally_owned"]
+          },
+          "then": {
+            "properties": { "controlled": { "const": true } }
+          }
+        }
+      ]
+    },
+    "terminal_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_encoding", "changed"],
+      "properties": {
+        "content_encoding": { "const": "unicode_scalars" },
+        "changed": { "const": true }
+      }
+    },
+    "topology_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "dojo_count", "window_count", "splint_count"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "dojo_created", "splint_split", "splint_closed", "split_ratio_changed",
+            "window_created", "window_closed", "dojo_renamed", "window_renamed",
+            "window_default_focus_changed", "splint_renamed", "runtime_changed"
+          ]
+        },
+        "dojo_count": { "type": "integer", "minimum": 0 },
+        "window_count": { "type": "integer", "minimum": 0 },
+        "splint_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "control_transfer_requested": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transfer_id"],
+      "properties": {
+        "transfer_id": { "$ref": "#/$defs/decimal_id" }
+      }
+    },
+    "control_transfer_resolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transfer_id", "outcome"],
+      "properties": {
+        "transfer_id": { "$ref": "#/$defs/decimal_id" },
+        "outcome": { "enum": ["granted", "denied", "timed_out", "cancelled"] }
+      }
+    },
+    "access_revoked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grant_id"],
+      "properties": {
+        "grant_id": { "$ref": "#/$defs/decimal_id" }
+      }
+    },
+    "exited": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "signal"],
+      "properties": {
+        "code": { "type": ["integer", "null"] },
+        "signal": { "type": ["integer", "null"] }
+      }
+    },
+    "terminal_resync_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["splint_id", "incarnation", "terminal_revision"],
+      "properties": {
+        "splint_id": { "$ref": "#/$defs/uuid" },
+        "incarnation": { "$ref": "#/$defs/counter" },
+        "terminal_revision": { "$ref": "#/$defs/nonnegative" },
+        "history_generation": { "$ref": "#/$defs/counter" }
+      }
+    },
+    "terminal_history_resync_resource": {
+      "allOf": [
+        { "$ref": "#/$defs/terminal_resync_resource" },
+        { "required": ["history_generation"] }
+      ]
+    },
+    "topology_resync_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topology_revision"],
+      "properties": {
+        "topology_revision": { "$ref": "#/$defs/nonnegative" }
+      }
+    },
+    "control_resync_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["splint_id", "incarnation"],
+      "properties": {
+        "splint_id": { "$ref": "#/$defs/uuid" },
+        "incarnation": { "$ref": "#/$defs/counter" }
+      }
+    },
+    "terminal_resync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": ["subscriber_stalled", "revision_gap", "history_replaced"]
+        }
+      }
+    },
+    "topology_or_control_resync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": ["subscriber_stalled", "revision_gap"]
+        }
+      }
+    },
+    "legacy_resync": {
       "type": "object",
       "additionalProperties": false,
       "required": ["reason"],
@@ -78,8 +490,8 @@
           "type": "string",
           "enum": ["subscriber_stalled", "revision_gap", "history_replaced"]
         },
-        "current_topology_revision": { "$ref": "#/$defs/counter" },
-        "current_terminal_revision": { "$ref": "#/$defs/counter" },
+        "current_topology_revision": { "$ref": "#/$defs/nonnegative" },
+        "current_terminal_revision": { "$ref": "#/$defs/nonnegative" },
         "history_generation": { "$ref": "#/$defs/counter" }
       },
       "minProperties": 2

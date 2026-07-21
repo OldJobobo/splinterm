@@ -32,7 +32,7 @@ the process that produced it.
   socket, verifies Linux peer credentials, and owns PTYs while no client is
   attached. What is missing is a supported headless service and authorization
   workflow, not a second daemon.
-- Protocol v17 already has bounded framing, negotiation, request IDs, stable
+- Protocol v18 has bounded framing, negotiation, request IDs, stable
   errors, cancellation, subscriptions, revisions, resynchronization, explicit
   Splint/incarnation identity, and per-Splint controller leases.
 - The current `splinterm` CLI mixes human output with development-only terminal
@@ -251,7 +251,7 @@ No graphical test was required or run for this repair.
   rules, symlink/path substitution, relay impersonation, SSH disconnects,
   terminal prompt injection, oversized streams, subscription stalls, and replay
   of stale resource/incarnation IDs.
-- Define the operation-to-scope matrix and classify every current v17 request.
+- Define the operation-to-scope matrix and classify every current v18 request.
 - Check in draft JSON Schemas and golden valid/invalid fixtures for one-shot
   responses, errors, subscription events, policy, and audit records.
 - Decide whether schemas are handwritten or generated only after a small spike;

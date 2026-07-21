@@ -126,7 +126,7 @@ pane's exclusive connection-owned lease, applies its remembered geometry, and
 then delivers input in order; explicit release or disconnect relinquishes it.
 Function/navigation/keypad keys,
 xterm modifiers, application cursor/keypad modes, xkb compose, focus reporting,
-and exact snapshot colors are supported. Protocol v17 streams bounded semantic
+and exact snapshot colors are supported. Protocol v18 streams bounded semantic
 row, scroll, cursor, mode, palette, dimension, and title updates. The client
 coalesces damage to Wayland frame callbacks, incrementally prepares changed
 rows, scroll-copies reusable backing pixels, submits row damage, and uses a

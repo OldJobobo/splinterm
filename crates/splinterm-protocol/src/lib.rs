@@ -10,7 +10,7 @@ use splinterm_core::{
     Axis, Dojo, DojoId, Lair, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
 };
 
-pub const PROTOCOL_VERSION: u16 = 17;
+pub const PROTOCOL_VERSION: u16 = 18;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -34,12 +34,20 @@ pub const MAX_CONSENT_FRAME_BYTES: usize = 16 * 1024;
 pub const CONSENT_CAPABILITY_BYTES: usize = 32;
 pub const MAX_ACCESS_SCOPES: usize = 8;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientRole {
+    TrustedUi,
+    Automation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
     Hello {
         minimum_version: u16,
         maximum_version: u16,
+        role: ClientRole,
     },
     Request {
         request_id: u64,
@@ -134,16 +142,20 @@ pub enum Request {
         launch: LaunchParameters,
     },
     RelaunchSplint {
+        expected_topology_revision: TopologyRevision,
         splint_id: SplintId,
         launch: LaunchParameters,
     },
     RestoreSplint {
+        expected_topology_revision: TopologyRevision,
         splint_id: SplintId,
     },
     RestoreWindow {
+        expected_topology_revision: TopologyRevision,
         window_id: WindowId,
     },
     RestoreDojo {
+        expected_topology_revision: TopologyRevision,
         dojo_id: DojoId,
     },
     CloseSplint {
@@ -268,6 +280,8 @@ pub enum Response {
     },
     DojoCreated {
         dojo: Dojo,
+        incarnation: u64,
+        topology_revision: TopologyRevision,
     },
     SplintStarted {
         splint_id: SplintId,
@@ -300,8 +314,12 @@ pub enum Response {
     AccessGranted {
         grant: AccessGrant,
     },
+    AccessRevoked {
+        grant: AccessGrant,
+    },
     AuthorizationStatus {
         grants: Vec<AccessGrant>,
+        persistent: Vec<PersistentAuthorizationStatus>,
         development_bypass: bool,
     },
     Attached {
@@ -334,6 +352,14 @@ pub enum Response {
     },
     AuditPage {
         page: AuditPage,
+    },
+    TerminalActionAcknowledged {
+        dojo_id: DojoId,
+        window_id: WindowId,
+        splint_id: SplintId,
+        incarnation: u64,
+        terminal_revision: u64,
+        history_generation: u64,
     },
     Acknowledged,
     SplintKilled {
@@ -806,6 +832,13 @@ pub struct AccessGrant {
     pub expires_at_unix_seconds: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistentAuthorizationStatus {
+    pub policy_rule_id: String,
+    pub scopes: Vec<AutomationScope>,
+    pub expires_at_unix_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -865,7 +898,6 @@ impl SearchPage {
                 && item.preview.len() <= MAX_SEARCH_PREVIEW_BYTES
         });
         if self.incarnation == 0
-            || self.terminal_revision == 0
             || self.history_generation == 0
             || self.matches.len() > MAX_SEARCH_RESULTS
             || self
@@ -920,7 +952,6 @@ impl ScrollbackPage {
             _ => false,
         };
         if self.incarnation == 0
-            || self.terminal_revision == 0
             || self.history_generation == 0
             || self.rows.len() > MAX_SCROLLBACK_PAGE_ROWS
             || self
@@ -1464,6 +1495,7 @@ mod tests {
         let frame = encode_frame(&ClientFrame::Hello {
             minimum_version: PROTOCOL_VERSION,
             maximum_version: PROTOCOL_VERSION,
+            role: ClientRole::Automation,
         })
         .unwrap();
         assert_eq!(
@@ -1750,9 +1782,9 @@ mod tests {
         let mut invalid = page.clone();
         invalid.incarnation = 0;
         assert!(invalid.validate().is_err());
-        let mut invalid = page.clone();
-        invalid.terminal_revision = 0;
-        assert!(invalid.validate().is_err());
+        let mut initial_revision = page.clone();
+        initial_revision.terminal_revision = 0;
+        assert!(initial_revision.validate().is_ok());
         let mut invalid = page.clone();
         invalid.history_generation = 0;
         assert!(invalid.validate().is_err());

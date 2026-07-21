@@ -1,0 +1,16 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v1",
+    "request_id": "1",
+    "operation": "ping",
+    "ok": false,
+    "error": {
+      "code": "timeout",
+      "message": "request deadline elapsed",
+      "retryable": true,
+      "current_terminal_revision": 45
+    },
+    "truncated": false
+  }
+}

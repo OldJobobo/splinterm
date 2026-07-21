@@ -1,16 +1,26 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet},
     env,
-    io::{self, ErrorKind, IsTerminal, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::PathBuf,
     sync::mpsc as std_mpsc,
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use splinterm::{
     AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowPaneOptions,
     WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    automation::{
+        CliEnvelopeV1, CliErrorCodeV1, CliEventV1, Connection, MutationIdentityV1, PingEnvelopeV1,
+        ReadResyncReasonV1, ResyncReasonV1, TerminalContinuationV1, TerminalReadProvenanceV1,
+        audit_page_envelope, authorization_status_envelope, committed_mutation_envelope,
+        created_mutation_envelope, decode_terminal_cursor, inspect_splint_envelope,
+        inspect_topology_envelope, kill_envelope, list_dojos_envelope, process_started_envelope,
+        protocol_error, public_error_code, read_resync_envelope, response_protocol_error,
+        restore_many_envelope, revoke_envelope, scrollback_page_envelope, search_page_envelope,
+        terminal_action_envelope, terminal_snapshot_envelope, write_json_document,
+    },
     config::{AppConfig, ConfigLoad, ResolvedTheme, load_default, load_theme},
     renderer::{self, RendererOptions},
     run_window,
@@ -19,17 +29,12 @@ use splinterm_core::{
     Axis, DojoId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
 };
 use splinterm_protocol::{
-    AccessGrant, AccessScope, ActiveScreen, CellAttributes, ClientFrame, ColorSource,
-    ConsentPrompt, ConsentReply, ControlTransferOutcome, ErrorCode, LaunchParameters,
-    MAX_CONSENT_FRAME_BYTES, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ServerFrame,
-    SubscriptionEvent, TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot,
-    TerminalUpdate, UnderlineStyle, encode_frame,
+    AccessGrant, AccessScope, ActiveScreen, CellAttributes, ColorSource, ConsentPrompt,
+    ConsentReply, ControlTransferOutcome, ErrorCode, HistoryTransition, LaunchParameters,
+    MAX_CONSENT_FRAME_BYTES, Request, Response, ServerFrame, SubscriptionEvent, TerminalCell,
+    TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixStream,
-    sync::mpsc,
-};
+use tokio::sync::mpsc;
 
 const WINDOW_UPDATE_QUEUE: usize = 4;
 const WINDOW_COMMAND_QUEUE: usize = 64;
@@ -37,8 +42,24 @@ const WINDOW_COMMAND_QUEUE: usize = 64;
 #[derive(Debug, Parser)]
 #[command(version, about = "Splinterm terminal client")]
 struct Cli {
+    /// Select human output or the supported JSON machine contract.
+    #[arg(long, global = true, value_enum)]
+    output: Option<OutputMode>,
+    /// Select the public machine schema major.
+    #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..))]
+    schema_major: Option<u16>,
+    /// Bound a machine request deadline in milliseconds.
+    #[arg(long, global = true, value_parser = clap::value_parser!(u64).range(1..=300_000))]
+    timeout_ms: Option<u64>,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputMode {
+    Human,
+    Json,
+    Ndjson,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -84,6 +105,25 @@ enum Command {
     },
     Ping,
     List,
+    /// Inspect effective authority or revoke ephemeral grants.
+    Authorization {
+        #[command(subcommand)]
+        command: AuthorizationCommand,
+    },
+    /// Inspect bounded in-memory daemon audit records.
+    Audit {
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        after: Option<u64>,
+        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u16).range(1..=128))]
+        max_records: u16,
+    },
+    /// Stream bounded machine events as NDJSON.
+    Subscribe {
+        #[command(subcommand)]
+        stream: SubscribeCommand,
+    },
+    /// Inspect all reviewed topology metadata.
+    Topology,
     /// Inspect one Splint by stable identity.
     Inspect {
         splint_id: SplintId,
@@ -131,6 +171,9 @@ enum Command {
     /// Close an exited Splint leaf and collapse its parent branch.
     Close {
         splint_id: SplintId,
+        /// Confirm destructive topology mutation for machine output.
+        #[arg(long)]
+        yes: bool,
     },
     /// Change the ratio of the selected Splint's parent branch.
     Ratio {
@@ -151,6 +194,9 @@ enum Command {
     /// Close a window whose Splints have all exited.
     CloseWindow {
         window_id: WindowId,
+        /// Confirm destructive topology mutation for machine output.
+        #[arg(long)]
+        yes: bool,
     },
     RenameDojo {
         dojo_id: DojoId,
@@ -194,6 +240,25 @@ enum Command {
     Snapshot {
         splint_id: SplintId,
     },
+    /// Read one bounded page of terminal history.
+    Scrollback {
+        splint_id: SplintId,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u16).range(1..=16))]
+        max_rows: u16,
+    },
+    /// Search terminal history without echoing the query in machine output.
+    Search {
+        splint_id: SplintId,
+        query: String,
+        #[arg(long)]
+        case_sensitive: bool,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u16).range(1..=64))]
+        max_results: u16,
+    },
     /// Send literal UTF-8 text to one live shell (development mode only).
     Send {
         splint_id: SplintId,
@@ -215,6 +280,26 @@ enum Command {
     /// Private daemon-launched trusted consent surface.
     #[command(hide = true)]
     Consent,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthorizationCommand {
+    Status {
+        splint_id: SplintId,
+    },
+    Revoke {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        grant_id: u64,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SubscribeCommand {
+    Terminal { splint_id: SplintId },
+    Topology,
+    Control { splint_id: SplintId },
 }
 
 fn confirm_kill(splint_id: SplintId) -> Result<bool> {
@@ -239,9 +324,69 @@ fn confirm_kill(splint_id: SplintId) -> Result<bool> {
 
 // The client needs concurrent local IPC and theme watching, not one allocator
 // arena per CPU. Wayland rendering already runs on a bounded blocking worker.
+fn usage_error(message: &str) -> ! {
+    Cli::command()
+        .error(clap::error::ErrorKind::ArgumentConflict, message)
+        .exit()
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
-    let command = Cli::parse().command;
+    let Cli {
+        output,
+        schema_major,
+        timeout_ms,
+        command,
+    } = Cli::parse();
+    if matches!(
+        &command,
+        Command::Window { .. } | Command::Launch { .. } | Command::Consent
+    ) && (output.is_some() || schema_major.is_some() || timeout_ms.is_some())
+    {
+        usage_error(
+            "automation output, schema, and timeout options are unavailable for graphical commands",
+        );
+    }
+    if matches!(command, Command::Subscribe { .. }) && output != Some(OutputMode::Ndjson) {
+        usage_error("subscriptions require --output ndjson");
+    }
+    if output == Some(OutputMode::Json) {
+        match run_machine_command(
+            command,
+            schema_major.unwrap_or(1),
+            timeout_ms.unwrap_or(5_000),
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                eprintln!("{error:#}");
+                std::process::exit(machine_exit_code(&error));
+            }
+        }
+    }
+    if output == Some(OutputMode::Ndjson) {
+        let Command::Subscribe { stream } = command else {
+            usage_error("NDJSON output is reserved for subscription commands");
+        };
+        match run_machine_subscription(
+            stream,
+            schema_major.unwrap_or(1),
+            timeout_ms.unwrap_or(5_000),
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                eprintln!("{error:#}");
+                std::process::exit(machine_exit_code(&error));
+            }
+        }
+    }
+    if schema_major.is_some() || timeout_ms.is_some() {
+        usage_error("--schema-major and --timeout-ms require --output json or ndjson");
+    }
+
     let ConfigLoad {
         config,
         diagnostics,
@@ -276,6 +421,2285 @@ async fn main() -> Result<()> {
     run_headless(command, &config).await
 }
 
+fn machine_exit_code(error: &anyhow::Error) -> i32 {
+    if let Some(protocol) = protocol_error(error) {
+        return match protocol.code {
+            ErrorCode::ConsentUnavailable | ErrorCode::ConsentDenied | ErrorCode::Unauthorized => 3,
+            ErrorCode::AuthenticationFailed
+            | ErrorCode::HandshakeRequired
+            | ErrorCode::IncompatibleVersion => 4,
+            ErrorCode::Cancelled => 6,
+            ErrorCode::Internal | ErrorCode::DevelopmentFeatureDisabled => 70,
+            _ => 5,
+        };
+    }
+    let message = error.to_string();
+    if message.contains("requires --yes") {
+        3
+    } else if message.contains("timed out") || message.contains("deadline") {
+        6
+    } else if message.contains("unsupported schema")
+        || message.contains("cannot connect")
+        || message.contains("XDG_RUNTIME_DIR")
+        || message.contains("handshake")
+        || message.contains("protocol version")
+    {
+        4
+    } else if message.contains("not found")
+        || message.contains("invalid continuation cursor")
+        || message.contains("does not match the selected")
+        || message.contains("does not have a live process")
+        || message.contains("controller")
+        || message.contains("resource limit")
+    {
+        5
+    } else {
+        70
+    }
+}
+
+async fn run_machine_command(command: Command, schema_major: u16, timeout_ms: u64) -> Result<()> {
+    let command = match extract_machine_mutation(command) {
+        Ok(mutation) => return run_machine_mutation(mutation, schema_major, timeout_ms).await,
+        Err(command) => command,
+    };
+    match command {
+        Command::Ping => run_machine_ping(schema_major, timeout_ms).await,
+        Command::List => run_machine_read(MachineRead::List, schema_major, timeout_ms).await,
+        Command::Topology => {
+            run_machine_read(MachineRead::Topology, schema_major, timeout_ms).await
+        }
+        Command::Inspect { splint_id } => {
+            run_machine_read(MachineRead::Splint(splint_id), schema_major, timeout_ms).await
+        }
+        Command::Snapshot { splint_id } => {
+            run_machine_snapshot(splint_id, schema_major, timeout_ms).await
+        }
+        Command::Authorization {
+            command: AuthorizationCommand::Status { splint_id },
+        } => run_machine_authorization_status(splint_id, schema_major, timeout_ms).await,
+        Command::Audit { after, max_records } => {
+            run_machine_audit(after, usize::from(max_records), schema_major, timeout_ms).await
+        }
+        Command::Send { splint_id, text } => {
+            run_machine_control(
+                MachineControl::Input(text.into_bytes()),
+                splint_id,
+                schema_major,
+                timeout_ms,
+            )
+            .await
+        }
+        Command::Resize {
+            splint_id,
+            columns,
+            rows,
+        } => {
+            run_machine_control(
+                MachineControl::Resize { columns, rows },
+                splint_id,
+                schema_major,
+                timeout_ms,
+            )
+            .await
+        }
+        Command::Scrollback {
+            splint_id,
+            cursor,
+            max_rows,
+        } => {
+            run_machine_history(
+                MachineHistory::Scrollback {
+                    cursor,
+                    max_rows: usize::from(max_rows),
+                },
+                splint_id,
+                schema_major,
+                timeout_ms,
+            )
+            .await
+        }
+        Command::Search {
+            splint_id,
+            query,
+            case_sensitive,
+            cursor,
+            max_results,
+        } => {
+            run_machine_history(
+                MachineHistory::Search {
+                    query,
+                    case_sensitive,
+                    cursor,
+                    max_results: usize::from(max_results),
+                },
+                splint_id,
+                schema_major,
+                timeout_ms,
+            )
+            .await
+        }
+        _ => bail!("JSON output is not implemented for this command yet"),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MachineRead {
+    List,
+    Topology,
+    Splint(SplintId),
+}
+
+impl MachineRead {
+    const fn operation(self) -> &'static str {
+        match self {
+            Self::List => "list_dojos",
+            Self::Topology => "inspect_topology",
+            Self::Splint(_) => "inspect_splint",
+        }
+    }
+}
+
+fn write_machine_read_failure(
+    operation: &'static str,
+    code: CliErrorCodeV1,
+    message: impl Into<String>,
+    retryable: bool,
+) -> Result<()> {
+    write_json_document(&CliEnvelopeV1::failure(
+        operation, code, message, retryable,
+    )?)
+}
+
+fn write_machine_connection_failure(operation: &'static str, error: &anyhow::Error) -> Result<()> {
+    if let Some(protocol) = protocol_error(error) {
+        return write_json_document(&CliEnvelopeV1::protocol_failure(
+            operation,
+            protocol,
+            bounded_public_message(error),
+        )?);
+    }
+    write_machine_read_failure(
+        operation,
+        CliErrorCodeV1::Internal,
+        bounded_public_message(error),
+        true,
+    )
+}
+
+async fn run_machine_read(command: MachineRead, schema_major: u16, timeout_ms: u64) -> Result<()> {
+    let operation = command.operation();
+    if schema_major != 1 {
+        write_machine_read_failure(
+            operation,
+            CliErrorCodeV1::UnsupportedSchema,
+            format!("unsupported schema major {schema_major}"),
+            false,
+        )?;
+        bail!("unsupported schema major {schema_major}");
+    }
+
+    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let started = std::time::Instant::now();
+    let mut connection =
+        match tokio::time::timeout(deadline, Connection::connect_automation()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                write_machine_connection_failure(operation, &error)?;
+                return Err(error);
+            }
+            Err(_) => {
+                write_machine_read_failure(
+                    operation,
+                    CliErrorCodeV1::Timeout,
+                    "connection deadline elapsed",
+                    true,
+                )?;
+                bail!("splinterd connection timed out");
+            }
+        };
+    let remaining = deadline.saturating_sub(started.elapsed());
+    let response = match connection
+        .request_with_deadline(Request::InspectTopology, remaining)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let (code, retryable) = if error.to_string().contains("timed out") {
+                (CliErrorCodeV1::Timeout, true)
+            } else if let Some(protocol) = protocol_error(&error) {
+                public_error_code(protocol.code)
+            } else {
+                (CliErrorCodeV1::Internal, true)
+            };
+            write_machine_read_failure(operation, code, bounded_public_message(&error), retryable)?;
+            return Err(error);
+        }
+    };
+    let Response::Topology { snapshot } = response else {
+        write_machine_read_failure(
+            operation,
+            CliErrorCodeV1::Internal,
+            "splinterd returned an unexpected topology response",
+            false,
+        )?;
+        bail!("splinterd returned an unexpected topology response");
+    };
+    if let MachineRead::Splint(splint_id) = command
+        && snapshot.lair.find_splint(splint_id).is_none()
+    {
+        write_machine_read_failure(
+            operation,
+            CliErrorCodeV1::NotFound,
+            "requested Splint was not found",
+            false,
+        )?;
+        bail!("requested Splint was not found");
+    }
+    let envelope = match command {
+        MachineRead::List => list_dojos_envelope(&snapshot),
+        MachineRead::Topology => inspect_topology_envelope(&snapshot),
+        MachineRead::Splint(splint_id) => inspect_splint_envelope(&snapshot, splint_id),
+    };
+    match envelope {
+        Ok(envelope) => write_json_document(&envelope),
+        Err(error) => {
+            write_machine_read_failure(
+                operation,
+                CliErrorCodeV1::Internal,
+                bounded_public_message(&error),
+                false,
+            )?;
+            Err(error)
+        }
+    }
+}
+
+enum MachineMutation {
+    Create {
+        name: String,
+        cwd: Option<PathBuf>,
+        command: Vec<String>,
+    },
+    Split {
+        target_splint_id: SplintId,
+        axis: Axis,
+        side: SplitSide,
+        ratio: SplitRatio,
+        cwd: Option<PathBuf>,
+        command: Vec<String>,
+    },
+    CloseSplint {
+        splint_id: SplintId,
+        yes: bool,
+    },
+    Ratio {
+        splint_id: SplintId,
+        ratio: SplitRatio,
+    },
+    NewWindow {
+        dojo_id: DojoId,
+        title: String,
+        cwd: Option<PathBuf>,
+        command: Vec<String>,
+    },
+    CloseWindow {
+        window_id: WindowId,
+        yes: bool,
+    },
+    RenameDojo {
+        dojo_id: DojoId,
+        name: String,
+    },
+    RenameWindow {
+        window_id: WindowId,
+        title: String,
+    },
+    Focus {
+        window_id: WindowId,
+        splint_id: SplintId,
+    },
+    RenameSplint {
+        splint_id: SplintId,
+        title: String,
+    },
+    Relaunch {
+        splint_id: SplintId,
+        cwd: Option<PathBuf>,
+        command: Vec<String>,
+    },
+    RestoreSplint {
+        splint_id: SplintId,
+    },
+    RestoreWindow {
+        window_id: WindowId,
+    },
+    RestoreDojo {
+        dojo_id: DojoId,
+    },
+    Kill {
+        splint_id: SplintId,
+        yes: bool,
+    },
+    Revoke {
+        grant_id: u64,
+        yes: bool,
+    },
+}
+
+fn extract_machine_mutation(command: Command) -> std::result::Result<MachineMutation, Command> {
+    Ok(match command {
+        Command::New { name, cwd, command } => MachineMutation::Create { name, cwd, command },
+        Command::Split {
+            target_splint_id,
+            axis,
+            side,
+            ratio,
+            cwd,
+            command,
+        } => MachineMutation::Split {
+            target_splint_id,
+            axis: axis.into(),
+            side: side.into(),
+            ratio: SplitRatio::new(ratio).unwrap_or_else(|_| unreachable!("Clap bounded ratio")),
+            cwd,
+            command,
+        },
+        Command::Close { splint_id, yes } => MachineMutation::CloseSplint { splint_id, yes },
+        Command::Ratio {
+            target_splint_id,
+            ratio,
+        } => MachineMutation::Ratio {
+            splint_id: target_splint_id,
+            ratio: SplitRatio::new(ratio).unwrap_or_else(|_| unreachable!("Clap bounded ratio")),
+        },
+        Command::NewWindow {
+            dojo_id,
+            title,
+            cwd,
+            command,
+        } => MachineMutation::NewWindow {
+            dojo_id,
+            title,
+            cwd,
+            command,
+        },
+        Command::CloseWindow { window_id, yes } => MachineMutation::CloseWindow { window_id, yes },
+        Command::RenameDojo { dojo_id, name } => MachineMutation::RenameDojo { dojo_id, name },
+        Command::RenameWindow { window_id, title } => {
+            MachineMutation::RenameWindow { window_id, title }
+        }
+        Command::WindowFocusHint {
+            window_id,
+            splint_id,
+        } => MachineMutation::Focus {
+            window_id,
+            splint_id,
+        },
+        Command::RenameSplint { splint_id, title } => {
+            MachineMutation::RenameSplint { splint_id, title }
+        }
+        Command::Relaunch {
+            splint_id,
+            cwd,
+            command,
+        } => MachineMutation::Relaunch {
+            splint_id,
+            cwd,
+            command,
+        },
+        Command::Restore { splint_id } => MachineMutation::RestoreSplint { splint_id },
+        Command::RestoreWindow { window_id } => MachineMutation::RestoreWindow { window_id },
+        Command::RestoreDojo { dojo_id } => MachineMutation::RestoreDojo { dojo_id },
+        Command::Kill { splint_id, yes } => MachineMutation::Kill { splint_id, yes },
+        Command::Authorization {
+            command: AuthorizationCommand::Revoke { grant_id, yes },
+        } => MachineMutation::Revoke { grant_id, yes },
+        other => return Err(other),
+    })
+}
+
+impl MachineMutation {
+    const fn operation(&self) -> &'static str {
+        match self {
+            Self::Create { .. } => "create_dojo",
+            Self::Split { .. } => "split_splint",
+            Self::CloseSplint { .. } => "close_splint",
+            Self::Ratio { .. } => "set_split_ratio",
+            Self::NewWindow { .. } => "new_window",
+            Self::CloseWindow { .. } => "close_window",
+            Self::RenameDojo { .. } => "rename_dojo",
+            Self::RenameWindow { .. } => "rename_window",
+            Self::Focus { .. } => "set_window_default_focus",
+            Self::RenameSplint { .. } => "rename_splint",
+            Self::Relaunch { .. } => "relaunch_splint",
+            Self::RestoreSplint { .. } => "restore_splint",
+            Self::RestoreWindow { .. } => "restore_window",
+            Self::RestoreDojo { .. } => "restore_dojo",
+            Self::Kill { .. } => "kill_splint",
+            Self::Revoke { .. } => "revoke_access",
+        }
+    }
+
+    const fn confirmation_missing(&self) -> bool {
+        matches!(
+            self,
+            Self::CloseSplint { yes: false, .. }
+                | Self::CloseWindow { yes: false, .. }
+                | Self::Kill { yes: false, .. }
+                | Self::Revoke { yes: false, .. }
+        )
+    }
+}
+
+fn machine_launch(cwd: Option<PathBuf>, command: Vec<String>) -> Result<LaunchParameters> {
+    let config = load_default()?.config;
+    Ok(launch_parameters(
+        cwd.unwrap_or(env::current_dir().context("failed to read current directory")?),
+        command,
+        &config,
+    ))
+}
+
+fn topology_splint_location(
+    topology: &splinterm_protocol::TopologySnapshot,
+    splint_id: SplintId,
+) -> Result<(DojoId, WindowId)> {
+    topology
+        .lair
+        .dojos()
+        .find_map(|dojo| {
+            dojo.windows
+                .iter()
+                .find(|window| window.root.find_splint(splint_id).is_some())
+                .map(|window| (dojo.id, window.id))
+        })
+        .context("requested Splint was not found")
+}
+
+fn topology_window_location(
+    topology: &splinterm_protocol::TopologySnapshot,
+    window_id: WindowId,
+) -> Result<DojoId> {
+    topology
+        .lair
+        .dojos()
+        .find(|dojo| dojo.windows.iter().any(|window| window.id == window_id))
+        .map(|dojo| dojo.id)
+        .context("requested window was not found")
+}
+
+fn require_dojo(topology: &splinterm_protocol::TopologySnapshot, dojo_id: DojoId) -> Result<()> {
+    if topology.lair.dojos().any(|dojo| dojo.id == dojo_id) {
+        Ok(())
+    } else {
+        bail!("requested Dojo was not found")
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "closed machine mutation request construction stays adjacent for auditability"
+)]
+fn machine_mutation_request(
+    mutation: &MachineMutation,
+    topology: &splinterm_protocol::TopologySnapshot,
+) -> Result<Request> {
+    let expected_topology_revision = topology.revision;
+    Ok(match mutation {
+        MachineMutation::Create { name, cwd, command } => Request::CreateDojo {
+            expected_topology_revision,
+            name: name.clone(),
+            launch: machine_launch(cwd.clone(), command.clone())?,
+        },
+        MachineMutation::Split {
+            target_splint_id,
+            axis,
+            side,
+            ratio,
+            cwd,
+            command,
+        } => {
+            topology_splint_location(topology, *target_splint_id)?;
+            Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: *target_splint_id,
+                axis: *axis,
+                side: *side,
+                ratio: *ratio,
+                launch: machine_launch(cwd.clone(), command.clone())?,
+            }
+        }
+        MachineMutation::CloseSplint { splint_id, .. } => {
+            topology_splint_location(topology, *splint_id)?;
+            Request::CloseSplint {
+                expected_topology_revision,
+                splint_id: *splint_id,
+            }
+        }
+        MachineMutation::Ratio { splint_id, ratio } => {
+            topology_splint_location(topology, *splint_id)?;
+            Request::SetSplitRatio {
+                expected_topology_revision,
+                target_splint_id: *splint_id,
+                ratio: *ratio,
+            }
+        }
+        MachineMutation::NewWindow {
+            dojo_id,
+            title,
+            cwd,
+            command,
+        } => {
+            require_dojo(topology, *dojo_id)?;
+            Request::NewWindow {
+                expected_topology_revision,
+                dojo_id: *dojo_id,
+                title: title.clone(),
+                launch: machine_launch(cwd.clone(), command.clone())?,
+            }
+        }
+        MachineMutation::CloseWindow { window_id, .. } => {
+            topology_window_location(topology, *window_id)?;
+            Request::CloseWindow {
+                expected_topology_revision,
+                window_id: *window_id,
+            }
+        }
+        MachineMutation::RenameDojo { dojo_id, name } => {
+            require_dojo(topology, *dojo_id)?;
+            Request::RenameDojo {
+                expected_topology_revision,
+                dojo_id: *dojo_id,
+                name: name.clone(),
+            }
+        }
+        MachineMutation::RenameWindow { window_id, title } => {
+            topology_window_location(topology, *window_id)?;
+            Request::RenameWindow {
+                expected_topology_revision,
+                window_id: *window_id,
+                title: title.clone(),
+            }
+        }
+        MachineMutation::Focus {
+            window_id,
+            splint_id,
+        } => {
+            let (_, actual_window) = topology_splint_location(topology, *splint_id)?;
+            if actual_window != *window_id {
+                bail!("selected Splint does not belong to the selected window");
+            }
+            Request::SetWindowDefaultFocus {
+                expected_topology_revision,
+                window_id: *window_id,
+                splint_id: *splint_id,
+            }
+        }
+        MachineMutation::RenameSplint { splint_id, title } => {
+            topology_splint_location(topology, *splint_id)?;
+            Request::RenameSplint {
+                expected_topology_revision,
+                splint_id: *splint_id,
+                title: title.clone(),
+            }
+        }
+        MachineMutation::Relaunch {
+            splint_id,
+            cwd,
+            command,
+        } => {
+            topology_splint_location(topology, *splint_id)?;
+            Request::RelaunchSplint {
+                expected_topology_revision,
+                splint_id: *splint_id,
+                launch: machine_launch(cwd.clone(), command.clone())?,
+            }
+        }
+        MachineMutation::RestoreSplint { splint_id } => {
+            topology_splint_location(topology, *splint_id)?;
+            Request::RestoreSplint {
+                expected_topology_revision,
+                splint_id: *splint_id,
+            }
+        }
+        MachineMutation::RestoreWindow { window_id } => {
+            topology_window_location(topology, *window_id)?;
+            Request::RestoreWindow {
+                expected_topology_revision,
+                window_id: *window_id,
+            }
+        }
+        MachineMutation::RestoreDojo { dojo_id } => {
+            require_dojo(topology, *dojo_id)?;
+            Request::RestoreDojo {
+                expected_topology_revision,
+                dojo_id: *dojo_id,
+            }
+        }
+        MachineMutation::Kill { splint_id, .. } => {
+            let (_, _, incarnation) = live_terminal_location(topology, *splint_id)?;
+            Request::KillSplint {
+                splint_id: *splint_id,
+                incarnation,
+            }
+        }
+        MachineMutation::Revoke { grant_id, .. } => Request::RevokeAccess {
+            grant_id: *grant_id,
+        },
+    })
+}
+
+async fn connect_machine(
+    operation: &'static str,
+    deadline: std::time::Duration,
+) -> Result<(Connection, std::time::Instant)> {
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(deadline, Connection::connect_automation()).await {
+        Ok(Ok(connection)) => Ok((connection, started)),
+        Ok(Err(error)) => {
+            write_machine_connection_failure(operation, &error)?;
+            Err(error)
+        }
+        Err(_) => {
+            write_machine_read_failure(
+                operation,
+                CliErrorCodeV1::Timeout,
+                "connection deadline elapsed",
+                true,
+            )?;
+            bail!("splinterd connection timed out")
+        }
+    }
+}
+
+fn finish_machine_envelope(operation: &'static str, result: Result<CliEnvelopeV1>) -> Result<()> {
+    match result {
+        Ok(envelope) => write_json_document(&envelope),
+        Err(error) => {
+            if let Some(protocol) = protocol_error(&error) {
+                write_json_document(&CliEnvelopeV1::protocol_failure(
+                    operation,
+                    protocol,
+                    bounded_public_message(&error),
+                )?)?;
+                return Err(error);
+            }
+            let (code, retryable) = if error.to_string().contains("timed out") {
+                (CliErrorCodeV1::Timeout, true)
+            } else if error.to_string().contains("not found") {
+                (CliErrorCodeV1::NotFound, false)
+            } else {
+                (CliErrorCodeV1::Internal, false)
+            };
+            write_machine_read_failure(operation, code, bounded_public_message(&error), retryable)?;
+            Err(error)
+        }
+    }
+}
+
+fn committed_revision(before: TopologyRevision, committed: TopologyRevision) -> Result<u64> {
+    let expected = before
+        .get()
+        .checked_add(1)
+        .context("topology revision exhausted")?;
+    if committed.get() != expected {
+        bail!("splinterd returned an inconsistent committed topology revision");
+    }
+    Ok(committed.get())
+}
+
+fn topology_identity(
+    topology: &splinterm_protocol::TopologySnapshot,
+    splint_id: SplintId,
+    revision: u64,
+    incarnation: Option<u64>,
+) -> Result<MutationIdentityV1> {
+    let (dojo_id, window_id) = topology_splint_location(topology, splint_id)?;
+    Ok(MutationIdentityV1 {
+        dojo_id: Some(dojo_id),
+        window_id: Some(window_id),
+        splint_id: Some(splint_id),
+        topology_revision: Some(revision),
+        incarnation,
+    })
+}
+
+fn created_dojo_envelope(
+    before: &splinterm_protocol::TopologySnapshot,
+    dojo: &splinterm_core::Dojo,
+    incarnation: u64,
+    topology_revision: TopologyRevision,
+) -> Result<CliEnvelopeV1> {
+    let revision = committed_revision(before.revision, topology_revision)?;
+    if dojo.windows.len() != 1 || incarnation == 0 {
+        bail!("splinterd returned inconsistent created Dojo topology");
+    }
+    let window = &dojo.windows[0];
+    let LayoutNode::Leaf(splint) = &window.root else {
+        bail!("created Dojo did not contain one Splint leaf");
+    };
+    if before.lair.dojos().any(|existing| existing.id == dojo.id)
+        || before
+            .lair
+            .dojos()
+            .flat_map(|existing| &existing.windows)
+            .any(|existing| existing.id == window.id)
+        || before.lair.find_splint(splint.id).is_some()
+    {
+        bail!("create response reused an existing stable identity");
+    }
+    created_mutation_envelope(
+        "create_dojo",
+        MutationIdentityV1 {
+            dojo_id: Some(dojo.id),
+            window_id: Some(window.id),
+            splint_id: Some(splint.id),
+            topology_revision: Some(revision),
+            incarnation: Some(incarnation),
+        },
+    )
+}
+
+fn topology_commit_envelope(
+    mutation: &MachineMutation,
+    topology: &splinterm_protocol::TopologySnapshot,
+    revision: TopologyRevision,
+) -> Result<CliEnvelopeV1> {
+    let revision = committed_revision(topology.revision, revision)?;
+    let (identity, confirmed) = match mutation {
+        MachineMutation::CloseSplint { splint_id, .. }
+        | MachineMutation::Ratio { splint_id, .. }
+        | MachineMutation::RenameSplint { splint_id, .. } => (
+            topology_identity(topology, *splint_id, revision, None)?,
+            matches!(mutation, MachineMutation::CloseSplint { .. }),
+        ),
+        MachineMutation::Focus {
+            window_id,
+            splint_id,
+        } => {
+            let identity = topology_identity(topology, *splint_id, revision, None)?;
+            if identity.window_id != Some(*window_id) {
+                bail!("committed focus hint identity is inconsistent");
+            }
+            (identity, false)
+        }
+        MachineMutation::CloseWindow { window_id, .. }
+        | MachineMutation::RenameWindow { window_id, .. } => (
+            MutationIdentityV1 {
+                dojo_id: Some(topology_window_location(topology, *window_id)?),
+                window_id: Some(*window_id),
+                splint_id: None,
+                topology_revision: Some(revision),
+                incarnation: None,
+            },
+            matches!(mutation, MachineMutation::CloseWindow { .. }),
+        ),
+        MachineMutation::RenameDojo { dojo_id, .. } => (
+            MutationIdentityV1 {
+                dojo_id: Some(*dojo_id),
+                window_id: None,
+                splint_id: None,
+                topology_revision: Some(revision),
+                incarnation: None,
+            },
+            false,
+        ),
+        _ => bail!("topology commit response does not match mutation"),
+    };
+    committed_mutation_envelope(mutation.operation(), identity, confirmed)
+}
+
+fn layout_ids(node: &LayoutNode, ids: &mut Vec<SplintId>) {
+    match node {
+        LayoutNode::Leaf(splint) => ids.push(splint.id),
+        LayoutNode::Branch { first, second, .. } => {
+            layout_ids(first, ids);
+            layout_ids(second, ids);
+        }
+    }
+}
+
+fn validate_restore_results(
+    topology: &splinterm_protocol::TopologySnapshot,
+    mutation: &MachineMutation,
+    topology_revision: TopologyRevision,
+    results: &[splinterm_protocol::RestoreLeafResult],
+) -> Result<()> {
+    if topology_revision < topology.revision {
+        bail!("restore response regressed topology revision");
+    }
+    let mut expected = Vec::new();
+    match mutation {
+        MachineMutation::RestoreWindow { window_id } => {
+            let window = topology
+                .lair
+                .dojos()
+                .flat_map(|dojo| &dojo.windows)
+                .find(|window| window.id == *window_id)
+                .context("restore window disappeared from reviewed topology")?;
+            layout_ids(&window.root, &mut expected);
+        }
+        MachineMutation::RestoreDojo { dojo_id } => {
+            let dojo = topology
+                .lair
+                .dojos()
+                .find(|dojo| dojo.id == *dojo_id)
+                .context("restore Dojo disappeared from reviewed topology")?;
+            for window in &dojo.windows {
+                layout_ids(&window.root, &mut expected);
+            }
+        }
+        _ => bail!("restore result validation used for non-aggregate mutation"),
+    }
+    let expected = expected.into_iter().collect::<HashSet<_>>();
+    let actual = results
+        .iter()
+        .map(|result| result.splint_id)
+        .collect::<HashSet<_>>();
+    if actual.len() != results.len() || actual != expected {
+        bail!("restore response does not exactly cover the selected Splints");
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "closed mutation response identity correlations stay adjacent for auditability"
+)]
+fn mutation_response_envelope(
+    mutation: &MachineMutation,
+    topology: &splinterm_protocol::TopologySnapshot,
+    response: Response,
+) -> Result<CliEnvelopeV1> {
+    match (mutation, response) {
+        (
+            MachineMutation::Split {
+                target_splint_id, ..
+            },
+            Response::SplintStarted {
+                splint_id,
+                incarnation,
+                topology_revision,
+            },
+        ) => {
+            let revision = committed_revision(topology.revision, topology_revision)?;
+            if topology.lair.find_splint(splint_id).is_some() {
+                bail!("split response reused an existing Splint identity");
+            }
+            let (dojo_id, window_id) = topology_splint_location(topology, *target_splint_id)?;
+            created_mutation_envelope(
+                "split_splint",
+                MutationIdentityV1 {
+                    dojo_id: Some(dojo_id),
+                    window_id: Some(window_id),
+                    splint_id: Some(splint_id),
+                    topology_revision: Some(revision),
+                    incarnation: Some(incarnation),
+                },
+            )
+        }
+        (
+            MachineMutation::NewWindow { dojo_id, .. },
+            Response::WindowStarted {
+                window_id,
+                splint_id,
+                incarnation,
+                topology_revision,
+            },
+        ) => {
+            if topology.lair.find_splint(splint_id).is_some()
+                || topology
+                    .lair
+                    .dojos()
+                    .flat_map(|dojo| &dojo.windows)
+                    .any(|window| window.id == window_id)
+            {
+                bail!("new-window response reused an existing stable identity");
+            }
+            created_mutation_envelope(
+                "new_window",
+                MutationIdentityV1 {
+                    dojo_id: Some(*dojo_id),
+                    window_id: Some(window_id),
+                    splint_id: Some(splint_id),
+                    topology_revision: Some(committed_revision(
+                        topology.revision,
+                        topology_revision,
+                    )?),
+                    incarnation: Some(incarnation),
+                },
+            )
+        }
+        (
+            MachineMutation::Relaunch { splint_id, .. },
+            Response::SplintStarted {
+                splint_id: response_id,
+                incarnation,
+                topology_revision,
+            },
+        ) if *splint_id == response_id => process_started_envelope(
+            mutation.operation(),
+            topology_identity(
+                topology,
+                *splint_id,
+                committed_revision(topology.revision, topology_revision)?,
+                Some(incarnation),
+            )?,
+        ),
+        (
+            MachineMutation::RestoreSplint { splint_id },
+            Response::RestoreCompleted {
+                topology_revision,
+                mut results,
+            },
+        ) if results.len() == 1 && results[0].splint_id == *splint_id => {
+            let result = results.pop().expect("one checked restore result");
+            if let Some(error) = result.error {
+                return Err(response_protocol_error(error));
+            }
+            let incarnation = result
+                .incarnation
+                .context("successful restore omitted process incarnation")?;
+            process_started_envelope(
+                "restore_splint",
+                topology_identity(
+                    topology,
+                    *splint_id,
+                    committed_revision(topology.revision, topology_revision)?,
+                    Some(incarnation),
+                )?,
+            )
+        }
+        (
+            MachineMutation::RestoreWindow { window_id },
+            Response::RestoreCompleted {
+                topology_revision,
+                results,
+            },
+        ) => {
+            validate_restore_results(topology, mutation, topology_revision, &results)?;
+            restore_many_envelope(
+                "restore_window",
+                MutationIdentityV1 {
+                    dojo_id: Some(topology_window_location(topology, *window_id)?),
+                    window_id: Some(*window_id),
+                    splint_id: None,
+                    topology_revision: Some(topology_revision.get()),
+                    incarnation: None,
+                },
+                &results,
+            )
+        }
+        (
+            MachineMutation::RestoreDojo { dojo_id },
+            Response::RestoreCompleted {
+                topology_revision,
+                results,
+            },
+        ) => {
+            validate_restore_results(topology, mutation, topology_revision, &results)?;
+            restore_many_envelope(
+                "restore_dojo",
+                MutationIdentityV1 {
+                    dojo_id: Some(*dojo_id),
+                    window_id: None,
+                    splint_id: None,
+                    topology_revision: Some(topology_revision.get()),
+                    incarnation: None,
+                },
+                &results,
+            )
+        }
+        (
+            MachineMutation::Kill { splint_id, .. },
+            Response::SplintKilled {
+                splint_id: response_id,
+                incarnation,
+                ..
+            },
+        ) if *splint_id == response_id => {
+            let (dojo_id, window_id, expected_incarnation) =
+                live_terminal_location(topology, *splint_id)?;
+            if incarnation != expected_incarnation {
+                bail!("splinterd returned an inconsistent killed incarnation");
+            }
+            kill_envelope(dojo_id, window_id, *splint_id, incarnation)
+        }
+        (MachineMutation::Revoke { grant_id, .. }, Response::AccessRevoked { grant })
+            if *grant_id == grant.grant_id =>
+        {
+            let (dojo_id, window_id, incarnation) =
+                live_terminal_location(topology, grant.splint_id)?;
+            if incarnation != grant.incarnation {
+                bail!("revoked grant incarnation does not match reviewed topology");
+            }
+            revoke_envelope(dojo_id, window_id, &grant)
+        }
+        (mutation, Response::TopologyCommitted { topology_revision }) => {
+            topology_commit_envelope(mutation, topology, topology_revision)
+        }
+        _ => bail!("splinterd returned a mutation response with inconsistent identity"),
+    }
+}
+
+async fn machine_mutation_envelope(
+    connection: &mut Connection,
+    mutation: &MachineMutation,
+    deadline: std::time::Duration,
+    started: std::time::Instant,
+) -> Result<CliEnvelopeV1> {
+    let response = connection
+        .request_with_deadline(
+            Request::InspectTopology,
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    let Response::Topology { snapshot: topology } = response else {
+        bail!("splinterd returned an unexpected topology response");
+    };
+    topology
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let request = machine_mutation_request(mutation, &topology)?;
+    let response = connection
+        .request_with_deadline(request, deadline.saturating_sub(started.elapsed()))
+        .await?;
+    if matches!(mutation, MachineMutation::Create { .. }) {
+        let Response::DojoCreated {
+            dojo,
+            incarnation,
+            topology_revision,
+        } = response
+        else {
+            bail!("splinterd returned an inconsistent create response");
+        };
+        return created_dojo_envelope(&topology, &dojo, incarnation, topology_revision);
+    }
+    mutation_response_envelope(mutation, &topology, response)
+}
+
+async fn run_machine_mutation(
+    mutation: MachineMutation,
+    schema_major: u16,
+    timeout_ms: u64,
+) -> Result<()> {
+    let operation = mutation.operation();
+    if schema_major != 1 {
+        write_machine_read_failure(
+            operation,
+            CliErrorCodeV1::UnsupportedSchema,
+            format!("unsupported schema major {schema_major}"),
+            false,
+        )?;
+        bail!("unsupported schema major {schema_major}");
+    }
+    if mutation.confirmation_missing() {
+        write_machine_read_failure(
+            operation,
+            CliErrorCodeV1::ConfirmationRequired,
+            "destructive machine command requires --yes",
+            false,
+        )?;
+        bail!("destructive machine command requires --yes");
+    }
+    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let (mut connection, started) = connect_machine(operation, deadline).await?;
+    let result = machine_mutation_envelope(&mut connection, &mutation, deadline, started).await;
+    finish_machine_envelope(operation, result)
+}
+
+async fn run_machine_authorization_status(
+    splint_id: SplintId,
+    schema_major: u16,
+    timeout_ms: u64,
+) -> Result<()> {
+    const OPERATION: &str = "authorization_status";
+    if schema_major != 1 {
+        write_machine_read_failure(
+            OPERATION,
+            CliErrorCodeV1::UnsupportedSchema,
+            format!("unsupported schema major {schema_major}"),
+            false,
+        )?;
+        bail!("unsupported schema major {schema_major}");
+    }
+    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let (mut connection, started) = connect_machine(OPERATION, deadline).await?;
+    let result = async {
+        let response = connection
+            .request_with_deadline(
+                Request::InspectTopology,
+                deadline.saturating_sub(started.elapsed()),
+            )
+            .await?;
+        let Response::Topology { snapshot: topology } = response else {
+            bail!("splinterd returned an unexpected topology response");
+        };
+        let (dojo_id, window_id, incarnation) = live_terminal_location(&topology, splint_id)?;
+        let response = connection
+            .request_with_deadline(
+                Request::AuthorizationStatus {
+                    splint_id,
+                    incarnation,
+                },
+                deadline.saturating_sub(started.elapsed()),
+            )
+            .await?;
+        let Response::AuthorizationStatus {
+            grants,
+            persistent,
+            development_bypass,
+        } = response
+        else {
+            bail!("splinterd returned an unexpected authorization response");
+        };
+        authorization_status_envelope(
+            dojo_id,
+            window_id,
+            splint_id,
+            incarnation,
+            &grants,
+            &persistent,
+            development_bypass,
+        )
+    }
+    .await;
+    finish_machine_envelope(OPERATION, result)
+}
+
+async fn run_machine_audit(
+    after_audit_id: Option<u64>,
+    max_records: usize,
+    schema_major: u16,
+    timeout_ms: u64,
+) -> Result<()> {
+    const OPERATION: &str = "audit_inspect";
+    if schema_major != 1 {
+        write_machine_read_failure(
+            OPERATION,
+            CliErrorCodeV1::UnsupportedSchema,
+            format!("unsupported schema major {schema_major}"),
+            false,
+        )?;
+        bail!("unsupported schema major {schema_major}");
+    }
+    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let (mut connection, started) = connect_machine(OPERATION, deadline).await?;
+    let result = async {
+        let response = connection
+            .request_with_deadline(
+                Request::AuditInspect {
+                    after_audit_id,
+                    max_records,
+                },
+                deadline.saturating_sub(started.elapsed()),
+            )
+            .await?;
+        let Response::AuditPage { page } = response else {
+            bail!("splinterd returned an unexpected audit response");
+        };
+        audit_page_envelope(&page)
+    }
+    .await;
+    finish_machine_envelope(OPERATION, result)
+}
+
+enum MachineControl {
+    Input(Vec<u8>),
+    Resize { columns: u16, rows: u16 },
+}
+
+impl MachineControl {
+    const fn operation(&self) -> &'static str {
+        match self {
+            Self::Input(_) => "input",
+            Self::Resize { .. } => "resize",
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "atomic acquire/action/release and cleanup remain adjacent for auditability"
+)]
+async fn machine_control_envelope(
+    connection: &mut Connection,
+    command: &MachineControl,
+    splint_id: SplintId,
+    deadline: std::time::Duration,
+    started: std::time::Instant,
+) -> Result<CliEnvelopeV1> {
+    if matches!(command, MachineControl::Input(bytes) if bytes.len() > connection.limits().maximum_input_bytes)
+    {
+        bail!("input exceeds negotiated resource limit");
+    }
+    let response = connection
+        .request_with_deadline(
+            Request::InspectTopology,
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    let Response::Topology { snapshot: topology } = response else {
+        bail!("splinterd returned an unexpected topology response");
+    };
+    let (dojo_id, window_id, incarnation) = live_terminal_location(&topology, splint_id)?;
+    let response = connection
+        .request_with_deadline(
+            Request::AcquireControl {
+                splint_id,
+                incarnation,
+            },
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    let Response::ControlGranted { controller_id } = response else {
+        bail!("splinterd did not grant a controller lease");
+    };
+    if controller_id == 0 {
+        bail!("splinterd returned an invalid controller lease");
+    }
+    let request = match command {
+        MachineControl::Input(bytes) => Request::Input {
+            controller_id,
+            splint_id,
+            incarnation,
+            bytes: bytes.clone(),
+        },
+        MachineControl::Resize { columns, rows } => Request::Resize {
+            controller_id,
+            splint_id,
+            incarnation,
+            columns: *columns,
+            rows: *rows,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
+    };
+    let action = connection
+        .request_with_deadline(request, deadline.saturating_sub(started.elapsed()))
+        .await;
+    let release = connection
+        .request_with_deadline(
+            Request::ReleaseControl { controller_id },
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await;
+    let response = match action {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = release;
+            return Err(error);
+        }
+    };
+    if !matches!(release?, Response::Acknowledged) {
+        bail!("splinterd did not release the controller lease");
+    }
+    let Response::TerminalActionAcknowledged {
+        dojo_id: response_dojo,
+        window_id: response_window,
+        splint_id: response_splint,
+        incarnation: response_incarnation,
+        terminal_revision,
+        history_generation,
+    } = response
+    else {
+        bail!("splinterd returned an unexpected terminal action response");
+    };
+    if (
+        response_dojo,
+        response_window,
+        response_splint,
+        response_incarnation,
+    ) != (dojo_id, window_id, splint_id, incarnation)
+    {
+        bail!("splinterd returned inconsistent terminal action identity");
+    }
+    terminal_action_envelope(
+        command.operation(),
+        TerminalReadProvenanceV1 {
+            dojo_id,
+            window_id,
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+        },
+        match command {
+            MachineControl::Input(_) => None,
+            MachineControl::Resize { columns, rows } => Some((*columns, *rows)),
+        },
+    )
+}
+
+async fn run_machine_control(
+    command: MachineControl,
+    splint_id: SplintId,
+    schema_major: u16,
+    timeout_ms: u64,
+) -> Result<()> {
+    let operation = command.operation();
+    if schema_major != 1 {
+        write_machine_read_failure(
+            operation,
+            CliErrorCodeV1::UnsupportedSchema,
+            format!("unsupported schema major {schema_major}"),
+            false,
+        )?;
+        bail!("unsupported schema major {schema_major}");
+    }
+    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let (mut connection, started) = connect_machine(operation, deadline).await?;
+    let result =
+        machine_control_envelope(&mut connection, &command, splint_id, deadline, started).await;
+    finish_machine_envelope(operation, result)
+}
+
+enum MachineHistory {
+    Scrollback {
+        cursor: Option<String>,
+        max_rows: usize,
+    },
+    Search {
+        query: String,
+        case_sensitive: bool,
+        cursor: Option<String>,
+        max_results: usize,
+    },
+}
+
+impl MachineHistory {
+    const fn operation(&self) -> &'static str {
+        match self {
+            Self::Scrollback { .. } => "scrollback_page",
+            Self::Search { .. } => "search_scrollback",
+        }
+    }
+
+    fn cursor(&self) -> Option<&str> {
+        match self {
+            Self::Scrollback { cursor, .. } | Self::Search { cursor, .. } => cursor.as_deref(),
+        }
+    }
+}
+
+struct MachineHistoryContext {
+    provenance: TerminalReadProvenanceV1,
+    before_row_id: Option<u64>,
+    daemon_cursor: Option<String>,
+}
+
+fn history_cursor_context(
+    command: &MachineHistory,
+    encoded: &str,
+    dojo_id: DojoId,
+    window_id: WindowId,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<MachineHistoryContext> {
+    let cursor = decode_terminal_cursor(encoded).context("invalid continuation cursor")?;
+    let (cursor_splint, cursor_incarnation, revision, generation, before, daemon) = match cursor {
+        TerminalContinuationV1::Scrollback {
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+            before_row_id,
+        } if matches!(command, MachineHistory::Scrollback { .. }) => (
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+            Some(before_row_id),
+            None,
+        ),
+        TerminalContinuationV1::Search {
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+            daemon_cursor,
+        } if matches!(command, MachineHistory::Search { .. }) => (
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+            None,
+            Some(daemon_cursor),
+        ),
+        _ => bail!("continuation cursor does not match the requested operation"),
+    };
+    if cursor_splint != splint_id || cursor_incarnation != incarnation {
+        bail!("continuation cursor does not match the selected live Splint");
+    }
+    Ok(MachineHistoryContext {
+        provenance: TerminalReadProvenanceV1 {
+            dojo_id,
+            window_id,
+            splint_id,
+            incarnation,
+            terminal_revision: revision,
+            history_generation: generation,
+        },
+        before_row_id: before,
+        daemon_cursor: daemon,
+    })
+}
+
+fn live_terminal_location(
+    topology: &splinterm_protocol::TopologySnapshot,
+    splint_id: SplintId,
+) -> Result<(DojoId, WindowId, u64)> {
+    topology
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let (dojo_id, window_id) = topology
+        .lair
+        .dojos()
+        .find_map(|dojo| {
+            dojo.windows
+                .iter()
+                .find(|window| window.root.find_splint(splint_id).is_some())
+                .map(|window| (dojo.id, window.id))
+        })
+        .context("requested Splint was not found")?;
+    let incarnation = topology
+        .runtimes
+        .iter()
+        .find(|runtime| runtime.splint_id == splint_id)
+        .context("validated topology omitted Splint runtime")?
+        .live_incarnation
+        .context("selected Splint does not have a live process")?;
+    Ok((dojo_id, window_id, incarnation))
+}
+
+async fn machine_history_context(
+    connection: &mut Connection,
+    command: &MachineHistory,
+    splint_id: SplintId,
+    deadline: std::time::Duration,
+    started: std::time::Instant,
+) -> Result<MachineHistoryContext> {
+    let response = connection
+        .request_with_deadline(
+            Request::InspectTopology,
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    let Response::Topology { snapshot: topology } = response else {
+        bail!("splinterd returned an unexpected topology response");
+    };
+    let (dojo_id, window_id, incarnation) = live_terminal_location(&topology, splint_id)?;
+    if let Some(encoded) = command.cursor() {
+        return history_cursor_context(
+            command,
+            encoded,
+            dojo_id,
+            window_id,
+            splint_id,
+            incarnation,
+        );
+    }
+    let response = connection
+        .request_with_deadline(
+            Request::Attach {
+                splint_id,
+                incarnation,
+                scrollback_rows: 0,
+            },
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    let Response::Attached {
+        subscription_id,
+        snapshot,
+    } = response
+    else {
+        bail!("splinterd returned an unexpected attach response");
+    };
+    snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if subscription_id == 0
+        || snapshot.splint_id != splint_id
+        || snapshot.incarnation != incarnation
+    {
+        bail!("splinterd returned inconsistent terminal identity");
+    }
+    let before_row_id = snapshot
+        .newest_available_scrollback_row_id
+        .unwrap_or(1)
+        .checked_add(1)
+        .context("scrollback row identity exhausted")?;
+    let detached = connection
+        .request_with_deadline(
+            Request::Detach { subscription_id },
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    if !matches!(detached, Response::Acknowledged) {
+        bail!("splinterd did not detach the history bootstrap subscription");
+    }
+    Ok(MachineHistoryContext {
+        provenance: TerminalReadProvenanceV1 {
+            dojo_id,
+            window_id,
+            splint_id,
+            incarnation,
+            terminal_revision: snapshot.revision,
+            history_generation: snapshot.history_generation,
+        },
+        before_row_id: Some(before_row_id),
+        daemon_cursor: None,
+    })
+}
+
+async fn machine_history_envelope(
+    connection: &mut Connection,
+    command: &MachineHistory,
+    splint_id: SplintId,
+    deadline: std::time::Duration,
+    started: std::time::Instant,
+) -> Result<CliEnvelopeV1> {
+    let context =
+        machine_history_context(connection, command, splint_id, deadline, started).await?;
+    let request = match command {
+        MachineHistory::Scrollback { max_rows, .. } => Request::ScrollbackPage {
+            splint_id,
+            incarnation: context.provenance.incarnation,
+            terminal_revision: context.provenance.terminal_revision,
+            history_generation: context.provenance.history_generation,
+            before_row_id: context
+                .before_row_id
+                .context("scrollback cursor omitted row identity")?,
+            max_rows: *max_rows,
+        },
+        MachineHistory::Search {
+            query,
+            case_sensitive,
+            max_results,
+            ..
+        } => Request::SearchScrollback {
+            splint_id,
+            incarnation: context.provenance.incarnation,
+            terminal_revision: context.provenance.terminal_revision,
+            history_generation: context.provenance.history_generation,
+            query: query.clone(),
+            case_sensitive: *case_sensitive,
+            cursor: context.daemon_cursor.clone(),
+            max_results: *max_results,
+        },
+    };
+    let response = connection
+        .request_with_deadline(request, deadline.saturating_sub(started.elapsed()))
+        .await?;
+    match response {
+        Response::ScrollbackPage { page }
+            if matches!(command, MachineHistory::Scrollback { .. }) =>
+        {
+            if page.splint_id != splint_id
+                || page.incarnation != context.provenance.incarnation
+                || page.terminal_revision != context.provenance.terminal_revision
+                || page.history_generation != context.provenance.history_generation
+            {
+                bail!("splinterd returned inconsistent scrollback provenance");
+            }
+            scrollback_page_envelope(
+                context.provenance.dojo_id,
+                context.provenance.window_id,
+                &page,
+            )
+        }
+        Response::SearchResults { page } if matches!(command, MachineHistory::Search { .. }) => {
+            if page.splint_id != splint_id
+                || page.incarnation != context.provenance.incarnation
+                || page.terminal_revision != context.provenance.terminal_revision
+                || page.history_generation != context.provenance.history_generation
+            {
+                bail!("splinterd returned inconsistent search provenance");
+            }
+            search_page_envelope(
+                context.provenance.dojo_id,
+                context.provenance.window_id,
+                &page,
+            )
+        }
+        Response::ScrollbackResyncRequired {
+            current_revision,
+            history_generation,
+        } if matches!(command, MachineHistory::Scrollback { .. }) => read_resync_envelope(
+            command.operation(),
+            TerminalReadProvenanceV1 {
+                terminal_revision: current_revision,
+                history_generation,
+                ..context.provenance
+            },
+            if history_generation == context.provenance.history_generation {
+                ReadResyncReasonV1::StaleRevision
+            } else {
+                ReadResyncReasonV1::HistoryReplaced
+            },
+        ),
+        Response::SearchResyncRequired {
+            current_revision,
+            history_generation,
+        } if matches!(command, MachineHistory::Search { .. }) => read_resync_envelope(
+            command.operation(),
+            TerminalReadProvenanceV1 {
+                terminal_revision: current_revision,
+                history_generation,
+                ..context.provenance
+            },
+            if history_generation == context.provenance.history_generation {
+                ReadResyncReasonV1::StaleRevision
+            } else {
+                ReadResyncReasonV1::HistoryReplaced
+            },
+        ),
+        _ => bail!("splinterd returned an unexpected history response"),
+    }
+}
+
+async fn run_machine_history(
+    command: MachineHistory,
+    splint_id: SplintId,
+    schema_major: u16,
+    timeout_ms: u64,
+) -> Result<()> {
+    let operation = command.operation();
+    if schema_major != 1 {
+        write_machine_read_failure(
+            operation,
+            CliErrorCodeV1::UnsupportedSchema,
+            format!("unsupported schema major {schema_major}"),
+            false,
+        )?;
+        bail!("unsupported schema major {schema_major}");
+    }
+    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let started = std::time::Instant::now();
+    let mut connection =
+        match tokio::time::timeout(deadline, Connection::connect_automation()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                write_machine_connection_failure(operation, &error)?;
+                return Err(error);
+            }
+            Err(_) => {
+                write_machine_read_failure(
+                    operation,
+                    CliErrorCodeV1::Timeout,
+                    "connection deadline elapsed",
+                    true,
+                )?;
+                bail!("splinterd connection timed out");
+            }
+        };
+    match machine_history_envelope(&mut connection, &command, splint_id, deadline, started).await {
+        Ok(envelope) => write_json_document(&envelope),
+        Err(error) => {
+            let (code, retryable) = if error.to_string().contains("timed out") {
+                (CliErrorCodeV1::Timeout, true)
+            } else if let Some(protocol) = protocol_error(&error) {
+                public_error_code(protocol.code)
+            } else if error.to_string().contains("continuation cursor") {
+                (CliErrorCodeV1::InvalidArgument, false)
+            } else if error.to_string().contains("not found") {
+                (CliErrorCodeV1::NotFound, false)
+            } else {
+                (CliErrorCodeV1::Internal, false)
+            };
+            write_machine_read_failure(operation, code, bounded_public_message(&error), retryable)?;
+            Err(error)
+        }
+    }
+}
+
+async fn machine_snapshot_envelope(
+    connection: &mut Connection,
+    splint_id: SplintId,
+    deadline: std::time::Duration,
+    started: std::time::Instant,
+) -> Result<CliEnvelopeV1> {
+    let topology = connection
+        .request_with_deadline(
+            Request::InspectTopology,
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    let Response::Topology { snapshot: topology } = topology else {
+        bail!("splinterd returned an unexpected topology response");
+    };
+    topology
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let mut identity = None;
+    for dojo in topology.lair.dojos() {
+        for window in &dojo.windows {
+            if window.root.find_splint(splint_id).is_some() {
+                let runtime = topology
+                    .runtimes
+                    .iter()
+                    .find(|runtime| runtime.splint_id == splint_id)
+                    .context("validated topology omitted Splint runtime")?;
+                identity = Some((
+                    dojo.id,
+                    window.id,
+                    runtime
+                        .live_incarnation
+                        .context("selected Splint does not have a live process")?,
+                ));
+            }
+        }
+    }
+    let (dojo_id, window_id, incarnation) = identity.context("requested Splint was not found")?;
+    let attached = connection
+        .request_with_deadline(
+            Request::Attach {
+                splint_id,
+                incarnation,
+                scrollback_rows: 0,
+            },
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    let Response::Attached {
+        subscription_id,
+        snapshot,
+    } = attached
+    else {
+        bail!("splinterd returned an unexpected attach response");
+    };
+    if subscription_id == 0
+        || snapshot.splint_id != splint_id
+        || snapshot.incarnation != incarnation
+    {
+        bail!("splinterd returned inconsistent terminal identity");
+    }
+    let detached = connection
+        .request_with_deadline(
+            Request::Detach { subscription_id },
+            deadline.saturating_sub(started.elapsed()),
+        )
+        .await?;
+    if !matches!(detached, Response::Acknowledged) {
+        bail!("splinterd did not detach the one-shot terminal subscription");
+    }
+    terminal_snapshot_envelope(dojo_id, window_id, &snapshot)
+}
+
+async fn run_machine_snapshot(
+    splint_id: SplintId,
+    schema_major: u16,
+    timeout_ms: u64,
+) -> Result<()> {
+    const OPERATION: &str = "terminal_snapshot";
+    if schema_major != 1 {
+        write_machine_read_failure(
+            OPERATION,
+            CliErrorCodeV1::UnsupportedSchema,
+            format!("unsupported schema major {schema_major}"),
+            false,
+        )?;
+        bail!("unsupported schema major {schema_major}");
+    }
+    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let started = std::time::Instant::now();
+    let mut connection =
+        match tokio::time::timeout(deadline, Connection::connect_automation()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                write_machine_connection_failure(OPERATION, &error)?;
+                return Err(error);
+            }
+            Err(_) => {
+                write_machine_read_failure(
+                    OPERATION,
+                    CliErrorCodeV1::Timeout,
+                    "connection deadline elapsed",
+                    true,
+                )?;
+                bail!("splinterd connection timed out");
+            }
+        };
+    let result = machine_snapshot_envelope(&mut connection, splint_id, deadline, started).await;
+    match result {
+        Ok(envelope) => write_json_document(&envelope),
+        Err(error) => {
+            let (code, retryable) = if error.to_string().contains("timed out") {
+                (CliErrorCodeV1::Timeout, true)
+            } else if let Some(protocol) = protocol_error(&error) {
+                public_error_code(protocol.code)
+            } else if error.to_string().contains("not found") {
+                (CliErrorCodeV1::NotFound, false)
+            } else if error.to_string().contains("does not have a live process") {
+                (CliErrorCodeV1::StaleIncarnation, false)
+            } else {
+                (CliErrorCodeV1::Internal, false)
+            };
+            write_machine_read_failure(OPERATION, code, bounded_public_message(&error), retryable)?;
+            Err(error)
+        }
+    }
+}
+
+async fn run_machine_ping(schema_major: u16, timeout_ms: u64) -> Result<()> {
+    if schema_major != 1 {
+        let envelope = PingEnvelopeV1::failure(
+            1,
+            CliErrorCodeV1::UnsupportedSchema,
+            format!("unsupported schema major {schema_major}"),
+            false,
+        )?;
+        write_json_document(&envelope)?;
+        bail!("unsupported schema major {schema_major}");
+    }
+
+    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let started = std::time::Instant::now();
+    let mut connection =
+        match tokio::time::timeout(deadline, Connection::connect_automation()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                let (code, retryable) = protocol_error(&error)
+                    .map_or((CliErrorCodeV1::Internal, true), |protocol| {
+                        public_error_code(protocol.code)
+                    });
+                write_json_document(&PingEnvelopeV1::failure(
+                    1,
+                    code,
+                    bounded_public_message(&error),
+                    retryable,
+                )?)?;
+                return Err(error);
+            }
+            Err(_) => {
+                write_json_document(&PingEnvelopeV1::failure(
+                    1,
+                    CliErrorCodeV1::Timeout,
+                    "connection deadline elapsed",
+                    true,
+                )?)?;
+                bail!("splinterd connection timed out");
+            }
+        };
+    let remaining = deadline.saturating_sub(started.elapsed());
+    match connection
+        .request_with_deadline(Request::Ping, remaining)
+        .await
+    {
+        Ok(Response::Pong) => write_json_document(&PingEnvelopeV1::success(1)?),
+        Ok(_) => {
+            write_json_document(&PingEnvelopeV1::failure(
+                1,
+                CliErrorCodeV1::Internal,
+                "splinterd returned an unexpected ping response",
+                false,
+            )?)?;
+            bail!("splinterd returned an unexpected ping response")
+        }
+        Err(error) => {
+            let timed_out = error.to_string().contains("timed out");
+            let code = if timed_out {
+                CliErrorCodeV1::Timeout
+            } else {
+                CliErrorCodeV1::Internal
+            };
+            write_json_document(&PingEnvelopeV1::failure(
+                1,
+                code,
+                bounded_public_message(&error),
+                true,
+            )?)?;
+            Err(error)
+        }
+    }
+}
+
+fn bounded_public_message(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    if message.chars().count() <= 1024 {
+        return message;
+    }
+    message
+        .chars()
+        .take(1023)
+        .chain(std::iter::once('…'))
+        .collect()
+}
+
+async fn next_private_event(connection: &mut Connection) -> Result<(u64, u64, SubscriptionEvent)> {
+    match connection.next_server_frame().await? {
+        ServerFrame::Event {
+            subscription_id,
+            sequence,
+            event,
+        } => Ok((subscription_id, sequence, event)),
+        ServerFrame::Error { error, .. } => Err(response_protocol_error(error)),
+        _ => bail!("splinterd sent an unexpected subscription frame"),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "terminal sequence, revision, history, and termination state stay adjacent"
+)]
+async fn run_terminal_subscription(
+    connection: &mut Connection,
+    splint_id: SplintId,
+    setup_deadline: std::time::Duration,
+) -> Result<()> {
+    let runtime = connection
+        .request_with_deadline(Request::InspectSplint { splint_id }, setup_deadline)
+        .await?;
+    let Response::Splint { runtime } = runtime else {
+        bail!("splinterd did not return the selected Splint identity");
+    };
+    let incarnation = runtime
+        .live_incarnation
+        .context("selected Splint does not have a live process")?;
+    let response = connection
+        .request_with_deadline(
+            Request::Attach {
+                splint_id,
+                incarnation,
+                scrollback_rows: 0,
+            },
+            setup_deadline,
+        )
+        .await?;
+    let Response::Attached {
+        subscription_id,
+        snapshot,
+    } = response
+    else {
+        bail!("splinterd returned an unexpected attach response");
+    };
+    if snapshot.splint_id != splint_id || snapshot.incarnation != incarnation {
+        bail!("splinterd returned inconsistent terminal subscription identity");
+    }
+    write_json_document(&CliEventV1::terminal_snapshot(1, 1, &snapshot, false)?)?;
+    let mut public_sequence = 1_u64;
+    let mut private_sequence = 1_u64;
+    let mut revision = snapshot.revision;
+    let mut history_generation = snapshot.history_generation;
+    let mut columns = snapshot.columns;
+    let mut rows = snapshot.rows;
+    loop {
+        let (event_subscription, sequence, event) = tokio::select! {
+            result = next_private_event(connection) => result?,
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
+        public_sequence = public_sequence
+            .checked_add(1)
+            .context("public sequence exhausted")?;
+        if event_subscription != subscription_id {
+            bail!("splinterd sent an event for the wrong subscription");
+        }
+        if sequence != private_sequence {
+            write_json_document(&CliEventV1::terminal_resync(
+                1,
+                public_sequence,
+                splint_id,
+                incarnation,
+                revision,
+                Some(history_generation),
+                ResyncReasonV1::RevisionGap,
+            )?)?;
+            return Ok(());
+        }
+        private_sequence = private_sequence
+            .checked_add(1)
+            .context("private sequence exhausted")?;
+        match event {
+            SubscriptionEvent::Snapshot { snapshot } => {
+                if snapshot.splint_id != splint_id || snapshot.incarnation != incarnation {
+                    bail!("terminal subscription snapshot identity changed");
+                }
+                revision = snapshot.revision;
+                history_generation = snapshot.history_generation;
+                columns = snapshot.columns;
+                rows = snapshot.rows;
+                write_json_document(&CliEventV1::terminal_snapshot(
+                    1,
+                    public_sequence,
+                    &snapshot,
+                    false,
+                )?)?;
+            }
+            SubscriptionEvent::Update { update } => {
+                update
+                    .validate_against(revision, history_generation, columns, rows)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                revision = update.revision;
+                columns = update.columns.unwrap_or(columns);
+                rows = update.row_count.unwrap_or(rows);
+                if let Some(scrollback) = &update.scrollback {
+                    history_generation = scrollback.history_generation;
+                    if !matches!(scrollback.transition, HistoryTransition::Append { .. }) {
+                        write_json_document(&CliEventV1::terminal_resync(
+                            1,
+                            public_sequence,
+                            splint_id,
+                            incarnation,
+                            revision,
+                            Some(history_generation),
+                            ResyncReasonV1::HistoryReplaced,
+                        )?)?;
+                        return Ok(());
+                    }
+                }
+                write_json_document(&CliEventV1::terminal_update(
+                    1,
+                    public_sequence,
+                    splint_id,
+                    incarnation,
+                    revision,
+                    history_generation,
+                )?)?;
+            }
+            SubscriptionEvent::ResyncRequired { current_revision } => {
+                write_json_document(&CliEventV1::terminal_resync(
+                    1,
+                    public_sequence,
+                    splint_id,
+                    incarnation,
+                    current_revision,
+                    Some(history_generation),
+                    ResyncReasonV1::SubscriberStalled,
+                )?)?;
+                return Ok(());
+            }
+            SubscriptionEvent::AccessRevoked { grant_id } => {
+                write_json_document(&CliEventV1::access_revoked(
+                    1,
+                    public_sequence,
+                    splint_id,
+                    incarnation,
+                    grant_id,
+                )?)?;
+                return Ok(());
+            }
+            SubscriptionEvent::Exited { code, signal } => {
+                write_json_document(&CliEventV1::exited(
+                    1,
+                    public_sequence,
+                    splint_id,
+                    incarnation,
+                    code,
+                    signal,
+                )?)?;
+                return Ok(());
+            }
+            _ => bail!("splinterd sent a non-terminal event on a terminal subscription"),
+        }
+    }
+}
+
+async fn run_topology_subscription(
+    connection: &mut Connection,
+    setup_deadline: std::time::Duration,
+) -> Result<()> {
+    let response = connection
+        .request_with_deadline(Request::SubscribeTopology, setup_deadline)
+        .await?;
+    let Response::TopologySubscribed {
+        subscription_id,
+        snapshot,
+    } = response
+    else {
+        bail!("splinterd returned an unexpected topology subscription response");
+    };
+    write_json_document(&CliEventV1::topology_snapshot(1, 1, &snapshot)?)?;
+    let mut public_sequence = 1_u64;
+    let mut private_sequence = 1_u64;
+    let mut revision = snapshot.revision;
+    loop {
+        let (event_subscription, sequence, event) = tokio::select! {
+            result = next_private_event(connection) => result?,
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
+        public_sequence = public_sequence
+            .checked_add(1)
+            .context("public sequence exhausted")?;
+        if event_subscription != subscription_id {
+            bail!("splinterd sent an event for the wrong subscription");
+        }
+        let event_revision = match &event {
+            SubscriptionEvent::TopologyChanged { change } => change.revision,
+            SubscriptionEvent::TopologyResyncRequired { current_revision } => *current_revision,
+            _ => bail!("splinterd sent a non-topology event on a topology subscription"),
+        };
+        if sequence != private_sequence {
+            write_json_document(&CliEventV1::topology_resync(
+                1,
+                public_sequence,
+                event_revision,
+                ResyncReasonV1::RevisionGap,
+            )?)?;
+            return Ok(());
+        }
+        private_sequence = private_sequence
+            .checked_add(1)
+            .context("private sequence exhausted")?;
+        match event {
+            SubscriptionEvent::TopologyChanged { change } => {
+                if change.revision <= revision {
+                    bail!("topology subscription revision did not advance");
+                }
+                change
+                    .validate()
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                revision = change.revision;
+                write_json_document(&CliEventV1::topology_changed(
+                    1,
+                    public_sequence,
+                    change.kind,
+                    &change.snapshot,
+                )?)?;
+            }
+            SubscriptionEvent::TopologyResyncRequired { current_revision } => {
+                write_json_document(&CliEventV1::topology_resync(
+                    1,
+                    public_sequence,
+                    current_revision,
+                    ResyncReasonV1::SubscriberStalled,
+                )?)?;
+                return Ok(());
+            }
+            _ => unreachable!("topology event checked above"),
+        }
+    }
+}
+
+async fn run_control_subscription(
+    connection: &mut Connection,
+    splint_id: SplintId,
+    setup_deadline: std::time::Duration,
+) -> Result<()> {
+    let runtime = connection
+        .request_with_deadline(Request::InspectSplint { splint_id }, setup_deadline)
+        .await?;
+    let Response::Splint { runtime } = runtime else {
+        bail!("splinterd did not return the selected Splint identity");
+    };
+    let incarnation = runtime
+        .live_incarnation
+        .context("selected Splint does not have a live process")?;
+    let response = connection
+        .request_with_deadline(
+            Request::SubscribeControl {
+                splint_id,
+                incarnation,
+            },
+            setup_deadline,
+        )
+        .await?;
+    let Response::ControlSubscribed {
+        subscription_id,
+        status,
+    } = response
+    else {
+        bail!("splinterd returned an unexpected control subscription response");
+    };
+    write_json_document(&CliEventV1::control_snapshot(1, 1, status)?)?;
+    let mut public_sequence = 1_u64;
+    let mut private_sequence = 1_u64;
+    let mut transfer_ids = HashMap::<u64, u64>::new();
+    let mut next_transfer_id = 1_u64;
+    loop {
+        let (event_subscription, sequence, event) = tokio::select! {
+            result = next_private_event(connection) => result?,
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
+        public_sequence = public_sequence
+            .checked_add(1)
+            .context("public sequence exhausted")?;
+        if event_subscription != subscription_id {
+            bail!("splinterd sent an event for the wrong subscription");
+        }
+        if sequence != private_sequence {
+            write_json_document(&CliEventV1::control_resync(
+                1,
+                public_sequence,
+                splint_id,
+                incarnation,
+                ResyncReasonV1::RevisionGap,
+            )?)?;
+            return Ok(());
+        }
+        private_sequence = private_sequence
+            .checked_add(1)
+            .context("private sequence exhausted")?;
+        let record = match event {
+            SubscriptionEvent::ControlStatusChanged { status } => {
+                CliEventV1::control_status_changed(1, public_sequence, status)?
+            }
+            SubscriptionEvent::ControlTransferRequested { transfer_id } => {
+                if transfer_ids.len() >= 64 || transfer_ids.contains_key(&transfer_id) {
+                    bail!("control transfer map is full or contains a duplicate private ID");
+                }
+                let public_transfer_id = next_transfer_id;
+                next_transfer_id = next_transfer_id
+                    .checked_add(1)
+                    .context("public transfer ID space exhausted")?;
+                transfer_ids.insert(transfer_id, public_transfer_id);
+                CliEventV1::control_transfer_requested(
+                    1,
+                    public_sequence,
+                    splint_id,
+                    incarnation,
+                    public_transfer_id,
+                )?
+            }
+            SubscriptionEvent::ControlTransferResolved {
+                transfer_id,
+                outcome,
+                ..
+            } => {
+                let public_transfer_id = transfer_ids
+                    .remove(&transfer_id)
+                    .context("control transfer resolution has no public request mapping")?;
+                CliEventV1::control_transfer_resolved(
+                    1,
+                    public_sequence,
+                    splint_id,
+                    incarnation,
+                    public_transfer_id,
+                    outcome,
+                )?
+            }
+            _ => bail!("splinterd sent a non-control event on a control subscription"),
+        };
+        write_json_document(&record)?;
+    }
+}
+
+async fn run_machine_subscription(
+    stream: SubscribeCommand,
+    schema_major: u16,
+    timeout_ms: u64,
+) -> Result<()> {
+    if schema_major != 1 {
+        bail!("unsupported schema major {schema_major}");
+    }
+    let setup_deadline = std::time::Duration::from_millis(timeout_ms);
+    let mut connection = tokio::time::timeout(setup_deadline, Connection::connect_automation())
+        .await
+        .context("subscription connection deadline elapsed")??;
+    match stream {
+        SubscribeCommand::Terminal { splint_id } => {
+            run_terminal_subscription(&mut connection, splint_id, setup_deadline).await
+        }
+        SubscribeCommand::Topology => {
+            run_topology_subscription(&mut connection, setup_deadline).await
+        }
+        SubscribeCommand::Control { splint_id } => {
+            run_control_subscription(&mut connection, splint_id, setup_deadline).await
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "explicit-ID lifecycle command construction stays adjacent for auditability"
@@ -288,6 +2712,7 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
         }
         Command::Ping => print_response(connection.request(Request::Ping).await?),
         Command::List => print_response(connection.request(Request::ListDojos).await?),
+        Command::Topology => print_response(connection.request(Request::InspectTopology).await?),
         Command::Inspect { splint_id } => print_response(
             connection
                 .request(Request::InspectSplint { splint_id })
@@ -339,7 +2764,7 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
                     .await?,
             )
         }
-        Command::Close { splint_id } => {
+        Command::Close { splint_id, .. } => {
             let expected_topology_revision = connection.topology_revision().await?;
             print_response(
                 connection
@@ -391,7 +2816,7 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
                     .await?,
             )
         }
-        Command::CloseWindow { window_id } => {
+        Command::CloseWindow { window_id, .. } => {
             let expected_topology_revision = connection.topology_revision().await?;
             print_response(
                 connection
@@ -457,32 +2882,59 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
             splint_id,
             cwd,
             command,
-        } => print_response(
-            connection
-                .request(Request::RelaunchSplint {
-                    splint_id,
-                    launch: launch_parameters(
-                        cwd.unwrap_or(
-                            env::current_dir().context("failed to read current directory")?,
+        } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::RelaunchSplint {
+                        expected_topology_revision,
+                        splint_id,
+                        launch: launch_parameters(
+                            cwd.unwrap_or(
+                                env::current_dir().context("failed to read current directory")?,
+                            ),
+                            command,
+                            config,
                         ),
-                        command,
-                        config,
-                    ),
-                })
-                .await?,
-        ),
-        Command::Restore { splint_id } => print_response(
-            connection
-                .request(Request::RestoreSplint { splint_id })
-                .await?,
-        ),
-        Command::RestoreWindow { window_id } => print_response(
-            connection
-                .request(Request::RestoreWindow { window_id })
-                .await?,
-        ),
+                    })
+                    .await?,
+            )
+        }
+        Command::Restore { splint_id } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::RestoreSplint {
+                        expected_topology_revision,
+                        splint_id,
+                    })
+                    .await?,
+            )
+        }
+        Command::RestoreWindow { window_id } => {
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::RestoreWindow {
+                        expected_topology_revision,
+                        window_id,
+                    })
+                    .await?,
+            )
+        }
         Command::RestoreDojo { dojo_id } => {
-            print_response(connection.request(Request::RestoreDojo { dojo_id }).await?)
+            let expected_topology_revision = connection.topology_revision().await?;
+            print_response(
+                connection
+                    .request(Request::RestoreDojo {
+                        expected_topology_revision,
+                        dojo_id,
+                    })
+                    .await?,
+            )
+        }
+        Command::Authorization { .. } | Command::Audit { .. } | Command::Subscribe { .. } => {
+            bail!("authorization, audit, and subscriptions require machine output")
         }
         Command::Snapshot { splint_id } => {
             let incarnation = connection.live_incarnation(splint_id).await?;
@@ -495,6 +2947,9 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
                     })
                     .await?,
             )
+        }
+        Command::Scrollback { .. } | Command::Search { .. } => {
+            bail!("scrollback and search require --output json")
         }
         Command::Send { splint_id, text } => {
             let incarnation = connection.live_incarnation(splint_id).await?;
@@ -710,7 +3165,7 @@ async fn launch(
         splint_id
     } else {
         let expected = connection.topology_revision().await?;
-        let Response::DojoCreated { dojo } = connection
+        let Response::DojoCreated { dojo, .. } = connection
             .request(create_request(expected, name, cwd, command, &config))
             .await?
         else {
@@ -1032,6 +3487,7 @@ async fn load_authority_status(
     {
         Response::AuthorizationStatus {
             grants,
+            persistent: _,
             development_bypass,
         } => Ok(authority_status(grants, development_bypass)),
         _ => bail!("splinterd did not return authorization status"),
@@ -2242,179 +4698,6 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     }
 }
 
-struct Connection {
-    stream: UnixStream,
-    next_request: u64,
-    read_buffer: Vec<u8>,
-    queued_events: VecDeque<ServerFrame>,
-}
-
-impl Connection {
-    async fn connect() -> Result<Self> {
-        let socket = socket_path()?;
-        let mut stream = UnixStream::connect(&socket)
-            .await
-            .with_context(|| format!("cannot connect to splinterd at {}", socket.display()))?;
-        write_frame(
-            &mut stream,
-            &ClientFrame::Hello {
-                minimum_version: PROTOCOL_VERSION,
-                maximum_version: PROTOCOL_VERSION,
-            },
-        )
-        .await?;
-        match read_frame(&mut stream).await? {
-            ServerFrame::Hello { version, .. } if version == PROTOCOL_VERSION => {}
-            ServerFrame::Error { error, .. } => bail!("splinterd: {}", error.message),
-            _ => bail!("splinterd sent an invalid handshake"),
-        }
-        Ok(Self {
-            stream,
-            next_request: 1,
-            read_buffer: Vec::new(),
-            queued_events: VecDeque::new(),
-        })
-    }
-
-    async fn request(&mut self, request: Request) -> Result<Response> {
-        let request_id = self.next_request;
-        self.next_request += 1;
-        write_frame(
-            &mut self.stream,
-            &ClientFrame::Request {
-                request_id,
-                request,
-            },
-        )
-        .await?;
-        loop {
-            match self.read_server_frame().await? {
-                ServerFrame::Response {
-                    request_id: response_id,
-                    result,
-                } if response_id == request_id => return Ok(result),
-                ServerFrame::Error {
-                    request_id: Some(response_id),
-                    error,
-                } if response_id == request_id => {
-                    if error.code == ErrorCode::DevelopmentFeatureDisabled {
-                        bail!(
-                            "splinterd: {} (restart with SPLINTERM_ENABLE_DEV_ATTACH=1)",
-                            error.message
-                        );
-                    }
-                    bail!(
-                        "splinterd [{}]: {}",
-                        format!("{:?}", error.code).to_lowercase(),
-                        error.message
-                    )
-                }
-                event @ ServerFrame::Event { .. } => self.queued_events.push_back(event),
-                _ => bail!("splinterd sent a response with the wrong request id"),
-            }
-        }
-    }
-
-    async fn next_server_frame(&mut self) -> Result<ServerFrame> {
-        if let Some(event) = self.queued_events.pop_front() {
-            return Ok(event);
-        }
-        self.read_server_frame().await
-    }
-
-    async fn read_server_frame(&mut self) -> Result<ServerFrame> {
-        loop {
-            if self.read_buffer.len() >= 4 {
-                let length = u32::from_be_bytes(
-                    self.read_buffer[..4]
-                        .try_into()
-                        .expect("four-byte frame prefix"),
-                ) as usize;
-                if length == 0 || length > MAX_FRAME_BYTES {
-                    bail!("splinterd sent an invalid frame length: {length} bytes");
-                }
-                let frame_length = length + 4;
-                if self.read_buffer.len() >= frame_length {
-                    let frame = serde_json::from_slice(&self.read_buffer[4..frame_length])
-                        .context("splinterd sent invalid JSON")?;
-                    self.read_buffer.drain(..frame_length);
-                    return Ok(frame);
-                }
-            }
-            let mut chunk = Box::new([0_u8; 16 * 1024]);
-            let read = self.stream.read(chunk.as_mut_slice()).await?;
-            if read == 0 {
-                bail!("splinterd closed a partial frame");
-            }
-            self.read_buffer.extend_from_slice(&chunk[..read]);
-        }
-    }
-
-    async fn topology_revision(&mut self) -> Result<TopologyRevision> {
-        match self.request(Request::InspectTopology).await? {
-            Response::Topology { snapshot } => Ok(snapshot.revision),
-            _ => bail!("splinterd did not return topology"),
-        }
-    }
-
-    async fn live_incarnation(&mut self, splint_id: SplintId) -> Result<u64> {
-        match self.request(Request::InspectSplint { splint_id }).await? {
-            Response::Splint { runtime } if runtime.splint_id == splint_id => runtime
-                .live_incarnation
-                .context("selected Splint does not have a live process"),
-            _ => bail!("splinterd did not return the selected Splint identity"),
-        }
-    }
-
-    async fn acquire_control(&mut self, splint_id: SplintId, incarnation: u64) -> Result<u64> {
-        match self
-            .request(Request::AcquireControl {
-                splint_id,
-                incarnation,
-            })
-            .await?
-        {
-            Response::ControlGranted { controller_id } if controller_id != 0 => Ok(controller_id),
-            _ => bail!("splinterd did not grant a controller lease"),
-        }
-    }
-
-    async fn release_control(&mut self, controller_id: u64) -> Result<()> {
-        if matches!(
-            self.request(Request::ReleaseControl { controller_id })
-                .await?,
-            Response::Acknowledged
-        ) {
-            Ok(())
-        } else {
-            bail!("splinterd did not release the controller lease")
-        }
-    }
-}
-
-async fn write_frame(stream: &mut UnixStream, frame: &ClientFrame) -> Result<()> {
-    stream.write_all(&encode_frame(frame)?).await?;
-    Ok(())
-}
-
-async fn read_frame(stream: &mut UnixStream) -> Result<ServerFrame> {
-    let mut length = [0_u8; 4];
-    stream.read_exact(&mut length).await?;
-    let length = u32::from_be_bytes(length) as usize;
-    if length == 0 || length > MAX_FRAME_BYTES {
-        bail!("splinterd sent an invalid frame length: {length} bytes");
-    }
-    let mut body = vec![0_u8; length];
-    stream.read_exact(&mut body).await.map_err(|error| {
-        if error.kind() == ErrorKind::UnexpectedEof {
-            anyhow::anyhow!("splinterd sent a truncated frame")
-        } else {
-            error.into()
-        }
-    })?;
-    serde_json::from_slice(&body).context("splinterd sent invalid JSON")
-}
-
 #[allow(
     clippy::unnecessary_wraps,
     reason = "response rendering retains a fallible CLI boundary for future output modes"
@@ -2475,7 +4758,7 @@ fn print_response(response: Response) -> Result<()> {
         Response::Pong => println!("splinterd is awake"),
         Response::Dojos { dojos } if dojos.is_empty() => println!("No dojos in the lair."),
         Response::Dojos { dojos } => print_dojos(dojos),
-        Response::DojoCreated { dojo } => println!("Created dojo '{}'.", dojo.name),
+        Response::DojoCreated { dojo, .. } => println!("Created dojo '{}'.", dojo.name),
         Response::Topology { snapshot } => println!(
             "Topology revision {}: {} dojo(s), {} Splint(s)",
             snapshot.revision.get(),
@@ -2520,13 +4803,18 @@ fn print_response(response: Response) -> Result<()> {
         Response::AccessGranted { grant } => {
             println!("Access grant {} issued.", grant.grant_id);
         }
+        Response::AccessRevoked { grant } => {
+            println!("Access grant {} revoked.", grant.grant_id);
+        }
         Response::AuthorizationStatus {
             grants,
+            persistent,
             development_bypass,
         } => {
             println!(
-                "{} active grant(s); development bypass={development_bypass}",
-                grants.len()
+                "{} active grant(s), {} persistent rule(s); development bypass={development_bypass}",
+                grants.len(),
+                persistent.len()
             );
         }
         Response::ControlGranted { controller_id } => {
@@ -2547,6 +4835,14 @@ fn print_response(response: Response) -> Result<()> {
             page.records.len(),
             page.retention_gap,
             page.newest_available_audit_id
+        ),
+        Response::TerminalActionAcknowledged {
+            splint_id,
+            incarnation,
+            terminal_revision,
+            ..
+        } => println!(
+            "Splint {splint_id} incarnation {incarnation} acknowledged at terminal revision {terminal_revision}."
         ),
         Response::Acknowledged => println!("Acknowledged."),
         Response::SplintStarted {
@@ -2624,60 +4920,10 @@ fn print_snapshot(snapshot: &TerminalSnapshot) {
     }
 }
 
-fn socket_path() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("SPLINTERM_SOCKET") {
-        return Ok(path.into());
-    }
-    let runtime = env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .context("XDG_RUNTIME_DIR is unset; set SPLINTERM_SOCKET explicitly")?;
-    Ok(runtime.join("splinterm/splinterd.sock"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use splinterm_protocol::{ActiveScreen, TerminalInputModes};
-
-    #[tokio::test]
-    async fn subscribed_frame_read_resumes_after_cancellation() {
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let expected = ServerFrame::Hello {
-            version: PROTOCOL_VERSION,
-            limits: splinterm_protocol::ServerLimits::default(),
-            development_terminal_access: true,
-        };
-        let encoded = encode_frame(&expected).unwrap();
-        let (prefix_sent, prefix_received) = tokio::sync::oneshot::channel();
-        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
-        let writer = tokio::spawn(async move {
-            server.write_all(&encoded[..4]).await.unwrap();
-            prefix_sent.send(()).unwrap();
-            resume_rx.await.unwrap();
-            server.write_all(&encoded[4..]).await.unwrap();
-        });
-        prefix_received.await.unwrap();
-        let mut connection = Connection {
-            stream: client,
-            next_request: 1,
-            read_buffer: Vec::new(),
-            queued_events: VecDeque::new(),
-        };
-
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                connection.next_server_frame()
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(connection.read_buffer.len(), 4);
-        resume_tx.send(()).unwrap();
-        assert_eq!(connection.next_server_frame().await.unwrap(), expected);
-        assert!(connection.read_buffer.is_empty());
-        writer.await.unwrap();
-    }
 
     fn snapshot(revision: u64) -> TerminalSnapshot {
         TerminalSnapshot {

@@ -58,6 +58,33 @@ impl PolicyDocument {
                 })
         })
     }
+
+    fn status(
+        &self,
+        executable: &ExecutableIdentity,
+        resource: PolicyResource,
+        now_unix_seconds: u64,
+    ) -> Vec<splinterm_protocol::PersistentAuthorizationStatus> {
+        self.rules
+            .iter()
+            .filter(|rule| {
+                rule.executable.path == executable.path
+                    && rule.executable.sha256 == executable.sha256
+                    && rule
+                        .expires_at_unix_seconds
+                        .is_none_or(|expiration| expiration > now_unix_seconds)
+                    && rule
+                        .resources
+                        .iter()
+                        .any(|selector| selector.matches(resource))
+            })
+            .map(|rule| splinterm_protocol::PersistentAuthorizationStatus {
+                policy_rule_id: rule.id.clone(),
+                scopes: rule.scopes.clone(),
+                expires_at_unix_seconds: rule.expires_at_unix_seconds,
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -350,6 +377,17 @@ impl PolicyStore {
             *used = next;
         }
         Some(matched)
+    }
+
+    pub fn status(
+        &self,
+        executable: &ExecutableIdentity,
+        resource: PolicyResource,
+        now_unix_seconds: u64,
+    ) -> Vec<splinterm_protocol::PersistentAuthorizationStatus> {
+        self.generation
+            .document
+            .status(executable, resource, now_unix_seconds)
     }
 
     pub fn reload(&mut self, path: Option<&Path>) -> PolicyGeneration {
@@ -669,6 +707,11 @@ mod tests {
 
         let matched = document.authorize(&executable, &request, u64::MAX / 2);
         assert_eq!(matched.unwrap().rule_id, "reader");
+        let status = document.status(&executable, resource, u64::MAX / 2);
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].policy_rule_id, "reader");
+        assert_eq!(status[0].scopes, vec![OperationScope::TerminalVisibleRead]);
+        assert_eq!(status[0].expires_at_unix_seconds, None);
 
         let excessive = PolicyRequest {
             limits: RequestedLimits {

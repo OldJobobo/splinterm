@@ -1,0 +1,21 @@
+{
+  "$schema_file": "cli-event.schema.json",
+  "document": {
+    "schema": "splinterm.cli.event.v1",
+    "subscription_id": "1",
+    "sequence": 1,
+    "event_type": "snapshot",
+    "resource": {
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77110",
+      "incarnation": 3,
+      "terminal_revision": 42
+    },
+    "data": {
+      "columns": 1,
+      "rows": 1,
+      "title": "build",
+      "visible_rows": []
+    },
+    "truncated": false
+  }
+}

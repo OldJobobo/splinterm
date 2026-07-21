@@ -7,9 +7,10 @@ use std::{
 
 use splinterm_core::{Axis, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
-    ClientFrame, ColorSource, ControlTransferDecision, ControlTransferOutcome, ErrorCode,
-    LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS, PROTOCOL_VERSION, ProtocolError, Request,
-    Response, ServerFrame, SubscriptionEvent, TerminalSnapshot, TopologyChangeKind, encode_frame,
+    ClientFrame, ClientRole, ColorSource, ControlTransferDecision, ControlTransferOutcome,
+    ErrorCode, LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS, PROTOCOL_VERSION,
+    ProtocolError, Request, Response, ServerFrame, SubscriptionEvent, TerminalSnapshot,
+    TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -133,6 +134,7 @@ impl Connection {
             &ClientFrame::Hello {
                 minimum_version: PROTOCOL_VERSION,
                 maximum_version: PROTOCOL_VERSION,
+                role: ClientRole::Automation,
             },
         )
         .await;
@@ -155,6 +157,13 @@ impl Connection {
         self.request_result(request).await.unwrap_or_else(|error| {
             panic!("request failed with {:?}: {}", error.code, error.message)
         })
+    }
+
+    async fn topology_revision(&mut self) -> splinterm_core::TopologyRevision {
+        let Response::Topology { snapshot } = self.request(Request::InspectTopology).await else {
+            panic!("topology response was not returned");
+        };
+        snapshot.revision
     }
 
     async fn request_result(&mut self, request: Request) -> Result<Response, ProtocolError> {
@@ -254,7 +263,7 @@ impl Connection {
 
     async fn input(&mut self, splint_id: SplintId, incarnation: u64, bytes: &[u8]) {
         let controller_id = self.acquire_control(splint_id, incarnation).await;
-        assert_eq!(
+        assert!(matches!(
             self.request(Request::Input {
                 controller_id,
                 splint_id,
@@ -262,13 +271,17 @@ impl Connection {
                 bytes: bytes.to_vec(),
             })
             .await,
-            Response::Acknowledged
-        );
+            Response::TerminalActionAcknowledged {
+                splint_id: response_id,
+                incarnation: response_incarnation,
+                ..
+            } if response_id == splint_id && response_incarnation == incarnation
+        ));
     }
 
     async fn resize(&mut self, splint_id: SplintId, incarnation: u64, columns: u16, rows: u16) {
         let controller_id = self.acquire_control(splint_id, incarnation).await;
-        assert_eq!(
+        assert!(matches!(
             self.request(Request::Resize {
                 controller_id,
                 splint_id,
@@ -279,8 +292,12 @@ impl Connection {
                 pixel_height: 0,
             })
             .await,
-            Response::Acknowledged
-        );
+            Response::TerminalActionAcknowledged {
+                splint_id: response_id,
+                incarnation: response_incarnation,
+                ..
+            } if response_id == splint_id && response_incarnation == incarnation
+        ));
     }
 
     async fn attach(&mut self, splint_id: SplintId, incarnation: u64) -> (u64, TerminalSnapshot) {
@@ -377,7 +394,7 @@ async fn restart_restores_ids_without_running_saved_commands() {
             scrollback_lines: 100,
         };
         let mut connection = daemon.connect().await;
-        let Response::DojoCreated { dojo } = connection
+        let Response::DojoCreated { dojo, .. } = connection
             .request(Request::CreateDojo {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "durable".into(),
@@ -438,8 +455,13 @@ async fn restart_restores_ids_without_running_saved_commands() {
         ));
         assert_eq!(snapshot.runtimes[0].live_incarnation, None);
 
-        let Response::RestoreCompleted { results, .. } =
-            restored.request(Request::RestoreSplint { splint_id }).await
+        let expected_topology_revision = snapshot.revision;
+        let Response::RestoreCompleted { results, .. } = restored
+            .request(Request::RestoreSplint {
+                expected_topology_revision,
+                splint_id,
+            })
+            .await
         else {
             panic!("restore result was not returned");
         };
@@ -471,7 +493,7 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
             scrollback_lines: 100,
         };
         let mut connection = daemon.connect().await;
-        let Response::DojoCreated { dojo } = connection
+        let Response::DojoCreated { dojo, .. } = connection
             .request(Request::CreateDojo {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "restore-scopes".into(),
@@ -536,8 +558,10 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
             ));
         }
 
+        let expected_topology_revision = connection.topology_revision().await;
         let Response::RestoreCompleted { results, .. } = connection
             .request(Request::RestoreSplint {
+                expected_topology_revision,
                 splint_id: first_id,
             })
             .await
@@ -547,8 +571,12 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
         assert_eq!(results.len(), 1);
         assert!(results[0].incarnation.is_some());
 
+        let expected_topology_revision = connection.topology_revision().await;
         let Response::RestoreCompleted { results, .. } = connection
-            .request(Request::RestoreWindow { window_id })
+            .request(Request::RestoreWindow {
+                expected_topology_revision,
+                window_id,
+            })
             .await
         else {
             panic!("window restore failed");
@@ -569,8 +597,13 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
             1
         );
 
-        let Response::RestoreCompleted { results, .. } =
-            connection.request(Request::RestoreDojo { dojo_id }).await
+        let expected_topology_revision = connection.topology_revision().await;
+        let Response::RestoreCompleted { results, .. } = connection
+            .request(Request::RestoreDojo {
+                expected_topology_revision,
+                dojo_id,
+            })
+            .await
         else {
             panic!("dojo restore failed");
         };
@@ -638,8 +671,8 @@ async fn topology_cas_stream_and_complete_edits() {
             second.request_result(second_request)
         );
         let (dojo, stale) = match (first_result, second_result) {
-            (Ok(Response::DojoCreated { dojo }), Err(stale))
-            | (Err(stale), Ok(Response::DojoCreated { dojo })) => (dojo, stale),
+            (Ok(Response::DojoCreated { dojo, .. }), Err(stale))
+            | (Err(stale), Ok(Response::DojoCreated { dojo, .. })) => (dojo, stale),
             results => panic!("exactly one racing create must commit: {results:?}"),
         };
         assert_eq!(stale.code, ErrorCode::StaleTopology);
@@ -819,7 +852,7 @@ async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
     time::timeout(TEST_TIMEOUT, async {
         let daemon = Daemon::start().await;
         let mut client = daemon.connect().await;
-        let Response::DojoCreated { dojo } = client
+        let Response::DojoCreated { dojo, .. } = client
             .request(Request::CreateDojo {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "search".into(),
@@ -896,7 +929,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
     time::timeout(TEST_TIMEOUT, async {
         let daemon = Daemon::start().await;
         let mut admin = daemon.connect().await;
-        let Response::DojoCreated { dojo } = admin
+        let Response::DojoCreated { dojo, .. } = admin
             .request(Request::CreateDojo {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "control-transfer".into(),
@@ -1008,7 +1041,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
             .await
             .unwrap_err();
         assert_eq!(stale.code, ErrorCode::Unauthorized);
-        assert_eq!(
+        assert!(matches!(
             requester
                 .request(Request::Input {
                     controller_id: transferred_controller,
@@ -1017,8 +1050,12 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                     bytes: b"printf 'transferred-control\\n'\n".to_vec(),
                 })
                 .await,
-            Response::Acknowledged
-        );
+            Response::TerminalActionAcknowledged {
+                splint_id: response_id,
+                incarnation: response_incarnation,
+                ..
+            } if response_id == splint_id && response_incarnation == incarnation
+        ));
         snapshot_until(&mut admin, splint_id, incarnation, "transferred-control").await;
 
         drop(requester);
@@ -1048,7 +1085,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
             scrollback_lines: 100,
         };
         let mut admin = daemon.connect().await;
-        let Response::DojoCreated { dojo } = admin
+        let Response::DojoCreated { dojo, .. } = admin
             .request(Request::CreateDojo {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "multiplex".into(),
@@ -1165,12 +1202,14 @@ async fn two_splints_spawn_and_preserve_independent_output() {
         )
         .await;
 
+        let expected_topology_revision = admin.topology_revision().await;
         let Response::SplintStarted {
             splint_id: relaunched_id,
             incarnation: relaunched_incarnation,
             topology_revision,
         } = admin
             .request(Request::RelaunchSplint {
+                expected_topology_revision,
                 splint_id: first_id,
                 launch: LaunchParameters {
                     command: vec![
@@ -1238,7 +1277,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             })
             .await
         {
-            Response::DojoCreated { dojo } => dojo,
+            Response::DojoCreated { dojo, .. } => dojo,
             response => panic!("unexpected create response: {response:?}"),
         };
         let LayoutNode::Leaf(model_splint) = &dojo.windows[0].root else {
@@ -1281,7 +1320,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             }));
 
         let creator_controller = creator.acquire_control(splint_id, incarnation).await;
-        assert_eq!(
+        assert!(matches!(
             creator
                 .request(Request::Resize {
                     controller_id: creator_controller,
@@ -1293,8 +1332,12 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     pixel_height: 600,
                 })
                 .await,
-            Response::Acknowledged
-        );
+            Response::TerminalActionAcknowledged {
+                splint_id: response_id,
+                incarnation: response_incarnation,
+                ..
+            } if response_id == splint_id && response_incarnation == incarnation
+        ));
         let resized = snapshot_until(&mut creator, splint_id, incarnation, "phase8-initial").await;
         assert_eq!((resized.columns, resized.rows), (100, 30));
         assert!(resized.history_generation > with_pwd.history_generation);
@@ -1316,7 +1359,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         assert!(detached.revision > resized.revision);
 
         let reattached_controller = reattached.acquire_control(splint_id, incarnation).await;
-        assert_eq!(
+        assert!(matches!(
             reattached
                 .request(Request::Resize {
                     controller_id: reattached_controller,
@@ -1328,8 +1371,12 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     pixel_height: 0,
                 })
                 .await,
-            Response::Acknowledged
-        );
+            Response::TerminalActionAcknowledged {
+                splint_id: response_id,
+                incarnation: response_incarnation,
+                ..
+            } if response_id == splint_id && response_incarnation == incarnation
+        ));
         reattached.release_control().await;
         let mut slow = daemon.connect().await;
         for _ in 0..MAX_SUBSCRIPTIONS {

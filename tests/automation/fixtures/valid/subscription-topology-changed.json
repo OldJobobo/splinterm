@@ -1,0 +1,19 @@
+{
+  "$schema_file": "cli-event.schema.json",
+  "document": {
+    "schema": "splinterm.cli.event.v1",
+    "subscription_id": "1",
+    "sequence": 2,
+    "event_type": "topology_changed",
+    "resource": {
+      "topology_revision": 8
+    },
+    "data": {
+      "kind": "splint_split",
+      "dojo_count": 1,
+      "window_count": 2,
+      "splint_count": 4
+    },
+    "truncated": false
+  }
+}

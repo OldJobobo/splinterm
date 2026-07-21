@@ -7,7 +7,7 @@
 
 ## Context
 
-Protocol v17 authenticates local Unix-socket peers and has scoped, incarnation-
+Protocol v18 authenticates local Unix-socket peers and has scoped, incarnation-
 bound grant-once consent for terminal access. It does not authorize topology
 reads, process creation, restore, layout mutation, or audit inspection. The
 current executable device/inode binding is suitable for one daemon lifetime but
@@ -105,9 +105,12 @@ trusted consent surface is unavailable, a request without a matching policy
 fails closed. Headless operation never enables the development bypass.
 
 The matching packaged `splinterm` UI retains only the narrow implicit behavior
-accepted in ADR 0005. Public automation modes, editor clients, relays, and MCP
-adapters are third parties even when shipped together and require policy or
-interactive consent as the matrix allows.
+accepted in ADR 0005. Protocol v18 also requires that connection to declare the
+`trusted_ui` handshake role. JSON/NDJSON connections declare `automation`, so
+sharing the same executable inode cannot activate the graphical bypass. Public
+automation modes, editor clients, relays, and MCP adapters are third parties even
+when shipped together and require policy or interactive consent as the matrix
+allows.
 
 `splinterm relay --stdio` is authorized as its own exact executable identity.
 SSH authenticates the host and login, not Splinterm operations. Because the
@@ -135,13 +138,20 @@ policy v1 and cannot be granted persistently. Policy administration is not a
 socket scope. New requests and new sensitive behavior default to unauthorized
 until this ADR's matrix is revised.
 
-### Protocol v17 operation matrix
+### Protocol v18 operation matrix
+
+The public CLI is a composition of these protocol operations. Commands that need
+parent IDs or a topology CAS first issue `InspectTopology`, so their CLI policy
+rules also require `topology_metadata_read` with a Lair resource selector.
+Terminal/control subscriptions use `InspectSplint` and require
+`topology_metadata_read` for that Splint. These compound prerequisites are
+intentional and visible rather than inherited from the trusted-UI bypass.
 
 `own connection` means an unforgeable daemon-owned subscription, transfer, or
 controller identifier created for that connection. Resource selectors are
 checked in addition to every listed scope.
 
-| v17 request | Required policy scope or authority |
+| v18 request | Required policy scope or authority |
 | --- | --- |
 | `Ping` | authenticated local peer; no resource data |
 | `ListDojos` | `topology_metadata_read` |
@@ -178,8 +188,9 @@ checked in addition to every listed scope.
 | `Resize` | own controller and `resize` |
 | `Detach` | own subscription; no additional scope |
 | `KillSplint` | `process_terminate` for exact Splint/incarnation |
+| `AuditInspect` | `audit_inspect` for daemon-lifetime bounded metadata |
 
-Audit inspection will be a new paginated request requiring `audit_inspect`.
+Audit inspection is paginated and requires `audit_inspect`.
 Cancellation is connection-local and needs no separate scope, but can cancel
 only the caller's request or subscription.
 
