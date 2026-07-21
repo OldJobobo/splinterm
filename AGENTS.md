@@ -2,8 +2,6 @@
 
 ## Cost and delegation stop-loss
 
-- Work directly by default. Do not launch a subagent unless the user explicitly approves that specific launch.
-- Launch at most one subagent at a time.
 - Delegate only one bounded diagnosis or localized edit. Never delegate an entire plan slice or broad architecture rewrite.
 - Cap an approved subagent at 8 assistant turns and 25 tool calls.
 - Never automatically retry, resume, or replace a failed, timed-out, or incomplete subagent. Stop and report to the user.
@@ -14,7 +12,6 @@
 
 - Split work into small, dependency-ordered changes with validation after each change.
 - Before editing, state the immediate change and expected validation.
-- If a change is likely to exceed about 300 changed lines, reveals a new architecture requirement, or expands beyond the active plan slice, stop and ask the user before continuing.
 - Do not repeat a failed expensive command without first diagnosing the failure and explaining the next bounded attempt.
 - For graphical matrices, run one guarded case first. Run the full matrix only after the one-case smoke test succeeds.
 
