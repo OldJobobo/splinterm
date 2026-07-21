@@ -16,6 +16,7 @@ pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
 pub const MAX_SEARCH_QUERY_BYTES: usize = 256;
 pub const MAX_SEARCH_RESULTS: usize = 64;
+pub const MAX_AUDIT_PAGE_RECORDS: usize = 128;
 pub const MAX_SEARCH_PREVIEW_BYTES: usize = 256;
 pub const MAX_SEARCH_CURSOR_BYTES: usize = 32;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -252,6 +253,10 @@ pub enum Request {
         splint_id: SplintId,
         incarnation: u64,
     },
+    AuditInspect {
+        after_audit_id: Option<u64>,
+        max_records: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -326,6 +331,9 @@ pub enum Response {
     },
     ControlTransferPending {
         transfer_id: u64,
+    },
+    AuditPage {
+        page: AuditPage,
     },
     Acknowledged,
     SplintKilled {
@@ -598,6 +606,148 @@ impl ProtocolError {
             current_topology_revision: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationScope {
+    TopologyMetadataRead,
+    TopologySubscribe,
+    TerminalVisibleRead,
+    TerminalSubscribe,
+    ScrollbackRead,
+    ScrollbackSearch,
+    ControllerAcquire,
+    ControllerTransfer,
+    Input,
+    Resize,
+    ProcessSpawn,
+    ProcessRestore,
+    ProcessTerminate,
+    TopologyLayoutMutate,
+    TopologyNameMutate,
+    AuthorizationInspect,
+    AuthorizationRevoke,
+    AuditInspect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditOperation {
+    Ping,
+    RequestAccess,
+    AuthorizationStatus,
+    RevokeAccess,
+    ListDojos,
+    InspectTopology,
+    SubscribeTopology,
+    InspectSplint,
+    CreateDojo,
+    SplitSplint,
+    RelaunchSplint,
+    RestoreSplint,
+    RestoreWindow,
+    RestoreDojo,
+    CloseSplint,
+    SetSplitRatio,
+    NewWindow,
+    CloseWindow,
+    RenameDojo,
+    RenameWindow,
+    SetWindowDefaultFocus,
+    RenameSplint,
+    Attach,
+    ScrollbackPage,
+    SearchScrollback,
+    AcquireControl,
+    SubscribeControl,
+    RequestControlTransfer,
+    DecideControlTransfer,
+    ForceControlTransfer,
+    ReleaseControl,
+    Input,
+    Resize,
+    Detach,
+    KillSplint,
+    ProcessExit,
+    AuditInspect,
+    PolicyReload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditDecision {
+    Allowed,
+    Denied,
+    Revoked,
+    Expired,
+    Matched,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditPeer {
+    pub uid: u32,
+    pub executable_path: String,
+    pub executable_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inode: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditResource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dojo_id: Option<DojoId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<WindowId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub splint_id: Option<SplintId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub schema: String,
+    pub retention: String,
+    pub audit_id: u64,
+    pub unix_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_rule_id: Option<String>,
+    pub peer: AuditPeer,
+    pub operation: AuditOperation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<AuditResource>,
+    pub requested_scopes: Vec<AutomationScope>,
+    pub decision: AuditDecision,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AuditOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable_basename: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditPage {
+    pub records: Vec<AuditRecord>,
+    pub retention_gap: bool,
+    pub oldest_available_audit_id: Option<u64>,
+    pub newest_available_audit_id: Option<u64>,
+    pub next_after_audit_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

@@ -393,10 +393,14 @@ async fn restart_restores_ids_without_running_saved_commands() {
             panic!("created dojo was not a leaf");
         };
         let splint_id = splint.id;
-        while !marker.exists() {
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(fs::read_to_string(&marker), Ok(contents) if contents == "run\n") {
+            assert!(
+                Instant::now() < marker_deadline,
+                "launch marker did not contain expected output"
+            );
             time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(fs::read_to_string(&marker).unwrap(), "run\n");
         drop(connection);
 
         daemon.stop_preserving_state();

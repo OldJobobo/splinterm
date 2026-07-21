@@ -2542,6 +2542,12 @@ fn print_response(response: Response) -> Result<()> {
         Response::ControlTransferPending { transfer_id } => {
             println!("Control transfer {transfer_id} pending.");
         }
+        Response::AuditPage { page } => println!(
+            "Audit page: {} record(s), retention_gap={}, newest={:?}.",
+            page.records.len(),
+            page.retention_gap,
+            page.newest_available_audit_id
+        ),
         Response::Acknowledged => println!("Acknowledged."),
         Response::SplintStarted {
             splint_id,

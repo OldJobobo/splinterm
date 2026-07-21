@@ -85,6 +85,7 @@
     "operation": {
       "type": "string",
       "enum": [
+        "ping",
         "request_access",
         "authorization_status",
         "revoke_access",
@@ -119,6 +120,7 @@
         "resize",
         "detach",
         "kill_splint",
+        "process_exit",
         "audit_inspect",
         "policy_reload"
       ]

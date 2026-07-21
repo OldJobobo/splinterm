@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, AsRawFd, OwnedFd},
         unix::{fs::MetadataExt, net::UnixStream as StdUnixStream},
     },
     path::PathBuf,
@@ -18,12 +18,18 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use nix::{
+    poll::{PollFd, PollFlags, PollTimeout, poll},
+    sys::socket::{getsockopt, sockopt::PeerPidfd},
+};
 use splinterm_core::SplintId;
 use splinterm_protocol::{
-    AccessGrant, AccessScope, CONSENT_CAPABILITY_BYTES, ConsentPrompt, ConsentReply,
+    AccessGrant, AccessScope, AuditPeer, CONSENT_CAPABILITY_BYTES, ConsentPrompt, ConsentReply,
     MAX_ACCESS_SCOPES, MAX_CONSENT_FRAME_BYTES,
 };
-use tokio::net::UnixStream;
+use tokio::{io::unix::AsyncFd, net::UnixStream};
+
+use crate::executable_identity::ExecutableIdentity;
 
 pub const GRANT_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const CONSENT_DEADLINE: Duration = Duration::from_secs(20);
@@ -36,6 +42,7 @@ pub struct PeerIdentity {
     executable: PathBuf,
     executable_device: u64,
     executable_inode: u64,
+    persistent_executable: Option<ExecutableIdentity>,
 }
 
 impl PeerIdentity {
@@ -52,6 +59,7 @@ impl PeerIdentity {
             executable,
             executable_device: metadata.dev(),
             executable_inode: metadata.ino(),
+            persistent_executable: None,
         })
     }
 
@@ -73,7 +81,32 @@ impl PeerIdentity {
             executable,
             executable_device: metadata.dev(),
             executable_inode: metadata.ino(),
+            persistent_executable: None,
         }
+    }
+
+    pub fn install_persistent_executable(&mut self, executable: ExecutableIdentity) {
+        self.persistent_executable = Some(executable);
+    }
+
+    pub fn persistent_executable(&self) -> Option<&ExecutableIdentity> {
+        self.persistent_executable.as_ref()
+    }
+
+    pub fn audit_peer(&self) -> Option<AuditPeer> {
+        let executable = self.persistent_executable.as_ref()?;
+        Some(AuditPeer {
+            uid: self.uid,
+            executable_path: executable
+                .path
+                .to_string_lossy()
+                .chars()
+                .take(4096)
+                .collect(),
+            executable_sha256: executable.sha256.clone(),
+            device: Some(executable.device),
+            inode: Some(executable.inode),
+        })
     }
 
     pub fn is_matching_splinterm(&self) -> bool {
@@ -85,6 +118,66 @@ impl PeerIdentity {
             metadata.dev() == self.executable_device && metadata.ino() == self.executable_inode
         })
     }
+}
+
+#[derive(Debug)]
+pub struct PeerMonitor {
+    pidfd: AsyncFd<OwnedFd>,
+}
+
+impl PeerMonitor {
+    pub async fn initialize(stream: &UnixStream, pid: u32) -> Result<(Self, ExecutableIdentity)> {
+        let pidfd = getsockopt(stream, PeerPidfd).context("SO_PEERPIDFD is unavailable")?;
+        verify_pidfd_pid(&pidfd, pid)?;
+        require_live_pidfd(&pidfd)?;
+        let executable = tokio::task::spawn_blocking(move || ExecutableIdentity::from_pid(pid))
+            .await
+            .context("peer executable snapshot task failed")??;
+        require_live_pidfd(&pidfd)?;
+        Ok((
+            Self {
+                pidfd: AsyncFd::new(pidfd).context("cannot monitor peer pidfd")?,
+            },
+            executable,
+        ))
+    }
+
+    pub async fn exited(&self) -> Result<()> {
+        let _guard = self
+            .pidfd
+            .readable()
+            .await
+            .context("peer pidfd monitor failed")?;
+        Ok(())
+    }
+}
+
+fn verify_pidfd_pid(pidfd: &OwnedFd, expected_pid: u32) -> Result<()> {
+    let path = format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd());
+    let contents = fs::read_to_string(path).context("cannot inspect peer pidfd")?;
+    let actual = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("Pid:\t"))
+        .context("peer pidfd omits process identity")?
+        .parse::<u32>()
+        .context("peer pidfd process identity is invalid")?;
+    if actual != expected_pid {
+        bail!("SO_PEERCRED and SO_PEERPIDFD identify different processes");
+    }
+    Ok(())
+}
+
+fn require_live_pidfd(pidfd: &OwnedFd) -> Result<()> {
+    let mut descriptors = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
+    let ready = poll(&mut descriptors, PollTimeout::ZERO).context("cannot poll peer pidfd")?;
+    if ready != 0
+        || descriptors[0]
+            .revents()
+            .is_some_and(|events| !events.is_empty())
+    {
+        bail!("peer exited during persistent identity snapshot");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -240,6 +333,13 @@ impl GrantStore {
             AuditDecision::Denied,
             reason,
         );
+    }
+
+    pub fn grant_resource(&self, grant_id: u64) -> Option<(SplintId, u64)> {
+        self.grants
+            .iter()
+            .find(|grant| grant.id == grant_id)
+            .map(|grant| (grant.splint_id, grant.incarnation))
     }
 
     pub fn revoke(&mut self, grant_id: u64) -> Option<AccessGrant> {
@@ -422,6 +522,19 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn peer_pidfd_matches_credentials_and_guards_executable_snapshot() {
+        let (first, _second) = UnixStream::pair().unwrap();
+        let credentials = first.peer_cred().unwrap();
+        let pid = u32::try_from(credentials.pid().unwrap()).unwrap();
+
+        let (_monitor, executable) = PeerMonitor::initialize(&first, pid).await.unwrap();
+
+        assert_eq!(pid, std::process::id());
+        assert!(executable.path.is_absolute());
+        assert_eq!(executable.sha256.len(), 64);
+    }
 
     #[test]
     fn grants_are_bound_to_peer_splint_incarnation_and_scope() {

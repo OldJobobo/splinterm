@@ -1,7 +1,9 @@
+mod audit;
+mod authorization;
 mod consent;
-#[cfg(test)]
 mod executable_identity;
 mod persistence;
+mod policy;
 
 use std::{
     collections::HashMap,
@@ -25,8 +27,8 @@ use splinterd::{
     SubscriptionReceive,
 };
 use splinterm_core::{
-    Dojo, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId, SplintLaunchMetadata,
-    SplintState, Window,
+    Dojo, DojoId, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId,
+    SplintLaunchMetadata, SplintState, Window, WindowId,
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
@@ -423,6 +425,19 @@ impl ControllerState {
         ids.into_iter().filter_map(|id| self.release(id)).collect()
     }
 
+    fn reset_connections(&mut self) -> (Vec<ControllerLease>, Vec<PendingControlTransfer>) {
+        let leases = self.by_id.drain().map(|(_, lease)| lease).collect();
+        let transfers = self
+            .transfers
+            .drain()
+            .map(|(_, transfer)| transfer)
+            .collect();
+        self.by_splint.clear();
+        self.by_connection.clear();
+        self.transfer_by_splint.clear();
+        (leases, transfers)
+    }
+
     fn release_identity(
         &mut self,
         splint_id: SplintId,
@@ -510,6 +525,10 @@ impl TopologyHub {
         self.subscribers.remove(&id);
     }
 
+    fn clear(&mut self) {
+        self.subscribers.clear();
+    }
+
     fn publish(&mut self, change: &TopologyChange) {
         let change = Arc::new(change.clone());
         self.subscribers.retain(|_, subscriber| {
@@ -532,6 +551,10 @@ struct DaemonState {
     topology_transactions: Semaphore,
     exit_observers: TaskTracker,
     metadata: Option<MetadataStore>,
+    policy: Mutex<policy::PolicyStore>,
+    audit: Mutex<audit::AuditStore>,
+    daemon_audit_peer: splinterm_protocol::AuditPeer,
+    policy_reloads: broadcast::Sender<u64>,
     controller: Mutex<ControllerState>,
     control_events: broadcast::Sender<ControlNotice>,
     grants: Mutex<GrantStore>,
@@ -576,8 +599,31 @@ async fn main() -> Result<()> {
     fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).await?;
     verify_socket(&socket).await?;
 
+    let daemon_identity = tokio::task::spawn_blocking(|| {
+        executable_identity::ExecutableIdentity::from_pid(std::process::id())
+    })
+    .await
+    .context("daemon executable identity task failed")??;
+    let daemon_audit_peer = splinterm_protocol::AuditPeer {
+        uid: rustix::process::geteuid().as_raw(),
+        executable_path: daemon_identity
+            .path
+            .to_string_lossy()
+            .chars()
+            .take(4096)
+            .collect(),
+        executable_sha256: daemon_identity.sha256,
+        device: Some(daemon_identity.device),
+        inode: Some(daemon_identity.inode),
+    };
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
+    let (policy_reloads, _) = broadcast::channel(1);
+    let mut policy = policy::PolicyStore::default();
+    let policy_generation = policy.reload(policy::configured_path().as_deref());
+    if let Some(diagnostic) = &policy_generation.diagnostic {
+        warn!(generation = policy_generation.id, %diagnostic, "persistent policy rejected; installed deny-all generation");
+    }
     let state = Arc::new(DaemonState {
         lair: RwLock::new(lair),
         runtimes: Mutex::new(RuntimeRegistry::default()),
@@ -585,6 +631,10 @@ async fn main() -> Result<()> {
         topology_transactions: Semaphore::new(1),
         exit_observers: TaskTracker::new(),
         metadata: Some(metadata),
+        policy: Mutex::new(policy),
+        audit: Mutex::new(audit::AuditStore::default()),
+        daemon_audit_peer,
+        policy_reloads,
         controller: Mutex::new(ControllerState::default()),
         control_events,
         grants: Mutex::new(GrantStore::default()),
@@ -593,11 +643,14 @@ async fn main() -> Result<()> {
         development_terminal_access: env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").as_deref()
             == Some(std::ffi::OsStr::new("1")),
     });
+    record_policy_reload(&state, &policy_generation).await;
     let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
     let mut connection_tasks = tokio::task::JoinSet::new();
     info!(socket = %socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
     let shutdown_signal = signal::ctrl_c();
     tokio::pin!(shutdown_signal);
+    let mut reload_signal = signal::unix::signal(signal::unix::SignalKind::hangup())
+        .context("failed to listen for policy reload signal")?;
 
     loop {
         tokio::select! {
@@ -605,6 +658,49 @@ async fn main() -> Result<()> {
             result = &mut shutdown_signal => {
                 result.context("failed to listen for shutdown signal")?;
                 break;
+            }
+            received = reload_signal.recv() => {
+                if received.is_none() {
+                    bail!("policy reload signal stream closed");
+                }
+                let policy_path = policy::configured_path();
+                let candidate = tokio::task::spawn_blocking(move || policy::prepare(policy_path))
+                    .await
+                    .context("policy reload task failed")?;
+                let generation = state.policy.lock().await.publish(candidate);
+                record_policy_reload(&state, &generation).await;
+                let _ = state.policy_reloads.send(generation.id);
+                state.topology.lock().await.clear();
+                let (leases, transfers) = state.controller.lock().await.reset_connections();
+                for lease in &leases {
+                    append_daemon_splint_audit(
+                        &state,
+                        splinterm_protocol::AuditOperation::AcquireControl,
+                        lease.splint_id,
+                        lease.incarnation,
+                        splinterm_protocol::AuditDecision::Revoked,
+                        "policy_reload_revoked",
+                        splinterm_protocol::AuditOutcome::Cancelled,
+                    )
+                    .await;
+                }
+                for transfer in &transfers {
+                    append_daemon_splint_audit(
+                        &state,
+                        splinterm_protocol::AuditOperation::RequestControlTransfer,
+                        transfer.splint_id,
+                        transfer.incarnation,
+                        splinterm_protocol::AuditDecision::Revoked,
+                        "policy_reload_revoked",
+                        splinterm_protocol::AuditOutcome::Cancelled,
+                    )
+                    .await;
+                }
+                if let Some(diagnostic) = &generation.diagnostic {
+                    warn!(generation = generation.id, %diagnostic, released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reload rejected; installed deny-all generation and disconnected clients");
+                } else {
+                    info!(generation = generation.id, rules = generation.document.rule_count(), released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reloaded atomically; disconnected clients");
+                }
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("failed to accept client")?;
@@ -669,25 +765,132 @@ async fn main() -> Result<()> {
 }
 
 async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
-    let peer = verify_peer(&stream)?;
+    let (peer, peer_monitor) = verify_peer(&stream).await?;
     let connection_id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (reader, writer) = stream.into_split();
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE);
     let writer_task = AbortOnDrop::new(tokio::spawn(write_frames(writer, outbound_rx, control_rx)));
-    let result = serve_authenticated(
+    let authenticated = serve_authenticated(
         reader,
         &state,
         &peer,
         connection_id,
         &outbound_tx,
         &control_tx,
-    )
-    .await;
+    );
+    let result = if let Some(peer_monitor) = peer_monitor {
+        tokio::select! {
+            result = authenticated => result,
+            exited = peer_monitor.exited() => {
+                exited?;
+                Err(anyhow::anyhow!("socket peer exited"))
+            }
+        }
+    } else {
+        authenticated.await
+    };
+    cleanup_connection(&state, connection_id).await;
     drop(outbound_tx);
     drop(control_tx);
     writer_task.join().await;
     result
+}
+
+async fn record_policy_reload(state: &DaemonState, generation: &policy::PolicyGeneration) {
+    let rejected = generation.diagnostic.is_some();
+    state.audit.lock().await.record(audit::AuditDraft {
+        unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        policy_generation: Some(generation.id),
+        policy_rule_id: None,
+        peer: state.daemon_audit_peer.clone(),
+        operation: splinterm_protocol::AuditOperation::PolicyReload,
+        resource: None,
+        requested_scopes: Vec::new(),
+        decision: if rejected {
+            splinterm_protocol::AuditDecision::Rejected
+        } else {
+            splinterm_protocol::AuditDecision::Allowed
+        },
+        reason: if rejected {
+            "policy_reload_rejected"
+        } else {
+            "policy_reload_accepted"
+        },
+        outcome: Some(splinterm_protocol::AuditOutcome::Succeeded),
+        argument_count: None,
+        executable_basename: None,
+    });
+}
+
+async fn append_daemon_splint_audit(
+    state: &DaemonState,
+    operation: splinterm_protocol::AuditOperation,
+    splint_id: SplintId,
+    incarnation: u64,
+    decision: splinterm_protocol::AuditDecision,
+    reason: &'static str,
+    outcome: splinterm_protocol::AuditOutcome,
+) {
+    let resource = {
+        let lair = state.lair.read().await;
+        lair.dojos().find_map(|dojo| {
+            dojo.windows.iter().find_map(|window| {
+                window
+                    .root
+                    .find_splint(splint_id)
+                    .map(|_| splinterm_protocol::AuditResource {
+                        dojo_id: Some(dojo.id),
+                        window_id: Some(window.id),
+                        splint_id: Some(splint_id),
+                        incarnation: Some(incarnation),
+                    })
+            })
+        })
+    };
+    state.audit.lock().await.record(audit::AuditDraft {
+        unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        policy_generation: None,
+        policy_rule_id: None,
+        peer: state.daemon_audit_peer.clone(),
+        operation,
+        resource,
+        requested_scopes: Vec::new(),
+        decision,
+        reason,
+        outcome: Some(outcome),
+        argument_count: None,
+        executable_basename: None,
+    });
+}
+
+async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
+    let (released, cancelled) = {
+        let mut controllers = state.controller.lock().await;
+        (
+            controllers.release_connection(connection_id),
+            controllers.cancel_connection_transfers(connection_id),
+        )
+    };
+    if let Some(lease) = released {
+        publish_control_status(state, lease.splint_id, lease.incarnation).await;
+    }
+    for transfer in cancelled {
+        publish_control_notice(
+            state,
+            ControlNotice::TransferResolved {
+                transfer,
+                outcome: ControlTransferOutcome::Cancelled,
+                controller_id: None,
+            },
+        );
+    }
 }
 
 #[allow(
@@ -740,8 +943,15 @@ async fn serve_authenticated(
     .await?;
 
     let mut subscriptions = HashMap::<u64, AbortOnDrop>::new();
+    let mut policy_reloads = state.policy_reloads.subscribe();
     let mut last_request_id = 0_u64;
-    while let Some(frame) = read_optional_frame(&mut reader).await? {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            _ = policy_reloads.recv() => break,
+            frame = read_optional_frame(&mut reader) => frame?,
+        };
+        let Some(frame) = frame else { break };
         match frame {
             ClientFrame::Hello { .. } => {
                 send_control(
@@ -792,14 +1002,46 @@ async fn serve_authenticated(
                 }
                 last_request_id = request_id;
                 if let Request::Detach { subscription_id } = &request {
-                    if let Some(task) = subscriptions.remove(subscription_id) {
-                        drop(task);
-                    }
+                    let authorization = RequestAuthorizationContext::default();
+                    let Some(task) = subscriptions.remove(subscription_id) else {
+                        append_request_audit(
+                            state,
+                            peer,
+                            &request,
+                            Some(&authorization),
+                            splinterm_protocol::AuditDecision::Denied,
+                            "subscription_not_owned",
+                            splinterm_protocol::AuditOutcome::Failed,
+                        )
+                        .await;
+                        send_response(
+                            outbound,
+                            request_id,
+                            Err(ProtocolError::new(
+                                ErrorCode::Unauthorized,
+                                "subscription is not owned by this connection",
+                            )),
+                        )
+                        .await?;
+                        continue;
+                    };
+                    drop(task);
                     state.topology.lock().await.remove(*subscription_id);
+                    append_request_audit(
+                        state,
+                        peer,
+                        &request,
+                        Some(&authorization),
+                        splinterm_protocol::AuditDecision::Allowed,
+                        "owned_subscription",
+                        splinterm_protocol::AuditOutcome::Succeeded,
+                    )
+                    .await;
                     send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
-                let handled = handle_request(request, state, peer, connection_id).await;
+                let handled =
+                    handle_request(request, state, peer, connection_id, subscriptions.len()).await;
                 match handled {
                     Ok(Handled {
                         response,
@@ -831,15 +1073,30 @@ async fn serve_authenticated(
                                         id,
                                         stream,
                                         handle,
-                                        outbound.clone(),
-                                        control.clone(),
+                                        SubscriptionOutputs {
+                                            outbound: outbound.clone(),
+                                            control: control.clone(),
+                                        },
                                         state.revocations.subscribe(),
                                         access,
+                                        SubscriptionAudit {
+                                            state: Arc::clone(state),
+                                            peer: peer.audit_peer(),
+                                        },
                                     ),
                                 ),
-                                PendingSubscription::Topology { id, stream } => (
+                                PendingSubscription::Topology {
                                     id,
-                                    spawn_topology_subscription(id, stream, outbound.clone()),
+                                    stream,
+                                    maximum_returned_bytes,
+                                } => (
+                                    id,
+                                    spawn_topology_subscription(
+                                        id,
+                                        stream,
+                                        outbound.clone(),
+                                        maximum_returned_bytes,
+                                    ),
                                 ),
                                 PendingSubscription::Control {
                                     id,
@@ -847,16 +1104,20 @@ async fn serve_authenticated(
                                     connection_id,
                                     splint_id,
                                     incarnation,
+                                    maximum_returned_bytes,
                                 } => (
                                     id,
                                     spawn_control_subscription(
                                         id,
                                         stream,
                                         outbound.clone(),
-                                        Arc::clone(state),
-                                        connection_id,
-                                        splint_id,
-                                        incarnation,
+                                        ControlSubscriptionContext {
+                                            state: Arc::clone(state),
+                                            connection_id,
+                                            splint_id,
+                                            incarnation,
+                                            maximum_returned_bytes,
+                                        },
                                     ),
                                 ),
                             };
@@ -871,26 +1132,6 @@ async fn serve_authenticated(
         }
     }
     drop(subscriptions);
-    let (released, cancelled) = {
-        let mut controllers = state.controller.lock().await;
-        (
-            controllers.release_connection(connection_id),
-            controllers.cancel_connection_transfers(connection_id),
-        )
-    };
-    if let Some(lease) = released {
-        publish_control_status(state, lease.splint_id, lease.incarnation).await;
-    }
-    for transfer in cancelled {
-        publish_control_notice(
-            state,
-            ControlNotice::TransferResolved {
-                transfer,
-                outcome: ControlTransferOutcome::Cancelled,
-                controller_id: None,
-            },
-        );
-    }
     Ok(())
 }
 
@@ -911,6 +1152,7 @@ enum PendingSubscription {
     Topology {
         id: u64,
         stream: TopologySubscription,
+        maximum_returned_bytes: Option<usize>,
     },
     Control {
         id: u64,
@@ -918,12 +1160,14 @@ enum PendingSubscription {
         connection_id: u64,
         splint_id: SplintId,
         incarnation: u64,
+        maximum_returned_bytes: Option<usize>,
     },
 }
 
 #[derive(Clone, Copy, Debug)]
 struct SubscriptionAccess {
     grant_id: Option<u64>,
+    maximum_returned_bytes: Option<usize>,
     scrollback_rows: usize,
     history: HistoryState,
 }
@@ -964,6 +1208,16 @@ fn schedule_transfer_timeout(state: Arc<DaemonState>, transfer: PendingControlTr
         time::sleep(CONTROL_TRANSFER_TIMEOUT).await;
         let expired = state.controller.lock().await.expire_transfer(transfer.id);
         if let Some(transfer) = expired {
+            append_daemon_splint_audit(
+                &state,
+                splinterm_protocol::AuditOperation::RequestControlTransfer,
+                transfer.splint_id,
+                transfer.incarnation,
+                splinterm_protocol::AuditDecision::Expired,
+                "control_transfer_expired",
+                splinterm_protocol::AuditOutcome::Cancelled,
+            )
+            .await;
             publish_control_notice(
                 &state,
                 ControlNotice::TransferResolved {
@@ -1358,6 +1612,16 @@ async fn finalize_exit_if_current(
     }
     install_lair(state, candidate).await;
     publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+    append_daemon_splint_audit(
+        state,
+        splinterm_protocol::AuditOperation::ProcessExit,
+        splint_id,
+        incarnation,
+        splinterm_protocol::AuditDecision::Allowed,
+        "process_exit_reconciled",
+        splinterm_protocol::AuditOutcome::Succeeded,
+    )
+    .await;
     true
 }
 
@@ -1377,15 +1641,631 @@ fn observe_process_exit(state: &Arc<DaemonState>, handle: LiveSplintHandle) {
     });
 }
 
+#[derive(Debug, Default)]
+struct RequestAuthorizationContext {
+    policy_match: Option<policy::PolicyMatch>,
+}
+
+impl RequestAuthorizationContext {
+    fn policy_authorized(&self) -> bool {
+        self.policy_match
+            .as_ref()
+            .is_some_and(|matched| !matched.rule_id.is_empty())
+    }
+
+    fn maximum_returned_bytes(&self) -> Option<usize> {
+        self.policy_match
+            .as_ref()
+            .and_then(|matched| matched.max_returned_bytes)
+    }
+}
+
+fn trusted_ui_request(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Ping
+            | Request::ListDojos
+            | Request::InspectTopology
+            | Request::SubscribeTopology
+            | Request::InspectSplint { .. }
+            | Request::RequestAccess { .. }
+            | Request::AuthorizationStatus { .. }
+            | Request::RevokeAccess { .. }
+            | Request::CreateDojo { .. }
+            | Request::SplitSplint { .. }
+            | Request::RelaunchSplint { .. }
+            | Request::RestoreSplint { .. }
+            | Request::RestoreWindow { .. }
+            | Request::RestoreDojo { .. }
+            | Request::CloseSplint { .. }
+            | Request::SetSplitRatio { .. }
+            | Request::NewWindow { .. }
+            | Request::CloseWindow { .. }
+            | Request::RenameDojo { .. }
+            | Request::RenameWindow { .. }
+            | Request::SetWindowDefaultFocus { .. }
+            | Request::RenameSplint { .. }
+            | Request::Attach { .. }
+            | Request::ScrollbackPage { .. }
+            | Request::SearchScrollback { .. }
+            | Request::AcquireControl { .. }
+            | Request::SubscribeControl { .. }
+            | Request::RequestControlTransfer { .. }
+            | Request::DecideControlTransfer { .. }
+            | Request::ForceControlTransfer { .. }
+            | Request::ReleaseControl { .. }
+            | Request::Input { .. }
+            | Request::Resize { .. }
+            | Request::Detach { .. }
+            | Request::KillSplint { .. }
+    )
+}
+
+fn consent_capable_request(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::RequestAccess { .. }
+            | Request::Attach { .. }
+            | Request::ScrollbackPage { .. }
+            | Request::SearchScrollback { .. }
+            | Request::AcquireControl { .. }
+            | Request::Input { .. }
+            | Request::Resize { .. }
+            | Request::KillSplint { .. }
+    )
+}
+
+fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::OperationScope>> {
+    use authorization::{ConditionalRequirement, OperationScope as Scope, RequestAuthorization};
+
+    let plan = authorization::for_request(request);
+    let mut scopes = match plan {
+        RequestAuthorization::Authenticated
+        | RequestAuthorization::Owned(_)
+        | RequestAuthorization::TrustedUiConsent => return Some(Vec::new()),
+        RequestAuthorization::Policy { required, .. }
+        | RequestAuthorization::PolicyAndOwned { required, .. } => required.to_vec(),
+        RequestAuthorization::Conditional { base, requirement } => {
+            let mut scopes = base.to_vec();
+            match requirement {
+                ConditionalRequirement::RequestedAccessScopes => {
+                    let Request::RequestAccess {
+                        scopes: requested, ..
+                    } = request
+                    else {
+                        return None;
+                    };
+                    for scope in requested {
+                        scopes.push(match scope {
+                            AccessScope::Observe => Scope::TerminalVisibleRead,
+                            AccessScope::Scrollback => Scope::ScrollbackRead,
+                            AccessScope::Input => Scope::Input,
+                            AccessScope::Resize => Scope::Resize,
+                            AccessScope::Terminate => Scope::ProcessTerminate,
+                            AccessScope::ClipboardRead
+                            | AccessScope::ClipboardWrite
+                            | AccessScope::ControlTakeover => return None,
+                        });
+                    }
+                }
+                ConditionalRequirement::AttachScrollback => {
+                    if matches!(request, Request::Attach { scrollback_rows, .. } if *scrollback_rows > 0)
+                    {
+                        scopes.push(Scope::ScrollbackRead);
+                    }
+                }
+                ConditionalRequirement::LiveProcessTermination
+                | ConditionalRequirement::ExpandedLiveProcessTermination => {}
+            }
+            scopes
+        }
+    };
+    scopes.sort_unstable();
+    scopes.dedup();
+    Some(scopes)
+}
+
+fn requested_limits(request: &Request, active_subscriptions: usize) -> policy::RequestedLimits {
+    let mut limits = policy::RequestedLimits::default();
+    match request {
+        Request::SubscribeTopology | Request::Attach { .. } | Request::SubscribeControl { .. } => {
+            limits.live_subscriptions = Some(active_subscriptions.saturating_add(1));
+        }
+        _ => {}
+    }
+    match request {
+        Request::Attach {
+            scrollback_rows, ..
+        } if *scrollback_rows > 0 => limits.returned_rows = Some(*scrollback_rows),
+        Request::ScrollbackPage { max_rows, .. } => limits.returned_rows = Some(*max_rows),
+        Request::SearchScrollback { max_results, .. } => {
+            limits.results = Some(*max_results);
+            limits.deadline_ms =
+                Some(u64::try_from(SEARCH_DEADLINE.as_millis()).unwrap_or(u64::MAX));
+        }
+        Request::AuditInspect { max_records, .. } => limits.results = Some(*max_records),
+        Request::CreateDojo { .. } | Request::SplitSplint { .. } | Request::NewWindow { .. } => {
+            limits.spawn_count = Some(1);
+        }
+        _ => {}
+    }
+    limits
+}
+
+fn splint_policy_resource(
+    lair: &Lair,
+    handles: &HashMap<SplintId, LiveSplintHandle>,
+    splint_id: SplintId,
+    requested_incarnation: Option<u64>,
+) -> Option<policy::PolicyResource> {
+    let current = handles
+        .get(&splint_id)
+        .map(|handle| handle.incarnation.value());
+    if requested_incarnation.is_some() && requested_incarnation != current {
+        return None;
+    }
+    for dojo in lair.dojos() {
+        for window in &dojo.windows {
+            if window.root.find_splint(splint_id).is_some() {
+                return Some(policy::PolicyResource::Splint {
+                    dojo_id: dojo.id,
+                    window_id: window.id,
+                    splint_id,
+                    incarnation: requested_incarnation.or(current),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn window_policy_resources(
+    lair: &Lair,
+    handles: &HashMap<SplintId, LiveSplintHandle>,
+    window_id: WindowId,
+    expanded: bool,
+) -> Option<Vec<policy::PolicyResource>> {
+    for dojo in lair.dojos() {
+        if let Some(window) = dojo.windows.iter().find(|window| window.id == window_id) {
+            let mut resources = vec![policy::PolicyResource::Window {
+                dojo_id: dojo.id,
+                window_id,
+            }];
+            if expanded {
+                resources.extend(
+                    layout_splint_ids(&window.root)
+                        .into_iter()
+                        .filter_map(|id| splint_policy_resource(lair, handles, id, None)),
+                );
+            }
+            return Some(resources);
+        }
+    }
+    None
+}
+
+fn dojo_policy_resources(
+    lair: &Lair,
+    handles: &HashMap<SplintId, LiveSplintHandle>,
+    dojo_id: DojoId,
+    expanded: bool,
+) -> Option<Vec<policy::PolicyResource>> {
+    let dojo = lair.dojos().find(|dojo| dojo.id == dojo_id)?;
+    let mut resources = vec![policy::PolicyResource::Dojo { dojo_id }];
+    if expanded {
+        resources.extend(
+            dojo.windows
+                .iter()
+                .flat_map(|window| layout_splint_ids(&window.root))
+                .filter_map(|id| splint_policy_resource(lair, handles, id, None)),
+        );
+    }
+    Some(resources)
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "authorization remains adjacent to every sensitive operation"
+    reason = "the exhaustive request-to-resource security table remains reviewable in one match"
 )]
+async fn request_policy_resources(
+    request: &Request,
+    state: &DaemonState,
+) -> Option<Vec<policy::PolicyResource>> {
+    let lair = state.lair.read().await.clone();
+    let handles = state.runtimes.lock().await.handles();
+    let splint = |id, incarnation| splint_policy_resource(&lair, &handles, id, incarnation);
+    let window = |id, expanded| window_policy_resources(&lair, &handles, id, expanded);
+    let dojo = |id, expanded| dojo_policy_resources(&lair, &handles, id, expanded);
+
+    Some(match request {
+        Request::Ping
+        | Request::DecideControlTransfer { .. }
+        | Request::ReleaseControl { .. }
+        | Request::Detach { .. }
+        | Request::ForceControlTransfer { .. } => Vec::new(),
+        Request::ListDojos
+        | Request::InspectTopology
+        | Request::SubscribeTopology
+        | Request::CreateDojo { .. }
+        | Request::AuditInspect { .. } => vec![policy::PolicyResource::Lair],
+        Request::RevokeAccess { grant_id } => {
+            let (splint_id, incarnation) = state.grants.lock().await.grant_resource(*grant_id)?;
+            vec![splint(splint_id, Some(incarnation))?]
+        }
+        Request::InspectSplint { splint_id }
+        | Request::RelaunchSplint { splint_id, .. }
+        | Request::RestoreSplint { splint_id }
+        | Request::CloseSplint { splint_id, .. }
+        | Request::RenameSplint { splint_id, .. }
+        | Request::SetSplitRatio {
+            target_splint_id: splint_id,
+            ..
+        } => vec![splint(*splint_id, None)?],
+        Request::RequestAccess {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::Attach {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::ScrollbackPage {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::SearchScrollback {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::AcquireControl {
+            splint_id,
+            incarnation,
+        }
+        | Request::SubscribeControl {
+            splint_id,
+            incarnation,
+        }
+        | Request::RequestControlTransfer {
+            splint_id,
+            incarnation,
+        }
+        | Request::Input {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::Resize {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::KillSplint {
+            splint_id,
+            incarnation,
+        }
+        | Request::AuthorizationStatus {
+            splint_id,
+            incarnation,
+        } => vec![splint(*splint_id, Some(*incarnation))?],
+        Request::SplitSplint {
+            target_splint_id, ..
+        } => vec![splint(*target_splint_id, None)?],
+        Request::RestoreWindow { window_id } | Request::CloseWindow { window_id, .. } => {
+            window(*window_id, true)?
+        }
+        Request::RestoreDojo { dojo_id } => dojo(*dojo_id, true)?,
+        Request::NewWindow { dojo_id, .. } | Request::RenameDojo { dojo_id, .. } => {
+            dojo(*dojo_id, false)?
+        }
+        Request::RenameWindow { window_id, .. } => window(*window_id, false)?,
+        Request::SetWindowDefaultFocus {
+            window_id,
+            splint_id,
+            ..
+        } => {
+            let mut resources = window(*window_id, false)?;
+            resources.push(splint(*splint_id, None)?);
+            resources
+        }
+    })
+}
+
+async fn authorize_request(
+    request: &Request,
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    active_subscriptions: usize,
+) -> Result<RequestAuthorizationContext, ProtocolError> {
+    use authorization::RequestAuthorization;
+
+    let plan = authorization::for_request(request);
+    if matches!(
+        plan,
+        RequestAuthorization::Authenticated
+            | RequestAuthorization::Owned(_)
+            | RequestAuthorization::TrustedUiConsent
+    ) || state.development_terminal_access
+        || (peer.is_matching_splinterm() && trusted_ui_request(request))
+    {
+        return Ok(RequestAuthorizationContext::default());
+    }
+
+    let Some(required_scopes) = requested_operation_scopes(request) else {
+        if consent_capable_request(request) {
+            return Ok(RequestAuthorizationContext::default());
+        }
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "request cannot be authorized by persistent policy",
+        ));
+    };
+    let any_scope = match plan {
+        RequestAuthorization::Policy { any_of, .. } => any_of,
+        _ => &[],
+    };
+    let mut required_scopes = required_scopes;
+    if matches!(
+        plan,
+        RequestAuthorization::Conditional {
+            requirement: authorization::ConditionalRequirement::LiveProcessTermination
+                | authorization::ConditionalRequirement::ExpandedLiveProcessTermination,
+            ..
+        }
+    ) {
+        let resources = request_policy_resources(request, state).await;
+        if resources.as_ref().is_some_and(|resources| {
+            resources.iter().any(|resource| {
+                matches!(
+                    resource,
+                    policy::PolicyResource::Splint {
+                        incarnation: Some(_),
+                        ..
+                    }
+                )
+            })
+        }) {
+            required_scopes.push(authorization::OperationScope::ProcessTerminate);
+        }
+    }
+    if required_scopes.is_empty() {
+        if consent_capable_request(request) {
+            return Ok(RequestAuthorizationContext::default());
+        }
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "policy-authorized request has no operation scopes",
+        ));
+    }
+    let resources = request_policy_resources(request, state)
+        .await
+        .filter(|resources| !resources.is_empty())
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::Unauthorized, "policy resource is unavailable")
+        })?;
+    let policy_request = policy::PolicyRequest {
+        required_scopes: &required_scopes,
+        any_scope,
+        resources: &resources,
+        limits: requested_limits(request, active_subscriptions),
+    };
+    let matched = if let Some(executable) = peer.persistent_executable() {
+        state.policy.lock().await.authorize(
+            executable,
+            &policy_request,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+    } else {
+        None
+    };
+    if let Some(policy_match) = matched {
+        return Ok(RequestAuthorizationContext {
+            policy_match: Some(policy_match),
+        });
+    }
+    if consent_capable_request(request) {
+        Ok(RequestAuthorizationContext::default())
+    } else {
+        Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "no exact persistent policy rule authorizes this request",
+        ))
+    }
+}
+
+fn audit_resource(resource: policy::PolicyResource) -> Option<splinterm_protocol::AuditResource> {
+    match resource {
+        policy::PolicyResource::Lair => None,
+        policy::PolicyResource::Dojo { dojo_id } => Some(splinterm_protocol::AuditResource {
+            dojo_id: Some(dojo_id),
+            window_id: None,
+            splint_id: None,
+            incarnation: None,
+        }),
+        policy::PolicyResource::Window { dojo_id, window_id } => {
+            Some(splinterm_protocol::AuditResource {
+                dojo_id: Some(dojo_id),
+                window_id: Some(window_id),
+                splint_id: None,
+                incarnation: None,
+            })
+        }
+        policy::PolicyResource::Splint {
+            dojo_id,
+            window_id,
+            splint_id,
+            incarnation,
+        } => Some(splinterm_protocol::AuditResource {
+            dojo_id: Some(dojo_id),
+            window_id: Some(window_id),
+            splint_id: Some(splint_id),
+            incarnation,
+        }),
+    }
+}
+
+fn spawn_audit_metadata(request: &Request) -> (Option<usize>, Option<String>) {
+    let (Request::CreateDojo { launch, .. }
+    | Request::SplitSplint { launch, .. }
+    | Request::RelaunchSplint { launch, .. }
+    | Request::NewWindow { launch, .. }) = request
+    else {
+        return (None, None);
+    };
+    let basename = launch
+        .command
+        .first()
+        .map(PathBuf::from)
+        .or_else(|| launch.shell.as_ref().map(PathBuf::from))
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        });
+    (Some(launch.command.len().saturating_sub(1)), basename)
+}
+
+async fn append_request_audit(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    request: &Request,
+    authorization: Option<&RequestAuthorizationContext>,
+    decision: splinterm_protocol::AuditDecision,
+    reason: &'static str,
+    outcome: splinterm_protocol::AuditOutcome,
+) {
+    let Some(audit_peer) = peer.audit_peer() else {
+        warn!(operation = ?audit::operation_for_request(request), "audit record omitted because stable peer identity is unavailable");
+        return;
+    };
+    let resources = request_policy_resources(request, state)
+        .await
+        .unwrap_or_default();
+    let scopes = requested_operation_scopes(request).unwrap_or_default();
+    let (argument_count, executable_basename) = spawn_audit_metadata(request);
+    let policy_generation =
+        if authorization.is_some_and(RequestAuthorizationContext::policy_authorized) {
+            Some(state.policy.lock().await.snapshot().id)
+        } else {
+            None
+        };
+    let policy_rule_id = authorization
+        .and_then(|context| context.policy_match.as_ref())
+        .map(|matched| matched.rule_id.clone());
+    state.audit.lock().await.record(audit::AuditDraft {
+        unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        policy_generation,
+        policy_rule_id,
+        peer: audit_peer,
+        operation: audit::operation_for_request(request),
+        resource: resources.first().copied().and_then(audit_resource),
+        requested_scopes: scopes,
+        decision,
+        reason,
+        outcome: Some(outcome),
+        argument_count,
+        executable_basename,
+    });
+}
+
 async fn handle_request(
     request: Request,
     state: &Arc<DaemonState>,
     peer: &PeerIdentity,
     connection_id: u64,
+    active_subscriptions: usize,
+) -> Result<Handled, ProtocolError> {
+    let authorization = match authorize_request(&request, state, peer, active_subscriptions).await {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            append_request_audit(
+                state,
+                peer,
+                &request,
+                None,
+                splinterm_protocol::AuditDecision::Denied,
+                "policy_rejected",
+                splinterm_protocol::AuditOutcome::Failed,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let mut result =
+        handle_authorized_request(request.clone(), state, peer, connection_id, &authorization)
+            .await;
+    if let (Ok(handled), Some(maximum)) = (&result, authorization.maximum_returned_bytes()) {
+        let encoded_bytes = serde_json::to_vec(&handled.response)
+            .map_err(|_| internal())?
+            .len();
+        if encoded_bytes > maximum {
+            result = Err(ProtocolError::new(
+                ErrorCode::ResourceLimit,
+                "response exceeds persistent policy byte limit",
+            ));
+        }
+    }
+    let denied = result.as_ref().err().is_some_and(|error| {
+        matches!(
+            error.code,
+            ErrorCode::Unauthorized | ErrorCode::ConsentDenied | ErrorCode::ConsentUnavailable
+        )
+    });
+    let revoked = result.is_ok() && matches!(request, Request::RevokeAccess { .. });
+    let decision = if denied {
+        splinterm_protocol::AuditDecision::Denied
+    } else if revoked {
+        splinterm_protocol::AuditDecision::Revoked
+    } else if authorization.policy_authorized() {
+        splinterm_protocol::AuditDecision::Matched
+    } else {
+        splinterm_protocol::AuditDecision::Allowed
+    };
+    let reason = if denied {
+        "authorization_denied"
+    } else if revoked {
+        "grant_revoked"
+    } else if authorization.policy_authorized() {
+        "policy_match"
+    } else {
+        "trusted_or_owned_authority"
+    };
+    let outcome = if result.is_ok() {
+        splinterm_protocol::AuditOutcome::Succeeded
+    } else {
+        splinterm_protocol::AuditOutcome::Failed
+    };
+    append_request_audit(
+        state,
+        peer,
+        &request,
+        Some(&authorization),
+        decision,
+        reason,
+        outcome,
+    )
+    .await;
+    result
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "authorization remains adjacent to every sensitive operation"
+)]
+async fn handle_authorized_request(
+    request: Request,
+    state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
+    connection_id: u64,
+    authorization: &RequestAuthorizationContext,
 ) -> Result<Handled, ProtocolError> {
     let response = match request {
         Request::Ping => Response::Pong,
@@ -1402,7 +2282,11 @@ async fn handle_request(
                     subscription_id: id,
                     snapshot,
                 },
-                subscription: Some(PendingSubscription::Topology { id, stream }),
+                subscription: Some(PendingSubscription::Topology {
+                    id,
+                    stream,
+                    maximum_returned_bytes: authorization.maximum_returned_bytes(),
+                }),
             });
         }
         Request::InspectSplint { splint_id } => {
@@ -1425,7 +2309,11 @@ async fn handle_request(
                 return Err(invalid("access scopes are empty or exceed limits"));
             }
             let scopes: Vec<_> = canonical.into_iter().collect();
-            if state.development_terminal_access {
+            if authorization.policy_authorized() {
+                Response::AccessGranted {
+                    grant: first_party_grant(splint_id, incarnation, scopes),
+                }
+            } else if state.development_terminal_access {
                 Response::AccessGranted {
                     grant: development_grant(peer, splint_id, incarnation, scopes),
                 }
@@ -1483,10 +2371,13 @@ async fn handle_request(
             splint_id,
             incarnation,
         } => {
-            if !state.development_terminal_access && !peer.is_matching_splinterm() {
+            if !authorization.policy_authorized()
+                && !state.development_terminal_access
+                && !peer.is_matching_splinterm()
+            {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
-                    "authorization status is available only to trusted Splinterm UI",
+                    "authorization status requires trusted UI or exact policy",
                 ));
             }
             let grants = state.grants.lock().await.status(splint_id, incarnation);
@@ -1496,10 +2387,13 @@ async fn handle_request(
             }
         }
         Request::RevokeAccess { grant_id } => {
-            if !state.development_terminal_access && !peer.is_matching_splinterm() {
+            if !authorization.policy_authorized()
+                && !state.development_terminal_access
+                && !peer.is_matching_splinterm()
+            {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
-                    "revocation is available only to trusted Splinterm UI",
+                    "revocation requires trusted UI or exact policy",
                 ));
             }
             let revoked = state
@@ -1994,7 +2888,11 @@ async fn handle_request(
             } else {
                 vec![AccessScope::Observe, AccessScope::Scrollback]
             };
-            let grant_id = authorize_scope(state, peer, splint_id, incarnation, &required).await?;
+            let grant_id = if authorization.policy_authorized() {
+                None
+            } else {
+                authorize_scope(state, peer, splint_id, incarnation, &required).await?
+            };
             let handle = current_handle(state, splint_id, incarnation).await?;
             let scrollback_rows = scrollback_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS);
             let (snapshot, subscription) = handle
@@ -2014,6 +2912,7 @@ async fn handle_request(
                     handle,
                     access: SubscriptionAccess {
                         grant_id,
+                        maximum_returned_bytes: authorization.maximum_returned_bytes(),
                         scrollback_rows,
                         history,
                     },
@@ -2034,14 +2933,16 @@ async fn handle_request(
                     "scrollback page request exceeds protocol bounds",
                 ));
             }
-            let _ = authorize_scope(
-                state,
-                peer,
-                splint_id,
-                incarnation,
-                &[AccessScope::Observe, AccessScope::Scrollback],
-            )
-            .await?;
+            if !authorization.policy_authorized() {
+                let _ = authorize_scope(
+                    state,
+                    peer,
+                    splint_id,
+                    incarnation,
+                    &[AccessScope::Observe, AccessScope::Scrollback],
+                )
+                .await?;
+            }
             let handle = current_handle(state, splint_id, incarnation).await?;
             let current = handle
                 .snapshot_with_scrollback(1)
@@ -2104,14 +3005,16 @@ async fn handle_request(
                 return Err(invalid("search request exceeds protocol bounds"));
             }
             let skip_rows = decode_search_cursor(cursor.as_deref())?;
-            let _ = authorize_scope(
-                state,
-                peer,
-                splint_id,
-                incarnation,
-                &[AccessScope::Observe, AccessScope::Scrollback],
-            )
-            .await?;
+            if !authorization.policy_authorized() {
+                let _ = authorize_scope(
+                    state,
+                    peer,
+                    splint_id,
+                    incarnation,
+                    &[AccessScope::Observe, AccessScope::Scrollback],
+                )
+                .await?;
+            }
             let page = current_handle(state, splint_id, incarnation)
                 .await?
                 .search(
@@ -2159,7 +3062,8 @@ async fn handle_request(
             splint_id,
             incarnation,
         } => {
-            let grant_id = if state.development_terminal_access
+            let grant_id = if authorization.policy_authorized()
+                || state.development_terminal_access
                 || trusted_first_party_ui(peer, &[AccessScope::Input, AccessScope::Resize])
             {
                 None
@@ -2194,7 +3098,8 @@ async fn handle_request(
             splint_id,
             incarnation,
         } => {
-            if !state.development_terminal_access
+            if !authorization.policy_authorized()
+                && !state.development_terminal_access
                 && !trusted_first_party_ui(peer, &[AccessScope::Observe])
             {
                 return Err(ProtocolError::new(
@@ -2221,6 +3126,7 @@ async fn handle_request(
                     connection_id,
                     splint_id,
                     incarnation,
+                    maximum_returned_bytes: authorization.maximum_returned_bytes(),
                 }),
             });
         }
@@ -2228,7 +3134,8 @@ async fn handle_request(
             splint_id,
             incarnation,
         } => {
-            if !state.development_terminal_access
+            if !authorization.policy_authorized()
+                && !state.development_terminal_access
                 && !trusted_first_party_ui(peer, &[AccessScope::Input, AccessScope::Resize])
             {
                 return Err(ProtocolError::new(
@@ -2332,8 +3239,10 @@ async fn handle_request(
             incarnation,
             bytes,
         } => {
-            let _ =
-                authorize_scope(state, peer, splint_id, incarnation, &[AccessScope::Input]).await?;
+            if !authorization.policy_authorized() {
+                let _ = authorize_scope(state, peer, splint_id, incarnation, &[AccessScope::Input])
+                    .await?;
+            }
             if bytes.len() > MAX_INPUT_BYTES {
                 return Err(invalid("input exceeds limit"));
             }
@@ -2353,8 +3262,11 @@ async fn handle_request(
             pixel_width,
             pixel_height,
         } => {
-            let _ = authorize_scope(state, peer, splint_id, incarnation, &[AccessScope::Resize])
-                .await?;
+            if !authorization.policy_authorized() {
+                let _ =
+                    authorize_scope(state, peer, splint_id, incarnation, &[AccessScope::Resize])
+                        .await?;
+            }
             if columns == 0 || rows == 0 || columns > MAX_COLUMNS || rows > MAX_ROWS {
                 return Err(invalid("terminal dimensions exceed limits"));
             }
@@ -2385,14 +3297,16 @@ async fn handle_request(
             splint_id,
             incarnation,
         } => {
-            let _ = authorize_scope(
-                state,
-                peer,
-                splint_id,
-                incarnation,
-                &[AccessScope::Terminate],
-            )
-            .await?;
+            if !authorization.policy_authorized() {
+                let _ = authorize_scope(
+                    state,
+                    peer,
+                    splint_id,
+                    incarnation,
+                    &[AccessScope::Terminate],
+                )
+                .await?;
+            }
             let runtime = state
                 .runtimes
                 .lock()
@@ -2434,6 +3348,17 @@ async fn handle_request(
                     code: status.code,
                     signal: status.signal,
                 },
+            }
+        }
+        Request::AuditInspect {
+            after_audit_id,
+            max_records,
+        } => {
+            if max_records == 0 || max_records > splinterm_protocol::MAX_AUDIT_PAGE_RECORDS {
+                return Err(invalid("audit page request exceeds protocol bounds"));
+            }
+            Response::AuditPage {
+                page: state.audit.lock().await.page(after_audit_id, max_records),
             }
         }
     };
@@ -2545,16 +3470,28 @@ async fn current_handle(
     Ok(handle)
 }
 
-fn spawn_control_subscription(
-    id: u64,
-    mut stream: broadcast::Receiver<ControlNotice>,
-    outbound: mpsc::Sender<ServerFrame>,
+struct ControlSubscriptionContext {
     state: Arc<DaemonState>,
     connection_id: u64,
     splint_id: SplintId,
     incarnation: u64,
+    maximum_returned_bytes: Option<usize>,
+}
+
+fn spawn_control_subscription(
+    id: u64,
+    mut stream: broadcast::Receiver<ControlNotice>,
+    outbound: mpsc::Sender<ServerFrame>,
+    context: ControlSubscriptionContext,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let ControlSubscriptionContext {
+            state,
+            connection_id,
+            splint_id,
+            incarnation,
+            maximum_returned_bytes,
+        } = context;
         let mut sequence = 1_u64;
         loop {
             let event = match stream.recv().await {
@@ -2611,14 +3548,13 @@ fn spawn_control_subscription(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
             let Some(event) = event else { continue };
-            if outbound
-                .send(ServerFrame::Event {
-                    subscription_id: id,
-                    sequence,
-                    event,
-                })
-                .await
-                .is_err()
+            let frame = ServerFrame::Event {
+                subscription_id: id,
+                sequence,
+                event,
+            };
+            if !frame_within_policy_limit(&frame, maximum_returned_bytes)
+                || outbound.send(frame).await.is_err()
             {
                 break;
             }
@@ -2631,6 +3567,7 @@ fn spawn_topology_subscription(
     id: u64,
     mut subscription: TopologySubscription,
     outbound: mpsc::Sender<ServerFrame>,
+    maximum_returned_bytes: Option<usize>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut sequence = 1_u64;
@@ -2659,14 +3596,13 @@ fn spawn_topology_subscription(
                     )
                 }
             };
-            if outbound
-                .send(ServerFrame::Event {
-                    subscription_id: id,
-                    sequence,
-                    event,
-                })
-                .await
-                .is_err()
+            let frame = ServerFrame::Event {
+                subscription_id: id,
+                sequence,
+                event,
+            };
+            if !frame_within_policy_limit(&frame, maximum_returned_bytes)
+                || outbound.send(frame).await.is_err()
             {
                 break;
             }
@@ -2678,14 +3614,73 @@ fn spawn_topology_subscription(
     })
 }
 
+struct SubscriptionOutputs {
+    outbound: mpsc::Sender<ServerFrame>,
+    control: mpsc::Sender<ServerFrame>,
+}
+
+struct SubscriptionAudit {
+    state: Arc<DaemonState>,
+    peer: Option<splinterm_protocol::AuditPeer>,
+}
+
+async fn record_subscription_expiry(audit: &SubscriptionAudit, handle: &LiveSplintHandle) {
+    let Some(peer) = audit.peer.clone() else {
+        return;
+    };
+    audit.state.audit.lock().await.record(audit::AuditDraft {
+        unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        policy_generation: None,
+        policy_rule_id: None,
+        peer,
+        operation: splinterm_protocol::AuditOperation::RequestAccess,
+        resource: Some(splinterm_protocol::AuditResource {
+            dojo_id: None,
+            window_id: None,
+            splint_id: Some(handle.splint_id),
+            incarnation: Some(handle.incarnation.value()),
+        }),
+        requested_scopes: Vec::new(),
+        decision: splinterm_protocol::AuditDecision::Expired,
+        reason: "grant_expired",
+        outcome: Some(splinterm_protocol::AuditOutcome::Cancelled),
+        argument_count: None,
+        executable_basename: None,
+    });
+}
+
+async fn send_access_revoked(
+    control: &mpsc::Sender<ServerFrame>,
+    subscription_id: u64,
+    sequence: u64,
+    grant_id: u64,
+) {
+    let _ = control
+        .send(ServerFrame::Event {
+            subscription_id,
+            sequence,
+            event: SubscriptionEvent::AccessRevoked { grant_id },
+        })
+        .await;
+}
+
+fn frame_within_policy_limit(frame: &ServerFrame, maximum: Option<usize>) -> bool {
+    maximum.is_none_or(|maximum| {
+        serde_json::to_vec(frame).is_ok_and(|encoded| encoded.len() <= maximum)
+    })
+}
+
 fn spawn_subscription(
     id: u64,
     mut subscription: Subscription,
     handle: LiveSplintHandle,
-    outbound: mpsc::Sender<ServerFrame>,
-    control: mpsc::Sender<ServerFrame>,
+    outputs: SubscriptionOutputs,
     mut revocations: broadcast::Receiver<Revocation>,
     access: SubscriptionAccess,
+    audit: SubscriptionAudit,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut sequence = 1_u64;
@@ -2698,13 +3693,13 @@ fn spawn_subscription(
                 revoked = revocations.recv(), if access.grant_id.is_some() => {
                     match revoked {
                         Ok(revocation) if Some(revocation.grant_id) == access.grant_id => {
-                            let _ = control.send(ServerFrame::Event {
-                                subscription_id: id,
+                            send_access_revoked(
+                                &outputs.control,
+                                id,
                                 sequence,
-                                event: SubscriptionEvent::AccessRevoked {
-                                    grant_id: revocation.grant_id,
-                                },
-                            }).await;
+                                revocation.grant_id,
+                            )
+                            .await;
                             break;
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -2713,11 +3708,8 @@ fn spawn_subscription(
                 }
                 () = &mut expiry, if access.grant_id.is_some() => {
                     if let Some(grant_id) = access.grant_id {
-                        let _ = control.send(ServerFrame::Event {
-                            subscription_id: id,
-                            sequence,
-                            event: SubscriptionEvent::AccessRevoked { grant_id },
-                        }).await;
+                        send_access_revoked(&outputs.control, id, sequence, grant_id).await;
+                        record_subscription_expiry(&audit, &handle).await;
                     }
                     break;
                 }
@@ -2725,7 +3717,8 @@ fn spawn_subscription(
             match received {
                 SubscriptionReceive::ResnapshotRequired => {
                     let revision = current_revision(&handle, access.scrollback_rows).await;
-                    let _ = control
+                    let _ = outputs
+                        .control
                         .send(ServerFrame::Event {
                             subscription_id: id,
                             sequence,
@@ -2737,7 +3730,7 @@ fn spawn_subscription(
                     break;
                 }
                 SubscriptionReceive::Event(LiveEvent::Exited { status, .. }) => {
-                    let _ = outbound.try_send(ServerFrame::Event {
+                    let _ = outputs.outbound.try_send(ServerFrame::Event {
                         subscription_id: id,
                         sequence,
                         event: SubscriptionEvent::Exited {
@@ -2760,17 +3753,17 @@ fn spawn_subscription(
                     }
                     let event = subscription_update_event(&updates, snapshot, previous_history);
                     previous_history = current_history;
-
-                    if outbound
-                        .try_send(ServerFrame::Event {
-                            subscription_id: id,
-                            sequence,
-                            event,
-                        })
-                        .is_err()
+                    let frame = ServerFrame::Event {
+                        subscription_id: id,
+                        sequence,
+                        event,
+                    };
+                    if !frame_within_policy_limit(&frame, access.maximum_returned_bytes)
+                        || outputs.outbound.try_send(frame).is_err()
                     {
                         let revision = current_revision(&handle, access.scrollback_rows).await;
-                        let _ = control
+                        let _ = outputs
+                            .control
                             .send(ServerFrame::Event {
                                 subscription_id: id,
                                 sequence,
@@ -3175,12 +4168,22 @@ fn wire_color_source(source: TerminalColorSource) -> ColorSource {
     }
 }
 
-fn verify_peer(stream: &UnixStream) -> Result<PeerIdentity> {
-    let identity = PeerIdentity::from_stream(stream)?;
+async fn verify_peer(stream: &UnixStream) -> Result<(PeerIdentity, Option<consent::PeerMonitor>)> {
+    let mut identity = PeerIdentity::from_stream(stream)?;
     if identity.uid != rustix::process::geteuid().as_raw() {
         bail!("peer uid mismatch");
     }
-    Ok(identity)
+    let monitor = match consent::PeerMonitor::initialize(stream, identity.pid).await {
+        Ok((monitor, executable)) => {
+            identity.install_persistent_executable(executable);
+            Some(monitor)
+        }
+        Err(error) => {
+            warn!(%error, "persistent peer identity unavailable; policy authorization disabled");
+            None
+        }
+    };
+    Ok((identity, monitor))
 }
 
 async fn prepare_socket_parent(path: &Path) -> Result<()> {
@@ -3245,6 +4248,16 @@ mod tests {
             topology_transactions: Semaphore::new(1),
             exit_observers: TaskTracker::new(),
             metadata: None,
+            policy: Mutex::new(policy::PolicyStore::default()),
+            audit: Mutex::new(audit::AuditStore::default()),
+            daemon_audit_peer: splinterm_protocol::AuditPeer {
+                uid: rustix::process::geteuid().as_raw(),
+                executable_path: "/test/splinterd".into(),
+                executable_sha256: "0".repeat(64),
+                device: Some(1),
+                inode: Some(1),
+            },
+            policy_reloads: broadcast::channel(1).0,
             controller: Mutex::new(ControllerState::default()),
             control_events,
             grants: Mutex::new(GrantStore::default()),
@@ -3261,6 +4274,62 @@ mod tests {
             .as_nanos();
         env::temp_dir().join(format!("splinterd-test-{}-{nonce}", std::process::id()))
     }
+    #[tokio::test]
+    async fn exact_policy_authorizes_only_its_declared_request_scope() {
+        let state = test_state(false);
+        let mut peer = PeerIdentity::for_test();
+        let executable = executable_identity::ExecutableIdentity::from_pid(std::process::id())
+            .expect("snapshot test executable");
+        peer.install_persistent_executable(executable.clone());
+
+        let denied = authorize_request(&Request::ListDojos, &state, &peer, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, ErrorCode::Unauthorized);
+
+        let directory = temp_dir();
+        fs::create_dir(&directory).await.unwrap();
+        let policy_path = directory.join("policy.json");
+        let policy = serde_json::json!({
+            "schema": "splinterm.policy.v1",
+            "rules": [{
+                "id": "topology-reader",
+                "executable": {
+                    "path": executable.path,
+                    "sha256": executable.sha256,
+                },
+                "scopes": ["topology_metadata_read"],
+                "resources": [{"kind": "lair"}],
+                "limits": {"deadline_ms": 1000, "max_returned_bytes": 1},
+            }],
+        });
+        fs::write(&policy_path, serde_json::to_vec(&policy).unwrap())
+            .await
+            .unwrap();
+        fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
+        state
+            .policy
+            .lock()
+            .await
+            .reload(Some(policy_path.as_path()));
+
+        let allowed = authorize_request(&Request::ListDojos, &state, &peer, 0)
+            .await
+            .unwrap();
+        assert!(allowed.policy_authorized());
+        let oversized = handle_request(Request::ListDojos, &state, &peer, 1, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(oversized.code, ErrorCode::ResourceLimit);
+        let wrong_scope = authorize_request(&Request::SubscribeTopology, &state, &peer, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(wrong_scope.code, ErrorCode::Unauthorized);
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
     #[tokio::test]
     async fn socket_directory_and_endpoint_are_private() {
         let dir = temp_dir();
@@ -3340,6 +4409,7 @@ mod tests {
             &state,
             &peer,
             1,
+            0,
         )
         .await
         .unwrap_err();
@@ -3363,6 +4433,7 @@ mod tests {
             &state,
             &peer,
             1,
+            0,
         )
         .await
         .unwrap_err();
@@ -3482,6 +4553,24 @@ mod tests {
     }
 
     #[test]
+    fn policy_reload_reset_revokes_all_connection_owned_control() {
+        let mut controllers = ControllerState::default();
+        let splint_id = SplintId::new();
+        let lease = controllers.acquire(10, splint_id, 4, None).unwrap();
+        let transfer = controllers.request_transfer(20, splint_id, 4).unwrap();
+
+        let (leases, transfers) = controllers.reset_connections();
+
+        assert_eq!(leases, vec![lease]);
+        assert_eq!(transfers, vec![transfer]);
+        assert!(controllers.by_id.is_empty());
+        assert!(controllers.by_splint.is_empty());
+        assert!(controllers.by_connection.is_empty());
+        assert!(controllers.transfers.is_empty());
+        assert!(controllers.transfer_by_splint.is_empty());
+    }
+
+    #[test]
     fn controller_transfer_is_explicit_atomic_and_disconnect_bounded() {
         let splint_id = SplintId::new();
         let mut controllers = ControllerState::default();
@@ -3524,6 +4613,10 @@ mod tests {
         assert!(!first_party_ui_scopes(&[AccessScope::ClipboardRead]));
         assert!(!first_party_ui_scopes(&[AccessScope::ClipboardWrite]));
         assert!(!first_party_ui_scopes(&[AccessScope::Terminate]));
+        assert!(!trusted_ui_request(&Request::AuditInspect {
+            after_audit_id: None,
+            max_records: 1,
+        }));
     }
 
     #[test]

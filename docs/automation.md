@@ -1,9 +1,10 @@
 # Supported automation contracts
 
-> **Phase 4 status:** contract draft. The JSON/NDJSON commands, persistent policy
-> loader, audit inspection, and relay described here are not implemented yet.
-> Until their implementation slices land, the existing human CLI and protocol
-> DTOs are private interfaces and are not compatibility promises.
+> **Phase 4 status:** authorization, persistent policy loading, and daemon-lifetime
+> audit inspection are implemented behind the private protocol. Public JSON/NDJSON
+> commands and the SSH relay are not implemented yet. Until those later slices
+> land, the existing human CLI and protocol DTOs remain private interfaces and
+> are not compatibility promises.
 
 Splinterm automation uses the owner-only local daemon socket. Remote automation
 will use the same operations through `splinterm relay --stdio` over authenticated
@@ -82,7 +83,10 @@ Schema validation is necessary but not sufficient. The daemon must additionally
 reject duplicate rule IDs, expired rules, unsafe ownership or mode, symlinks,
 hard links, non-canonical paths, unknown resources, invalid scope/selector
 combinations, and limits that exceed protocol ceilings. Any load or reload
-failure installs a deny-all persistent-policy generation.
+failure installs a deny-all persistent-policy generation. `splinterd` reloads
+the configured policy on `SIGHUP`; publication is atomic, and existing client
+sessions are disconnected so subscriptions and connection-owned controller
+state cannot survive a narrowed or rejected generation.
 
 ## Audit v1
 

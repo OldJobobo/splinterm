@@ -265,7 +265,7 @@ No graphical test was required or run for this repair.
 review can answer exactly which identity and scope authorizes every operation,
 including on a host with no graphical session.
 
-### Slice 1 — complete authorization and inspectable audit
+### Slice 1 — complete authorization and inspectable audit (complete)
 
 **Work**
 
@@ -291,6 +291,46 @@ including on a host with no graphical session.
 or policy, narrowly allowed by its exact rule, denied outside resource/scope/
 limit, revoked on policy removal or incarnation change, and represented by a
 body-free audit record.
+
+**Completion evidence (2026-07-20):**
+
+- all daemon requests pass through one exhaustive operation-scope table and one
+  exact request-to-resource translator; connection-owned and trusted-UI
+  authority remain separate from persistent policy;
+- persistent identity uses `SO_PEERPIDFD`, verifies it against `SO_PEERCRED`,
+  hashes the bounded opened executable outside daemon locks, and monitors peer
+  exit for the connection lifetime;
+- policy loading walks every path component with `O_NOFOLLOW`, enforces bounded
+  owner/mode/schema/rule validation, publishes complete generations atomically,
+  and installs deny-all on rejection;
+- exact path/digest, scope, resource/incarnation, returned row/result/byte,
+  live-subscription, deadline, and cumulative spawn limits are enforced;
+- `SIGHUP` reload disconnects existing clients and revokes all connection-owned
+  controllers, transfers, and subscriptions before the new generation serves
+  requests;
+- audit wire DTOs and `AuditInspect` provide monotonic cursor pages over the
+  newest 1,024 daemon-lifetime records with explicit retention gaps; records
+  include bounded identities and symbolic outcomes but no terminal, input,
+  search, environment, capability, or complete argv bodies; and
+- post-implementation review closed future-request trusted bypass, exact grant
+  resource selection, `Detach` audit coverage, per-authority reload revocation,
+  cumulative spawn/subscription accounting, and serialized response/event byte
+  ceilings.
+
+The guarded serialized smoke and complete non-graphical gate passed:
+
+```bash
+cargo test -p splinterd --test end_to_end \
+  explicit_restore_scopes_report_per_leaf_results \
+  -- --exact --test-threads=1
+uv run --with jsonschema python tools/automation/validate-contract-fixtures.py
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test -p splinterd --test end_to_end -- --test-threads=1
+```
+
+No graphical test was required or run for Slice 1.
 
 ### Slice 2 — stable JSON/NDJSON CLI
 
