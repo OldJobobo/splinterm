@@ -528,7 +528,7 @@ installed-tree validator, and real packaged relay runtime smoke also passed. No
 graphical test was required or run for Slice 4. Unix-socket
 forwarding remains unsupported pending a separate security spike.
 
-### Slice 5 — reference editor/client and in-Splint integration
+### Slice 5 — reference editor/client and in-Splint integration (complete)
 
 **Work**
 
@@ -554,6 +554,45 @@ private Rust API. A reference in-Splint flow can discover its logical location,
 split a selected Splint, launch a structured child process, observe bounded
 output, handle controller denial, and reconcile after resync without treating
 terminal prose or context variables as authority.
+
+**Completion evidence (2026-07-21):**
+
+- every PTY launch receives daemon-overridden Dojo, window, Splint, and exact
+  pre-exec incarnation hints; create, split, relaunch, restore, and new-window
+  tests correlate those values and prove inherited spoof values are replaced;
+- incarnation allocation remains coupled to runtime spawn and fails before
+  wrap-to-zero; relaunch receives a distinct value;
+- additive `--expected-incarnation` preconditions on split, snapshot, send, and
+  terminal/control subscriptions combine a fresh authoritative lookup with the
+  request's exact incarnation or topology revision, preventing relaunch
+  retargeting between discovery and action;
+- handler-level first-party terminal authority now requires both the exact
+  `splinterm` executable and the negotiated trusted-UI role, so automation-role
+  CLI connections remain subject to policy/consent/controller checks;
+- the packaged `splinterm-session-picker` consumes only public v1 JSON/NDJSON,
+  validates operation-specific envelopes and terminal events, keeps subprocess
+  time/output/diagnostics/process groups bounded, passes child argv directly,
+  surfaces denial/revocation/stale/disconnect, and rebuilds topology plus a
+  bounded snapshot after explicit resync;
+- `docs/integrations.md` publishes the client-author checklist, logical-versus-
+  compositor distinction, context threat model, reference picker, exact
+  incarnation usage, and shell/`jq` examples with array-preserving launch;
+- fourteen fake-CLI adversarial tests cover malformed contracts, stale context,
+  exact preconditions, shell-looking argv, denial, revocation, resync, premature
+  EOF, deadlines, oversized/no-newline streams, stderr backpressure, and a
+  leader-exited pipe-holding descendant; and
+- package validation runs a real isolated no-Wayland flow under exact changing
+  policies: bootstrap, context validation, structured split/child launch,
+  policy reload, bounded child observation, denied input/controller authority,
+  and clean daemon child/socket teardown. Context variables presented to a
+  separate real request do not broaden a read-only policy.
+
+Two fresh review rounds rejected incomplete exact-incarnation, I/O-bound,
+subscription-failure, event-validation, role-separation, lifecycle, cleanup, and
+documentation behavior; all findings were corrected within the two-round cap.
+The complete ephemeral release package build, serialized package test suite,
+installed-tree checks, and real packaged reference flow passed. No graphical test
+was required or run for Slice 5.
 
 ### Slice 6 — required full-capability MCP adapter
 

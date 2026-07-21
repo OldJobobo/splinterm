@@ -8,12 +8,12 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use splinterm_core::{Axis, LayoutNode, SplintId, SplitRatio, SplitSide};
+use splinterm_core::{Axis, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision};
 use splinterm_protocol::{
     AccessScope, ClientFrame, ClientRole, ColorSource, ControlTransferDecision,
     ControlTransferOutcome, ErrorCode, LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS,
-    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SubscriptionEvent,
-    TerminalSnapshot, TopologyChangeKind, encode_frame,
+    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SplintLifecycle,
+    SubscriptionEvent, TerminalSnapshot, TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -52,6 +52,13 @@ impl Daemon {
         command
             .env("SPLINTERM_SOCKET", socket)
             .env("XDG_STATE_HOME", runtime.join("state"))
+            .env("SPLINTERM_DOJO_ID", "caller-supplied-dojo")
+            .env("SPLINTERM_WINDOW_ID", "caller-supplied-window")
+            .env("SPLINTERM_SPLINT_ID", "caller-supplied-splint")
+            .env(
+                "SPLINTERM_SPLINT_INCARNATION",
+                "caller-supplied-incarnation",
+            )
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
             .stdin(Stdio::null())
@@ -753,6 +760,122 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
     })
     .await
     .expect("signal-resistant shutdown integration timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one lifecycle scenario correlates create, restore, and new-window context"
+)]
+async fn new_window_and_restore_inject_exact_current_context() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let restored_marker = daemon.runtime.join("restored-context");
+        let window_marker = daemon.runtime.join("window-context");
+        let context_launch = |marker: &Path| LaunchParameters {
+            cwd: std::env::current_dir().unwrap(),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "printf '%s|%s|%s|%s' \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_WINDOW_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\" > {}",
+                    marker.display()
+                ),
+            ],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let mut connection = daemon.connect().await;
+        let Response::DojoCreated {
+            dojo,
+            incarnation: first_incarnation,
+            ..
+        } = connection
+            .request(Request::CreateDojo {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "context-lifecycle".into(),
+                launch: context_launch(&restored_marker),
+            })
+            .await
+        else {
+            panic!("context test Dojo was not created");
+        };
+        let dojo_id = dojo.id;
+        let first_window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(first) = &dojo.windows[0].root else {
+            panic!("context test Dojo was not a leaf");
+        };
+        let first_id = first.id;
+        let expected_first =
+            format!("{dojo_id}|{first_window_id}|{first_id}|{first_incarnation}");
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(fs::read_to_string(&restored_marker), Ok(ref value) if value == &expected_first) {
+            assert!(Instant::now() < marker_deadline, "initial context marker timed out");
+            time::sleep(Duration::from_millis(10)).await;
+        }
+        loop {
+            let Response::Splint { runtime } = connection
+                .request(Request::InspectSplint { splint_id: first_id })
+                .await
+            else {
+                panic!("context test Splint was not inspected");
+            };
+            if matches!(runtime.lifecycle, SplintLifecycle::Exited) {
+                break;
+            }
+            time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let revision = connection.topology_revision().await;
+        let Response::RestoreCompleted { results, .. } = connection
+            .request(Request::RestoreSplint {
+                expected_topology_revision: revision,
+                splint_id: first_id,
+            })
+            .await
+        else {
+            panic!("context test Splint was not restored");
+        };
+        let restored_incarnation = results[0].incarnation.expect("restore must start process");
+        assert_ne!(restored_incarnation, first_incarnation);
+        let expected_restored =
+            format!("{dojo_id}|{first_window_id}|{first_id}|{restored_incarnation}");
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(fs::read_to_string(&restored_marker), Ok(ref value) if value == &expected_restored) {
+            assert!(Instant::now() < marker_deadline, "restored context marker timed out");
+            time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let revision = connection.topology_revision().await;
+        let Response::WindowStarted {
+            window_id,
+            splint_id,
+            incarnation,
+            ..
+        } = connection
+            .request(Request::NewWindow {
+                expected_topology_revision: revision,
+                dojo_id,
+                title: "context-window".into(),
+                launch: context_launch(&window_marker),
+            })
+            .await
+        else {
+            panic!("context test window was not created");
+        };
+        let expected_window = format!("{dojo_id}|{window_id}|{splint_id}|{incarnation}");
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(fs::read_to_string(&window_marker), Ok(ref value) if value == &expected_window) {
+            assert!(Instant::now() < marker_deadline, "window context marker timed out");
+            time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!expected_restored.contains("caller-supplied"));
+        assert!(!expected_window.contains("caller-supplied"));
+        daemon.shutdown();
+    })
+    .await
+    .expect("context lifecycle scenario timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1473,6 +1596,8 @@ async fn two_splints_spawn_and_preserve_independent_output() {
         else {
             panic!("daemon did not create initial Splint");
         };
+        let dojo_id = dojo.id;
+        let window_id = dojo.windows[0].id;
         let LayoutNode::Leaf(first) = &dojo.windows[0].root else {
             panic!("new dojo was not a leaf");
         };
@@ -1534,6 +1659,13 @@ async fn two_splints_spawn_and_preserve_independent_output() {
             .acquire_control(second_id, second_incarnation)
             .await;
         assert_ne!(first_controller, second_controller);
+        let context_command = b"printf 'CTX=%s|%s|%s|%s\\n' \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_WINDOW_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\"\n";
+        first_client
+            .input(first_id, first_incarnation, context_command)
+            .await;
+        second_client
+            .input(second_id, second_incarnation, context_command)
+            .await;
         first_client
             .input(first_id, first_incarnation, b"printf 'first-ready\\n'\n")
             .await;
@@ -1553,8 +1685,18 @@ async fn two_splints_spawn_and_preserve_independent_output() {
             snapshot_until(&mut admin, second_id, second_incarnation, "second-ready").await;
         assert_eq!((first_snapshot.columns, first_snapshot.rows), (90, 30));
         assert_eq!((second_snapshot.columns, second_snapshot.rows), (100, 40));
-        assert!(!snapshot_text(&first_snapshot).contains("second-ready"));
-        assert!(!snapshot_text(&second_snapshot).contains("first-ready"));
+        let first_text = snapshot_text(&first_snapshot);
+        let second_text = snapshot_text(&second_snapshot);
+        assert!(first_text.contains(&format!(
+            "CTX={dojo_id}|{window_id}|{first_id}|{first_incarnation}"
+        )));
+        assert!(second_text.contains(&format!(
+            "CTX={dojo_id}|{window_id}|{second_id}|{second_incarnation}"
+        )));
+        assert!(!first_text.contains("caller-supplied"));
+        assert!(!second_text.contains("caller-supplied"));
+        assert!(!first_text.contains("second-ready"));
+        assert!(!second_text.contains("first-ready"));
 
         assert!(matches!(
             admin
@@ -1593,7 +1735,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
                     command: vec![
                         "/bin/sh".into(),
                         "-c".into(),
-                        "printf first-relaunched; exec sleep 30".into(),
+                        "printf 'RELAUNCH=%s|%s|%s|%s\\n' \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_WINDOW_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\"; exec sleep 30".into(),
                     ],
                     ..shell_launch()
                 },
@@ -1615,13 +1757,18 @@ async fn two_splints_spawn_and_preserve_independent_output() {
             .await
             .unwrap_err();
         assert_eq!(stale.code, ErrorCode::StaleIncarnation);
-        snapshot_until(
+        let relaunched = snapshot_until(
             &mut admin,
             first_id,
             relaunched_incarnation,
-            "first-relaunched",
+            "RELAUNCH=",
         )
         .await;
+        let relaunched_text = snapshot_text(&relaunched);
+        assert!(relaunched_text.contains(&format!(
+            "RELAUNCH={dojo_id}|{window_id}|{first_id}|{relaunched_incarnation}"
+        )));
+        assert!(!relaunched_text.contains("caller-supplied"));
 
         // Both remaining live processes are intentionally left to daemon shutdown,
         // which must drain the registry, reap them, and remove the socket.

@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    ffi::OsString,
     io::{self, Read, Write},
     os::unix::process::ExitStatusExt,
     sync::{
@@ -34,8 +35,13 @@ const READ_BUFFER: usize = 16 * 1024;
 pub struct ProcessIncarnation(u64);
 
 impl ProcessIncarnation {
-    fn new() -> Self {
-        Self(NEXT_INCARNATION.fetch_add(1, Ordering::Relaxed))
+    fn allocate() -> Self {
+        let value = NEXT_INCARNATION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("process incarnation space exhausted");
+        Self(value)
     }
 
     #[must_use]
@@ -174,6 +180,7 @@ pub struct LiveSplintConfig {
     pub terminate_grace: Duration,
     pub poll_interval: Duration,
     pub terminal: TerminalConfig,
+    pub incarnation_environment: Option<OsString>,
 }
 
 impl Default for LiveSplintConfig {
@@ -194,6 +201,7 @@ impl Default for LiveSplintConfig {
             terminate_grace: Duration::from_secs(30),
             poll_interval: Duration::from_millis(10),
             terminal: TerminalConfig::default(),
+            incarnation_environment: None,
         }
     }
 }
@@ -443,6 +451,12 @@ impl LiveSplintRuntime {
         command: PtyCommand,
         config: LiveSplintConfig,
     ) -> Result<Self, LiveError> {
+        let incarnation = ProcessIncarnation::allocate();
+        let command = if let Some(name) = &config.incarnation_environment {
+            command.env(name, incarnation.value().to_string())
+        } else {
+            command
+        };
         validate_dimensions(config.columns, config.rows)?;
         if config.poll_interval.is_zero() {
             return Err(LiveError::InvalidPollInterval);
@@ -468,16 +482,22 @@ impl LiveSplintRuntime {
                 return Err(error.into());
             }
         };
-        Ok(Self::from_session(splint_id, session, io, config))
+        Ok(Self::from_session(
+            splint_id,
+            incarnation,
+            session,
+            io,
+            config,
+        ))
     }
 
     fn from_session(
         splint_id: SplintId,
+        incarnation: ProcessIncarnation,
         session: LinuxPtySession,
         io: AsyncFd<std::fs::File>,
         config: LiveSplintConfig,
     ) -> Self {
-        let incarnation = ProcessIncarnation::new();
         let terminal = Terminal::new(
             usize::from(config.columns),
             usize::from(config.rows),
@@ -1068,7 +1088,7 @@ mod tests {
         let (event_tx, events) = mpsc::channel(1);
         event_tx
             .send(LiveEvent::Exited {
-                incarnation: ProcessIncarnation::new(),
+                incarnation: ProcessIncarnation::allocate(),
                 status: ProcessExit {
                     code: Some(0),
                     signal: None,

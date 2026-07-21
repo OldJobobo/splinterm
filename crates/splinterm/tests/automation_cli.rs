@@ -865,6 +865,32 @@ fn output_json_snapshot_uses_exact_provenance_and_detaches() {
 }
 
 #[test]
+fn expected_incarnation_rejects_retargeting_before_terminal_access() {
+    let (socket, server) = serve_one(Ok(Response::Topology {
+        snapshot: reviewed_topology(),
+    }));
+    let output = run_json_ping(
+        &[
+            "--output",
+            "json",
+            "snapshot",
+            "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+            "--expected-incarnation",
+            "99",
+        ],
+        &socket,
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["operation"], "terminal_snapshot");
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["error"]["code"], "stale_incarnation");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected incarnation"));
+}
+
+#[test]
 fn output_json_history_reads_emit_pages_and_resync_without_query_echo() {
     let terminal = reviewed_terminal_snapshot();
     let (socket, server) = serve_history_response(

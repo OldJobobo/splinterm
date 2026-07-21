@@ -1295,18 +1295,24 @@ fn first_party_ui_scopes(scopes: &[AccessScope]) -> bool {
     })
 }
 
-fn trusted_first_party_ui(peer: &PeerIdentity, scopes: &[AccessScope]) -> bool {
-    peer.is_matching_splinterm() && first_party_ui_scopes(scopes)
+fn trusted_first_party_ui(
+    trusted_ui_client: bool,
+    peer: &PeerIdentity,
+    scopes: &[AccessScope],
+) -> bool {
+    trusted_ui_client && peer.is_matching_splinterm() && first_party_ui_scopes(scopes)
 }
 
 async fn authorize_scope(
     state: &DaemonState,
     peer: &PeerIdentity,
+    trusted_ui_client: bool,
     splint_id: SplintId,
     incarnation: u64,
     scopes: &[AccessScope],
 ) -> Result<Option<u64>, ProtocolError> {
-    if state.development_terminal_access || trusted_first_party_ui(peer, scopes) {
+    if state.development_terminal_access || trusted_first_party_ui(trusted_ui_client, peer, scopes)
+    {
         return Ok(None);
     }
     state
@@ -1430,9 +1436,31 @@ async fn publish_topology(
     });
 }
 
+#[derive(Clone, Copy)]
+struct SplintLaunchContext {
+    dojo: DojoId,
+    window: WindowId,
+    splint: SplintId,
+}
+
+fn splint_launch_context(lair: &Lair, splint_id: SplintId) -> Option<SplintLaunchContext> {
+    for dojo in lair.dojos() {
+        for window in &dojo.windows {
+            if window.root.find_splint(splint_id).is_some() {
+                return Some(SplintLaunchContext {
+                    dojo: dojo.id,
+                    window: window.id,
+                    splint: splint_id,
+                });
+            }
+        }
+    }
+    None
+}
+
 async fn spawn_runtime(
     state: &DaemonState,
-    splint_id: SplintId,
+    context: SplintLaunchContext,
     launch: &splinterm_protocol::LaunchParameters,
 ) -> Result<LiveSplintRuntime, ProtocolError> {
     launch.validate()?;
@@ -1449,15 +1477,24 @@ async fn spawn_runtime(
             launch.cwd.clone(),
         )
         .login_shell(launch.login_shell)
-    };
+    }
+    .env("SPLINTERM_DOJO_ID", context.dojo.to_string())
+    .env("SPLINTERM_WINDOW_ID", context.window.to_string())
+    .env("SPLINTERM_SPLINT_ID", context.splint.to_string());
     let mut config = LiveSplintConfig::default();
     config.terminal.scrollback_lines = launch.scrollback_lines;
-    LiveSplintRuntime::spawn(splint_id, state.pty_backend.clone(), pty_command, config)
-        .await
-        .map_err(|error| {
-            error!(%error, ?splint_id, "failed to spawn live Splint");
-            internal()
-        })
+    config.incarnation_environment = Some(OsString::from("SPLINTERM_SPLINT_INCARNATION"));
+    LiveSplintRuntime::spawn(
+        context.splint,
+        state.pty_backend.clone(),
+        pty_command,
+        config,
+    )
+    .await
+    .map_err(|error| {
+        error!(%error, splint_id = ?context.splint, "failed to spawn live Splint");
+        internal()
+    })
 }
 
 fn durable_launch(launch: &splinterm_protocol::LaunchParameters) -> SplintLaunchMetadata {
@@ -1513,7 +1550,9 @@ async fn start_exited_splint(
         runtime.shutdown().await.map_err(|_| internal())?;
     }
 
-    let runtime = spawn_runtime(state, splint_id, launch).await?;
+    let context =
+        splint_launch_context(&*state.lair.read().await, splint_id).ok_or_else(not_found)?;
+    let runtime = spawn_runtime(state, context, launch).await?;
     let handle = runtime.handle();
     let incarnation = handle.incarnation.value();
     let previous_lair = state.lair.read().await.clone();
@@ -2279,9 +2318,15 @@ async fn handle_request(
             return Err(error);
         }
     };
-    let mut result =
-        handle_authorized_request(request.clone(), state, peer, connection_id, &authorization)
-            .await;
+    let mut result = handle_authorized_request(
+        request.clone(),
+        state,
+        peer,
+        connection_id,
+        trusted_ui_client,
+        &authorization,
+    )
+    .await;
     if let (Ok(handled), Some(maximum)) = (&result, authorization.maximum_returned_bytes()) {
         let encoded_bytes = serde_json::to_vec(&handled.response)
             .map_err(|_| internal())?
@@ -2348,6 +2393,7 @@ async fn handle_authorized_request(
     state: &Arc<DaemonState>,
     peer: &PeerIdentity,
     connection_id: u64,
+    trusted_ui_client: bool,
     authorization: &RequestAuthorizationContext,
 ) -> Result<Handled, ProtocolError> {
     let response = match request {
@@ -2400,7 +2446,7 @@ async fn handle_authorized_request(
                 Response::AccessGranted {
                     grant: development_grant(peer, splint_id, incarnation, scopes),
                 }
-            } else if trusted_first_party_ui(peer, &scopes) {
+            } else if trusted_first_party_ui(trusted_ui_client, peer, &scopes) {
                 Response::AccessGranted {
                     grant: first_party_grant(splint_id, incarnation, scopes),
                 }
@@ -2541,13 +2587,20 @@ async fn handle_authorized_request(
                 return Err(invalid("dojo name exceeds protocol limits"));
             }
             let mut dojo = Dojo::new(name, launch.cwd.clone());
+            let dojo_id = dojo.id;
+            let window_id = dojo.windows[0].id;
             let LayoutNode::Leaf(splint) = &mut dojo.windows[0].root else {
                 unreachable!()
             };
             splint.command.clone_from(&launch.command);
             splint.launch = Box::new(durable_launch(&launch));
             let splint_id = splint.id;
-            let runtime = spawn_runtime(state, splint_id, &launch).await?;
+            let context = SplintLaunchContext {
+                dojo: dojo_id,
+                window: window_id,
+                splint: splint_id,
+            };
+            let runtime = spawn_runtime(state, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.state = SplintState::Running;
@@ -2629,7 +2682,13 @@ async fn handle_authorized_request(
             splint.command.clone_from(&launch.command);
             splint.launch = Box::new(durable_launch(&launch));
             let splint_id = splint.id;
-            let runtime = spawn_runtime(state, splint_id, &launch).await?;
+            let parent_context = splint_launch_context(&*state.lair.read().await, target_splint_id)
+                .ok_or_else(not_found)?;
+            let context = SplintLaunchContext {
+                splint: splint_id,
+                ..parent_context
+            };
+            let runtime = spawn_runtime(state, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
 
@@ -2849,7 +2908,12 @@ async fn handle_authorized_request(
             splint.launch = Box::new(durable_launch(&launch));
             let splint_id = splint.id;
             let window_id = window.id;
-            let runtime = spawn_runtime(state, splint_id, &launch).await?;
+            let context = SplintLaunchContext {
+                dojo: dojo_id,
+                window: window_id,
+                splint: splint_id,
+            };
+            let runtime = spawn_runtime(state, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.state = SplintState::Running;
@@ -3017,7 +3081,15 @@ async fn handle_authorized_request(
             let grant_id = if authorization.policy_authorized() {
                 None
             } else {
-                authorize_scope(state, peer, splint_id, incarnation, &required).await?
+                authorize_scope(
+                    state,
+                    peer,
+                    trusted_ui_client,
+                    splint_id,
+                    incarnation,
+                    &required,
+                )
+                .await?
             };
             let handle = current_handle(state, splint_id, incarnation).await?;
             let scrollback_rows = scrollback_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS);
@@ -3063,6 +3135,7 @@ async fn handle_authorized_request(
                 let _ = authorize_scope(
                     state,
                     peer,
+                    trusted_ui_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Observe, AccessScope::Scrollback],
@@ -3135,6 +3208,7 @@ async fn handle_authorized_request(
                 let _ = authorize_scope(
                     state,
                     peer,
+                    trusted_ui_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Observe, AccessScope::Scrollback],
@@ -3190,8 +3264,11 @@ async fn handle_authorized_request(
         } => {
             let grant_id = if authorization.policy_authorized()
                 || state.development_terminal_access
-                || trusted_first_party_ui(peer, &[AccessScope::Input, AccessScope::Resize])
-            {
+                || trusted_first_party_ui(
+                    trusted_ui_client,
+                    peer,
+                    &[AccessScope::Input, AccessScope::Resize],
+                ) {
                 None
             } else {
                 let mut grants = state.grants.lock().await;
@@ -3226,7 +3303,7 @@ async fn handle_authorized_request(
         } => {
             if !authorization.policy_authorized()
                 && !state.development_terminal_access
-                && !trusted_first_party_ui(peer, &[AccessScope::Observe])
+                && !trusted_first_party_ui(trusted_ui_client, peer, &[AccessScope::Observe])
             {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
@@ -3262,7 +3339,11 @@ async fn handle_authorized_request(
         } => {
             if !authorization.policy_authorized()
                 && !state.development_terminal_access
-                && !trusted_first_party_ui(peer, &[AccessScope::Input, AccessScope::Resize])
+                && !trusted_first_party_ui(
+                    trusted_ui_client,
+                    peer,
+                    &[AccessScope::Input, AccessScope::Resize],
+                )
             {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
@@ -3307,7 +3388,11 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
         } => {
-            if !trusted_first_party_ui(peer, &[AccessScope::Input, AccessScope::Resize]) {
+            if !trusted_first_party_ui(
+                trusted_ui_client,
+                peer,
+                &[AccessScope::Input, AccessScope::Resize],
+            ) {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
                     "forced transfer is restricted to the trusted first-party UI",
@@ -3366,8 +3451,15 @@ async fn handle_authorized_request(
             bytes,
         } => {
             if !authorization.policy_authorized() {
-                let _ = authorize_scope(state, peer, splint_id, incarnation, &[AccessScope::Input])
-                    .await?;
+                let _ = authorize_scope(
+                    state,
+                    peer,
+                    trusted_ui_client,
+                    splint_id,
+                    incarnation,
+                    &[AccessScope::Input],
+                )
+                .await?;
             }
             if bytes.len() > MAX_INPUT_BYTES {
                 return Err(invalid("input exceeds limit"));
@@ -3388,9 +3480,15 @@ async fn handle_authorized_request(
             pixel_height,
         } => {
             if !authorization.policy_authorized() {
-                let _ =
-                    authorize_scope(state, peer, splint_id, incarnation, &[AccessScope::Resize])
-                        .await?;
+                let _ = authorize_scope(
+                    state,
+                    peer,
+                    trusted_ui_client,
+                    splint_id,
+                    incarnation,
+                    &[AccessScope::Resize],
+                )
+                .await?;
             }
             if columns == 0 || rows == 0 || columns > MAX_COLUMNS || rows > MAX_ROWS {
                 return Err(invalid("terminal dimensions exceed limits"));
@@ -3428,6 +3526,7 @@ async fn handle_authorized_request(
                 let _ = authorize_scope(
                     state,
                     peer,
+                    trusted_ui_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Terminate],
@@ -4414,6 +4513,8 @@ mod tests {
                 max_records: 1,
             }
         ));
+        let peer = PeerIdentity::for_test();
+        assert!(!trusted_first_party_ui(false, &peer, &[AccessScope::Input]));
     }
 
     #[tokio::test]

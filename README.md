@@ -15,9 +15,9 @@ persistent multiplexing built in.
 > multi-Splint lifecycle, and explicit durable metadata restore are validated.
 > Persistent multi-window/pane multiplexing, explicit multi-client control,
 > stable local JSON/NDJSON automation, headless policy administration, bounded
-> audit inspection, and the dedicated SSH stdio relay are validated. The
-> reference in-Splint coding-agent flow, full-capability `splinterm-mcp` adapter,
-> and public distribution remain future work.
+> audit inspection, dedicated SSH stdio relay, daemon-injected logical context,
+> and public-CLI reference session picker are validated. The full-capability
+> `splinterm-mcp` adapter and public distribution remain future work.
 
 ## Workspace
 
@@ -175,7 +175,9 @@ operation with explicit owner-controlled policy. See
 [`docs/headless.md`](docs/headless.md) for policy validation/reload, logout and
 lingering behavior, service accounts, backups, upgrades, and recovery. Remote
 automation uses the dedicated, policy-scoped SSH stdio relay documented in
-[`docs/remote.md`](docs/remote.md).
+[`docs/remote.md`](docs/remote.md). Client authors and in-Splint tools should use
+the checklist, safe `jq` examples, and packaged reference picker in
+[`docs/integrations.md`](docs/integrations.md).
 
 ## Research direction
 

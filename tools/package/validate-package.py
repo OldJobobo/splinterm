@@ -13,6 +13,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -21,6 +22,7 @@ REQUIRED = {
     "usr/bin/splinterd",
     "usr/bin/splinterm",
     "usr/bin/splinterm-relay",
+    "usr/bin/splinterm-session-picker",
     "usr/bin/splinterm-pty-child",
     "usr/bin/splinterm-xdg-terminal-exec",
     "usr/lib/systemd/user/splinterd.service",
@@ -30,6 +32,7 @@ REQUIRED = {
     "usr/share/doc/splinterm/automation.md",
     "usr/share/doc/splinterm/config.ini",
     "usr/share/doc/splinterm/headless.md",
+    "usr/share/doc/splinterm/integrations.md",
     "usr/share/doc/splinterm/omarchy/10-splinterm.sh",
     "usr/share/doc/splinterm/packaging.md",
     "usr/share/doc/splinterm/remote.md",
@@ -43,6 +46,7 @@ EXECUTABLES = {
     "usr/bin/splinterd",
     "usr/bin/splinterm",
     "usr/bin/splinterm-relay",
+    "usr/bin/splinterm-session-picker",
     "usr/bin/splinterm-pty-child",
     "usr/bin/splinterm-xdg-terminal-exec",
 }
@@ -148,7 +152,7 @@ def validate_systemd_unit(root: Path) -> None:
         assert inherited_shell_restriction not in unit
 
 
-def validate_headless_runtime(daemon: Path, client: Path) -> None:
+def validate_headless_runtime(daemon: Path, client: Path, picker: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="splinterm-headless-") as directory:
         runtime = Path(directory)
         socket = runtime / "splinterd.sock"
@@ -218,6 +222,47 @@ def validate_headless_runtime(daemon: Path, client: Path) -> None:
                 timeout=10,
             )
             assert listed.returncode == 0, listed.stderr
+
+            picked = subprocess.run(
+                [sys.executable, str(picker), "--splinterm", str(client), "list"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert picked.returncode == 0, picked.stderr
+            assert picked.stdout == ""
+
+            spoofed = environment.copy()
+            spoofed.update(
+                SPLINTERM_DOJO_ID="018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+                SPLINTERM_WINDOW_ID="018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+                SPLINTERM_SPLINT_ID="018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                SPLINTERM_SPLINT_INCARNATION="1",
+            )
+            denied = subprocess.run(
+                [
+                    str(client),
+                    "--output",
+                    "json",
+                    "--schema-major",
+                    "1",
+                    "--timeout-ms",
+                    "5000",
+                    "new",
+                    "context-is-not-authority",
+                    "--",
+                    "/bin/true",
+                ],
+                env=spoofed,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert denied.returncode == 3, (denied.stdout, denied.stderr)
+            denied_document = json.loads(denied.stdout)
+            assert denied_document["ok"] is False
+            assert denied_document["error"]["code"] == "unauthorized"
         finally:
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)
@@ -229,6 +274,247 @@ def validate_headless_runtime(daemon: Path, client: Path) -> None:
         assert process.returncode == 0
         assert not socket.exists(), "headless daemon left its socket after clean shutdown"
 
+
+def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="splinterm-picker-runtime-") as directory:
+        runtime = Path(directory)
+        socket = runtime / "splinterd.sock"
+        policy = runtime / "policy.json"
+        executable = client.resolve()
+        identity = {
+            "path": str(executable),
+            "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        }
+
+        def install_rule(
+            rule_id: str,
+            scopes: list[str],
+            resources: list[dict[str, object]],
+            max_spawn_count: int | None = None,
+        ) -> None:
+            limits: dict[str, int] = {
+                "max_returned_rows": 16,
+                "max_returned_bytes": 8 * 1024 * 1024,
+                "max_live_subscriptions": 1,
+            }
+            if max_spawn_count is not None:
+                limits["max_spawn_count"] = max_spawn_count
+            policy.write_text(
+                json.dumps({
+                    "schema": "splinterm.policy.v1",
+                    "rules": [{
+                        "id": rule_id,
+                        "executable": identity,
+                        "scopes": scopes,
+                        "resources": resources,
+                        "limits": limits,
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            policy.chmod(0o600)
+
+        install_rule(
+            "picker-bootstrap",
+            ["topology_metadata_read", "process_spawn", "topology_layout_mutate"],
+            [{"kind": "lair"}],
+            1,
+        )
+        environment = os.environ.copy()
+        for name in ("DISPLAY", "WAYLAND_DISPLAY", "SPLINTERM_ENABLE_DEV_ATTACH"):
+            environment.pop(name, None)
+        environment.update(
+            HOME=str(runtime),
+            XDG_CONFIG_HOME=str(runtime / "config"),
+            XDG_RUNTIME_DIR=str(runtime),
+            XDG_STATE_HOME=str(runtime / "state"),
+            SPLINTERM_SOCKET=str(socket),
+            SPLINTERM_POLICY=str(policy),
+        )
+        process = subprocess.Popen(
+            [str(daemon)],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        def machine(arguments: list[str], env: dict[str, str] = environment) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    str(client),
+                    "--output",
+                    "json",
+                    "--schema-major",
+                    "1",
+                    "--timeout-ms",
+                    "10000",
+                    *arguments,
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    stderr = process.stderr.read() if process.stderr else ""
+                    raise AssertionError(f"picker daemon exited during startup: {stderr[-2000:]}")
+                if socket.exists():
+                    ping = subprocess.run(
+                        [str(client), "ping"],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if ping.returncode == 0:
+                        break
+                time.sleep(0.02)
+            else:
+                raise AssertionError("picker daemon did not become ready")
+
+            created = machine([
+                "new",
+                "picker-reference",
+                "--",
+                "/bin/sh",
+                "-c",
+                "printf 'picker-parent-ready\\n'; exec sleep 30",
+            ])
+            assert created.returncode == 0, (created.stdout, created.stderr)
+            parent = json.loads(created.stdout)["resource"]
+            context = environment.copy()
+            context.update(
+                SPLINTERM_DOJO_ID=parent["dojo_id"],
+                SPLINTERM_WINDOW_ID=parent["window_id"],
+                SPLINTERM_SPLINT_ID=parent["splint_id"],
+                SPLINTERM_SPLINT_INCARNATION=str(parent["incarnation"]),
+            )
+            install_rule(
+                "picker-split",
+                ["topology_metadata_read", "process_spawn", "topology_layout_mutate"],
+                [
+                    {"kind": "lair"},
+                    {
+                        "kind": "splint",
+                        "splint_id": parent["splint_id"],
+                        "incarnation": parent["incarnation"],
+                    },
+                ],
+                1,
+            )
+            process.send_signal(signal.SIGHUP)
+            time.sleep(0.2)
+
+            selected = subprocess.run(
+                [sys.executable, str(picker), "--splinterm", str(client), "context"],
+                env=context,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert selected.returncode == 0, (selected.stdout, selected.stderr)
+            assert json.loads(selected.stdout)["incarnation"] == parent["incarnation"]
+
+            split = subprocess.run(
+                [
+                    sys.executable,
+                    str(picker),
+                    "--splinterm",
+                    str(client),
+                    "split-context",
+                    "--axis",
+                    "vertical",
+                    "--side",
+                    "second",
+                    "--",
+                    "/bin/sh",
+                    "-c",
+                    "printf 'picker-child-ready\\n'; exec sleep 30",
+                ],
+                env=context,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert split.returncode == 0, (split.stdout, split.stderr)
+            child = json.loads(split.stdout)["resource"]
+            child_context = context.copy()
+            child_context.update(
+                SPLINTERM_DOJO_ID=child["dojo_id"],
+                SPLINTERM_WINDOW_ID=child["window_id"],
+                SPLINTERM_SPLINT_ID=child["splint_id"],
+                SPLINTERM_SPLINT_INCARNATION=str(child["incarnation"]),
+            )
+            install_rule(
+                "picker-read-child",
+                ["topology_metadata_read", "terminal_visible_read", "terminal_subscribe"],
+                [
+                    {"kind": "lair"},
+                    {
+                        "kind": "splint",
+                        "splint_id": child["splint_id"],
+                        "incarnation": child["incarnation"],
+                    },
+                ],
+            )
+            process.send_signal(signal.SIGHUP)
+            time.sleep(0.2)
+
+            snapshot = subprocess.run(
+                [
+                    sys.executable,
+                    str(picker),
+                    "--splinterm",
+                    str(client),
+                    "snapshot-context",
+                ],
+                env=child_context,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert snapshot.returncode == 0, (snapshot.stdout, snapshot.stderr)
+            snapshot_document = json.loads(snapshot.stdout)
+            text = "".join(
+                cell["text"]
+                for row in snapshot_document["data"]["rows"]
+                for cell in row["cells"]
+            )
+            assert "picker-child-ready" in text
+
+            denied = subprocess.run(
+                [
+                    sys.executable,
+                    str(picker),
+                    "--splinterm",
+                    str(client),
+                    "send-context",
+                    "literal-input",
+                ],
+                env=child_context,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert denied.returncode == 3, (denied.stdout, denied.stderr)
+            assert denied.stdout == ""
+            assert "unauthorized" in denied.stderr
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=90)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        assert process.returncode == 0
+        assert not socket.exists(), "picker daemon left its socket after clean shutdown"
 
 def encode_private_frame(document: dict[str, object]) -> bytes:
     body = json.dumps(document, separators=(",", ":")).encode("utf-8")
@@ -575,7 +861,16 @@ def main() -> int:
         }
         assert RUNTIME_DEPENDENCIES <= dependencies
         validate_systemd_unit(root)
-        validate_headless_runtime(root / "usr/bin/splinterd", root / "usr/bin/splinterm")
+        validate_headless_runtime(
+            root / "usr/bin/splinterd",
+            root / "usr/bin/splinterm",
+            root / "usr/bin/splinterm-session-picker",
+        )
+        validate_picker_runtime(
+            root / "usr/bin/splinterd",
+            root / "usr/bin/splinterm",
+            root / "usr/bin/splinterm-session-picker",
+        )
         validate_relay_runtime(
             root / "usr/bin/splinterd",
             root / "usr/bin/splinterm",

@@ -1,8 +1,8 @@
 # Supported automation contracts
 
 > **Phase 4 status:** the local JSON/NDJSON CLI, authorization, persistent policy
-> loading, daemon-lifetime audit inspection, and dedicated SSH stdio relay are
-> implemented. Human rendering and raw protocol DTOs remain private interfaces
+> loading, daemon-lifetime audit inspection, dedicated SSH stdio relay, and
+> public-CLI reference integration are implemented. Human rendering and raw protocol DTOs remain private interfaces
 > and are not compatibility promises.
 
 Splinterm automation uses the owner-only local daemon socket. Remote automation
@@ -188,6 +188,13 @@ Splint, closing a window, and revoking authorization. Create, split, restore,
 relaunch of an exited Splint, rename, ratio, focus hint, input, and resize remain
 explicit authorized commands but do not require a second confirmation flag.
 
+In-Splint clients pass `--expected-incarnation N` to `split`, `snapshot`, `send`,
+and terminal/control subscriptions. The CLI compares that precondition against
+its fresh authoritative lookup, then carries the selected incarnation or topology
+revision into the daemon request. A relaunch before or during the operation fails
+as `stale_incarnation` or `stale_topology`; the command never silently retargets
+the replacement process.
+
 ## Persistent policy v1
 
 No policy file means no persistent third-party grants. Graphical grant-once
@@ -244,17 +251,19 @@ verification, and lifecycle guidance.
 ## In-Splint automation context
 
 A process running inside a Splint receives no authority merely because of its
-location. A future launch-context slice will have `splinterd` override and
-inject `SPLINTERM_DOJO_ID`, `SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
+location. `splinterd` overrides and injects `SPLINTERM_DOJO_ID`,
+`SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
 `SPLINTERM_SPLINT_INCARNATION` into each PTY child. These values are discovery
 hints so a CLI-using coding agent can identify its initial logical location
 without guessing from topology. They are not credentials, policy selectors,
 proof of ancestry, or consent, and the daemon never trusts values presented
-back by a client. Relaunch must inject the new incarnation.
+back by a client. Relaunch injects the new incarnation.
 
-Until that slice lands, automation must discover stable IDs through `topology`
-and explicit user or host configuration. Absence of context variables must not
-broaden a policy or cause an adapter to select an arbitrary Splint.
+Automation must reconcile every hint against a fresh authorized `topology`
+response. Absence, malformed values, stale incarnation, process exit, or denied
+topology access must not broaden policy or cause an adapter to select an
+arbitrary Splint. See [integrations.md](integrations.md) for the client-author
+checklist, reference picker, and safe shell/`jq` workflows.
 
 ## Audit v1
 

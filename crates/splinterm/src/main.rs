@@ -175,6 +175,9 @@ enum Command {
         /// Thousandths assigned to the first child (1..=999).
         #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u16).range(1..=999))]
         ratio: u16,
+        /// Fail if the target no longer has this exact live incarnation.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        expected_incarnation: Option<u64>,
         #[arg(long)]
         cwd: Option<PathBuf>,
         /// Executable and arguments passed directly, never through a shell.
@@ -252,6 +255,9 @@ enum Command {
     /// Show one live terminal snapshot (development mode only).
     Snapshot {
         splint_id: SplintId,
+        /// Fail if the target no longer has this exact live incarnation.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        expected_incarnation: Option<u64>,
     },
     /// Read one bounded page of terminal history.
     Scrollback {
@@ -276,6 +282,9 @@ enum Command {
     Send {
         splint_id: SplintId,
         text: String,
+        /// Fail if the target no longer has this exact live incarnation.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        expected_incarnation: Option<u64>,
     },
     /// Resize one live terminal (development mode only).
     Resize {
@@ -320,9 +329,17 @@ enum AuthorizationCommand {
 
 #[derive(Debug, Subcommand)]
 enum SubscribeCommand {
-    Terminal { splint_id: SplintId },
+    Terminal {
+        splint_id: SplintId,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        expected_incarnation: Option<u64>,
+    },
     Topology,
-    Control { splint_id: SplintId },
+    Control {
+        splint_id: SplintId,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        expected_incarnation: Option<u64>,
+    },
 }
 
 fn confirm_kill(splint_id: SplintId) -> Result<bool> {
@@ -521,6 +538,7 @@ fn machine_exit_code(error: &anyhow::Error) -> i32 {
     } else if message.contains("not found")
         || message.contains("invalid continuation cursor")
         || message.contains("does not match the selected")
+        || message.contains("expected incarnation")
         || message.contains("does not have a live process")
         || message.contains("controller")
         || message.contains("resource limit")
@@ -545,19 +563,25 @@ async fn run_machine_command(command: Command, schema_major: u16, timeout_ms: u6
         Command::Inspect { splint_id } => {
             run_machine_read(MachineRead::Splint(splint_id), schema_major, timeout_ms).await
         }
-        Command::Snapshot { splint_id } => {
-            run_machine_snapshot(splint_id, schema_major, timeout_ms).await
-        }
+        Command::Snapshot {
+            splint_id,
+            expected_incarnation,
+        } => run_machine_snapshot(splint_id, expected_incarnation, schema_major, timeout_ms).await,
         Command::Authorization {
             command: AuthorizationCommand::Status { splint_id },
         } => run_machine_authorization_status(splint_id, schema_major, timeout_ms).await,
         Command::Audit { after, max_records } => {
             run_machine_audit(after, usize::from(max_records), schema_major, timeout_ms).await
         }
-        Command::Send { splint_id, text } => {
+        Command::Send {
+            splint_id,
+            text,
+            expected_incarnation,
+        } => {
             run_machine_control(
                 MachineControl::Input(text.into_bytes()),
                 splint_id,
+                expected_incarnation,
                 schema_major,
                 timeout_ms,
             )
@@ -571,6 +595,7 @@ async fn run_machine_command(command: Command, schema_major: u16, timeout_ms: u6
             run_machine_control(
                 MachineControl::Resize { columns, rows },
                 splint_id,
+                None,
                 schema_major,
                 timeout_ms,
             )
@@ -759,6 +784,7 @@ enum MachineMutation {
         axis: Axis,
         side: SplitSide,
         ratio: SplitRatio,
+        expected_incarnation: Option<u64>,
         cwd: Option<PathBuf>,
         command: Vec<String>,
     },
@@ -828,6 +854,7 @@ fn extract_machine_mutation(command: Command) -> std::result::Result<MachineMuta
             axis,
             side,
             ratio,
+            expected_incarnation,
             cwd,
             command,
         } => MachineMutation::Split {
@@ -835,6 +862,7 @@ fn extract_machine_mutation(command: Command) -> std::result::Result<MachineMuta
             axis: axis.into(),
             side: side.into(),
             ratio: SplitRatio::new(ratio).unwrap_or_else(|_| unreachable!("Clap bounded ratio")),
+            expected_incarnation,
             cwd,
             command,
         },
@@ -950,6 +978,27 @@ fn topology_splint_location(
         .context("requested Splint was not found")
 }
 
+fn require_incarnation(actual: u64, expected: Option<u64>) -> Result<()> {
+    if expected.is_some_and(|expected| actual != expected) {
+        bail!("selected Splint does not match expected incarnation");
+    }
+    Ok(())
+}
+
+fn require_expected_incarnation(
+    topology: &splinterm_protocol::TopologySnapshot,
+    splint_id: SplintId,
+    expected: Option<u64>,
+) -> Result<()> {
+    let actual = topology
+        .runtimes
+        .iter()
+        .find(|runtime| runtime.splint_id == splint_id)
+        .and_then(|runtime| runtime.live_incarnation)
+        .context("selected Splint does not have a live process")?;
+    require_incarnation(actual, expected)
+}
+
 fn topology_window_location(
     topology: &splinterm_protocol::TopologySnapshot,
     window_id: WindowId,
@@ -990,10 +1039,12 @@ fn machine_mutation_request(
             axis,
             side,
             ratio,
+            expected_incarnation,
             cwd,
             command,
         } => {
             topology_splint_location(topology, *target_splint_id)?;
+            require_expected_incarnation(topology, *target_splint_id, *expected_incarnation)?;
             Request::SplitSplint {
                 expected_topology_revision,
                 target_splint_id: *target_splint_id,
@@ -1162,6 +1213,10 @@ fn finish_machine_envelope(operation: &'static str, result: Result<CliEnvelopeV1
                 (CliErrorCodeV1::Timeout, true)
             } else if error.to_string().contains("not found") {
                 (CliErrorCodeV1::NotFound, false)
+            } else if error.to_string().contains("expected incarnation")
+                || error.to_string().contains("does not have a live process")
+            {
+                (CliErrorCodeV1::StaleIncarnation, false)
             } else {
                 (CliErrorCodeV1::Internal, false)
             };
@@ -1700,6 +1755,7 @@ async fn machine_control_envelope(
     connection: &mut Connection,
     command: &MachineControl,
     splint_id: SplintId,
+    expected_incarnation: Option<u64>,
     deadline: std::time::Duration,
     started: std::time::Instant,
 ) -> Result<CliEnvelopeV1> {
@@ -1716,6 +1772,7 @@ async fn machine_control_envelope(
     let Response::Topology { snapshot: topology } = response else {
         bail!("splinterd returned an unexpected topology response");
     };
+    require_expected_incarnation(&topology, splint_id, expected_incarnation)?;
     let (dojo_id, window_id, incarnation) = live_terminal_location(&topology, splint_id)?;
     let response = connection
         .request_with_deadline(
@@ -1808,6 +1865,7 @@ async fn machine_control_envelope(
 async fn run_machine_control(
     command: MachineControl,
     splint_id: SplintId,
+    expected_incarnation: Option<u64>,
     schema_major: u16,
     timeout_ms: u64,
 ) -> Result<()> {
@@ -1823,8 +1881,15 @@ async fn run_machine_control(
     }
     let deadline = std::time::Duration::from_millis(timeout_ms);
     let (mut connection, started) = connect_machine(operation, deadline).await?;
-    let result =
-        machine_control_envelope(&mut connection, &command, splint_id, deadline, started).await;
+    let result = machine_control_envelope(
+        &mut connection,
+        &command,
+        splint_id,
+        expected_incarnation,
+        deadline,
+        started,
+    )
+    .await;
     finish_machine_envelope(operation, result)
 }
 
@@ -2191,6 +2256,7 @@ async fn run_machine_history(
 async fn machine_snapshot_envelope(
     connection: &mut Connection,
     splint_id: SplintId,
+    expected_incarnation: Option<u64>,
     deadline: std::time::Duration,
     started: std::time::Instant,
 ) -> Result<CliEnvelopeV1> {
@@ -2206,6 +2272,7 @@ async fn machine_snapshot_envelope(
     topology
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
+    require_expected_incarnation(&topology, splint_id, expected_incarnation)?;
     let mut identity = None;
     for dojo in topology.lair.dojos() {
         for window in &dojo.windows {
@@ -2263,6 +2330,7 @@ async fn machine_snapshot_envelope(
 
 async fn run_machine_snapshot(
     splint_id: SplintId,
+    expected_incarnation: Option<u64>,
     schema_major: u16,
     timeout_ms: u64,
 ) -> Result<()> {
@@ -2295,7 +2363,14 @@ async fn run_machine_snapshot(
                 bail!("splinterd connection timed out");
             }
         };
-    let result = machine_snapshot_envelope(&mut connection, splint_id, deadline, started).await;
+    let result = machine_snapshot_envelope(
+        &mut connection,
+        splint_id,
+        expected_incarnation,
+        deadline,
+        started,
+    )
+    .await;
     match result {
         Ok(envelope) => write_json_document(&envelope),
         Err(error) => {
@@ -2305,7 +2380,9 @@ async fn run_machine_snapshot(
                 public_error_code(protocol.code)
             } else if error.to_string().contains("not found") {
                 (CliErrorCodeV1::NotFound, false)
-            } else if error.to_string().contains("does not have a live process") {
+            } else if error.to_string().contains("does not have a live process")
+                || error.to_string().contains("expected incarnation")
+            {
                 (CliErrorCodeV1::StaleIncarnation, false)
             } else {
                 (CliErrorCodeV1::Internal, false)
@@ -2420,6 +2497,7 @@ async fn next_private_event(connection: &mut Connection) -> Result<(u64, u64, Su
 async fn run_terminal_subscription(
     connection: &mut Connection,
     splint_id: SplintId,
+    expected_incarnation: Option<u64>,
     setup_deadline: std::time::Duration,
 ) -> Result<()> {
     let runtime = connection
@@ -2431,6 +2509,7 @@ async fn run_terminal_subscription(
     let incarnation = runtime
         .live_incarnation
         .context("selected Splint does not have a live process")?;
+    require_incarnation(incarnation, expected_incarnation)?;
     let response = connection
         .request_with_deadline(
             Request::Attach {
@@ -2648,6 +2727,7 @@ async fn run_topology_subscription(
 async fn run_control_subscription(
     connection: &mut Connection,
     splint_id: SplintId,
+    expected_incarnation: Option<u64>,
     setup_deadline: std::time::Duration,
 ) -> Result<()> {
     let runtime = connection
@@ -2659,6 +2739,7 @@ async fn run_control_subscription(
     let incarnation = runtime
         .live_incarnation
         .context("selected Splint does not have a live process")?;
+    require_incarnation(incarnation, expected_incarnation)?;
     let response = connection
         .request_with_deadline(
             Request::SubscribeControl {
@@ -2761,14 +2842,32 @@ async fn run_machine_subscription(
         .await
         .context("subscription connection deadline elapsed")??;
     match stream {
-        SubscribeCommand::Terminal { splint_id } => {
-            run_terminal_subscription(&mut connection, splint_id, setup_deadline).await
+        SubscribeCommand::Terminal {
+            splint_id,
+            expected_incarnation,
+        } => {
+            run_terminal_subscription(
+                &mut connection,
+                splint_id,
+                expected_incarnation,
+                setup_deadline,
+            )
+            .await
         }
         SubscribeCommand::Topology => {
             run_topology_subscription(&mut connection, setup_deadline).await
         }
-        SubscribeCommand::Control { splint_id } => {
-            run_control_subscription(&mut connection, splint_id, setup_deadline).await
+        SubscribeCommand::Control {
+            splint_id,
+            expected_incarnation,
+        } => {
+            run_control_subscription(
+                &mut connection,
+                splint_id,
+                expected_incarnation,
+                setup_deadline,
+            )
+            .await
         }
     }
 }
@@ -2816,12 +2915,19 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
             axis,
             side,
             ratio,
+            expected_incarnation,
             cwd,
             command,
         } => {
             let ratio = SplitRatio::new(ratio)
                 .map_err(|_| anyhow::anyhow!("split ratio must be between 1 and 999"))?;
-            let expected_topology_revision = connection.topology_revision().await?;
+            let Response::Topology { snapshot } =
+                connection.request(Request::InspectTopology).await?
+            else {
+                bail!("splinterd returned an unexpected topology response");
+            };
+            require_expected_incarnation(&snapshot, target_splint_id, expected_incarnation)?;
+            let expected_topology_revision = snapshot.revision;
             print_response(
                 connection
                     .request(Request::SplitSplint {
@@ -3013,8 +3119,12 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
         Command::Authorization { .. } | Command::Audit { .. } | Command::Subscribe { .. } => {
             bail!("authorization, audit, and subscriptions require machine output")
         }
-        Command::Snapshot { splint_id } => {
+        Command::Snapshot {
+            splint_id,
+            expected_incarnation,
+        } => {
             let incarnation = connection.live_incarnation(splint_id).await?;
+            require_incarnation(incarnation, expected_incarnation)?;
             print_response(
                 connection
                     .request(Request::Attach {
@@ -3028,8 +3138,13 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
         Command::Scrollback { .. } | Command::Search { .. } => {
             bail!("scrollback and search require --output json")
         }
-        Command::Send { splint_id, text } => {
+        Command::Send {
+            splint_id,
+            text,
+            expected_incarnation,
+        } => {
             let incarnation = connection.live_incarnation(splint_id).await?;
+            require_incarnation(incarnation, expected_incarnation)?;
             let controller_id = connection.acquire_control(splint_id, incarnation).await?;
             let response = connection
                 .request(Request::Input {

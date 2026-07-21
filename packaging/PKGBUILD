@@ -45,6 +45,7 @@ check() {
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
   cargo test --frozen --workspace -- --test-threads=1
+  python -m unittest tools/automation/test_session_picker.py
 }
 
 package() {
@@ -56,6 +57,8 @@ package() {
   install -Dm755 target/release/splinterm-pty-child "$pkgdir/usr/bin/splinterm-pty-child"
   install -Dm755 dist/bin/splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-xdg-terminal-exec"
   install -Dm755 tools/generate-omarchy-theme.py "$pkgdir/usr/bin/generate-omarchy-theme.py"
+  install -Dm755 tools/automation/splinterm-session-picker.py \
+    "$pkgdir/usr/bin/splinterm-session-picker"
 
   install -Dm644 dist/applications/com.oldjobobo.splinterm.desktop \
     "$pkgdir/usr/share/applications/com.oldjobobo.splinterm.desktop"
@@ -74,6 +77,7 @@ package() {
   install -Dm644 docs/packaging.md "$pkgdir/usr/share/doc/splinterm/packaging.md"
   install -Dm644 docs/headless.md "$pkgdir/usr/share/doc/splinterm/headless.md"
   install -Dm644 docs/automation.md "$pkgdir/usr/share/doc/splinterm/automation.md"
+  install -Dm644 docs/integrations.md "$pkgdir/usr/share/doc/splinterm/integrations.md"
   install -Dm644 docs/remote.md "$pkgdir/usr/share/doc/splinterm/remote.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/splinterm/LICENSE"
   install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/licenses/splinterm/THIRD_PARTY.md"

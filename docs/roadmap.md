@@ -69,14 +69,31 @@ and one pinned shutdown signal.
 - Stable JSON/NDJSON CLI and published schemas
 - Supported third-party capability policy and audit inspection
 - Resolve Dojo/window future-descendant policy semantics before agent lifecycle tools
-- Inject non-authoritative Dojo/window/Splint/incarnation context into PTY children
-- Editor/client integrations
+- Inject non-authoritative Dojo/window/Splint/incarnation context into PTY children (complete)
+- Public-CLI reference session picker and client-author examples (complete)
 - Required full-capability `splinterm-mcp` adapter with supported-automation parity
-- Reference in-Splint coding-agent flow: discover, split, launch, observe, control, reconcile
+- Reference in-Splint flow: discover, split, launch, observe, denied control, reconcile (complete)
 - Logical topology automation remains separate from compositor-native window control
 - No network listener in `splinterd` by default
 
-## Phase 5 — Nix and tertiary distribution
+## Phase 5 — bounded terminal image protocols
+
+Detailed plan: [`plans/0008-terminal-image-protocols.md`](plans/0008-terminal-image-protocols.md)
+
+- Generic sparse image-content and placement plane without enlarging every cell
+- Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers
+- Foot-compatible Sixel with pinned differential fixtures
+- Practical Kitty static-image support: direct chunked PNG/RGB/RGBA,
+  transmit/display/query/delete, IDs, crop, scale, offsets, and z-order
+- Bounded daemon-owned semantics across scrollback, resize, panes,
+  detach/reattach, updates, and resynchronization
+- Separate on-demand pixel transport with a low-copy local path and bounded
+  transport-independent fallback
+- CPU/Wayland-SHM composition before any separately justified GPU evolution
+- Optional iTerm2 compatibility, external Kitty transports, Unicode
+  placeholders, and animation only through later security/performance gates
+
+## Phase 6 — Nix and tertiary distribution
 
 - Nix package, flake checks, and Home Manager module
 - Reproducible release artifacts for other distributions

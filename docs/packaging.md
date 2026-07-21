@@ -42,7 +42,8 @@ versioned immutable source URL and checksum.
 - `/usr/bin/splinterm`, `/usr/bin/splinterd`, the dedicated
   `/usr/bin/splinterm-relay` SSH transport, and the adjacent
   `/usr/bin/splinterm-pty-child` helper;
-- `/usr/bin/splinterm-xdg-terminal-exec` and
+- `/usr/bin/splinterm-xdg-terminal-exec`, the public-CLI-only
+  `/usr/bin/splinterm-session-picker` reference client, and
   `/usr/bin/generate-omarchy-theme.py`;
 - desktop entry, AppStream metadata, scalable icon, and user service;
 - headless lifecycle/policy guidance and integration snippets under
@@ -58,7 +59,8 @@ remove its socket cleanly. If protocol negotiation fails after an upgrade, it
 restarts the user daemon once and waits a bounded 2.5 seconds. This ends old
 daemon-owned shells because cross-version process migration is not promised.
 See [headless.md](headless.md) for the complete service, policy, backup, and
-recovery workflow and [remote.md](remote.md) for the policy-scoped SSH relay.
+recovery workflow, [remote.md](remote.md) for the policy-scoped SSH relay, and
+[integrations.md](integrations.md) for reference-client and in-Splint workflows.
 
 ## Optional user integration
 

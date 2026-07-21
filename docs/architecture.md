@@ -109,17 +109,19 @@ higher-level orchestrator may build those semantics over structured process
 launch and bounded observation, but terminal content remains untrusted data and
 must never become authority or an automatic instruction.
 
-PTY children will eventually receive daemon-overridden logical context hints for
-their Dojo, window, Splint, and incarnation. These values improve discovery for
-an in-Splint agent but are not credentials and are never accepted as proof of
-resource authority.
+PTY children receive daemon-overridden logical context hints for their Dojo,
+window, Splint, and current incarnation. These values improve discovery for an
+in-Splint agent but are not credentials and are never accepted as proof of
+resource authority. Relaunch replaces the incarnation, and supported clients
+reconcile every hint against current public topology before selection.
 
 ## Private prerelease deployment
 
 The Arch package installs four adjacent runtime executables—`splinterm`,
-`splinterd`, `splinterm-relay`, and `splinterm-pty-child`—plus an on-demand
-systemd user service, xdg launcher/desktop metadata, icon/AppStream metadata,
-theme generator, examples, and license notices. The launcher starts the daemon
+`splinterd`, `splinterm-relay`, and `splinterm-pty-child`—plus the public-CLI-only
+`splinterm-session-picker` reference integration, an on-demand systemd user
+service, xdg launcher/desktop metadata, icon/AppStream metadata, theme generator,
+examples, and license notices. The launcher starts the daemon
 and performs one bounded restart when protocol negotiation reveals a stale
 pre-upgrade process. The headless-capable unit does not require graphical
 display variables, preserves them for PTY children when the graphical session
@@ -129,8 +131,8 @@ fail-closed policy reload, and uses SIGINT for graceful child/socket cleanup.
 Policy validation and inspection reuse the daemon's secure loader locally;
 reload remains systemd control rather than an ordinary socket RPC. Package
 scripts do not edit user homes, enable lingering, change SSH policy, or mutate
-Omarchy-owned directories; see [headless.md](headless.md) and
-[packaging.md](packaging.md).
+Omarchy-owned directories; see [headless.md](headless.md),
+[integrations.md](integrations.md), and [packaging.md](packaging.md).
 
 ## Foot reference map
 
