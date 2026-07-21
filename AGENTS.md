@@ -2,7 +2,6 @@
 
 ## Cost and delegation stop-loss
 
-- Cap an approved subagent at 8 assistant turns and 25 tool calls.
 - Never automatically retry, resume, or replace a failed, timed-out, or incomplete subagent. Stop and report to the user.
 - Before an approved launch, state its exact task, expected files, and validation command.
 - After a launch, immediately report the agent name, scope, and outcome.
@@ -18,7 +17,6 @@
 
 - Run graphical tests only on inactive workspace 8 on DP-2.
 - Never switch the user to workspace 8, focus a test window, or map a test window on another workspace or monitor.
-- Verify workspace 8 is assigned to DP-2, inactive, and empty before every graphical launch.
 - Use pre-map placement and no-focus rules. Abort and clean up immediately on any placement or focus violation.
 - Non-graphical build, lint, and unit-test commands do not launch windows and may run normally from the repository.
 
@@ -26,5 +24,4 @@
 
 - Preserve pinned Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e` as oracle authority.
 - Do not modify the canonical Foot checkout, translate comparison images, widen tolerances broadly, or regenerate references silently.
-- Leave unrelated untracked `assets/` untouched and uncommitted.
 - Do not claim a slice complete without recorded validation evidence and review.
