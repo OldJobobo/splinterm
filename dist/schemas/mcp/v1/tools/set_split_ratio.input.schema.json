@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/set_split_ratio.input.schema.json",
+  "title": "splinterm.set_split_ratio input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splint_id",
+        "ratio"
+      ],
+      "properties": {
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        }
+      }
+    }
+  ]
+}

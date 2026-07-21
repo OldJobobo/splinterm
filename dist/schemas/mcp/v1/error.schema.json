@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/error.schema.json",
+  "title": "Splinterm MCP v1 tool error",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "tool",
+    "ok",
+    "error",
+    "truncated",
+    "content_trust"
+  ],
+  "properties": {
+    "schema": {
+      "const": "splinterm.mcp.v1"
+    },
+    "tool": {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/tool_name"
+    },
+    "ok": {
+      "const": false
+    },
+    "error": {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/tool_error"
+    },
+    "truncated": {
+      "const": false
+    },
+    "content_trust": {
+      "const": "trusted_metadata"
+    }
+  }
+}

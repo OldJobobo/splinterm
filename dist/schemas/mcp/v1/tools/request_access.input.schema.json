@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/request_access.input.schema.json",
+  "title": "splinterm.request_access input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splint_id",
+        "scopes"
+      ],
+      "properties": {
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 18,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/scope"
+          }
+        }
+      }
+    }
+  ]
+}

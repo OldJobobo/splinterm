@@ -1,0 +1,21 @@
+{
+  "$schema_file": "tools/restore_dojo.output.schema.json",
+  "document": {
+    "schema": "splinterm.mcp.v1",
+    "tool": "splinterm.restore_dojo",
+    "ok": true,
+    "resource": {
+      "kind": "dojo",
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "topology_revision": 8
+    },
+    "data": {
+      "committed": true,
+      "restored_count": 1,
+      "failed_count": 0,
+      "partial": false
+    },
+    "truncated": false,
+    "content_trust": "trusted_metadata"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "$schema_file": "tools/revoke_access.input.schema.json",
+  "$expected_keyword": "pattern",
+  "document": {
+    "grant_id": "grant_1",
+    "confirm": true
+  }
+}

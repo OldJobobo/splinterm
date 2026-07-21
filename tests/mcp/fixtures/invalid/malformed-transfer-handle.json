@@ -1,0 +1,8 @@
+{
+  "$schema_file": "tools/decide_control_transfer.input.schema.json",
+  "$expected_keyword": "pattern",
+  "document": {
+    "transfer_handle": "7",
+    "decision": "accept"
+  }
+}

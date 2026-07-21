@@ -1,0 +1,7 @@
+{
+  "$schema_file": "tools/inspect_splint.input.schema.json",
+  "$expected_keyword": "pattern",
+  "document": {
+    "splint_id": "018F4D8C-2A18-4B31-8C2F-9E7C5DE77103"
+  }
+}

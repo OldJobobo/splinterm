@@ -1,0 +1,649 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json",
+  "title": "Splinterm MCP v1 common definitions",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "positive_integer": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cursor": {
+      "type": "string",
+      "pattern": "^cur_[A-Za-z0-9_-]{16,256}$"
+    },
+    "controller_handle": {
+      "type": "string",
+      "pattern": "^ctl_[A-Za-z0-9_-]{16,256}$"
+    },
+    "transfer_handle": {
+      "type": "string",
+      "pattern": "^xfer_[A-Za-z0-9_-]{16,256}$"
+    },
+    "grant_id": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "argv": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "maxLength": 4096
+      },
+      "$comment": "Runtime validation additionally caps total encoded argv bytes at 65536."
+    },
+    "scope": {
+      "enum": [
+        "topology_metadata_read",
+        "topology_subscribe",
+        "terminal_visible_read",
+        "terminal_subscribe",
+        "scrollback_read",
+        "scrollback_search",
+        "authorization_inspect",
+        "authorization_revoke",
+        "audit_inspect",
+        "process_spawn",
+        "process_restore",
+        "process_terminate",
+        "topology_layout_mutate",
+        "topology_name_mutate",
+        "controller_acquire",
+        "controller_transfer",
+        "input",
+        "resize"
+      ]
+    },
+    "modes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "input",
+          "resize"
+        ]
+      }
+    },
+    "resource": {
+      "oneOf": [
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/daemon_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/topology_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/dojo_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/window_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/splint_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/terminal_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/authorization_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/audit_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/control_resource"
+        }
+      ]
+    },
+    "terminal_cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "width"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        }
+      }
+    },
+    "terminal_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linebreak",
+        "cells"
+      ],
+      "properties": {
+        "linebreak": {
+          "type": "boolean"
+        },
+        "cells": {
+          "type": "array",
+          "maxItems": 240,
+          "items": {
+            "$ref": "#/$defs/terminal_cell"
+          }
+        }
+      }
+    },
+    "terminal_rows": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/terminal_row"
+      }
+    },
+    "tool_name": {
+      "enum": [
+        "splinterm.ping",
+        "splinterm.list_dojos",
+        "splinterm.inspect_topology",
+        "splinterm.inspect_splint",
+        "splinterm.read_terminal",
+        "splinterm.read_scrollback",
+        "splinterm.search_scrollback",
+        "splinterm.request_access",
+        "splinterm.authorization_status",
+        "splinterm.revoke_access",
+        "splinterm.inspect_audit",
+        "splinterm.create_dojo",
+        "splinterm.split_splint",
+        "splinterm.new_window",
+        "splinterm.relaunch_splint",
+        "splinterm.restore_splint",
+        "splinterm.restore_window",
+        "splinterm.restore_dojo",
+        "splinterm.close_splint",
+        "splinterm.close_window",
+        "splinterm.kill_splint",
+        "splinterm.set_split_ratio",
+        "splinterm.rename_dojo",
+        "splinterm.rename_window",
+        "splinterm.rename_splint",
+        "splinterm.set_window_default_focus",
+        "splinterm.acquire_control",
+        "splinterm.request_control_transfer",
+        "splinterm.decide_control_transfer",
+        "splinterm.release_control",
+        "splinterm.input",
+        "splinterm.resize"
+      ]
+    },
+    "success_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "tool",
+        "ok",
+        "resource",
+        "data",
+        "truncated",
+        "content_trust"
+      ],
+      "properties": {
+        "schema": {
+          "const": "splinterm.mcp.v1"
+        },
+        "tool": {
+          "$ref": "#/$defs/tool_name"
+        },
+        "ok": {
+          "const": true
+        },
+        "resource": true,
+        "data": true,
+        "truncated": {
+          "type": "boolean"
+        },
+        "content_trust": {
+          "$ref": "#/$defs/content_trust"
+        }
+      }
+    },
+    "committed_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "committed",
+        "topology_revision"
+      ],
+      "properties": {
+        "committed": {
+          "const": true
+        },
+        "topology_revision": {
+          "$ref": "#/$defs/revision"
+        }
+      }
+    },
+    "content_trust": {
+      "enum": [
+        "trusted_metadata",
+        "untrusted_terminal_data"
+      ]
+    },
+    "error_code": {
+      "enum": [
+        "authentication_failed",
+        "handshake_required",
+        "incompatible_version",
+        "invalid_request",
+        "unsupported_schema",
+        "consent_unavailable",
+        "consent_denied",
+        "unauthorized",
+        "confirmation_required",
+        "controller_unavailable",
+        "control_transfer_unavailable",
+        "stale_topology",
+        "not_found",
+        "stale_incarnation",
+        "invalid_argument",
+        "resource_limit",
+        "cancelled",
+        "timeout",
+        "internal"
+      ]
+    },
+    "error_details": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/resource"
+        },
+        "expected_revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "actual_revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "resync_required": {
+          "const": true
+        }
+      },
+      "minProperties": 1
+    },
+    "tool_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": {
+          "$ref": "#/$defs/error_details"
+        }
+      }
+    },
+    "daemon_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "daemon"
+        }
+      }
+    },
+    "topology_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "topology_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "topology"
+        },
+        "topology_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        }
+      }
+    },
+    "dojo_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "dojo_id",
+        "topology_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dojo"
+        },
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "topology_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        }
+      }
+    },
+    "window_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "dojo_id",
+        "window_id",
+        "topology_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "window"
+        },
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "window_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "topology_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        }
+      }
+    },
+    "splint_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "dojo_id",
+        "window_id",
+        "splint_id",
+        "incarnation",
+        "topology_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "splint"
+        },
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "window_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        },
+        "topology_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        }
+      }
+    },
+    "terminal_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "dojo_id",
+        "window_id",
+        "splint_id",
+        "incarnation",
+        "topology_revision",
+        "terminal_revision",
+        "history_generation"
+      ],
+      "properties": {
+        "kind": {
+          "const": "terminal"
+        },
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "window_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        },
+        "topology_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        },
+        "terminal_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        },
+        "history_generation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        }
+      }
+    },
+    "authorization_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "dojo_id",
+        "window_id",
+        "splint_id",
+        "incarnation",
+        "grant_id",
+        "authorization_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "authorization"
+        },
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "window_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        },
+        "grant_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/grant_id"
+        },
+        "authorization_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        }
+      }
+    },
+    "audit_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "audit"
+        }
+      }
+    },
+    "control_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "dojo_id",
+        "window_id",
+        "splint_id",
+        "incarnation",
+        "control_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "control"
+        },
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "window_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        },
+        "control_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        }
+      }
+    },
+    "topology_splint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splint_id",
+        "incarnation",
+        "title",
+        "state"
+      ],
+      "properties": {
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        },
+        "title": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/name"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "exited",
+            "restorable"
+          ]
+        }
+      }
+    },
+    "topology_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window_id",
+        "title",
+        "default_focus_splint_id",
+        "splints"
+      ],
+      "properties": {
+        "window_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "title": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/name"
+        },
+        "default_focus_splint_id": {
+          "oneOf": [
+            {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "splints": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/topology_splint"
+          }
+        }
+      }
+    },
+    "topology_dojo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dojo_id",
+        "name",
+        "windows"
+      ],
+      "properties": {
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "name": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/name"
+        },
+        "windows": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/topology_window"
+          }
+        }
+      }
+    },
+    "topology_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dojos"
+      ],
+      "properties": {
+        "dojos": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/topology_dojo"
+          }
+        }
+      }
+    }
+  }
+}

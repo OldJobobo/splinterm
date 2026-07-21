@@ -1,0 +1,7 @@
+{
+  "$schema_file": "tools/ping.input.schema.json",
+  "$expected_keyword": "additionalProperties",
+  "document": {
+    "private_request_id": "9"
+  }
+}

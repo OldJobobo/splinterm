@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/release_control.output.schema.json",
+  "title": "splinterm.release_control successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {
+          "const": "splinterm.release_control"
+        },
+        "content_trust": {
+          "const": "trusted_metadata"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "committed",
+            "released"
+          ],
+          "properties": {
+            "committed": {
+              "const": true
+            },
+            "released": {
+              "const": true
+            }
+          }
+        },
+        "truncated": {
+          "const": false
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/control_resource"
+        }
+      }
+    }
+  ]
+}

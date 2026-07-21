@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/inspect_splint.output.schema.json",
+  "title": "splinterm.inspect_splint successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {
+          "const": "splinterm.inspect_splint"
+        },
+        "content_trust": {
+          "const": "untrusted_terminal_data"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "title",
+            "state"
+          ],
+          "properties": {
+            "title": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "state": {
+              "enum": [
+                "running",
+                "exited",
+                "restorable"
+              ]
+            }
+          }
+        },
+        "truncated": {
+          "const": false
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/splint_resource"
+        }
+      }
+    }
+  ]
+}

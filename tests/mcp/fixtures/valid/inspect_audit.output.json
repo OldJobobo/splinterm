@@ -1,0 +1,25 @@
+{
+  "$schema_file": "tools/inspect_audit.output.schema.json",
+  "document": {
+    "schema": "splinterm.mcp.v1",
+    "tool": "splinterm.inspect_audit",
+    "ok": true,
+    "resource": {
+      "kind": "audit"
+    },
+    "data": {
+      "retention": "daemon_lifetime",
+      "retention_gap": false,
+      "records": [
+        {
+          "audit_id": 1,
+          "operation": "ping",
+          "outcome": "allowed"
+        }
+      ],
+      "continuation_cursor": null
+    },
+    "truncated": false,
+    "content_trust": "trusted_metadata"
+  }
+}

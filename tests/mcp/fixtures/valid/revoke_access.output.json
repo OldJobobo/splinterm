@@ -1,0 +1,22 @@
+{
+  "$schema_file": "tools/revoke_access.output.schema.json",
+  "document": {
+    "schema": "splinterm.mcp.v1",
+    "tool": "splinterm.revoke_access",
+    "ok": true,
+    "resource": {
+      "kind": "authorization",
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+      "incarnation": 2,
+      "grant_id": "42",
+      "authorization_revision": 4
+    },
+    "data": {
+      "committed": true
+    },
+    "truncated": false,
+    "content_trust": "trusted_metadata"
+  }
+}

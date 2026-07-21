@@ -1,0 +1,16 @@
+{
+  "$schema_file": "error.schema.json",
+  "$expected_keyword": "enum",
+  "document": {
+    "schema": "splinterm.mcp.v1",
+    "tool": "splinterm.ping",
+    "ok": false,
+    "error": {
+      "code": "AUTHENTICATION_FAILED",
+      "message": "sanitized failure",
+      "retryable": false
+    },
+    "truncated": false,
+    "content_trust": "trusted_metadata"
+  }
+}

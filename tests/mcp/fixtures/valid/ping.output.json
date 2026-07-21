@@ -1,0 +1,16 @@
+{
+  "$schema_file": "tools/ping.output.schema.json",
+  "document": {
+    "schema": "splinterm.mcp.v1",
+    "tool": "splinterm.ping",
+    "ok": true,
+    "resource": {
+      "kind": "daemon"
+    },
+    "data": {
+      "protocol_version": "2025-11-25"
+    },
+    "truncated": false,
+    "content_trust": "trusted_metadata"
+  }
+}

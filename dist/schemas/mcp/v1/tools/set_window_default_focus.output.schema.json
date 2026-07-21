@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/set_window_default_focus.output.schema.json",
+  "title": "splinterm.set_window_default_focus successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {
+          "const": "splinterm.set_window_default_focus"
+        },
+        "content_trust": {
+          "const": "trusted_metadata"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "committed",
+            "splint_id"
+          ],
+          "properties": {
+            "committed": {
+              "const": true
+            },
+            "splint_id": {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+            }
+          }
+        },
+        "truncated": {
+          "const": false
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/window_resource"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "$schema_file": "tools/create_dojo.input.schema.json",
+  "document": {
+    "name": "dojo",
+    "cwd": "/tmp",
+    "argv": [
+      "sh"
+    ]
+  }
+}

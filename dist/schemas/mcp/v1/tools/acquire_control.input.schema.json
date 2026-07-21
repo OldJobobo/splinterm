@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/acquire_control.input.schema.json",
+  "title": "splinterm.acquire_control input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splint_id",
+        "incarnation",
+        "modes"
+      ],
+      "properties": {
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        },
+        "modes": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/modes"
+        }
+      }
+    }
+  ]
+}

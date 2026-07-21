@@ -1,0 +1,4 @@
+{
+  "$schema_file": "tools/inspect_topology.input.schema.json",
+  "document": {}
+}

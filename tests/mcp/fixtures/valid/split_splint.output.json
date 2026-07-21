@@ -1,0 +1,21 @@
+{
+  "$schema_file": "tools/split_splint.output.schema.json",
+  "document": {
+    "schema": "splinterm.mcp.v1",
+    "tool": "splinterm.split_splint",
+    "ok": true,
+    "resource": {
+      "kind": "splint",
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+      "incarnation": 2,
+      "topology_revision": 8
+    },
+    "data": {
+      "committed": true
+    },
+    "truncated": false,
+    "content_trust": "trusted_metadata"
+  }
+}

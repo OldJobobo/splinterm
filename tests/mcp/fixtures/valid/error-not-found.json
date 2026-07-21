@@ -1,0 +1,15 @@
+{
+  "$schema_file": "error.schema.json",
+  "document": {
+    "schema": "splinterm.mcp.v1",
+    "tool": "splinterm.ping",
+    "ok": false,
+    "error": {
+      "code": "not_found",
+      "message": "sanitized failure",
+      "retryable": false
+    },
+    "truncated": false,
+    "content_trust": "trusted_metadata"
+  }
+}

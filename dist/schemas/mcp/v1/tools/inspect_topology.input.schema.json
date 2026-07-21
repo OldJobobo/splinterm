@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/inspect_topology.input.schema.json",
+  "title": "splinterm.inspect_topology input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/resources/control.schema.json",
+  "title": "Splinterm MCP v1 control resource contents",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "uri",
+        "sequence",
+        "resync_required",
+        "content_trust",
+        "resource",
+        "data"
+      ],
+      "properties": {
+        "schema": {
+          "const": "splinterm.mcp.resource.v1"
+        },
+        "uri": {
+          "type": "string",
+          "pattern": "^splinterm://splints/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/control$"
+        },
+        "sequence": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        },
+        "resync_required": {
+          "type": "boolean"
+        },
+        "content_trust": {
+          "const": "trusted_metadata"
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/control_resource"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "controlled",
+            "locally_owned",
+            "modes"
+          ],
+          "properties": {
+            "controlled": {
+              "type": "boolean"
+            },
+            "locally_owned": {
+              "type": "boolean"
+            },
+            "modes": {
+              "type": "array",
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "input",
+                  "resize"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

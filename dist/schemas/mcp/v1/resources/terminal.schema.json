@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/resources/terminal.schema.json",
+  "title": "Splinterm MCP v1 terminal resource contents",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "uri",
+        "sequence",
+        "resync_required",
+        "content_trust",
+        "resource",
+        "data"
+      ],
+      "properties": {
+        "schema": {
+          "const": "splinterm.mcp.resource.v1"
+        },
+        "uri": {
+          "type": "string",
+          "pattern": "^splinterm://splints/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/terminal$"
+        },
+        "sequence": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        },
+        "resync_required": {
+          "type": "boolean"
+        },
+        "content_trust": {
+          "const": "untrusted_terminal_data"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "content_encoding",
+            "title",
+            "rows"
+          ],
+          "properties": {
+            "content_encoding": {
+              "const": "unicode_scalars"
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "rows": {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/terminal_rows"
+            }
+          }
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/terminal_resource"
+        }
+      }
+    }
+  ]
+}

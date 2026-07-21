@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/release_control.input.schema.json",
+  "title": "splinterm.release_control input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_handle"
+      ],
+      "properties": {
+        "controller_handle": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/controller_handle"
+        }
+      }
+    }
+  ]
+}

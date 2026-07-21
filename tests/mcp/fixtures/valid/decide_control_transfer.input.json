@@ -1,0 +1,7 @@
+{
+  "$schema_file": "tools/decide_control_transfer.input.schema.json",
+  "document": {
+    "transfer_handle": "xfer_abcdefghijklmnop",
+    "decision": "accept"
+  }
+}

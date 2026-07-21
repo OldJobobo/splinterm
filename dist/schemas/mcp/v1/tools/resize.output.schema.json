@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/resize.output.schema.json",
+  "title": "splinterm.resize successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {
+          "const": "splinterm.resize"
+        },
+        "content_trust": {
+          "const": "trusted_metadata"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "committed",
+            "terminal_revision",
+            "columns",
+            "rows"
+          ],
+          "properties": {
+            "committed": {
+              "const": true
+            },
+            "terminal_revision": {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+            },
+            "columns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "rows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        },
+        "truncated": {
+          "const": false
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/control_resource"
+        }
+      }
+    }
+  ]
+}

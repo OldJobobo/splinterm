@@ -1,0 +1,6 @@
+{
+  "$schema_file": "tools/release_control.input.schema.json",
+  "document": {
+    "controller_handle": "ctl_abcdefghijklmnop"
+  }
+}

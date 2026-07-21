@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/list_dojos.output.schema.json",
+  "title": "splinterm.list_dojos successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {
+          "const": "splinterm.list_dojos"
+        },
+        "content_trust": {
+          "const": "untrusted_terminal_data"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "dojos"
+          ],
+          "properties": {
+            "dojos": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "dojo_id",
+                  "name"
+                ],
+                "properties": {
+                  "dojo_id": {
+                    "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+                  },
+                  "name": {
+                    "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/name"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "truncated": {
+          "const": false
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/topology_resource"
+        }
+      }
+    }
+  ]
+}

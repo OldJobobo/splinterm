@@ -1,0 +1,7 @@
+{
+  "$schema_file": "tools/inspect_audit.input.schema.json",
+  "$expected_keyword": "maximum",
+  "document": {
+    "max_records": 257
+  }
+}

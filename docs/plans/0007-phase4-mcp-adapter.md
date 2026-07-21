@@ -1,8 +1,9 @@
 # Plan 0007: required full-capability MCP adapter
 
 - **Status:** In progress; stable JSON/NDJSON CLI, publication-snapshotted
-  descendant policy, the SDK/protocol spike, and reusable non-Wayland client
-  extraction are implemented; MCP production schemas and tools remain pending
+  descendant policy, the SDK/protocol spike, reusable non-Wayland client
+  extraction, and the frozen MCP v1 schemas and fixtures are implemented;
+  production MCP tools and resources remain pending
 - **Roadmap:** Phase 4 — Headless access and supported automation, Slice 6
 - **Foundation:** [Plan 0006](0006-phase4-headless-automation.md),
   [ADR 0007](../adr/0007-supported-automation-policy.md), and
@@ -344,11 +345,19 @@ or after that JSON. Both representations count toward the response byte ceiling.
 
 ### Errors
 
-Use MCP protocol-level errors only for protocol problems such as an unknown tool,
-invalid tool arguments, invalid initialization, or an unsupported MCP version.
+Use MCP protocol-level errors only for protocol problems such as malformed
+framing, an unknown tool, invalid tool arguments, invalid initialization, or an
+unsupported MCP version.
 
-Daemon, authorization, stale-state, timeout, resource-limit, and not-found
-failures are tool results with `isError: true` and a closed
+Supported tool-result failures share the exact closed CLI v1 taxonomy:
+`authentication_failed`, `handshake_required`, `incompatible_version`,
+`invalid_request`, `unsupported_schema`, `consent_unavailable`,
+`consent_denied`, `unauthorized`, `confirmation_required`,
+`controller_unavailable`, `control_transfer_unavailable`, `stale_topology`,
+`not_found`, `stale_incarnation`, `invalid_argument`, `resource_limit`,
+`cancelled`, `timeout`, and `internal`. Daemon, authorization, stale-state,
+timeout, resource-limit, and not-found failures are tool results with
+`isError: true` and a closed
 `splinterm.mcp.v1` error object containing:
 
 - stable symbolic code;
@@ -544,8 +553,11 @@ production tool or schema work was included in this slice.
 - Add valid fixtures for every tool and error class.
 - Add invalid fixtures for unknown fields, malformed UUID/cursor/handle,
   missing provenance or confirmation, excessive limits, private daemon IDs, raw
-  bytes, query/input/argv echo, open-ended data, false trust labels, invalid
-  controller ownership, uncommitted mutation results, and oversized text.
+  bytes, query/input/argv echo, open-ended data, false trust labels, wrong
+  resource kinds, uncommitted mutation results, and oversized text. Schema
+  fixtures cover handle syntax only; syntactically valid controller handles
+  owned by the wrong adapter process require runtime state and are explicitly
+  deferred to the Slice 7 controller tests and Slice 8 adversarial matrix.
 - Extend the fixture validator without weakening existing CLI schemas.
 
 **Gate**
@@ -553,6 +565,30 @@ production tool or schema work was included in this slice.
 Every valid fixture passes and every security-negative fixture fails for the
 intended reason. Schema inventory is exact and duplicate field definitions are
 factored without opening objects accidentally.
+
+**Status:** complete on 2026-07-21. The checked-in Draft 2020-12 inventory is
+exactly 69 schemas: common and error schemas, input/output schemas for all 32
+tools, and three resource schemas. The 86 valid fixtures cover every tool input,
+every successful tool output, all three resources, and every one of the 19 exact
+lowercase CLI v1 error codes. All 29 security-negative fixtures fail only for
+their declared JSON Schema keyword. Full bounded topology DTOs expose exact
+Dojo/window/Splint identities, containment, topology revision, and current
+incarnation. Tool and resource outputs select closed kind-specific identities;
+terminal provenance is carried once by that identity. Terminal-derived names
+and titles are labeled untrusted, and public grant IDs use canonical nonzero
+CLI v1 decimal strings. The validator also audits path-derived canonical IDs,
+resolvable references, closed objects, exact inventories and discriminators,
+destructive confirmation, successful mutation commit state, forbidden
+private/raw/echo/leak-alias output fields, and reviewed SHA-256 structural hashes
+while preserving the existing 35 valid/39 invalid automation fixtures. The
+package schema-inventory test independently checks all 32 tool pairs, three
+resources, two common/error roots, ordered 19-code taxonomy, path-derived IDs,
+and reviewed FNV-64 structural hashes. Syntactically valid wrong-process
+controller-handle ownership remains a runtime Slice 7/8 test obligation and is
+not claimed as schema enforcement. Rust 1.88 formatting, all five
+`splinterm-mcp` tests, package Clippy with warnings denied, contract validation,
+and whitespace checks pass. No production handler or packaging work is included
+in this slice.
 
 ### Slice 3 — tools/resources MCP server skeleton
 

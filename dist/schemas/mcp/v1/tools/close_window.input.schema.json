@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/close_window.input.schema.json",
+  "title": "splinterm.close_window input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window_id",
+        "confirm"
+      ],
+      "properties": {
+        "window_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "confirm": {
+          "const": true
+        }
+      }
+    }
+  ]
+}

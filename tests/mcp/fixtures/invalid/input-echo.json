@@ -1,0 +1,25 @@
+{
+  "$schema_file": "tools/input.output.schema.json",
+  "$expected_keyword": "additionalProperties",
+  "document": {
+    "schema": "splinterm.mcp.v1",
+    "tool": "splinterm.input",
+    "ok": true,
+    "resource": {
+      "kind": "control",
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+      "incarnation": 2,
+      "control_revision": 5
+    },
+    "data": {
+      "committed": true,
+      "terminal_revision": 10,
+      "accepted_bytes": 11,
+      "input": "printf safe"
+    },
+    "truncated": false,
+    "content_trust": "trusted_metadata"
+  }
+}

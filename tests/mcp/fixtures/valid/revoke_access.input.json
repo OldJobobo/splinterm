@@ -1,0 +1,7 @@
+{
+  "$schema_file": "tools/revoke_access.input.schema.json",
+  "document": {
+    "grant_id": "42",
+    "confirm": true
+  }
+}

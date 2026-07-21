@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/decide_control_transfer.output.schema.json",
+  "title": "splinterm.decide_control_transfer successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {
+          "const": "splinterm.decide_control_transfer"
+        },
+        "content_trust": {
+          "const": "trusted_metadata"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "committed",
+            "decision",
+            "controller_handle"
+          ],
+          "properties": {
+            "committed": {
+              "const": true
+            },
+            "decision": {
+              "enum": [
+                "accepted",
+                "denied"
+              ]
+            },
+            "controller_handle": {
+              "oneOf": [
+                {
+                  "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/controller_handle"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "truncated": {
+          "const": false
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/control_resource"
+        }
+      }
+    }
+  ]
+}

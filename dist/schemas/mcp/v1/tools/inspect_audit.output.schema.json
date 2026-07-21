@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/inspect_audit.output.schema.json",
+  "title": "splinterm.inspect_audit successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {
+          "const": "splinterm.inspect_audit"
+        },
+        "content_trust": {
+          "const": "trusted_metadata"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "retention",
+            "retention_gap",
+            "records",
+            "continuation_cursor"
+          ],
+          "properties": {
+            "retention": {
+              "const": "daemon_lifetime"
+            },
+            "retention_gap": {
+              "type": "boolean"
+            },
+            "records": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "audit_id",
+                  "operation",
+                  "outcome"
+                ],
+                "properties": {
+                  "audit_id": {
+                    "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+                  },
+                  "operation": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "outcome": {
+                    "enum": [
+                      "allowed",
+                      "denied",
+                      "committed",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            },
+            "continuation_cursor": {
+              "oneOf": [
+                {
+                  "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/cursor"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/audit_resource"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "truncated": {
+                "const": true
+              }
+            },
+            "required": [
+              "truncated"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "continuation_cursor": {
+                    "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/cursor"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "continuation_cursor": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

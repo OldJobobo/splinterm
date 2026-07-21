@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/decide_control_transfer.input.schema.json",
+  "title": "splinterm.decide_control_transfer input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transfer_handle",
+        "decision"
+      ],
+      "properties": {
+        "transfer_handle": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/transfer_handle"
+        },
+        "decision": {
+          "enum": [
+            "accept",
+            "deny"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v1/tools/split_splint.input.schema.json",
+  "title": "splinterm.split_splint input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splint_id",
+        "axis",
+        "side",
+        "ratio",
+        "argv"
+      ],
+      "properties": {
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "axis": {
+          "enum": [
+            "horizontal",
+            "vertical"
+          ]
+        },
+        "side": {
+          "enum": [
+            "before",
+            "after"
+          ]
+        },
+        "ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "cwd": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/cwd"
+        },
+        "argv": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/argv"
+        }
+      }
+    }
+  ]
+}

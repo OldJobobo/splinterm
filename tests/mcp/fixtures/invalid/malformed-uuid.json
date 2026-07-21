@@ -1,0 +1,7 @@
+{
+  "$schema_file": "tools/inspect_splint.input.schema.json",
+  "$expected_keyword": "pattern",
+  "document": {
+    "splint_id": "NOT-A-UUID"
+  }
+}
