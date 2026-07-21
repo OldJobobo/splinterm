@@ -2,7 +2,6 @@
 
 ## Cost and delegation stop-loss
 
-- Delegate only one bounded diagnosis or localized edit. Never delegate an entire plan slice or broad architecture rewrite.
 - Cap an approved subagent at 8 assistant turns and 25 tool calls.
 - Never automatically retry, resume, or replace a failed, timed-out, or incomplete subagent. Stop and report to the user.
 - Before an approved launch, state its exact task, expected files, and validation command.
