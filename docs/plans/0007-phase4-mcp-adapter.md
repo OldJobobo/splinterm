@@ -1,8 +1,8 @@
 # Plan 0007: required full-capability MCP adapter
 
 - **Status:** In progress; stable JSON/NDJSON CLI, publication-snapshotted
-  descendant policy, and the SDK/protocol spike are implemented; reusable
-  non-Wayland client extraction is next
+  descendant policy, the SDK/protocol spike, and reusable non-Wayland client
+  extraction are implemented; MCP production schemas and tools remain pending
 - **Roadmap:** Phase 4 — Headless access and supported automation, Slice 6
 - **Foundation:** [Plan 0006](0006-phase4-headless-automation.md),
   [ADR 0007](../adr/0007-supported-automation-policy.md), and
@@ -516,9 +516,24 @@ Existing CLI fixtures and subprocess tests remain compatible, crate dependency
 inspection shows no graphical dependencies, and focused cancellation tests prove
 one best-effort daemon cancel followed by connection disposal.
 
-Do not begin this extraction until the active Slice 2 work and its P0
-authorization/schema review findings are closed or explicitly rebased into this
-slice.
+**Status:** complete on 2026-07-21. `splinterm-automation-client` owns the
+non-Wayland negotiation/framing client, typed protocol and cancellation errors,
+deadlines and cancellation-token handling, bounded event queuing, opaque
+cursors, and reviewed CLI projections. `splinterm` retains only a compatibility
+re-export and command wiring. The extracted crate's 21 tests include preflight,
+deadline, token, and dropped-future cancellation; they prove no pre-cancelled
+request is dispatched, at most one best-effort cancel, complete connection
+disposal, and late-frame rejection. Daemon-side release of connection-owned
+subscriptions/controllers remains covered by daemon lifecycle tests and will be
+joined to adapter cancellation in Slice 8. All 15
+`automation_cli` subprocess tests and all 35 valid/39 invalid contract fixtures
+remain compatible. Rust 1.88 workspace formatting and Clippy pass, and the
+normal dependency tree contains only the approved non-graphical direct
+boundaries (`anyhow`, Serde/JSON, Tokio/Tokio utility,
+`splinterm-core`, and `splinterm-protocol`).
+
+The extraction used the completed baseline through commit `221c813`; no MCP
+production tool or schema work was included in this slice.
 
 ### Slice 2 — freeze MCP schemas and fixtures
 

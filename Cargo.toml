@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/splinterm",
+    "crates/splinterm-automation-client",
     "crates/splinterd",
     "crates/splinterm-relay",
     "crates/splinterm-core",

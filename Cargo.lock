@@ -1127,6 +1127,7 @@ dependencies = [
  "serde_json",
  "smithay-client-toolkit",
  "splinterd",
+ "splinterm-automation-client",
  "splinterm-core",
  "splinterm-filemap",
  "splinterm-freetype",
@@ -1135,6 +1136,19 @@ dependencies = [
  "tokio",
  "unicode-width",
  "wayland-client",
+]
+
+[[package]]
+name = "splinterm-automation-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "splinterm-core",
+ "splinterm-protocol",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
