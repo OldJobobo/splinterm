@@ -1,8 +1,8 @@
 # Plan 0007: required full-capability MCP adapter
 
-- **Status:** In progress; stable JSON/NDJSON CLI and publication-snapshotted
-  descendant policy are implemented; SDK spike and reusable non-Wayland client
-  extraction are next
+- **Status:** In progress; stable JSON/NDJSON CLI, publication-snapshotted
+  descendant policy, and the SDK/protocol spike are implemented; reusable
+  non-Wayland client extraction is next
 - **Roadmap:** Phase 4 — Headless access and supported automation, Slice 6
 - **Foundation:** [Plan 0006](0006-phase4-headless-automation.md),
   [ADR 0007](../adr/0007-supported-automation-policy.md), and
@@ -146,10 +146,13 @@ The first release:
   structured logging, tasks, or experimental capabilities; and
 - marks every tool with task support `forbidden`.
 
-A dependency spike must prove the exact feature set, Rust 1.85 compatibility,
+A dependency spike must prove the exact feature set, Rust 1.88 compatibility,
 newline-delimited stdout purity, lifecycle negotiation, resource subscriptions,
 cancellation hooks, and clean EOF shutdown before production tool code is
-accepted. If `rmcp 2.2.0` cannot meet those gates without broad HTTP/OAuth/client
+accepted. The project MSRV was raised from Rust 1.85 to 1.88 by explicit
+architecture decision because exact `rmcp 2.2.0` macros require Rust 1.88; the
+official SDK and its macros remain preferable to a second MCP stack. If
+`rmcp 2.2.0` cannot meet those gates without broad HTTP/OAuth/client
 dependencies, stop for an architecture decision rather than silently
 implementing a second MCP stack.
 
@@ -476,7 +479,7 @@ now use the same fail-closed contract.
 reload publishes a new bounded snapshot; no implicit containment behavior
 remains.
 
-### Slice 0 — SDK and protocol spike
+### Slice 0 — SDK and protocol spike (complete)
 
 **Work**
 
@@ -486,16 +489,16 @@ remains.
   advertisement, static `tools/list`, resource templates/read/subscribe,
   closed argument rejection, structured output, tool errors, cancellation
   observation, stdin EOF shutdown, and stdout purity.
-- Measure the dependency tree and verify Rust 1.85, workspace lint, license, and
+- Measure the dependency tree and verify Rust 1.88, workspace lint, license, and
   minimal-feature compatibility.
 - Determine and test the bounded stdin wrapper required to reject a line before
   allocating beyond 256 KiB.
 
-**Gate**
-
-A black-box stdio test passes every behavior above. Record the exact Cargo
-feature set and dependency/license inventory. Stop if the official SDK requires
-unneeded HTTP/OAuth/client features or cannot expose cancellation safely.
+**Gate:** complete on 2026-07-21. The black-box stdio suite passes every
+behavior above on Rust 1.88.0. The exact Cargo feature/dependency/license
+evidence is recorded in [Spike 0021](../spikes/0021-mcp-sdk.md); no HTTP, OAuth,
+or client feature/dependency is present, and rmcp exposes per-request
+cancellation safely.
 
 ### Slice 1 — extract the non-Wayland automation client
 

@@ -568,6 +568,10 @@ fn validate_policy_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::unnecessary_debug_formatting,
+    reason = "Debug formatting escapes untrusted policy path components"
+)]
 fn open_without_symlinks(path: &Path) -> Result<File> {
     let components = path
         .components()

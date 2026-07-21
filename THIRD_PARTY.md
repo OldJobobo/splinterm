@@ -27,6 +27,25 @@ Foot is Copyright (c) 2019 Daniel Eklöf and is distributed under the MIT
 License. Splinterm's MIT `LICENSE` preserves the applicable permission and
 warranty terms for these translations.
 
+## rmcp
+
+Plan 0007 Slice 0 uses the official Rust Model Context Protocol SDK in the
+non-shipping `splinterm-mcp` spike.
+
+- Source: <https://github.com/modelcontextprotocol/rust-sdk>
+- Version: exactly 2.2.0 (`rmcp` and `rmcp-macros`)
+- License: Apache-2.0
+- Default features: disabled
+- Enabled rmcp features: `macros`, `schemars`, `server`, `transport-io`
+- Protocol accepted by the spike: exactly MCP `2025-11-25`
+
+The selected feature tree contains no HTTP, SSE, OAuth, JWT, client,
+child-process, tower, or elicitation dependency. The exact resolved dependency
+and license inventory, feature-tree commands, and the reason the workspace MSRV
+rose to Rust 1.88 are recorded in
+[`docs/spikes/0021-mcp-sdk.md`](docs/spikes/0021-mcp-sdk.md). The crate has
+`publish = false` and is not included in packaging.
+
 ## rustix
 
 Splinterm uses `rustix` for safe Linux PTY, termios, process, signal, and

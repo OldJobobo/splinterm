@@ -12,7 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      # rmcp 2.2.0's macros require Rust 1.88; keep CI on the workspace MSRV.
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2

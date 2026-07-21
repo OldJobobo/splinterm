@@ -147,6 +147,10 @@ impl Row {
     /// # Panics
     ///
     /// Panics if `column` is outside the row.
+    #[allow(
+        clippy::range_plus_one,
+        reason = "the terminal row mutation API intentionally uses half-open Range values"
+    )]
     pub fn insert_cells(&mut self, column: usize, count: usize, background: Color) {
         assert!(
             column < self.cells.len(),
@@ -172,6 +176,10 @@ impl Row {
     /// # Panics
     ///
     /// Panics if `column` is outside the row.
+    #[allow(
+        clippy::range_plus_one,
+        reason = "the terminal row mutation API intentionally uses half-open Range values"
+    )]
     pub fn delete_cells(&mut self, column: usize, count: usize, background: Color) {
         assert!(
             column < self.cells.len(),
@@ -271,6 +279,10 @@ impl Row {
     }
 
     /// Resizes row storage without reflowing its content.
+    #[allow(
+        clippy::comparison_chain,
+        reason = "ordered grow/shrink branches mirror the terminal resize behavior"
+    )]
     pub(crate) fn resize_without_reflow(&mut self, columns: usize) {
         let old_columns = self.cells.len();
         if columns > old_columns {

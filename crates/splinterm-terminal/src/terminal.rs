@@ -1114,6 +1114,10 @@ impl Terminal {
         self.set_column(params.get(1).value(1, true).saturating_sub(1));
     }
 
+    #[allow(
+        clippy::range_plus_one,
+        reason = "the terminal erase API intentionally uses half-open Range values"
+    )]
     fn erase_line(&mut self, mode: u32) {
         self.clear_deferred_wrap(false);
         let cursor = self.grid().cursor().position();
@@ -1132,6 +1136,10 @@ impl Terminal {
             .erase(range, background);
     }
 
+    #[allow(
+        clippy::range_plus_one,
+        reason = "the terminal erase API intentionally uses half-open Range values"
+    )]
     fn erase_display(&mut self, mode: u32) {
         self.clear_deferred_wrap(false);
         let cursor = self.grid().cursor().position();

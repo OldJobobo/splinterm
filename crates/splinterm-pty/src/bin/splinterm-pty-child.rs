@@ -51,6 +51,10 @@ fn connect_exec_status(
         .map_err(|error| format!("connecting exec status socket failed: {error}"))
 }
 
+#[allow(
+    clippy::unnecessary_debug_formatting,
+    reason = "Debug formatting escapes an untrusted executable path in diagnostics"
+)]
 fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
     let login = match arguments.next().as_deref() {
         Some(value) if value == OsStr::new("--login") => true,
