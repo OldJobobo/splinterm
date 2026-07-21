@@ -2,6 +2,7 @@
 members = [
     "crates/splinterm",
     "crates/splinterd",
+    "crates/splinterm-relay",
     "crates/splinterm-core",
     "crates/splinterm-protocol",
     "crates/splinterm-pty",

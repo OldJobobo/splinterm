@@ -13,9 +13,11 @@ persistent multiplexing built in.
 > [!IMPORTANT]
 > Splinterm is a private prerelease. The Omarchy-native terminal MVP, headless
 > multi-Splint lifecycle, and explicit durable metadata restore are validated.
-> Persistent multi-window/pane multiplexing, explicit multi-client control
-> transfer, and bounded scrollback search are validated. Supported third-party
-> automation and public distribution remain future work.
+> Persistent multi-window/pane multiplexing, explicit multi-client control,
+> stable local JSON/NDJSON automation, headless policy administration, bounded
+> audit inspection, and the dedicated SSH stdio relay are validated. The
+> reference in-Splint coding-agent flow, full-capability `splinterm-mcp` adapter,
+> and public distribution remain future work.
 
 ## Workspace
 
@@ -25,6 +27,7 @@ crates/
 ├── splinterd/           # persistent session daemon
 ├── splinterm-core/      # Lair/Dojo/window/splint state model
 ├── splinterm-protocol/  # versioned client-daemon wire protocol
+├── splinterm-relay/     # dedicated policy-identified SSH stdio transport
 ├── splinterm-pty/       # Linux PTY and child-process boundary
 └── splinterm-terminal/  # Foot-derived grid and streaming VT kernel
 docs/
@@ -166,7 +169,13 @@ interpolation. Project-owned configuration and Omarchy theme templates live in
 and migration guide.
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
-for development with `SPLINTERM_SOCKET=/path/to/socket`.
+for development with `SPLINTERM_SOCKET=/path/to/socket`. The packaged daemon is
+Wayland-independent and supports on-demand or persistent systemd user-service
+operation with explicit owner-controlled policy. See
+[`docs/headless.md`](docs/headless.md) for policy validation/reload, logout and
+lingering behavior, service accounts, backups, upgrades, and recovery. Remote
+automation uses the dedicated, policy-scoped SSH stdio relay documented in
+[`docs/remote.md`](docs/remote.md).
 
 ## Research direction
 

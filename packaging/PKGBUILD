@@ -37,14 +37,14 @@ build() {
   cd "$pkgname-$pkgver"
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
-  cargo build --frozen --release -p splinterm -p splinterd -p splinterm-pty
+  cargo build --frozen --release -p splinterm -p splinterd -p splinterm-relay -p splinterm-pty
 }
 
 check() {
   cd "$pkgname-$pkgver"
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
-  cargo test --frozen --workspace
+  cargo test --frozen --workspace -- --test-threads=1
 }
 
 package() {
@@ -52,6 +52,7 @@ package() {
 
   install -Dm755 target/release/splinterm "$pkgdir/usr/bin/splinterm"
   install -Dm755 target/release/splinterd "$pkgdir/usr/bin/splinterd"
+  install -Dm755 target/release/splinterm-relay "$pkgdir/usr/bin/splinterm-relay"
   install -Dm755 target/release/splinterm-pty-child "$pkgdir/usr/bin/splinterm-pty-child"
   install -Dm755 dist/bin/splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-xdg-terminal-exec"
   install -Dm755 tools/generate-omarchy-theme.py "$pkgdir/usr/bin/generate-omarchy-theme.py"
@@ -71,6 +72,9 @@ package() {
     "$pkgdir/usr/share/doc/splinterm/omarchy/10-splinterm.sh"
   install -Dm644 dist/xdg-terminals.list "$pkgdir/usr/share/doc/splinterm/xdg-terminals.list"
   install -Dm644 docs/packaging.md "$pkgdir/usr/share/doc/splinterm/packaging.md"
+  install -Dm644 docs/headless.md "$pkgdir/usr/share/doc/splinterm/headless.md"
+  install -Dm644 docs/automation.md "$pkgdir/usr/share/doc/splinterm/automation.md"
+  install -Dm644 docs/remote.md "$pkgdir/usr/share/doc/splinterm/remote.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/splinterm/LICENSE"
   install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/licenses/splinterm/THIRD_PARTY.md"
 }

@@ -27,7 +27,11 @@ Phase 4 does not turn terminal output into trusted instructions. All screen and
 scrollback content remains untrusted data even when an automation client launched
 the process that produced it.
 
-## Current-state constraints
+## Historical baseline at plan start
+
+The constraints below describe the state when this plan was opened. Completion
+evidence in the dependency-ordered slices is authoritative for the current
+worktree.
 
 - `splinterd` is already Wayland-independent, binds only an owner-only Unix
   socket, verifies Linux peer credentials, and owns PTYs while no client is
@@ -98,6 +102,22 @@ the process that produced it.
     installed/configured, and provides full supported-automation capability
     parity under the daemon's exact policy, resource, controller, confirmation,
     and audit checks. It is required for the core Phase 4 completion gate.
+13. **Logical versus graphical windows:** daemon window operations mutate logical
+    topology only. They do not map, focus, move, resize, or close a
+    compositor-native Wayland window. Any future compositor control requires a
+    separately reviewed trusted graphical broker.
+14. **In-Splint discovery:** PTY children will receive daemon-overridden
+    `SPLINTERM_DOJO_ID`, `SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
+    `SPLINTERM_SPLINT_INCARNATION` hints. They are not credentials or policy
+    inputs and cannot prove ancestry or authority when presented back.
+15. **Agent orchestration boundary:** Splinterm supplies structured process
+    launch, logical topology, terminal observation, and exclusive control. Task
+    status, inter-agent messaging, readiness, completion, and result transport
+    belong to a higher-level coding-agent orchestrator.
+16. **Future descendants:** lifecycle automation must not rely on containment
+    silently broadening a Dojo/window selector. Before MCP mutation tools land,
+    the implementation must match ADR 0007's snapshot semantics or a new ADR
+    must define conspicuous bounded future-descendant authority.
 
 ## Non-goals
 
@@ -112,6 +132,9 @@ the process that produced it.
 - collaborative typing, shared controller leases, or automatic takeover;
 - persistent clipboard transport through the daemon;
 - a general plugin runtime or a commitment to multiple editor plugins;
+- compositor-native mapping, focus, movement, resize, workspace assignment, or
+  window-manager control through the topology API;
+- a built-in semantic multi-agent supervisor or message bus;
 - public/AUR publication, Nix packaging, or sandboxed distribution; and
 - changing the Foot-derived terminal or renderer behavior.
 
@@ -136,6 +159,10 @@ the process that produced it.
   never include terminal or input bodies.
 - Closing a CLI, relay, editor, or MCP client cancels its subscriptions and
   releases its controllers without ending daemon-owned processes.
+- Logical context hints and terminal-derived content never authorize a request,
+  provide consent, or become executable instructions.
+- Future-child authority is explicit and bounded; current resource containment
+  alone does not silently broaden a rule.
 
 ## Public capability direction
 
@@ -334,7 +361,7 @@ cargo test -p splinterd --test end_to_end -- --test-threads=1
 
 No graphical test was required or run for Slice 1.
 
-### Slice 2 — stable JSON/NDJSON CLI
+### Slice 2 — stable JSON/NDJSON CLI (implementation complete)
 
 **Work**
 
@@ -360,7 +387,14 @@ schema; a subprocess test proves stdout contains only JSON/NDJSON while warnings
 remain on stderr; older v1 fixtures remain byte/semantics compatible after
 additive changes.
 
-### Slice 3 — supported headless service and policy workflow
+**Completion evidence:** `docs/automation.md` freezes the one-shot and
+subscription inventory, `crates/splinterm/src/automation.rs` contains explicit
+public projections, and `crates/splinterm/tests/automation_cli.rs` exercises
+machine stdout, operation envelopes, mutations, atomic control, and resync. The
+non-Wayland client extraction remains deliberately deferred to Plan 0007 and is
+not part of this slice's public CLI compatibility claim.
+
+### Slice 3 — supported headless service and policy workflow (complete)
 
 **Work**
 
@@ -385,7 +419,47 @@ only under the installed policy; consent-required requests fail closed; daemon
 restart never auto-runs saved commands; shutdown reaps children and leaves no
 socket/process residue.
 
-### Slice 4 — SSH stdio relay
+**Completion evidence (2026-07-21):**
+
+- the canonical packaged user unit is Wayland-independent, loads only an optional
+  owner-controlled environment file, removes the development authorization
+  bypass after environment loading, preserves graphical variables for PTY
+  children, and exposes SIGHUP policy reload without a socket administration
+  RPC;
+- `splinterm policy validate` and `policy inspect` reuse the daemon's bounded,
+  owner/mode/link-checked loader locally, while `policy reload` requests only
+  `systemctl --user reload splinterd.service` and does not claim acceptance;
+- invalid policy reload atomically installs deny-all, disconnects existing
+  clients, and revokes connection-owned subscriptions, controller leases, and
+  transfers before clients reconnect;
+- the isolated no-Wayland lifecycle test verifies exact executable/audit
+  attribution, policy-authorized spawn/read/control, consent failure, accepted
+  and rejected reloads, explicit recovery, restart process loss, no automatic
+  command rerun, daemon-lifetime audit reset, child reaping, and socket removal;
+- a dedicated resistant-child regression proves SIGINT shutdown completes the
+  bounded HUP-to-TERM-to-KILL process-group escalation before final persistence
+  and socket removal; the unit allows 90 seconds for that bounded path; and
+- package validation checks the unit contract and runs the real daemon and CLI
+  paths without graphical variables under an exact path-and-digest policy. The
+  installed documentation now includes the headless, automation, and packaging
+  guides referenced by that workflow.
+
+Two fresh review rounds closed inherited `UMask`, development-bypass,
+exact-audit, reload-race, installed-CLI, shutdown-bound, and documentation-link
+findings. The complete non-graphical gate passed after the final fixes:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test -p splinterd --test end_to_end -- --test-threads=1
+systemd-analyze verify --user dist/systemd/user/splinterd.service
+```
+
+The real daemon/CLI headless package-validator smoke and focused policy CLI tests
+also passed. No graphical test was required or run for Slice 3.
+
+### Slice 4 — SSH stdio relay (complete)
 
 **Work**
 
@@ -411,13 +485,60 @@ large frames, stalled readers, cancellation, daemon restart, relay/SSH death,
 and malformed lengths; unauthorized operations remain denied and cleanup leaves
 no child, task, or socket residue.
 
-### Slice 5 — reference editor/client integrations
+**Completion evidence (2026-07-21):**
+
+- `splinterm relay --stdio` replaces itself with the separately packaged
+  `splinterm-relay` executable, so persistent policy grants identify the relay
+  without granting the ordinary CLI the same executable identity;
+- the relay accepts only an absolute normalized non-symlink socket in an
+  owner-only canonical directory, verifies endpoint owner/mode/device/inode,
+  binds the same-UID peer through Linux `SO_PEERPIDFD`, compares stable opened
+  peer and adjacent `splinterd` executable identities, and monitors peer exit for
+  the full connection lifetime;
+- helper startup closes every inherited non-stdio descriptor before creating its
+  runtime or socket, rejects terminal stdin/stdout, and emits only bounded
+  body-free diagnostics on stderr;
+- two fixed 16 KiB copy buffers preserve opaque bytes and kernel backpressure;
+  stdin EOF half-closes the daemon write direction, while daemon EOF, peer exit,
+  broken stdout, SSH/relay death, or transport failure terminates promptly even
+  when stdin remains blocked;
+- focused tests cover path/mode/symlink and same-UID substitute rejection,
+  pidfd/CLOEXEC behavior, bidirectional opaque data, upstream/output stalls,
+  half-close, blocked input cancellation, and TTY/diagnostic rules; and
+- the transport-equivalent real-daemon smoke proves exact relay policy identity,
+  authorized topology read, unauthorized mutation, a live subscription,
+  explicit cancellation, relay death while the daemon remains alive, replacement
+  connection cleanup, daemon restart and explicit reconnection, inherited-FD
+  removal through the wrapper, oversized-frame daemon rejection, broken stdout,
+  and clean socket shutdown.
+
+Two fresh review rounds closed the socket swap/restore, numeric-PID reuse,
+stable executable identity, inherited-descriptor, cancellation, and relay-death
+findings. The complete non-graphical gate passed:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test -p splinterd --test end_to_end -- --test-threads=1
+```
+
+The complete ephemeral release package build, serialized package test suite,
+installed-tree validator, and real packaged relay runtime smoke also passed. No
+graphical test was required or run for Slice 4. Unix-socket
+forwarding remains unsupported pending a separate security spike.
+
+### Slice 5 — reference editor/client and in-Splint integration
 
 **Work**
 
 - Publish a client-author checklist covering schema negotiation, stable IDs,
   deadlines, cancellation, resync, controller ownership, untrusted terminal
-  content, and revocation.
+  content, revocation, and the distinction between logical and compositor
+  windows.
+- Inject daemon-overridden Dojo, window, Splint, and incarnation context into PTY
+  children. Test that relaunch updates the incarnation, user-supplied values are
+  replaced, and presenting those values never authorizes a daemon request.
 - Ship one narrow reference integration, preferably an editor task/session picker
   that lists topology and opens an existing selected window or starts a direct
   argv launch through the CLI. It must not parse human output or copy the daemon
@@ -429,7 +550,10 @@ no child, task, or socket residue.
 
 **Gate:** the reference client uses only documented public CLI contracts, handles
 not-found/stale/resync/denied outcomes, and requires no development bypass or
-private Rust API.
+private Rust API. A reference in-Splint flow can discover its logical location,
+split a selected Splint, launch a structured child process, observe bounded
+output, handle controller denial, and reconcile after resync without treating
+terminal prose or context variables as authority.
 
 ### Slice 6 — required full-capability MCP adapter
 
@@ -504,14 +628,18 @@ Core Phase 4 is complete when a user can install an explicit least-privileged
 policy on a no-Wayland host, manage persistent Splints through documented stable
 JSON/NDJSON CLI contracts, inspect bounded authorization audit metadata, use the
 same contracts remotely through an SSH stdio relay, and access the required
-full-capability `splinterm-mcp` adapter under the same capability checks. Every
-operation remains resource/scoped, controller-exclusive, revision-aware,
-bounded, cancellable, and fail-closed; terminal content is labeled untrusted;
-`splinterd` exposes no network listener; and package/service documentation
-states logout, lingering, upgrade, and process-loss behavior honestly.
+full-capability `splinterm-mcp` adapter under the same capability checks. An
+in-Splint coding agent can discover its logical context and perform a bounded
+split, structured child launch, observation, control, and reconciliation flow
+without receiving ambient authority. Every operation remains resource/scoped,
+controller-exclusive, revision-aware, bounded, cancellable, and fail-closed;
+terminal content is labeled untrusted; logical window operations make no
+compositor-control claim; `splinterd` exposes no network listener; and
+package/service documentation states logout, lingering, upgrade, and
+process-loss behavior honestly.
 
-A reference editor/client integration and the full-capability MCP adapter are
-both required for this definition of done.
+A reference editor/client integration, the in-Splint reference flow, and the
+full-capability MCP adapter are required for this definition of done.
 
 ## Stop gates
 
@@ -521,6 +649,10 @@ Stop and request a new architecture decision if implementation requires:
 - treating SSH login, same UID, executable basename, argv, or client labels as
   sufficient authorization;
 - a headless policy that silently grants all resources or future resources;
+- proceeding with lifecycle MCP tools while Dojo/window selectors dynamically
+  match later descendants contrary to the accepted v1 contract;
+- treating inherited Dojo/window/Splint/incarnation context as authority;
+- claiming logical window mutation maps or focuses a Wayland window;
 - exposing raw internal protocol/Rust DTOs as the stable public CLI promise;
 - bypassing consent/policy/controller checks in relay, editor, or MCP clients;
 - logging terminal, scrollback, clipboard, input, token, environment, or complete

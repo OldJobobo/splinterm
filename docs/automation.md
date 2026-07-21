@@ -1,13 +1,15 @@
 # Supported automation contracts
 
 > **Phase 4 status:** the local JSON/NDJSON CLI, authorization, persistent policy
-> loading, and daemon-lifetime audit inspection are implemented. The SSH relay is
-> deferred to a later slice. Human rendering and raw protocol DTOs remain private
-> interfaces and are not compatibility promises.
+> loading, daemon-lifetime audit inspection, and dedicated SSH stdio relay are
+> implemented. Human rendering and raw protocol DTOs remain private interfaces
+> and are not compatibility promises.
 
 Splinterm automation uses the owner-only local daemon socket. Remote automation
-will use the same operations through `splinterm relay --stdio` over authenticated
-SSH; `splinterd` will not expose a network listener. Transport access, an SSH
+uses the same daemon operations through `splinterm relay --stdio` over
+authenticated SSH; `splinterd` does not expose a network listener. See
+[remote.md](remote.md) for the exact executable policy and transport lifecycle.
+Transport access, an SSH
 login, or the same Unix UID does not grant terminal authority.
 
 The security and operation-to-scope contract is fixed by
@@ -47,8 +49,16 @@ Human-readable output remains the default. Machine modes reserve stdout:
 
 One-shot NDJSON and JSON subscriptions are rejected rather than silently changing
 record shape. Machine output, schema, and timeout flags are also rejected for the
-graphical `window` and `launch` commands. Those commands remain human-only;
-automation uses the non-Wayland lifecycle commands instead.
+graphical `window` and `launch` commands and for local policy or relay
+administration. Those commands remain human-only; automation uses the
+non-Wayland lifecycle commands instead.
+
+A daemon `window` is a logical topology resource. `new-window`,
+`close-window`, `rename-window`, and `window-focus-hint` do not map, focus,
+move, resize, or close a compositor-native Wayland window. Graphical
+`splinterm window` clients are separate disposable processes, and the default
+focus field is only a persisted presentation hint. Compositor orchestration is
+outside the v1 automation contract.
 
 Request and subscription IDs are client-owned nonzero decimal strings, independent
 of private daemon protocol IDs. This avoids precision loss in JSON consumers and
@@ -201,20 +211,50 @@ A v1 rule has:
 
 There are no wildcard scopes, basename identities, path-only identities, or
 implicit future resources. A `splint` selector identifies an exact Splint and
-either an exact incarnation or the conspicuous value `current`. `dojo` and
-`window` selectors expand once to a bounded set during authorization. The
-singleton `{ "kind": "lair" }` selector is required for operations such as
-creating a Dojo that have no pre-existing child resource; it does not select
-future Splints for later terminal access.
+either an exact incarnation or the conspicuous value `current`. The intended v1
+contract is that `dojo` and `window` selectors expand to a bounded set and do
+not silently authorize descendants created later. The singleton
+`{ "kind": "lair" }` selector is required for operations such as creating a
+Dojo that have no pre-existing child resource; it does not select future
+Splints for later terminal access.
+
+**Known contract mismatch:** the current `ResourceSelector::matches`
+implementation lets a Dojo selector dynamically match later descendant windows
+and Splints, and a window selector dynamically match later descendant Splints.
+That can unintentionally authorize name, layout, terminal, or process operations
+on resources absent when the rule was reviewed, contradicting the contract above
+and ADR 0007. This behavior is not a supported future-resource grant. It must be
+removed or replaced by a separately reviewed, conspicuous, bounded
+descendant-authority design before lifecycle MCP or autonomous agent
+orchestration is released.
 
 Schema validation is necessary but not sufficient. The daemon must additionally
 reject duplicate rule IDs, expired rules, unsafe ownership or mode, symlinks,
 hard links, non-canonical paths, unknown resources, invalid scope/selector
 combinations, and limits that exceed protocol ceilings. Any load or reload
-failure installs a deny-all persistent-policy generation. `splinterd` reloads
-the configured policy on `SIGHUP`; publication is atomic, and existing client
-sessions are disconnected so subscriptions and connection-owned controller
-state cannot survive a narrowed or rejected generation.
+failure installs a deny-all persistent-policy generation. Use `splinterm policy
+validate PATH` and `splinterm policy inspect PATH` for offline administration
+through the same secure loader. `splinterm policy reload` asks the canonical
+systemd user service to deliver `SIGHUP`; it does not claim the file was
+accepted. Publication is atomic, and existing client sessions are disconnected
+so subscriptions and connection-owned controller state cannot survive a
+narrowed or rejected generation. See [headless.md](headless.md) for installation,
+verification, and lifecycle guidance.
+
+## In-Splint automation context
+
+A process running inside a Splint receives no authority merely because of its
+location. A future launch-context slice will have `splinterd` override and
+inject `SPLINTERM_DOJO_ID`, `SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
+`SPLINTERM_SPLINT_INCARNATION` into each PTY child. These values are discovery
+hints so a CLI-using coding agent can identify its initial logical location
+without guessing from topology. They are not credentials, policy selectors,
+proof of ancestry, or consent, and the daemon never trusts values presented
+back by a client. Relaunch must inject the new incarnation.
+
+Until that slice lands, automation must discover stable IDs through `topology`
+and explicit user or host configuration. Absence of context variables must not
+broaden a policy or cause an adapter to select an arbitrary Splint.
 
 ## Audit v1
 

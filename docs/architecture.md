@@ -6,7 +6,9 @@ The boundaries below reorganize ownership for persistence; they do not replace
 Foot with another terminal engine.
 
 Splinterm has two lifetimes: the graphical client may come and go, while the
-daemon owns terminal processes and session state.
+daemon owns terminal processes and session state. A third-party automation
+client, including a coding agent or MCP adapter, is also disposable and receives
+no authority from running inside a Splint.
 
 ```text
 ┌──────────────── splinterm ────────────────┐
@@ -83,15 +85,52 @@ Client-owned configuration controls renderer/window policy; a generated,
 project-owned theme maps Omarchy roles and reloads without mutating daemon
 terminal state or process lifetime.
 
+A daemon `Window` is logical topology, not a compositor-native surface.
+Automation may create or mutate logical windows and their Splint trees without
+mapping a Wayland window. Mapping, focusing, moving, resizing, or assigning a
+native window to a compositor workspace requires a separate trusted graphical
+broker and is not implied by topology mutation or the persisted default-focus
+hint.
+
+## Automation and coding-agent boundary
+
+The supported path for a coding agent is a least-privileged automation client:
+today the stable JSON/NDJSON CLI, and eventually the separately authorized
+`splinterm-mcp` adapter. Both use the same daemon operations and policy checks;
+neither inherits trusted-UI authority. If an agent shells out to the general
+`splinterm` CLI, the daemon authorizes that CLI executable, so every process able
+to invoke that exact binary can exercise the rule's scopes. The dedicated MCP
+binary exists to provide a narrower independently reviewable identity.
+
+Splinterm provides topology, PTYs, terminal observation, process lifecycle, and
+exclusive input/resize control. It does not itself provide semantic agent task
+status, inter-agent messaging, readiness, completion, or result transport. A
+higher-level orchestrator may build those semantics over structured process
+launch and bounded observation, but terminal content remains untrusted data and
+must never become authority or an automatic instruction.
+
+PTY children will eventually receive daemon-overridden logical context hints for
+their Dojo, window, Splint, and incarnation. These values improve discovery for
+an in-Splint agent but are not credentials and are never accepted as proof of
+resource authority.
+
 ## Private prerelease deployment
 
-The Arch package installs all three adjacent runtime executables, an on-demand
+The Arch package installs four adjacent runtime executables—`splinterm`,
+`splinterd`, `splinterm-relay`, and `splinterm-pty-child`—plus an on-demand
 systemd user service, xdg launcher/desktop metadata, icon/AppStream metadata,
 theme generator, examples, and license notices. The launcher starts the daemon
 and performs one bounded restart when protocol negotiation reveals a stale
-pre-upgrade process. The unit uses SIGINT for the daemon's graceful child/socket
-cleanup path. Package scripts do not edit user homes, terminal preferences, or
-Omarchy-owned directories; see [packaging.md](packaging.md).
+pre-upgrade process. The headless-capable unit does not require graphical
+display variables, preserves them for PTY children when the graphical session
+provides them, strips the unsupported development authorization bypass, loads
+only an optional owner-controlled environment file, uses SIGHUP for atomic
+fail-closed policy reload, and uses SIGINT for graceful child/socket cleanup.
+Policy validation and inspection reuse the daemon's secure loader locally;
+reload remains systemd control rather than an ordinary socket RPC. Package
+scripts do not edit user homes, enable lingering, change SSH policy, or mutate
+Omarchy-owned directories; see [headless.md](headless.md) and
+[packaging.md](packaging.md).
 
 ## Foot reference map
 
@@ -117,7 +156,13 @@ Wayland client's lifetime.
 3. Domain types do not know about rendering or transport.
 4. The protocol is versioned and rejects incompatible peers.
 5. Ported Foot code retains MIT attribution and provenance.
-6. Headless remote access uses an authenticated relay such as SSH; `splinterd`
-   does not expose a network listener by default.
+6. Headless remote access uses the dedicated, exact-policy
+   `splinterm-relay` transport over authenticated SSH; `splinterd` exposes no
+   network listener and never attributes the remote caller as its local peer.
 7. Shutdown owns and drains connection tasks before runtime shutdown and final
    metadata persistence; one pinned signal future prevents lost SIGINT events.
+8. Logical window mutation never claims compositor-native mapping or focus.
+9. In-Splint context and terminal-derived data are discovery inputs, never
+   authorization, consent, or executable instructions.
+10. Future-descendant authority must be explicit and bounded; containment alone
+    cannot silently broaden an automation rule.

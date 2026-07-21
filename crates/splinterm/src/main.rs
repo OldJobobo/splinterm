@@ -2,7 +2,9 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     io::{self, IsTerminal, Read, Write},
+    os::unix::process::CommandExt,
     path::PathBuf,
+    process::Command as ProcessCommand,
     sync::mpsc as std_mpsc,
 };
 
@@ -109,6 +111,17 @@ enum Command {
     Authorization {
         #[command(subcommand)]
         command: AuthorizationCommand,
+    },
+    /// Bridge private protocol bytes over non-terminal stdin/stdout.
+    Relay {
+        /// Use stdin and stdout as one full-duplex SSH transport.
+        #[arg(long, required = true)]
+        stdio: bool,
+    },
+    /// Validate, inspect, or reload the local persistent policy.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
     },
     /// Inspect bounded in-memory daemon audit records.
     Audit {
@@ -283,6 +296,16 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum PolicyCommand {
+    /// Validate a policy using the daemon's secure loader without publishing it.
+    Validate { path: PathBuf },
+    /// Print the normalized, validated policy document.
+    Inspect { path: PathBuf },
+    /// Ask the canonical systemd user service to reload its configured policy.
+    Reload,
+}
+
+#[derive(Debug, Subcommand)]
 enum AuthorizationCommand {
     Status {
         splint_id: SplintId,
@@ -330,6 +353,46 @@ fn usage_error(message: &str) -> ! {
         .exit()
 }
 
+fn run_relay_command(stdio: bool) -> Result<()> {
+    if !stdio {
+        bail!("relay requires --stdio");
+    }
+    let current = env::current_exe().context("cannot resolve the splinterm executable")?;
+    let relay = current.with_file_name("splinterm-relay");
+    let error = ProcessCommand::new(&relay).arg("--stdio").exec();
+    Err(error).with_context(|| format!("failed to execute {}", relay.display()))
+}
+
+fn run_policy_command(command: PolicyCommand) -> Result<()> {
+    match command {
+        PolicyCommand::Validate { path } => {
+            let (rule_count, _) = splinterd::inspect_policy_file(&path)
+                .with_context(|| format!("policy validation failed for {}", path.display()))?;
+            println!("valid splinterm.policy.v1 policy ({rule_count} rules)");
+        }
+        PolicyCommand::Inspect { path } => {
+            let (_, document) = splinterd::inspect_policy_file(&path)
+                .with_context(|| format!("policy inspection failed for {}", path.display()))?;
+            serde_json::to_writer_pretty(io::stdout().lock(), &document)
+                .context("failed to write validated policy")?;
+            println!();
+        }
+        PolicyCommand::Reload => {
+            let status = ProcessCommand::new("systemctl")
+                .args(["--user", "reload", "splinterd.service"])
+                .status()
+                .context("failed to invoke systemctl --user reload splinterd.service")?;
+            if !status.success() {
+                bail!("systemctl --user reload splinterd.service failed with {status}");
+            }
+            println!(
+                "policy reload requested; inspect daemon logs or bounded audit metadata for acceptance"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let Cli {
@@ -340,11 +403,15 @@ async fn main() -> Result<()> {
     } = Cli::parse();
     if matches!(
         &command,
-        Command::Window { .. } | Command::Launch { .. } | Command::Consent
+        Command::Window { .. }
+            | Command::Launch { .. }
+            | Command::Consent
+            | Command::Policy { .. }
+            | Command::Relay { .. }
     ) && (output.is_some() || schema_major.is_some() || timeout_ms.is_some())
     {
         usage_error(
-            "automation output, schema, and timeout options are unavailable for graphical commands",
+            "automation output, schema, and timeout options are unavailable for graphical, policy, and relay commands",
         );
     }
     if matches!(command, Command::Subscribe { .. }) && output != Some(OutputMode::Ndjson) {
@@ -385,6 +452,12 @@ async fn main() -> Result<()> {
     }
     if schema_major.is_some() || timeout_ms.is_some() {
         usage_error("--schema-major and --timeout-ms require --output json or ndjson");
+    }
+    if let Command::Policy { command } = command {
+        return run_policy_command(command);
+    }
+    if let Command::Relay { stdio } = command {
+        return run_relay_command(stdio);
     }
 
     let ConfigLoad {
@@ -2707,8 +2780,12 @@ async fn run_machine_subscription(
 async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
     let mut connection = Connection::connect().await?;
     match command {
-        Command::Window { .. } | Command::Launch { .. } | Command::Consent => {
-            unreachable!("graphical command returned before daemon connection")
+        Command::Window { .. }
+        | Command::Launch { .. }
+        | Command::Consent
+        | Command::Policy { .. }
+        | Command::Relay { .. } => {
+            unreachable!("graphical, policy, or relay command returned before daemon connection")
         }
         Command::Ping => print_response(connection.request(Request::Ping).await?),
         Command::List => print_response(connection.request(Request::ListDojos).await?),
@@ -3145,9 +3222,9 @@ async fn launch(
     command: Vec<String>,
     config: AppConfig,
 ) -> Result<()> {
-    let mut connection = Connection::connect().await.context(
-        "splinterd is unavailable; start com.oldjobobo.splinterm-daemon.service or run splinterd",
-    )?;
+    let mut connection = Connection::connect()
+        .await
+        .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
     let Response::Dojos { dojos } = connection.request(Request::ListDojos).await? else {
         bail!("splinterd did not return its session list");
     };
@@ -5020,6 +5097,17 @@ mod tests {
                 yes: true,
             } if splint_id == id
         ));
+    }
+
+    #[test]
+    fn relay_requires_explicit_stdio_transport() {
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "relay", "--stdio"])
+                .unwrap()
+                .command,
+            Command::Relay { stdio: true }
+        ));
+        assert!(Cli::try_parse_from(["splinterm", "relay"]).is_err());
     }
 
     #[test]

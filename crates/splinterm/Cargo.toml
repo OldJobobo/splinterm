@@ -14,6 +14,7 @@ fontdb.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+splinterd = { path = "../splinterd" }
 splinterm-core = { path = "../splinterm-core" }
 splinterm-filemap = { path = "../splinterm-filemap" }
 splinterm-freetype = { path = "../splinterm-freetype" }

@@ -28,7 +28,7 @@ git -C "$root" archive --format=tar.gz --prefix="splinterm-$pkgver/" -o "$archiv
   cd "$package_dir"
   makepkg --cleanbuild --clean --noconfirm --noprogressbar
 )
-package=$(find "$package_dir" -maxdepth 1 -name 'splinterm-*.pkg.tar.*' -print -quit)
+package=$(find "$package_dir" -maxdepth 1 -name 'splinterm-*.pkg.tar.*' ! -name 'splinterm-debug-*' -print -quit)
 [[ -n "$package" ]] || { printf 'makepkg produced no package\n' >&2; exit 1; }
 python "$root/tools/package/validate-package.py" "$package"
 printf 'Private package ready: %s\n' "$package"

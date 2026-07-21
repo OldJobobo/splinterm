@@ -1,9 +1,6 @@
 mod audit;
-mod authorization;
 mod consent;
-mod executable_identity;
 mod persistence;
-mod policy;
 
 use std::{
     collections::HashMap,
@@ -24,7 +21,7 @@ use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use splinterd::{
     LiveEvent, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, Subscription,
-    SubscriptionReceive,
+    SubscriptionReceive, authorization, executable_identity, policy,
 };
 use splinterm_core::{
     Dojo, DojoId, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId,
@@ -729,7 +726,7 @@ async fn main() -> Result<()> {
 
     state.exit_observers.close();
     let runtimes = state.runtimes.lock().await.drain();
-    let shutdown = async {
+    let shutdown_result = async {
         let mut tasks = tokio::task::JoinSet::new();
         for runtime in runtimes {
             tasks.spawn(runtime.shutdown());
@@ -741,26 +738,23 @@ async fn main() -> Result<()> {
                 Err(error) => error!(%error, "live Splint shutdown task failed"),
             }
         }
-    };
-    if time::timeout(Duration::from_secs(10), shutdown)
-        .await
-        .is_err()
-    {
-        error!("timed out while shutting down live Splints");
+        time::timeout(EXIT_OBSERVER_TIMEOUT, state.exit_observers.wait())
+            .await
+            .context("timed out while reconciling process exits during shutdown")?;
+        let _transaction = state
+            .topology_transactions
+            .acquire()
+            .await
+            .context("topology transaction barrier closed during shutdown")?;
+        let final_lair = state.lair.read().await.clone();
+        persist_lair(&state, &final_lair)
+            .await
+            .map_err(|_| anyhow::anyhow!("failed to persist final Lair metadata"))
     }
-    time::timeout(EXIT_OBSERVER_TIMEOUT, state.exit_observers.wait())
-        .await
-        .context("timed out while reconciling process exits during shutdown")?;
-    let _transaction = state
-        .topology_transactions
-        .acquire()
-        .await
-        .context("topology transaction barrier closed during shutdown")?;
-    let final_lair = state.lair.read().await.clone();
-    persist_lair(&state, &final_lair)
-        .await
-        .map_err(|_| anyhow::anyhow!("failed to persist final Lair metadata"))?;
-    fs::remove_file(&socket).await?;
+    .await;
+    let socket_removal = fs::remove_file(&socket).await;
+    shutdown_result?;
+    socket_removal?;
     Ok(())
 }
 

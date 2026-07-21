@@ -65,11 +65,15 @@ and one pinned shutdown signal.
 ## Phase 4 — headless access and supported automation
 
 - Headless `splinterd` service for homelab/server deployments
-- SSH-mediated stdio relay or Unix-socket forwarding
+- Dedicated policy-scoped SSH stdio relay (complete)
 - Stable JSON/NDJSON CLI and published schemas
 - Supported third-party capability policy and audit inspection
+- Resolve Dojo/window future-descendant policy semantics before agent lifecycle tools
+- Inject non-authoritative Dojo/window/Splint/incarnation context into PTY children
 - Editor/client integrations
 - Required full-capability `splinterm-mcp` adapter with supported-automation parity
+- Reference in-Splint coding-agent flow: discover, split, launch, observe, control, reconcile
+- Logical topology automation remains separate from compositor-native window control
 - No network listener in `splinterd` by default
 
 ## Phase 5 — Nix and tertiary distribution

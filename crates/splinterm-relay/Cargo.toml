@@ -1,0 +1,17 @@
+[package]
+name = "splinterm-relay"
+description = "Bounded stdio transport for remote Splinterm automation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+nix.workspace = true
+rustix.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+
+[lints]
+workspace = true

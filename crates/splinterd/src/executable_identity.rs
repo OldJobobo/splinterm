@@ -27,6 +27,12 @@ pub struct ExecutableIdentity {
 }
 
 impl ExecutableIdentity {
+    /// Snapshots and hashes the exact executable currently held by `pid`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when procfs identity, path, metadata, size, or stable
+    /// descriptor verification fails.
     pub fn from_pid(pid: u32) -> Result<Self> {
         snapshot_link(Path::new(&format!("/proc/{pid}/exe")))
             .with_context(|| format!("cannot snapshot peer executable for pid {pid}"))

@@ -866,6 +866,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smithay-client-toolkit",
+ "splinterd",
  "splinterm-core",
  "splinterm-filemap",
  "splinterm-freetype",
@@ -927,6 +928,16 @@ version = "0.1.0"
 dependencies = [
  "rustix",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "splinterm-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nix",
+ "rustix",
  "tokio",
 ]
 

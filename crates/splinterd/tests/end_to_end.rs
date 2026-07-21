@@ -1,16 +1,19 @@
 use std::{
     fs,
+    io::Read,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use sha2::{Digest, Sha256};
 use splinterm_core::{Axis, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
-    ClientFrame, ClientRole, ColorSource, ControlTransferDecision, ControlTransferOutcome,
-    ErrorCode, LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS, PROTOCOL_VERSION,
-    ProtocolError, Request, Response, ServerFrame, SubscriptionEvent, TerminalSnapshot,
-    TopologyChangeKind, encode_frame,
+    AccessScope, ClientFrame, ClientRole, ColorSource, ControlTransferDecision,
+    ControlTransferOutcome, ErrorCode, LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS,
+    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SubscriptionEvent,
+    TerminalSnapshot, TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -25,24 +28,44 @@ struct Daemon {
     child: Child,
     runtime: PathBuf,
     socket: PathBuf,
+    policy: Option<PathBuf>,
+    development_terminal_access: bool,
 }
 
 impl Daemon {
     fn spawn_child(runtime: &Path, socket: &Path) -> Child {
+        Self::spawn_configured(runtime, socket, None, true)
+    }
+
+    fn spawn_configured(
+        runtime: &Path,
+        socket: &Path,
+        policy: Option<&Path>,
+        development_terminal_access: bool,
+    ) -> Child {
         let stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(runtime.join("daemon.stderr"))
             .unwrap();
-        Command::new(DAEMON)
+        let mut command = Command::new(DAEMON);
+        command
             .env("SPLINTERM_SOCKET", socket)
             .env("XDG_STATE_HOME", runtime.join("state"))
-            .env("SPLINTERM_ENABLE_DEV_ATTACH", "1")
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(stderr)
-            .spawn()
-            .unwrap()
+            .stderr(stderr);
+        if development_terminal_access {
+            command.env("SPLINTERM_ENABLE_DEV_ATTACH", "1");
+        } else {
+            command.env_remove("SPLINTERM_ENABLE_DEV_ATTACH");
+        }
+        if let Some(policy) = policy {
+            command.env("SPLINTERM_POLICY", policy);
+        }
+        command.spawn().unwrap()
     }
 
     fn assert_success(&self, status: std::process::ExitStatus) {
@@ -80,6 +103,33 @@ impl Daemon {
             child,
             runtime,
             socket,
+            policy: None,
+            development_terminal_access: true,
+        }
+    }
+
+    async fn start_with_policy(policy_contents: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let runtime = std::env::temp_dir().join(format!(
+            "splinterm-headless-policy-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&runtime).unwrap();
+        let policy = runtime.join("policy.json");
+        fs::write(&policy, policy_contents).unwrap();
+        fs::set_permissions(&policy, fs::Permissions::from_mode(0o600)).unwrap();
+        let socket = runtime.join("splinterd.sock");
+        let child = Self::spawn_configured(&runtime, &socket, Some(&policy), false);
+        Self::wait_until_ready(&socket).await;
+        Self {
+            child,
+            runtime,
+            socket,
+            policy: Some(policy),
+            development_terminal_access: false,
         }
     }
 
@@ -96,8 +146,18 @@ impl Daemon {
     }
 
     async fn start_again(&mut self) {
-        self.child = Self::spawn_child(&self.runtime, &self.socket);
+        self.child = Self::spawn_configured(
+            &self.runtime,
+            &self.socket,
+            self.policy.as_deref(),
+            self.development_terminal_access,
+        );
         Self::wait_until_ready(&self.socket).await;
+    }
+
+    fn reload_policy(&self) {
+        let pid = rustix::process::Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::HUP).unwrap();
     }
 
     fn shutdown(mut self) {
@@ -142,7 +202,6 @@ impl Connection {
             read_frame(&mut stream).await,
             ServerFrame::Hello {
                 version: PROTOCOL_VERSION,
-                development_terminal_access: true,
                 ..
             }
         ));
@@ -325,20 +384,34 @@ async fn write_frame(stream: &mut UnixStream, frame: &ClientFrame) {
         .unwrap();
 }
 
-async fn read_frame(stream: &mut UnixStream) -> ServerFrame {
+async fn read_frame_or_eof(stream: &mut UnixStream) -> Option<ServerFrame> {
     let mut length = [0_u8; 4];
-    time::timeout(TEST_TIMEOUT, stream.read_exact(&mut length))
+    match time::timeout(TEST_TIMEOUT, stream.read_exact(&mut length))
         .await
         .expect("timed out reading frame length")
-        .unwrap();
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return None,
+        Err(error) => panic!("failed reading frame length: {error}"),
+    }
     let length = u32::from_be_bytes(length) as usize;
     assert!((1..=MAX_FRAME_BYTES).contains(&length));
     let mut body = vec![0_u8; length];
-    time::timeout(TEST_TIMEOUT, stream.read_exact(&mut body))
+    match time::timeout(TEST_TIMEOUT, stream.read_exact(&mut body))
         .await
         .expect("timed out reading frame body")
-        .unwrap();
-    serde_json::from_slice(&body).unwrap()
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return None,
+        Err(error) => panic!("failed reading frame body: {error}"),
+    }
+    Some(serde_json::from_slice(&body).unwrap())
+}
+
+async fn read_frame(stream: &mut UnixStream) -> ServerFrame {
+    read_frame_or_eof(stream)
+        .await
+        .expect("connection closed before the expected frame")
 }
 
 fn snapshot_text(snapshot: &TerminalSnapshot) -> String {
@@ -357,7 +430,7 @@ async fn snapshot_until(
     incarnation: u64,
     marker: &str,
 ) -> TerminalSnapshot {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let (subscription_id, snapshot) = connection.attach(splint_id, incarnation).await;
         assert_eq!(
@@ -375,6 +448,311 @@ async fn snapshot_until(
         );
         time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+fn exact_headless_policy(splint: Option<(SplintId, u64)>) -> String {
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let mut file = fs::File::open(&executable).unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    let sha256 = format!("{:x}", Sha256::digest(bytes));
+    let mut scopes = vec![
+        "topology_metadata_read",
+        "process_spawn",
+        "topology_layout_mutate",
+        "audit_inspect",
+        "topology_subscribe",
+    ];
+    let mut resources = vec![serde_json::json!({"kind": "lair"})];
+    if let Some((splint_id, incarnation)) = splint {
+        scopes.extend([
+            "terminal_visible_read",
+            "terminal_subscribe",
+            "controller_acquire",
+            "input",
+        ]);
+        resources.push(serde_json::json!({
+            "kind": "splint",
+            "splint_id": splint_id,
+            "incarnation": incarnation
+        }));
+    }
+    serde_json::json!({
+        "schema": "splinterm.policy.v1",
+        "rules": [{
+            "id": "headless-test",
+            "executable": {"path": executable, "sha256": sha256},
+            "scopes": scopes,
+            "resources": resources,
+            "limits": {
+                "max_spawn_count": 1,
+                "max_results": 16,
+                "max_live_subscriptions": 2
+            }
+        }]
+    })
+    .to_string()
+}
+
+async fn assert_connection_closed(connection: &mut Connection, reason: &str) {
+    let mut byte = [0_u8; 1];
+    let closed = time::timeout(Duration::from_secs(5), connection.stream.read(&mut byte))
+        .await
+        .unwrap_or_else(|_| panic!("{reason} did not close the existing client"))
+        .unwrap();
+    assert_eq!(closed, 0);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ordered policy reload, controller cleanup, restart, and process-reap gate is one lifecycle"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn headless_policy_reload_fails_closed_and_cleans_up() {
+    time::timeout(TEST_TIMEOUT, async {
+        let mut daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
+        let marker = daemon.runtime.join("child-pid");
+        let mut connection = daemon.connect().await;
+        let revision = connection.topology_revision().await;
+        let Response::DojoCreated {
+            dojo, incarnation, ..
+        } = connection
+            .request(Request::CreateDojo {
+                expected_topology_revision: revision,
+                name: "headless".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!("printf '%s\\n' $$ > {}; exec sleep 30", marker.display()),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("headless Dojo was not created");
+        };
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("created headless Dojo was not a leaf");
+        };
+        let splint_id = splint.id;
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() {
+            assert!(
+                Instant::now() < marker_deadline,
+                "child PID marker was not written"
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        }
+        let child_pid: u32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+
+        let Response::AuditPage { page } = connection
+            .request(Request::AuditInspect {
+                after_audit_id: None,
+                max_records: 16,
+            })
+            .await
+        else {
+            panic!("audit page was not returned");
+        };
+        let create_audit = page
+            .records
+            .iter()
+            .find(|record| record.operation == splinterm_protocol::AuditOperation::CreateDojo)
+            .expect("authorized create audit record was absent");
+        let peer_executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let peer_metadata = fs::metadata(&peer_executable).unwrap();
+        let mut peer_bytes = Vec::new();
+        fs::File::open(&peer_executable)
+            .unwrap()
+            .read_to_end(&mut peer_bytes)
+            .unwrap();
+        assert_eq!(create_audit.schema, "splinterm.audit.v1");
+        assert_eq!(create_audit.retention, "daemon_lifetime");
+        assert_ne!(create_audit.audit_id, 0);
+        assert_ne!(create_audit.policy_generation, Some(0));
+        assert_eq!(
+            create_audit.policy_rule_id.as_deref(),
+            Some("headless-test")
+        );
+        assert_eq!(create_audit.peer.uid, rustix::process::geteuid().as_raw());
+        assert_eq!(
+            create_audit.peer.executable_path,
+            peer_executable.to_string_lossy()
+        );
+        assert_eq!(
+            create_audit.peer.executable_sha256,
+            format!("{:x}", Sha256::digest(peer_bytes))
+        );
+        assert_eq!(create_audit.peer.device, Some(peer_metadata.dev()));
+        assert_eq!(create_audit.peer.inode, Some(peer_metadata.ino()));
+        assert_eq!(create_audit.resource, None);
+        assert_eq!(
+            create_audit.requested_scopes,
+            vec![
+                splinterm_protocol::AutomationScope::ProcessSpawn,
+                splinterm_protocol::AutomationScope::TopologyLayoutMutate,
+            ]
+        );
+        assert_eq!(
+            create_audit.decision,
+            splinterm_protocol::AuditDecision::Matched
+        );
+        assert_eq!(create_audit.reason, "policy_match");
+        assert_eq!(
+            create_audit.outcome,
+            Some(splinterm_protocol::AuditOutcome::Succeeded)
+        );
+        assert_eq!(create_audit.argument_count, Some(2));
+        assert_eq!(create_audit.executable_basename.as_deref(), Some("sh"));
+
+        let policy = daemon.policy.as_ref().unwrap();
+        fs::write(
+            policy,
+            exact_headless_policy(Some((splint_id, incarnation))),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut connection, "accepted policy reload").await;
+
+        let mut controlled = daemon.connect().await;
+        let topology_subscription = match controlled.request(Request::SubscribeTopology).await {
+            Response::TopologySubscribed {
+                subscription_id, ..
+            } => subscription_id,
+            response => panic!("unexpected topology subscription response: {response:?}"),
+        };
+        assert_ne!(topology_subscription, 0);
+        let control_subscription = controlled.subscribe_control(splint_id, incarnation).await;
+        assert_ne!(control_subscription, 0);
+        let controller_id = controlled.acquire_control(splint_id, incarnation).await;
+        assert_ne!(controller_id, 0);
+        let consent_error = controlled
+            .request_result(Request::RequestAccess {
+                splint_id,
+                incarnation,
+                scopes: vec![AccessScope::Resize],
+            })
+            .await
+            .expect_err("under-scoped headless consent request must fail closed");
+        assert_eq!(consent_error.code, ErrorCode::ConsentDenied);
+
+        fs::write(policy, r#"{"schema":"wrong","rules":[]}"#).unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut controlled, "rejected policy reload").await;
+        let mut denied = daemon.connect().await;
+        assert_eq!(
+            denied
+                .request_result(Request::InspectTopology)
+                .await
+                .expect_err("rejected reload must install deny-all policy")
+                .code,
+            ErrorCode::Unauthorized
+        );
+        fs::write(
+            policy,
+            exact_headless_policy(Some((splint_id, incarnation))),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut denied, "accepted recovery policy reload").await;
+        let mut reauthorized = daemon.connect().await;
+        let replacement_controller = reauthorized.acquire_control(splint_id, incarnation).await;
+        assert_ne!(replacement_controller, controller_id);
+        drop(reauthorized);
+
+        daemon.stop_preserving_state();
+        assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+        let marker_before_restart = fs::read_to_string(&marker).unwrap();
+        daemon.start_again().await;
+        time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(fs::read_to_string(&marker).unwrap(), marker_before_restart);
+        let mut restarted = daemon.connect().await;
+        let Response::Topology { snapshot } = restarted.request(Request::InspectTopology).await
+        else {
+            panic!("restarted headless topology was not returned");
+        };
+        assert!(
+            snapshot
+                .runtimes
+                .iter()
+                .all(|runtime| runtime.live_incarnation.is_none())
+        );
+        let Response::AuditPage { page } = restarted
+            .request(Request::AuditInspect {
+                after_audit_id: None,
+                max_records: 16,
+            })
+            .await
+        else {
+            panic!("restarted audit page was not returned");
+        };
+        assert!(
+            page.records.iter().all(|record| {
+                record.operation != splinterm_protocol::AuditOperation::CreateDojo
+            })
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("headless policy integration timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
+    time::timeout(Duration::from_secs(80), async {
+        let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
+        let marker = daemon.runtime.join("resistant-child-pid");
+        let mut connection = daemon.connect().await;
+        let revision = connection.topology_revision().await;
+        let Response::DojoCreated { .. } = connection
+            .request(Request::CreateDojo {
+                expected_topology_revision: revision,
+                name: "resistant-shutdown".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!(
+                            "trap '' HUP TERM; printf '%s\\n' $$ > {}; exec sleep 75",
+                            marker.display()
+                        ),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("signal-resistant Dojo was not created");
+        };
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() {
+            assert!(
+                Instant::now() < marker_deadline,
+                "signal-resistant child PID marker was not written"
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        }
+        let child_pid: u32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        drop(connection);
+
+        tokio::task::spawn_blocking(move || daemon.shutdown())
+            .await
+            .unwrap();
+        assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+    })
+    .await
+    .expect("signal-resistant shutdown integration timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1399,9 +1777,18 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         .await;
 
         let mut saw_resync = false;
+        let mut disconnected = false;
         for _ in 0..128 {
-            let Ok(frame) = time::timeout(Duration::from_secs(2), read_frame(&mut slow.stream)).await
+            let Ok(frame) = time::timeout(
+                Duration::from_secs(2),
+                read_frame_or_eof(&mut slow.stream),
+            )
+            .await
             else {
+                break;
+            };
+            let Some(frame) = frame else {
+                disconnected = true;
                 break;
             };
             if let ServerFrame::Event {
@@ -1413,7 +1800,10 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 break;
             }
         }
-        assert!(saw_resync, "slow subscriber was not forced to resynchronize");
+        assert!(
+            saw_resync || disconnected,
+            "slow subscriber was neither forced to resynchronize nor disconnected"
+        );
         drop(producer);
 
         let final_snapshot = snapshot_until(

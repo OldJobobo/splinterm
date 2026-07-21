@@ -3,6 +3,8 @@
 /.vscode/
 *.swp
 *.swo
+__pycache__/
+*.py[cod]
 .DS_Store
 .env
 /graphify-out/

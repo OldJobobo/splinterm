@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use rustix::fs::{Mode, OFlags};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use splinterm_core::{DojoId, SplintId, WindowId};
 
 use crate::{authorization::OperationScope, executable_identity::ExecutableIdentity};
@@ -24,7 +24,7 @@ const MAX_RULE_ID_BYTES: usize = 64;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DIAGNOSTIC_BYTES: usize = 512;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyDocument {
     schema: String,
@@ -39,10 +39,12 @@ impl PolicyDocument {
         }
     }
 
+    #[must_use]
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }
 
+    #[must_use]
     pub fn authorize(
         &self,
         executable: &ExecutableIdentity,
@@ -87,26 +89,26 @@ impl PolicyDocument {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyRule {
     pub id: String,
     pub executable: ExecutableMatcher,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix_seconds: Option<u64>,
     pub scopes: Vec<OperationScope>,
     pub resources: Vec<ResourceSelector>,
     pub limits: PolicyLimits,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutableMatcher {
     pub path: PathBuf,
     pub sha256: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceSelector {
     Lair,
@@ -122,21 +124,27 @@ pub enum ResourceSelector {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum IncarnationSelector {
     Exact(u64),
     Current(String),
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PolicyLimits {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_returned_rows: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_returned_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_live_subscriptions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_spawn_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
 }
 
@@ -350,6 +358,7 @@ impl Default for PolicyStore {
 }
 
 impl PolicyStore {
+    #[must_use]
     pub fn snapshot(&self) -> PolicyGeneration {
         self.generation.clone()
     }
@@ -379,6 +388,7 @@ impl PolicyStore {
         Some(matched)
     }
 
+    #[must_use]
     pub fn status(
         &self,
         executable: &ExecutableIdentity,
@@ -411,10 +421,11 @@ pub struct PolicyCandidate {
     diagnostic: Option<String>,
 }
 
+#[must_use]
 pub fn prepare(path: Option<PathBuf>) -> PolicyCandidate {
     let (document, diagnostic) = match path {
         None => (PolicyDocument::deny_all(), None),
-        Some(path) => match load(&path) {
+        Some(path) => match inspect_file(&path) {
             Ok(document) => (document, None),
             Err(error) => (
                 PolicyDocument::deny_all(),
@@ -432,7 +443,15 @@ pub fn configured_path() -> Option<PathBuf> {
     std::env::var_os("SPLINTERM_POLICY").map(PathBuf::from)
 }
 
-fn load(path: &Path) -> Result<PolicyDocument> {
+/// Loads and semantically validates one policy without publishing it.
+///
+/// This uses the same bounded, owner-checked, no-symlink path as daemon startup
+/// and reload, making it suitable for local administrative validation.
+/// # Errors
+///
+/// Returns an error when the path, file metadata, bounded JSON, or semantic
+/// policy constraints fail validation.
+pub fn inspect_file(path: &Path) -> Result<PolicyDocument> {
     validate_policy_path(path)?;
     let file = open_without_symlinks(path)?;
     let metadata = file.metadata().context("cannot stat opened policy")?;
@@ -646,7 +665,7 @@ mod tests {
         let path = test_path("valid");
         write_policy(&path, &valid_policy(), 0o600);
 
-        let document = load(&path).unwrap();
+        let document = inspect_file(&path).unwrap();
 
         assert_eq!(document.rules.len(), 1);
         assert_eq!(document.rules[0].id, "reader");
@@ -675,7 +694,7 @@ mod tests {
     fn exact_identity_scope_resource_and_limit_match_is_narrow() {
         let path = test_path("match");
         write_policy(&path, &valid_policy(), 0o600);
-        let document = load(&path).unwrap();
+        let document = inspect_file(&path).unwrap();
         let rule = &document.rules[0];
         let ResourceSelector::Splint { splint_id, .. } = rule.resources[0] else {
             panic!("expected Splint selector");
@@ -786,12 +805,12 @@ mod tests {
     fn rejects_unsafe_mode_symlink_duplicate_and_expired_rules() {
         let path = test_path("unsafe");
         write_policy(&path, &valid_policy(), 0o644);
-        assert!(load(&path).is_err());
+        assert!(inspect_file(&path).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
 
         let link = test_path("link");
         std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert!(load(&link).is_err());
+        assert!(inspect_file(&link).is_err());
         fs::remove_file(link).unwrap();
 
         let duplicate = valid_policy().replace(
@@ -799,12 +818,12 @@ mod tests {
             ",\n              {\"id\":\"reader\",\"executable\":{\"path\":\"/usr/bin/client\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"scopes\":[\"input\"],\"resources\":[{\"kind\":\"lair\"}],\"limits\":{\"deadline_ms\":1}}]\n            }",
         );
         write_policy(&path, &duplicate, 0o600);
-        assert!(load(&path).is_err());
+        assert!(inspect_file(&path).is_err());
 
         let expired =
             valid_policy().replace("\"scopes\"", "\"expires_at_unix_seconds\":1,\"scopes\"");
         write_policy(&path, &expired, 0o600);
-        assert!(load(&path).is_err());
+        assert!(inspect_file(&path).is_err());
         fs::remove_file(path).unwrap();
     }
 }

@@ -39,20 +39,26 @@ versioned immutable source URL and checksum.
 
 ## Installed layout
 
-- `/usr/bin/splinterm`, `/usr/bin/splinterd`, and the adjacent
+- `/usr/bin/splinterm`, `/usr/bin/splinterd`, the dedicated
+  `/usr/bin/splinterm-relay` SSH transport, and the adjacent
   `/usr/bin/splinterm-pty-child` helper;
 - `/usr/bin/splinterm-xdg-terminal-exec` and
   `/usr/bin/generate-omarchy-theme.py`;
 - desktop entry, AppStream metadata, scalable icon, and user service;
-- examples and integration snippets under `/usr/share/doc/splinterm/`; and
+- headless lifecycle/policy guidance and integration snippets under
+  `/usr/share/doc/splinterm/`; and
 - MIT/project third-party notices under `/usr/share/licenses/splinterm/`.
 
-The package does not modify a user's home, enable a service, replace their
-terminal preference, or edit `/usr/share/omarchy`. The desktop launcher starts
-`splinterd.service` on demand. The unit stops with SIGINT so the daemon can reap
-its shell and remove its socket cleanly. If protocol negotiation fails after an
-upgrade, it restarts the user daemon once and waits a bounded 2.5 seconds. This ends old
+The package does not modify a user's home, enable a service or lingering,
+replace their terminal preference, edit SSH policy, or edit
+`/usr/share/omarchy`. The desktop launcher starts `splinterd.service` on demand.
+The headless unit reads an optional owner-controlled environment file, reloads
+policy with SIGHUP, and stops with SIGINT so the daemon can reap its shells and
+remove its socket cleanly. If protocol negotiation fails after an upgrade, it
+restarts the user daemon once and waits a bounded 2.5 seconds. This ends old
 daemon-owned shells because cross-version process migration is not promised.
+See [headless.md](headless.md) for the complete service, policy, backup, and
+recovery workflow and [remote.md](remote.md) for the policy-scoped SSH relay.
 
 ## Optional user integration
 
@@ -90,5 +96,12 @@ no longer needed:
 systemctl --user stop splinterd.service
 ```
 
-Remove with `sudo pacman -Rns splinterm`. User-owned config, theme hooks, and
-runtime state are deliberately not deleted by package scripts.
+After an upgrade, reload the installed unit before restarting:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user start splinterd.service
+```
+
+Remove with `sudo pacman -Rns splinterm`. User-owned config, theme hooks, policy,
+and durable state are deliberately not deleted by package scripts.
