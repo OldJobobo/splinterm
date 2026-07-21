@@ -36,10 +36,11 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 Request/response types shared by both processes. The current development
 protocol uses bounded length-prefixed JSON frames, version-range negotiation,
 request IDs, peer-UID verification, stable errors, and explicit subscription
-resynchronization. Protocol v12 carries closed access scopes, grant status,
+resynchronization. Protocol v17 carries closed access scopes, grant status,
 revocation events, bounded direct command argv/working-directory/shell launch
-fields, semantic terminal updates, history generations and stable row IDs,
-revision-bound scrollback pages, and visible-row identity. Command arguments
+fields, semantic terminal updates, topology and history generations, stable row
+IDs, revision-bound scrollback/search pages, visible-row identity, and bounded
+per-Splint control-status/transfer events. Command arguments
 are never rebuilt as a shell string. Protocol DTOs remain separate from
 terminal and daemon runtime structs.
 
@@ -56,7 +57,15 @@ one-use capability material and the bounded grant-once/deny exchange stay on
 that channel. In-memory grants bind peer UID/PID/executable identity,
 Splint/incarnation, and explicit scopes. Revocation releases tied controllers
 and subscriptions; bounded audit metadata excludes terminal, clipboard, and
-input bodies. See [ADR 0005](adr/0005-trusted-consent-broker.md).
+input bodies. Per-Splint controller leases bind daemon-owned connection IDs.
+Control observers receive subscriber-specific status without peer identity;
+transfer requests are bounded, owner-decided, timeout-denied, and cancelled on
+either disconnect. Forced transfer uses a separate trusted consent prompt.
+Literal search runs inside the owning terminal actor with fixed query/result/
+preview/deadline bounds and opaque cursors tied to incarnation, terminal
+revision, and history generation. See
+[ADR 0005](adr/0005-trusted-consent-broker.md) and
+[ADR 0006](adr/0006-multiplexing-lifecycle.md).
 
 ### `splinterm`
 
@@ -64,7 +73,9 @@ This is the disposable Wayland terminal UI, responsible for presentation,
 local input, clipboard/IME integration, and rendering state received from the
 daemon. Its private consent mode renders fixed trusted application chrome and
 never accepts requester-supplied terminal content. Normal windows keep active
-authority, development bypass, and controller state visibly indicated.
+authority, development bypass, controller state, pending transfer decisions,
+and the local search surface visibly indicated. Search focus, query, match
+selection, and viewport position remain client-local.
 
 The graphical identity is fixed to `com.oldjobobo.splinterm` across Wayland and
 desktop metadata. `splinterm launch` is the `xdg-terminal-exec` boundary.
@@ -108,3 +119,5 @@ Wayland client's lifetime.
 5. Ported Foot code retains MIT attribution and provenance.
 6. Headless remote access uses an authenticated relay such as SSH; `splinterd`
    does not expose a network listener by default.
+7. Shutdown owns and drains connection tasks before runtime shutdown and final
+   metadata persistence; one pinned signal future prevents lost SIGINT events.

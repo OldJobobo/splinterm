@@ -15,8 +15,8 @@ use splinterm_pty::{
 };
 use splinterm_terminal::{
     ActiveScreen, CellAttributesSnapshot, CellSnapshotContent, CursorSnapshot, Dimensions,
-    ScrollRegion, ScrollbackSnapshot, SnapshotRequest, Terminal, TerminalConfig, TerminalEvent,
-    TerminalModes, TerminalRevision, TerminalUpdate,
+    ScrollRegion, ScrollbackSnapshot, SearchPage, SnapshotRequest, Terminal, TerminalConfig,
+    TerminalEvent, TerminalModes, TerminalRevision, TerminalUpdate,
 };
 use thiserror::Error;
 use tokio::{
@@ -229,6 +229,7 @@ enum Command {
     Resize(PtySize, Reply<()>),
     Snapshot(usize, Reply<LiveSnapshot>),
     ScrollbackPage(u64, usize, Reply<LiveScrollbackPage>),
+    Search(String, bool, usize, usize, Duration, Reply<SearchPage>),
     Subscribe(usize, Reply<Subscription>),
     Attach(usize, usize, Reply<(LiveSnapshot, Subscription)>),
     Shutdown(oneshot::Sender<()>),
@@ -317,6 +318,27 @@ impl LiveSplintHandle {
     ) -> Result<LiveScrollbackPage, LiveError> {
         self.request(|reply| Command::ScrollbackPage(before_row_id, max_rows, reply))
             .await
+    }
+
+    pub async fn search(
+        &self,
+        query: String,
+        case_sensitive: bool,
+        skip_rows: usize,
+        max_results: usize,
+        deadline: Duration,
+    ) -> Result<SearchPage, LiveError> {
+        self.request(|reply| {
+            Command::Search(
+                query,
+                case_sensitive,
+                skip_rows,
+                max_results,
+                deadline,
+                reply,
+            )
+        })
+        .await
     }
 
     pub async fn attach(&self) -> Result<(LiveSnapshot, Subscription), LiveError> {
@@ -744,6 +766,7 @@ async fn run_actor_body(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "command application is the actor's serialization point"
 )]
 fn handle_command(
@@ -804,6 +827,16 @@ fn handle_command(
                 rows: page.rows.into_iter().map(owned_row).collect(),
                 has_older: page.has_older,
             }));
+        }
+        Command::Search(query, case_sensitive, skip_rows, maximum_results, deadline, reply) => {
+            let page = terminal.search_normal(
+                &query,
+                case_sensitive,
+                skip_rows,
+                maximum_results,
+                deadline,
+            );
+            let _ = reply.send(Ok(page));
         }
         Command::Subscribe(capacity, reply) => {
             subscribers.retain(|subscriber| !subscriber.events.is_closed());

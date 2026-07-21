@@ -642,6 +642,17 @@ impl Grid {
         (rows.into(), has_older)
     }
 
+    pub(crate) fn rows_reverse(&self) -> impl Iterator<Item = (u64, &Row)> {
+        let start = self.scrollback_start(self.screen_rows);
+        (0..self.rows.len()).rev().filter_map(move |distance| {
+            let index = start.wrapping_add(distance) & (self.rows.len() - 1);
+            let row = self.rows[index].as_ref()?;
+            let id = self.row_ids[index];
+            assert_ne!(id, 0, "allocated row has stable identity");
+            Some((id, row))
+        })
+    }
+
     fn scrollback_rows_chronological(&self) -> Vec<(u64, &Row)> {
         let history_capacity = self.rows.len() - self.screen_rows;
         let start = self.scrollback_start(self.screen_rows);

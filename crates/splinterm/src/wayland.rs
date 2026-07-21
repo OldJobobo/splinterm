@@ -75,8 +75,9 @@ use wayland_client::{
 
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{
-    ActiveScreen, CellAttributes, ColorSource, HistoryTransition, MouseTracking, TerminalCell,
-    TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
+    ActiveScreen, CellAttributes, ColorSource, ControlTransferDecision, ControlTransferOutcome,
+    HistoryTransition, MouseTracking, SearchMatch, SearchPage, TerminalCell, TerminalInputModes,
+    TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
 };
 
 use smithay_client_toolkit::reexports::protocols::wp::{
@@ -321,6 +322,10 @@ pub enum WindowUpdate {
     ScrollbackResyncRequired,
     Authority(AuthorityStatus),
     Control(bool),
+    ControlTransferRequested(u64),
+    ControlTransferResolved(ControlTransferOutcome),
+    SearchResults(SearchPage),
+    SearchResyncRequired,
     Theme(ResolvedTheme),
     Shutdown,
 }
@@ -349,6 +354,19 @@ pub enum WindowCommand {
         before_row_id: u64,
     },
     RevokeAccess(u64),
+    RequestControlTransfer,
+    DecideControlTransfer {
+        transfer_id: u64,
+        decision: ControlTransferDecision,
+    },
+    ForceControlTransfer,
+    Search {
+        terminal_revision: u64,
+        history_generation: u64,
+        query: String,
+        case_sensitive: bool,
+        cursor: Option<String>,
+    },
     ReleaseControl,
 }
 
@@ -603,6 +621,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             }),
             controller_active,
             &options.authority,
+            false,
+            None,
         )
     };
     window.set_title(title);
@@ -652,6 +672,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             updates: options.updates,
             commands: options.commands,
             controller_active,
+            pending_control_transfer: None,
+            search: SearchUiState::default(),
             authority: options.authority,
             last_resize: None,
             prepare_dirty_rows: Vec::new(),
@@ -1239,9 +1261,19 @@ fn note_output_leave<T: Eq>(entered: &mut Vec<T>, output: &T) -> bool {
     was_most_recent
 }
 
+#[derive(Clone, Debug, Default)]
+struct SearchUiState {
+    input: Option<String>,
+    query: String,
+    matches: Vec<SearchMatch>,
+    selected: usize,
+    next_cursor: Option<String>,
+    pending_reveal: Option<SearchMatch>,
+}
+
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "independent Wayland lifecycle and evidence-mode flags are not one state machine"
+    reason = "independent pane rendering, history, and input flags are not one state machine"
 )]
 struct PaneView {
     snapshot: Option<TerminalSnapshot>,
@@ -1256,6 +1288,8 @@ struct PaneView {
     updates: Option<Receiver<WindowUpdate>>,
     commands: Option<Sender<WindowCommand>>,
     controller_active: bool,
+    pending_control_transfer: Option<u64>,
+    search: SearchUiState,
     authority: AuthorityStatus,
     last_resize: Option<(u16, u16, u16, u16)>,
     prepare_dirty_rows: Vec<bool>,
@@ -1285,6 +1319,8 @@ impl PaneView {
             updates: Some(options.updates),
             commands: Some(options.commands),
             controller_active: options.controlled,
+            pending_control_transfer: None,
+            search: SearchUiState::default(),
             authority: options.authority,
             last_resize: None,
             prepare_dirty_rows: Vec::new(),
@@ -1401,6 +1437,10 @@ impl PaneView {
         Ok(true)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the bounded pane reducer keeps every protocol update transition explicit"
+    )]
     fn apply_background_update(
         &mut self,
         update: WindowUpdate,
@@ -1480,6 +1520,27 @@ impl PaneView {
             }
             WindowUpdate::Control(active) => {
                 self.controller_active = active;
+                Ok(true)
+            }
+            WindowUpdate::ControlTransferRequested(transfer_id) => {
+                self.pending_control_transfer = Some(transfer_id);
+                Ok(true)
+            }
+            WindowUpdate::ControlTransferResolved(_) => {
+                self.pending_control_transfer = None;
+                Ok(true)
+            }
+            WindowUpdate::SearchResults(page) => {
+                self.search.matches = page.matches;
+                self.search.selected = 0;
+                self.search.next_cursor = page.next_cursor;
+                self.search.pending_reveal = self.search.matches.first().cloned();
+                Ok(true)
+            }
+            WindowUpdate::SearchResyncRequired => {
+                self.search.matches.clear();
+                self.search.next_cursor = None;
+                self.search.pending_reveal = None;
                 Ok(true)
             }
             WindowUpdate::ScrollbackResyncRequired => {
@@ -2615,6 +2676,8 @@ fn window_title(
     snapshot_title: Option<&str>,
     controller_active: bool,
     authority: &AuthorityStatus,
+    control_transfer_pending: bool,
+    search: Option<&SearchUiState>,
 ) -> String {
     let base = snapshot_title
         .map(str::trim)
@@ -2628,11 +2691,30 @@ fn window_title(
     } else {
         Some("EXTERNAL ACCESS ACTIVE")
     };
-    match (controller, authority_label) {
+    let title = match (controller, authority_label) {
         (Some(controller), Some(authority)) => format!("{base} — {controller} — {authority}"),
         (Some(controller), None) => format!("{base} — {controller}"),
         (None, Some(authority)) => format!("{base} — {authority}"),
         (None, None) => base.to_owned(),
+    };
+    let title = if control_transfer_pending {
+        format!("{title} — CONTROL REQUEST: Ctrl+Shift+Y accept / Ctrl+Shift+N deny")
+    } else {
+        title
+    };
+    if let Some(search) = search.filter(|search| search.input.is_some()) {
+        let query = search.input.as_deref().unwrap_or_default();
+        let query = query
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(64)
+            .collect::<String>();
+        format!(
+            "{title} — SEARCH: {query} [{} match(es), Ctrl+N/P]",
+            search.matches.len()
+        )
+    } else {
+        title
     }
 }
 
@@ -3833,6 +3915,90 @@ impl App {
         self.exit = true;
     }
 
+    fn update_window_title(&self) {
+        if let Some(snapshot) = &self.pane.snapshot {
+            self.window.set_title(window_title(
+                self.title_override.as_deref().or(Some(&snapshot.title)),
+                self.pane.controller_active,
+                &self.pane.authority,
+                self.pane.pending_control_transfer.is_some(),
+                Some(&self.pane.search),
+            ));
+        }
+    }
+
+    fn reveal_pending_search_match(&mut self) {
+        let Some(item) = self.pane.search.pending_reveal.clone() else {
+            return;
+        };
+        let Some(snapshot) = self.pane.snapshot.as_ref() else {
+            return;
+        };
+        if snapshot.active_screen != ActiveScreen::Normal {
+            return;
+        }
+        if self
+            .pane
+            .scrollback_viewport
+            .reveal_row(item.row_id, snapshot)
+        {
+            let endpoint = |column| SelectionEndpoint {
+                active_screen: ActiveScreen::Normal,
+                history_generation: snapshot.history_generation,
+                row_id: item.row_id,
+                column,
+            };
+            self.pane.selection = Some(Selection {
+                anchor: endpoint(item.start_column),
+                end: endpoint(item.end_column.saturating_sub(1)),
+            });
+            self.pane.search.pending_reveal = None;
+            self.pane.viewport_dirty = true;
+            self.full_redraw = true;
+        } else if !self.pane.history_page_pending {
+            let before_row_id = snapshot
+                .scrollback_rows
+                .first()
+                .and_then(|row| row.row_id)
+                .or_else(|| {
+                    snapshot
+                        .newest_available_scrollback_row_id
+                        .and_then(|id| id.checked_add(1))
+                });
+            if let Some(before_row_id) = before_row_id {
+                self.pane.history_page_pending = true;
+                self.send_command(WindowCommand::FetchScrollback {
+                    splint_id: snapshot.splint_id,
+                    incarnation: snapshot.incarnation,
+                    terminal_revision: snapshot.revision,
+                    history_generation: snapshot.history_generation,
+                    before_row_id,
+                });
+            }
+        }
+    }
+
+    fn submit_search(&mut self, cursor: Option<String>) {
+        let Some(snapshot) = self.pane.snapshot.as_ref() else {
+            return;
+        };
+        let query = self.pane.search.query.clone();
+        if query.is_empty() {
+            return;
+        }
+        self.send_command(WindowCommand::Search {
+            terminal_revision: snapshot.revision,
+            history_generation: snapshot.history_generation,
+            query,
+            case_sensitive: false,
+            cursor,
+        });
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "trusted local shortcuts and search editing share one ordered keyboard boundary"
+    )]
     fn handle_key(&mut self, event: &KeyEvent) {
         if self.trusted_consent.is_some() {
             match event.keysym {
@@ -3842,6 +4008,73 @@ impl App {
                 Keysym::d | Keysym::D | Keysym::Escape => self.decide_consent(false),
                 _ => {}
             }
+            return;
+        }
+        if self.pane.search.input.is_some() {
+            if self.modifiers.ctrl && matches!(event.keysym, Keysym::n | Keysym::N) {
+                if self.pane.search.selected + 1 < self.pane.search.matches.len() {
+                    self.pane.search.selected += 1;
+                    self.pane.search.pending_reveal = self
+                        .pane
+                        .search
+                        .matches
+                        .get(self.pane.search.selected)
+                        .cloned();
+                    self.reveal_pending_search_match();
+                } else if let Some(cursor) = self.pane.search.next_cursor.clone() {
+                    self.submit_search(Some(cursor));
+                }
+                self.update_window_title();
+                return;
+            }
+            if self.modifiers.ctrl && matches!(event.keysym, Keysym::p | Keysym::P) {
+                self.pane.search.selected = self.pane.search.selected.saturating_sub(1);
+                self.pane.search.pending_reveal = self
+                    .pane
+                    .search
+                    .matches
+                    .get(self.pane.search.selected)
+                    .cloned();
+                self.reveal_pending_search_match();
+                self.update_window_title();
+                return;
+            }
+            match event.keysym {
+                Keysym::Escape => {
+                    self.pane.search = SearchUiState::default();
+                    self.pane.selection = None;
+                }
+                Keysym::Return | Keysym::KP_Enter => {
+                    self.pane.search.query = self
+                        .pane
+                        .search
+                        .input
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_owned();
+                    self.submit_search(None);
+                }
+                Keysym::BackSpace => {
+                    if let Some(input) = self.pane.search.input.as_mut() {
+                        input.pop();
+                    }
+                }
+                _ if !self.modifiers.ctrl && !self.modifiers.alt => {
+                    if let (Some(input), Some(text)) =
+                        (self.pane.search.input.as_mut(), event.utf8.as_deref())
+                    {
+                        for character in text.chars().filter(|character| !character.is_control()) {
+                            if input.len() + character.len_utf8()
+                                <= splinterm_protocol::MAX_SEARCH_QUERY_BYTES
+                            {
+                                input.push(character);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            self.update_window_title();
             return;
         }
         if self.modifiers.ctrl
@@ -3864,9 +4097,49 @@ impl App {
                     self.title_override.as_deref().or(Some(&snapshot.title)),
                     self.pane.controller_active,
                     &self.pane.authority,
+                    self.pane.pending_control_transfer.is_some(),
+                    Some(&self.pane.search),
                 ));
             }
             return;
+        }
+        if self.modifiers.ctrl && self.modifiers.shift {
+            match event.keysym {
+                Keysym::t | Keysym::T => {
+                    self.send_command(WindowCommand::RequestControlTransfer);
+                    return;
+                }
+                Keysym::f | Keysym::F => {
+                    self.pane.search.input = Some(String::new());
+                    self.pane.search.matches.clear();
+                    self.pane.search.next_cursor = None;
+                    self.update_window_title();
+                    return;
+                }
+                Keysym::u | Keysym::U => {
+                    self.send_command(WindowCommand::ForceControlTransfer);
+                    return;
+                }
+                Keysym::y | Keysym::Y => {
+                    if let Some(transfer_id) = self.pane.pending_control_transfer.take() {
+                        self.send_command(WindowCommand::DecideControlTransfer {
+                            transfer_id,
+                            decision: ControlTransferDecision::Accept,
+                        });
+                    }
+                    return;
+                }
+                Keysym::n | Keysym::N => {
+                    if let Some(transfer_id) = self.pane.pending_control_transfer.take() {
+                        self.send_command(WindowCommand::DecideControlTransfer {
+                            transfer_id,
+                            decision: ControlTransferDecision::Deny,
+                        });
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
         if self.modifiers.ctrl
             && self.modifiers.shift
@@ -3879,6 +4152,8 @@ impl App {
                     self.title_override.as_deref().or(Some(&snapshot.title)),
                     self.pane.controller_active,
                     &self.pane.authority,
+                    self.pane.pending_control_transfer.is_some(),
+                    Some(&self.pane.search),
                 ));
             }
             return;
@@ -4348,6 +4623,31 @@ impl App {
                     visual_changed = true;
                     self.full_redraw = true;
                 }
+                WindowUpdate::ControlTransferRequested(transfer_id) => {
+                    self.pane.pending_control_transfer = Some(transfer_id);
+                    title_changed = true;
+                }
+                WindowUpdate::ControlTransferResolved(_) => {
+                    self.pane.pending_control_transfer = None;
+                    title_changed = true;
+                }
+                WindowUpdate::SearchResults(page) => {
+                    self.pane.search.matches = page.matches;
+                    self.pane.search.selected = 0;
+                    self.pane.search.next_cursor = page.next_cursor;
+                    self.pane.search.pending_reveal = self.pane.search.matches.first().cloned();
+                    title_changed = true;
+                    visual_changed = true;
+                    self.full_redraw = true;
+                }
+                WindowUpdate::SearchResyncRequired => {
+                    self.pane.search.matches.clear();
+                    self.pane.search.next_cursor = None;
+                    self.pane.search.pending_reveal = None;
+                    title_changed = true;
+                    visual_changed = true;
+                    self.full_redraw = true;
+                }
                 WindowUpdate::Theme(theme) => {
                     self.theme = theme;
                     if let Some(snapshot) = self.pane.snapshot.as_mut() {
@@ -4371,6 +4671,10 @@ impl App {
                     }
                 }
             }
+        }
+        if self.pane.search.pending_reveal.is_some() {
+            self.reveal_pending_search_match();
+            visual_changed = true;
         }
         if visual_changed {
             self.cursor_blink_visible = true;
@@ -4416,6 +4720,8 @@ impl App {
                 self.title_override.as_deref().or(Some(&snapshot.title)),
                 self.pane.controller_active,
                 &self.pane.authority,
+                self.pane.pending_control_transfer.is_some(),
+                Some(&self.pane.search),
             ));
         }
         Ok(())
@@ -5295,7 +5601,14 @@ impl KeyboardHandler for App {
         } else {
             match self.handle_history_key(&event, queue_handle) {
                 Ok(true) => {}
-                Ok(false) => self.handle_key(&event),
+                Ok(false) => {
+                    self.handle_key(&event);
+                    if self.full_redraw {
+                        if let Err(error) = self.schedule_draw(queue_handle) {
+                            self.fail(error);
+                        }
+                    }
+                }
                 Err(error) => self.fail(error),
             }
         }
@@ -6745,6 +7058,26 @@ mod tests {
             600,
             true,
         ));
+    }
+
+    #[test]
+    fn trusted_title_surfaces_control_decision_and_bounded_search_state() {
+        let authority = AuthorityStatus::default();
+        let mut search = SearchUiState {
+            input: Some("needle\nspoof".into()),
+            ..SearchUiState::default()
+        };
+        search.matches.push(SearchMatch {
+            row_id: 1,
+            start_column: 0,
+            end_column: 2,
+            preview: "needle".into(),
+        });
+        let title = window_title(Some("shell"), true, &authority, true, Some(&search));
+        assert!(title.contains("local controller"));
+        assert!(title.contains("CONTROL REQUEST"));
+        assert!(title.contains("SEARCH: needlespoof [1 match(es)"));
+        assert!(!title.contains('\n'));
     }
 
     #[test]

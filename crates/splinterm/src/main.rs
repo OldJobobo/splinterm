@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     env,
     io::{self, ErrorKind, IsTerminal, Read, Write},
     path::PathBuf,
@@ -19,10 +20,10 @@ use splinterm_core::{
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen, CellAttributes, ClientFrame, ColorSource,
-    ConsentPrompt, ConsentReply, ErrorCode, LaunchParameters, MAX_CONSENT_FRAME_BYTES,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ServerFrame, SubscriptionEvent,
-    TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate,
-    UnderlineStyle, encode_frame,
+    ConsentPrompt, ConsentReply, ControlTransferOutcome, ErrorCode, LaunchParameters,
+    MAX_CONSENT_FRAME_BYTES, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ServerFrame,
+    SubscriptionEvent, TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot,
+    TerminalUpdate, UnderlineStyle, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -934,7 +935,10 @@ fn classify_subscription_event(
             EventAction::Shutdown
         }
         SubscriptionEvent::TopologyChanged { .. }
-        | SubscriptionEvent::TopologyResyncRequired { .. } => EventAction::Ignore,
+        | SubscriptionEvent::TopologyResyncRequired { .. }
+        | SubscriptionEvent::ControlStatusChanged { .. }
+        | SubscriptionEvent::ControlTransferRequested { .. }
+        | SubscriptionEvent::ControlTransferResolved { .. } => EventAction::Ignore,
     }
 }
 
@@ -1233,6 +1237,58 @@ async fn active_resize_request(
     })
 }
 
+async fn handle_control_event(
+    frame: ServerFrame,
+    subscription_id: u64,
+    active_controller: &mut Option<u64>,
+    updates: &mpsc::Sender<WindowUpdate>,
+) -> Result<()> {
+    let ServerFrame::Event {
+        subscription_id: event_subscription,
+        event,
+        ..
+    } = frame
+    else {
+        bail!("splinterd sent an unexpected control-subscription frame");
+    };
+    if event_subscription != subscription_id {
+        return Ok(());
+    }
+    match event {
+        SubscriptionEvent::ControlStatusChanged { status } => {
+            if !status.locally_owned {
+                *active_controller = None;
+            }
+            let _ = updates
+                .send(WindowUpdate::Control(status.locally_owned))
+                .await;
+        }
+        SubscriptionEvent::ControlTransferRequested { transfer_id } => {
+            let _ = updates
+                .send(WindowUpdate::ControlTransferRequested(transfer_id))
+                .await;
+        }
+        SubscriptionEvent::ControlTransferResolved {
+            outcome,
+            controller_id,
+            ..
+        } => {
+            if outcome == ControlTransferOutcome::Granted {
+                *active_controller = controller_id;
+            }
+            let _ = updates
+                .send(WindowUpdate::ControlTransferResolved(outcome))
+                .await;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one task serializes control ownership, search, resize, and input for a pane"
+)]
 async fn run_controller(
     mut control: Connection,
     mut commands: mpsc::Receiver<WindowCommand>,
@@ -1244,8 +1300,38 @@ async fn run_controller(
 ) -> Result<()> {
     let mut active_controller = controller_id;
     let mut prepared_resize = None;
+    let Response::ControlSubscribed {
+        subscription_id: control_subscription,
+        status: initial_status,
+    } = control
+        .request(Request::SubscribeControl {
+            splint_id,
+            incarnation,
+        })
+        .await?
+    else {
+        bail!("splinterd did not establish a control subscription");
+    };
+    active_controller = active_controller.filter(|_| initial_status.locally_owned);
+    let _ = outputs
+        .updates
+        .send(WindowUpdate::Control(initial_status.locally_owned))
+        .await;
     let result = async {
-        while let Some(command) = commands.recv().await {
+        loop {
+            let command = tokio::select! {
+                frame = control.next_server_frame() => {
+                    handle_control_event(
+                        frame?,
+                        control_subscription,
+                        &mut active_controller,
+                        &outputs.updates,
+                    ).await?;
+                    continue;
+                }
+                command = commands.recv() => command,
+            };
+            let Some(command) = command else { break };
             let request = match command {
                 WindowCommand::Input(bytes) => {
                     let controller_id = ensure_pane_control(
@@ -1314,6 +1400,78 @@ async fn run_controller(
                     continue;
                 }
                 WindowCommand::RevokeAccess(grant_id) => Request::RevokeAccess { grant_id },
+                WindowCommand::RequestControlTransfer => {
+                    if !matches!(
+                        control
+                            .request(Request::RequestControlTransfer {
+                                splint_id,
+                                incarnation,
+                            })
+                            .await?,
+                        Response::ControlTransferPending { .. }
+                    ) {
+                        bail!("splinterd did not queue the control transfer");
+                    }
+                    continue;
+                }
+                WindowCommand::DecideControlTransfer {
+                    transfer_id,
+                    decision,
+                } => Request::DecideControlTransfer {
+                    transfer_id,
+                    decision,
+                },
+                WindowCommand::ForceControlTransfer => {
+                    active_controller = match control
+                        .request(Request::ForceControlTransfer {
+                            splint_id,
+                            incarnation,
+                        })
+                        .await?
+                    {
+                        Response::ControlGranted { controller_id } => Some(controller_id),
+                        _ => bail!("splinterd did not grant forced control"),
+                    };
+                    let _ = outputs.updates.send(WindowUpdate::Control(true)).await;
+                    continue;
+                }
+                WindowCommand::Search {
+                    terminal_revision,
+                    history_generation,
+                    query,
+                    case_sensitive,
+                    cursor,
+                } => {
+                    match control
+                        .request(Request::SearchScrollback {
+                            splint_id,
+                            incarnation,
+                            terminal_revision,
+                            history_generation,
+                            query,
+                            case_sensitive,
+                            cursor,
+                            max_results: splinterm_protocol::MAX_SEARCH_RESULTS,
+                        })
+                        .await?
+                    {
+                        Response::SearchResults { page } => {
+                            let _ = outputs
+                                .updates
+                                .send(WindowUpdate::SearchResults(page))
+                                .await;
+                        }
+                        Response::SearchResyncRequired { .. } => {
+                            let _ = outputs
+                                .updates
+                                .send(WindowUpdate::SearchResyncRequired)
+                                .await;
+                            let _ = outputs.resyncs.send(()).await;
+                        }
+                        _ => bail!("splinterd did not return search results"),
+                    }
+                    continue;
+                }
                 WindowCommand::ReleaseControl => {
                     let Some(controller_id) = active_controller.take() else {
                         continue;
@@ -2088,6 +2246,7 @@ struct Connection {
     stream: UnixStream,
     next_request: u64,
     read_buffer: Vec<u8>,
+    queued_events: VecDeque<ServerFrame>,
 }
 
 impl Connection {
@@ -2113,6 +2272,7 @@ impl Connection {
             stream,
             next_request: 1,
             read_buffer: Vec::new(),
+            queued_events: VecDeque::new(),
         })
     }
 
@@ -2149,13 +2309,16 @@ impl Connection {
                         error.message
                     )
                 }
-                ServerFrame::Event { .. } => {}
+                event @ ServerFrame::Event { .. } => self.queued_events.push_back(event),
                 _ => bail!("splinterd sent a response with the wrong request id"),
             }
         }
     }
 
     async fn next_server_frame(&mut self) -> Result<ServerFrame> {
+        if let Some(event) = self.queued_events.pop_front() {
+            return Ok(event);
+        }
         self.read_server_frame().await
     }
 
@@ -2303,6 +2466,10 @@ fn print_dojos(dojos: Vec<splinterm_core::Dojo>) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the CLI keeps exhaustive human rendering for every private protocol response"
+)]
 fn print_response(response: Response) -> Result<()> {
     match response {
         Response::Pong => println!("splinterd is awake"),
@@ -2338,6 +2505,18 @@ fn print_response(response: Response) -> Result<()> {
         } => println!(
             "Scrollback resync required at revision {current_revision}, generation {history_generation}"
         ),
+        Response::SearchResults { page } => println!(
+            "Search page: {} match(es), continuation={}, timed_out={}",
+            page.matches.len(),
+            page.next_cursor.is_some(),
+            page.timed_out,
+        ),
+        Response::SearchResyncRequired {
+            current_revision,
+            history_generation,
+        } => println!(
+            "Search resync required at revision {current_revision}, generation {history_generation}"
+        ),
         Response::AccessGranted { grant } => {
             println!("Access grant {} issued.", grant.grant_id);
         }
@@ -2352,6 +2531,16 @@ fn print_response(response: Response) -> Result<()> {
         }
         Response::ControlGranted { controller_id } => {
             println!("Controller lease {controller_id} granted.");
+        }
+        Response::ControlSubscribed {
+            subscription_id,
+            status,
+        } => println!(
+            "Control subscription {subscription_id}: controlled={}, locally_owned={}",
+            status.controlled, status.locally_owned,
+        ),
+        Response::ControlTransferPending { transfer_id } => {
+            println!("Control transfer {transfer_id} pending.");
         }
         Response::Acknowledged => println!("Acknowledged."),
         Response::SplintStarted {
@@ -2466,6 +2655,7 @@ mod tests {
             stream: client,
             next_request: 1,
             read_buffer: Vec::new(),
+            queued_events: VecDeque::new(),
         };
 
         assert!(

@@ -33,6 +33,24 @@ pub struct ScrollbackPage<'a> {
     pub has_older: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchMatch {
+    pub row_id: u64,
+    pub start_column: usize,
+    pub end_column: usize,
+    pub preview: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchPage {
+    pub history_generation: u64,
+    pub terminal_revision: TerminalRevision,
+    pub matches: Vec<SearchMatch>,
+    pub has_older: bool,
+    pub next_offset: Option<usize>,
+    pub timed_out: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScrollbackSnapshot {
     pub history_generation: u64,

@@ -28,15 +28,17 @@ use splinterm_core::{
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
-    ColorSource, ErrorCode, HistoryTransition, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES,
-    MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
-    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, ProcessExitStatus, ProtocolError,
-    Request, Response, RestoreLeafResult, ScrollDirection as WireScrollDirection,
-    ScrollbackPage as WireScrollbackPage, ServerFrame, ServerLimits, SplintLifecycle,
-    SplintRuntimeSummary, SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes,
-    TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
-    TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind, TopologySnapshot,
-    UnderlineStyle as WireUnderlineStyle, encode_frame,
+    ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome, ErrorCode,
+    HistoryTransition, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS,
+    MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking,
+    PROTOCOL_VERSION, ProcessExitStatus, ProtocolError, Request, Response, RestoreLeafResult,
+    ScrollDirection as WireScrollDirection, ScrollbackPage as WireScrollbackPage,
+    SearchMatch as WireSearchMatch, SearchPage as WireSearchPage, ServerFrame, ServerLimits,
+    SplintLifecycle, SplintRuntimeSummary, SubscriptionEvent, TerminalCell, TerminalCursor,
+    TerminalInputModes, TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate,
+    TerminalSnapshot, TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind,
+    TopologySnapshot, UnderlineStyle as WireUnderlineStyle, encode_frame,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
@@ -65,29 +67,94 @@ const OUTBOUND_QUEUE: usize = 32;
 const CONTROL_QUEUE: usize = 4;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTROL_EVENT_QUEUE: usize = 32;
+const SEARCH_DEADLINE: Duration = Duration::from_millis(10);
 static NEXT_SUBSCRIPTION: AtomicU64 = AtomicU64::new(1);
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+
+struct AbortOnDrop {
+    task: Option<JoinHandle<()>>,
+}
+
+impl AbortOnDrop {
+    fn new(task: JoinHandle<()>) -> Self {
+        Self { task: Some(task) }
+    }
+
+    fn abort(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+
+    async fn join(mut self) {
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ControllerLease {
     id: u64,
+    connection_id: u64,
     splint_id: SplintId,
     incarnation: u64,
     grant_id: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingControlTransfer {
+    id: u64,
+    owner_connection_id: u64,
+    requester_connection_id: u64,
+    splint_id: SplintId,
+    incarnation: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ControlNotice {
+    Status {
+        splint_id: SplintId,
+        incarnation: u64,
+        owner_connection_id: Option<u64>,
+    },
+    TransferRequested(PendingControlTransfer),
+    TransferResolved {
+        transfer: PendingControlTransfer,
+        outcome: ControlTransferOutcome,
+        controller_id: Option<u64>,
+    },
+}
+
 #[derive(Debug)]
 struct ControllerState {
     next_id: u64,
+    next_transfer_id: u64,
     by_id: HashMap<u64, ControllerLease>,
     by_splint: HashMap<SplintId, u64>,
+    by_connection: HashMap<u64, u64>,
+    transfers: HashMap<u64, PendingControlTransfer>,
+    transfer_by_splint: HashMap<SplintId, u64>,
 }
 
 impl Default for ControllerState {
     fn default() -> Self {
         Self {
             next_id: 1,
+            next_transfer_id: 1,
             by_id: HashMap::new(),
             by_splint: HashMap::new(),
+            by_connection: HashMap::new(),
+            transfers: HashMap::new(),
+            transfer_by_splint: HashMap::new(),
         }
     }
 }
@@ -95,10 +162,17 @@ impl Default for ControllerState {
 impl ControllerState {
     fn acquire(
         &mut self,
+        connection_id: u64,
         splint_id: SplintId,
         incarnation: u64,
         grant_id: Option<u64>,
     ) -> Result<ControllerLease, ProtocolError> {
+        if self.by_connection.contains_key(&connection_id) {
+            return Err(ProtocolError::new(
+                ErrorCode::ControllerUnavailable,
+                "connection already owns a controller lease",
+            ));
+        }
         if self.by_splint.contains_key(&splint_id) {
             return Err(ProtocolError::new(
                 ErrorCode::ControllerUnavailable,
@@ -111,23 +185,30 @@ impl ControllerState {
         })?;
         let lease = ControllerLease {
             id,
+            connection_id,
             splint_id,
             incarnation,
             grant_id,
         };
         self.by_id.insert(id, lease);
         self.by_splint.insert(splint_id, id);
+        self.by_connection.insert(connection_id, id);
         Ok(lease)
     }
 
     fn authorize(
         &self,
+        connection_id: u64,
         controller_id: u64,
         splint_id: SplintId,
         incarnation: u64,
     ) -> Result<(), ProtocolError> {
         match self.by_id.get(&controller_id) {
-            Some(lease) if lease.splint_id == splint_id && lease.incarnation == incarnation => {
+            Some(lease)
+                if lease.connection_id == connection_id
+                    && lease.splint_id == splint_id
+                    && lease.incarnation == incarnation =>
+            {
                 Ok(())
             }
             _ => Err(ProtocolError::new(
@@ -137,36 +218,219 @@ impl ControllerState {
         }
     }
 
-    fn release(&mut self, controller_id: u64) -> bool {
-        let Some(lease) = self.by_id.remove(&controller_id) else {
-            return false;
-        };
-        self.by_splint.remove(&lease.splint_id);
-        true
+    fn status(&self, connection_id: u64, splint_id: SplintId, incarnation: u64) -> ControlStatus {
+        let lease = self
+            .by_splint
+            .get(&splint_id)
+            .and_then(|id| self.by_id.get(id))
+            .filter(|lease| lease.incarnation == incarnation);
+        ControlStatus {
+            splint_id,
+            incarnation,
+            controlled: lease.is_some(),
+            locally_owned: lease.is_some_and(|lease| lease.connection_id == connection_id),
+        }
     }
 
-    fn release_grant(&mut self, grant_id: u64) {
+    fn release(&mut self, controller_id: u64) -> Option<ControllerLease> {
+        let lease = self.by_id.remove(&controller_id)?;
+        self.by_splint.remove(&lease.splint_id);
+        self.by_connection.remove(&lease.connection_id);
+        Some(lease)
+    }
+
+    fn release_owned(&mut self, connection_id: u64, controller_id: u64) -> Option<ControllerLease> {
+        (self.by_connection.get(&connection_id) == Some(&controller_id))
+            .then(|| self.release(controller_id))
+            .flatten()
+    }
+
+    fn release_connection(&mut self, connection_id: u64) -> Option<ControllerLease> {
+        let controller_id = self.by_connection.get(&connection_id).copied()?;
+        self.release(controller_id)
+    }
+
+    fn request_transfer(
+        &mut self,
+        requester_connection_id: u64,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> Result<PendingControlTransfer, ProtocolError> {
+        if self.by_connection.contains_key(&requester_connection_id)
+            || self.transfer_by_splint.contains_key(&splint_id)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::ControlTransferUnavailable,
+                "control transfer is unavailable",
+            ));
+        }
+        let owner = self
+            .by_splint
+            .get(&splint_id)
+            .and_then(|id| self.by_id.get(id))
+            .filter(|lease| lease.incarnation == incarnation)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::ControlTransferUnavailable,
+                    "live Splint has no matching controller",
+                )
+            })?;
+        let id = self.next_transfer_id;
+        self.next_transfer_id = self.next_transfer_id.checked_add(1).ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::ResourceLimit,
+                "control transfer ID space exhausted",
+            )
+        })?;
+        let transfer = PendingControlTransfer {
+            id,
+            owner_connection_id: owner.connection_id,
+            requester_connection_id,
+            splint_id,
+            incarnation,
+        };
+        self.transfers.insert(id, transfer);
+        self.transfer_by_splint.insert(splint_id, id);
+        Ok(transfer)
+    }
+
+    fn take_transfer(
+        &mut self,
+        connection_id: u64,
+        transfer_id: u64,
+    ) -> Result<PendingControlTransfer, ProtocolError> {
+        let transfer = self.transfers.get(&transfer_id).copied().ok_or_else(|| {
+            ProtocolError::new(ErrorCode::RequestNotFound, "control transfer not found")
+        })?;
+        if transfer.owner_connection_id != connection_id {
+            return Err(ProtocolError::new(
+                ErrorCode::Unauthorized,
+                "only the current controller may decide a transfer",
+            ));
+        }
+        self.transfers.remove(&transfer_id);
+        self.transfer_by_splint.remove(&transfer.splint_id);
+        Ok(transfer)
+    }
+
+    fn expire_transfer(&mut self, transfer_id: u64) -> Option<PendingControlTransfer> {
+        let transfer = self.transfers.remove(&transfer_id)?;
+        self.transfer_by_splint.remove(&transfer.splint_id);
+        Some(transfer)
+    }
+
+    fn decide_transfer(
+        &mut self,
+        connection_id: u64,
+        transfer_id: u64,
+        decision: ControlTransferDecision,
+    ) -> Result<
+        (
+            PendingControlTransfer,
+            ControlTransferOutcome,
+            Option<ControllerLease>,
+        ),
+        ProtocolError,
+    > {
+        let transfer = self.take_transfer(connection_id, transfer_id)?;
+        if decision == ControlTransferDecision::Deny {
+            return Ok((transfer, ControlTransferOutcome::Denied, None));
+        }
+        let current = self
+            .by_splint
+            .get(&transfer.splint_id)
+            .and_then(|id| self.by_id.get(id))
+            .copied();
+        if current.is_none_or(|lease| {
+            lease.connection_id != transfer.owner_connection_id
+                || lease.incarnation != transfer.incarnation
+        }) || self
+            .by_connection
+            .contains_key(&transfer.requester_connection_id)
+        {
+            return Ok((transfer, ControlTransferOutcome::Cancelled, None));
+        }
+        self.next_id.checked_add(1).ok_or_else(|| {
+            ProtocolError::new(ErrorCode::ResourceLimit, "controller ID space exhausted")
+        })?;
+        self.release(current.expect("matching controller checked").id);
+        let lease = self.acquire(
+            transfer.requester_connection_id,
+            transfer.splint_id,
+            transfer.incarnation,
+            None,
+        )?;
+        Ok((transfer, ControlTransferOutcome::Granted, Some(lease)))
+    }
+
+    fn force_transfer(
+        &mut self,
+        requester_connection_id: u64,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> Result<ControllerLease, ProtocolError> {
+        if self.by_connection.contains_key(&requester_connection_id) {
+            return Err(ProtocolError::new(
+                ErrorCode::ControllerUnavailable,
+                "connection already owns a controller lease",
+            ));
+        }
+        let current = self
+            .by_splint
+            .get(&splint_id)
+            .and_then(|id| self.by_id.get(id))
+            .copied()
+            .filter(|lease| lease.incarnation == incarnation)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::ControlTransferUnavailable,
+                    "live Splint has no matching controller",
+                )
+            })?;
+        self.next_id.checked_add(1).ok_or_else(|| {
+            ProtocolError::new(ErrorCode::ResourceLimit, "controller ID space exhausted")
+        })?;
+        self.release(current.id);
+        self.acquire(requester_connection_id, splint_id, incarnation, None)
+    }
+
+    fn cancel_connection_transfers(&mut self, connection_id: u64) -> Vec<PendingControlTransfer> {
+        let ids: Vec<_> = self
+            .transfers
+            .values()
+            .filter(|transfer| {
+                transfer.owner_connection_id == connection_id
+                    || transfer.requester_connection_id == connection_id
+            })
+            .map(|transfer| transfer.id)
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| self.expire_transfer(id))
+            .collect()
+    }
+
+    fn release_grant(&mut self, grant_id: u64) -> Vec<ControllerLease> {
         let ids: Vec<_> = self
             .by_id
             .values()
             .filter(|lease| lease.grant_id == Some(grant_id))
             .map(|lease| lease.id)
             .collect();
-        for id in ids {
-            self.release(id);
-        }
+        ids.into_iter().filter_map(|id| self.release(id)).collect()
     }
 
-    fn release_identity(&mut self, splint_id: SplintId, incarnation: u64) {
+    fn release_identity(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> Option<ControllerLease> {
         let id = self
             .by_splint
             .get(&splint_id)
             .and_then(|id| self.by_id.get(id))
             .filter(|lease| lease.incarnation == incarnation)
-            .map(|lease| lease.id);
-        if let Some(id) = id {
-            self.release(id);
-        }
+            .map(|lease| lease.id)?;
+        self.release(id)
     }
 }
 
@@ -264,6 +528,7 @@ struct DaemonState {
     topology_transactions: Semaphore,
     metadata: Option<MetadataStore>,
     controller: Mutex<ControllerState>,
+    control_events: broadcast::Sender<ControlNotice>,
     grants: Mutex<GrantStore>,
     revocations: broadcast::Sender<Revocation>,
     pty_backend: LinuxPtyBackend,
@@ -272,6 +537,10 @@ struct DaemonState {
 
 // Local PTY and Unix-socket work is asynchronous; bounding workers also bounds
 // glibc per-thread allocator arenas after sustained terminal output.
+#[allow(
+    clippy::too_many_lines,
+    reason = "startup, owned connection lifetime, and ordered shutdown remain one daemon boundary"
+)]
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -303,6 +572,7 @@ async fn main() -> Result<()> {
     verify_socket(&socket).await?;
 
     let (revocations, _) = broadcast::channel(32);
+    let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
     let state = Arc::new(DaemonState {
         lair: RwLock::new(lair),
         runtimes: Mutex::new(RuntimeRegistry::default()),
@@ -310,6 +580,7 @@ async fn main() -> Result<()> {
         topology_transactions: Semaphore::new(1),
         metadata: Some(metadata),
         controller: Mutex::new(ControllerState::default()),
+        control_events,
         grants: Mutex::new(GrantStore::default()),
         revocations,
         pty_backend: LinuxPtyBackend::installed()?,
@@ -317,10 +588,18 @@ async fn main() -> Result<()> {
             == Some(std::ffi::OsStr::new("1")),
     });
     let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
+    let mut connection_tasks = tokio::task::JoinSet::new();
     info!(socket = %socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
+    let shutdown_signal = signal::ctrl_c();
+    tokio::pin!(shutdown_signal);
 
     loop {
         tokio::select! {
+            biased;
+            result = &mut shutdown_signal => {
+                result.context("failed to listen for shutdown signal")?;
+                break;
+            }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("failed to accept client")?;
                 let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
@@ -328,19 +607,23 @@ async fn main() -> Result<()> {
                     continue;
                 };
                 let state = Arc::clone(&state);
-                tokio::spawn(async move {
+                connection_tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = serve_client(stream, state).await {
                         warn!(%error, "client connection closed");
                     }
                 });
             }
-            result = signal::ctrl_c() => {
-                result.context("failed to listen for shutdown signal")?;
-                break;
+            completed = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    warn!(%error, "client connection task failed");
+                }
             }
         }
     }
+
+    connection_tasks.abort_all();
+    while connection_tasks.join_next().await.is_some() {}
 
     let runtimes = state.runtimes.lock().await.drain();
     let shutdown = async {
@@ -372,14 +655,23 @@ async fn main() -> Result<()> {
 
 async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
     let peer = verify_peer(&stream)?;
+    let connection_id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (reader, writer) = stream.into_split();
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE);
-    let writer_task = tokio::spawn(write_frames(writer, outbound_rx, control_rx));
-    let result = serve_authenticated(reader, &state, &peer, &outbound_tx, &control_tx).await;
+    let writer_task = AbortOnDrop::new(tokio::spawn(write_frames(writer, outbound_rx, control_rx)));
+    let result = serve_authenticated(
+        reader,
+        &state,
+        &peer,
+        connection_id,
+        &outbound_tx,
+        &control_tx,
+    )
+    .await;
     drop(outbound_tx);
     drop(control_tx);
-    let _ = writer_task.await;
+    writer_task.join().await;
     result
 }
 
@@ -391,6 +683,7 @@ async fn serve_authenticated(
     mut reader: OwnedReadHalf,
     state: &Arc<DaemonState>,
     peer: &PeerIdentity,
+    connection_id: u64,
     outbound: &mpsc::Sender<ServerFrame>,
     control: &mpsc::Sender<ServerFrame>,
 ) -> Result<()> {
@@ -431,8 +724,7 @@ async fn serve_authenticated(
     )
     .await?;
 
-    let mut subscriptions = HashMap::<u64, JoinHandle<()>>::new();
-    let mut owned_controller = None;
+    let mut subscriptions = HashMap::<u64, AbortOnDrop>::new();
     let mut last_request_id = 0_u64;
     while let Some(frame) = read_optional_frame(&mut reader).await? {
         match frame {
@@ -486,13 +778,13 @@ async fn serve_authenticated(
                 last_request_id = request_id;
                 if let Request::Detach { subscription_id } = &request {
                     if let Some(task) = subscriptions.remove(subscription_id) {
-                        task.abort();
+                        drop(task);
                     }
                     state.topology.lock().await.remove(*subscription_id);
                     send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
-                let handled = handle_request(request, state, peer, &mut owned_controller).await;
+                let handled = handle_request(request, state, peer, connection_id).await;
                 match handled {
                     Ok(Handled {
                         response,
@@ -534,8 +826,26 @@ async fn serve_authenticated(
                                     id,
                                     spawn_topology_subscription(id, stream, outbound.clone()),
                                 ),
+                                PendingSubscription::Control {
+                                    id,
+                                    stream,
+                                    connection_id,
+                                    splint_id,
+                                    incarnation,
+                                } => (
+                                    id,
+                                    spawn_control_subscription(
+                                        id,
+                                        stream,
+                                        outbound.clone(),
+                                        Arc::clone(state),
+                                        connection_id,
+                                        splint_id,
+                                        incarnation,
+                                    ),
+                                ),
                             };
-                            subscriptions.insert(id, task);
+                            subscriptions.insert(id, AbortOnDrop::new(task));
                         } else {
                             send_response(outbound, request_id, Ok(response)).await?;
                         }
@@ -545,11 +855,26 @@ async fn serve_authenticated(
             }
         }
     }
-    for (_, task) in subscriptions {
-        task.abort();
+    drop(subscriptions);
+    let (released, cancelled) = {
+        let mut controllers = state.controller.lock().await;
+        (
+            controllers.release_connection(connection_id),
+            controllers.cancel_connection_transfers(connection_id),
+        )
+    };
+    if let Some(lease) = released {
+        publish_control_status(state, lease.splint_id, lease.incarnation).await;
     }
-    if let Some(controller_id) = owned_controller {
-        state.controller.lock().await.release(controller_id);
+    for transfer in cancelled {
+        publish_control_notice(
+            state,
+            ControlNotice::TransferResolved {
+                transfer,
+                outcome: ControlTransferOutcome::Cancelled,
+                controller_id: None,
+            },
+        );
     }
     Ok(())
 }
@@ -572,6 +897,13 @@ enum PendingSubscription {
         id: u64,
         stream: TopologySubscription,
     },
+    Control {
+        id: u64,
+        stream: broadcast::Receiver<ControlNotice>,
+        connection_id: u64,
+        splint_id: SplintId,
+        incarnation: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -588,32 +920,61 @@ struct HistoryState {
     available_rows: usize,
 }
 
+fn publish_control_notice(state: &DaemonState, notice: ControlNotice) {
+    let _ = state.control_events.send(notice);
+}
+
+async fn publish_control_status(state: &DaemonState, splint_id: SplintId, incarnation: u64) {
+    let owner_connection_id = {
+        let controllers = state.controller.lock().await;
+        controllers
+            .by_splint
+            .get(&splint_id)
+            .and_then(|id| controllers.by_id.get(id))
+            .filter(|lease| lease.incarnation == incarnation)
+            .map(|lease| lease.connection_id)
+    };
+    publish_control_notice(
+        state,
+        ControlNotice::Status {
+            splint_id,
+            incarnation,
+            owner_connection_id,
+        },
+    );
+}
+
+fn schedule_transfer_timeout(state: Arc<DaemonState>, transfer: PendingControlTransfer) {
+    tokio::spawn(async move {
+        time::sleep(CONTROL_TRANSFER_TIMEOUT).await;
+        let expired = state.controller.lock().await.expire_transfer(transfer.id);
+        if let Some(transfer) = expired {
+            publish_control_notice(
+                &state,
+                ControlNotice::TransferResolved {
+                    transfer,
+                    outcome: ControlTransferOutcome::TimedOut,
+                    controller_id: None,
+                },
+            );
+        }
+    });
+}
+
 async fn controlled_handle(
     state: &Arc<DaemonState>,
-    owned_controller: &mut Option<u64>,
+    connection_id: u64,
     controller_id: u64,
     splint_id: SplintId,
     incarnation: u64,
 ) -> Result<LiveSplintHandle, ProtocolError> {
-    if *owned_controller != Some(controller_id) {
-        return Err(ProtocolError::new(
-            ErrorCode::Unauthorized,
-            "controller lease is not owned by this connection",
-        ));
-    }
-    let handle = match current_handle(state, splint_id, incarnation).await {
-        Ok(handle) => handle,
-        Err(error) => {
-            state.controller.lock().await.release(controller_id);
-            *owned_controller = None;
-            return Err(error);
-        }
-    };
-    state
-        .controller
-        .lock()
-        .await
-        .authorize(controller_id, splint_id, incarnation)?;
+    let handle = current_handle(state, splint_id, incarnation).await?;
+    state.controller.lock().await.authorize(
+        connection_id,
+        controller_id,
+        splint_id,
+        incarnation,
+    )?;
     Ok(handle)
 }
 
@@ -819,6 +1180,7 @@ async fn start_exited_splint(
             .lock()
             .await
             .release_identity(splint_id, incarnation);
+        publish_control_status(state, splint_id, incarnation).await;
         let revoked =
             state
                 .grants
@@ -957,6 +1319,7 @@ async fn finalize_exit_if_current(
         .lock()
         .await
         .release_identity(splint_id, incarnation);
+    publish_control_status(state, splint_id, incarnation).await;
     let revoked =
         state
             .grants
@@ -1006,7 +1369,7 @@ async fn handle_request(
     request: Request,
     state: &Arc<DaemonState>,
     peer: &PeerIdentity,
-    owned_controller: &mut Option<u64>,
+    connection_id: u64,
 ) -> Result<Handled, ProtocolError> {
     let response = match request {
         Request::Ping => Response::Pong,
@@ -1129,7 +1492,10 @@ async fn handle_request(
                 .await
                 .revoke(grant_id)
                 .ok_or_else(not_found)?;
-            state.controller.lock().await.release_grant(grant_id);
+            let released = state.controller.lock().await.release_grant(grant_id);
+            for lease in released {
+                publish_control_status(state, lease.splint_id, lease.incarnation).await;
+            }
             let _ = state.revocations.send(Revocation { grant_id });
             info!(
                 grant_id,
@@ -1704,6 +2070,75 @@ async fn handle_request(
                 },
             }
         }
+        Request::SearchScrollback {
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+            query,
+            case_sensitive,
+            cursor,
+            max_results,
+        } => {
+            if query.is_empty()
+                || query.len() > MAX_SEARCH_QUERY_BYTES
+                || max_results == 0
+                || max_results > MAX_SEARCH_RESULTS
+            {
+                return Err(invalid("search request exceeds protocol bounds"));
+            }
+            let skip_rows = decode_search_cursor(cursor.as_deref())?;
+            let _ = authorize_scope(
+                state,
+                peer,
+                splint_id,
+                incarnation,
+                &[AccessScope::Observe, AccessScope::Scrollback],
+            )
+            .await?;
+            let page = current_handle(state, splint_id, incarnation)
+                .await?
+                .search(
+                    query,
+                    case_sensitive,
+                    skip_rows,
+                    max_results,
+                    SEARCH_DEADLINE,
+                )
+                .await
+                .map_err(|_| internal())?;
+            if page.terminal_revision.value() != terminal_revision
+                || page.history_generation != history_generation
+            {
+                return Ok(Handled {
+                    response: Response::SearchResyncRequired {
+                        current_revision: page.terminal_revision.value(),
+                        history_generation: page.history_generation,
+                    },
+                    subscription: None,
+                });
+            }
+            let page = WireSearchPage {
+                splint_id,
+                incarnation,
+                terminal_revision,
+                history_generation,
+                matches: page
+                    .matches
+                    .into_iter()
+                    .map(|item| WireSearchMatch {
+                        row_id: item.row_id,
+                        start_column: item.start_column,
+                        end_column: item.end_column,
+                        preview: item.preview,
+                    })
+                    .collect(),
+                next_cursor: page.next_offset.map(encode_search_cursor),
+                timed_out: page.timed_out,
+            };
+            page.validate()?;
+            Response::SearchResults { page }
+        }
         Request::AcquireControl {
             splint_id,
             incarnation,
@@ -1728,32 +2163,151 @@ async fn handle_request(
                     })?
             };
             let _ = current_handle(state, splint_id, incarnation).await?;
-            if owned_controller.is_some() {
+            let lease = state.controller.lock().await.acquire(
+                connection_id,
+                splint_id,
+                incarnation,
+                grant_id,
+            )?;
+            publish_control_status(state, splint_id, incarnation).await;
+            Response::ControlGranted {
+                controller_id: lease.id,
+            }
+        }
+        Request::SubscribeControl {
+            splint_id,
+            incarnation,
+        } => {
+            if !state.development_terminal_access
+                && !trusted_first_party_ui(peer, &[AccessScope::Observe])
+            {
                 return Err(ProtocolError::new(
-                    ErrorCode::ControllerUnavailable,
-                    "connection already owns a controller lease",
+                    ErrorCode::Unauthorized,
+                    "control status is restricted to the trusted first-party UI",
                 ));
             }
-            let lease = state
-                .controller
-                .lock()
-                .await
-                .acquire(splint_id, incarnation, grant_id)?;
-            *owned_controller = Some(lease.id);
+            let _ = current_handle(state, splint_id, incarnation).await?;
+            let status =
+                state
+                    .controller
+                    .lock()
+                    .await
+                    .status(connection_id, splint_id, incarnation);
+            let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
+            return Ok(Handled {
+                response: Response::ControlSubscribed {
+                    subscription_id: id,
+                    status,
+                },
+                subscription: Some(PendingSubscription::Control {
+                    id,
+                    stream: state.control_events.subscribe(),
+                    connection_id,
+                    splint_id,
+                    incarnation,
+                }),
+            });
+        }
+        Request::RequestControlTransfer {
+            splint_id,
+            incarnation,
+        } => {
+            if !state.development_terminal_access
+                && !trusted_first_party_ui(peer, &[AccessScope::Input, AccessScope::Resize])
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unauthorized,
+                    "control transfer is restricted to the trusted first-party UI",
+                ));
+            }
+            let _ = current_handle(state, splint_id, incarnation).await?;
+            let transfer = state.controller.lock().await.request_transfer(
+                connection_id,
+                splint_id,
+                incarnation,
+            )?;
+            publish_control_notice(state, ControlNotice::TransferRequested(transfer));
+            schedule_transfer_timeout(Arc::clone(state), transfer);
+            Response::ControlTransferPending {
+                transfer_id: transfer.id,
+            }
+        }
+        Request::DecideControlTransfer {
+            transfer_id,
+            decision,
+        } => {
+            let (transfer, outcome, lease) = state.controller.lock().await.decide_transfer(
+                connection_id,
+                transfer_id,
+                decision,
+            )?;
+            publish_control_notice(
+                state,
+                ControlNotice::TransferResolved {
+                    transfer,
+                    outcome,
+                    controller_id: lease.map(|lease| lease.id),
+                },
+            );
+            if outcome == ControlTransferOutcome::Granted {
+                publish_control_status(state, transfer.splint_id, transfer.incarnation).await;
+            }
+            Response::Acknowledged
+        }
+        Request::ForceControlTransfer {
+            splint_id,
+            incarnation,
+        } => {
+            if !trusted_first_party_ui(peer, &[AccessScope::Input, AccessScope::Resize]) {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unauthorized,
+                    "forced transfer is restricted to the trusted first-party UI",
+                ));
+            }
+            let _ = current_handle(state, splint_id, incarnation).await?;
+            let confirmed = consent::prompt(
+                peer,
+                splint_id,
+                incarnation,
+                vec![AccessScope::ControlTakeover],
+            )
+            .await
+            .map_err(|error| {
+                warn!(%error, "trusted forced-control confirmation failed closed");
+                ProtocolError::new(
+                    ErrorCode::ConsentUnavailable,
+                    "trusted confirmation unavailable",
+                )
+            })?;
+            if !confirmed {
+                return Err(ProtocolError::new(
+                    ErrorCode::ConsentDenied,
+                    "forced control transfer denied",
+                ));
+            }
+            let lease = state.controller.lock().await.force_transfer(
+                connection_id,
+                splint_id,
+                incarnation,
+            )?;
+            publish_control_status(state, splint_id, incarnation).await;
             Response::ControlGranted {
                 controller_id: lease.id,
             }
         }
         Request::ReleaseControl { controller_id } => {
-            if *owned_controller != Some(controller_id)
-                || !state.controller.lock().await.release(controller_id)
-            {
-                return Err(ProtocolError::new(
-                    ErrorCode::Unauthorized,
-                    "controller lease is not owned by this connection",
-                ));
-            }
-            *owned_controller = None;
+            let lease = state
+                .controller
+                .lock()
+                .await
+                .release_owned(connection_id, controller_id)
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::Unauthorized,
+                        "controller lease is not owned by this connection",
+                    )
+                })?;
+            publish_control_status(state, lease.splint_id, lease.incarnation).await;
             Response::Acknowledged
         }
         Request::Input {
@@ -1767,17 +2321,11 @@ async fn handle_request(
             if bytes.len() > MAX_INPUT_BYTES {
                 return Err(invalid("input exceeds limit"));
             }
-            controlled_handle(
-                state,
-                owned_controller,
-                controller_id,
-                splint_id,
-                incarnation,
-            )
-            .await?
-            .input(bytes)
-            .await
-            .map_err(|_| internal())?;
+            controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
+                .await?
+                .input(bytes)
+                .await
+                .map_err(|_| internal())?;
             Response::Acknowledged
         }
         Request::Resize {
@@ -1794,22 +2342,16 @@ async fn handle_request(
             if columns == 0 || rows == 0 || columns > MAX_COLUMNS || rows > MAX_ROWS {
                 return Err(invalid("terminal dimensions exceed limits"));
             }
-            controlled_handle(
-                state,
-                owned_controller,
-                controller_id,
-                splint_id,
-                incarnation,
-            )
-            .await?
-            .resize(PtySize {
-                columns,
-                rows,
-                pixel_width,
-                pixel_height,
-            })
-            .await
-            .map_err(|_| invalid("resize rejected"))?;
+            controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
+                .await?
+                .resize(PtySize {
+                    columns,
+                    rows,
+                    pixel_width,
+                    pixel_height,
+                })
+                .await
+                .map_err(|_| invalid("resize rejected"))?;
             let _transaction = state
                 .topology_transactions
                 .acquire()
@@ -1854,6 +2396,7 @@ async fn handle_request(
                 .lock()
                 .await
                 .release_identity(splint_id, incarnation);
+            publish_control_status(state, splint_id, incarnation).await;
             let revoked = state.grants.lock().await.revoke_identity(
                 splint_id,
                 incarnation,
@@ -1862,7 +2405,6 @@ async fn handle_request(
             for grant_id in revoked {
                 let _ = state.revocations.send(Revocation { grant_id });
             }
-            *owned_controller = None;
             let status = runtime.shutdown().await.map_err(|_| internal())?;
             let code = status
                 .code
@@ -1985,6 +2527,88 @@ async fn current_handle(
         ));
     }
     Ok(handle)
+}
+
+fn spawn_control_subscription(
+    id: u64,
+    mut stream: broadcast::Receiver<ControlNotice>,
+    outbound: mpsc::Sender<ServerFrame>,
+    state: Arc<DaemonState>,
+    connection_id: u64,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut sequence = 1_u64;
+        loop {
+            let event = match stream.recv().await {
+                Ok(ControlNotice::Status {
+                    splint_id: event_splint,
+                    incarnation: event_incarnation,
+                    owner_connection_id,
+                }) if event_splint == splint_id && event_incarnation == incarnation => {
+                    Some(SubscriptionEvent::ControlStatusChanged {
+                        status: ControlStatus {
+                            splint_id,
+                            incarnation,
+                            controlled: owner_connection_id.is_some(),
+                            locally_owned: owner_connection_id == Some(connection_id),
+                        },
+                    })
+                }
+                Ok(ControlNotice::TransferRequested(transfer))
+                    if transfer.splint_id == splint_id
+                        && transfer.incarnation == incarnation
+                        && transfer.owner_connection_id == connection_id =>
+                {
+                    Some(SubscriptionEvent::ControlTransferRequested {
+                        transfer_id: transfer.id,
+                    })
+                }
+                Ok(ControlNotice::TransferResolved {
+                    transfer,
+                    outcome,
+                    controller_id,
+                }) if transfer.splint_id == splint_id
+                    && transfer.incarnation == incarnation
+                    && (transfer.owner_connection_id == connection_id
+                        || transfer.requester_connection_id == connection_id) =>
+                {
+                    Some(SubscriptionEvent::ControlTransferResolved {
+                        transfer_id: transfer.id,
+                        outcome,
+                        controller_id: (transfer.requester_connection_id == connection_id)
+                            .then_some(controller_id)
+                            .flatten(),
+                    })
+                }
+                Ok(_) => None,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let status =
+                        state
+                            .controller
+                            .lock()
+                            .await
+                            .status(connection_id, splint_id, incarnation);
+                    Some(SubscriptionEvent::ControlStatusChanged { status })
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let Some(event) = event else { continue };
+            if outbound
+                .send(ServerFrame::Event {
+                    subscription_id: id,
+                    sequence,
+                    event,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+            sequence = sequence.saturating_add(1);
+        }
+    })
 }
 
 fn spawn_topology_subscription(
@@ -2264,6 +2888,18 @@ fn protocol_error(request_id: Option<u64>, code: ErrorCode, message: &str) -> Se
 }
 fn invalid(message: &str) -> ProtocolError {
     ProtocolError::new(ErrorCode::InvalidArgument, message)
+}
+
+fn decode_search_cursor(cursor: Option<&str>) -> Result<usize, ProtocolError> {
+    let Some(cursor) = cursor else { return Ok(0) };
+    if cursor.is_empty() || cursor.len() > MAX_SEARCH_CURSOR_BYTES {
+        return Err(invalid("search cursor exceeds limit"));
+    }
+    usize::from_str_radix(cursor, 16).map_err(|_| invalid("search cursor is invalid"))
+}
+
+fn encode_search_cursor(offset: usize) -> String {
+    format!("{offset:016x}")
 }
 fn internal() -> ProtocolError {
     ProtocolError::new(ErrorCode::Internal, "operation failed")
@@ -2585,6 +3221,7 @@ mod tests {
 
     fn test_state(development_terminal_access: bool) -> Arc<DaemonState> {
         let (revocations, _) = broadcast::channel(32);
+        let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
         Arc::new(DaemonState {
             lair: RwLock::new(Lair::new()),
             runtimes: Mutex::new(RuntimeRegistry::default()),
@@ -2592,6 +3229,7 @@ mod tests {
             topology_transactions: Semaphore::new(1),
             metadata: None,
             controller: Mutex::new(ControllerState::default()),
+            control_events,
             grants: Mutex::new(GrantStore::default()),
             revocations,
             pty_backend: LinuxPtyBackend::new("/missing/helper"),
@@ -2676,7 +3314,6 @@ mod tests {
     async fn terminal_operations_require_consent_by_default() {
         let state = test_state(false);
         let peer = PeerIdentity::for_test();
-        let mut owned_controller = None;
         let error = handle_request(
             Request::Attach {
                 splint_id: SplintId::new(),
@@ -2685,7 +3322,7 @@ mod tests {
             },
             &state,
             &peer,
-            &mut owned_controller,
+            1,
         )
         .await
         .unwrap_err();
@@ -2696,7 +3333,6 @@ mod tests {
     async fn resize_limits_are_checked_before_runtime_access() {
         let state = test_state(true);
         let peer = PeerIdentity::for_test();
-        let mut owned_controller = None;
         let error = handle_request(
             Request::Resize {
                 controller_id: 1,
@@ -2709,7 +3345,7 @@ mod tests {
             },
             &state,
             &peer,
-            &mut owned_controller,
+            1,
         )
         .await
         .unwrap_err();
@@ -2797,32 +3433,64 @@ mod tests {
         let second_id = SplintId::new();
         let mut controllers = ControllerState::default();
         let first = controllers
-            .acquire(first_id, 7, Some(4))
+            .acquire(101, first_id, 7, Some(4))
             .expect("first controller");
         let second = controllers
-            .acquire(second_id, 3, Some(5))
+            .acquire(102, second_id, 3, Some(5))
             .expect("different Splint controller");
         assert_eq!(
-            controllers.acquire(first_id, 7, Some(4)).unwrap_err().code,
+            controllers
+                .acquire(103, first_id, 7, Some(4))
+                .unwrap_err()
+                .code,
             ErrorCode::ControllerUnavailable
         );
-        assert!(controllers.authorize(first.id, first_id, 7).is_ok());
-        assert!(controllers.authorize(second.id, second_id, 3).is_ok());
+        assert!(controllers.authorize(101, first.id, first_id, 7).is_ok());
+        assert!(controllers.authorize(102, second.id, second_id, 3).is_ok());
         assert_eq!(
             controllers
-                .authorize(first.id, second_id, 3)
+                .authorize(101, first.id, second_id, 3)
                 .unwrap_err()
                 .code,
             ErrorCode::Unauthorized
         );
         controllers.release_identity(first_id, 8);
-        assert!(controllers.authorize(first.id, first_id, 7).is_ok());
+        assert!(controllers.authorize(101, first.id, first_id, 7).is_ok());
         controllers.release_identity(first_id, 7);
-        assert!(controllers.authorize(first.id, first_id, 7).is_err());
-        assert!(controllers.authorize(second.id, second_id, 3).is_ok());
+        assert!(controllers.authorize(101, first.id, first_id, 7).is_err());
+        assert!(controllers.authorize(102, second.id, second_id, 3).is_ok());
         controllers.release_grant(5);
-        assert!(controllers.authorize(second.id, second_id, 3).is_err());
-        assert!(controllers.acquire(first_id, 8, None).is_ok());
+        assert!(controllers.authorize(102, second.id, second_id, 3).is_err());
+        assert!(controllers.acquire(101, first_id, 8, None).is_ok());
+    }
+
+    #[test]
+    fn controller_transfer_is_explicit_atomic_and_disconnect_bounded() {
+        let splint_id = SplintId::new();
+        let mut controllers = ControllerState::default();
+        let owner = controllers.acquire(10, splint_id, 4, None).unwrap();
+        let denied = controllers.request_transfer(20, splint_id, 4).unwrap();
+        let (_, outcome, lease) = controllers
+            .decide_transfer(10, denied.id, ControlTransferDecision::Deny)
+            .unwrap();
+        assert_eq!(outcome, ControlTransferOutcome::Denied);
+        assert!(lease.is_none());
+        assert!(controllers.authorize(10, owner.id, splint_id, 4).is_ok());
+
+        let accepted = controllers.request_transfer(20, splint_id, 4).unwrap();
+        let (_, outcome, lease) = controllers
+            .decide_transfer(10, accepted.id, ControlTransferDecision::Accept)
+            .unwrap();
+        let lease = lease.unwrap();
+        assert_eq!(outcome, ControlTransferOutcome::Granted);
+        assert!(controllers.authorize(10, owner.id, splint_id, 4).is_err());
+        assert!(controllers.authorize(20, lease.id, splint_id, 4).is_ok());
+
+        controllers.release_connection(20);
+        let owner = controllers.acquire(10, splint_id, 4, None).unwrap();
+        let pending = controllers.request_transfer(30, splint_id, 4).unwrap();
+        assert_eq!(controllers.cancel_connection_transfers(30), vec![pending]);
+        assert!(controllers.authorize(10, owner.id, splint_id, 4).is_ok());
     }
 
     #[test]

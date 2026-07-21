@@ -10,10 +10,14 @@ use splinterm_core::{
     Axis, Dojo, DojoId, Lair, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
 };
 
-pub const PROTOCOL_VERSION: u16 = 16;
+pub const PROTOCOL_VERSION: u16 = 17;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
+pub const MAX_SEARCH_QUERY_BYTES: usize = 256;
+pub const MAX_SEARCH_RESULTS: usize = 64;
+pub const MAX_SEARCH_PREVIEW_BYTES: usize = 256;
+pub const MAX_SEARCH_CURSOR_BYTES: usize = 32;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_LAUNCH_ARGUMENTS: usize = 64;
 pub const MAX_LAUNCH_ARGUMENT_BYTES: usize = 4096;
@@ -27,7 +31,7 @@ pub const MAX_UPDATE_ROW_PATCHES: usize = MAX_ROWS as usize;
 pub const MAX_UPDATE_SCROLLS: usize = MAX_ROWS as usize;
 pub const MAX_CONSENT_FRAME_BYTES: usize = 16 * 1024;
 pub const CONSENT_CAPABILITY_BYTES: usize = 32;
-pub const MAX_ACCESS_SCOPES: usize = 7;
+pub const MAX_ACCESS_SCOPES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -193,7 +197,33 @@ pub enum Request {
         before_row_id: u64,
         max_rows: usize,
     },
+    SearchScrollback {
+        splint_id: SplintId,
+        incarnation: u64,
+        terminal_revision: u64,
+        history_generation: u64,
+        query: String,
+        case_sensitive: bool,
+        cursor: Option<String>,
+        max_results: usize,
+    },
     AcquireControl {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+    SubscribeControl {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+    RequestControlTransfer {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+    DecideControlTransfer {
+        transfer_id: u64,
+        decision: ControlTransferDecision,
+    },
+    ForceControlTransfer {
         splint_id: SplintId,
         incarnation: u64,
     },
@@ -280,8 +310,22 @@ pub enum Response {
         current_revision: u64,
         history_generation: u64,
     },
+    SearchResults {
+        page: SearchPage,
+    },
+    SearchResyncRequired {
+        current_revision: u64,
+        history_generation: u64,
+    },
     ControlGranted {
         controller_id: u64,
+    },
+    ControlSubscribed {
+        subscription_id: u64,
+        status: ControlStatus,
+    },
+    ControlTransferPending {
+        transfer_id: u64,
     },
     Acknowledged,
     SplintKilled {
@@ -305,6 +349,17 @@ pub enum SubscriptionEvent {
     },
     AccessRevoked {
         grant_id: u64,
+    },
+    ControlStatusChanged {
+        status: ControlStatus,
+    },
+    ControlTransferRequested {
+        transfer_id: u64,
+    },
+    ControlTransferResolved {
+        transfer_id: u64,
+        outcome: ControlTransferOutcome,
+        controller_id: Option<u64>,
     },
     TopologyChanged {
         change: TopologyChange,
@@ -337,6 +392,46 @@ impl TopologyChange {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "topology change revision does not match its snapshot",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlTransferDecision {
+    Accept,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlTransferOutcome {
+    Granted,
+    Denied,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlStatus {
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub controlled: bool,
+    pub locally_owned: bool,
+}
+
+impl ControlStatus {
+    /// Validates a subscriber-specific control status snapshot.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for malformed identity or ownership state.
+    pub fn validate(self) -> Result<(), ProtocolError> {
+        if self.incarnation == 0 || (self.locally_owned && !self.controlled) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid control status",
             ));
         }
         Ok(())
@@ -515,6 +610,7 @@ pub enum AccessScope {
     ClipboardRead,
     ClipboardWrite,
     Terminate,
+    ControlTakeover,
 }
 
 impl AccessScope {
@@ -528,6 +624,7 @@ impl AccessScope {
             Self::ClipboardRead => "read clipboard metadata",
             Self::ClipboardWrite => "write clipboard metadata",
             Self::Terminate => "terminate process",
+            Self::ControlTakeover => "take over terminal control",
         }
     }
 }
@@ -576,6 +673,7 @@ pub enum ErrorCode {
     ConsentDenied,
     Unauthorized,
     ControllerUnavailable,
+    ControlTransferUnavailable,
     StaleTopology,
     NotFound,
     StaleIncarnation,
@@ -584,6 +682,55 @@ pub enum ErrorCode {
     Cancelled,
     RequestNotFound,
     Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchMatch {
+    pub row_id: u64,
+    pub start_column: usize,
+    pub end_column: usize,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchPage {
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub terminal_revision: u64,
+    pub history_generation: u64,
+    pub matches: Vec<SearchMatch>,
+    pub next_cursor: Option<String>,
+    pub timed_out: bool,
+}
+
+impl SearchPage {
+    /// Validates bounded search results and their identity correlation.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for malformed identities, ranges, previews, or cursors.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let valid_matches = self.matches.iter().all(|item| {
+            item.row_id > 0
+                && item.start_column < item.end_column
+                && item.preview.len() <= MAX_SEARCH_PREVIEW_BYTES
+        });
+        if self.incarnation == 0
+            || self.terminal_revision == 0
+            || self.history_generation == 0
+            || self.matches.len() > MAX_SEARCH_RESULTS
+            || self
+                .next_cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.is_empty() || cursor.len() > MAX_SEARCH_CURSOR_BYTES)
+            || !valid_matches
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid search page",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1224,6 +1371,42 @@ mod tests {
     }
 
     #[test]
+    fn control_transfer_contract_is_bounded_and_subscriber_specific() {
+        let splint_id = SplintId::new();
+        let status = ControlStatus {
+            splint_id,
+            incarnation: 7,
+            controlled: true,
+            locally_owned: false,
+        };
+        assert!(status.validate().is_ok());
+        assert!(
+            ControlStatus {
+                locally_owned: true,
+                controlled: false,
+                ..status
+            }
+            .validate()
+            .is_err()
+        );
+
+        let request = Request::RequestControlTransfer {
+            splint_id,
+            incarnation: 7,
+        };
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains("request_control_transfer"));
+        let event = SubscriptionEvent::ControlTransferResolved {
+            transfer_id: 9,
+            outcome: ControlTransferOutcome::Granted,
+            controller_id: Some(11),
+        };
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains("control_transfer_resolved"));
+        assert!(encoded.contains("controller_id"));
+    }
+
+    #[test]
     fn targeted_inspection_and_topology_runtime_correlation_are_explicit() {
         let splint_id = SplintId::new();
         let request = Request::InspectSplint { splint_id };
@@ -1361,6 +1544,31 @@ mod tests {
         assert!(invalid.validate().is_err());
         let mut invalid = snapshot();
         invalid.history_generation = 0;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn search_page_validation_enforces_identity_ranges_and_bounds() {
+        let page = SearchPage {
+            splint_id: SplintId::new(),
+            incarnation: 2,
+            terminal_revision: 3,
+            history_generation: 4,
+            matches: vec![SearchMatch {
+                row_id: 5,
+                start_column: 1,
+                end_column: 3,
+                preview: "hit".into(),
+            }],
+            next_cursor: Some("0000000000000010".into()),
+            timed_out: false,
+        };
+        assert!(page.validate().is_ok());
+        let mut invalid = page.clone();
+        invalid.matches[0].end_column = 1;
+        assert!(invalid.validate().is_err());
+        let mut invalid = page;
+        invalid.next_cursor = Some("x".repeat(MAX_SEARCH_CURSOR_BYTES + 1));
         assert!(invalid.validate().is_err());
     }
 

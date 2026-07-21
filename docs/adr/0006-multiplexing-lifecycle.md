@@ -33,8 +33,13 @@ subscriptions, and control authority bound to the previous incarnation.
 Control and terminal-size ownership are exclusive per Splint/incarnation, not
 global. Different connections may control different Splints concurrently.
 Observation, attach, focus, and reconnect never acquire or steal control.
-Keyboard focus, selection, viewport, search cursor, and active pane are
-client-local.
+Controller leases bind a daemon-owned connection ID. A bounded control
+subscription reports subscriber-specific local/remote ownership without peer
+identity. Transfer requests route only to the current owner, time out to denial,
+and cancel when either participant disconnects. Acceptance atomically revokes
+the old lease and grants a new requester lease; forced transfer requires a
+separate trusted consent prompt. Keyboard focus, selection, viewport, search
+query/cursor, and active pane are client-local.
 
 Lifecycle operations are distinct:
 
@@ -58,6 +63,12 @@ process is still running. Startup loads every persisted leaf as exited and
 restorable; executing a saved command always requires an explicit restore or
 relaunch action.
 
+Literal scrollback search is serialized by the terminal actor, scans retained
+normal-screen rows without copying configured history, and applies hard query,
+result, preview, cursor, and deadline bounds. Opaque continuation cursors are
+valid only for the exact Splint/incarnation, terminal revision, and history
+generation; output, trim, reflow, clear, resize, or relaunch forces restart.
+
 No shared daemon lock may be held across PTY spawn, actor requests, process
 shutdown, filesystem I/O, consent UI, or protocol writes. A split is reported
 only after both spawn and topology insertion can commit; either-side failure
@@ -77,3 +88,6 @@ be reported as a committed durable mutation.
   but cannot claim process, PTY, exact terminal-state, or scrollback continuity.
 - Structural transactions require coordination and bounded rollback paths, but
   PTY consumption remains isolated per live Splint.
+- Graceful shutdown owns all connection tasks, drops nested writer/subscription
+  tasks, then drains runtimes and persists once; a pinned signal future prevents
+  aggregate SIGINT loss.

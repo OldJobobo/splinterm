@@ -1,6 +1,6 @@
 # Plan 0005: line and frame pane divider styles
 
-- **Status:** Implemented and guarded-validated (2026-07-20); aggregate daemon shutdown gate remains flaky
+- **Status:** Complete and guarded-validated (2026-07-20)
 - **Roadmap:** Phase 3 — Multiplexing, Slice 5 visual follow-up
 - **Foundation:** [Plan 0004](0004-phase3-multiplexing.md), [ADR 0004](../adr/0004-font-and-cpu-renderer.md)
 - **Reference source:** Foot 1.27.0, commit
@@ -24,11 +24,11 @@ rows or columns.
 
 The configuration, style-aware geometry, Foot-derived box masks, trusted title
 cache, live theme roles, clipped Wayland painting, and development-only capture
-hook are implemented. All 145 `splinterm` library tests and workspace clippy
-pass. Each `splinterd` end-to-end case passes in isolation, but the aggregate
-binary retains a pre-existing moving shutdown-only failure after SIGINT; it
-failed once in restore and once in topology teardown while both cases passed
-immediately in isolation. No divider code runs in the daemon.
+hook are implemented. The complete workspace test/clippy contract passes. The
+former aggregate SIGINT shutdown race was independently resolved during Phase 3
+closure by owning connection tasks and pinning one prioritized shutdown signal;
+all seven serialized daemon lifecycle scenarios now pass together. No divider
+code runs in the daemon.
 
 The single guarded graphical case passed on inactive workspace 8 on DP-2 for a
 nested three-Splint layout. It captured both styles at the same 888×608 surface,

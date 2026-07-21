@@ -4,16 +4,19 @@
 //! `csi.c`, and `osc.c` at commit
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
     ActiveScreen, Attributes, CellContent, ChangeSet, Color, ColorSource, ComposedTable,
     Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, MouseTracking, ResnapshotRequired,
-    RowSnapshot, ScrollDirection, ScrollRegion, ScrollbackSnapshot, SnapshotRequest,
-    TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision,
-    TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
+    RowSnapshot, ScrollDirection, ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage,
+    SnapshotRequest, TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes,
+    TerminalRevision, TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -339,6 +342,99 @@ impl Terminal {
                 .map(|(id, row)| RowSnapshot::scrollback(id, row, &self.composed))
                 .collect(),
             has_older,
+        }
+    }
+
+    /// Searches retained normal-screen rows newest-first without copying configured history.
+    #[must_use]
+    pub fn search_normal(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        skip_rows: usize,
+        maximum_results: usize,
+        deadline: Duration,
+    ) -> SearchPage {
+        let needle = if case_sensitive {
+            query.to_owned()
+        } else {
+            query.to_lowercase()
+        };
+        let started = Instant::now();
+        let mut matches = Vec::with_capacity(maximum_results.min(64));
+        let mut scanned_rows = 0_usize;
+        let mut timed_out = false;
+        let mut has_older = false;
+        let mut rows = self.normal.rows_reverse().skip(skip_rows).peekable();
+        while let Some((row_id, row)) = rows.next() {
+            scanned_rows = scanned_rows.saturating_add(1);
+            if started.elapsed() >= deadline {
+                timed_out = true;
+                has_older = true;
+                break;
+            }
+            let cells = row.cells();
+            let mut original = String::new();
+            let mut searchable = String::new();
+            let mut byte_columns = Vec::<(usize, usize)>::new();
+            for (column, cell) in cells.iter().enumerate() {
+                let content = match cell.content() {
+                    CellContent::Empty => " ".to_owned(),
+                    CellContent::Scalar(character) => character.to_string(),
+                    CellContent::Composed(key) => self
+                        .composed
+                        .chars(key)
+                        .map_or_else(String::new, |chars| chars.iter().collect()),
+                    CellContent::Spacer(_) => continue,
+                };
+                let end_column = cells
+                    .get(column + 1)
+                    .and_then(|next| match next.content() {
+                        CellContent::Spacer(remaining) => usize::try_from(remaining)
+                            .ok()
+                            .map(|remaining| column + remaining + 1),
+                        _ => None,
+                    })
+                    .unwrap_or(column + 1);
+                original.push_str(&content);
+                let normalized = if case_sensitive {
+                    content
+                } else {
+                    content.to_lowercase()
+                };
+                byte_columns.extend(std::iter::repeat_n((column, end_column), normalized.len()));
+                searchable.push_str(&normalized);
+            }
+            if let Some(start) = searchable.find(&needle) {
+                let end = start + needle.len();
+                if let (Some((start_column, _)), Some((_, end_column))) = (
+                    byte_columns.get(start).copied(),
+                    byte_columns.get(end.saturating_sub(1)).copied(),
+                ) {
+                    let mut preview = original.trim_end().to_owned();
+                    while preview.len() > 256 {
+                        preview.pop();
+                    }
+                    matches.push(SearchMatch {
+                        row_id,
+                        start_column,
+                        end_column,
+                        preview,
+                    });
+                }
+            }
+            if matches.len() == maximum_results {
+                has_older = rows.peek().is_some();
+                break;
+            }
+        }
+        SearchPage {
+            history_generation: self.normal.history_generation(),
+            terminal_revision: self.revision,
+            matches,
+            has_older,
+            next_offset: has_older.then_some(skip_rows.saturating_add(scanned_rows)),
+            timed_out,
         }
     }
 
@@ -2039,6 +2135,36 @@ mod tests {
             .attributes_mut()
             .set_underline_color(Color::rgb(0x12_34_56));
         assert!(!rows_semantically_equal(&original, &colored));
+    }
+
+    #[test]
+    fn bounded_search_covers_history_visible_unicode_case_and_cursor_pages() {
+        let mut terminal = Terminal::new(
+            12,
+            2,
+            TerminalConfig {
+                scrollback_lines: 8,
+                ..TerminalConfig::default()
+            },
+        );
+        terminal.advance("Alpha\r\nbeta 界\r\nalpha\r\ngamma".as_bytes());
+        let first = terminal.search_normal("ALPHA", false, 0, 1, Duration::from_secs(1));
+        assert_eq!(first.matches.len(), 1);
+        assert!(first.has_older);
+        assert_eq!(first.matches[0].preview.trim(), "alpha");
+        let second = terminal.search_normal(
+            "ALPHA",
+            false,
+            first.next_offset.unwrap(),
+            4,
+            Duration::from_secs(1),
+        );
+        assert_eq!(second.matches.len(), 1);
+        assert_ne!(first.matches[0].row_id, second.matches[0].row_id);
+        let wide = terminal.search_normal("界", true, 0, 4, Duration::from_secs(1));
+        assert_eq!(wide.matches.len(), 1);
+        assert!(wide.matches[0].end_column > wide.matches[0].start_column);
+        assert_eq!(first.history_generation, second.history_generation);
     }
 
     #[test]

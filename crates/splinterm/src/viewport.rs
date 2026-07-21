@@ -56,6 +56,33 @@ impl ScrollbackViewport {
         }
     }
 
+    pub fn reveal_row(&mut self, row_id: u64, snapshot: &TerminalSnapshot) -> bool {
+        let Some(index) = snapshot
+            .scrollback_rows
+            .iter()
+            .position(|row| row.row_id == Some(row_id))
+        else {
+            return snapshot
+                .visible_rows
+                .iter()
+                .any(|row| row.row_id == Some(row_id));
+        };
+        let total_rows = snapshot
+            .scrollback_rows
+            .len()
+            .saturating_add(snapshot.visible_rows.len());
+        let viewport_height = snapshot.rows.min(total_rows);
+        self.offset_from_bottom = total_rows
+            .saturating_sub(index.saturating_add(viewport_height))
+            .min(snapshot.scrollback_rows.len());
+        if self.offset_from_bottom == 0 {
+            self.return_to_live();
+        } else {
+            self.update_anchor(snapshot);
+        }
+        true
+    }
+
     /// Preserves a detached viewport as history grows and clamps it when the
     /// bounded daemon snapshot trims or clears rows.
     pub fn observe_history_change(
@@ -199,6 +226,21 @@ mod tests {
             exited_code: None,
             exited_signal: None,
         }
+    }
+
+    #[test]
+    fn search_reveal_positions_a_stable_history_row() {
+        let state = snapshot(&["h1", "h2", "h3", "h4"], &["v1", "v2"]);
+        let mut viewport = ScrollbackViewport::default();
+        assert!(viewport.reveal_row(2, &state));
+        assert!(!viewport.is_live());
+        assert!(
+            viewport
+                .visible_rows(&state)
+                .iter()
+                .any(|row| row.row_id == Some(2))
+        );
+        assert!(!viewport.reveal_row(99, &state));
     }
 
     #[test]

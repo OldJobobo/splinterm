@@ -13,8 +13,9 @@ persistent multiplexing built in.
 > [!IMPORTANT]
 > Splinterm is a private prerelease. The Omarchy-native terminal MVP, headless
 > multi-Splint lifecycle, and explicit durable metadata restore are validated.
-> Native split-pane rendering is under active Phase 3 validation. Supported
-> third-party automation and public distribution remain future work.
+> Persistent multi-window/pane multiplexing, explicit multi-client control
+> transfer, and bounded scrollback search are validated. Supported third-party
+> automation and public distribution remain future work.
 
 ## Workspace
 
@@ -46,7 +47,7 @@ independent PTYs, track terminal state, and survive client disconnection. The lo
 uses bounded framed messages, version negotiation, request IDs, peer-UID
 verification, owner-only socket permissions, and explicit resynchronization.
 The complete headless lifecycle is covered by an isolated real-daemon test.
-Roadmap Phases 1 and 2 are complete; the
+Roadmap Phases 1, 2, and 3 are complete; the
 [Omarchy-native terminal MVP plan](docs/plans/0002-omarchy-terminal-mvp.md)
 links exact renderer, graphical sign-off, and private package evidence.
 Headless multiplexing, crash-safe metadata restore, independently attachable
@@ -125,7 +126,7 @@ pane's exclusive connection-owned lease, applies its remembered geometry, and
 then delivers input in order; explicit release or disconnect relinquishes it.
 Function/navigation/keypad keys,
 xterm modifiers, application cursor/keypad modes, xkb compose, focus reporting,
-and exact snapshot colors are supported. Protocol v16 streams bounded semantic
+and exact snapshot colors are supported. Protocol v17 streams bounded semantic
 row, scroll, cursor, mode, palette, dimension, and title updates. The client
 coalesces damage to Wayland frame callbacks, incrementally prepares changed
 rows, scroll-copies reusable backing pixels, submits row damage, and uses a
@@ -145,7 +146,13 @@ trusted box-drawing chrome configured by `[multiplexer] divider-style=line`,
 `frame`, or `none`. Frame mode optionally displays the sanitized daemon-owned
 Splint title with `frame-title=splint`; terminal OSC titles cannot spoof it.
 Active and inactive borders follow the live-reloaded `pane_border_active` and
-`pane_border` theme roles. The
+`pane_border` theme roles. Ctrl+Shift+T requests control from another client;
+the current owner accepts with Ctrl+Shift+Y or denies with Ctrl+Shift+N, and a
+request times out closed. Ctrl+Shift+U starts the separate trusted confirmation
+for a forced transfer. Ctrl+Shift+F opens the trusted local literal-search
+surface; Enter searches case-insensitively, Ctrl+N/P navigates matches, and
+Escape closes it. Search results and opaque cursors are bounded and invalidated
+by terminal revision or history-generation changes. The
 `SPLINTERM_ENABLE_DEV_ATTACH=1` bypass remains available only for isolated
 development and is prominently labeled in the window title.
 

@@ -1,6 +1,6 @@
 # Plan 0004: persistent multiplexing
 
-- **Status:** Planned
+- **Status:** Complete (2026-07-20)
 - **Roadmap:** Phase 3 — Multiplexing
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md), [Plan 0002](0002-omarchy-terminal-mvp.md), [ADR 0001](../adr/0001-foot-rust-port.md)
 - **Reference source:** Foot 1.27.0, commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -316,6 +316,15 @@ box-drawing pane chrome is specified separately in
 or another client's topology edit; only the visible lease owner can mutate the
 PTY and terminal size.
 
+**Status:** Complete. Protocol v17 exposes subscriber-specific control status,
+bounded pending transfer IDs, explicit accept/deny, 15-second timeout denial,
+disconnect cancellation, and separately confirmed forced transfer. Controller
+leases bind daemon connection identity, so accepted transfer atomically makes
+the former controller stale. The trusted UI displays pending decisions and
+provides request/accept/deny/force bindings. Unit and real-daemon tests cover
+denial, acceptance, stale-owner rejection, transferred input, and disconnect
+release without exposing peer details.
+
 ### Slice 7 — bounded scrollback search
 
 - Add a terminal-actor search command over normal-history rows and optionally the
@@ -337,6 +346,17 @@ PTY and terminal size.
 history capacity and does not measurably stall PTY consumption or another
 Splint actor.
 
+**Status:** Complete. Literal Unicode search scans the normal terminal actor's
+retained rows without constructing a history-sized copy. Protocol bounds are
+256 query bytes, 64 results, 256 preview bytes, 32 cursor bytes, and a 10 ms
+actor deadline. Opaque continuation offsets are correlated with exact
+Splint/incarnation/revision/generation and stale requests resynchronize. The
+trusted client-local surface submits and navigates results, lazily pages an old
+match into its bounded cache, anchors the viewport by stable row ID, and uses
+the existing trusted selection highlight. Focused terminal and real-daemon
+tests cover case folding, Unicode/wide cells, duplicate row matches, paging,
+and output invalidation.
+
 ### Slice 8 — closure, documentation, and package evidence
 
 - Run the complete headless lifecycle and guarded graphical scenarios, record
@@ -348,6 +368,16 @@ Splint actor.
 - Record deferred work: persistent scrollback bodies, public automation schema,
   remote/headless access workflow, wire-memory optimization, Nix, and public
   distribution.
+
+**Status:** Complete. The full format/clippy/workspace contract and all seven
+serialized real-daemon lifecycle scenarios pass. The former moving aggregate
+SIGINT failure was traced to cancellable signal registration and detached
+connection children; one pinned prioritized signal plus owned connection and
+abort-on-drop nested tasks now close clients before runtime drain and final
+metadata persistence. The guarded workspace-8/DP-2 line/frame smoke passed with
+active workspace, active window, pointer, and cleanup unchanged. Closure evidence
+is recorded under `docs/spikes/artifacts/phase3-closure/`; the Phase 2 CPU/PSS,
+queue, renderer, and package baselines remain the release thresholds.
 
 ## Validation contract for every implementation slice
 

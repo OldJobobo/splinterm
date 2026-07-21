@@ -7,9 +7,9 @@ use std::{
 
 use splinterm_core::{Axis, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
-    ClientFrame, ColorSource, ErrorCode, LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS,
-    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SubscriptionEvent,
-    TerminalSnapshot, TopologyChangeKind, encode_frame,
+    ClientFrame, ColorSource, ControlTransferDecision, ControlTransferOutcome, ErrorCode,
+    LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS, PROTOCOL_VERSION, ProtocolError, Request,
+    Response, ServerFrame, SubscriptionEvent, TerminalSnapshot, TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -187,6 +187,25 @@ impl Connection {
                 .live_incarnation
                 .expect("created Splint must have a live incarnation"),
             response => panic!("unexpected targeted identity response: {response:?}"),
+        }
+    }
+
+    async fn subscribe_control(&mut self, splint_id: SplintId, incarnation: u64) -> u64 {
+        match self
+            .request(Request::SubscribeControl {
+                splint_id,
+                incarnation,
+            })
+            .await
+        {
+            Response::ControlSubscribed {
+                subscription_id,
+                status,
+            } => {
+                status.validate().unwrap();
+                subscription_id
+            }
+            response => panic!("unexpected control subscription response: {response:?}"),
         }
     }
 
@@ -772,6 +791,223 @@ async fn topology_cas_stream_and_complete_edits() {
     })
     .await
     .expect("topology CAS scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut client = daemon.connect().await;
+        let Response::DojoCreated { dojo } = client
+            .request(Request::CreateDojo {
+                expected_topology_revision: splinterm_core::TopologyRevision::default(),
+                name: "search".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("daemon did not create search Splint");
+        };
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("new dojo was not a leaf");
+        };
+        let splint_id = splint.id;
+        let incarnation = client.live_incarnation(splint_id).await;
+        client
+            .input(
+                splint_id,
+                incarnation,
+                "printf 'Needle one\\nnoise\\nneedle two 界\\n'\n".as_bytes(),
+            )
+            .await;
+        snapshot_until(&mut client, splint_id, incarnation, "needle two").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let (_, snapshot) = client.attach(splint_id, incarnation).await;
+        let search = |cursor| Request::SearchScrollback {
+            splint_id,
+            incarnation,
+            terminal_revision: snapshot.revision,
+            history_generation: snapshot.history_generation,
+            query: "NEEDLE".into(),
+            case_sensitive: false,
+            cursor,
+            max_results: 1,
+        };
+        let Response::SearchResults { page: first } = client.request(search(None)).await else {
+            panic!("daemon did not return first search page");
+        };
+        first.validate().unwrap();
+        assert_eq!(first.matches.len(), 1);
+        let cursor = first.next_cursor.clone().expect("older match cursor");
+        let Response::SearchResults { page: second } = client.request(search(Some(cursor))).await
+        else {
+            panic!("daemon did not return second search page");
+        };
+        assert_eq!(second.matches.len(), 1);
+        assert_ne!(first.matches[0].row_id, second.matches[0].row_id);
+
+        client
+            .input(splint_id, incarnation, b"printf 'revision-change\\n'\n")
+            .await;
+        snapshot_until(&mut client, splint_id, incarnation, "revision-change").await;
+        assert!(matches!(
+            client.request(search(first.next_cursor)).await,
+            Response::SearchResyncRequired { .. }
+        ));
+        daemon.shutdown();
+    })
+    .await
+    .expect("search scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one connection-level scenario proves denial, acceptance, stale ownership, input, and disconnect"
+)]
+async fn simultaneous_clients_transfer_control_explicitly() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let Response::DojoCreated { dojo } = admin
+            .request(Request::CreateDojo {
+                expected_topology_revision: splinterm_core::TopologyRevision::default(),
+                name: "control-transfer".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("daemon did not create transfer Splint");
+        };
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("new dojo was not a leaf");
+        };
+        let splint_id = splint.id;
+        let incarnation = admin.live_incarnation(splint_id).await;
+
+        let mut owner = daemon.connect().await;
+        let mut requester = daemon.connect().await;
+        let owner_subscription = owner.subscribe_control(splint_id, incarnation).await;
+        let requester_subscription = requester.subscribe_control(splint_id, incarnation).await;
+        let owner_controller = owner.acquire_control(splint_id, incarnation).await;
+
+        let Response::ControlTransferPending { transfer_id } = requester
+            .request(Request::RequestControlTransfer {
+                splint_id,
+                incarnation,
+            })
+            .await
+        else {
+            panic!("control transfer was not queued");
+        };
+        loop {
+            if matches!(
+                owner.next_event(owner_subscription).await.1,
+                SubscriptionEvent::ControlTransferRequested { transfer_id: seen }
+                    if seen == transfer_id
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            owner
+                .request(Request::DecideControlTransfer {
+                    transfer_id,
+                    decision: ControlTransferDecision::Deny,
+                })
+                .await,
+            Response::Acknowledged
+        );
+        assert!(matches!(
+            requester.next_event(requester_subscription).await.1,
+            SubscriptionEvent::ControlTransferResolved {
+                transfer_id: seen,
+                outcome: ControlTransferOutcome::Denied,
+                controller_id: None,
+            } if seen == transfer_id
+        ));
+
+        let Response::ControlTransferPending { transfer_id } = requester
+            .request(Request::RequestControlTransfer {
+                splint_id,
+                incarnation,
+            })
+            .await
+        else {
+            panic!("second control transfer was not queued");
+        };
+        loop {
+            if matches!(
+                owner.next_event(owner_subscription).await.1,
+                SubscriptionEvent::ControlTransferRequested { transfer_id: seen }
+                    if seen == transfer_id
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            owner
+                .request(Request::DecideControlTransfer {
+                    transfer_id,
+                    decision: ControlTransferDecision::Accept,
+                })
+                .await,
+            Response::Acknowledged
+        );
+        let transferred_controller = loop {
+            if let SubscriptionEvent::ControlTransferResolved {
+                transfer_id: seen,
+                outcome: ControlTransferOutcome::Granted,
+                controller_id: Some(controller_id),
+            } = requester.next_event(requester_subscription).await.1
+            {
+                assert_eq!(seen, transfer_id);
+                break controller_id;
+            }
+        };
+        let stale = owner
+            .request_result(Request::Input {
+                controller_id: owner_controller,
+                splint_id,
+                incarnation,
+                bytes: b"stale".to_vec(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, ErrorCode::Unauthorized);
+        assert_eq!(
+            requester
+                .request(Request::Input {
+                    controller_id: transferred_controller,
+                    splint_id,
+                    incarnation,
+                    bytes: b"printf 'transferred-control\\n'\n".to_vec(),
+                })
+                .await,
+            Response::Acknowledged
+        );
+        snapshot_until(&mut admin, splint_id, incarnation, "transferred-control").await;
+
+        drop(requester);
+        let mut replacement = daemon.connect().await;
+        let replacement_controller = replacement.acquire_control(splint_id, incarnation).await;
+        assert_ne!(replacement_controller, transferred_controller);
+        daemon.shutdown();
+    })
+    .await
+    .expect("control transfer scenario timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

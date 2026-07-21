@@ -40,7 +40,12 @@ avoids claiming arbitrary `foot.ini` compatibility.
 
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste,
 Ctrl+Shift+R to revoke active access, and Ctrl+Shift+L to release control.
-Foot-compatible runtime zoom uses Ctrl+plus/equal/KP_Add and
+Ctrl+Shift+T requests transfer from the current controller; its trusted UI uses
+Ctrl+Shift+Y/N to accept/deny, while Ctrl+Shift+U opens separate trusted
+confirmation for forced takeover. Ctrl+Shift+F opens local literal scrollback
+search; Enter submits, Ctrl+N/P navigates, and Escape closes the trusted search
+surface. These control/search bindings are not terminal-controlled and are not
+currently remappable. Foot-compatible runtime zoom uses Ctrl+plus/equal/KP_Add and
 Ctrl+minus/KP_Subtract in 0.5-point steps; Ctrl+0/KP_0 resets the configured
 size. Terminal key mappings otherwise follow the implemented Foot/xterm behavior.
 

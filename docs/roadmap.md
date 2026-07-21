@@ -45,7 +45,7 @@ private Arch prerelease package with coherent binaries, service, desktop/theme
 integration, upgrade handling, documentation, and licenses. Installation and
 public/AUR publication remain optional post-milestone decisions.
 
-## Phase 3 — multiplexing
+## Phase 3 — multiplexing (complete)
 
 Detailed plans: [`plans/0004-phase3-multiplexing.md`](plans/0004-phase3-multiplexing.md) and the [`line/frame pane divider follow-up`](plans/0005-pane-divider-styles.md)
 
@@ -53,7 +53,14 @@ Detailed plans: [`plans/0004-phase3-multiplexing.md`](plans/0004-phase3-multiple
 - Multiple windows per dojo
 - Detach, reattach, rename, kill, and restore workflows
 - Scrollback ownership and search
-- Multiple simultaneous clients with explicit control semantics
+- Multiple simultaneous clients with explicit control-transfer semantics
+- Bounded daemon-owned literal scrollback search with client-local navigation
+
+Protocol v17 completes explicit multi-client control status, deny/accept/confirmed
+forced transfer, disconnect and timeout handling, and revision-bound search. The
+serialized daemon lifecycle suite and guarded line/frame graphical smoke pass;
+the former aggregate SIGINT shutdown race is closed by owned connection tasks
+and one pinned shutdown signal.
 
 ## Phase 4 — headless access and supported automation
 
