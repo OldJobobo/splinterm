@@ -77,23 +77,20 @@ Rules contain a unique bounded ID, canonical executable identity, expiry,
 closed operation scopes, exact resource selectors, and operation-specific
 limits. The default scope is `topology_metadata_read`; no wildcard scope exists.
 Exact Splint selectors may bind an incarnation or explicitly select the current
-incarnation. Dojo/window selectors expand once to an explicit bounded Splint set
-at authorization time. They do not include resources created later. A rule that
-opts into future resources is deferred beyond policy v1.
+incarnation. When a policy generation is published, Dojo selectors resolve to
+the selected Dojo plus its then-present windows and Splints, and window selectors
+resolve to the selected window plus its then-present Splints. Resolution is
+deduplicated and capped at 512 resources per rule. Missing selectors or an
+oversized expansion reject the candidate generation and install deny-all.
+Resources created afterward are excluded until an explicit policy update or
+reload publishes a new snapshot. A snapshotted parent follows the same stable
+Splint ID under the conspicuous `current` incarnation semantics; a directly
+configured exact incarnation remains exact. Future-descendant authority is
+deferred beyond policy v1.
 
 Limits include, where applicable, maximum returned rows/results/bytes, maximum
 live subscriptions, maximum spawn count, and deadline. Request protocol bounds
 remain hard ceilings. A rule can only narrow them.
-
-**Implementation conformance note:** the current
-`ResourceSelector::matches` implementation lets a Dojo selector dynamically
-match descendant windows and Splints, and a window selector dynamically match
-descendant Splints. That behavior contradicts the bounded snapshot decision
-above and is not accepted as an implicit future-resource grant. Before lifecycle
-MCP or autonomous coding-agent orchestration ships, the implementation must
-either be repaired to match this ADR or a superseding ADR must define a
-conspicuous bounded future-descendant selector with creation lineage, limits,
-expiry, revocation, audit, and adversarial-test semantics.
 
 Reload parses and validates a complete candidate before publication. Invalid,
 unsafe, expired, unreadable, or oversized policy produces a bounded diagnostic

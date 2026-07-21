@@ -457,12 +457,17 @@ async fn snapshot_until(
     }
 }
 
-fn exact_headless_policy(splint: Option<(SplintId, u64)>) -> String {
+fn policy_executable_identity() -> (PathBuf, String) {
     let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
     let mut file = fs::File::open(&executable).unwrap();
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     let sha256 = format!("{:x}", Sha256::digest(bytes));
+    (executable, sha256)
+}
+
+fn exact_headless_policy(splint: Option<(SplintId, u64)>) -> String {
+    let (executable, sha256) = policy_executable_identity();
     let mut scopes = vec![
         "topology_metadata_read",
         "process_spawn",
@@ -495,6 +500,36 @@ fn exact_headless_policy(splint: Option<(SplintId, u64)>) -> String {
                 "max_spawn_count": 1,
                 "max_results": 16,
                 "max_live_subscriptions": 2
+            }
+        }]
+    })
+    .to_string()
+}
+
+fn parent_snapshot_policy(dojo_id: splinterm_core::DojoId) -> String {
+    let (executable, sha256) = policy_executable_identity();
+    serde_json::json!({
+        "schema": "splinterm.policy.v1",
+        "rules": [{
+            "id": "parent-snapshot-test",
+            "executable": {"path": executable, "sha256": sha256},
+            "scopes": [
+                "topology_metadata_read",
+                "process_spawn",
+                "topology_layout_mutate",
+                "terminal_visible_read",
+                "terminal_subscribe",
+                "scrollback_read"
+            ],
+            "resources": [
+                {"kind": "lair"},
+                {"kind": "dojo", "dojo_id": dojo_id}
+            ],
+            "limits": {
+                "max_spawn_count": 2,
+                "max_results": 16,
+                "max_returned_rows": 16,
+                "max_live_subscriptions": 1
             }
         }]
     })
@@ -547,6 +582,15 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
             panic!("created headless Dojo was not a leaf");
         };
         let splint_id = splint.id;
+        let lair_only_denial = connection
+            .request_result(Request::Attach {
+                splint_id,
+                incarnation,
+                scrollback_rows: 0,
+            })
+            .await
+            .expect_err("Lair creation authority must not cover the new Dojo descendant");
+        assert_eq!(lair_only_denial.code, ErrorCode::Unauthorized);
         let marker_deadline = Instant::now() + Duration::from_secs(5);
         while !marker.exists() {
             assert!(
@@ -710,6 +754,92 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
     })
     .await
     .expect("headless policy integration timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
+        let mut bootstrap = daemon.connect().await;
+        let revision = bootstrap.topology_revision().await;
+        let Response::DojoCreated { dojo, .. } = bootstrap
+            .request(Request::CreateDojo {
+                expected_topology_revision: revision,
+                name: "snapshot-policy".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("snapshot policy Dojo was not created");
+        };
+        let dojo_id = dojo.id;
+        let LayoutNode::Leaf(original) = &dojo.windows[0].root else {
+            panic!("snapshot policy Dojo was not a leaf");
+        };
+        let original_id = original.id;
+
+        let policy = daemon.policy.as_ref().unwrap();
+        fs::write(policy, parent_snapshot_policy(dojo_id)).unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut bootstrap, "parent snapshot policy reload").await;
+
+        let mut connection = daemon.connect().await;
+        let revision = connection.topology_revision().await;
+        let Response::SplintStarted {
+            splint_id,
+            incarnation,
+            ..
+        } = connection
+            .request(Request::SplitSplint {
+                expected_topology_revision: revision,
+                target_splint_id: original_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("snapshot policy split was not created");
+        };
+        let denied = connection
+            .request_result(Request::Attach {
+                splint_id,
+                incarnation,
+                scrollback_rows: 1,
+            })
+            .await
+            .expect_err("new descendant must not inherit the published parent snapshot");
+        assert_eq!(denied.code, ErrorCode::Unauthorized);
+
+        fs::write(policy, parent_snapshot_policy(dojo_id)).unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut connection, "explicit descendant policy reload").await;
+
+        let mut refreshed = daemon.connect().await;
+        let (subscription_id, _) = refreshed.attach(splint_id, incarnation).await;
+        assert_eq!(
+            refreshed.request(Request::Detach { subscription_id }).await,
+            Response::Acknowledged
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("parent policy snapshot integration timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

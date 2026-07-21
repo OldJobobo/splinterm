@@ -114,10 +114,10 @@ worktree.
     launch, logical topology, terminal observation, and exclusive control. Task
     status, inter-agent messaging, readiness, completion, and result transport
     belong to a higher-level coding-agent orchestrator.
-16. **Future descendants:** lifecycle automation must not rely on containment
-    silently broadening a Dojo/window selector. Before MCP mutation tools land,
-    the implementation must match ADR 0007's snapshot semantics or a new ADR
-    must define conspicuous bounded future-descendant authority.
+16. **Future descendants:** lifecycle automation uses ADR 0007's implemented
+    publication-time snapshot semantics. Dojo/window rules include only resources
+    present when that policy generation is published; later descendants require
+    an explicit reviewed reload. Policy v1 has no future-descendant authority.
 
 ## Non-goals
 

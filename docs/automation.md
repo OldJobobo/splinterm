@@ -218,22 +218,16 @@ A v1 rule has:
 
 There are no wildcard scopes, basename identities, path-only identities, or
 implicit future resources. A `splint` selector identifies an exact Splint and
-either an exact incarnation or the conspicuous value `current`. The intended v1
-contract is that `dojo` and `window` selectors expand to a bounded set and do
-not silently authorize descendants created later. The singleton
-`{ "kind": "lair" }` selector is required for operations such as creating a
-Dojo that have no pre-existing child resource; it does not select future
-Splints for later terminal access.
-
-**Known contract mismatch:** the current `ResourceSelector::matches`
-implementation lets a Dojo selector dynamically match later descendant windows
-and Splints, and a window selector dynamically match later descendant Splints.
-That can unintentionally authorize name, layout, terminal, or process operations
-on resources absent when the rule was reviewed, contradicting the contract above
-and ADR 0007. This behavior is not a supported future-resource grant. It must be
-removed or replaced by a separately reviewed, conspicuous, bounded
-descendant-authority design before lifecycle MCP or autonomous agent
-orchestration is released.
+either an exact incarnation or the conspicuous value `current`. When a policy
+generation is published, a `dojo` selector snapshots that Dojo plus its existing
+windows and Splints; a `window` selector snapshots that window plus its existing
+Splints. Overlaps are deduplicated and each rule may resolve to at most 512
+resources. Missing selectors or larger expansions reject the generation and
+install deny-all. Later descendants remain unauthorized until the user updates
+or reloads policy, which publishes a fresh snapshot. Parent snapshots follow a
+stable Splint ID using `current`; directly configured numeric incarnations remain
+exact. The singleton `{ "kind": "lair" }` selector authorizes only Lair-level
+operations such as creating a Dojo and never selects its resulting descendants.
 
 Schema validation is necessary but not sufficient. The daemon must additionally
 reject duplicate rule IDs, expired rules, unsafe ownership or mode, symlinks,

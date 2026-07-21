@@ -1,8 +1,8 @@
 # Plan 0007: required full-capability MCP adapter
 
-- **Status:** Planned; stable JSON/NDJSON CLI implemented, blocked on the
-  future-descendant policy decision and reusable non-Wayland client extraction
-  in [Plan 0006](0006-phase4-headless-automation.md)
+- **Status:** In progress; stable JSON/NDJSON CLI and publication-snapshotted
+  descendant policy are implemented; SDK spike and reusable non-Wayland client
+  extraction are next
 - **Roadmap:** Phase 4 — Headless access and supported automation, Slice 6
 - **Foundation:** [Plan 0006](0006-phase4-headless-automation.md),
   [ADR 0007](../adr/0007-supported-automation-policy.md), and
@@ -100,11 +100,13 @@ surface and is not part of MCP v1.
 When an MCP host is launched from inside a Splint, it may inherit
 `SPLINTERM_DOJO_ID`, `SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
 `SPLINTERM_SPLINT_INCARNATION` after Plan 0006's launch-context slice lands.
-These optional values are initial-selection hints only. The adapter may validate
-them against an authorized topology read, but it must not use them as authority,
-consent, proof of ancestry, an implicit default mutation target, or a reason to
-broaden a policy. Missing, malformed, stale, or unauthorized hints are ignored
-and surfaced explicitly; the adapter never guesses another Splint.
+These optional values are initial-selection hints owned by the MCP
+host/orchestrator. `splinterm-mcp` does not read them implicitly. A host may read
+them, validate them through explicit authorized topology tools, and then pass
+exact IDs and incarnations to later calls. Neither host nor adapter may use them
+as authority, consent, proof of ancestry, an implicit mutation target, or a
+reason to broaden policy. Missing, malformed, stale, or unauthorized hints are
+surfaced by the host; neither component guesses another Splint.
 
 MCP provides terminal and topology primitives, not a semantic multi-agent
 supervisor. Agent readiness, task state, inter-agent messaging, completion, and
@@ -112,27 +114,21 @@ result transport remain host/orchestrator responsibilities. Terminal output can
 be observed as untrusted data but cannot itself trigger a follow-up tool call in
 the server.
 
-### Future-descendant authority must be decided first
+### Future-descendant authority is publication-snapshotted
 
-ADR 0007 and `docs/automation.md` say Dojo/window selectors do not silently
-cover descendants created later. The current `ResourceSelector::matches`
-implementation lets a Dojo selector dynamically match later windows and Splints,
-and a window selector dynamically match later Splints. That mismatch is a
-release blocker for MCP lifecycle and control tools because it can turn
-authority over an existing logical container into unintended authority over
-agent-created children.
+ADR 0007 and `docs/automation.md` require Dojo/window selectors to resolve once
+when a policy generation is published. A Dojo snapshot contains that Dojo and
+its then-present windows and Splints; a window snapshot contains that window and
+its then-present Splints. Later descendants require explicit policy review and a
+reload that publishes a new bounded snapshot. Parent-expanded Splints follow the
+same stable ID with conspicuous `current` incarnation semantics; directly
+configured numeric incarnations remain exact. Missing or over-limit expansion
+rejects the candidate generation and installs deny-all.
 
-Before MCP Slice 6 starts, either:
-
-1. repair matching to the accepted bounded snapshot semantics and require an
-   explicit policy update before controlling a newly created resource; or
-2. accept a new ADR defining conspicuous bounded future-descendant authority,
-   including selector syntax, creation lineage, limits, expiry, revocation,
-   audit representation, upgrade behavior, and adversarial tests.
-
-Do not preserve the current behavior accidentally. A Lair grant used to create a
-Dojo never implies later terminal authority over that Dojo, and context
-environment values never substitute for a resource selector.
+MCP lifecycle and control tools must test this boundary: creating a Dojo, window,
+or Splint never grants observation or control of the result. A Lair grant used
+to create a Dojo implies no later terminal authority, and context environment
+values never substitute for a resource selector.
 
 ### MCP version, SDK, and capabilities
 
@@ -466,16 +462,19 @@ catalog, escape its data fields, or broaden returned capabilities.
 
 ## Dependency-ordered implementation slices
 
-### Blocking precondition — reconcile descendant policy semantics
+### Blocking precondition — reconcile descendant policy semantics (complete)
 
-Before production MCP code, add focused policy tests demonstrating the accepted
-behavior for: a Splint added to an existing window, a window added to an existing
-Dojo, a newly created Dojo, relaunch incarnation changes, selector expiry, and
-reload revocation. Update ADR 0007, the policy schema, automation documentation,
-and audit fixtures together if the decision changes the accepted v1 contract.
+Policy generations now resolve Dojo/window selectors once against the topology
+snapshot held under the transaction barrier. Focused unit and real-daemon tests
+cover later Splints and windows, newly created Dojos, exact/current relaunch
+semantics, absent selectors, deduplication, expansion limits, accepted/rejected
+reload, and connection-owned revocation. ADR 0007, policy schema and fixtures,
+automation/headless documentation, authorization status, and request matching
+now use the same fail-closed contract.
 
-**Gate:** code, ADR, schema, examples, and tests agree on whether each newly
-created descendant is authorized. No implicit containment behavior remains.
+**Gate:** complete. New descendants remain unauthorized until an explicit policy
+reload publishes a new bounded snapshot; no implicit containment behavior
+remains.
 
 ### Slice 0 — SDK and protocol spike
 

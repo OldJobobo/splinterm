@@ -42,6 +42,7 @@
       ]
     },
     "selector": {
+      "description": "A policy-generation selector. Dojo and window selectors snapshot only resources present when the generation is published; policy v1 has no future-descendant selector.",
       "oneOf": [
         {
           "type": "object",
@@ -52,6 +53,7 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "description": "The Dojo itself and its windows and Splints present at generation publication, bounded by the daemon expansion limit.",
           "required": ["kind", "dojo_id"],
           "properties": {
             "kind": { "const": "dojo" },
@@ -61,6 +63,7 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "description": "The window itself and its Splints present at generation publication, bounded by the daemon expansion limit.",
           "required": ["kind", "window_id"],
           "properties": {
             "kind": { "const": "window" },

@@ -1,0 +1,26 @@
+{
+  "$schema_file": "policy.schema.json",
+  "document": {
+    "schema": "splinterm.policy.v1",
+    "rules": [
+      {
+        "id": "unsafe-future-children",
+        "executable": {
+          "path": "/usr/local/bin/splinterm-agent",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        "scopes": ["terminal_visible_read"],
+        "resources": [
+          {
+            "kind": "dojo",
+            "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77111",
+            "include_future_descendants": true
+          }
+        ],
+        "limits": {
+          "max_returned_rows": 40
+        }
+      }
+    ]
+  }
+}

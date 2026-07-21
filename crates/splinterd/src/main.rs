@@ -617,7 +617,7 @@ async fn main() -> Result<()> {
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
     let (policy_reloads, _) = broadcast::channel(1);
     let mut policy = policy::PolicyStore::default();
-    let policy_generation = policy.reload(policy::configured_path().as_deref());
+    let policy_generation = policy.reload(policy::configured_path().as_deref(), &lair);
     if let Some(diagnostic) = &policy_generation.diagnostic {
         warn!(generation = policy_generation.id, %diagnostic, "persistent policy rejected; installed deny-all generation");
     }
@@ -664,7 +664,17 @@ async fn main() -> Result<()> {
                 let candidate = tokio::task::spawn_blocking(move || policy::prepare(policy_path))
                     .await
                     .context("policy reload task failed")?;
-                let generation = state.policy.lock().await.publish(candidate);
+                let _transaction = state
+                    .topology_transactions
+                    .acquire()
+                    .await
+                    .context("topology transaction barrier closed during policy reload")?;
+                let topology_snapshot = state.lair.read().await.clone();
+                let generation = state
+                    .policy
+                    .lock()
+                    .await
+                    .publish(candidate, &topology_snapshot);
                 record_policy_reload(&state, &generation).await;
                 let _ = state.policy_reloads.send(generation.id);
                 state.topology.lock().await.clear();
@@ -4552,11 +4562,12 @@ mod tests {
         fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600))
             .await
             .unwrap();
+        let topology_snapshot = state.lair.read().await.clone();
         state
             .policy
             .lock()
             .await
-            .reload(Some(policy_path.as_path()));
+            .reload(Some(policy_path.as_path()), &topology_snapshot);
 
         let allowed = authorize_request(&Request::ListDojos, &state, &peer, 0, false)
             .await

@@ -68,7 +68,7 @@ and one pinned shutdown signal.
 - Dedicated policy-scoped SSH stdio relay (complete)
 - Stable JSON/NDJSON CLI and published schemas
 - Supported third-party capability policy and audit inspection
-- Resolve Dojo/window future-descendant policy semantics before agent lifecycle tools
+- Publication-snapshotted Dojo/window descendant policy semantics (complete)
 - Inject non-authoritative Dojo/window/Splint/incarnation context into PTY children (complete)
 - Public-CLI reference session picker and client-author examples (complete)
 - Required full-capability `splinterm-mcp` adapter with supported-automation parity

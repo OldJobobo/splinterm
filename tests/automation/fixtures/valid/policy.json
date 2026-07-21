@@ -20,6 +20,14 @@
             "kind": "splint",
             "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77110",
             "incarnation": "current"
+          },
+          {
+            "kind": "dojo",
+            "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77111"
+          },
+          {
+            "kind": "window",
+            "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77112"
           }
         ],
         "limits": {

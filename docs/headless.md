@@ -74,10 +74,11 @@ Authorizing the general `splinterm` CLI delegates the selected rule to every
 same-account process able to invoke that exact binary; running inside a Splint
 does not narrow or grant that authority. This can support a supervised CLI-based
 coding agent, but the planned `splinterm-mcp` adapter should use its own exact
-executable identity for a narrower production boundary. Do not grant future
-resources merely so an agent can control children it creates: the descendant
-policy semantics are an explicit Phase 4 blocker, not an invitation to use broad
-selectors.
+executable identity for a narrower production boundary. Dojo and window rules
+snapshot only resources present when the policy generation is published. To
+authorize a newly created child, review the concrete resource, update policy,
+reload the service, and reconnect; broad future-descendant authority is not part
+of policy v1.
 
 Validate and inspect the file offline through the daemon's exact secure loader:
 
