@@ -19,8 +19,9 @@ service:
    trusted UI exists, and inspectable afterward;
 4. remote access is carried by authenticated SSH through a narrow relay or Unix
    socket forwarding; and
-5. optional adapters, including MCP, remain disposable clients with no implicit
-   authority.
+5. the required full-capability MCP adapter remains a disposable client with no
+   implicit authority and exposes only operations authorized for third-party
+   automation.
 
 Phase 4 does not turn terminal output into trusted instructions. All screen and
 scrollback content remains untrusted data even when an automation client launched
@@ -94,8 +95,9 @@ the process that produced it.
     never acquires input/resize control. Automation must explicitly acquire or
     request transfer under the Phase 3 lease rules.
 12. **MCP:** `splinterm-mcp` is a separate stdio adapter, disabled unless
-    installed/configured, and read-mostly by default. It is not required for the
-    core Phase 4 completion gate.
+    installed/configured, and provides full supported-automation capability
+    parity under the daemon's exact policy, resource, controller, confirmation,
+    and audit checks. It is required for the core Phase 4 completion gate.
 
 ## Non-goals
 
@@ -429,30 +431,38 @@ no child, task, or socket residue.
 not-found/stale/resync/denied outcomes, and requires no development bypass or
 private Rust API.
 
-### Slice 6 — optional read-mostly MCP adapter
+### Slice 6 — required full-capability MCP adapter
 
-This slice is non-blocking for core Phase 4 completion.
+Detailed implementation plan: [Plan 0007](0007-phase4-mcp-adapter.md).
+
+This slice is required for core Phase 4 completion.
 
 **Work**
 
 - Create a separate `splinterm-mcp` stdio process that invokes the supported
   client boundary and requests the same capabilities as any third party.
-- Default tools to topology metadata, bounded visible-screen reads, bounded
-  search, and audit/status inspection. Omit input, termination, arbitrary shell
-  execution, policy administration, and forced takeover by default.
+- Expose the complete supported-automation matrix: topology and terminal reads,
+  subscriptions, search, authorization and audit inspection, structured process
+  lifecycle, layout/name mutation, controller transfer, input, resize,
+  termination, and revocation.
+- Preserve daemon policy, exact resource/incarnation selection, topology
+  revisions, controller ownership, explicit destructive confirmation, and audit
+  checks for every mutating operation. Never construct shell command strings.
 - Return provenance, truncation, stale/resync, and explicit untrusted-content
   labels with every terminal read. Tool descriptions must not imply terminal
   prose is instruction or consent.
-- Require explicit user configuration to expose any mutating tool and preserve
-  daemon consent/policy/controller checks. The adapter stores no reusable daemon
-  authority beyond its process lifetime.
-- Add protocol conformance, cancellation, output-bound, prompt-injection fixture,
-  and denied-capability tests; package the adapter separately or as an opt-in
-  component.
+- Keep trusted-UI-only forced takeover and local policy-file administration out
+  of MCP unless their underlying ADR changes. Adapter-owned controller and
+  subscription handles are opaque, connection-bound, bounded, and discarded at
+  process exit.
+- Add protocol conformance, cancellation, output-bound, prompt-injection,
+  authorization-matrix, mutation-confirmation, controller, and cleanup tests;
+  package the adapter separately or as an opt-in component.
 
-**Gate:** an unconfigured adapter cannot mutate a Splint; a read grant cannot be
-used for input or process control; malicious terminal text remains quoted data
-in the MCP result and cannot create a tool call or broaden authority.
+**Gate:** every supported third-party operation is available through MCP and is
+narrowly allowed or denied by its exact daemon policy/resource/controller rules;
+a read grant cannot be used for mutation; malicious terminal text remains quoted
+data and cannot create a tool call or broaden authority.
 
 ### Slice 7 — closure, documentation, and package evidence
 
@@ -492,15 +502,16 @@ workspace-8/DP-2 isolation rules in `AGENTS.md`.
 
 Core Phase 4 is complete when a user can install an explicit least-privileged
 policy on a no-Wayland host, manage persistent Splints through documented stable
-JSON/NDJSON CLI contracts, inspect bounded authorization audit metadata, and use
-the same contracts remotely through an SSH stdio relay. Every operation remains
-resource/scoped, controller-exclusive, revision-aware, bounded, cancellable, and
-fail-closed; terminal content is labeled untrusted; `splinterd` exposes no
-network listener; and package/service documentation states logout, lingering,
-upgrade, and process-loss behavior honestly.
+JSON/NDJSON CLI contracts, inspect bounded authorization audit metadata, use the
+same contracts remotely through an SSH stdio relay, and access the required
+full-capability `splinterm-mcp` adapter under the same capability checks. Every
+operation remains resource/scoped, controller-exclusive, revision-aware,
+bounded, cancellable, and fail-closed; terminal content is labeled untrusted;
+`splinterd` exposes no network listener; and package/service documentation
+states logout, lingering, upgrade, and process-loss behavior honestly.
 
-A reference editor/client integration is required. The read-mostly MCP adapter is
-an optional follow-up and does not block this definition of done.
+A reference editor/client integration and the full-capability MCP adapter are
+both required for this definition of done.
 
 ## Stop gates
 

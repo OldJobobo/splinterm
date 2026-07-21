@@ -69,7 +69,7 @@ and one pinned shutdown signal.
 - Stable JSON/NDJSON CLI and published schemas
 - Supported third-party capability policy and audit inspection
 - Editor/client integrations
-- Optional read-mostly `splinterm-mcp` adapter
+- Required full-capability `splinterm-mcp` adapter with supported-automation parity
 - No network listener in `splinterd` by default
 
 ## Phase 5 — Nix and tertiary distribution
