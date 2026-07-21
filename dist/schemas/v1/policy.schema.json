@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/v1/policy.schema.json",
+  "title": "Splinterm persistent automation policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "rules"],
+  "properties": {
+    "schema": { "const": "splinterm.policy.v1" },
+    "rules": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "topology_metadata_read",
+        "topology_subscribe",
+        "terminal_visible_read",
+        "terminal_subscribe",
+        "scrollback_read",
+        "scrollback_search",
+        "controller_acquire",
+        "controller_transfer",
+        "input",
+        "resize",
+        "process_spawn",
+        "process_restore",
+        "process_terminate",
+        "topology_layout_mutate",
+        "topology_name_mutate",
+        "authorization_inspect",
+        "authorization_revoke",
+        "audit_inspect"
+      ]
+    },
+    "selector": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "lair" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "dojo_id"],
+          "properties": {
+            "kind": { "const": "dojo" },
+            "dojo_id": { "$ref": "#/$defs/uuid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "window_id"],
+          "properties": {
+            "kind": { "const": "window" },
+            "window_id": { "$ref": "#/$defs/uuid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "splint_id", "incarnation"],
+          "properties": {
+            "kind": { "const": "splint" },
+            "splint_id": { "$ref": "#/$defs/uuid" },
+            "incarnation": {
+              "oneOf": [
+                { "type": "integer", "minimum": 1 },
+                { "const": "current" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_returned_rows": { "type": "integer", "minimum": 1, "maximum": 80 },
+        "max_results": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "max_returned_bytes": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "max_live_subscriptions": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "max_spawn_count": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "deadline_ms": { "type": "integer", "minimum": 1, "maximum": 300000 }
+      },
+      "minProperties": 1
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "executable", "scopes", "resources", "limits"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
+        },
+        "executable": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^/(?!.*(?:^|/)\\.\\.?/)(?!.*//$).+$",
+              "maxLength": 4096
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "expires_at_unix_seconds": { "type": "integer", "minimum": 1 },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 18,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/scope" }
+        },
+        "resources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/selector" }
+        },
+        "limits": { "$ref": "#/$defs/limits" }
+      }
+    }
+  }
+}

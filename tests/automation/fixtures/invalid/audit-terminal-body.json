@@ -1,0 +1,19 @@
+{
+  "$schema_file": "audit-record.schema.json",
+  "document": {
+    "schema": "splinterm.audit.v1",
+    "retention": "daemon_lifetime",
+    "audit_id": 72,
+    "unix_seconds": 1784764801,
+    "peer": {
+      "uid": 1000,
+      "executable_path": "/usr/local/bin/client",
+      "executable_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    "operation": "input",
+    "requested_scopes": ["input"],
+    "decision": "allowed",
+    "reason": "policy_match",
+    "terminal_bytes": "rm -rf /"
+  }
+}

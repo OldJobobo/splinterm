@@ -1,0 +1,15 @@
+{
+  "$schema_file": "policy.schema.json",
+  "document": {
+    "schema": "splinterm.policy.v1",
+    "rules": [
+      {
+        "id": "path-only",
+        "executable": { "path": "/usr/local/bin/client" },
+        "scopes": ["topology_metadata_read"],
+        "resources": [{ "kind": "lair" }],
+        "limits": { "deadline_ms": 5000 }
+      }
+    ]
+  }
+}

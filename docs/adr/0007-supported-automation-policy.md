@@ -29,13 +29,19 @@ A persistent rule identifies one executable with both:
 - an absolute, normalized path with no `.` or `..` components; and
 - the SHA-256 digest of the exact regular executable file opened for the peer.
 
-At connection acceptance the daemon obtains `SO_PEERCRED`, opens the peer's
-`/proc/<pid>/exe` target read-only and close-on-exec, and derives path, device,
-inode, owner, mode, size, and digest from that open file. It rejects a missing,
-non-regular, oversized, unreadable, or changed-while-hashing executable. The
-open descriptor, not a later path lookup, is authoritative. PID reuse, an exec
-race, and hashing limits require an adversarial implementation spike before the
-policy matcher lands; inability to establish one stable snapshot fails closed.
+At connection acceptance the daemon obtains `SO_PEERCRED` and the Linux 6.5+
+`SO_PEERPIDFD`, opens the peer's `/proc/<pid>/exe` target read-only and
+close-on-exec, and derives path, device, inode, owner, mode, size, and digest from
+that open file. It rejects a missing, non-regular, oversized, unreadable, or
+changed-while-hashing executable. The open descriptor, not a later path lookup,
+is authoritative.
+
+[Spike 0020](../spikes/0020-persistent-executable-identity.md) established that
+the pidfd must identify the same PID, remain alive across the bounded hash, and
+be monitored for the connection lifetime. Peer exit closes the connection even
+if its socket descriptor was passed elsewhere. Persistent-policy authorization
+fails closed when `SO_PEERPIDFD` is unavailable; it never falls back to a reused
+numeric PID. Hashing runs outside daemon locks on a bounded blocking worker.
 
 Path and digest must both match. Device/inode remain useful connection audit
 metadata but are not persisted as upgrade-stable identity. Basename, argv,

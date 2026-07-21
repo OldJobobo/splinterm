@@ -1,4 +1,6 @@
 mod consent;
+#[cfg(test)]
+mod executable_identity;
 mod persistence;
 
 use std::{
@@ -57,6 +59,7 @@ use tokio::{
     task::JoinHandle,
     time,
 };
+use tokio_util::task::TaskTracker;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -68,6 +71,7 @@ const CONTROL_QUEUE: usize = 4;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15);
+const EXIT_OBSERVER_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_EVENT_QUEUE: usize = 32;
 const SEARCH_DEADLINE: Duration = Duration::from_millis(10);
 static NEXT_SUBSCRIPTION: AtomicU64 = AtomicU64::new(1);
@@ -526,6 +530,7 @@ struct DaemonState {
     runtimes: Mutex<RuntimeRegistry>,
     topology: Mutex<TopologyHub>,
     topology_transactions: Semaphore,
+    exit_observers: TaskTracker,
     metadata: Option<MetadataStore>,
     controller: Mutex<ControllerState>,
     control_events: broadcast::Sender<ControlNotice>,
@@ -578,6 +583,7 @@ async fn main() -> Result<()> {
         runtimes: Mutex::new(RuntimeRegistry::default()),
         topology: Mutex::new(TopologyHub::default()),
         topology_transactions: Semaphore::new(1),
+        exit_observers: TaskTracker::new(),
         metadata: Some(metadata),
         controller: Mutex::new(ControllerState::default()),
         control_events,
@@ -625,6 +631,7 @@ async fn main() -> Result<()> {
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
 
+    state.exit_observers.close();
     let runtimes = state.runtimes.lock().await.drain();
     let shutdown = async {
         let mut tasks = tokio::task::JoinSet::new();
@@ -645,6 +652,14 @@ async fn main() -> Result<()> {
     {
         error!("timed out while shutting down live Splints");
     }
+    time::timeout(EXIT_OBSERVER_TIMEOUT, state.exit_observers.wait())
+        .await
+        .context("timed out while reconciling process exits during shutdown")?;
+    let _transaction = state
+        .topology_transactions
+        .acquire()
+        .await
+        .context("topology transaction barrier closed during shutdown")?;
     let final_lair = state.lair.read().await.clone();
     persist_lair(&state, &final_lair)
         .await
@@ -1347,8 +1362,9 @@ async fn finalize_exit_if_current(
 }
 
 fn observe_process_exit(state: &Arc<DaemonState>, handle: LiveSplintHandle) {
+    let exit_observers = state.exit_observers.clone();
     let state = Arc::clone(state);
-    tokio::spawn(async move {
+    exit_observers.spawn(async move {
         let splint_id = handle.splint_id;
         let incarnation = handle.incarnation.value();
         if let Some(status) = handle.wait_for_exit().await {
@@ -3227,6 +3243,7 @@ mod tests {
             runtimes: Mutex::new(RuntimeRegistry::default()),
             topology: Mutex::new(TopologyHub::default()),
             topology_transactions: Semaphore::new(1),
+            exit_observers: TaskTracker::new(),
             metadata: None,
             controller: Mutex::new(ControllerState::default()),
             control_events,

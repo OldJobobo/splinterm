@@ -1,0 +1,34 @@
+{
+  "$schema_file": "policy.schema.json",
+  "document": {
+    "schema": "splinterm.policy.v1",
+    "rules": [
+      {
+        "id": "readonly-build-pane",
+        "executable": {
+          "path": "/usr/local/bin/splinterm-dashboard",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        "expires_at_unix_seconds": 1893456000,
+        "scopes": [
+          "topology_metadata_read",
+          "terminal_visible_read",
+          "terminal_subscribe"
+        ],
+        "resources": [
+          {
+            "kind": "splint",
+            "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77110",
+            "incarnation": "current"
+          }
+        ],
+        "limits": {
+          "max_returned_rows": 40,
+          "max_returned_bytes": 262144,
+          "max_live_subscriptions": 1,
+          "deadline_ms": 5000
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v1",
+    "request_id": "3",
+    "ok": true,
+    "data": {},
+    "error": {
+      "code": "internal",
+      "message": "contradictory envelope",
+      "retryable": false
+    },
+    "truncated": false
+  }
+}

@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/v1/audit-record.schema.json",
+  "title": "Splinterm daemon-lifetime audit record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "retention",
+    "audit_id",
+    "unix_seconds",
+    "peer",
+    "operation",
+    "requested_scopes",
+    "decision",
+    "reason"
+  ],
+  "properties": {
+    "schema": { "const": "splinterm.audit.v1" },
+    "retention": { "const": "daemon_lifetime" },
+    "audit_id": { "type": "integer", "minimum": 1 },
+    "unix_seconds": { "type": "integer", "minimum": 1 },
+    "policy_generation": { "type": "integer", "minimum": 1 },
+    "policy_rule_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "peer": { "$ref": "#/$defs/peer" },
+    "operation": { "$ref": "#/$defs/operation" },
+    "resource": { "$ref": "#/$defs/resource" },
+    "requested_scopes": {
+      "type": "array",
+      "maxItems": 18,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/scope" }
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["allowed", "denied", "revoked", "expired", "matched", "rejected"]
+    },
+    "reason": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["succeeded", "failed", "cancelled"]
+    },
+    "argument_count": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "executable_basename": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^/]+$"
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "topology_metadata_read",
+        "topology_subscribe",
+        "terminal_visible_read",
+        "terminal_subscribe",
+        "scrollback_read",
+        "scrollback_search",
+        "controller_acquire",
+        "controller_transfer",
+        "input",
+        "resize",
+        "process_spawn",
+        "process_restore",
+        "process_terminate",
+        "topology_layout_mutate",
+        "topology_name_mutate",
+        "authorization_inspect",
+        "authorization_revoke",
+        "audit_inspect"
+      ]
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "request_access",
+        "authorization_status",
+        "revoke_access",
+        "list_dojos",
+        "inspect_topology",
+        "subscribe_topology",
+        "inspect_splint",
+        "create_dojo",
+        "split_splint",
+        "relaunch_splint",
+        "restore_splint",
+        "restore_window",
+        "restore_dojo",
+        "close_splint",
+        "set_split_ratio",
+        "new_window",
+        "close_window",
+        "rename_dojo",
+        "rename_window",
+        "set_window_default_focus",
+        "rename_splint",
+        "attach",
+        "scrollback_page",
+        "search_scrollback",
+        "acquire_control",
+        "subscribe_control",
+        "request_control_transfer",
+        "decide_control_transfer",
+        "force_control_transfer",
+        "release_control",
+        "input",
+        "resize",
+        "detach",
+        "kill_splint",
+        "audit_inspect",
+        "policy_reload"
+      ]
+    },
+    "peer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uid", "executable_path", "executable_sha256"],
+      "properties": {
+        "uid": { "type": "integer", "minimum": 0 },
+        "executable_path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "executable_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "device": { "type": "integer", "minimum": 0 },
+        "inode": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dojo_id": { "$ref": "#/$defs/uuid" },
+        "window_id": { "$ref": "#/$defs/uuid" },
+        "splint_id": { "$ref": "#/$defs/uuid" },
+        "incarnation": { "type": "integer", "minimum": 1 }
+      },
+      "minProperties": 1
+    }
+  }
+}

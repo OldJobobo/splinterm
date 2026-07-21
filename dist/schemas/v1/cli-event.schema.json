@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/v1/cli-event.schema.json",
+  "title": "Splinterm CLI v1 NDJSON event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "subscription_id",
+    "sequence",
+    "event_type",
+    "data",
+    "truncated"
+  ],
+  "properties": {
+    "schema": { "const": "splinterm.cli.event.v1" },
+    "subscription_id": { "$ref": "#/$defs/decimal_id" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "snapshot",
+        "update",
+        "topology_changed",
+        "control_status_changed",
+        "control_transfer_requested",
+        "control_transfer_resolved",
+        "access_revoked",
+        "exited",
+        "resync_required"
+      ]
+    },
+    "resource": { "$ref": "#/$defs/resource" },
+    "data": { "type": "object" },
+    "truncated": { "type": "boolean" },
+    "resync": { "$ref": "#/$defs/resync" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "event_type": { "const": "resync_required" } },
+        "required": ["event_type"]
+      },
+      "then": { "required": ["resync"] },
+      "else": { "not": { "required": ["resync"] } }
+    }
+  ],
+  "$defs": {
+    "decimal_id": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "counter": { "type": "integer", "minimum": 1 },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dojo_id": { "$ref": "#/$defs/uuid" },
+        "window_id": { "$ref": "#/$defs/uuid" },
+        "splint_id": { "$ref": "#/$defs/uuid" },
+        "incarnation": { "$ref": "#/$defs/counter" },
+        "topology_revision": { "$ref": "#/$defs/counter" },
+        "terminal_revision": { "$ref": "#/$defs/counter" },
+        "history_generation": { "$ref": "#/$defs/counter" }
+      },
+      "minProperties": 1
+    },
+    "resync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": ["subscriber_stalled", "revision_gap", "history_replaced"]
+        },
+        "current_topology_revision": { "$ref": "#/$defs/counter" },
+        "current_terminal_revision": { "$ref": "#/$defs/counter" },
+        "history_generation": { "$ref": "#/$defs/counter" }
+      },
+      "minProperties": 2
+    }
+  }
+}

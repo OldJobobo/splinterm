@@ -1,0 +1,11 @@
+{
+  "$schema_file": "cli-event.schema.json",
+  "document": {
+    "schema": "splinterm.cli.event.v1",
+    "subscription_id": "4",
+    "sequence": 2,
+    "event_type": "resync_required",
+    "data": {},
+    "truncated": false
+  }
+}

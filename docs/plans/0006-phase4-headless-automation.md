@@ -1,6 +1,6 @@
 # Plan 0006: headless access and supported automation
 
-- **Status:** Proposed
+- **Status:** In progress
 - **Roadmap:** Phase 4 — Headless access and supported automation
 - **Foundation:** [Plan 0004](0004-phase3-multiplexing.md), [ADR 0005](../adr/0005-trusted-consent-broker.md), [ADR 0006](../adr/0006-multiplexing-lifecycle.md)
 - **Reference source:** Foot 1.27.0, commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -179,9 +179,68 @@ subscription identity, event type, and explicit `resync_required` records.
 Terminal bytes that cannot be represented as semantic cells use an explicitly
 named encoding; they are never inserted into JSON strings ambiguously.
 
+## Execution checkpoint — resumed and closed after reboot
+
+Recorded 2026-07-20 before an unrelated host reboot.
+
+### Completed implementation
+
+Slice 0 implementation is present in the worktree:
+
+- ADR 0007 now records the Linux 6.5+ `SO_PEERPIDFD` requirement;
+- `docs/spikes/0020-persistent-executable-identity.md` records the adversarial
+  identity spike and accepted open-descriptor hashing algorithm;
+- the five focused executable-identity tests pass;
+- handwritten public v1 schemas exist under `dist/schemas/v1/` for one-shot CLI
+  envelopes, NDJSON events, persistent policy, and audit records;
+- five valid and five security-negative fixtures exist under
+  `tests/automation/fixtures/`;
+- `tools/automation/validate-contract-fixtures.py` validates those fixtures and
+  is wired into CI; and
+- `docs/automation.md` documents the draft public/private compatibility boundary.
+
+Treat `AGENTS.md` as user-owned and do not alter it as part of this work. No
+Phase 4 changes have been committed yet.
+
+### Closure completed
+
+Closed 2026-07-20. The intermittent shutdown-ordering race was repaired without
+retries or filesystem-only serialization:
+
+- process-exit observers now run under a daemon-owned `TaskTracker` that removes
+  completed task outputs;
+- shutdown stops and awaits connection tasks, closes the observer tracker,
+  shuts down live runtimes, and awaits every observer with an explicit bounded
+  timeout;
+- final Lair persistence occurs only after observer reconciliation and while
+  holding the topology transaction barrier;
+- the socket is removed only after that final durable save; and
+- the integration harness preserves and reports a bounded daemon stderr tail on
+  failure.
+
+The formerly failing serialized smoke passed:
+
+```bash
+cargo test -p splinterd --test end_to_end \
+  explicit_restore_scopes_report_per_leaf_results \
+  -- --exact --test-threads=1
+```
+
+The complete closure gate then passed: all ten contract fixtures validated
+against four schemas, formatting and workspace Clippy passed with warnings
+denied, the full workspace test suite passed, and all seven serialized
+`splinterd` end-to-end tests passed. The local validator used an ephemeral
+`uv --with jsonschema` environment because the host Python did not have the
+CI-documented `jsonschema` dependency installed. Post-gate review confirmed
+that `TaskTracker` removes completed tasks immediately, its closed-and-empty
+wait semantics match the shutdown requirement, and every observer-registration
+call site is behind a connection task drained before tracker closure.
+
+No graphical test was required or run for this repair.
+
 ## Dependency-ordered implementation slices
 
-### Slice 0 — security ADR, threat model, and contract fixtures
+### Slice 0 — security ADR, threat model, and contract fixtures (complete)
 
 **Work**
 

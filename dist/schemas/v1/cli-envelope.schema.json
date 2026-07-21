@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/v1/cli-envelope.schema.json",
+  "title": "Splinterm CLI v1 one-shot envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "request_id", "ok", "truncated"],
+  "properties": {
+    "schema": { "const": "splinterm.cli.v1" },
+    "request_id": { "$ref": "#/$defs/decimal_id" },
+    "ok": { "type": "boolean" },
+    "resource": { "$ref": "#/$defs/resource" },
+    "data": { "type": "object" },
+    "error": { "$ref": "#/$defs/error" },
+    "truncated": { "type": "boolean" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
+      "then": { "required": ["data"], "not": { "required": ["error"] } },
+      "else": { "required": ["error"], "not": { "required": ["data"] } }
+    }
+  ],
+  "$defs": {
+    "decimal_id": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "counter": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dojo_id": { "$ref": "#/$defs/uuid" },
+        "window_id": { "$ref": "#/$defs/uuid" },
+        "splint_id": { "$ref": "#/$defs/uuid" },
+        "incarnation": { "$ref": "#/$defs/counter" },
+        "topology_revision": { "$ref": "#/$defs/counter" },
+        "terminal_revision": { "$ref": "#/$defs/counter" },
+        "history_generation": { "$ref": "#/$defs/counter" }
+      },
+      "minProperties": 1
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "authentication_failed",
+            "handshake_required",
+            "incompatible_version",
+            "invalid_request",
+            "unsupported_schema",
+            "consent_unavailable",
+            "consent_denied",
+            "unauthorized",
+            "confirmation_required",
+            "controller_unavailable",
+            "control_transfer_unavailable",
+            "stale_topology",
+            "not_found",
+            "stale_incarnation",
+            "invalid_argument",
+            "resource_limit",
+            "cancelled",
+            "timeout",
+            "internal"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "retryable": { "type": "boolean" },
+        "current_topology_revision": { "$ref": "#/$defs/counter" },
+        "current_terminal_revision": { "$ref": "#/$defs/counter" }
+      }
+    }
+  }
+}

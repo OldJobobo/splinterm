@@ -28,15 +28,32 @@ struct Daemon {
 
 impl Daemon {
     fn spawn_child(runtime: &Path, socket: &Path) -> Child {
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(runtime.join("daemon.stderr"))
+            .unwrap();
         Command::new(DAEMON)
             .env("SPLINTERM_SOCKET", socket)
             .env("XDG_STATE_HOME", runtime.join("state"))
             .env("SPLINTERM_ENABLE_DEV_ATTACH", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .unwrap()
+    }
+
+    fn assert_success(&self, status: std::process::ExitStatus) {
+        if status.success() {
+            return;
+        }
+        let stderr = fs::read(self.runtime.join("daemon.stderr")).unwrap_or_default();
+        let tail = &stderr[stderr.len().saturating_sub(8 * 1024)..];
+        panic!(
+            "daemon exited as {status:?}; bounded stderr tail:\n{}",
+            String::from_utf8_lossy(tail)
+        );
     }
 
     async fn wait_until_ready(socket: &Path) {
@@ -73,7 +90,7 @@ impl Daemon {
         let pid = rustix::process::Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
         rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
         let status = self.child.wait().unwrap();
-        assert!(status.success(), "daemon exited as {status:?}");
+        self.assert_success(status);
         assert!(!self.socket.exists());
     }
 
@@ -86,7 +103,7 @@ impl Daemon {
         let pid = rustix::process::Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
         rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
         let status = self.child.wait().unwrap();
-        assert!(status.success(), "daemon exited as {status:?}");
+        self.assert_success(status);
         assert!(!self.socket.exists());
         fs::remove_dir_all(&self.runtime).unwrap();
     }

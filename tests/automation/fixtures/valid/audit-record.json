@@ -1,0 +1,27 @@
+{
+  "$schema_file": "audit-record.schema.json",
+  "document": {
+    "schema": "splinterm.audit.v1",
+    "retention": "daemon_lifetime",
+    "audit_id": 71,
+    "unix_seconds": 1784764800,
+    "policy_generation": 4,
+    "policy_rule_id": "readonly-build-pane",
+    "peer": {
+      "uid": 1000,
+      "executable_path": "/usr/local/bin/splinterm-dashboard",
+      "executable_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "device": 259,
+      "inode": 44291
+    },
+    "operation": "attach",
+    "resource": {
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77110",
+      "incarnation": 3
+    },
+    "requested_scopes": ["terminal_visible_read", "terminal_subscribe"],
+    "decision": "allowed",
+    "reason": "policy_match",
+    "outcome": "succeeded"
+  }
+}
