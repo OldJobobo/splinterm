@@ -3246,6 +3246,23 @@ fn collect_choices(
     }
 }
 
+fn parse_session_choice(
+    choices: &[(SplintId, String)],
+    allow_new: bool,
+    answer: &str,
+) -> Result<Option<SplintId>> {
+    let answer = answer.trim();
+    if allow_new && answer.eq_ignore_ascii_case("new") {
+        return Ok(None);
+    }
+    let selected: SplintId = answer.parse().context("selection is not a Splint UUID")?;
+    choices
+        .iter()
+        .any(|(id, _)| *id == selected)
+        .then_some(Some(selected))
+        .context("selected Splint is not present in the current Lair")
+}
+
 fn choose_session(dojos: &[splinterm_core::Dojo], allow_new: bool) -> Result<Option<SplintId>> {
     if !io::stdin().is_terminal() {
         let guidance = if allow_new {
@@ -3279,16 +3296,7 @@ fn choose_session(dojos: &[splinterm_core::Dojo], allow_new: bool) -> Result<Opt
     io::stdin()
         .read_line(&mut answer)
         .context("failed to read session selection")?;
-    let answer = answer.trim();
-    if allow_new && answer.eq_ignore_ascii_case("new") {
-        return Ok(None);
-    }
-    let selected: SplintId = answer.parse().context("selection is not a Splint UUID")?;
-    choices
-        .iter()
-        .any(|(id, _)| *id == selected)
-        .then_some(Some(selected))
-        .context("selected Splint is not present in the current Lair")
+    parse_session_choice(&choices, allow_new, &answer)
 }
 
 fn select_window_from(
@@ -3323,6 +3331,16 @@ fn window_containing(
         .cloned()
 }
 
+fn focused_window_containing(
+    dojos: &[splinterm_core::Dojo],
+    splint_id: SplintId,
+) -> Result<splinterm_core::Window> {
+    let mut window = window_containing(dojos, splint_id)
+        .context("selected Splint is not present in a daemon window")?;
+    window.default_focus = splint_id;
+    Ok(window)
+}
+
 async fn select_window(selection: Option<(DojoId, WindowId)>) -> Result<splinterm_core::Window> {
     let mut connection = Connection::connect().await?;
     let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
@@ -3351,18 +3369,21 @@ async fn launch(
     let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
         bail!("splinterd did not return its session list");
     };
-    let attach = if let Some(splint_id) = splint_id {
-        Some(splint_id)
-    } else if create_new || dojos.is_empty() || !command.is_empty() {
+    if let Some(splint_id) = splint_id {
+        if !command.is_empty() {
+            bail!("cannot execute a new command while attaching an existing Splint");
+        }
+        drop(connection);
+        return run_live_window(config, splint_id).await;
+    }
+
+    let attach = if create_new || dojos.is_empty() || !command.is_empty() {
         None
     } else {
         choose_session(&dojos, true)?
     };
-    let selected = if let Some(splint_id) = attach {
-        if !command.is_empty() {
-            bail!("cannot execute a new command while attaching an existing Splint");
-        }
-        splint_id
+    let window = if let Some(selected) = attach {
+        focused_window_containing(&dojos, selected)?
     } else {
         let expected = connection.topology_revision().await?;
         let Response::DojoCreated { dojo, .. } = connection
@@ -3375,15 +3396,13 @@ async fn launch(
             .windows
             .first()
             .context("new dojo did not contain a window")?;
-        match &window.root {
-            splinterm_core::LayoutNode::Leaf(splint) => splint.id,
-            splinterm_core::LayoutNode::Branch { .. } => {
-                bail!("new dojo did not contain exactly one Splint")
-            }
+        if !matches!(&window.root, splinterm_core::LayoutNode::Leaf(_)) {
+            bail!("new dojo did not contain exactly one Splint");
         }
+        window.clone()
     };
     drop(connection);
-    run_live_window(config, selected).await
+    run_live_multipane_window(config, window).await
 }
 
 fn read_private_frame<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
@@ -5298,6 +5317,40 @@ mod tests {
 
         first.windows[0].default_focus = SplintId::new();
         assert!(select_window_from(&[first], (first_dojo, first_window)).is_err());
+    }
+
+    #[test]
+    fn interactive_launch_new_choice_requests_creation() {
+        let saved = SplintId::new();
+        let choices = vec![(saved, "saved".to_owned())];
+        assert_eq!(parse_session_choice(&choices, true, "new\n").unwrap(), None);
+        assert_eq!(
+            parse_session_choice(&choices, true, &saved.to_string()).unwrap(),
+            Some(saved)
+        );
+        assert!(parse_session_choice(&choices, false, "new").is_err());
+    }
+
+    #[test]
+    fn launch_window_selection_preserves_the_requested_focused_splint() {
+        let mut dojo = splinterm_core::Dojo::new("multipane", PathBuf::from("/tmp"));
+        let original = dojo.windows[0].default_focus;
+        let selected = SplintId::new();
+        dojo.windows[0].root = splinterm_core::LayoutNode::Branch {
+            axis: splinterm_core::Axis::Horizontal,
+            ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+            first: Box::new(splinterm_core::LayoutNode::Leaf(
+                splinterm_core::Splint::shell(PathBuf::from("/tmp")),
+            )),
+            second: Box::new(splinterm_core::LayoutNode::Leaf(splinterm_core::Splint {
+                id: selected,
+                ..splinterm_core::Splint::shell(PathBuf::from("/tmp"))
+            })),
+        };
+
+        let window = focused_window_containing(&[dojo], selected).unwrap();
+        assert_eq!(window.default_focus, selected);
+        assert_ne!(window.default_focus, original);
     }
 
     #[test]

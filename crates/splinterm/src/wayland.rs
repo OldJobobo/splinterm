@@ -2580,11 +2580,15 @@ fn pane_topology_action(keysym: Keysym, modifiers: Modifiers) -> Option<PaneTopo
         return None;
     }
     match keysym {
-        Keysym::Return => Some(PaneTopologyAction::Split(splinterm_core::Axis::Horizontal)),
-        Keysym::backslash => Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical)),
+        Keysym::Return | Keysym::KP_Enter => {
+            Some(PaneTopologyAction::Split(splinterm_core::Axis::Horizontal))
+        }
+        Keysym::backslash | Keysym::bar => {
+            Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical))
+        }
         Keysym::w | Keysym::W => Some(PaneTopologyAction::Close),
-        Keysym::bracketleft => Some(PaneTopologyAction::AdjustRatio(-50)),
-        Keysym::bracketright => Some(PaneTopologyAction::AdjustRatio(50)),
+        Keysym::bracketleft | Keysym::braceleft => Some(PaneTopologyAction::AdjustRatio(-50)),
+        Keysym::bracketright | Keysym::braceright => Some(PaneTopologyAction::AdjustRatio(50)),
         _ => None,
     }
 }
@@ -6500,8 +6504,16 @@ mod tests {
             Some(PaneTopologyAction::Split(splinterm_core::Axis::Horizontal))
         );
         assert_eq!(
-            pane_topology_action(Keysym::bracketleft, modifiers),
+            pane_topology_action(Keysym::bar, modifiers),
+            Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical))
+        );
+        assert_eq!(
+            pane_topology_action(Keysym::braceleft, modifiers),
             Some(PaneTopologyAction::AdjustRatio(-50))
+        );
+        assert_eq!(
+            pane_topology_action(Keysym::braceright, modifiers),
+            Some(PaneTopologyAction::AdjustRatio(50))
         );
         assert_eq!(pane_topology_action(Keysym::w, Modifiers::default()), None);
         assert_eq!(
