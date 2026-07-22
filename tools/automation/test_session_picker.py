@@ -54,7 +54,8 @@ TOPOLOGY = envelope(
                 "splint_id": SPLINT,
                 "title": "shell",
                 "lifecycle": "running",
-                "incarnation": INCARNATION,
+                "current_incarnation": INCARNATION,
+                "last_incarnation": INCARNATION,
             }
         ],
     },

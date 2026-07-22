@@ -202,17 +202,27 @@ def validate_topology_data(data: dict[str, Any]) -> None:
         ):
             fail("topology response has an invalid window summary", 4)
     for splint in data["splints"]:
-        incarnation = splint.get("incarnation") if isinstance(splint, dict) else None
+        current = splint.get("current_incarnation") if isinstance(splint, dict) else None
+        last = splint.get("last_incarnation") if isinstance(splint, dict) else None
         lifecycle = splint.get("lifecycle") if isinstance(splint, dict) else None
+        valid_last = last is None or (isinstance(last, int) and last > 0)
         if not (
             isinstance(splint, dict)
             and valid_uuid(splint.get("dojo_id"))
             and valid_uuid(splint.get("window_id"))
             and valid_uuid(splint.get("splint_id"))
             and isinstance(splint.get("title"), str)
-            and lifecycle in {"running", "exited"}
-            and ((lifecycle == "running" and isinstance(incarnation, int) and incarnation > 0)
-                 or (lifecycle == "exited" and incarnation is None))
+            and lifecycle in {"running", "exited", "restorable"}
+            and valid_last
+            and (
+                (
+                    lifecycle == "running"
+                    and isinstance(current, int)
+                    and current > 0
+                    and last == current
+                )
+                or (lifecycle != "running" and current is None)
+            )
         ):
             fail("topology response has an invalid Splint summary", 4)
 
@@ -491,7 +501,8 @@ def validated_context(topology: dict[str, Any], environment: dict[str, str]) -> 
         and item.get("dojo_id") == context.dojo_id
         and item.get("window_id") == context.window_id
         and item.get("splint_id") == context.splint_id
-        and item.get("incarnation") == context.incarnation
+        and item.get("current_incarnation") == context.incarnation
+        and item.get("last_incarnation") == context.incarnation
         and item.get("lifecycle") == "running"
     ]
     if len(matching) != 1:
