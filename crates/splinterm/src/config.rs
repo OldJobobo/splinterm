@@ -71,7 +71,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             font: DEFAULT_FONT.to_owned(),
-            font_size: FontSize::Pixels(22.0),
+            font_size: FontSize::Pixels(14.0),
             font_sizing_policy: FontSizingPolicy::OutputScale,
             padding: TerminalPadding::DEFAULT,
             initial_columns: 80,
@@ -526,6 +526,12 @@ fn blend_rgb(first: u32, second: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_font_size_is_laptop_reasonable() {
+        assert_eq!(AppConfig::default().font_size, FontSize::Pixels(14.0));
+    }
+
     #[test]
     fn supported_subset_and_diagnostics_are_explicit() {
         let loaded = parse("[main]\nfont=Mono\nfont-size=14\ninitial-columns=100\napp-id=spoof\nunknown=x\n[cursor]\nstyle=beam\nblink=no\n").unwrap();

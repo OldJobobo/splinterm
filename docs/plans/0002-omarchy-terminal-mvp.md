@@ -809,7 +809,7 @@ ADR 0004.
 **Matrix:**
 
 - faces: regular, bold, italic, bold italic;
-- logical font sizes: 6, 12, current default 22, 32, 48, and 96 px;
+- logical font sizes: 6, 12, current default 14, retained oracle profile 22, 32, 48, and 96 px;
 - scales: 1×, 1.25×, 1.5×, and 2×;
 - corpora: all printable ASCII, long drift rows, punctuation, combining text,
   box drawing, CJK, and fallback cases.

@@ -10,7 +10,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | Section/key | Meaning | Range/default |
 | --- | --- | --- |
 | `main.font` | fontconfig pattern | JetBrains Mono Nerd Font Regular |
-| `main.font-pixelsize` | configured pixel font size | 6–96; 22 |
+| `main.font-pixelsize` | configured pixel font size | 6–96; 14 |
 | `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` (no auto mode) | output-scale |
