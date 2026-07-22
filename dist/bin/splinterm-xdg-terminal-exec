@@ -36,5 +36,7 @@ if ! ping; then
   fi
 fi
 
-# Desktop/XDG launchers have no interactive stdin; always create a fresh Dojo.
-exec splinterm launch --new "$@"
+# Desktop/XDG launchers have no interactive stdin; always create a fresh,
+# uniquely named Dojo so repeated terminal launches never prompt or collide.
+name="terminal-$(date +%s)-$$"
+exec splinterm launch --new --name "$name" "$@"

@@ -115,12 +115,15 @@ def validate_launcher(root: Path) -> None:
         )
         calls = (state / "systemctl").read_text(encoding="utf-8").splitlines()
         assert calls == ["--user start splinterd.service", "--user restart splinterd.service"]
-        assert record.read_text(encoding="utf-8").splitlines() == [
-            "launch",
-            "--new",
-            "--working-directory",
-            "/tmp/a b",
-        ]
+        launch = record.read_text(encoding="utf-8").splitlines()
+        assert launch[:3] == ["launch", "--new", "--name"]
+        name_parts = launch[3].split("-")
+        assert (
+            len(name_parts) == 3
+            and name_parts[0] == "terminal"
+            and all(part.isdigit() for part in name_parts[1:])
+        )
+        assert launch[4:] == ["--working-directory", "/tmp/a b"]
 
 
 def validate_systemd_unit(root: Path) -> None:

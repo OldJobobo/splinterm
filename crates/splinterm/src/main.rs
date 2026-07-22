@@ -3787,6 +3787,17 @@ struct ControllerOutputs {
 
 type PaneResize = (u16, u16, u16, u16);
 
+fn terminal_action_matches(response: &Response, splint_id: SplintId, incarnation: u64) -> bool {
+    matches!(
+        response,
+        Response::TerminalActionAcknowledged {
+            splint_id: acknowledged_splint,
+            incarnation: acknowledged_incarnation,
+            ..
+        } if *acknowledged_splint == splint_id && *acknowledged_incarnation == incarnation
+    )
+}
+
 async fn ensure_pane_control(
     control: &mut Connection,
     active_controller: &mut Option<u64>,
@@ -3804,20 +3815,18 @@ async fn ensure_pane_control(
     let _ = updates.send(WindowUpdate::Control(true)).await;
     if apply_prepared_resize {
         if let Some((columns, rows, pixel_width, pixel_height)) = prepared_resize.take() {
-            if !matches!(
-                control
-                    .request(Request::Resize {
-                        controller_id,
-                        splint_id,
-                        incarnation,
-                        columns,
-                        rows,
-                        pixel_width,
-                        pixel_height,
-                    })
-                    .await?,
-                Response::Acknowledged
-            ) {
+            let response = control
+                .request(Request::Resize {
+                    controller_id,
+                    splint_id,
+                    incarnation,
+                    columns,
+                    rows,
+                    pixel_width,
+                    pixel_height,
+                })
+                .await?;
+            if !terminal_action_matches(&response, splint_id, incarnation) {
                 bail!("splinterd did not acknowledge prepared pane resize");
             }
         }
@@ -4137,7 +4146,15 @@ async fn run_controller(
                     Request::ReleaseControl { controller_id }
                 }
             };
-            if !matches!(control.request(request).await?, Response::Acknowledged) {
+            let expects_terminal_action =
+                matches!(&request, Request::Input { .. } | Request::Resize { .. });
+            let response = control.request(request).await?;
+            let acknowledged = if expects_terminal_action {
+                terminal_action_matches(&response, splint_id, incarnation)
+            } else {
+                matches!(response, Response::Acknowledged)
+            };
+            if !acknowledged {
                 bail!("splinterd did not acknowledge a window control command");
             }
         }
@@ -5505,5 +5522,26 @@ mod tests {
             ),
             EventAction::Shutdown
         );
+    }
+
+    #[test]
+    fn window_controller_accepts_only_its_exact_terminal_action_acknowledgement() {
+        let splint_id = SplintId::new();
+        let response = Response::TerminalActionAcknowledged {
+            dojo_id: splinterm_core::DojoId::new(),
+            window_id: splinterm_core::WindowId::new(),
+            splint_id,
+            incarnation: 3,
+            terminal_revision: 7,
+            history_generation: 2,
+        };
+        assert!(terminal_action_matches(&response, splint_id, 3));
+        assert!(!terminal_action_matches(&response, splint_id, 4));
+        assert!(!terminal_action_matches(&response, SplintId::new(), 3));
+        assert!(!terminal_action_matches(
+            &Response::Acknowledged,
+            splint_id,
+            3
+        ));
     }
 }
