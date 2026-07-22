@@ -117,6 +117,7 @@ def validate_launcher(root: Path) -> None:
         assert calls == ["--user start splinterd.service", "--user restart splinterd.service"]
         assert record.read_text(encoding="utf-8").splitlines() == [
             "launch",
+            "--new",
             "--working-directory",
             "/tmp/a b",
         ]

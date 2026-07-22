@@ -36,4 +36,5 @@ if ! ping; then
   fi
 fi
 
-exec splinterm launch "$@"
+# Desktop/XDG launchers have no interactive stdin; always create a fresh Dojo.
+exec splinterm launch --new "$@"
