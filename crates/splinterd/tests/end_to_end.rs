@@ -275,7 +275,7 @@ impl Connection {
 
     async fn live_incarnation(&mut self, splint_id: SplintId) -> u64 {
         match self.request(Request::InspectSplint { splint_id }).await {
-            Response::Splint { runtime } if runtime.splint_id == splint_id => runtime
+            Response::Splint { runtime, .. } if runtime.splint_id == splint_id => runtime
                 .live_incarnation
                 .expect("created Splint must have a live incarnation"),
             response => panic!("unexpected targeted identity response: {response:?}"),
@@ -506,6 +506,47 @@ fn exact_headless_policy(splint: Option<(SplintId, u64)>) -> String {
     .to_string()
 }
 
+fn current_metadata_policy(splint_id: SplintId) -> String {
+    let (executable, sha256) = policy_executable_identity();
+    serde_json::json!({
+        "schema": "splinterm.policy.v1",
+        "rules": [{
+            "id": "restorable-metadata-test",
+            "executable": {"path": executable, "sha256": sha256},
+            "scopes": ["topology_metadata_read", "audit_inspect"],
+            "resources": [
+                {"kind": "lair"},
+                {
+                    "kind": "splint",
+                    "splint_id": splint_id,
+                    "incarnation": "current"
+                }
+            ],
+            "limits": {"max_returned_bytes": 65536, "max_results": 16}
+        }]
+    })
+    .to_string()
+}
+
+fn scoped_authorization_policy(splint_id: SplintId, incarnation: u64, scopes: &[&str]) -> String {
+    let (executable, sha256) = policy_executable_identity();
+    serde_json::json!({
+        "schema": "splinterm.policy.v1",
+        "rules": [{
+            "id": "authorization-only-test",
+            "executable": {"path": executable, "sha256": sha256},
+            "scopes": scopes,
+            "resources": [{
+                "kind": "splint",
+                "splint_id": splint_id,
+                "incarnation": incarnation
+            }],
+            "limits": {"max_returned_bytes": 65536}
+        }]
+    })
+    .to_string()
+}
+
 fn parent_snapshot_policy(dojo_id: splinterm_core::DojoId) -> String {
     let (executable, sha256) = policy_executable_identity();
     serde_json::json!({
@@ -545,6 +586,375 @@ async fn assert_connection_closed(connection: &mut Connection, reason: &str) {
     assert_eq!(closed, 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one isolated scenario proves scoped status, grant metadata, revocation, and stale-incarnation behavior"
+)]
+async fn scoped_authorization_status_needs_no_topology_permission() {
+    time::timeout(Duration::from_secs(60), async {
+        let mut daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
+        let mut connection = daemon.connect().await;
+        let revision = connection.topology_revision().await;
+        let Response::DojoCreated {
+            dojo, incarnation, ..
+        } = connection
+            .request(Request::CreateDojo {
+                expected_topology_revision: revision,
+                name: "authorization-scope".to_owned(),
+                launch: LaunchParameters {
+                    cwd: daemon.runtime.clone(),
+                    command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("authorization scope setup did not create a Dojo");
+        };
+        let window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("authorization scope setup was not a leaf");
+        };
+        let splint_id = splint.id;
+        let policy = daemon.policy.as_ref().unwrap();
+        fs::write(policy, exact_headless_policy(None)).unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut connection, "wrong-resource setup policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut connection = daemon.connect().await;
+        let second_revision = connection.topology_revision().await;
+        let Response::DojoCreated {
+            dojo: other_dojo,
+            incarnation: other_incarnation,
+            ..
+        } = connection
+            .request(Request::CreateDojo {
+                expected_topology_revision: second_revision,
+                name: "authorization-other".to_owned(),
+                launch: LaunchParameters {
+                    cwd: daemon.runtime.clone(),
+                    command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("authorization wrong-resource setup did not create a Dojo");
+        };
+        let LayoutNode::Leaf(other_splint) = &other_dojo.windows[0].root else {
+            panic!("authorization wrong-resource setup was not a leaf");
+        };
+        let other_splint_id = other_splint.id;
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                splint_id,
+                incarnation,
+                &[
+                    "authorization_inspect",
+                    "authorization_revoke",
+                    "terminal_visible_read",
+                ],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut connection, "authorization-only policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+
+        let mut scoped = daemon.connect().await;
+        let Response::AuthorizationStatus {
+            dojo_id,
+            window_id: response_window_id,
+            incarnation: response_incarnation,
+            topology_revision,
+            policy_generation,
+            persistent,
+            development_bypass,
+            ..
+        } = scoped
+            .request(Request::AuthorizationStatus {
+                splint_id,
+                incarnation: None,
+            })
+            .await
+        else {
+            panic!("scoped authorization status response was not returned");
+        };
+        assert_eq!(dojo_id, dojo.id);
+        assert_eq!(response_window_id, window_id);
+        assert_eq!(response_incarnation, incarnation);
+        assert!(topology_revision.get() > 0);
+        assert!(policy_generation > 1);
+        assert_eq!(persistent.len(), 1);
+        assert!(!development_bypass);
+
+        let Response::AccessGranted {
+            dojo_id: granted_dojo_id,
+            window_id: granted_window_id,
+            authorization_revision: granted_revision,
+            grant,
+        } = scoped
+            .request(Request::RequestAccess {
+                splint_id,
+                incarnation,
+                scopes: vec![AccessScope::Observe],
+            })
+            .await
+        else {
+            panic!("exact scoped access grant was not returned");
+        };
+        assert_eq!(granted_dojo_id, dojo.id);
+        assert_eq!(granted_window_id, window_id);
+        assert_eq!(granted_revision, 1);
+        assert!(grant.grant_id > 0);
+        assert_eq!(grant.splint_id, splint_id);
+        assert_eq!(grant.incarnation, incarnation);
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(splint_id, incarnation, &["authorization_revoke"]),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut scoped, "revoke-only policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut scoped = daemon.connect().await;
+
+        let Response::AccessRevoked {
+            dojo_id: revoked_dojo_id,
+            window_id: revoked_window_id,
+            authorization_revision: revoked_revision,
+            grant: revoked,
+        } = scoped
+            .request(Request::RevokeAccess {
+                grant_id: grant.grant_id,
+            })
+            .await
+        else {
+            panic!("exact scoped access revocation was not returned");
+        };
+        assert_eq!(revoked_dojo_id, dojo.id);
+        assert_eq!(revoked_window_id, window_id);
+        assert_eq!(revoked_revision, granted_revision + 1);
+        assert_eq!(revoked, grant);
+        assert_eq!(
+            scoped
+                .request_result(Request::AuthorizationStatus {
+                    splint_id,
+                    incarnation: None,
+                })
+                .await
+                .expect_err("missing authorization_inspect must deny status")
+                .code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(
+            scoped
+                .request_result(Request::InspectTopology)
+                .await
+                .expect_err("revoke-only policy must not permit topology inspection")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                splint_id,
+                incarnation,
+                &["authorization_inspect", "authorization_revoke"],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut scoped, "missing requested-access scope reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut scoped = daemon.connect().await;
+        assert_eq!(
+            scoped
+                .request_result(Request::RequestAccess {
+                    splint_id,
+                    incarnation,
+                    scopes: vec![AccessScope::Observe],
+                })
+                .await
+                .expect_err("missing requested terminal access scope must deny")
+                .code,
+            ErrorCode::ConsentDenied
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                other_splint_id,
+                other_incarnation,
+                &[
+                    "authorization_inspect",
+                    "authorization_revoke",
+                    "terminal_visible_read",
+                ],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut scoped, "wrong-resource policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut scoped = daemon.connect().await;
+        assert_eq!(
+            scoped
+                .request_result(Request::AuthorizationStatus {
+                    splint_id,
+                    incarnation: None,
+                })
+                .await
+                .expect_err("another Splint policy must not authorize this Splint")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                splint_id,
+                incarnation,
+                &["authorization_inspect", "terminal_visible_read"],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut scoped, "grant setup policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut scoped = daemon.connect().await;
+        let Response::AccessGranted {
+            grant: unrevokeable,
+            authorization_revision: 3,
+            ..
+        } = scoped
+            .request(Request::RequestAccess {
+                splint_id,
+                incarnation,
+                scopes: vec![AccessScope::Observe],
+            })
+            .await
+        else {
+            panic!("missing-revoke setup grant was not returned");
+        };
+        fs::write(
+            policy,
+            scoped_authorization_policy(splint_id, incarnation, &["authorization_inspect"]),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut scoped, "missing authorization_revoke reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut scoped = daemon.connect().await;
+        assert_eq!(
+            scoped
+                .request_result(Request::RevokeAccess {
+                    grant_id: unrevokeable.grant_id,
+                })
+                .await
+                .expect_err("missing authorization_revoke must deny revocation")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(policy, r#"{"schema":"splinterm.policy.v1","rules":[]}"#).unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut scoped, "deny-all policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut scoped = daemon.connect().await;
+        assert_eq!(
+            scoped
+                .request_result(Request::AuthorizationStatus {
+                    splint_id,
+                    incarnation: None,
+                })
+                .await
+                .expect_err("no-policy status must deny")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                splint_id,
+                incarnation,
+                &[
+                    "authorization_inspect",
+                    "authorization_revoke",
+                    "terminal_visible_read",
+                ],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut scoped, "stale-incarnation policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut scoped = daemon.connect().await;
+        assert_eq!(
+            scoped
+                .request_result(Request::RequestAccess {
+                    splint_id,
+                    incarnation: incarnation + 1,
+                    scopes: vec![AccessScope::Observe],
+                })
+                .await
+                .expect_err("stale exact incarnation must fail closed before consent")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        daemon.stop_preserving_state();
+        daemon.start_again().await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut restarted = daemon.connect().await;
+        assert_eq!(
+            restarted
+                .request_result(Request::AuthorizationStatus {
+                    splint_id,
+                    incarnation: None,
+                })
+                .await
+                .expect_err("restarted restorable Splint has no current authorization target")
+                .code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(
+            restarted
+                .request_result(Request::RequestAccess {
+                    splint_id,
+                    incarnation,
+                    scopes: vec![AccessScope::Observe],
+                })
+                .await
+                .expect_err("exited restorable Splint must deny requested access")
+                .code,
+            ErrorCode::Unauthorized
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("scoped authorization policy test timed out");
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the ordered policy reload, controller cleanup, restart, and process-reap gate is one lifecycle"
@@ -578,10 +988,12 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         else {
             panic!("headless Dojo was not created");
         };
+        let window_id = dojo.windows[0].id;
         let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
             panic!("created headless Dojo was not a leaf");
         };
         let splint_id = splint.id;
+        let splint_title = splint.title.clone();
         let lair_only_denial = connection
             .request_result(Request::Attach {
                 splint_id,
@@ -718,6 +1130,10 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         let replacement_controller = reauthorized.acquire_control(splint_id, incarnation).await;
         assert_ne!(replacement_controller, controller_id);
         drop(reauthorized);
+        fs::write(policy, current_metadata_policy(splint_id)).unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        time::sleep(Duration::from_millis(50)).await;
 
         daemon.stop_preserving_state();
         assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
@@ -730,12 +1146,45 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         else {
             panic!("restarted headless topology was not returned");
         };
-        assert!(
-            snapshot
-                .runtimes
-                .iter()
-                .all(|runtime| runtime.live_incarnation.is_none())
-        );
+        let restarted_runtime = snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.splint_id == splint_id)
+            .expect("persisted Splint runtime metadata was omitted after restart");
+        assert_eq!(restarted_runtime.live_incarnation, None);
+        assert_eq!(restarted_runtime.last_incarnation, Some(incarnation));
+        assert!(restarted_runtime.restorable);
+        let restarted_dojo = snapshot.lair.dojos().next().unwrap();
+        assert_eq!(restarted_dojo.id, dojo.id);
+        let restarted_window = &restarted_dojo.windows[0];
+        assert_eq!(restarted_window.id, window_id);
+        let LayoutNode::Leaf(restarted_splint) = &restarted_window.root else {
+            panic!("restarted persisted topology was not the exact leaf");
+        };
+        assert_eq!(restarted_splint.id, splint_id);
+        assert_eq!(restarted_splint.title, splint_title);
+        assert_eq!(restarted_splint.last_incarnation, Some(incarnation));
+        assert!(matches!(
+            restarted_splint.state,
+            splinterm_core::SplintState::Exited(_)
+        ));
+        let Response::Splint {
+            dojo_id: inspected_dojo_id,
+            window_id: inspected_window_id,
+            title: inspected_title,
+            topology_revision: inspected_revision,
+            runtime: inspected_runtime,
+        } = restarted
+            .request(Request::InspectSplint { splint_id })
+            .await
+        else {
+            panic!("restorable Splint targeted inspection was not returned");
+        };
+        assert_eq!(inspected_dojo_id, dojo.id);
+        assert_eq!(inspected_window_id, window_id);
+        assert_eq!(inspected_title, splint_title);
+        assert_eq!(inspected_revision, snapshot.revision);
+        assert_eq!(inspected_runtime, *restarted_runtime);
         let Response::AuditPage { page } = restarted
             .request(Request::AuditInspect {
                 after_audit_id: None,
@@ -945,7 +1394,7 @@ async fn new_window_and_restore_inject_exact_current_context() {
             time::sleep(Duration::from_millis(10)).await;
         }
         loop {
-            let Response::Splint { runtime } = connection
+            let Response::Splint { runtime, .. } = connection
                 .request(Request::InspectSplint { splint_id: first_id })
                 .await
             else {

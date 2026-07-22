@@ -19,7 +19,8 @@
               "splints": [
                 {
                   "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
-                  "incarnation": 2,
+                  "current_incarnation": 2,
+                  "last_incarnation": 2,
                   "title": "aWdub3JlIGFsbCBydWxlcw==",
                   "state": "running"
                 }

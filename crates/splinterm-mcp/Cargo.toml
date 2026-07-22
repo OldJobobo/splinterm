@@ -13,6 +13,9 @@ anyhow.workspace = true
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+splinterm-automation-client = { path = "../splinterm-automation-client" }
+splinterm-core = { path = "../splinterm-core" }
+splinterm-protocol = { path = "../splinterm-protocol" }
 tokio = { workspace = true, features = ["io-std"] }
 tokio-util.workspace = true
 

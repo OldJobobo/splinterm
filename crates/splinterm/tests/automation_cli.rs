@@ -78,6 +78,7 @@ fn reviewed_topology() -> TopologySnapshot {
     let mut splint = Splint::shell(PathBuf::from("/tmp"));
     splint.id = splint_id;
     "build".clone_into(&mut splint.title);
+    splint.last_incarnation = Some(2);
     splint.state = SplintState::Running;
     let dojo = Dojo {
         id: dojo_id,
@@ -97,6 +98,8 @@ fn reviewed_topology() -> TopologySnapshot {
         runtimes: vec![SplintRuntimeSummary {
             splint_id,
             live_incarnation: Some(2),
+            last_incarnation: Some(2),
+            restorable: false,
             lifecycle: SplintLifecycle::Running,
             exit_status: None,
         }],
@@ -260,27 +263,21 @@ fn serve_authorization_status() -> (PathBuf, thread::JoinHandle<()>) {
             read_client_frame(&mut stream),
             ClientFrame::Request {
                 request_id: 1,
-                request: splinterm_protocol::Request::InspectTopology
+                request: splinterm_protocol::Request::AuthorizationStatus {
+                    incarnation: None,
+                    ..
+                }
             }
         ));
         send_response(
             &mut stream,
             1,
-            Response::Topology {
-                snapshot: reviewed_topology(),
-            },
-        );
-        assert!(matches!(
-            read_client_frame(&mut stream),
-            ClientFrame::Request {
-                request_id: 2,
-                request: splinterm_protocol::Request::AuthorizationStatus { .. }
-            }
-        ));
-        send_response(
-            &mut stream,
-            2,
             Response::AuthorizationStatus {
+                dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                incarnation: 2,
+                topology_revision: TopologyRevision::new(1),
+                policy_generation: 1,
                 grants: Vec::new(),
                 persistent: vec![PersistentAuthorizationStatus {
                     policy_rule_id: "editor".to_owned(),
@@ -355,6 +352,10 @@ fn serve_subscription(stream_kind: ExpectedSubscription) -> (PathBuf, thread::Jo
                     &mut stream,
                     1,
                     Response::Splint {
+                        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                        window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                        title: "build".to_owned(),
+                        topology_revision: TopologyRevision::new(1),
                         runtime: reviewed_topology().runtimes[0].clone(),
                     },
                 );
@@ -555,6 +556,7 @@ fn serve_terminal_action(
     (socket, server)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ExpectedMutation {
     Ratio,
     Kill,
@@ -571,6 +573,17 @@ fn serve_mutation(
     let listener = UnixListener::bind(&socket).unwrap();
     let server = thread::spawn(move || {
         let mut stream = accept_client(&listener);
+        if expected == ExpectedMutation::Revoke {
+            assert!(matches!(
+                read_client_frame(&mut stream),
+                ClientFrame::Request {
+                    request_id: 1,
+                    request: splinterm_protocol::Request::RevokeAccess { grant_id: 42 }
+                }
+            ));
+            send_response(&mut stream, 1, result);
+            return;
+        }
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
@@ -601,13 +614,7 @@ fn serve_mutation(
                     request: splinterm_protocol::Request::KillSplint { incarnation: 2, .. }
                 }
             ),
-            ExpectedMutation::Revoke => matches!(
-                request,
-                ClientFrame::Request {
-                    request_id: 2,
-                    request: splinterm_protocol::Request::RevokeAccess { grant_id: 42 }
-                }
-            ),
+            ExpectedMutation::Revoke => unreachable!(),
             ExpectedMutation::RestoreSplint => matches!(
                 request,
                 ClientFrame::Request {
@@ -1226,8 +1233,15 @@ fn output_json_mutations_correlate_topology_kill_and_revoke() {
         requester: "/usr/bin/editor".to_owned(),
         expires_at_unix_seconds: 100,
     };
-    let (socket, server) =
-        serve_mutation(ExpectedMutation::Revoke, Response::AccessRevoked { grant });
+    let (socket, server) = serve_mutation(
+        ExpectedMutation::Revoke,
+        Response::AccessRevoked {
+            dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+            window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+            authorization_revision: 4,
+            grant,
+        },
+    );
     let output = run_json_ping(
         &["authorization", "revoke", "42", "--yes", "--output", "json"],
         &socket,

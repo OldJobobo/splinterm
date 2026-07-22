@@ -35,6 +35,18 @@ const READ_BUFFER: usize = 16 * 1024;
 pub struct ProcessIncarnation(u64);
 
 impl ProcessIncarnation {
+    /// Advances process-wide allocation beyond a persisted incarnation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the persisted value has exhausted the `u64` incarnation space.
+    pub fn reserve_after(incarnation: u64) {
+        let next = incarnation
+            .checked_add(1)
+            .expect("process incarnation space exhausted");
+        NEXT_INCARNATION.fetch_max(next, Ordering::Relaxed);
+    }
+
     fn allocate() -> Self {
         let value = NEXT_INCARNATION
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {

@@ -1131,6 +1131,9 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "splinterm-automation-client",
+ "splinterm-core",
+ "splinterm-protocol",
  "tokio",
  "tokio-util",
 ]

@@ -8,11 +8,15 @@
       "additionalProperties": false,
       "required": [
         "splint_id",
+        "incarnation",
         "scopes"
       ],
       "properties": {
         "splint_id": {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
         },
         "scopes": {
           "type": "array",

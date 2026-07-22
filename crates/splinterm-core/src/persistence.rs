@@ -173,6 +173,7 @@ fn validate_tree(
             }) || splint.launch.scrollback_lines > 1_000_000
                 || !(1..=4096).contains(&splint.launch.columns)
                 || !(1..=4096).contains(&splint.launch.rows)
+                || splint.last_incarnation == Some(0)
             {
                 return Err(PersistenceError::InvalidLaunchMetadata);
             }
@@ -289,8 +290,14 @@ mod tests {
     #[test]
     fn live_model_is_serialized_only_as_restorable_metadata() {
         let mut lair = Lair::new();
-        lair.create_dojo("main", std::path::PathBuf::from("/tmp"))
-            .unwrap();
+        let dojo = lair
+            .create_dojo("main", std::path::PathBuf::from("/tmp"))
+            .unwrap()
+            .clone();
+        let LayoutNode::Leaf(created) = &dojo.windows[0].root else {
+            unreachable!()
+        };
+        assert!(lair.set_splint_last_incarnation(created.id, 41));
         let document = LairDocument::from_lair(&lair).unwrap();
         let restored = LairDocument::decode(&document.encode().unwrap())
             .unwrap()
@@ -300,6 +307,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(splint.state, SplintState::Exited(0));
+        assert_eq!(splint.last_incarnation, Some(41));
     }
 
     #[test]

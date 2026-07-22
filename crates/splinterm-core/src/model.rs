@@ -429,6 +429,13 @@ impl Lair {
         })
     }
 
+    pub fn set_splint_last_incarnation(&mut self, id: SplintId, incarnation: u64) -> bool {
+        self.find_splint_mut(id).is_some_and(|splint| {
+            splint.last_incarnation = Some(incarnation);
+            true
+        })
+    }
+
     pub fn set_splint_dimensions(&mut self, id: SplintId, columns: u16, rows: u16) -> bool {
         self.find_splint_mut(id).is_some_and(|splint| {
             let changed = splint.launch.columns != columns || splint.launch.rows != rows;

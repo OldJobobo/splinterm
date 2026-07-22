@@ -2029,7 +2029,9 @@
         "window_id",
         "splint_id",
         "title",
-        "lifecycle"
+        "lifecycle",
+        "current_incarnation",
+        "last_incarnation"
       ],
       "properties": {
         "dojo_id": {
@@ -2048,11 +2050,23 @@
         "lifecycle": {
           "enum": [
             "running",
-            "exited"
+            "exited",
+            "restorable"
           ]
         },
-        "incarnation": {
-          "$ref": "#/$defs/counter"
+        "current_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "last_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         }
       }
     },
@@ -2111,7 +2125,9 @@
       "additionalProperties": false,
       "required": [
         "title",
-        "lifecycle"
+        "lifecycle",
+        "current_incarnation",
+        "last_incarnation"
       ],
       "properties": {
         "title": {
@@ -2121,8 +2137,23 @@
         "lifecycle": {
           "enum": [
             "running",
-            "exited"
+            "exited",
+            "restorable"
           ]
+        },
+        "current_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "last_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "exit_code": {
           "type": [

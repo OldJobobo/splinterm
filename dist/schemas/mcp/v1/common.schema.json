@@ -15,6 +15,16 @@
       "type": "integer",
       "minimum": 1
     },
+    "optional_incarnation": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/positive_integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "cursor": {
       "type": "string",
       "pattern": "^cur_[A-Za-z0-9_-]{16,256}$"
@@ -100,6 +110,9 @@
         },
         {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/splint_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/logical_splint_resource"
         },
         {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/terminal_resource"
@@ -422,6 +435,42 @@
         }
       }
     },
+    "logical_splint_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "dojo_id",
+        "window_id",
+        "splint_id",
+        "current_incarnation",
+        "last_incarnation",
+        "topology_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "splint"
+        },
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "window_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
+        },
+        "current_incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/optional_incarnation"
+        },
+        "last_incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/optional_incarnation"
+        },
+        "topology_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/revision"
+        }
+      }
+    },
     "terminal_resource": {
       "type": "object",
       "additionalProperties": false,
@@ -547,7 +596,8 @@
       "additionalProperties": false,
       "required": [
         "splint_id",
-        "incarnation",
+        "current_incarnation",
+        "last_incarnation",
         "title",
         "state"
       ],
@@ -555,8 +605,11 @@
         "splint_id": {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/uuid"
         },
-        "incarnation": {
-          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/positive_integer"
+        "current_incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/optional_incarnation"
+        },
+        "last_incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/optional_incarnation"
         },
         "title": {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/name"

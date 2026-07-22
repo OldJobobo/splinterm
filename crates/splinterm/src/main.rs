@@ -1554,16 +1554,6 @@ fn mutation_response_envelope(
             }
             kill_envelope(dojo_id, window_id, *splint_id, incarnation)
         }
-        (MachineMutation::Revoke { grant_id, .. }, Response::AccessRevoked { grant })
-            if *grant_id == grant.grant_id =>
-        {
-            let (dojo_id, window_id, incarnation) =
-                live_terminal_location(topology, grant.splint_id)?;
-            if incarnation != grant.incarnation {
-                bail!("revoked grant incarnation does not match reviewed topology");
-            }
-            revoke_envelope(dojo_id, window_id, &grant)
-        }
         (mutation, Response::TopologyCommitted { topology_revision }) => {
             topology_commit_envelope(mutation, topology, topology_revision)
         }
@@ -1577,6 +1567,30 @@ async fn machine_mutation_envelope(
     deadline: std::time::Duration,
     started: std::time::Instant,
 ) -> Result<CliEnvelopeV1> {
+    if let MachineMutation::Revoke { grant_id, .. } = mutation {
+        let response = connection
+            .request_with_deadline(
+                Request::RevokeAccess {
+                    grant_id: *grant_id,
+                },
+                deadline.saturating_sub(started.elapsed()),
+            )
+            .await?;
+        let Response::AccessRevoked {
+            dojo_id,
+            window_id,
+            grant,
+            ..
+        } = response
+        else {
+            bail!("splinterd returned an inconsistent revoke response");
+        };
+        if grant.grant_id != *grant_id {
+            bail!("splinterd returned an inconsistent revoked grant");
+        }
+        return revoke_envelope(dojo_id, window_id, &grant);
+    }
+
     let response = connection
         .request_with_deadline(
             Request::InspectTopology,
@@ -1657,27 +1671,21 @@ async fn run_machine_authorization_status(
     let result = async {
         let response = connection
             .request_with_deadline(
-                Request::InspectTopology,
-                deadline.saturating_sub(started.elapsed()),
-            )
-            .await?;
-        let Response::Topology { snapshot: topology } = response else {
-            bail!("splinterd returned an unexpected topology response");
-        };
-        let (dojo_id, window_id, incarnation) = live_terminal_location(&topology, splint_id)?;
-        let response = connection
-            .request_with_deadline(
                 Request::AuthorizationStatus {
                     splint_id,
-                    incarnation,
+                    incarnation: None,
                 },
                 deadline.saturating_sub(started.elapsed()),
             )
             .await?;
         let Response::AuthorizationStatus {
+            dojo_id,
+            window_id,
+            incarnation,
             grants,
             persistent,
             development_bypass,
+            ..
         } = response
         else {
             bail!("splinterd returned an unexpected authorization response");
@@ -2503,7 +2511,7 @@ async fn run_terminal_subscription(
     let runtime = connection
         .request_with_deadline(Request::InspectSplint { splint_id }, setup_deadline)
         .await?;
-    let Response::Splint { runtime } = runtime else {
+    let Response::Splint { runtime, .. } = runtime else {
         bail!("splinterd did not return the selected Splint identity");
     };
     let incarnation = runtime
@@ -2733,7 +2741,7 @@ async fn run_control_subscription(
     let runtime = connection
         .request_with_deadline(Request::InspectSplint { splint_id }, setup_deadline)
         .await?;
-    let Response::Splint { runtime } = runtime else {
+    let Response::Splint { runtime, .. } = runtime else {
         bail!("splinterd did not return the selected Splint identity");
     };
     let incarnation = runtime
@@ -3317,7 +3325,7 @@ fn window_containing(
 
 async fn select_window(selection: Option<(DojoId, WindowId)>) -> Result<splinterm_core::Window> {
     let mut connection = Connection::connect().await?;
-    let Response::Dojos { dojos } = connection.request(Request::ListDojos).await? else {
+    let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
         bail!("splinterd did not return its session list");
     };
     if let Some(selection) = selection {
@@ -3340,7 +3348,7 @@ async fn launch(
     let mut connection = Connection::connect()
         .await
         .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
-    let Response::Dojos { dojos } = connection.request(Request::ListDojos).await? else {
+    let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
         bail!("splinterd did not return its session list");
     };
     let attach = if let Some(splint_id) = splint_id {
@@ -3673,7 +3681,7 @@ async fn load_authority_status(
     match connection
         .request(Request::AuthorizationStatus {
             splint_id,
-            incarnation,
+            incarnation: Some(incarnation),
         })
         .await?
     {
@@ -3681,6 +3689,7 @@ async fn load_authority_status(
             grants,
             persistent: _,
             development_bypass,
+            ..
         } => Ok(authority_status(grants, development_bypass)),
         _ => bail!("splinterd did not return authorization status"),
     }
@@ -4948,8 +4957,8 @@ fn print_dojos(dojos: Vec<splinterm_core::Dojo>) {
 fn print_response(response: Response) -> Result<()> {
     match response {
         Response::Pong => println!("splinterd is awake"),
-        Response::Dojos { dojos } if dojos.is_empty() => println!("No dojos in the lair."),
-        Response::Dojos { dojos } => print_dojos(dojos),
+        Response::Dojos { dojos, .. } if dojos.is_empty() => println!("No dojos in the lair."),
+        Response::Dojos { dojos, .. } => print_dojos(dojos),
         Response::DojoCreated { dojo, .. } => println!("Created dojo '{}'.", dojo.name),
         Response::Topology { snapshot } => println!(
             "Topology revision {}: {} dojo(s), {} Splint(s)",
@@ -4964,7 +4973,7 @@ fn print_response(response: Response) -> Result<()> {
             "Topology subscription {subscription_id} started at revision {}.",
             snapshot.revision.get()
         ),
-        Response::Splint { runtime } => println!(
+        Response::Splint { runtime, .. } => println!(
             "Splint {:?}: {:?}, incarnation={:?}, exit={:?}",
             runtime.splint_id, runtime.lifecycle, runtime.live_incarnation, runtime.exit_status
         ),
@@ -4992,16 +5001,17 @@ fn print_response(response: Response) -> Result<()> {
         } => println!(
             "Search resync required at revision {current_revision}, generation {history_generation}"
         ),
-        Response::AccessGranted { grant } => {
+        Response::AccessGranted { grant, .. } => {
             println!("Access grant {} issued.", grant.grant_id);
         }
-        Response::AccessRevoked { grant } => {
+        Response::AccessRevoked { grant, .. } => {
             println!("Access grant {} revoked.", grant.grant_id);
         }
         Response::AuthorizationStatus {
             grants,
             persistent,
             development_bypass,
+            ..
         } => {
             println!(
                 "{} active grant(s), {} persistent rule(s); development bypass={development_bypass}",

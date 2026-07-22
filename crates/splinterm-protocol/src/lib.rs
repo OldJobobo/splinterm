@@ -10,7 +10,7 @@ use splinterm_core::{
     Axis, Dojo, DojoId, Lair, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
 };
 
-pub const PROTOCOL_VERSION: u16 = 18;
+pub const PROTOCOL_VERSION: u16 = 19;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -123,7 +123,7 @@ pub enum Request {
     },
     AuthorizationStatus {
         splint_id: SplintId,
-        incarnation: u64,
+        incarnation: Option<u64>,
     },
     RevokeAccess {
         grant_id: u64,
@@ -277,6 +277,7 @@ pub enum Response {
     Pong,
     Dojos {
         dojos: Vec<Dojo>,
+        topology_revision: TopologyRevision,
     },
     DojoCreated {
         dojo: Dojo,
@@ -309,15 +310,30 @@ pub enum Response {
         snapshot: TopologySnapshot,
     },
     Splint {
+        dojo_id: DojoId,
+        window_id: WindowId,
+        title: String,
+        topology_revision: TopologyRevision,
         runtime: SplintRuntimeSummary,
     },
     AccessGranted {
+        dojo_id: DojoId,
+        window_id: WindowId,
+        authorization_revision: u64,
         grant: AccessGrant,
     },
     AccessRevoked {
+        dojo_id: DojoId,
+        window_id: WindowId,
+        authorization_revision: u64,
         grant: AccessGrant,
     },
     AuthorizationStatus {
+        dojo_id: DojoId,
+        window_id: WindowId,
+        incarnation: u64,
+        topology_revision: TopologyRevision,
+        policy_generation: u64,
         grants: Vec<AccessGrant>,
         persistent: Vec<PersistentAuthorizationStatus>,
         development_bypass: bool,
@@ -557,7 +573,10 @@ impl TopologySnapshot {
             && runtime_count == self.runtimes.len()
             && self.runtimes.iter().all(|runtime| {
                 identities.insert(runtime.splint_id)
-                    && self.lair.find_splint(runtime.splint_id).is_some()
+                    && self
+                        .lair
+                        .find_splint(runtime.splint_id)
+                        .is_some_and(|splint| splint.last_incarnation == runtime.last_incarnation)
                     && runtime.validate()
             });
         if !valid {
@@ -582,6 +601,8 @@ pub struct RestoreLeafResult {
 pub struct SplintRuntimeSummary {
     pub splint_id: SplintId,
     pub live_incarnation: Option<u64>,
+    pub last_incarnation: Option<u64>,
+    pub restorable: bool,
     pub lifecycle: SplintLifecycle,
     pub exit_status: Option<ProcessExitStatus>,
 }
@@ -589,14 +610,22 @@ pub struct SplintRuntimeSummary {
 impl SplintRuntimeSummary {
     #[must_use]
     pub fn validate(&self) -> bool {
+        let valid_last = self.last_incarnation.is_none_or(|value| value > 0);
         match self.lifecycle {
             SplintLifecycle::Starting => {
-                self.live_incarnation.is_none_or(|value| value > 0) && self.exit_status.is_none()
+                !self.restorable
+                    && valid_last
+                    && self.live_incarnation.is_none_or(|value| value > 0)
+                    && self.exit_status.is_none()
             }
             SplintLifecycle::Running => {
-                self.live_incarnation.is_some_and(|value| value > 0) && self.exit_status.is_none()
+                !self.restorable
+                    && valid_last
+                    && self.live_incarnation.is_some_and(|value| value > 0)
+                    && self.live_incarnation == self.last_incarnation
+                    && self.exit_status.is_none()
             }
-            SplintLifecycle::Exited => self.live_incarnation.is_none(),
+            SplintLifecycle::Exited => valid_last && self.live_incarnation.is_none(),
         }
     }
 }
@@ -1606,9 +1635,12 @@ mod tests {
             splinterm_core::LayoutNode::Branch { .. } => unreachable!(),
         };
         assert!(lair.set_splint_state(splint_id, splinterm_core::SplintState::Exited(0)));
+        assert!(lair.set_splint_last_incarnation(splint_id, 1));
         let runtime = SplintRuntimeSummary {
             splint_id,
             live_incarnation: None,
+            last_incarnation: Some(1),
+            restorable: true,
             lifecycle: SplintLifecycle::Exited,
             exit_status: Some(ProcessExitStatus {
                 code: Some(0),

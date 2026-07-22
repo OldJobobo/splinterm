@@ -2,10 +2,11 @@
 
 //! Bounded stdio MCP adapter for Splinterm.
 //!
-//! This slice freezes production lifecycle and discovery behavior while all
-//! daemon-backed tool and resource operations fail closed until their reviewed
-//! implementation slices land.
+//! This slice provides bounded lifecycle/discovery plus the reviewed metadata,
+//! authorization-status, revocation, and audit tools. Later tool/resource slices
+//! remain fail closed.
 
+mod dispatch;
 mod dto;
 mod limits;
 mod server;

@@ -21,8 +21,9 @@ use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::{
+    dispatch,
     dto::ToolFailure,
-    limits::{AdmissionError, AdmissionGate},
+    limits::{AdmissionError, AdmissionGate, MAXIMUM_TOOL_RESPONSE_BYTES},
     tools,
 };
 
@@ -227,7 +228,7 @@ impl ServerHandler for SplintermServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.require_initialized().await?;
         if tools::find(&request.name).is_none() {
@@ -250,7 +251,53 @@ impl ServerHandler for SplintermServer {
             return Ok(structured_failure(failure));
         }
 
-        Ok(structured_failure(ToolFailure::unavailable(&request.name)))
+        if !matches!(
+            request.name.as_ref(),
+            "splinterm.ping"
+                | "splinterm.list_dojos"
+                | "splinterm.inspect_topology"
+                | "splinterm.inspect_splint"
+                | "splinterm.request_access"
+                | "splinterm.authorization_status"
+                | "splinterm.revoke_access"
+                | "splinterm.inspect_audit"
+        ) {
+            return Ok(structured_failure(ToolFailure::unavailable(&request.name)));
+        }
+
+        let value = match dispatch::dispatch(&request.name, &arguments, &context.ct).await {
+            Ok(value) => value,
+            Err(failure) => {
+                return Ok(structured_failure(ToolFailure::execution(
+                    &request.name,
+                    failure.code,
+                    failure.message,
+                    failure.retryable,
+                )));
+            }
+        };
+        if tools::validate_output(&request.name, &value).is_err() {
+            let failure = dispatch::DispatchFailure::internal();
+            return Ok(structured_failure(ToolFailure::execution(
+                &request.name,
+                failure.code,
+                failure.message,
+                failure.retryable,
+            )));
+        }
+        let result = CallToolResult::structured(value);
+        if serde_json::to_vec(&result)
+            .map_or(true, |encoded| encoded.len() > MAXIMUM_TOOL_RESPONSE_BYTES)
+        {
+            let failure = dispatch::DispatchFailure::resource_limit();
+            return Ok(structured_failure(ToolFailure::execution(
+                &request.name,
+                failure.code,
+                failure.message,
+                failure.retryable,
+            )));
+        }
+        Ok(result)
     }
 
     async fn list_resources(

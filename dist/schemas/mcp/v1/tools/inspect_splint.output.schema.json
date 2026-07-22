@@ -39,7 +39,7 @@
           "const": false
         },
         "resource": {
-          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/splint_resource"
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/logical_splint_resource"
         }
       }
     }

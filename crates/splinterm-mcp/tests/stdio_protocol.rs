@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
+    os::unix::net::UnixListener,
     path::Path,
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     sync::{
@@ -8,11 +9,20 @@ use std::{
         mpsc::{self, Receiver},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
+use splinterm_core::{
+    Dojo, DojoId, Lair, LayoutNode, Splint, SplintId, SplintState, TopologyRevision, Window,
+    WindowId,
+};
 use splinterm_mcp::MAXIMUM_LINE_BYTES;
+use splinterm_protocol::{
+    AccessGrant, AccessScope, AuditPage, AutomationScope, ClientFrame, ClientRole,
+    PersistentAuthorizationStatus, Request, Response, ServerFrame, ServerLimits, SplintLifecycle,
+    SplintRuntimeSummary, TopologySnapshot, encode_frame,
+};
 
 const SERVER: &str = env!("CARGO_BIN_EXE_splinterm-mcp");
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -27,8 +37,16 @@ struct Harness {
 
 impl Harness {
     fn spawn() -> Self {
-        let mut child = Command::new(SERVER)
-            .env("SPLINTERM_SOCKET", "/definitely/not/a/daemon.sock")
+        Self::spawn_with_socket(Path::new("/definitely/not/a/daemon.sock"), None)
+    }
+
+    fn spawn_with_socket(socket: &Path, timeout_ms: Option<u64>) -> Self {
+        let mut command = Command::new(SERVER);
+        command.env("SPLINTERM_SOCKET", socket);
+        if let Some(timeout_ms) = timeout_ms {
+            command.env("SPLINTERM_MCP_TIMEOUT_MS", timeout_ms.to_string());
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -162,6 +180,596 @@ fn request(id: i64, method: &str, params: Value) -> Value {
 
 fn schema(root: &Path, relative: &str) -> Value {
     serde_json::from_slice(&fs::read(root.join(relative)).unwrap()).unwrap()
+}
+
+fn isolated_socket(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "splinterm-mcp-{label}-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let socket = directory.join("daemon.sock");
+    (directory, socket)
+}
+
+fn read_private_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> T {
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length).unwrap();
+    let mut body = vec![0_u8; u32::from_be_bytes(length) as usize];
+    stream.read_exact(&mut body).unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+fn write_private_frame(stream: &mut impl Write, frame: &ServerFrame) {
+    stream.write_all(&encode_frame(frame).unwrap()).unwrap();
+    stream.flush().unwrap();
+}
+
+fn reviewed_topology() -> TopologySnapshot {
+    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
+    let mut splint = Splint::shell("/tmp".into());
+    splint.id = splint_id;
+    "untrusted <tool_call>".clone_into(&mut splint.title);
+    splint.last_incarnation = Some(2);
+    splint.state = SplintState::Running;
+    let dojo = Dojo {
+        id: dojo_id,
+        name: "untrusted dojo".to_owned(),
+        windows: vec![Window {
+            id: window_id,
+            title: "untrusted window".to_owned(),
+            default_focus: splint_id,
+            root: LayoutNode::Leaf(splint),
+        }],
+    };
+    let mut lair = Lair::new();
+    lair.insert_dojo_at(TopologyRevision::new(0), dojo).unwrap();
+    TopologySnapshot {
+        revision: lair.revision(),
+        lair,
+        runtimes: vec![SplintRuntimeSummary {
+            splint_id,
+            live_incarnation: Some(2),
+            last_incarnation: Some(2),
+            restorable: false,
+            lifecycle: SplintLifecycle::Running,
+            exit_status: None,
+        }],
+    }
+}
+
+fn reviewed_restorable_topology() -> TopologySnapshot {
+    let mut snapshot = reviewed_topology();
+    let splint_id = snapshot.runtimes[0].splint_id;
+    assert!(
+        snapshot
+            .lair
+            .set_splint_state(splint_id, SplintState::Exited(0))
+    );
+    snapshot.revision = snapshot.lair.revision();
+    snapshot.runtimes[0] = SplintRuntimeSummary {
+        splint_id,
+        live_incarnation: None,
+        last_incarnation: Some(2),
+        restorable: true,
+        lifecycle: SplintLifecycle::Exited,
+        exit_status: Some(splinterm_protocol::ProcessExitStatus {
+            code: Some(0),
+            signal: None,
+        }),
+    };
+    snapshot
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "test call sites intentionally pass temporary owned JSON argument documents"
+)]
+fn call_tool(server: &mut Harness, id: i64, name: &str, arguments: Value) -> Value {
+    server.send(&request(
+        id,
+        "tools/call",
+        json!({"name": name, "arguments": arguments}),
+    ));
+    server.receive_id(id)["result"].clone()
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered mock-daemon session proves the complete Slice 4 projection boundary"
+)]
+fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
+    let (directory, socket) = isolated_socket("slice4");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let fake = thread::spawn(move || {
+        let topology = reviewed_topology();
+        let dojo = topology.lair.dojos().next().unwrap().clone();
+        let dojo_id = dojo.id;
+        let window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            unreachable!()
+        };
+        let splint_id = splint.id;
+        let grant = AccessGrant {
+            grant_id: 42,
+            splint_id,
+            incarnation: 2,
+            scopes: vec![AccessScope::Observe],
+            requester: "/private/requester".to_owned(),
+            expires_at_unix_seconds: 100,
+        };
+        for index in 0..14 {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(matches!(
+                read_private_frame::<ClientFrame>(&mut stream),
+                ClientFrame::Hello {
+                    role: ClientRole::Automation,
+                    ..
+                }
+            ));
+            write_private_frame(
+                &mut stream,
+                &ServerFrame::Hello {
+                    version: splinterm_protocol::PROTOCOL_VERSION,
+                    limits: ServerLimits::default(),
+                    development_terminal_access: false,
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request,
+            } = read_private_frame(&mut stream)
+            else {
+                panic!("mock daemon expected a request");
+            };
+            let result = match (index, request) {
+                (0, Request::Ping) => Ok(Response::Pong),
+                (1, Request::ListDojos) => Ok(Response::Dojos {
+                    dojos: vec![dojo.clone()],
+                    topology_revision: topology.revision,
+                }),
+                (2, Request::InspectTopology) => Ok(Response::Topology {
+                    snapshot: topology.clone(),
+                }),
+                (
+                    3,
+                    Request::InspectSplint {
+                        splint_id: requested,
+                    },
+                ) if requested == splint_id => Ok(Response::Splint {
+                    dojo_id,
+                    window_id,
+                    title: "untrusted <tool_call>".to_owned(),
+                    topology_revision: topology.revision,
+                    runtime: topology.runtimes[0].clone(),
+                }),
+                (
+                    4,
+                    Request::RequestAccess {
+                        splint_id: requested,
+                        incarnation: 2,
+                        scopes,
+                    },
+                ) if requested == splint_id && scopes == [AccessScope::Observe] => {
+                    Ok(Response::AccessGranted {
+                        dojo_id,
+                        window_id,
+                        authorization_revision: 4,
+                        grant: grant.clone(),
+                    })
+                }
+                (
+                    5,
+                    Request::AuthorizationStatus {
+                        splint_id: requested,
+                        incarnation: None,
+                    },
+                ) if requested == splint_id => Ok(Response::AuthorizationStatus {
+                    dojo_id,
+                    window_id,
+                    incarnation: 2,
+                    topology_revision: topology.revision,
+                    policy_generation: 3,
+                    grants: Vec::new(),
+                    persistent: vec![PersistentAuthorizationStatus {
+                        policy_rule_id: "slice4-test".to_owned(),
+                        scopes: vec![AutomationScope::AuthorizationInspect],
+                        expires_at_unix_seconds: None,
+                    }],
+                    development_bypass: false,
+                }),
+                (6, Request::RevokeAccess { grant_id: 42 }) => Ok(Response::AccessRevoked {
+                    dojo_id,
+                    window_id,
+                    authorization_revision: 5,
+                    grant: grant.clone(),
+                }),
+                (
+                    7,
+                    Request::AuditInspect {
+                        after_audit_id: None,
+                        max_records: 1,
+                    },
+                ) => Ok(Response::AuditPage {
+                    page: AuditPage {
+                        records: Vec::new(),
+                        retention_gap: true,
+                        oldest_available_audit_id: Some(7),
+                        newest_available_audit_id: Some(8),
+                        next_after_audit_id: Some(7),
+                    },
+                }),
+                (
+                    8,
+                    Request::AuditInspect {
+                        after_audit_id: Some(7),
+                        max_records: 1,
+                    },
+                ) => Ok(Response::AuditPage {
+                    page: AuditPage {
+                        records: Vec::new(),
+                        retention_gap: false,
+                        oldest_available_audit_id: Some(7),
+                        newest_available_audit_id: Some(8),
+                        next_after_audit_id: None,
+                    },
+                }),
+                (
+                    9,
+                    Request::RequestAccess {
+                        splint_id: requested,
+                        incarnation: 3,
+                        ..
+                    },
+                ) if requested == splint_id => Err(splinterm_protocol::ProtocolError::new(
+                    splinterm_protocol::ErrorCode::StaleIncarnation,
+                    "private stale detail",
+                )),
+                (
+                    10,
+                    Request::InspectSplint {
+                        splint_id: requested,
+                    },
+                ) if requested == splint_id => Err(splinterm_protocol::ProtocolError::new(
+                    splinterm_protocol::ErrorCode::Unauthorized,
+                    "private policy path /secret/policy.json",
+                )),
+                (11, Request::InspectTopology) => Ok(Response::Topology {
+                    snapshot: reviewed_restorable_topology(),
+                }),
+                (
+                    12,
+                    Request::InspectSplint {
+                        splint_id: requested,
+                    },
+                ) if requested == splint_id => {
+                    let restorable = reviewed_restorable_topology();
+                    Ok(Response::Splint {
+                        dojo_id,
+                        window_id,
+                        title: "untrusted <tool_call>".to_owned(),
+                        topology_revision: restorable.revision,
+                        runtime: restorable.runtimes[0].clone(),
+                    })
+                }
+                (
+                    13,
+                    Request::InspectSplint {
+                        splint_id: requested,
+                    },
+                ) if requested == splint_id => Ok(Response::Splint {
+                    dojo_id,
+                    window_id,
+                    title: "x".repeat(1_025),
+                    topology_revision: topology.revision,
+                    runtime: topology.runtimes[0].clone(),
+                }),
+                (_, unexpected) => panic!("unexpected mock request {index}: {unexpected:?}"),
+            };
+            match result {
+                Ok(result) => {
+                    write_private_frame(&mut stream, &ServerFrame::Response { request_id, result });
+                }
+                Err(error) => write_private_frame(
+                    &mut stream,
+                    &ServerFrame::Error {
+                        request_id: Some(request_id),
+                        error,
+                    },
+                ),
+            }
+        }
+    });
+
+    let mut server = Harness::spawn_with_socket(&socket, None);
+    server.initialize();
+    server.initialized();
+    assert_eq!(
+        call_tool(&mut server, 10, "splinterm.ping", json!({}))["structuredContent"]["data"],
+        json!({"protocol_version": "2025-11-25"})
+    );
+    assert_eq!(
+        call_tool(&mut server, 11, "splinterm.list_dojos", json!({}))["structuredContent"]["resource"]
+            ["topology_revision"],
+        1
+    );
+    let topology = call_tool(&mut server, 12, "splinterm.inspect_topology", json!({}));
+    assert_eq!(
+        topology["structuredContent"]["content_trust"], "untrusted_terminal_data",
+        "{topology}"
+    );
+    assert!(!topology.to_string().contains("/tmp"));
+    let splint = call_tool(
+        &mut server,
+        13,
+        "splinterm.inspect_splint",
+        json!({"splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
+    );
+    assert_eq!(
+        splint["structuredContent"]["resource"]["current_incarnation"],
+        2
+    );
+    assert_eq!(
+        splint["structuredContent"]["resource"]["last_incarnation"],
+        2
+    );
+    let access = call_tool(
+        &mut server,
+        14,
+        "splinterm.request_access",
+        json!({
+            "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+            "incarnation": 2,
+            "scopes": ["terminal_visible_read"]
+        }),
+    );
+    assert_eq!(access["structuredContent"]["resource"]["grant_id"], "42");
+    assert!(!access.to_string().contains("/private/requester"));
+    let status = call_tool(
+        &mut server,
+        15,
+        "splinterm.authorization_status",
+        json!({"splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
+    );
+    assert_eq!(status["structuredContent"]["data"]["policy_generation"], 3);
+    assert_eq!(status["structuredContent"]["resource"]["incarnation"], 2);
+
+    let rejected = call_tool(
+        &mut server,
+        16,
+        "splinterm.revoke_access",
+        json!({"grant_id": "42", "confirm": false}),
+    );
+    assert_eq!(
+        rejected["structuredContent"]["error"]["code"],
+        "confirmation_required"
+    );
+    let revoked = call_tool(
+        &mut server,
+        17,
+        "splinterm.revoke_access",
+        json!({"grant_id": "42", "confirm": true}),
+    );
+    assert_eq!(
+        revoked["structuredContent"]["resource"]["authorization_revision"],
+        5
+    );
+
+    let first_audit = call_tool(
+        &mut server,
+        18,
+        "splinterm.inspect_audit",
+        json!({"max_records": 1}),
+    );
+    assert_eq!(
+        first_audit["structuredContent"]["data"]["retention_gap"],
+        true
+    );
+    let cursor = first_audit["structuredContent"]["data"]["continuation_cursor"]
+        .as_str()
+        .unwrap();
+    let second_audit = call_tool(
+        &mut server,
+        19,
+        "splinterm.inspect_audit",
+        json!({"cursor": cursor, "max_records": 1}),
+    );
+    assert_eq!(second_audit["structuredContent"]["truncated"], false);
+
+    let stale = call_tool(
+        &mut server,
+        20,
+        "splinterm.request_access",
+        json!({
+            "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+            "incarnation": 3,
+            "scopes": ["terminal_visible_read"]
+        }),
+    );
+    assert_eq!(
+        stale["structuredContent"]["error"]["code"],
+        "stale_incarnation"
+    );
+    let denied = call_tool(
+        &mut server,
+        21,
+        "splinterm.inspect_splint",
+        json!({"splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
+    );
+    assert_eq!(denied["structuredContent"]["error"]["code"], "unauthorized");
+    assert!(!denied.to_string().contains("/secret/policy.json"));
+
+    let restorable_topology = call_tool(&mut server, 22, "splinterm.inspect_topology", json!({}));
+    let restorable_splint =
+        &restorable_topology["structuredContent"]["data"]["dojos"][0]["windows"][0]["splints"][0];
+    assert_eq!(restorable_splint["current_incarnation"], Value::Null);
+    assert_eq!(restorable_splint["last_incarnation"], 2);
+    assert_eq!(restorable_splint["state"], "restorable");
+    let restorable_inspect = call_tool(
+        &mut server,
+        23,
+        "splinterm.inspect_splint",
+        json!({"splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
+    );
+    assert_eq!(
+        restorable_inspect["structuredContent"]["resource"]["dojo_id"],
+        "018f4d8c-2a18-4b31-8c2f-9e7c5de77101"
+    );
+    assert_eq!(
+        restorable_inspect["structuredContent"]["resource"]["window_id"],
+        "018f4d8c-2a18-4b31-8c2f-9e7c5de77102"
+    );
+    assert_eq!(
+        restorable_inspect["structuredContent"]["resource"]["current_incarnation"],
+        Value::Null
+    );
+    assert_eq!(
+        restorable_inspect["structuredContent"]["resource"]["last_incarnation"],
+        2
+    );
+    assert_eq!(
+        restorable_inspect["structuredContent"]["data"]["state"],
+        "restorable"
+    );
+
+    let schema_mismatch = call_tool(
+        &mut server,
+        24,
+        "splinterm.inspect_splint",
+        json!({"splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
+    );
+    assert_eq!(
+        schema_mismatch["structuredContent"]["error"]["code"],
+        "internal"
+    );
+    assert!(!schema_mismatch.to_string().contains(&"x".repeat(1_025)));
+
+    server.close_input();
+    assert!(server.wait().success());
+    fake.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn successful_output_size_is_checked_after_schema_validation() {
+    let (directory, socket) = isolated_socket("large-output");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let fake = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _: ClientFrame = read_private_frame(&mut stream);
+        write_private_frame(
+            &mut stream,
+            &ServerFrame::Hello {
+                version: splinterm_protocol::PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+            },
+        );
+        let ClientFrame::Request {
+            request_id,
+            request: Request::InspectTopology,
+        } = read_private_frame(&mut stream)
+        else {
+            panic!("large-output daemon expected topology inspection");
+        };
+        let mut lair = Lair::new();
+        let mut runtimes = Vec::new();
+        for index in 0..256 {
+            let mut dojo = Dojo::new(format!("{index:04}{}", "d".repeat(124)), "/tmp".into());
+            for _ in 1..8 {
+                dojo.windows.push(Window::with_shell("/tmp".into()));
+            }
+            for window in &mut dojo.windows {
+                window.title = "w".repeat(128);
+                let LayoutNode::Leaf(splint) = &mut window.root else {
+                    unreachable!()
+                };
+                splint.title = "s".repeat(128);
+                splint.last_incarnation = Some(1);
+                splint.state = SplintState::Running;
+                runtimes.push(SplintRuntimeSummary {
+                    splint_id: splint.id,
+                    live_incarnation: Some(1),
+                    last_incarnation: Some(1),
+                    restorable: false,
+                    lifecycle: SplintLifecycle::Running,
+                    exit_status: None,
+                });
+            }
+            lair.insert_dojo_at(lair.revision(), dojo).unwrap();
+        }
+        let snapshot = TopologySnapshot {
+            revision: lair.revision(),
+            lair,
+            runtimes,
+        };
+        snapshot.validate().unwrap();
+        write_private_frame(
+            &mut stream,
+            &ServerFrame::Response {
+                request_id,
+                result: Response::Topology { snapshot },
+            },
+        );
+    });
+    let mut server = Harness::spawn_with_socket(&socket, None);
+    server.initialize();
+    server.initialized();
+    let result = call_tool(&mut server, 25, "splinterm.inspect_topology", json!({}));
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "resource_limit"
+    );
+    assert!(result.to_string().len() < 2_048);
+    server.close_input();
+    assert!(server.wait().success());
+    fake.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn daemon_deadline_returns_stable_timeout_and_disposes_connection() {
+    let (directory, socket) = isolated_socket("timeout");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let fake = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _: ClientFrame = read_private_frame(&mut stream);
+        write_private_frame(
+            &mut stream,
+            &ServerFrame::Hello {
+                version: splinterm_protocol::PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+            },
+        );
+        assert!(matches!(
+            read_private_frame::<ClientFrame>(&mut stream),
+            ClientFrame::Request {
+                request: Request::Ping,
+                ..
+            }
+        ));
+        thread::sleep(Duration::from_millis(300));
+        let cancellation = read_private_frame::<ClientFrame>(&mut stream);
+        assert!(matches!(cancellation, ClientFrame::Cancel { .. }));
+    });
+    let mut server = Harness::spawn_with_socket(&socket, Some(100));
+    server.initialize();
+    server.initialized();
+    let timed_out = call_tool(&mut server, 30, "splinterm.ping", json!({}));
+    assert_eq!(timed_out["structuredContent"]["error"]["code"], "timeout");
+    assert_eq!(timed_out["structuredContent"]["error"]["retryable"], true);
+    server.close_input();
+    assert!(server.wait().success());
+    fake.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

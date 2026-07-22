@@ -264,13 +264,14 @@ const DEFINITIONS: &[ToolDefinition] = &[
 ];
 
 const COMMON_SCHEMA: &str = include_str!("../../../dist/schemas/mcp/v1/common.schema.json");
-const MAXIMUM_SCHEMA_DEPTH: usize = 16;
+const MAXIMUM_SCHEMA_DEPTH: usize = 32;
 const MAXIMUM_ARGV_ENCODED_BYTES: usize = 65_536;
 const MAXIMUM_INPUT_TEXT_BYTES: usize = 65_536;
 
 struct Catalog {
     tools: Vec<Tool>,
     input_schemas: Vec<Value>,
+    output_schemas: Vec<Value>,
     common_schema: Value,
 }
 
@@ -282,6 +283,10 @@ fn catalog_cache() -> &'static Catalog {
             .iter()
             .map(|definition| parse_schema(definition.input_schema))
             .collect::<Vec<_>>();
+        let output_schemas = DEFINITIONS
+            .iter()
+            .map(|definition| parse_schema(definition.output_schema))
+            .collect::<Vec<_>>();
         let tools = DEFINITIONS
             .iter()
             .copied()
@@ -291,6 +296,7 @@ fn catalog_cache() -> &'static Catalog {
         Catalog {
             tools,
             input_schemas,
+            output_schemas,
             common_schema,
         }
     })
@@ -333,6 +339,19 @@ pub(crate) fn catalog() -> Vec<Tool> {
 
 pub(crate) fn find(name: &str) -> Option<Tool> {
     definition_index(name).map(|index| catalog_cache().tools[index].clone())
+}
+
+pub(crate) fn validate_output(name: &str, output: &Value) -> Result<(), ValidationError> {
+    let Some(index) = definition_index(name) else {
+        return Err(ValidationError::UnknownTool);
+    };
+    let catalog = catalog_cache();
+    validate_schema(
+        &catalog.output_schemas[index],
+        output,
+        &catalog.common_schema,
+        0,
+    )
 }
 
 pub(crate) fn validate_arguments(name: &str, arguments: &Value) -> Result<(), ValidationError> {
@@ -696,6 +715,7 @@ mod tests {
                 "splinterm.request_access",
                 json!({
                     "splint_id": "11111111-2222-4333-8444-555555555555",
+                    "incarnation": 1,
                     "scopes": ["input", "input"]
                 }),
             ),
@@ -748,6 +768,61 @@ mod tests {
         assert_eq!(
             validate_arguments("splinterm.input", &input("é".repeat(40_000))),
             Err(ValidationError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn successful_topology_output_accepts_nullable_incarnation_metadata() {
+        let envelope = |dojos: Value| {
+            json!({
+                "schema": "splinterm.mcp.v1",
+                "tool": "splinterm.inspect_topology",
+                "ok": true,
+                "resource": {"kind": "topology", "topology_revision": 1},
+                "data": {"dojos": dojos},
+                "truncated": false,
+                "content_trust": "untrusted_terminal_data"
+            })
+        };
+        let empty = envelope(json!([]));
+        let catalog = catalog_cache();
+        let schema =
+            &catalog.output_schemas[definition_index("splinterm.inspect_topology").unwrap()];
+        assert_eq!(
+            validate_schema(&schema["allOf"][0], &empty, &catalog.common_schema, 0),
+            Ok(()),
+            "common success envelope rejected a valid output"
+        );
+        assert_eq!(
+            validate_schema(&schema["allOf"][1], &empty, &catalog.common_schema, 0),
+            Ok(()),
+            "tool-specific output schema rejected a valid output"
+        );
+        assert_eq!(
+            validate_output("splinterm.inspect_topology", &empty),
+            Ok(())
+        );
+        assert_eq!(
+            validate_output(
+                "splinterm.inspect_topology",
+                &envelope(json!([{
+                    "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+                    "name": "dojo",
+                    "windows": [{
+                        "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+                        "title": "window",
+                        "default_focus_splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                        "splints": [{
+                            "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                            "current_incarnation": null,
+                            "last_incarnation": 2,
+                            "title": "shell",
+                            "state": "restorable"
+                        }]
+                    }]
+                }]))
+            ),
+            Ok(())
         );
     }
 

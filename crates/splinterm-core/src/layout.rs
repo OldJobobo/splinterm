@@ -160,6 +160,8 @@ pub struct Splint {
     pub command: Vec<String>,
     #[serde(default)]
     pub launch: Box<SplintLaunchMetadata>,
+    #[serde(default)]
+    pub last_incarnation: Option<u64>,
     pub state: SplintState,
 }
 
@@ -172,6 +174,7 @@ impl Splint {
             cwd,
             command: Vec::new(),
             launch: Box::new(SplintLaunchMetadata::default()),
+            last_incarnation: None,
             state: SplintState::Starting,
         }
     }

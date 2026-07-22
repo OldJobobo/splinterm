@@ -203,6 +203,7 @@ struct WindowSummaryV1 {
 enum SplintLifecycleV1 {
     Running,
     Exited,
+    Restorable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -212,8 +213,8 @@ struct SplintSummaryV1 {
     splint_id: String,
     title: String,
     lifecycle: SplintLifecycleV1,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    incarnation: Option<u64>,
+    current_incarnation: Option<u64>,
+    last_incarnation: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -240,6 +241,8 @@ struct InspectSplintResourceV1 {
 struct InspectSplintDataV1 {
     title: String,
     lifecycle: SplintLifecycleV1,
+    current_incarnation: Option<u64>,
+    last_incarnation: Option<u64>,
     exit_code: Option<u8>,
 }
 
@@ -732,6 +735,7 @@ pub fn decode_terminal_cursor(encoded: &str) -> Result<TerminalContinuationV1> {
 fn public_lifecycle(runtime: &SplintRuntimeSummary) -> SplintLifecycleV1 {
     match runtime.lifecycle {
         SplintLifecycle::Starting | SplintLifecycle::Running => SplintLifecycleV1::Running,
+        SplintLifecycle::Exited if runtime.restorable => SplintLifecycleV1::Restorable,
         SplintLifecycle::Exited => SplintLifecycleV1::Exited,
     }
 }
@@ -760,7 +764,8 @@ fn append_splint_summaries(
                 splint_id: splint.id.to_string(),
                 title: checked_public_text(&splint.title, "Splint title")?,
                 lifecycle: public_lifecycle(runtime),
-                incarnation: runtime.live_incarnation,
+                current_incarnation: runtime.live_incarnation,
+                last_incarnation: runtime.last_incarnation,
             });
         }
         LayoutNode::Branch { first, second, .. } => {
@@ -857,6 +862,8 @@ pub fn inspect_splint_envelope(
                     serde_json::to_value(InspectSplintDataV1 {
                         title: checked_public_text(&splint.title, "Splint title")?,
                         lifecycle: public_lifecycle(runtime),
+                        current_incarnation: runtime.live_incarnation,
+                        last_incarnation: runtime.last_incarnation,
                         exit_code: exit_code.map(u8::try_from).transpose()?,
                     })?,
                     false,
@@ -2830,7 +2837,7 @@ impl Connection {
     /// Resolves the current live incarnation of a selected Splint.
     pub async fn live_incarnation(&mut self, splint_id: SplintId) -> Result<u64> {
         match self.request(Request::InspectSplint { splint_id }).await? {
-            Response::Splint { runtime } if runtime.splint_id == splint_id => runtime
+            Response::Splint { runtime, .. } if runtime.splint_id == splint_id => runtime
                 .live_incarnation
                 .context("selected Splint does not have a live process"),
             _ => bail!("splinterd did not return the selected Splint identity"),
@@ -2970,6 +2977,7 @@ mod tests {
         let mut splint = Splint::shell(PathBuf::from("/tmp"));
         splint.id = splint_id;
         splint.title = "build".to_owned();
+        splint.last_incarnation = Some(2);
         splint.state = SplintState::Running;
         let window = Window {
             id: window_id,
@@ -2990,6 +2998,8 @@ mod tests {
             runtimes: vec![SplintRuntimeSummary {
                 splint_id,
                 live_incarnation: Some(2),
+                last_incarnation: Some(2),
+                restorable: false,
                 lifecycle: SplintLifecycle::Running,
                 exit_status: None,
             }],

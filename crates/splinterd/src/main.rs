@@ -20,8 +20,9 @@ use anyhow::{Context, Result, bail};
 use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use splinterd::{
-    LiveEvent, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, Subscription,
-    SubscriptionReceive, authorization, executable_identity, policy,
+    LiveEvent, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime,
+    ProcessIncarnation, Subscription, SubscriptionReceive, authorization, executable_identity,
+    policy,
 };
 use splinterm_core::{
     Dojo, DojoId, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId,
@@ -587,6 +588,18 @@ async fn main() -> Result<()> {
             Lair::new()
         }
     };
+    for dojo in lair.dojos() {
+        for window in &dojo.windows {
+            for splint_id in layout_splint_ids(&window.root) {
+                if let Some(incarnation) = lair
+                    .find_splint(splint_id)
+                    .and_then(|splint| splint.last_incarnation)
+                {
+                    ProcessIncarnation::reserve_after(incarnation);
+                }
+            }
+        }
+    }
 
     let socket = socket_path()?;
     prepare_socket_parent(&socket).await?;
@@ -1568,7 +1581,9 @@ async fn start_exited_splint(
     let previous_lair = state.lair.read().await.clone();
     let prepared = durable_lair_candidate(state, |lair| {
         lair.commit_relaunch(splint_id, launch.cwd.clone(), launch.command.clone())?;
-        if !lair.set_splint_launch_metadata(splint_id, durable_launch(launch)) {
+        if !lair.set_splint_launch_metadata(splint_id, durable_launch(launch))
+            || !lair.set_splint_last_incarnation(splint_id, incarnation)
+        {
             return Err(LairError::SplintNotFound(splint_id));
         }
         Ok(lair.revision())
@@ -1900,21 +1915,146 @@ fn requested_limits(request: &Request, active_subscriptions: usize) -> policy::R
     limits
 }
 
+fn splint_containment(
+    lair: &Lair,
+    splint_id: SplintId,
+) -> Option<(splinterm_core::DojoId, splinterm_core::WindowId, String)> {
+    for dojo in lair.dojos() {
+        for window in &dojo.windows {
+            if let Some(splint) = window.root.find_splint(splint_id) {
+                return Some((dojo.id, window.id, splint.title.clone()));
+            }
+        }
+    }
+    None
+}
+
+fn access_granted_response(
+    containment: &(DojoId, WindowId, String),
+    mutation: consent::AuthorizationMutation,
+) -> Response {
+    Response::AccessGranted {
+        dojo_id: containment.0,
+        window_id: containment.1,
+        authorization_revision: mutation.authorization_revision,
+        grant: mutation.grant,
+    }
+}
+
+async fn access_containment(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<(DojoId, WindowId, String), ProtocolError> {
+    let lair = state.lair.read().await;
+    let splint = lair.find_splint(splint_id).ok_or_else(not_found)?;
+    if matches!(splint.state, SplintState::Exited(_)) {
+        return Err(ProtocolError::new(
+            ErrorCode::StaleIncarnation,
+            "requested Splint has no current incarnation",
+        ));
+    }
+    let containment = splint_containment(&lair, splint_id).ok_or_else(not_found)?;
+    drop(lair);
+    let current = state
+        .runtimes
+        .lock()
+        .await
+        .handle(splint_id)
+        .map(|handle| handle.incarnation.value());
+    if current != Some(incarnation) {
+        return Err(ProtocolError::new(
+            ErrorCode::StaleIncarnation,
+            "requested incarnation is not current",
+        ));
+    }
+    Ok(containment)
+}
+
+async fn grant_access_response(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    splint_id: SplintId,
+    incarnation: u64,
+    scopes: Vec<AccessScope>,
+) -> Result<Response, ProtocolError> {
+    let _transaction = state
+        .topology_transactions
+        .acquire()
+        .await
+        .map_err(|_| internal())?;
+    let containment = access_containment(state, splint_id, incarnation).await?;
+    let mutation = state
+        .grants
+        .lock()
+        .await
+        .grant(peer, splint_id, incarnation, scopes);
+    Ok(access_granted_response(&containment, mutation))
+}
+
+async fn existing_access_response(
+    state: &DaemonState,
+    grant_id: u64,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<Response, ProtocolError> {
+    let _transaction = state
+        .topology_transactions
+        .acquire()
+        .await
+        .map_err(|_| internal())?;
+    let containment = access_containment(state, splint_id, incarnation).await?;
+    let mutation = state
+        .grants
+        .lock()
+        .await
+        .grant_with_revision(grant_id)
+        .filter(|mutation| {
+            mutation.grant.splint_id == splint_id && mutation.grant.incarnation == incarnation
+        })
+        .ok_or_else(not_found)?;
+    Ok(access_granted_response(&containment, mutation))
+}
+
+async fn nonstored_access_response(
+    state: &DaemonState,
+    grant: AccessGrant,
+) -> Result<Response, ProtocolError> {
+    let _transaction = state
+        .topology_transactions
+        .acquire()
+        .await
+        .map_err(|_| internal())?;
+    let containment = access_containment(state, grant.splint_id, grant.incarnation).await?;
+    let authorization_revision = state.grants.lock().await.authorization_revision();
+    Ok(access_granted_response(
+        &containment,
+        consent::AuthorizationMutation {
+            grant,
+            authorization_revision,
+        },
+    ))
+}
+
 fn splint_policy_resource(
     lair: &Lair,
     handles: &HashMap<SplintId, LiveSplintHandle>,
     splint_id: SplintId,
     requested_incarnation: Option<u64>,
 ) -> Option<policy::PolicyResource> {
-    let current = handles
-        .get(&splint_id)
-        .map(|handle| handle.incarnation.value());
-    if requested_incarnation.is_some() && requested_incarnation != current {
-        return None;
-    }
     for dojo in lair.dojos() {
         for window in &dojo.windows {
-            if window.root.find_splint(splint_id).is_some() {
+            if let Some(splint) = window.root.find_splint(splint_id) {
+                let current = if matches!(splint.state, SplintState::Exited(_)) {
+                    None
+                } else {
+                    handles
+                        .get(&splint_id)
+                        .map(|handle| handle.incarnation.value())
+                };
+                if requested_incarnation.is_some() && requested_incarnation != current {
+                    return None;
+                }
                 return Some(policy::PolicyResource::Splint {
                     dojo_id: dojo.id,
                     window_id: window.id,
@@ -2054,11 +2194,11 @@ async fn request_policy_resources(
         | Request::KillSplint {
             splint_id,
             incarnation,
-        }
-        | Request::AuthorizationStatus {
+        } => vec![splint(*splint_id, Some(*incarnation))?],
+        Request::AuthorizationStatus {
             splint_id,
             incarnation,
-        } => vec![splint(*splint_id, Some(*incarnation))?],
+        } => vec![splint(*splint_id, *incarnation)?],
         Request::SplitSplint {
             target_splint_id, ..
         } => vec![splint(*target_splint_id, None)?],
@@ -2408,9 +2548,13 @@ async fn handle_authorized_request(
 ) -> Result<Handled, ProtocolError> {
     let response = match request {
         Request::Ping => Response::Pong,
-        Request::ListDojos => Response::Dojos {
-            dojos: state.lair.read().await.dojos().cloned().collect(),
-        },
+        Request::ListDojos => {
+            let lair = state.lair.read().await;
+            Response::Dojos {
+                dojos: lair.dojos().cloned().collect(),
+                topology_revision: lair.revision(),
+            }
+        }
         Request::InspectTopology => Response::Topology {
             snapshot: topology_snapshot(state).await,
         },
@@ -2432,10 +2576,19 @@ async fn handle_authorized_request(
             let snapshot = topology_snapshot(state).await;
             let runtime = snapshot
                 .runtimes
-                .into_iter()
+                .iter()
                 .find(|runtime| runtime.splint_id == splint_id)
+                .cloned()
                 .ok_or_else(not_found)?;
-            Response::Splint { runtime }
+            let (dojo_id, window_id, title) =
+                splint_containment(&snapshot.lair, splint_id).ok_or_else(not_found)?;
+            Response::Splint {
+                dojo_id,
+                window_id,
+                title,
+                topology_revision: snapshot.revision,
+                runtime,
+            }
         }
         Request::RequestAccess {
             splint_id,
@@ -2449,17 +2602,16 @@ async fn handle_authorized_request(
             }
             let scopes: Vec<_> = canonical.into_iter().collect();
             if authorization.policy_authorized() {
-                Response::AccessGranted {
-                    grant: first_party_grant(splint_id, incarnation, scopes),
-                }
+                grant_access_response(state, peer, splint_id, incarnation, scopes).await?
             } else if state.development_terminal_access {
-                Response::AccessGranted {
-                    grant: development_grant(peer, splint_id, incarnation, scopes),
-                }
+                nonstored_access_response(
+                    state,
+                    development_grant(peer, splint_id, incarnation, scopes),
+                )
+                .await?
             } else if trusted_first_party_ui(trusted_ui_client, peer, &scopes) {
-                Response::AccessGranted {
-                    grant: first_party_grant(splint_id, incarnation, scopes),
-                }
+                nonstored_access_response(state, first_party_grant(splint_id, incarnation, scopes))
+                    .await?
             } else if let Some(grant_id) =
                 state
                     .grants
@@ -2467,15 +2619,7 @@ async fn handle_authorized_request(
                     .await
                     .authorize(peer, splint_id, incarnation, &scopes)
             {
-                let grant = state
-                    .grants
-                    .lock()
-                    .await
-                    .status(splint_id, incarnation)
-                    .into_iter()
-                    .find(|grant| grant.grant_id == grant_id)
-                    .ok_or_else(internal)?;
-                Response::AccessGranted { grant }
+                existing_access_response(state, grant_id, splint_id, incarnation).await?
             } else {
                 let granted =
                     match consent::prompt(peer, splint_id, incarnation, scopes.clone()).await {
@@ -2498,18 +2642,26 @@ async fn handle_authorized_request(
                         "access was denied",
                     ));
                 }
-                let grant = state
-                    .grants
-                    .lock()
-                    .await
-                    .grant(peer, splint_id, incarnation, scopes);
-                Response::AccessGranted { grant }
+                grant_access_response(state, peer, splint_id, incarnation, scopes).await?
             }
         }
         Request::AuthorizationStatus {
             splint_id,
-            incarnation,
+            incarnation: requested_incarnation,
         } => {
+            let handle = state
+                .runtimes
+                .lock()
+                .await
+                .handle(splint_id)
+                .ok_or_else(not_found)?;
+            let incarnation = handle.incarnation.value();
+            if requested_incarnation.is_some_and(|requested| requested != incarnation) {
+                return Err(ProtocolError::new(
+                    ErrorCode::StaleIncarnation,
+                    "requested incarnation is not current",
+                ));
+            }
             if !authorization.policy_authorized()
                 && !state.development_terminal_access
                 && !peer.is_matching_splinterm()
@@ -2519,18 +2671,25 @@ async fn handle_authorized_request(
                     "authorization status requires trusted UI or exact policy",
                 ));
             }
+            let lair = state.lair.read().await;
+            let topology_revision = lair.revision();
+            let (dojo_id, window_id, _) =
+                splint_containment(&lair, splint_id).ok_or_else(not_found)?;
+            drop(lair);
             let grants = state.grants.lock().await.status(splint_id, incarnation);
             let resource = request_policy_resources(
                 &Request::AuthorizationStatus {
                     splint_id,
-                    incarnation,
+                    incarnation: Some(incarnation),
                 },
                 state,
             )
             .await
             .and_then(|resources| resources.into_iter().next());
+            let policy = state.policy.lock().await;
+            let policy_generation = policy.snapshot().id;
             let persistent = match (peer.persistent_executable(), resource) {
-                (Some(executable), Some(resource)) => state.policy.lock().await.status(
+                (Some(executable), Some(resource)) => policy.status(
                     executable,
                     resource,
                     SystemTime::now()
@@ -2541,6 +2700,11 @@ async fn handle_authorized_request(
                 _ => Vec::new(),
             };
             Response::AuthorizationStatus {
+                dojo_id,
+                window_id,
+                incarnation,
+                topology_revision,
+                policy_generation,
                 grants,
                 persistent,
                 development_bypass: state.development_terminal_access,
@@ -2556,12 +2720,26 @@ async fn handle_authorized_request(
                     "revocation requires trusted UI or exact policy",
                 ));
             }
-            let revoked = state
+            let transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (splint_id, _incarnation) = state
+                .grants
+                .lock()
+                .await
+                .grant_resource(grant_id)
+                .ok_or_else(not_found)?;
+            let containment =
+                splint_containment(&*state.lair.read().await, splint_id).ok_or_else(not_found)?;
+            let mutation = state
                 .grants
                 .lock()
                 .await
                 .revoke(grant_id)
                 .ok_or_else(not_found)?;
+            drop(transaction);
             let released = state.controller.lock().await.release_grant(grant_id);
             for lease in released {
                 publish_control_status(state, lease.splint_id, lease.incarnation).await;
@@ -2569,11 +2747,16 @@ async fn handle_authorized_request(
             let _ = state.revocations.send(Revocation { grant_id });
             info!(
                 grant_id,
-                splint_id = ?revoked.splint_id,
-                incarnation = revoked.incarnation,
+                splint_id = ?mutation.grant.splint_id,
+                incarnation = mutation.grant.incarnation,
                 "terminal access grant revoked"
             );
-            Response::AccessRevoked { grant: revoked }
+            Response::AccessRevoked {
+                dojo_id: containment.0,
+                window_id: containment.1,
+                authorization_revision: mutation.authorization_revision,
+                grant: mutation.grant,
+            }
         }
         Request::CreateDojo {
             expected_topology_revision,
@@ -2613,6 +2796,7 @@ async fn handle_authorized_request(
             let runtime = spawn_runtime(state, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
+            splint.last_incarnation = Some(incarnation);
             splint.state = SplintState::Running;
             let previous = state.lair.read().await.clone();
             let prepared = durable_lair_candidate(state, |lair| {
@@ -2702,6 +2886,7 @@ async fn handle_authorized_request(
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
 
+            splint.last_incarnation = Some(incarnation);
             splint.state = SplintState::Running;
             let previous = state.lair.read().await.clone();
             let prepared = durable_lair_candidate(state, |lair| {
@@ -2926,6 +3111,7 @@ async fn handle_authorized_request(
             let runtime = spawn_runtime(state, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
+            splint.last_incarnation = Some(incarnation);
             splint.state = SplintState::Running;
             let previous = state.lair.read().await.clone();
             let prepared = durable_lair_candidate(state, |lair| {
@@ -3675,6 +3861,8 @@ fn collect_runtime_summaries(
                 } else {
                     matching_live.map(|handle| handle.incarnation.value())
                 },
+                last_incarnation: splint.last_incarnation,
+                restorable: matches!(splint.state, SplintState::Exited(_)),
                 lifecycle,
                 exit_status,
             });
@@ -4675,7 +4863,19 @@ mod tests {
     async fn revoke_access_returns_exact_removed_grant() {
         let state = test_state(true);
         let peer = PeerIdentity::for_test();
-        let splint_id = SplintId::new();
+        let dojo = state
+            .lair
+            .write()
+            .await
+            .create_dojo("test", PathBuf::from("/tmp"))
+            .unwrap()
+            .clone();
+        let dojo_id = dojo.id;
+        let window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            unreachable!()
+        };
+        let splint_id = splint.id;
         let grant =
             state
                 .grants
@@ -4685,7 +4885,7 @@ mod tests {
 
         let response = handle_request(
             Request::RevokeAccess {
-                grant_id: grant.grant_id,
+                grant_id: grant.grant.grant_id,
             },
             &state,
             &peer,
@@ -4699,9 +4899,96 @@ mod tests {
         assert_eq!(
             response.response,
             Response::AccessRevoked {
-                grant: grant.clone()
+                dojo_id,
+                window_id,
+                authorization_revision: 2,
+                grant: grant.grant.clone(),
             }
         );
+        assert!(state.grants.lock().await.status(splint_id, 2).is_empty());
+    }
+
+    #[tokio::test]
+    async fn revoke_metadata_commit_is_atomic_with_a_queued_close() {
+        let state = test_state(true);
+        let peer = PeerIdentity::for_test();
+        let dojo = state
+            .lair
+            .write()
+            .await
+            .create_dojo("race", PathBuf::from("/tmp"))
+            .unwrap()
+            .clone();
+        let dojo_id = dojo.id;
+        let window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            unreachable!()
+        };
+        let splint_id = splint.id;
+        assert!(
+            state
+                .lair
+                .write()
+                .await
+                .set_splint_state(splint_id, SplintState::Exited(0))
+        );
+        let grant = state
+            .grants
+            .lock()
+            .await
+            .grant(&peer, splint_id, 2, vec![AccessScope::Observe])
+            .grant;
+        let expected_topology_revision = state.lair.read().await.revision();
+
+        let barrier = state.topology_transactions.acquire().await.unwrap();
+        let revoke_state = Arc::clone(&state);
+        let revoke_peer = peer.clone();
+        let revoke = tokio::spawn(async move {
+            handle_request(
+                Request::RevokeAccess {
+                    grant_id: grant.grant_id,
+                },
+                &revoke_state,
+                &revoke_peer,
+                1,
+                0,
+                false,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        let close_state = Arc::clone(&state);
+        let close_peer = peer.clone();
+        let close = tokio::spawn(async move {
+            handle_request(
+                Request::CloseSplint {
+                    expected_topology_revision,
+                    splint_id,
+                },
+                &close_state,
+                &close_peer,
+                2,
+                0,
+                false,
+            )
+            .await
+        });
+        drop(barrier);
+
+        let revoked = revoke.await.unwrap().unwrap().response;
+        assert_eq!(
+            revoked,
+            Response::AccessRevoked {
+                dojo_id,
+                window_id,
+                authorization_revision: 2,
+                grant,
+            }
+        );
+        assert!(matches!(
+            close.await.unwrap().unwrap().response,
+            Response::TopologyCommitted { .. }
+        ));
         assert!(state.grants.lock().await.status(splint_id, 2).is_empty());
     }
 

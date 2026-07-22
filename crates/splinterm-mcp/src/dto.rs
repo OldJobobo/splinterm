@@ -43,6 +43,17 @@ impl<'a> ToolFailure<'a> {
         )
     }
 
+    pub(crate) fn execution(
+        tool: &'a str,
+        code: &'static str,
+        message: &'static str,
+        retryable: bool,
+    ) -> Self {
+        let mut failure = Self::new(tool, code, message);
+        failure.error.retryable = retryable;
+        failure
+    }
+
     fn new(tool: &'a str, code: &'static str, message: &'static str) -> Self {
         Self {
             schema: "splinterm.mcp.v1",

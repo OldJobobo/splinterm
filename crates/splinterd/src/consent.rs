@@ -229,15 +229,31 @@ pub struct AuditRecord {
     pub reason: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationMutation {
+    pub grant: AccessGrant,
+    pub authorization_revision: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct GrantStore {
     next_id: u64,
     next_audit_order: u64,
+    authorization_revision: u64,
     grants: Vec<Grant>,
     audit: VecDeque<AuditRecord>,
 }
 
 impl GrantStore {
+    #[must_use]
+    pub const fn authorization_revision(&self) -> u64 {
+        self.authorization_revision
+    }
+
+    fn advance_authorization_revision(&mut self) {
+        self.authorization_revision = self.authorization_revision.saturating_add(1);
+    }
+
     pub fn authorize(
         &mut self,
         peer: &PeerIdentity,
@@ -271,7 +287,7 @@ impl GrantStore {
         splint_id: SplintId,
         incarnation: u64,
         scopes: Vec<AccessScope>,
-    ) -> AccessGrant {
+    ) -> AuthorizationMutation {
         self.remove_expired();
         let scopes: BTreeSet<_> = scopes.into_iter().collect();
         if let Some(index) = self.grants.iter().position(|grant| {
@@ -284,6 +300,7 @@ impl GrantStore {
                 grant.expires_at_unix_seconds = unix_seconds() + GRANT_LIFETIME.as_secs();
                 grant.wire()
             };
+            self.advance_authorization_revision();
             self.record(
                 peer,
                 splint_id,
@@ -292,7 +309,10 @@ impl GrantStore {
                 AuditDecision::Granted,
                 "grant once",
             );
-            return wire;
+            return AuthorizationMutation {
+                grant: wire,
+                authorization_revision: self.authorization_revision,
+            };
         }
         self.next_id = self.next_id.saturating_add(1).max(1);
         let grant = Grant {
@@ -306,6 +326,7 @@ impl GrantStore {
         };
         let wire = grant.wire();
         self.grants.push(grant);
+        self.advance_authorization_revision();
         self.record(
             peer,
             splint_id,
@@ -314,7 +335,10 @@ impl GrantStore {
             AuditDecision::Granted,
             "grant once",
         );
-        wire
+        AuthorizationMutation {
+            grant: wire,
+            authorization_revision: self.authorization_revision,
+        }
     }
 
     pub fn deny(
@@ -342,10 +366,11 @@ impl GrantStore {
             .map(|grant| (grant.splint_id, grant.incarnation))
     }
 
-    pub fn revoke(&mut self, grant_id: u64) -> Option<AccessGrant> {
+    pub fn revoke(&mut self, grant_id: u64) -> Option<AuthorizationMutation> {
         let index = self.grants.iter().position(|grant| grant.id == grant_id)?;
         let grant = self.grants.remove(index);
         let wire = grant.wire();
+        self.advance_authorization_revision();
         self.record(
             &grant.peer,
             grant.splint_id,
@@ -354,7 +379,21 @@ impl GrantStore {
             AuditDecision::Revoked,
             "explicit local revocation",
         );
-        Some(wire)
+        Some(AuthorizationMutation {
+            grant: wire,
+            authorization_revision: self.authorization_revision,
+        })
+    }
+
+    pub fn grant_with_revision(&mut self, grant_id: u64) -> Option<AuthorizationMutation> {
+        self.remove_expired();
+        self.grants
+            .iter()
+            .find(|grant| grant.id == grant_id)
+            .map(|grant| AuthorizationMutation {
+                grant: grant.wire(),
+                authorization_revision: self.authorization_revision,
+            })
     }
 
     pub fn revoke_identity(
@@ -373,6 +412,9 @@ impl GrantStore {
             }
         });
         let ids = removed.iter().map(|grant| grant.id).collect();
+        if !removed.is_empty() {
+            self.advance_authorization_revision();
+        }
         for grant in removed {
             self.record(
                 &grant.peer,
@@ -387,7 +429,11 @@ impl GrantStore {
     }
 
     fn remove_expired(&mut self) {
+        let previous = self.grants.len();
         self.grants.retain(|grant| grant.expires > Instant::now());
+        if self.grants.len() != previous {
+            self.advance_authorization_revision();
+        }
     }
 
     fn record(
@@ -555,7 +601,7 @@ mod tests {
 
         assert_eq!(
             store.authorize(&peer, splint, 7, &[AccessScope::Observe]),
-            Some(grant.grant_id)
+            Some(grant.grant.grant_id)
         );
         assert_eq!(
             store.authorize(&peer, splint, 7, &[AccessScope::Resize]),
@@ -576,12 +622,27 @@ mod tests {
     }
 
     #[test]
+    fn grant_and_revoke_return_the_exact_atomic_authorization_revision() {
+        let peer = PeerIdentity::for_test();
+        let splint = SplintId::new();
+        let mut store = GrantStore::default();
+        let first = store.grant(&peer, splint, 1, vec![AccessScope::Observe]);
+        assert_eq!(first.authorization_revision, 1);
+        let second = store.grant(&peer, splint, 1, vec![AccessScope::Resize]);
+        assert_eq!(second.authorization_revision, 2);
+        assert_eq!(second.grant.grant_id, first.grant.grant_id);
+        let revoked = store.revoke(first.grant.grant_id).unwrap();
+        assert_eq!(revoked.authorization_revision, 3);
+        assert_eq!(revoked.grant, second.grant);
+    }
+
+    #[test]
     fn revocation_removes_authority_and_records_bounded_metadata() {
         let peer = PeerIdentity::for_test();
         let splint = SplintId::new();
         let mut store = GrantStore::default();
         let grant = store.grant(&peer, splint, 1, vec![AccessScope::Observe]);
-        assert!(store.revoke(grant.grant_id).is_some());
+        assert!(store.revoke(grant.grant.grant_id).is_some());
         assert_eq!(
             store.authorize(&peer, splint, 1, &[AccessScope::Observe]),
             None

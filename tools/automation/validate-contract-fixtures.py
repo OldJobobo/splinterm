@@ -131,7 +131,7 @@ MCP_OUTPUT_RESOURCE_DEFS = {
     "splinterm.ping": "daemon_resource",
     "splinterm.list_dojos": "topology_resource",
     "splinterm.inspect_topology": "topology_resource",
-    "splinterm.inspect_splint": "splint_resource",
+    "splinterm.inspect_splint": "logical_splint_resource",
     "splinterm.read_terminal": "terminal_resource",
     "splinterm.read_scrollback": "terminal_resource",
     "splinterm.search_scrollback": "terminal_resource",
@@ -196,7 +196,7 @@ EXPECTED_MCP_SCHEMAS = {
     ),
 }
 EXPECTED_MCP_SCHEMA_SHA256 = {
-    'common.schema.json': '0f6e023233ba5eac1446a61e354f48d79d0ad518bde92de41d7af8cc47d1cec1',
+    'common.schema.json': '16b85b7eaa5c05142ede88842650c8ec8c483b21c412a4b716b9f0b532b3a8e8',
     'error.schema.json': '83bf7548fa544b0dec1dadcfe27a235cf87bd98e2aac4e87bc201b809e46b821',
     'resources/control.schema.json': 'b6b4fa840655944b8167cc788af3a0a26796b540450c14ecbd92b57c98b65f66',
     'resources/terminal.schema.json': 'bb28b71e300fb0296af0513bd7a2be80eca9c1218229e0882ed972ce6b136452',
@@ -218,7 +218,7 @@ EXPECTED_MCP_SCHEMA_SHA256 = {
     'tools/inspect_audit.input.schema.json': '5a34cc510b84239e327cdc952aeea9d0054d48da398e077ff190501705222c35',
     'tools/inspect_audit.output.schema.json': '29a8b2523ddd8c18074c1cdfadac994462e7d31ba8391acbf6e79036d81f02b1',
     'tools/inspect_splint.input.schema.json': '076dae805c9963cc5d8f3bd2329f8666e91437bf4cd99ac7c19f87c561c8cf21',
-    'tools/inspect_splint.output.schema.json': '59b41e88f7b8061daf7b6a503ac908cc193f882e8a9afdf653836a1214fdaa7d',
+    'tools/inspect_splint.output.schema.json': 'dff3ac9baf8a2976d6c5c46767ed33e9fd57f85a41efb8a268cb82f7cf4641ff',
     'tools/inspect_topology.input.schema.json': '15f7caf8e6f919ef0b623405516040fa07dc8582495a2398091cc57840b3e9b8',
     'tools/inspect_topology.output.schema.json': 'ee87f47ef61f1b0529fe4821fc3aa9975907dc05a9ed9adefa84e64a80a8ebeb',
     'tools/kill_splint.input.schema.json': '3add9763a456f3d5fcdf2e8c1865b9ad2049a5543a962728ab13c77cdd9edc0e',
@@ -243,7 +243,7 @@ EXPECTED_MCP_SCHEMA_SHA256 = {
     'tools/rename_splint.output.schema.json': 'a635b22f783f2b2ee41a16edcf001d82953fd68df74eb2b56944ba715a3808c6',
     'tools/rename_window.input.schema.json': '21ff865b1c196a137af920845a65583d403db34d25aca65ec3386beab16675a2',
     'tools/rename_window.output.schema.json': 'e135283f5523125adb0f56c69ad66387c57b2f2208d479553a084952b802ca1b',
-    'tools/request_access.input.schema.json': '64564d52bb00256925f85b6d5fec12849b8d965acde55f89f1eeb0e6d128ea82',
+    'tools/request_access.input.schema.json': '341a6aadf1733be71448c465eea7c1960ef47fa0e67e0a14a6382e268a34dda2',
     'tools/request_access.output.schema.json': '40c6700b46ebab5670429492228be6af263789467a09676ba88cee481c328f8f',
     'tools/request_control_transfer.input.schema.json': '90ae2be9ba12fcb598b80260fc8f9be65fa2518cc9684b859b6f8959768fb922',
     'tools/request_control_transfer.output.schema.json': 'a949da9eca3ff557c7b1bcc43a60a8090fe8c73eeaca659761ce0a34c2e083c9',
@@ -288,6 +288,7 @@ EXPECTED_MCP_INVALID_FIXTURES = {
     "malformed-uuid.json",
     "missing-confirmation.json",
     "missing-provenance.json",
+    "missing-request-access-incarnation.json",
     "noncanonical-grant-id.json",
     "noncanonical-uuid.json",
     "open-output-object.json",
@@ -537,6 +538,15 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
             "incarnation",
             "topology_revision",
         },
+        "logical_splint_resource": {
+            "kind",
+            "dojo_id",
+            "window_id",
+            "splint_id",
+            "current_incarnation",
+            "last_incarnation",
+            "topology_revision",
+        },
         "terminal_resource": {
             "kind",
             "dojo_id",
@@ -589,7 +599,13 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
             "default_focus_splint_id",
             "splints",
         },
-        "topology_splint": {"splint_id", "incarnation", "title", "state"},
+        "topology_splint": {
+            "splint_id",
+            "current_incarnation",
+            "last_incarnation",
+            "title",
+            "state",
+        },
     }
     for definition, expected_properties in topology_shapes.items():
         topology = common_defs[definition]

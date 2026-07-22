@@ -655,6 +655,25 @@ Mock-daemon and real-daemon policy tests prove exact allow/deny behavior,
 resource scoping, explicit revoke confirmation, audit pagination/gaps, no
 private-field leakage, and no trusted UI authority.
 
+**Status:** complete on 2026-07-22. The eight metadata, topology,
+authorization, revocation, and audit tools dispatch through the extracted
+non-Wayland client with exact policy resources, deadlines, cancellation, stable
+errors, closed runtime-validated outputs, and final serialized-size bounds.
+A pre-shipping protocol-v19 correction carries scoped containment and exact
+operation revisions without broader topology reads; access requests now require
+an exact incarnation. Logical Splints persist last-incarnation metadata and
+project running, exited, and restart-restorable state without retargeting.
+Grant/revoke provenance is captured with the authorization mutation, cleanup is
+unconditional after successful revoke, and CLI revoke no longer requires
+`topology_metadata_read`.
+
+Rust 1.88 workspace Clippy, 27 `splinterm-mcp` tests, all 15 automation CLI
+tests, all 12 serialized daemon end-to-end tests, and the 35/39 automation plus
+86/30 MCP fixture matrix pass. Real-daemon coverage includes no policy,
+individually missing scopes, another Splint, stale incarnation, restart,
+revocation, and exact scoped status without trusted-UI authority. Installed
+relay package probes were advanced to private protocol v19.
+
 ### Slice 5 — bounded terminal tools and subscribable resources
 
 **Work**
