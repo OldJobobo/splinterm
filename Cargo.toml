@@ -28,7 +28,7 @@ clap = { version = "4.5", features = ["derive"] }
 fontdb = "0.23.0"
 freetype-rs = "0.38.0"
 pixman-sys = "0.1.0"
-rmcp = { version = "=2.2.0", default-features = false, features = ["macros", "schemars", "server", "transport-io"] }
+rmcp = { version = "=2.2.0", default-features = false, features = ["server", "transport-io"] }
 libc = "0.2"
 memmap2 = "0.9.11"
 nix = { version = "0.30.1", default-features = false, features = ["poll", "socket"] }

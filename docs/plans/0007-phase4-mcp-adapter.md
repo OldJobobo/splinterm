@@ -2,8 +2,9 @@
 
 - **Status:** In progress; stable JSON/NDJSON CLI, publication-snapshotted
   descendant policy, the SDK/protocol spike, reusable non-Wayland client
-  extraction, and the frozen MCP v1 schemas and fixtures are implemented;
-  production MCP tools and resources remain pending
+  extraction, frozen MCP v1 schemas and fixtures, and the production MCP
+  tools/resources server skeleton are implemented; daemon-backed handlers
+  remain pending
 - **Roadmap:** Phase 4 — Headless access and supported automation, Slice 6
 - **Foundation:** [Plan 0006](0006-phase4-headless-automation.md),
   [ADR 0007](../adr/0007-supported-automation-policy.md), and
@@ -607,6 +608,37 @@ in this slice.
 A subprocess test proves stdout contains only valid MCP messages; unsupported
 versions/capabilities and malformed/oversized lines fail closed; no HTTP listener
 or unrelated capability is present.
+
+**Status:** complete on 2026-07-21. The production skeleton now negotiates only
+MCP `2025-11-25`, advertises exactly static tools and non-subscribable resources,
+and discovers the reviewed 32 tools with their checked-in input/output schemas,
+closed annotations, and task support forbidden. It publishes one topology
+resource and the terminal/control templates while daemon-backed reads and all
+tool calls fail closed with sanitized, stable errors until their implementation
+slices land. Resource subscription methods remain unadvertised and unavailable
+until a bounded registry and daemon-backed updates are implemented. Bounded
+stdio rejects lines above 256 KiB before exposure; malformed complete frames are
+rejected before SDK dispatch; the process-wide gate permits four active calls
+and 32 admitted active calls plus cancellable waiters; the schema catalog is
+initialized once with fixed memory; diagnostics are one bounded stderr-only
+message; EOF promptly cancels the shared service/request token before bounded
+response draining, while malformed input and broken output terminate the service.
+
+The package's 23 tests cover exact discovery/capabilities/schemas/annotations,
+stateful lifecycle including duplicate-initialize rejection, strict raw initialize
+capabilities, unsupported versions, malformed/oversized/batched lines, stdout
+purity, no-connection fail-closed and input-schema-validated tool calls including
+the frozen 64 KiB UTF-8 input byte limit, resource fail-closure, canonical frozen
+UUID resource URIs, global semaphore admission and waiter cancellation, response
+IDs, notifications, prompt EOF cancellation with valid response draining, and
+broken-output shutdown with stdin still open.
+Rust 1.88 formatting, package tests, package Clippy with warnings denied, all
+35/39 automation and 86/29 MCP contract fixtures, dependency boundary scans,
+rmcp 2.2.0 feature inspection, and whitespace checks pass. The direct dependency
+boundary is only `anyhow`, exact `rmcp`, Serde/JSON, Tokio, and Tokio utility; the
+unused rmcp macro and schema-generation features are disabled, and no HTTP,
+OAuth, graphical, daemon, application, shell, prompt, sampling, elicitation, or
+logging implementation was added.
 
 ### Slice 4 — metadata, status, and audit tools
 
