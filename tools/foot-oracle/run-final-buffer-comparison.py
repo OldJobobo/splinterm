@@ -316,6 +316,7 @@ def capture_foot(
     payload_override: bytes | None = None,
     extra_environment: list[str] | None = None,
     extra_overrides: list[str] | None = None,
+    color_section: str = "colors",
 ) -> dict[str, Any]:
     wait_for_oracle_windows_to_close()
     assert_user_workspace_untouched()
@@ -342,8 +343,8 @@ def capture_foot(
         str(binary),
         "--config=/dev/null",
         f"--override=pad={profile['padding']}x{profile['padding']}",
-        f"--override=colors.background={profile['background']}",
-        f"--override=colors.foreground={profile['foreground']}",
+        f"--override={color_section}.background={profile['background']}",
+        f"--override={color_section}.foreground={profile['foreground']}",
         "--override=cursor.unfocused-style=unchanged",
         *(extra_overrides or []),
         f"--font={font_family}:pixelsize={profile['font_size']:g}",

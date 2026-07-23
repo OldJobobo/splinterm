@@ -1,0 +1,49 @@
+{
+  "host": {
+    "architecture": "x86_64",
+    "kernel": "7.1.4-arch1-1"
+  },
+  "limitations": [
+    "This isolates committed byte charges; it is not renderer throughput evidence.",
+    "Wayland SHM is unchanged because image composition reuses existing backing buffers.",
+    "Final integrated no-image and image-active measurements remain closure gates."
+  ],
+  "method": "separate safe-Rust processes touch one byte per 4 KiB page; /proc/PID/smaps_rollup sampled after 100 ms",
+  "records": {
+    "baseline": {
+      "bytes": 0,
+      "checksum": 0,
+      "pid": 2078970,
+      "private_bytes": 413696,
+      "pss_bytes": 435200,
+      "role": "baseline",
+      "rss_bytes": 2322432,
+      "shared_bytes": 1908736
+    },
+    "client_cache_full": {
+      "bytes": 67108864,
+      "checksum": 2041721,
+      "pid": 2079037,
+      "private_bytes": 67235840,
+      "pss_bytes": 67385344,
+      "pss_delta_bytes": 66950144,
+      "role": "client_cache_full",
+      "rss_bytes": 69496832,
+      "rss_delta_bytes": 67174400,
+      "shared_bytes": 2260992
+    },
+    "daemon_authoritative_full": {
+      "bytes": 67108864,
+      "checksum": 2041721,
+      "pid": 2078972,
+      "private_bytes": 67305472,
+      "pss_bytes": 67470336,
+      "pss_delta_bytes": 67035136,
+      "role": "daemon_authoritative_full",
+      "rss_bytes": 69496832,
+      "rss_delta_bytes": 67174400,
+      "shared_bytes": 2191360
+    }
+  },
+  "schema": "splinterm.phase5.image-budget-probe.v1"
+}

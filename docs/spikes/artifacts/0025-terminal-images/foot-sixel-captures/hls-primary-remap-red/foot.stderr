@@ -1,0 +1,1 @@
+warn: wayland.c:1854: compositor does not implement the xdg-toplevel-icon protocol

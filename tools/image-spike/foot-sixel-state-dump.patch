@@ -1,0 +1,28 @@
+diff --git a/vt.c b/vt.c
+--- a/vt.c
++++ b/vt.c
+@@ -1286,6 +1286,24 @@
+             start = end;
+         }
+     }
++    fputs("],\"sixels\":[", f);
++    bool first_sixel = true;
++    tll_foreach(term->grid->sixel_images, it) {
++        const struct sixel *six = &it->item;
++        const uint32_t *pixels = six->original.data;
++        const size_t pixel_count =
++            (size_t)six->original.width * (size_t)six->original.height;
++        fprintf(f,
++                "%s{\"width\":%d,\"height\":%d,\"row\":%d,\"column\":%d,"
++                "\"rows\":%d,\"columns\":%d,\"opaque\":%s,\"argb\":\"",
++                first_sixel ? "" : ",", six->original.width,
++                six->original.height, six->pos.row, six->pos.col,
++                six->rows, six->cols, six->opaque ? "true" : "false");
++        for (size_t pixel = 0; pixel < pixel_count; pixel++)
++            fprintf(f, "%08x", pixels[pixel]);
++        fputs("\"}", f);
++        first_sixel = false;
++    }
+     fputs("],\"events\":[]}\n", f);
+ 
+     bool ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
