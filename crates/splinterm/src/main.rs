@@ -28,7 +28,8 @@ use splinterm::{
     run_window,
 };
 use splinterm_core::{
-    Axis, DojoId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
+    Axis, DojoId, LayoutNode, SplintId, SplintState, SplitRatio, SplitSide, TopologyRevision,
+    WindowId,
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen, CellAttributes, ColorSource, ConsentPrompt,
@@ -4444,13 +4445,119 @@ async fn inspect_window_state(
     Ok((snapshot.revision, root))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseAction {
+    CloseExited,
+    KillAndClose { incarnation: u64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TopologyCommandOutcome {
+    Updated,
+    WindowClosed,
+}
+
+fn close_action(root: &LayoutNode, target: SplintId) -> Result<CloseAction> {
+    let splint = root
+        .find_splint(target)
+        .context("focused pane is absent from committed topology")?;
+    if matches!(splint.state, SplintState::Exited(_)) {
+        return Ok(CloseAction::CloseExited);
+    }
+    Ok(CloseAction::KillAndClose {
+        incarnation: splint
+            .last_incarnation
+            .context("live focused pane has no process incarnation")?,
+    })
+}
+
+fn validate_exited_close_target(
+    root: &LayoutNode,
+    target: SplintId,
+    expected_incarnation: Option<u64>,
+) -> Result<bool> {
+    let splint = root
+        .find_splint(target)
+        .context("focused pane is absent from committed topology")?;
+    anyhow::ensure!(
+        matches!(splint.state, SplintState::Exited(_)),
+        "pane remained live before close"
+    );
+    if let Some(expected) = expected_incarnation {
+        anyhow::ensure!(
+            splint.last_incarnation == Some(expected),
+            "pane incarnation changed before close"
+        );
+    }
+    Ok(root.splint_count() == 1)
+}
+
+async fn close_focused_splint(
+    connection: &mut Connection,
+    window_id: WindowId,
+    root: &LayoutNode,
+    expected_topology_revision: TopologyRevision,
+    target: SplintId,
+) -> Result<TopologyCommandOutcome> {
+    let (close_revision, final_leaf) = match close_action(root, target)? {
+        CloseAction::CloseExited => (
+            expected_topology_revision,
+            validate_exited_close_target(root, target, None)?,
+        ),
+        CloseAction::KillAndClose { incarnation } => {
+            match connection
+                .request(Request::KillSplint {
+                    splint_id: target,
+                    incarnation,
+                })
+                .await?
+            {
+                Response::SplintKilled {
+                    splint_id,
+                    incarnation: killed_incarnation,
+                    ..
+                } if splint_id == target && killed_incarnation == incarnation => {}
+                response => bail!("splinterd returned unexpected kill response: {response:?}"),
+            }
+            let (revision, refreshed_root) = inspect_window_state(connection, window_id).await?;
+            let final_leaf =
+                validate_exited_close_target(&refreshed_root, target, Some(incarnation))?;
+            (revision, final_leaf)
+        }
+    };
+    match connection
+        .request(Request::CloseSplint {
+            expected_topology_revision: close_revision,
+            splint_id: target,
+        })
+        .await?
+    {
+        Response::TopologyCommitted { .. } if final_leaf => {
+            Ok(TopologyCommandOutcome::WindowClosed)
+        }
+        Response::TopologyCommitted { .. } => Ok(TopologyCommandOutcome::Updated),
+        response => bail!("splinterd returned unexpected close response: {response:?}"),
+    }
+}
+
 async fn apply_topology_command(
     connection: &mut Connection,
     config: &AppConfig,
+    window_id: WindowId,
     root: &LayoutNode,
     expected_topology_revision: TopologyRevision,
     command: WindowTopologyCommand,
-) -> Result<()> {
+) -> Result<TopologyCommandOutcome> {
+    if let WindowTopologyCommand::Close { target } = command {
+        return close_focused_splint(
+            connection,
+            window_id,
+            root,
+            expected_topology_revision,
+            target,
+        )
+        .await;
+    }
     let request = match command {
         WindowTopologyCommand::Split { target, axis } => Request::SplitSplint {
             expected_topology_revision,
@@ -4463,10 +4570,6 @@ async fn apply_topology_command(
                 Vec::new(),
                 config,
             ),
-        },
-        WindowTopologyCommand::Close { target } => Request::CloseSplint {
-            expected_topology_revision,
-            splint_id: target,
         },
         WindowTopologyCommand::AdjustRatio { target, delta } => {
             let current = i32::from(
@@ -4481,9 +4584,12 @@ async fn apply_topology_command(
                 ratio: SplitRatio::new(next).map_err(|_| anyhow::anyhow!("invalid ratio"))?,
             }
         }
+        WindowTopologyCommand::Close { .. } => unreachable!("close handled above"),
     };
     match connection.request(request).await? {
-        Response::TopologyCommitted { .. } | Response::SplintStarted { .. } => Ok(()),
+        Response::TopologyCommitted { .. } | Response::SplintStarted { .. } => {
+            Ok(TopologyCommandOutcome::Updated)
+        }
         response => bail!("splinterd returned unexpected topology response: {response:?}"),
     }
 }
@@ -4592,10 +4698,22 @@ async fn run_topology_manager(
             }
             continue;
         };
-        if let Err(error) =
-            apply_topology_command(&mut connection, &config, &root, revision, command).await
+        match apply_topology_command(
+            &mut connection,
+            &config,
+            window_id,
+            &root,
+            revision,
+            command,
+        )
+        .await
         {
-            eprintln!("splinterm topology edit rejected: {error:#}");
+            Ok(TopologyCommandOutcome::Updated) => {}
+            Ok(TopologyCommandOutcome::WindowClosed) => {
+                let _ = updates.send(WindowTopologyUpdate::Closed).await;
+                break;
+            }
+            Err(error) => eprintln!("splinterm topology edit rejected: {error:#}"),
         }
     }
     for task in pane_tasks {
@@ -5341,6 +5459,43 @@ mod tests {
             Cli::try_parse_from(["splinterm", "window", "--window-id", &window_id.to_string(),])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn close_action_kills_live_panes_and_removes_exited_panes() {
+        let mut live = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let live_id = live.id;
+        live.state = SplintState::Running;
+        live.last_incarnation = Some(7);
+        assert_eq!(
+            close_action(&LayoutNode::Leaf(live), live_id).unwrap(),
+            CloseAction::KillAndClose { incarnation: 7 }
+        );
+
+        let mut exited = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let exited_id = exited.id;
+        exited.state = SplintState::Exited(0);
+        exited.last_incarnation = Some(7);
+        let exited_root = LayoutNode::Leaf(exited.clone());
+        assert_eq!(
+            close_action(&exited_root, exited_id).unwrap(),
+            CloseAction::CloseExited
+        );
+        assert!(validate_exited_close_target(&exited_root, exited_id, Some(7)).unwrap());
+        assert!(validate_exited_close_target(&exited_root, exited_id, Some(8)).is_err());
+
+        let sibling = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let split_root = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Leaf(exited)),
+            second: Box::new(LayoutNode::Leaf(sibling)),
+        };
+        assert!(!validate_exited_close_target(&split_root, exited_id, Some(7)).unwrap());
+
+        let missing_incarnation = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let missing_id = missing_incarnation.id;
+        assert!(close_action(&LayoutNode::Leaf(missing_incarnation), missing_id).is_err());
     }
 
     #[test]

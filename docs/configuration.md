@@ -38,8 +38,10 @@ supported. Other `[colors]` options direct users to generated `theme.json`, and
 `[key-bindings]` options explain that MVP bindings are not remappable. This
 avoids claiming arbitrary `foot.ini` compatibility.
 
-Built-in local bindings include Ctrl+Shift+C/V for copy/paste,
-Ctrl+Shift+R to revoke active access, and Ctrl+Shift+L to release control.
+Built-in local bindings include Ctrl+Shift+C/V for copy/paste. In managed
+multi-Splint windows, Ctrl+Shift+W terminates and closes the focused pane;
+legacy direct single-Splint attachments leave that chord to the terminal.
+Ctrl+Shift+R revokes active access, and Ctrl+Shift+L releases control.
 Ctrl+Shift+T requests transfer from the current controller; its trusted UI uses
 Ctrl+Shift+Y/N to accept/deny, while Ctrl+Shift+U opens separate trusted
 confirmation for forced takeover. Ctrl+Shift+F opens local literal scrollback

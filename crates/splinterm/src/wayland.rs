@@ -401,6 +401,7 @@ pub enum WindowTopologyUpdate {
         added: Vec<WindowPaneOptions>,
         removed: Vec<SplintId>,
     },
+    Closed,
     Shutdown(String),
 }
 
@@ -4267,6 +4268,10 @@ impl App {
                     added,
                     removed,
                 } => (layout, added, removed),
+                WindowTopologyUpdate::Closed => {
+                    self.exit = true;
+                    continue;
+                }
                 WindowTopologyUpdate::Shutdown(message) => {
                     anyhow::bail!("topology manager stopped: {message}");
                 }
@@ -5558,7 +5563,9 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
-        if let Some(action) = pane_topology_action(event.keysym, self.modifiers) {
+        if self.topology_commands.is_some()
+            && let Some(action) = pane_topology_action(event.keysym, self.modifiers)
+        {
             if let Some(target) = self.focused_splint() {
                 let command = match action {
                     PaneTopologyAction::Split(axis) => {
@@ -6506,6 +6513,10 @@ mod tests {
         assert_eq!(
             pane_topology_action(Keysym::bar, modifiers),
             Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical))
+        );
+        assert_eq!(
+            pane_topology_action(Keysym::W, modifiers),
+            Some(PaneTopologyAction::Close)
         );
         assert_eq!(
             pane_topology_action(Keysym::braceleft, modifiers),

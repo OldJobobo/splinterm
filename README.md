@@ -146,8 +146,9 @@ scoped five-minute grant-once authority, explicit revocation, and visible
 active-authority/controller indication. Ctrl+Shift+R revokes active grants and
 Ctrl+Shift+L releases the local controller. Pane focus uses Ctrl+Shift+Arrow or
 Ctrl+Shift+Tab (Shift+Tab reverses traversal). Ctrl+Shift+Enter splits
-horizontally, Ctrl+Shift+\\ splits vertically, Ctrl+Shift+W closes an exited
-pane, and Ctrl+Shift+[ / ] adjusts its parent ratio. Multi-Splint windows use
+horizontally, Ctrl+Shift+\\ splits vertically, Ctrl+Shift+W terminates and
+closes the focused pane (or directly removes it when already exited), and
+Ctrl+Shift+[ / ] adjusts its parent ratio. Multi-Splint windows use
 trusted box-drawing chrome configured by `[multiplexer] divider-style=line`,
 `frame`, or `none`. Frame mode optionally displays the sanitized daemon-owned
 Splint title with `frame-title=splint`; terminal OSC titles cannot spoof it.
