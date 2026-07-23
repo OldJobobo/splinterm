@@ -71,10 +71,24 @@ and one pinned shutdown signal.
 - Publication-snapshotted Dojo/window descendant policy semantics (complete)
 - Inject non-authoritative Dojo/window/Splint/incarnation context into PTY children (complete)
 - Public-CLI reference session picker and client-author examples (complete)
-- Required full-capability `splinterm-mcp` adapter with supported-automation parity
+- Required full-capability `splinterm-mcp` adapter with supported-automation parity (complete)
 - Reference in-Splint flow: discover, split, launch, observe, denied control, reconcile (complete)
 - Logical topology automation remains separate from compositor-native window control
 - No network listener in `splinterd` by default
+
+## Phase 4.1 — output throughput stabilization
+
+Detailed plan: [`plans/0009-output-throughput-optimization.md`](plans/0009-output-throughput-optimization.md)
+
+- Instrument PTY drain, terminal parsing, update publication, subscriptions, and rendering
+- Coalesce per-action terminal revisions into bounded semantic transactions
+- Remove 256-byte publication and per-event snapshot amplification
+- Preserve exact update/resync behavior, bounded memory, and small-write latency
+- Revalidate the five-terminal output matrix before image-protocol implementation
+
+This stabilization pass is recommended before Phase 5 because terminal images
+will add bulk parser, protocol, snapshot, and rendering pressure to the same
+pipeline that currently blocks ordinary text writers.
 
 ## Phase 5 — bounded terminal image protocols
 
