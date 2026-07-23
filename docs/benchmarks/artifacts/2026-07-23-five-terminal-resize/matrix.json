@@ -1,0 +1,327 @@
+{
+  "completed_measured_cases": 50,
+  "error": null,
+  "expected_measured_cases": 50,
+  "orders": [
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "terminals": [
+        "alacritty",
+        "ghostty",
+        "splinterm",
+        "foot",
+        "kitty"
+      ]
+    },
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "terminals": [
+        "foot",
+        "alacritty",
+        "splinterm",
+        "kitty",
+        "ghostty"
+      ]
+    },
+    {
+      "iteration": 2,
+      "phase": "warmup",
+      "terminals": [
+        "foot",
+        "ghostty",
+        "alacritty",
+        "kitty",
+        "splinterm"
+      ]
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "terminals": [
+        "kitty",
+        "foot",
+        "splinterm",
+        "ghostty",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "terminals": [
+        "alacritty",
+        "foot",
+        "ghostty",
+        "kitty",
+        "splinterm"
+      ]
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "terminals": [
+        "alacritty",
+        "foot",
+        "splinterm",
+        "kitty",
+        "ghostty"
+      ]
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "terminals": [
+        "ghostty",
+        "alacritty",
+        "splinterm",
+        "kitty",
+        "foot"
+      ]
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "terminals": [
+        "foot",
+        "alacritty",
+        "splinterm",
+        "kitty",
+        "ghostty"
+      ]
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "terminals": [
+        "kitty",
+        "splinterm",
+        "ghostty",
+        "foot",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "ghostty",
+        "kitty",
+        "alacritty",
+        "foot"
+      ]
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "terminals": [
+        "kitty",
+        "ghostty",
+        "splinterm",
+        "alacritty",
+        "foot"
+      ]
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "terminals": [
+        "foot",
+        "splinterm",
+        "kitty",
+        "ghostty",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "terminals": [
+        "alacritty",
+        "ghostty",
+        "kitty",
+        "splinterm",
+        "foot"
+      ]
+    }
+  ],
+  "sample_runs": 10,
+  "schema": "splinterm.benchmark.resize-matrix.v1",
+  "seed": 20260725,
+  "summary": {
+    "alacritty": {
+      "cpu_ticks": {
+        "count": 10,
+        "max": 2,
+        "median": 2.0,
+        "median_absolute_deviation": 0.0,
+        "min": 1,
+        "p95": 2.0
+      },
+      "dispatch_duration_ns": {
+        "count": 10,
+        "max": 56109135,
+        "median": 50092664.5,
+        "median_absolute_deviation": 2108887.0,
+        "min": 47421497,
+        "p95": 55003819.0
+      },
+      "rss_growth_bytes": {
+        "count": 10,
+        "max": 1597440,
+        "median": 1593344.0,
+        "median_absolute_deviation": 4096.0,
+        "min": 1585152,
+        "p95": 1597440.0
+      },
+      "settled_duration_ns": {
+        "count": 10,
+        "max": 291835239,
+        "median": 248427875.5,
+        "median_absolute_deviation": 5744114.5,
+        "min": 236234799,
+        "p95": 273037627.0
+      }
+    },
+    "foot": {
+      "cpu_ticks": {
+        "count": 10,
+        "max": 5,
+        "median": 4.0,
+        "median_absolute_deviation": 0.0,
+        "min": 3,
+        "p95": 4.0
+      },
+      "dispatch_duration_ns": {
+        "count": 10,
+        "max": 60846595,
+        "median": 51025111.5,
+        "median_absolute_deviation": 3114962.0,
+        "min": 46596649,
+        "p95": 60266330.0
+      },
+      "rss_growth_bytes": {
+        "count": 10,
+        "max": 1138688,
+        "median": 1130496.0,
+        "median_absolute_deviation": 4096.0,
+        "min": 1118208,
+        "p95": 1134592.0
+      },
+      "settled_duration_ns": {
+        "count": 10,
+        "max": 316537114,
+        "median": 259170717.0,
+        "median_absolute_deviation": 11980846.0,
+        "min": 239851910,
+        "p95": 303338087.0
+      }
+    },
+    "ghostty": {
+      "cpu_ticks": {
+        "count": 10,
+        "max": 3,
+        "median": 2.0,
+        "median_absolute_deviation": 0.0,
+        "min": 2,
+        "p95": 3.0
+      },
+      "dispatch_duration_ns": {
+        "count": 10,
+        "max": 62244692,
+        "median": 50934906.5,
+        "median_absolute_deviation": 2222226.0,
+        "min": 47070235,
+        "p95": 54293954.0
+      },
+      "rss_growth_bytes": {
+        "count": 10,
+        "max": 2002944,
+        "median": 1253376.0,
+        "median_absolute_deviation": 686080.0,
+        "min": 208896,
+        "p95": 1974272.0
+      },
+      "settled_duration_ns": {
+        "count": 10,
+        "max": 309095495,
+        "median": 256017934.0,
+        "median_absolute_deviation": 9398405.0,
+        "min": 237067388,
+        "p95": 270654157.0
+      }
+    },
+    "kitty": {
+      "cpu_ticks": {
+        "count": 10,
+        "max": 2,
+        "median": 1.0,
+        "median_absolute_deviation": 0.0,
+        "min": 0,
+        "p95": 2.0
+      },
+      "dispatch_duration_ns": {
+        "count": 10,
+        "max": 57598521,
+        "median": 51958363.0,
+        "median_absolute_deviation": 2800649.0,
+        "min": 46990269,
+        "p95": 55051759.0
+      },
+      "rss_growth_bytes": {
+        "count": 10,
+        "max": 28672,
+        "median": 22528.0,
+        "median_absolute_deviation": 2048.0,
+        "min": 16384,
+        "p95": 24576.0
+      },
+      "settled_duration_ns": {
+        "count": 10,
+        "max": 296818134,
+        "median": 256929759.5,
+        "median_absolute_deviation": 10744375.5,
+        "min": 233277630,
+        "p95": 284737657.0
+      }
+    },
+    "splinterm": {
+      "cpu_ticks": {
+        "count": 10,
+        "max": 3,
+        "median": 2.0,
+        "median_absolute_deviation": 0.0,
+        "min": 1,
+        "p95": 2.0
+      },
+      "dispatch_duration_ns": {
+        "count": 10,
+        "max": 56001492,
+        "median": 50445729.5,
+        "median_absolute_deviation": 1650360.0,
+        "min": 47055401,
+        "p95": 55160074.0
+      },
+      "rss_growth_bytes": {
+        "count": 10,
+        "max": 4145152,
+        "median": 3540992.0,
+        "median_absolute_deviation": 10240.0,
+        "min": 2134016,
+        "p95": 4132864.0
+      },
+      "settled_duration_ns": {
+        "count": 10,
+        "max": 289020741,
+        "median": 254767546.5,
+        "median_absolute_deviation": 7467353.5,
+        "min": 240938631,
+        "p95": 277584399.0
+      }
+    }
+  },
+  "valid": true,
+  "warmup_runs": 3
+}

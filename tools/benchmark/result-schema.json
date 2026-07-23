@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/oldjobobo/splinterm/tools/benchmark/result-schema.json",
+  "title": "Splinterbench portable result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "recorded_at", "host", "terminals", "samples"],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.v1" },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "host": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["os", "kernel", "architecture", "cpu", "clock_ticks_per_second"],
+      "properties": {
+        "os": { "type": ["string", "null"] },
+        "kernel": { "type": "string" },
+        "architecture": { "type": "string" },
+        "cpu": { "type": "string" },
+        "clock_ticks_per_second": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "repository": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["commit", "dirty"],
+      "properties": {
+        "commit": { "type": "string" },
+        "dirty": { "type": "boolean" }
+      }
+    },
+    "terminals": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/terminal" }
+    },
+    "samples": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sample" }
+    }
+  },
+  "$defs": {
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "available", "executable", "version", "sha256"],
+      "properties": {
+        "name": { "enum": ["splinterm", "foot", "kitty", "ghostty", "alacritty"] },
+        "available": { "type": "boolean" },
+        "executable": { "type": ["string", "null"] },
+        "version": { "type": ["string", "null"] },
+        "sha256": { "type": ["string", "null" ] }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terminal", "case", "boundary", "iteration", "metrics", "valid", "notes"],
+      "properties": {
+        "terminal": { "enum": ["splinterm", "foot", "kitty", "ghostty", "alacritty"] },
+        "case": { "type": "string", "minLength": 1 },
+        "boundary": {
+          "enum": ["child_ready", "pty_write_complete", "visible_marker_approximation", "compositor_presented"]
+        },
+        "iteration": { "type": "integer", "minimum": 0 },
+        "metrics": { "type": "object", "additionalProperties": { "type": ["integer", "number", "null"] } },
+        "valid": { "type": "boolean" },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

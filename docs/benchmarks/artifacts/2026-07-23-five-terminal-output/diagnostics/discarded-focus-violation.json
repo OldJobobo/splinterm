@@ -1,0 +1,11 @@
+{
+  "case": "ansi",
+  "launch_mode": "prestarted_daemon_client_launch",
+  "notes": [
+    "oracle stole focus to the reserved test workspace",
+    "cleanup: refusing to test on active DP-2/workspace 8"
+  ],
+  "schema": "splinterm.benchmark.graphical-output.v1",
+  "terminal": "splinterm",
+  "valid": false
+}

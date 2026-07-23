@@ -1,0 +1,32 @@
+{
+  "isolation": {
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "workspace": 8
+  },
+  "launch_mode": "standalone_process_launch",
+  "notes": [],
+  "processes": {
+    "child_included": true,
+    "child_pid": 8833,
+    "count": 5,
+    "root_pids": [
+      8770
+    ]
+  },
+  "retention": {
+    "clear_cycles": 9,
+    "context_switches": 9,
+    "cpu_ticks": 3,
+    "lines": 5000,
+    "retained_growth_bytes": 25280512,
+    "rss_baseline_bytes": 433893376,
+    "rss_peak_observed_bytes": 459173888,
+    "rss_post_settle_bytes": 459173888,
+    "trigger_to_visible_marker_ns": 506155572
+  },
+  "schema": "splinterm.benchmark.graphical-retention.v1",
+  "terminal": "kitty",
+  "valid": true
+}

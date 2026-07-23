@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Splinterbench guarded idle smoke",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "terminal", "launch_mode", "boundaries", "idle", "processes", "isolation", "valid", "notes"],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.graphical-idle.v1" },
+    "terminal": { "enum": ["splinterm", "foot", "kitty", "ghostty", "alacritty"] },
+    "launch_mode": {
+      "enum": ["prestarted_daemon_client_launch", "standalone_process_launch"]
+    },
+    "boundaries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["launch_to_child_ready_ns", "launch_to_window_map_ns"],
+      "properties": {
+        "launch_to_child_ready_ns": { "type": "integer", "minimum": 0 },
+        "launch_to_window_map_ns": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "idle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["warmup_seconds", "sample_seconds", "cpu_ticks", "context_switches", "rss_bytes"],
+      "properties": {
+        "warmup_seconds": { "type": "number", "minimum": 0 },
+        "sample_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "cpu_ticks": { "type": "integer", "minimum": 0 },
+        "context_switches": { "type": "integer", "minimum": 0 },
+        "rss_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "processes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_pids", "child_pid", "child_included", "count"],
+      "properties": {
+        "root_pids": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+        "child_pid": { "type": "integer", "minimum": 1 },
+        "child_included": { "const": true },
+        "count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace", "monitor", "no_initial_focus", "cleanup_verified"],
+      "properties": {
+        "workspace": { "const": 8 },
+        "monitor": { "const": "DP-2" },
+        "no_initial_focus": { "const": true },
+        "cleanup_verified": { "type": "boolean" }
+      }
+    },
+    "valid": { "type": "boolean" },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

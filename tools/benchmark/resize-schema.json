@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Splinterbench guarded resize result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "terminal", "launch_mode", "resize", "resources", "processes", "isolation", "valid", "notes"],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.graphical-resize.v1" },
+    "terminal": { "enum": ["splinterm", "foot", "kitty", "ghostty", "alacritty"] },
+    "launch_mode": { "enum": ["prestarted_daemon_client_launch", "standalone_process_launch"] },
+    "resize": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "sizes", "dispatch_duration_ns", "settled_duration_ns", "final_size", "window_survived"],
+      "properties": {
+        "count": { "const": 12 },
+        "sizes": { "type": "array", "minItems": 2, "items": { "type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}], "items": false } },
+        "dispatch_duration_ns": { "type": "integer", "minimum": 0 },
+        "settled_duration_ns": { "type": "integer", "minimum": 0 },
+        "final_size": { "type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}], "items": false },
+        "window_survived": { "const": true }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_ticks", "context_switches", "rss_before_bytes", "rss_after_bytes", "rss_growth_bytes"],
+      "properties": {
+        "cpu_ticks": { "type": "integer", "minimum": 0 },
+        "context_switches": { "type": "integer", "minimum": 0 },
+        "rss_before_bytes": { "type": "integer", "minimum": 0 },
+        "rss_after_bytes": { "type": "integer", "minimum": 0 },
+        "rss_growth_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "processes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_pids", "child_pid", "child_included", "count_before", "count_after"],
+      "properties": {
+        "root_pids": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+        "child_pid": { "type": "integer", "minimum": 1 },
+        "child_included": { "const": true },
+        "count_before": { "type": "integer", "minimum": 1 },
+        "count_after": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace", "monitor", "no_initial_focus", "cleanup_verified"],
+      "properties": {
+        "workspace": { "const": 8 }, "monitor": { "const": "DP-2" },
+        "no_initial_focus": { "const": true }, "cleanup_verified": { "type": "boolean" }
+      }
+    },
+    "valid": { "type": "boolean" },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

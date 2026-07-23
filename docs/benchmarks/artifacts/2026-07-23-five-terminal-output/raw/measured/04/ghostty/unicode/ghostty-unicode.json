@@ -1,0 +1,41 @@
+{
+  "case": "unicode",
+  "isolation": {
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "workspace": 8
+  },
+  "launch_mode": "standalone_process_launch",
+  "notes": [],
+  "processes": {
+    "child_included": true,
+    "child_pid": 437400,
+    "count_after": 2,
+    "count_before": 2,
+    "root_pids": [
+      437284
+    ]
+  },
+  "resources": {
+    "context_switches": 34,
+    "cpu_ticks": 1,
+    "rss_after_bytes": 412876800,
+    "rss_before_bytes": 393543680,
+    "rss_growth_bytes": 19333120
+  },
+  "schema": "splinterm.benchmark.graphical-output.v1",
+  "terminal": "ghostty",
+  "valid": true,
+  "workload": {
+    "child_write_duration_ns": 2746741,
+    "columns": 80,
+    "lines": 2000,
+    "payload_bytes": 282500,
+    "total_bytes": 282626,
+    "trigger_to_visible_marker_ns": 265713572,
+    "trigger_to_write_complete_ns": 3364874,
+    "visible_boundary": "screenshot_polling_approximation",
+    "visible_marker_pixels": 10240
+  }
+}
