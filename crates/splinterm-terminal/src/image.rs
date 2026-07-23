@@ -599,6 +599,11 @@ impl ImagePlane {
     }
 
     #[must_use]
+    pub fn has_placements(&self, screen: ActiveScreen) -> bool {
+        !self.catalog(screen).placements.is_empty()
+    }
+
+    #[must_use]
     pub fn content_metadata(
         &self,
         screen: ActiveScreen,

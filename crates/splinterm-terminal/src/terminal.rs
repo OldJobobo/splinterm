@@ -214,10 +214,14 @@ impl Terminal {
         self.alternate
             .resize_without_reflow(alternate_capacity, columns, rows);
         let image_metrics = self.images.metrics();
-        self.images
-            .retain_anchors(ActiveScreen::Normal, &self.normal.retained_row_ids());
-        self.images
-            .retain_anchors(ActiveScreen::Alternate, &self.alternate.retained_row_ids());
+        if self.images.has_placements(ActiveScreen::Normal) {
+            self.images
+                .retain_anchors(ActiveScreen::Normal, &self.normal.retained_row_ids());
+        }
+        if self.images.has_placements(ActiveScreen::Alternate) {
+            self.images
+                .retain_anchors(ActiveScreen::Alternate, &self.alternate.retained_row_ids());
+        }
         self.scroll_region = ScrollRegion::new(0, i32::try_from(rows).expect("rows fit in i32"));
         self.reset_tab_stops(columns);
         let change = self
@@ -611,6 +615,9 @@ impl Terminal {
     }
 
     fn prune_active_image_anchors(&mut self) {
+        if !self.images.has_placements(self.active) {
+            return;
+        }
         let row_ids = self.grid().retained_row_ids();
         self.images.retain_anchors(self.active, &row_ids);
     }
@@ -622,6 +629,9 @@ impl Terminal {
         start_column: usize,
         end_column: usize,
     ) {
+        if !self.images.has_placements(self.active) {
+            return;
+        }
         let row_ids = self.grid().screen_row_ids();
         self.images.remove_text_overlaps(
             self.active,
@@ -640,9 +650,11 @@ impl Terminal {
         rows: usize,
         background: Color,
     ) {
-        let before = self.grid().screen_row_ids();
+        let track_images =
+            self.active == ActiveScreen::Normal && self.images.has_placements(ActiveScreen::Normal);
+        let before = track_images.then(|| self.grid().screen_row_ids());
         let result = self.grid_mut().scroll(direction, region, rows, background);
-        if self.active == ActiveScreen::Normal
+        if let Some(before) = before
             && direction == ScrollDirection::Forward
             && region.start() == 0
             && usize::try_from(region.end()).ok() == Some(before.len())
