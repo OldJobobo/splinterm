@@ -181,8 +181,22 @@ def validate_daemon(
         failures.append("daemon user write queue exceeded byte limit")
     if metrics.get("reply_write_queue_high_water_bytes", 0) > bounds.get("reply_byte_limit", -1):
         failures.append("daemon reply write queue exceeded byte limit")
+    if metrics.get("pty_read_calls", 0) <= 0:
+        failures.append("daemon did not record PTY read calls")
     if metrics.get("pty_read_bytes", 0) <= 0:
         failures.append("daemon did not consume PTY output")
+    if metrics.get("output_parse_batches", 0) <= 0:
+        failures.append("daemon did not record output parse batches")
+    if metrics.get("output_terminal_updates", 0) <= 0:
+        failures.append("daemon did not record terminal update amplification")
+    if metrics.get("output_live_events", 0) <= 0:
+        failures.append("daemon did not record live output events")
+    if metrics.get("output_processing_ns", 0) <= 0:
+        failures.append("daemon did not record output processing time")
+    if metrics.get("snapshot_builds", 0) <= 0:
+        failures.append("daemon did not record snapshot builds")
+    if metrics.get("snapshot_build_ns", 0) <= 0:
+        failures.append("daemon did not record snapshot build time")
 
 
 def main() -> int:

@@ -273,7 +273,15 @@ pub struct LiveRuntimeMetrics {
     pub command_queue_high_water: usize,
     pub user_write_queue_high_water_bytes: usize,
     pub reply_write_queue_high_water_bytes: usize,
+    pub pty_read_calls: u64,
     pub pty_read_bytes: u64,
+    pub output_parse_batches: u64,
+    pub output_terminal_updates: u64,
+    pub output_live_events: u64,
+    pub output_subscriber_overflows: u64,
+    pub output_processing_ns: u64,
+    pub snapshot_builds: u64,
+    pub snapshot_build_ns: u64,
 }
 
 #[derive(Debug, Default)]
@@ -281,7 +289,15 @@ struct RuntimeMetrics {
     command_queue_high_water: AtomicUsize,
     user_write_queue_high_water_bytes: AtomicUsize,
     reply_write_queue_high_water_bytes: AtomicUsize,
+    pty_read_calls: AtomicU64,
     pty_read_bytes: AtomicU64,
+    output_parse_batches: AtomicU64,
+    output_terminal_updates: AtomicU64,
+    output_live_events: AtomicU64,
+    output_subscriber_overflows: AtomicU64,
+    output_processing_ns: AtomicU64,
+    snapshot_builds: AtomicU64,
+    snapshot_build_ns: AtomicU64,
 }
 
 impl RuntimeMetrics {
@@ -298,7 +314,15 @@ impl RuntimeMetrics {
             reply_write_queue_high_water_bytes: self
                 .reply_write_queue_high_water_bytes
                 .load(Ordering::Relaxed),
+            pty_read_calls: self.pty_read_calls.load(Ordering::Relaxed),
             pty_read_bytes: self.pty_read_bytes.load(Ordering::Relaxed),
+            output_parse_batches: self.output_parse_batches.load(Ordering::Relaxed),
+            output_terminal_updates: self.output_terminal_updates.load(Ordering::Relaxed),
+            output_live_events: self.output_live_events.load(Ordering::Relaxed),
+            output_subscriber_overflows: self.output_subscriber_overflows.load(Ordering::Relaxed),
+            output_processing_ns: self.output_processing_ns.load(Ordering::Relaxed),
+            snapshot_builds: self.snapshot_builds.load(Ordering::Relaxed),
+            snapshot_build_ns: self.snapshot_build_ns.load(Ordering::Relaxed),
         }
     }
 }
@@ -725,6 +749,7 @@ async fn run_actor_body(
                         &mut shutdown,
                         &mut shutdown_replies,
                         &config,
+                        metrics,
                         child_exit,
                     );
                     RuntimeMetrics::observe_max(
@@ -746,11 +771,13 @@ async fn run_actor_body(
                     match result {
                         Ok(0) => eof = true,
                         Ok(count) => {
+                            metrics.pty_read_calls.fetch_add(1, Ordering::Relaxed);
                             metrics.pty_read_bytes.fetch_add(
                                 u64::try_from(count).unwrap_or(u64::MAX),
                                 Ordering::Relaxed,
                             );
-                            process_output(
+                            let started = Instant::now();
+                            let output = process_output(
                                 &read_buffer[..count],
                                 incarnation,
                                 &mut terminal,
@@ -758,6 +785,26 @@ async fn run_actor_body(
                                 &mut subscribers,
                                 config.reply_byte_limit,
                             )?;
+                            metrics.output_parse_batches.fetch_add(
+                                output.parse_batches,
+                                Ordering::Relaxed,
+                            );
+                            metrics.output_terminal_updates.fetch_add(
+                                output.terminal_updates,
+                                Ordering::Relaxed,
+                            );
+                            metrics.output_live_events.fetch_add(
+                                output.live_events,
+                                Ordering::Relaxed,
+                            );
+                            metrics.output_subscriber_overflows.fetch_add(
+                                output.subscriber_overflows,
+                                Ordering::Relaxed,
+                            );
+                            metrics.output_processing_ns.fetch_add(
+                                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                                Ordering::Relaxed,
+                            );
                             RuntimeMetrics::observe_max(
                                 &metrics.reply_write_queue_high_water_bytes,
                                 reply_writes.bytes,
@@ -833,6 +880,7 @@ fn handle_command(
     shutdown: &mut Option<ShutdownStage>,
     shutdown_replies: &mut Vec<oneshot::Sender<()>>,
     config: &LiveSplintConfig,
+    metrics: &RuntimeMetrics,
     child_exit: Option<ProcessExit>,
 ) {
     match command {
@@ -861,13 +909,20 @@ fn handle_command(
             let _ = reply.send(result);
         }
         Command::Snapshot(max_rows, reply) => {
-            let _ = reply.send(Ok(owned_snapshot(
+            let started = Instant::now();
+            let snapshot = owned_snapshot(
                 splint_id,
                 incarnation,
                 terminal,
                 max_rows.min(config.max_scrollback_snapshot_rows),
                 child_exit,
-            )));
+            );
+            metrics.snapshot_builds.fetch_add(1, Ordering::Relaxed);
+            metrics.snapshot_build_ns.fetch_add(
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            let _ = reply.send(Ok(snapshot));
         }
         Command::ScrollbackPage(before_row_id, max_rows, reply) => {
             let snapshot = terminal.snapshot(SnapshotRequest {
@@ -945,12 +1000,18 @@ fn handle_command(
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
             }
+            let started = Instant::now();
             let snapshot = owned_snapshot(
                 splint_id,
                 incarnation,
                 terminal,
                 max_rows.min(config.max_scrollback_snapshot_rows),
                 child_exit,
+            );
+            metrics.snapshot_builds.fetch_add(1, Ordering::Relaxed);
+            metrics.snapshot_build_ns.fetch_add(
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
             );
             let (event_sender, events) = mpsc::channel(capacity.min(config.subscriber_capacity));
             let (resnapshot, resnapshot_receiver) = watch::channel(false);
@@ -979,22 +1040,34 @@ fn publish_updates(
     base: TerminalRevision,
     incarnation: ProcessIncarnation,
     subscribers: &mut Vec<Subscriber>,
-) {
+) -> (usize, usize) {
     let updates = terminal
         .updates_since(base)
         .expect("immediate update history cannot have a revision gap")
         .updates()
         .cloned()
         .collect::<Vec<_>>();
-    if !updates.is_empty() {
+    let update_count = updates.len();
+    let overflows = if updates.is_empty() {
+        0
+    } else {
         publish(
             subscribers,
             LiveEvent::Update {
                 incarnation,
                 updates,
             },
-        );
-    }
+        )
+    };
+    (update_count, overflows)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ProcessOutputMetrics {
+    parse_batches: u64,
+    terminal_updates: u64,
+    live_events: u64,
+    subscriber_overflows: u64,
 }
 
 fn process_output(
@@ -1004,11 +1077,20 @@ fn process_output(
     reply_writes: &mut WriteQueue,
     subscribers: &mut Vec<Subscriber>,
     reply_limit: usize,
-) -> Result<(), LiveError> {
+) -> Result<ProcessOutputMetrics, LiveError> {
+    let mut metrics = ProcessOutputMetrics::default();
     for batch in bytes.chunks(PARSE_BATCH) {
+        metrics.parse_batches = metrics.parse_batches.saturating_add(1);
         let base = terminal.revision();
         terminal.advance(batch);
-        publish_updates(terminal, base, incarnation, subscribers);
+        let (updates, overflows) = publish_updates(terminal, base, incarnation, subscribers);
+        metrics.terminal_updates = metrics
+            .terminal_updates
+            .saturating_add(u64::try_from(updates).unwrap_or(u64::MAX));
+        metrics.live_events = metrics.live_events.saturating_add(u64::from(updates > 0));
+        metrics.subscriber_overflows = metrics
+            .subscriber_overflows
+            .saturating_add(u64::try_from(overflows).unwrap_or(u64::MAX));
         for event in terminal.drain_events() {
             if let TerminalEvent::PtyWrite(bytes) = event {
                 reply_writes
@@ -1017,24 +1099,27 @@ fn process_output(
             }
         }
     }
-    Ok(())
+    Ok(metrics)
 }
 
 #[allow(
     clippy::needless_pass_by_value,
     reason = "fanout takes ownership of the event and clones only for retained subscribers"
 )]
-fn publish(subscribers: &mut Vec<Subscriber>, event: LiveEvent) {
+fn publish(subscribers: &mut Vec<Subscriber>, event: LiveEvent) -> usize {
+    let mut overflows = 0_usize;
     subscribers.retain(
         |subscriber| match subscriber.events.try_send(event.clone()) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
+                overflows = overflows.saturating_add(1);
                 subscriber.resnapshot.send_replace(true);
                 false
             }
             Err(mpsc::error::TrySendError::Closed(_)) => false,
         },
     );
+    overflows
 }
 
 fn advance_shutdown(
@@ -1272,10 +1357,18 @@ mod tests {
         };
         assert!(!updates.is_empty());
         assert!(updates.last().unwrap().revision() > snapshot.revision);
+        handle.snapshot().await.unwrap();
         let metrics = handle.metrics();
         assert!(metrics.command_queue_high_water >= 1);
         assert!(metrics.user_write_queue_high_water_bytes >= b"after-attach\n".len());
+        assert!(metrics.pty_read_calls > 0);
         assert!(metrics.pty_read_bytes > 0);
+        assert!(metrics.output_parse_batches > 0);
+        assert!(metrics.output_terminal_updates > 0);
+        assert!(metrics.output_live_events > 0);
+        assert!(metrics.output_processing_ns > 0);
+        assert!(metrics.snapshot_builds > 0);
+        assert!(metrics.snapshot_build_ns > 0);
         runtime.wait().await.unwrap();
     }
 

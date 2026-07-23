@@ -1,6 +1,6 @@
 # Plan 0009: PTY output throughput and update-pipeline optimization
 
-- **Status:** Planned — recommended before Phase 5 implementation
+- **Status:** In progress — non-graphical root-cause fix validated; graphical closure pending
 - **Roadmap:** Phase 4.1 — output throughput stabilization
 - **Evidence:** [five-terminal graphical output benchmark](../benchmarks/artifacts/2026-07-23-five-terminal-output/README.md)
 - **Benchmark method:** [terminal benchmark suite plan](../benchmarks/terminal-benchmark-plan.md)
@@ -17,6 +17,28 @@ Do not optimize inside an unreviewed mixed Phase 4 worktree. First review and
 split the completed protocol, daemon, MCP, packaging, and documentation changes
 into coherent commits. The performance work should then start from that known
 baseline as a separate, measurable change series.
+
+## Execution progress
+
+- Phase 4 was checkpointed independently before performance implementation.
+- Aggregate PTY, parser, publication, overflow, processing-time, and snapshot
+  metrics are implemented without recording terminal bodies.
+- The dominant cause was identified: action damage accounting walked and
+  allocated the complete retained scrollback row list twice for every parser
+  action, although only `CSI 3 J` needs the row count.
+- Row-count work is now conditional on that exact action. The release daemon
+  diagnostic improved from 4.740 seconds to a five-sample median of 131.1 ms
+  while preserving all 108,056 action-based terminal revisions.
+- Revision coalescing, larger parse batches, and protocol subscription
+  coalescing were investigated and removed rather than retained without a clear
+  correctness/performance case.
+- Non-graphical evidence is recorded in
+  [`artifacts/0023-output-throughput`](../spikes/artifacts/0023-output-throughput/README.md).
+- Graphical smoke/matrix validation remains pending.
+- Validation is also blocked by the unrelated
+  `headless_policy_reload_fails_closed_and_cleans_up` test consistently reaching
+  its fixed 20-second outer timeout; restoring original subscription and
+  revision semantics did not clear it.
 
 ## Problem statement
 
@@ -241,11 +263,19 @@ Stop and reassess rather than broadening the redesign when:
 
 ## Completion record
 
-When complete, update this section with:
+Current checkpoint:
 
-- the measured root causes and rejected hypotheses;
-- before/after stage timings and amplification counts;
-- exact implementation slices and commits;
-- test commands and results;
-- the new benchmark artifact path; and
-- any remaining performance debt or deferred architecture work.
+- **Measured root cause:** unconditional full-scrollback row enumeration before
+  and after every parser action.
+- **Retained fix:** enumerate scrollback rows only for `CSI 3 J` damage
+  accounting; retain action-based revisions and the 256-byte publication bound.
+- **Before:** 4.740 s output completion, 4.740 s output processing, 108,056
+  terminal updates for 126,056 PTY bytes.
+- **After:** five-sample median 131.1 ms output completion and 129.3 ms output
+  processing, with the same 108,056 terminal updates.
+- **Evidence:**
+  [`artifacts/0023-output-throughput`](../spikes/artifacts/0023-output-throughput/README.md).
+- **Pending:** guarded graphical evidence, resolution of the policy-reload test
+  timeout, final review, and closure commit references.
+
+Do not mark this plan complete until those pending gates are resolved.

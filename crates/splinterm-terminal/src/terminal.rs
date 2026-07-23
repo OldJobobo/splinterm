@@ -61,7 +61,7 @@ struct ActionBaseline {
     default_colors: [u32; 3],
     row_before: Option<(i32, crate::Row)>,
     visible_before: Option<Vec<crate::Row>>,
-    scrollback_rows: usize,
+    scrollback_rows: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -551,7 +551,15 @@ impl Terminal {
             } if first_param != 3 => Some(grid.snapshot_view_rows().into_iter().cloned().collect()),
             _ => None,
         };
-        let scrollback_rows = grid.snapshot_scrollback_rows(usize::MAX).1;
+        let scrollback_rows = matches!(
+            hint,
+            ActionHint::Csi {
+                final_byte: b'J',
+                first_param: 3,
+                ..
+            }
+        )
+        .then(|| grid.snapshot_scrollback_rows(usize::MAX).1);
         ActionBaseline {
             active: self.active,
             normal_generation: self.normal.generation(),
@@ -599,7 +607,9 @@ impl Terminal {
                     .zip(rows)
                     .any(|(left, right)| !rows_semantically_equal(left, right))
         });
-        let scrollback_rows = self.grid().snapshot_scrollback_rows(usize::MAX).1;
+        let scrollback_rows = before
+            .scrollback_rows
+            .map(|_| self.grid().snapshot_scrollback_rows(usize::MAX).1);
 
         let change = self
             .current_change

@@ -1,0 +1,46 @@
+{
+  "schema": "splinterm.performance.output-throughput-investigation.v1",
+  "status": "non_graphical_root_cause_fix_validated",
+  "baseline": {
+    "samples": 1,
+    "output_ns": 4740070573,
+    "output_processing_ns": 4739924897,
+    "pty_read_bytes": 126056,
+    "output_terminal_updates": 108056,
+    "output_live_events": 496
+  },
+  "optimized": {
+    "samples": 5,
+    "output_ns": {
+      "min": 125089866,
+      "median": 131066975,
+      "max": 147111640
+    },
+    "output_processing_ns": {
+      "min": 123339581,
+      "median": 129325143,
+      "max": 145612122
+    },
+    "pty_read_bytes": 126056,
+    "output_terminal_updates": 108056,
+    "output_live_events": {
+      "min": 495,
+      "median": 497,
+      "max": 498
+    }
+  },
+  "ratios": {
+    "output_speedup": 36.17,
+    "output_processing_speedup": 36.65
+  },
+  "retained_change": "Compute scrollback row counts only for CSI 3 J damage accounting instead of twice for every parser action.",
+  "rejected_experiments": [
+    "Coalescing terminal revisions reduced update count but was unnecessary after the root-cause fix and changed revision granularity.",
+    "Increasing the 256-byte parse/publication batch to 1 KiB, 4 KiB, or 16 KiB reduced event count but increased processing time.",
+    "Protocol subscription coalescing was reverted before checkpointing after lifecycle validation timed out."
+  ],
+  "pending": [
+    "Guarded graphical output smoke and matrix",
+    "Resolution of the independent headless_policy_reload_fails_closed_and_cleans_up 20-second timeout"
+  ]
+}
