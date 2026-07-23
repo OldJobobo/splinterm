@@ -25,10 +25,12 @@ git archive --format=tar.gz --prefix=splinterm-0.1.0.pre/ \
 ```
 
 `makepkg` builds release binaries with the lockfile, runs workspace tests, and
-creates a package without installing it. Inspect it with:
+creates the main package plus the explicitly optional `splinterm-mcp` split
+package without installing either. Inspect them with:
 
 ```bash
 pacman -Qlp packaging/splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.0.pre-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
@@ -42,6 +44,8 @@ versioned immutable source URL and checksum.
 - `/usr/bin/splinterm`, `/usr/bin/splinterd`, the dedicated
   `/usr/bin/splinterm-relay` SSH transport, and the adjacent
   `/usr/bin/splinterm-pty-child` helper;
+- optional split package `splinterm-mcp`, containing only the independently
+  policy-authorized `/usr/bin/splinterm-mcp`, its setup guide, and notices;
 - `/usr/bin/splinterm-xdg-terminal-exec`, the public-CLI-only
   `/usr/bin/splinterm-session-picker` reference client, and
   `/usr/bin/generate-omarchy-theme.py`;
@@ -59,8 +63,9 @@ remove its socket cleanly. If protocol negotiation fails after an upgrade, it
 restarts the user daemon once and waits a bounded 2.5 seconds. This ends old
 daemon-owned shells because cross-version process migration is not promised.
 See [headless.md](headless.md) for the complete service, policy, backup, and
-recovery workflow, [remote.md](remote.md) for the policy-scoped SSH relay, and
-[integrations.md](integrations.md) for reference-client and in-Splint workflows.
+recovery workflow, [remote.md](remote.md) for the policy-scoped SSH relay,
+[integrations.md](integrations.md) for reference-client and in-Splint workflows,
+and [mcp.md](mcp.md) for the optional adapter's host and digest-policy setup.
 
 ## Optional user integration
 
@@ -84,26 +89,43 @@ The reference snippet is `/usr/share/doc/splinterm/xdg-terminals.list`.
 
 ## Live installation and rollback
 
-Building and inspecting does not require installation. Install only after
-explicit approval:
+Building and inspecting does not require installation. The guarded local
+upgrade command validates the newest package under `packaging/`, shows the
+installed and candidate versions, warns before ending daemon-owned shells,
+installs with Pacman, reloads the user unit, and restores the daemon's previous
+running state:
 
 ```bash
-sudo pacman -U packaging/splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst
+tools/package/upgrade-local-package.sh
 ```
 
-Before upgrade/removal, close clients and stop the user daemon if its shells are
-no longer needed:
+To first build and validate a package from the clean, committed checkout:
+
+```bash
+tools/package/upgrade-local-package.sh --build
+```
+
+The command uses `sudo` because it is intended to run in an interactive
+terminal, matching Omarchy's privilege convention. Pass `--yes` only for an
+already-approved unattended invocation.
+
+The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-```
-
-After an upgrade, reload the installed unit before restarting:
-
-```bash
+sudo pacman -U packaging/splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
 
-Remove with `sudo pacman -Rns splinterm`. User-owned config, theme hooks, policy,
-and durable state are deliberately not deleted by package scripts.
+Install the adapter only when an MCP host will be configured:
+
+```bash
+sudo pacman -U packaging/splinterm-mcp-0.1.0.pre-1-x86_64.pkg.tar.zst
+```
+
+The guarded upgrade script upgrades `splinterm-mcp` only when that optional
+package is already installed; it never opts a user in. Remove it independently
+with `sudo pacman -Rns splinterm-mcp`. Remove the main package with
+`sudo pacman -Rns splinterm`. User-owned config, theme hooks, policy, and durable
+state are deliberately not deleted by package scripts.
