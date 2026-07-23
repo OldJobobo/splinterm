@@ -15,10 +15,10 @@ use crate::{
     ActiveScreen, Attributes, CellContent, ChangeSet, Color, ColorSource, ComposedTable,
     Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, ImageContent, ImageContentId, ImageError,
     ImageMetrics, ImagePlacement, ImagePlacementId, ImagePlane, MouseTracking, NewImageContent,
-    NewImagePlacement, ResnapshotRequired, RowSnapshot, ScrollDirection, ScrollRegion,
-    ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest, TerminalConfig, TerminalDamage,
-    TerminalEvent, TerminalModes, TerminalRevision, TerminalSnapshot, TerminalUpdate,
-    UnderlineStyle, UpdateBatch,
+    NewImagePlacement, NewImagePlacementOptions, ResnapshotRequired, RowSnapshot, ScrollDirection,
+    ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest, TerminalConfig,
+    TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision, TerminalSnapshot,
+    TerminalUpdate, UnderlineStyle, UpdateBatch,
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -303,6 +303,25 @@ impl Terminal {
         self.grid()
             .row_id(self.grid().cursor().position().row)
             .expect("the active cursor row is allocated")
+    }
+
+    /// Atomically inserts content and a cursor-anchored placement in one revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deterministic image validation or admission error without
+    /// committing partial content or advancing the revision.
+    pub fn insert_image_at_cursor(
+        &mut self,
+        content: NewImageContent<'_>,
+        placement: NewImagePlacementOptions,
+    ) -> Result<(ImageContentId, ImagePlacementId), ImageError> {
+        let row_id = self.cursor_row_id();
+        let identities =
+            self.images
+                .insert_content_and_placement(self.active, content, row_id, placement)?;
+        self.commit_image_change();
+        Ok(identities)
     }
 
     /// Inserts bounded canonical content on the active screen.

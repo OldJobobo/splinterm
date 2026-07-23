@@ -1,7 +1,7 @@
 use splinterm_terminal::{
-    ActiveScreen, CellExtent, ImageAlphaMode, ImageErasePolicy, ImageError, ImageRetention,
-    ImageSourceFormat, NewImageContent, NewImagePlacement, PixelRect, SnapshotRequest, Terminal,
-    TerminalConfig, TerminalDamage,
+    ActiveScreen, CellExtent, ImageAlphaMode, ImageErasePolicy, ImageError, ImageLimits,
+    ImageRetention, ImageSourceFormat, NewImageContent, NewImagePlacement,
+    NewImagePlacementOptions, PixelRect, SnapshotRequest, Terminal, TerminalConfig, TerminalDamage,
 };
 
 fn content(pixels: &[u8], retention: ImageRetention) -> NewImageContent<'_> {
@@ -39,6 +39,28 @@ fn placement(content_id: splinterm_terminal::ImageContentId, row_id: u64) -> New
     }
 }
 
+fn placement_options(erase_policy: ImageErasePolicy) -> NewImagePlacementOptions {
+    NewImagePlacementOptions {
+        column: 0,
+        source: PixelRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        destination: CellExtent {
+            columns: 1,
+            rows: 1,
+        },
+        x_offset: 0,
+        y_offset: 0,
+        z_index: 0,
+        application_image_id: None,
+        application_placement_id: None,
+        erase_policy,
+    }
+}
+
 fn insert_at_cursor(
     terminal: &mut Terminal,
     retention: ImageRetention,
@@ -54,6 +76,44 @@ fn insert_at_cursor(
     input.erase_policy = erase_policy;
     let placement_id = terminal.insert_image_placement(input).unwrap();
     (content_id, placement_id)
+}
+
+#[test]
+fn transmit_and_display_is_atomic_and_commits_one_revision() {
+    let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+    let base = terminal.revision();
+    terminal
+        .insert_image_at_cursor(
+            content(&[0, 0, 255, 255], ImageRetention::WhilePlaced),
+            placement_options(ImageErasePolicy::TextOverwrite),
+        )
+        .unwrap();
+    assert_eq!(terminal.revision().value(), base.value() + 1);
+    assert_eq!(terminal.image_metrics().content_count, 1);
+    assert_eq!(terminal.image_metrics().placement_count, 1);
+
+    let mut rejected = Terminal::new(
+        4,
+        2,
+        TerminalConfig {
+            image_limits: ImageLimits {
+                placements_per_terminal: 0,
+                ..ImageLimits::default()
+            },
+            ..TerminalConfig::default()
+        },
+    );
+    let revision = rejected.revision();
+    let metrics = rejected.image_metrics();
+    assert_eq!(
+        rejected.insert_image_at_cursor(
+            content(&[0, 0, 255, 255], ImageRetention::WhilePlaced),
+            placement_options(ImageErasePolicy::TextOverwrite),
+        ),
+        Err(ImageError::PlacementCount)
+    );
+    assert_eq!(rejected.revision(), revision);
+    assert_eq!(rejected.image_metrics(), metrics);
 }
 
 #[test]

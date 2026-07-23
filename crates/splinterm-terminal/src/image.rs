@@ -147,6 +147,38 @@ pub struct NewImageContent<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NewImagePlacementOptions {
+    pub column: usize,
+    pub source: PixelRect,
+    pub destination: CellExtent,
+    pub x_offset: i32,
+    pub y_offset: i32,
+    pub z_index: i32,
+    pub application_image_id: Option<u32>,
+    pub application_placement_id: Option<u32>,
+    pub erase_policy: ImageErasePolicy,
+}
+
+impl NewImagePlacementOptions {
+    #[must_use]
+    pub const fn bind(self, content_id: ImageContentId, row_id: u64) -> NewImagePlacement {
+        NewImagePlacement {
+            content_id,
+            row_id,
+            column: self.column,
+            source: self.source,
+            destination: self.destination,
+            x_offset: self.x_offset,
+            y_offset: self.y_offset,
+            z_index: self.z_index,
+            application_image_id: self.application_image_id,
+            application_placement_id: self.application_placement_id,
+            erase_policy: self.erase_policy,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NewImagePlacement {
     pub content_id: ImageContentId,
     pub row_id: u64,
@@ -323,6 +355,41 @@ impl ImagePlane {
         self.metrics.content_count += 1;
         self.update_high_water();
         Ok(id)
+    }
+
+    /// Atomically stores content and places it at one stable row anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deterministic validation, budget, or identity error. Validation
+    /// failures leave current accounting and semantic state unchanged.
+    pub fn insert_content_and_placement(
+        &mut self,
+        screen: ActiveScreen,
+        content: NewImageContent<'_>,
+        row_id: u64,
+        placement: NewImagePlacementOptions,
+    ) -> Result<(ImageContentId, ImagePlacementId), ImageError> {
+        self.validate_content(&content)?;
+        if row_id == 0 {
+            return Err(ImageError::InvalidAnchor);
+        }
+        if placement.destination.columns == 0 || placement.destination.rows == 0 {
+            return Err(ImageError::InvalidDestination);
+        }
+        validate_crop(placement.source, content.width, content.height)?;
+        if self.metrics.placement_count >= self.limits.placements_per_terminal {
+            return Err(ImageError::PlacementCount);
+        }
+        let content_id = self.insert_content(screen, content)?;
+        match self.insert_placement(screen, placement.bind(content_id, row_id)) {
+            Ok(placement_id) => Ok((content_id, placement_id)),
+            Err(error) => {
+                let rollback = self.remove_content_only(screen, content_id);
+                debug_assert!(rollback.is_ok(), "new content must remain for rollback");
+                Err(error)
+            }
+        }
     }
 
     /// Places existing content on one screen under the placement limit.
