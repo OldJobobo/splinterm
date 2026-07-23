@@ -1,6 +1,6 @@
 # ADR 0008: Use a bounded daemon-owned terminal image plane
 
-- **Status:** Proposed — Slice 0 validation in progress
+- **Status:** Accepted — Slice 0 evidence and independent review complete
 - **Date:** 2026-07-23
 - **Plan:** [Plan 0008](../plans/0008-terminal-image-protocols.md)
 - **Evidence:** [Spike 0025](../spikes/0025-terminal-image-contracts.md)

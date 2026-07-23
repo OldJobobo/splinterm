@@ -1,6 +1,6 @@
 # Spike 0025: terminal image contracts, budgets, and oracle inventory
 
-- **Status:** Blocked — final review found remaining executable evidence gaps
+- **Status:** Accepted — executable gates and independent review passed
 - **Date:** 2026-07-23
 - **Decision:** [ADR 0008](../adr/0008-bounded-terminal-image-plane.md)
 - **Machine record:** [`artifacts/0025-terminal-images/contracts.json`](artifacts/0025-terminal-images/contracts.json)
@@ -90,7 +90,10 @@ it close-on-exec, and proves writes fail. No first-party unsafe code is used.
 The fallback sends 64 KiB raw chunks under a four-chunk receive window. The
 content socket repeats ADR 0007 peer/executable authentication, uses mode 0600,
 and caps pending handshakes, unauthenticated peers, tokens, and transfer queues.
-A stalled content connection cannot occupy actor queues or PTY work.
+The executable spike binds and stats a real owner-only Unix socket and exercises
+clock-driven accept and read timeouts. Production integration must keep this
+socket work outside actor and PTY-drain queues so a stalled connection cannot
+occupy them.
 
 The memfd path is an optimization, not a correctness dependency. If ancillary
 FD passing cannot remain behind safe `rustix`/`nix` APIs, it belongs in one
@@ -196,12 +199,14 @@ UI detaches and may own many Splints.
 
 ## Decision
 
-ADR 0008 remains proposed and Slice 1 remains closed. Final review confirmed
-the exact Foot fixtures and token-expiry fixes, but still requires complete
-capture-provenance validation, strict per-transfer and socket/resource
-admission enforcement, and PNG expansion/cancellation evidence. Binary content
-fallback precedes memfd optimization. External application transports and
-animation remain separately gated.
+ADR 0008 is accepted and production Slice 1 is open. Capture provenance and
+PNG/Kitty expansion and cancellation are validated. Admission uses exact
+identity-keyed records for semantic objects, authoritative per-Splint/daemon
+bytes, client source/scaled caches, uploads, and outbound transfers; unknown
+and double releases fail closed. The spike also exercises a real mode-0600 Unix
+socket and timer-driven accept/handshake expiry. Binary content fallback
+precedes memfd optimization. External application transports and animation
+remain separately gated.
 
 ## Validation
 

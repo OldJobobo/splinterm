@@ -21,6 +21,8 @@ CAPTURES = ARTIFACT / "foot-sixel-captures"
 CAPTURE_SCRIPT = ROOT / "tools/image-spike/capture_foot_sixel.py"
 STATE_PATCH = ROOT / "tools/image-spike/foot-sixel-state-dump.patch"
 ORACLE_PATCHES = ROOT / "tools/foot-oracle/patches"
+ORACLE_PROVENANCE = ROOT / "tools/foot-oracle/provenance.json"
+ORACLE_BINARY = pathlib.Path("/tmp/splinterm-foot-oracle-build/foot")
 FOOT = pathlib.Path.home() / "Playground/foot"
 PINNED_FOOT = "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
 MAX_U32 = 2**32 - 1
@@ -60,6 +62,29 @@ def validate_provenance(contracts: dict[str, Any]) -> None:
     require(clean.returncode == 0 and foot["dirty"] is False, "Foot checkout dirty")
     for name, digest in foot["sources"].items():
         require(sha256(FOOT / name) == digest, f"Foot source hash drift: {name}")
+    provenance_path = ROOT / foot["oracle_provenance"]
+    require(provenance_path == ORACLE_PROVENANCE, "Foot provenance path drift")
+    require(
+        sha256(provenance_path) == foot["oracle_provenance_sha256"],
+        "Foot provenance hash drift",
+    )
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    require(provenance["schema"] == 3, "Foot provenance schema")
+    require(provenance["reference"]["commit"] == PINNED_FOOT, "Foot provenance commit")
+    if ORACLE_BINARY.exists():
+        require(
+            sha256(ORACLE_BINARY) == foot["oracle_binary_sha256"],
+            "Foot oracle binary hash drift",
+        )
+    fcft_version = subprocess.run(
+        ["pkg-config", "--modversion", "fcft"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    require(fcft_version == provenance["build"]["fcft_version"], "fcft version drift")
+    profile = provenance["default_final_buffer_profile"]
+    require(sha256(pathlib.Path(profile["font_file"])) == profile["font_sha256"], "Foot oracle font drift")
     kitty = contracts["kitty"]
     require(
         sha256(pathlib.Path(kitty["local_document"]))
@@ -163,12 +188,21 @@ def expand_bgra(case: dict[str, Any]) -> bytes:
     return bytes(output)
 
 
-def validate_foot_captures(sixel: dict[str, Any]) -> None:
+def validate_foot_captures(sixel: dict[str, Any], contracts: dict[str, Any]) -> None:
     expected_ids = {case["id"] for case in sixel["cases"]}
     report_paths = sorted(CAPTURES.glob("*/report.json"))
     require({path.parent.name for path in report_paths} == expected_ids, "Foot capture set")
     oracle_hashes = {
         patch.name: sha256(patch) for patch in sorted(ORACLE_PATCHES.glob("*.patch"))
+    }
+    foot_contract = contracts["foot"]
+    provenance = json.loads(ORACLE_PROVENANCE.read_text(encoding="utf-8"))
+    profile = provenance["default_final_buffer_profile"]
+    expected_isolation = {
+        "cleanup_verified": True,
+        "monitor": "DP-2",
+        "no_initial_focus": True,
+        "workspace": 8,
     }
     for case in sixel["cases"]:
         case_id = case["id"]
@@ -187,13 +221,30 @@ def validate_foot_captures(sixel: dict[str, Any]) -> None:
             f"{case_id}: semantic/render mismatch",
         )
         require(report["foot_commit"] == PINNED_FOOT, f"{case_id}: Foot commit")
+        require(
+            report["foot_binary_sha256"] == foot_contract["oracle_binary_sha256"],
+            f"{case_id}: Foot binary",
+        )
+        require(report["isolation"] == expected_isolation, f"{case_id}: isolation")
         require(report["capture_script_sha256"] == sha256(CAPTURE_SCRIPT), f"{case_id}: capture script")
         require(report["state_patch_sha256"] == sha256(STATE_PATCH), f"{case_id}: state patch")
         require(report["oracle_patch_sha256"] == oracle_hashes, f"{case_id}: oracle patches")
         require(report["source_argb_sha256"] == sha256(pixels_path), f"{case_id}: framebuffer hash")
         require(report["source_metadata_sha256"] == sha256(metadata_path), f"{case_id}: metadata hash")
         require(report["state_sha256"] == sha256(state_path), f"{case_id}: state hash")
-        require(metadata["provenance"]["commit"] == PINNED_FOOT, f"{case_id}: metadata commit")
+        metadata_provenance = metadata["provenance"]
+        require(
+            metadata_provenance
+            == {
+                "implementation": "foot",
+                "commit": PINNED_FOOT,
+                "fcft_version": provenance["build"]["fcft_version"],
+                "font_file": profile["font_file"],
+                "font_index": profile["font_index"],
+                "font_sha256": profile["font_sha256"],
+            },
+            f"{case_id}: metadata provenance",
+        )
         require(metadata["format"] == "argb8888" and metadata["byte_order"] == "bgra", f"{case_id}: format")
 
         expected = case["expected"]
@@ -302,7 +353,7 @@ def main() -> int:
         validate_provenance(contracts)
         validate_limits(contracts)
         validate_sixel(sixel)
-        validate_foot_captures(sixel)
+        validate_foot_captures(sixel, contracts)
         validate_kitty(kitty)
         validate_budget(budget, contracts)
         validate_clients(clients)

@@ -1,9 +1,17 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::{BTreeMap, HashMap},
-    io::{BufReader, Cursor, IoSlice, IoSliceMut, Read},
-    os::fd::{AsFd, OwnedFd},
+    collections::{BTreeMap, HashMap, HashSet},
+    io::{self, BufReader, Cursor, IoSlice, IoSliceMut, Read, Seek, SeekFrom},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
+    },
+    path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -36,6 +44,8 @@ pub const MAX_PENDING_TOKENS_PER_PEER: usize = 4;
 pub const MAX_PENDING_TOKENS_PER_DAEMON: usize = 32;
 pub const MAX_UNAUTHENTICATED_CONTENT_CONNECTIONS: usize = 8;
 pub const MAX_CONTENTS_PER_SPLINT: usize = 64;
+pub const MAX_AUTHORITATIVE_BYTES_PER_SPLINT: usize = 32 * 1024 * 1024;
+pub const MAX_AUTHORITATIVE_BYTES_PER_DAEMON: usize = 64 * 1024 * 1024;
 pub const MAX_PLACEMENTS_PER_SPLINT: usize = 256;
 pub const MAX_INBOUND_KITTY_UPLOADS_PER_PTY: usize = 1;
 pub const MAX_OUTBOUND_TRANSFERS_PER_SPLINT: usize = 2;
@@ -46,6 +56,13 @@ pub const MAX_KITTY_CONTROL_BYTES: usize = 1024;
 pub const MAX_REPLY_TEXT_BYTES: usize = 512;
 pub const MAX_DECODER_EXPANSION_RATIO: usize = 64;
 pub const MAX_PIXEL_WRITES_PER_COMMAND: usize = 16_777_216;
+pub const MAX_CLIENT_SOURCE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_CLIENT_SCALED_CACHE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_CLIENT_TOTAL_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_SIXEL_COLORS: usize = 1024;
+pub const CONTENT_SOCKET_MODE: u32 = 0o600;
+pub const CONTENT_CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
+pub const CONTENT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum SpikeError {
@@ -67,6 +84,12 @@ pub enum SpikeError {
     Token,
     #[error("resource capacity is exhausted")]
     Capacity,
+    #[error("admission identity is duplicate, missing, or mismatched")]
+    Admission,
+    #[error("content socket permissions are invalid")]
+    Permissions,
+    #[error("operation exceeded its deadline")]
+    Deadline,
     #[error("operating-system operation failed")]
     Os,
 }
@@ -104,48 +127,115 @@ fn premultiply(component: u8, alpha: u8) -> u8 {
         .expect("premultiplied component fits in one byte")
 }
 
+const PNG_READ_WORK_BYTES: usize = 4096;
+const PNG_CONVERSION_WORK_PIXELS: usize = 4096;
+
+struct CancellableReader<'a, F> {
+    input: Cursor<&'a [u8]>,
+    cancelled: &'a mut F,
+}
+
+impl<F: FnMut() -> bool> Read for CancellableReader<'_, F> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if (self.cancelled)() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let length = buffer.len().min(PNG_READ_WORK_BYTES);
+        self.input.read(&mut buffer[..length])
+    }
+}
+
+impl<F> Seek for CancellableReader<'_, F> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.input.seek(position)
+    }
+}
+
+fn map_png_error(error: &png::DecodingError) -> SpikeError {
+    if matches!(&error, png::DecodingError::IoError(source) if source.kind() == io::ErrorKind::Interrupted)
+    {
+        SpikeError::Cancelled
+    } else {
+        SpikeError::Malformed
+    }
+}
+
 /// Decodes one bounded PNG into canonical premultiplied BGRA8.
 ///
 /// # Errors
 ///
-/// Returns a bounded error for cancellation, malformed input, dimensions, or
-/// encoded/decoded resource exhaustion.
+/// Returns a bounded error for cancellation, malformed input, dimensions,
+/// expansion, or encoded/decoded resource exhaustion.
 pub fn decode_png(input: &[u8], cancelled: bool) -> Result<Pixels, SpikeError> {
-    if cancelled {
-        return Err(SpikeError::Cancelled);
-    }
+    decode_png_with_cancel(input, || cancelled)
+}
+
+/// Decodes PNG while checking cancellation during bounded reads and conversion.
+///
+/// # Errors
+///
+/// Returns a bounded error for cancellation, malformed input, dimensions,
+/// expansion, or encoded/decoded resource exhaustion.
+pub fn decode_png_with_cancel(
+    input: &[u8],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Pixels, SpikeError> {
     if input.len() > MAX_ENCODED_BYTES {
         return Err(SpikeError::EncodedLimit);
     }
-    let mut decoder = Decoder::new_with_limits(
-        BufReader::new(Cursor::new(input)),
-        Limits {
-            bytes: MAX_DECODED_BYTES,
-        },
-    );
-    decoder.set_transformations(Transformations::EXPAND | Transformations::STRIP_16);
-    let mut reader = decoder.read_info().map_err(|_| SpikeError::Malformed)?;
-    let info = reader.info();
-    let output_bytes = checked_pixel_bytes(info.width, info.height)?;
-    let buffer_bytes = reader
-        .output_buffer_size()
-        .ok_or(SpikeError::DecodedLimit)?;
-    if buffer_bytes > MAX_DECODED_BYTES {
-        return Err(SpikeError::DecodedLimit);
-    }
-    let mut frame_bytes = vec![0; buffer_bytes];
-    let frame = reader
-        .next_frame(&mut frame_bytes)
-        .map_err(|_| SpikeError::Malformed)?;
+    let (frame, frame_bytes, output_bytes) = {
+        let source = CancellableReader {
+            input: Cursor::new(input),
+            cancelled: &mut cancelled,
+        };
+        let mut decoder = Decoder::new_with_limits(
+            BufReader::with_capacity(PNG_READ_WORK_BYTES, source),
+            Limits {
+                bytes: MAX_DECODED_BYTES,
+            },
+        );
+        decoder.set_transformations(Transformations::EXPAND | Transformations::STRIP_16);
+        let mut reader = decoder.read_info().map_err(|error| map_png_error(&error))?;
+        let info = reader.info();
+        let output_bytes = checked_pixel_bytes(info.width, info.height)?;
+        let ratio_limit = input
+            .len()
+            .checked_mul(MAX_DECODER_EXPANSION_RATIO)
+            .unwrap_or(MAX_DECODED_BYTES)
+            .min(MAX_DECODED_BYTES);
+        if output_bytes > ratio_limit {
+            return Err(SpikeError::ExpansionRatio);
+        }
+        let buffer_bytes = reader
+            .output_buffer_size()
+            .ok_or(SpikeError::DecodedLimit)?;
+        if buffer_bytes > MAX_DECODED_BYTES {
+            return Err(SpikeError::DecodedLimit);
+        }
+        let mut frame_bytes = vec![0; buffer_bytes];
+        let frame = reader
+            .next_frame(&mut frame_bytes)
+            .map_err(|error| map_png_error(&error))?;
+        (frame, frame_bytes, output_bytes)
+    };
+
     let source = &frame_bytes[..frame.buffer_size()];
     let pixel_count = output_bytes / 4;
     let mut bgra = Vec::with_capacity(output_bytes);
+    let mut check_cancel = |pixel: usize| {
+        if pixel.is_multiple_of(PNG_CONVERSION_WORK_PIXELS) && cancelled() {
+            Err(SpikeError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
     match frame.color_type {
         ColorType::Rgba => {
             if source.len() != pixel_count * 4 {
                 return Err(SpikeError::Malformed);
             }
-            for pixel in source.chunks_exact(4) {
+            for (index, pixel) in source.chunks_exact(4).enumerate() {
+                check_cancel(index)?;
                 let alpha = pixel[3];
                 bgra.extend_from_slice(&[
                     premultiply(pixel[2], alpha),
@@ -159,7 +249,8 @@ pub fn decode_png(input: &[u8], cancelled: bool) -> Result<Pixels, SpikeError> {
             if source.len() != pixel_count * 3 {
                 return Err(SpikeError::Malformed);
             }
-            for pixel in source.chunks_exact(3) {
+            for (index, pixel) in source.chunks_exact(3).enumerate() {
+                check_cancel(index)?;
                 bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
             }
         }
@@ -167,7 +258,8 @@ pub fn decode_png(input: &[u8], cancelled: bool) -> Result<Pixels, SpikeError> {
             if source.len() != pixel_count * 2 {
                 return Err(SpikeError::Malformed);
             }
-            for pixel in source.chunks_exact(2) {
+            for (index, pixel) in source.chunks_exact(2).enumerate() {
+                check_cancel(index)?;
                 let alpha = pixel[1];
                 let value = premultiply(pixel[0], alpha);
                 bgra.extend_from_slice(&[value, value, value, alpha]);
@@ -177,7 +269,8 @@ pub fn decode_png(input: &[u8], cancelled: bool) -> Result<Pixels, SpikeError> {
             if source.len() != pixel_count {
                 return Err(SpikeError::Malformed);
             }
-            for value in source {
+            for (index, value) in source.iter().enumerate() {
+                check_cancel(index)?;
                 bgra.extend_from_slice(&[*value, *value, *value, 255]);
             }
         }
@@ -367,81 +460,514 @@ impl ChunkWindow {
     }
 }
 
-/// Bounded admission state for the dedicated content socket.
+/// Bounded admission state for image identities and Kitty command work.
 #[derive(Debug, Default)]
-pub struct ContentAdmission {
-    unauthenticated: usize,
-    transfers: usize,
-    encoded_bytes: usize,
-    transfers_by_splint: HashMap<[u8; 16], usize>,
+pub struct SemanticAdmission {
+    contents: HashSet<u64>,
+    placements: HashSet<u64>,
+    inbound_upload: Option<u64>,
 }
 
-impl ContentAdmission {
-    /// Admits one pre-authentication connection.
+impl SemanticAdmission {
+    /// Charges one authoritative content identity.
     ///
     /// # Errors
     ///
-    /// Returns [`SpikeError::Capacity`] at the daemon cap.
-    pub fn open_unauthenticated(&mut self) -> Result<(), SpikeError> {
-        if self.unauthenticated >= MAX_UNAUTHENTICATED_CONTENT_CONNECTIONS {
+    /// Returns a bounded error for duplicates or the per-Splint cap.
+    pub fn admit_content(&mut self, content_id: u64) -> Result<(), SpikeError> {
+        if self.contents.contains(&content_id) {
+            return Err(SpikeError::Admission);
+        }
+        if self.contents.len() >= MAX_CONTENTS_PER_SPLINT {
             return Err(SpikeError::Capacity);
         }
-        self.unauthenticated += 1;
+        self.contents.insert(content_id);
         Ok(())
     }
 
-    pub fn finish_authentication(&mut self) {
-        self.unauthenticated = self.unauthenticated.saturating_sub(1);
-    }
-
-    /// Admits one outbound transfer and charges its encoded bytes.
+    /// Releases exactly one retained content identity.
     ///
     /// # Errors
     ///
-    /// Returns a bounded error when the handshake, transfer, or byte cap fails.
-    pub fn start_transfer(
+    /// Returns [`SpikeError::Admission`] for unknown or double release.
+    pub fn release_content(&mut self, content_id: u64) -> Result<(), SpikeError> {
+        self.contents
+            .remove(&content_id)
+            .then_some(())
+            .ok_or(SpikeError::Admission)
+    }
+
+    /// Charges one placement identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded error for duplicates or the per-Splint cap.
+    pub fn admit_placement(&mut self, placement_id: u64) -> Result<(), SpikeError> {
+        if self.placements.contains(&placement_id) {
+            return Err(SpikeError::Admission);
+        }
+        if self.placements.len() >= MAX_PLACEMENTS_PER_SPLINT {
+            return Err(SpikeError::Capacity);
+        }
+        self.placements.insert(placement_id);
+        Ok(())
+    }
+
+    /// Releases exactly one retained placement identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpikeError::Admission`] for unknown or double release.
+    pub fn release_placement(&mut self, placement_id: u64) -> Result<(), SpikeError> {
+        self.placements
+            .remove(&placement_id)
+            .then_some(())
+            .ok_or(SpikeError::Admission)
+    }
+
+    /// Begins one non-interleavable Kitty upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpikeError::Capacity`] when an upload is already active.
+    pub fn begin_inbound_upload(&mut self, upload_id: u64) -> Result<(), SpikeError> {
+        if self.inbound_upload.is_some() {
+            return Err(SpikeError::Capacity);
+        }
+        self.inbound_upload = Some(upload_id);
+        Ok(())
+    }
+
+    /// Finishes only the matching active upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpikeError::Admission`] for mismatch or double release.
+    pub fn finish_inbound_upload(&mut self, upload_id: u64) -> Result<(), SpikeError> {
+        if self.inbound_upload != Some(upload_id) {
+            return Err(SpikeError::Admission);
+        }
+        self.inbound_upload = None;
+        Ok(())
+    }
+
+    /// Checks bounded Kitty control, reply, and pixel-write work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a resource error before any command work is admitted.
+    pub fn admit_command(
+        control_bytes: usize,
+        reply_bytes: usize,
+        pixel_writes: usize,
+    ) -> Result<(), SpikeError> {
+        if control_bytes > MAX_KITTY_CONTROL_BYTES || reply_bytes > MAX_REPLY_TEXT_BYTES {
+            return Err(SpikeError::EncodedLimit);
+        }
+        if pixel_writes > MAX_PIXEL_WRITES_PER_COMMAND {
+            return Err(SpikeError::DecodedLimit);
+        }
+        Ok(())
+    }
+}
+
+/// Process-wide authoritative decoded-content admission.
+#[derive(Debug, Default)]
+pub struct AuthoritativeAdmission {
+    contents: HashMap<([u8; 16], u64), usize>,
+    bytes_by_splint: HashMap<[u8; 16], usize>,
+    total_bytes: usize,
+}
+
+impl AuthoritativeAdmission {
+    /// Retains one exactly charged content object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded error for duplicate identity or any byte/count cap.
+    pub fn admit(
         &mut self,
         splint_id: [u8; 16],
+        content_id: u64,
+        decoded_bytes: usize,
+    ) -> Result<(), SpikeError> {
+        let key = (splint_id, content_id);
+        if self.contents.contains_key(&key) {
+            return Err(SpikeError::Admission);
+        }
+        if decoded_bytes > MAX_DECODED_BYTES
+            || self
+                .contents
+                .keys()
+                .filter(|(owner, _)| *owner == splint_id)
+                .count()
+                >= MAX_CONTENTS_PER_SPLINT
+        {
+            return Err(SpikeError::Capacity);
+        }
+        let splint_bytes = self.bytes_by_splint.get(&splint_id).copied().unwrap_or(0);
+        let next_splint = splint_bytes
+            .checked_add(decoded_bytes)
+            .filter(|bytes| *bytes <= MAX_AUTHORITATIVE_BYTES_PER_SPLINT)
+            .ok_or(SpikeError::Capacity)?;
+        let next_total = self
+            .total_bytes
+            .checked_add(decoded_bytes)
+            .filter(|bytes| *bytes <= MAX_AUTHORITATIVE_BYTES_PER_DAEMON)
+            .ok_or(SpikeError::Capacity)?;
+        self.contents.insert(key, decoded_bytes);
+        self.bytes_by_splint.insert(splint_id, next_splint);
+        self.total_bytes = next_total;
+        Ok(())
+    }
+
+    /// Releases the internally retained charge for one exact identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpikeError::Admission`] for unknown or double release.
+    pub fn release(&mut self, splint_id: [u8; 16], content_id: u64) -> Result<(), SpikeError> {
+        let charge = self
+            .contents
+            .remove(&(splint_id, content_id))
+            .ok_or(SpikeError::Admission)?;
+        let splint_bytes = self
+            .bytes_by_splint
+            .get_mut(&splint_id)
+            .ok_or(SpikeError::Admission)?;
+        *splint_bytes -= charge;
+        self.total_bytes -= charge;
+        if *splint_bytes == 0 {
+            self.bytes_by_splint.remove(&splint_id);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ClientCacheKind {
+    Source,
+    Scaled,
+}
+
+/// Exact-record admission for client source and scaled image caches.
+#[derive(Debug, Default)]
+pub struct ClientCacheAdmission {
+    entries: HashMap<(ClientCacheKind, u64), usize>,
+    source_bytes: usize,
+    scaled_bytes: usize,
+}
+
+impl ClientCacheAdmission {
+    /// Retains one cache entry under source, scaled, and total byte caps.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded error for duplicate identity or cache exhaustion.
+    pub fn admit(
+        &mut self,
+        kind: ClientCacheKind,
+        cache_id: u64,
+        bytes: usize,
+    ) -> Result<(), SpikeError> {
+        let key = (kind, cache_id);
+        if self.entries.contains_key(&key) {
+            return Err(SpikeError::Admission);
+        }
+        let (current, limit) = match kind {
+            ClientCacheKind::Source => (self.source_bytes, MAX_CLIENT_SOURCE_CACHE_BYTES),
+            ClientCacheKind::Scaled => (self.scaled_bytes, MAX_CLIENT_SCALED_CACHE_BYTES),
+        };
+        let next = current
+            .checked_add(bytes)
+            .filter(|value| *value <= limit)
+            .ok_or(SpikeError::Capacity)?;
+        self.source_bytes
+            .checked_add(self.scaled_bytes)
+            .and_then(|total| total.checked_add(bytes))
+            .filter(|total| *total <= MAX_CLIENT_TOTAL_CACHE_BYTES)
+            .ok_or(SpikeError::Capacity)?;
+        self.entries.insert(key, bytes);
+        match kind {
+            ClientCacheKind::Source => self.source_bytes = next,
+            ClientCacheKind::Scaled => self.scaled_bytes = next,
+        }
+        Ok(())
+    }
+
+    /// Releases the internally retained cache charge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpikeError::Admission`] for unknown or double release.
+    pub fn release(&mut self, kind: ClientCacheKind, cache_id: u64) -> Result<(), SpikeError> {
+        let bytes = self
+            .entries
+            .remove(&(kind, cache_id))
+            .ok_or(SpikeError::Admission)?;
+        match kind {
+            ClientCacheKind::Source => self.source_bytes -= bytes,
+            ClientCacheKind::Scaled => self.scaled_bytes -= bytes,
+        }
+        Ok(())
+    }
+}
+
+/// Tracks defined Sixel palette indices under the accepted 1,024-color bound.
+#[derive(Debug, Default)]
+pub struct SixelPaletteAdmission {
+    colors: HashSet<u16>,
+}
+
+impl SixelPaletteAdmission {
+    /// Defines or redefines one in-range palette index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpikeError::Capacity`] for indices outside the accepted palette.
+    pub fn define(&mut self, index: u16) -> Result<(), SpikeError> {
+        if usize::from(index) >= MAX_SIXEL_COLORS {
+            return Err(SpikeError::Capacity);
+        }
+        self.colors.insert(index);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TransferCharge {
+    splint_id: [u8; 16],
+    encoded_bytes: usize,
+}
+
+/// Bounded admission state for the dedicated content socket.
+#[derive(Debug, Default)]
+pub struct ContentAdmission {
+    unauthenticated: HashSet<u64>,
+    transfers: HashMap<u64, TransferCharge>,
+    encoded_bytes: usize,
+}
+
+impl ContentAdmission {
+    /// Admits one uniquely identified pre-authentication connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded error for duplicate identity, permissions, deadline, or cap.
+    pub fn open_unauthenticated(
+        &mut self,
+        connection_id: u64,
+        socket_mode: u32,
+        elapsed: Duration,
+    ) -> Result<(), SpikeError> {
+        if socket_mode != CONTENT_SOCKET_MODE {
+            return Err(SpikeError::Permissions);
+        }
+        if elapsed > CONTENT_CONNECTION_DEADLINE {
+            return Err(SpikeError::Deadline);
+        }
+        if self.unauthenticated.contains(&connection_id) {
+            return Err(SpikeError::Admission);
+        }
+        if self.unauthenticated.len() >= MAX_UNAUTHENTICATED_CONTENT_CONNECTIONS {
+            return Err(SpikeError::Capacity);
+        }
+        self.unauthenticated.insert(connection_id);
+        Ok(())
+    }
+
+    /// Completes only the matching connection's authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded error for unknown identity or deadline.
+    pub fn finish_authentication(
+        &mut self,
+        connection_id: u64,
+        elapsed: Duration,
+    ) -> Result<(), SpikeError> {
+        if !self.unauthenticated.remove(&connection_id) {
+            return Err(SpikeError::Admission);
+        }
+        if elapsed > CONTENT_HANDSHAKE_DEADLINE {
+            return Err(SpikeError::Deadline);
+        }
+        Ok(())
+    }
+
+    /// Admits one uniquely identified outbound transfer and retains its charge.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded error for duplicate identity or any transfer limit.
+    pub fn start_transfer(
+        &mut self,
+        transfer_id: u64,
+        splint_id: [u8; 16],
         handshake_bytes: usize,
+        handshake_elapsed: Duration,
         encoded_bytes: usize,
     ) -> Result<(), SpikeError> {
-        if handshake_bytes > MAX_CONTENT_HANDSHAKE_BYTES {
+        if self.transfers.contains_key(&transfer_id) {
+            return Err(SpikeError::Admission);
+        }
+        if handshake_elapsed > CONTENT_HANDSHAKE_DEADLINE {
+            return Err(SpikeError::Deadline);
+        }
+        if handshake_bytes > MAX_CONTENT_HANDSHAKE_BYTES || encoded_bytes > MAX_ENCODED_BYTES {
             return Err(SpikeError::EncodedLimit);
         }
         let per_splint = self
-            .transfers_by_splint
-            .get(&splint_id)
-            .copied()
-            .unwrap_or(0);
+            .transfers
+            .values()
+            .filter(|charge| charge.splint_id == splint_id)
+            .count();
         let next_bytes = self
             .encoded_bytes
             .checked_add(encoded_bytes)
             .filter(|bytes| *bytes <= MAX_ENCODED_BYTES_IN_FLIGHT)
             .ok_or(SpikeError::Capacity)?;
-        if self.transfers >= MAX_OUTBOUND_TRANSFERS_PER_DAEMON
+        if self.transfers.len() >= MAX_OUTBOUND_TRANSFERS_PER_DAEMON
             || per_splint >= MAX_OUTBOUND_TRANSFERS_PER_SPLINT
         {
             return Err(SpikeError::Capacity);
         }
-        self.transfers += 1;
+        self.transfers.insert(
+            transfer_id,
+            TransferCharge {
+                splint_id,
+                encoded_bytes,
+            },
+        );
         self.encoded_bytes = next_bytes;
-        self.transfers_by_splint.insert(splint_id, per_splint + 1);
         Ok(())
     }
 
-    pub fn finish_transfer(&mut self, splint_id: [u8; 16], encoded_bytes: usize) {
-        let Some(per_splint) = self.transfers_by_splint.get_mut(&splint_id) else {
-            return;
-        };
-        if *per_splint == 0 {
-            return;
+    /// Releases the internally retained transfer charge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpikeError::Admission`] for unknown or double release.
+    pub fn finish_transfer(&mut self, transfer_id: u64) -> Result<(), SpikeError> {
+        let charge = self
+            .transfers
+            .remove(&transfer_id)
+            .ok_or(SpikeError::Admission)?;
+        self.encoded_bytes -= charge.encoded_bytes;
+        Ok(())
+    }
+}
+
+/// A real owner-only Unix listener used by the transport spike.
+#[derive(Debug)]
+pub struct BoundContentSocket {
+    listener: UnixListener,
+    path: PathBuf,
+}
+
+impl BoundContentSocket {
+    /// Accepts one connection using the production five-second deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded deadline or OS error.
+    pub fn accept(&self) -> Result<UnixStream, SpikeError> {
+        accept_with_deadline(&self.listener, CONTENT_CONNECTION_DEADLINE)
+    }
+}
+
+impl Drop for BoundContentSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Binds and verifies a mode-0600 socket inside an owner-only directory.
+///
+/// # Errors
+///
+/// Returns a bounded permissions or OS error.
+pub fn bind_content_socket(path: &Path) -> Result<BoundContentSocket, SpikeError> {
+    let parent = path.parent().ok_or(SpikeError::Permissions)?;
+    let parent_mode = std::fs::metadata(parent)
+        .map_err(|_| SpikeError::Os)?
+        .permissions()
+        .mode()
+        & 0o777;
+    if parent_mode & 0o077 != 0 {
+        return Err(SpikeError::Permissions);
+    }
+    let listener = UnixListener::bind(path).map_err(|_| SpikeError::Os)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(CONTENT_SOCKET_MODE))
+        .map_err(|_| SpikeError::Os)?;
+    let mode = std::fs::metadata(path)
+        .map_err(|_| SpikeError::Os)?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode != CONTENT_SOCKET_MODE {
+        return Err(SpikeError::Permissions);
+    }
+    Ok(BoundContentSocket {
+        listener,
+        path: path.to_path_buf(),
+    })
+}
+
+fn accept_with_deadline(
+    listener: &UnixListener,
+    deadline: Duration,
+) -> Result<UnixStream, SpikeError> {
+    listener.set_nonblocking(true).map_err(|_| SpikeError::Os)?;
+    let started = Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return Ok(stream),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if started.elapsed() >= deadline {
+                    return Err(SpikeError::Deadline);
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => return Err(SpikeError::Os),
         }
-        *per_splint -= 1;
-        self.transfers -= 1;
-        self.encoded_bytes = self.encoded_bytes.saturating_sub(encoded_bytes);
-        if *per_splint == 0 {
-            self.transfers_by_splint.remove(&splint_id);
+    }
+}
+
+/// Reads a bounded handshake using the production five-second timeout.
+///
+/// # Errors
+///
+/// Returns a bounded framing, deadline, or OS error.
+pub fn read_content_handshake(stream: &UnixStream) -> Result<Vec<u8>, SpikeError> {
+    read_handshake_with_deadline(stream, CONTENT_HANDSHAKE_DEADLINE)
+}
+
+fn read_handshake_with_deadline(
+    stream: &UnixStream,
+    deadline: Duration,
+) -> Result<Vec<u8>, SpikeError> {
+    stream
+        .set_read_timeout(Some(deadline))
+        .map_err(|_| SpikeError::Os)?;
+    let mut stream = stream;
+    let mut bytes = vec![0_u8; MAX_CONTENT_HANDSHAKE_BYTES + 1];
+    match stream.read(&mut bytes) {
+        Ok(0) => Err(SpikeError::Malformed),
+        Ok(length) if length > MAX_CONTENT_HANDSHAKE_BYTES => Err(SpikeError::EncodedLimit),
+        Ok(length) => {
+            bytes.truncate(length);
+            Ok(bytes)
         }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Err(SpikeError::Deadline)
+        }
+        Err(_) => Err(SpikeError::Os),
     }
 }
 
@@ -615,7 +1141,7 @@ pub fn pass_one_fd(
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write as _, os::unix::net::UnixStream};
+    use std::{io::Write as _, net::Shutdown, os::unix::net::UnixStream};
 
     use super::*;
 
@@ -643,6 +1169,38 @@ mod tests {
             }
         );
         assert_eq!(decode_png(&encoded, true), Err(SpikeError::Cancelled));
+        let mut conversion_checks = 0;
+        assert_eq!(
+            decode_png_with_cancel(&encoded, || {
+                conversion_checks += 1;
+                conversion_checks > 1
+            }),
+            Err(SpikeError::Cancelled)
+        );
+
+        let mut random = 1_u32;
+        let mut noisy_pixels = vec![0_u8; 128 * 128 * 4];
+        for byte in &mut noisy_pixels {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            *byte = random.to_le_bytes()[0];
+        }
+        let noisy = png_rgba(128, 128, &noisy_pixels);
+        let mut read_checks = 0;
+        assert_eq!(
+            decode_png_with_cancel(&noisy, || {
+                read_checks += 1;
+                read_checks > 2
+            }),
+            Err(SpikeError::Cancelled)
+        );
+
+        let compressed = png_rgba(256, 256, &vec![0_u8; 256 * 256 * 4]);
+        assert_eq!(
+            decode_png(&compressed, false),
+            Err(SpikeError::ExpansionRatio)
+        );
         let invalid = png_rgba(
             MAX_DIMENSION + 1,
             1,
@@ -731,56 +1289,296 @@ mod tests {
     }
 
     #[test]
-    fn content_socket_admission_enforces_every_boundary_and_recovers() {
-        let mut admission = ContentAdmission::default();
-        for _ in 0..MAX_UNAUTHENTICATED_CONTENT_CONNECTIONS {
-            admission.open_unauthenticated().unwrap();
+    fn semantic_admission_enforces_identity_counts_uploads_and_work() {
+        let mut admission = SemanticAdmission::default();
+        for id in 0..MAX_CONTENTS_PER_SPLINT {
+            admission.admit_content(u64::try_from(id).unwrap()).unwrap();
         }
-        assert_eq!(admission.open_unauthenticated(), Err(SpikeError::Capacity));
-        admission.finish_authentication();
-        admission.open_unauthenticated().unwrap();
+        assert_eq!(admission.admit_content(0), Err(SpikeError::Admission));
+        assert_eq!(admission.admit_content(1000), Err(SpikeError::Capacity));
+        admission.release_content(0).unwrap();
+        assert_eq!(admission.release_content(0), Err(SpikeError::Admission));
+        admission.admit_content(1000).unwrap();
 
+        for id in 0..MAX_PLACEMENTS_PER_SPLINT {
+            admission
+                .admit_placement(u64::try_from(id).unwrap())
+                .unwrap();
+        }
+        assert_eq!(admission.admit_placement(0), Err(SpikeError::Admission));
+        assert_eq!(admission.admit_placement(1000), Err(SpikeError::Capacity));
+        admission.release_placement(0).unwrap();
+        assert_eq!(admission.release_placement(0), Err(SpikeError::Admission));
+        admission.admit_placement(1000).unwrap();
+
+        admission.begin_inbound_upload(7).unwrap();
+        assert_eq!(admission.begin_inbound_upload(8), Err(SpikeError::Capacity));
         assert_eq!(
-            admission.start_transfer([1; 16], MAX_CONTENT_HANDSHAKE_BYTES + 1, 1),
+            admission.finish_inbound_upload(8),
+            Err(SpikeError::Admission)
+        );
+        admission.finish_inbound_upload(7).unwrap();
+        assert_eq!(
+            admission.finish_inbound_upload(7),
+            Err(SpikeError::Admission)
+        );
+
+        SemanticAdmission::admit_command(
+            MAX_KITTY_CONTROL_BYTES,
+            MAX_REPLY_TEXT_BYTES,
+            MAX_PIXEL_WRITES_PER_COMMAND,
+        )
+        .unwrap();
+        assert_eq!(
+            SemanticAdmission::admit_command(MAX_KITTY_CONTROL_BYTES + 1, 0, 0),
             Err(SpikeError::EncodedLimit)
         );
-        admission
-            .start_transfer([1; 16], MAX_CONTENT_HANDSHAKE_BYTES, MAX_ENCODED_BYTES)
-            .unwrap();
-        admission
-            .start_transfer([1; 16], 1, MAX_ENCODED_BYTES)
-            .unwrap();
         assert_eq!(
-            admission.start_transfer([1; 16], 1, 0),
+            SemanticAdmission::admit_command(0, MAX_REPLY_TEXT_BYTES + 1, 0),
+            Err(SpikeError::EncodedLimit)
+        );
+        assert_eq!(
+            SemanticAdmission::admit_command(0, 0, MAX_PIXEL_WRITES_PER_COMMAND + 1),
+            Err(SpikeError::DecodedLimit)
+        );
+    }
+
+    #[test]
+    fn authoritative_cache_and_palette_admission_are_exact_and_recoverable() {
+        let mut authoritative = AuthoritativeAdmission::default();
+        authoritative.admit([1; 16], 1, MAX_DECODED_BYTES).unwrap();
+        authoritative.admit([1; 16], 2, MAX_DECODED_BYTES).unwrap();
+        assert_eq!(
+            authoritative.admit([1; 16], 3, 1),
             Err(SpikeError::Capacity)
         );
-        admission.finish_transfer([1; 16], MAX_ENCODED_BYTES);
-        admission.finish_transfer([1; 16], MAX_ENCODED_BYTES);
+        authoritative.release([1; 16], 1).unwrap();
+        assert_eq!(
+            authoritative.release([1; 16], 1),
+            Err(SpikeError::Admission)
+        );
+        authoritative.admit([1; 16], 3, MAX_DECODED_BYTES).unwrap();
 
-        for splint in 1..=MAX_OUTBOUND_TRANSFERS_PER_DAEMON {
+        let mut daemon = AuthoritativeAdmission::default();
+        for (owner, first_id) in [(1_u8, 10_u64), (2, 20)] {
+            daemon
+                .admit([owner; 16], first_id, MAX_DECODED_BYTES)
+                .unwrap();
+            daemon
+                .admit([owner; 16], first_id + 1, MAX_DECODED_BYTES)
+                .unwrap();
+        }
+        assert_eq!(daemon.admit([3; 16], 30, 1), Err(SpikeError::Capacity));
+        daemon.release([1; 16], 10).unwrap();
+        daemon.admit([3; 16], 30, MAX_DECODED_BYTES).unwrap();
+
+        let mut count = AuthoritativeAdmission::default();
+        for content_id in 0..MAX_CONTENTS_PER_SPLINT {
+            count
+                .admit([4; 16], u64::try_from(content_id).unwrap(), 0)
+                .unwrap();
+        }
+        assert_eq!(count.admit([4; 16], 1000, 0), Err(SpikeError::Capacity));
+
+        let mut cache = ClientCacheAdmission::default();
+        cache
+            .admit(ClientCacheKind::Source, 1, MAX_CLIENT_SOURCE_CACHE_BYTES)
+            .unwrap();
+        assert_eq!(
+            cache.admit(ClientCacheKind::Source, 2, 1),
+            Err(SpikeError::Capacity)
+        );
+        cache
+            .admit(ClientCacheKind::Scaled, 1, MAX_CLIENT_SCALED_CACHE_BYTES)
+            .unwrap();
+        assert_eq!(
+            cache.admit(ClientCacheKind::Scaled, 1, 0),
+            Err(SpikeError::Admission)
+        );
+        cache.release(ClientCacheKind::Source, 1).unwrap();
+        assert_eq!(
+            cache.release(ClientCacheKind::Source, 1),
+            Err(SpikeError::Admission)
+        );
+        cache
+            .admit(ClientCacheKind::Source, 2, MAX_CLIENT_SOURCE_CACHE_BYTES)
+            .unwrap();
+
+        let mut palette = SixelPaletteAdmission::default();
+        palette.define(1023).unwrap();
+        palette.define(1023).unwrap();
+        assert_eq!(palette.define(1024), Err(SpikeError::Capacity));
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one stateful matrix proves transfer identity, caps, and exact recovery"
+    )]
+    fn content_socket_admission_enforces_identity_boundaries_and_recovers() {
+        let mut admission = ContentAdmission::default();
+        assert_eq!(
+            admission.open_unauthenticated(1, 0o644, Duration::ZERO),
+            Err(SpikeError::Permissions)
+        );
+        assert_eq!(
+            admission.open_unauthenticated(
+                1,
+                CONTENT_SOCKET_MODE,
+                CONTENT_CONNECTION_DEADLINE + Duration::from_millis(1),
+            ),
+            Err(SpikeError::Deadline)
+        );
+        for id in 0..MAX_UNAUTHENTICATED_CONTENT_CONNECTIONS {
             admission
-                .start_transfer([u8::try_from(splint).unwrap(); 16], 1, 0)
+                .open_unauthenticated(
+                    u64::try_from(id).unwrap(),
+                    CONTENT_SOCKET_MODE,
+                    CONTENT_CONNECTION_DEADLINE,
+                )
                 .unwrap();
         }
         assert_eq!(
-            admission.start_transfer([9; 16], 1, 0),
+            admission.open_unauthenticated(0, CONTENT_SOCKET_MODE, Duration::ZERO),
+            Err(SpikeError::Admission)
+        );
+        assert_eq!(
+            admission.open_unauthenticated(100, CONTENT_SOCKET_MODE, Duration::ZERO),
             Err(SpikeError::Capacity)
         );
-        admission.finish_transfer([1; 16], 0);
-        admission.start_transfer([9; 16], 1, 0).unwrap();
-        for splint in [2_u8, 3, 4, 9] {
-            admission.finish_transfer([splint; 16], 0);
-        }
-
+        assert_eq!(
+            admission
+                .finish_authentication(0, CONTENT_HANDSHAKE_DEADLINE + Duration::from_millis(1)),
+            Err(SpikeError::Deadline)
+        );
+        assert_eq!(
+            admission.finish_authentication(0, Duration::ZERO),
+            Err(SpikeError::Admission)
+        );
         admission
-            .start_transfer([1; 16], 1, MAX_ENCODED_BYTES_IN_FLIGHT)
+            .open_unauthenticated(100, CONTENT_SOCKET_MODE, Duration::ZERO)
+            .unwrap();
+        admission
+            .finish_authentication(100, CONTENT_HANDSHAKE_DEADLINE)
+            .unwrap();
+
+        assert_eq!(
+            admission.start_transfer(
+                1,
+                [1; 16],
+                MAX_CONTENT_HANDSHAKE_BYTES + 1,
+                Duration::ZERO,
+                1,
+            ),
+            Err(SpikeError::EncodedLimit)
+        );
+        assert_eq!(
+            admission.start_transfer(
+                1,
+                [1; 16],
+                1,
+                CONTENT_HANDSHAKE_DEADLINE + Duration::from_millis(1),
+                1,
+            ),
+            Err(SpikeError::Deadline)
+        );
+        assert_eq!(
+            admission.start_transfer(1, [1; 16], 1, Duration::ZERO, MAX_ENCODED_BYTES + 1,),
+            Err(SpikeError::EncodedLimit)
+        );
+        admission
+            .start_transfer(
+                1,
+                [1; 16],
+                MAX_CONTENT_HANDSHAKE_BYTES,
+                CONTENT_HANDSHAKE_DEADLINE,
+                MAX_ENCODED_BYTES,
+            )
+            .unwrap();
+        admission
+            .start_transfer(2, [1; 16], 1, Duration::ZERO, MAX_ENCODED_BYTES)
             .unwrap();
         assert_eq!(
-            admission.start_transfer([2; 16], 1, 1),
+            admission.start_transfer(1, [2; 16], 1, Duration::ZERO, 0),
+            Err(SpikeError::Admission)
+        );
+        assert_eq!(
+            admission.start_transfer(3, [1; 16], 1, Duration::ZERO, 0),
             Err(SpikeError::Capacity)
         );
-        admission.finish_transfer([1; 16], MAX_ENCODED_BYTES_IN_FLIGHT);
-        admission.start_transfer([2; 16], 1, 1).unwrap();
+        assert_eq!(
+            admission.start_transfer(3, [2; 16], 1, Duration::ZERO, 1),
+            Err(SpikeError::Capacity)
+        );
+        admission.finish_transfer(1).unwrap();
+        assert_eq!(admission.finish_transfer(1), Err(SpikeError::Admission));
+        admission
+            .start_transfer(3, [2; 16], 1, Duration::ZERO, MAX_ENCODED_BYTES)
+            .unwrap();
+        admission.finish_transfer(2).unwrap();
+        admission.finish_transfer(3).unwrap();
+
+        for transfer_id in 0..MAX_OUTBOUND_TRANSFERS_PER_DAEMON {
+            admission
+                .start_transfer(
+                    u64::try_from(transfer_id).unwrap(),
+                    [u8::try_from(transfer_id).unwrap(); 16],
+                    1,
+                    Duration::ZERO,
+                    0,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            admission.start_transfer(99, [9; 16], 1, Duration::ZERO, 0),
+            Err(SpikeError::Capacity)
+        );
+    }
+
+    #[test]
+    fn content_socket_uses_real_permissions_and_timer_deadlines() {
+        let mut random = [0_u8; 8];
+        assert_eq!(
+            getrandom(&mut random, GetRandomFlags::empty()).unwrap(),
+            random.len()
+        );
+        let directory = std::env::temp_dir().join(format!(
+            "splinterm-image-spike-{}-{}",
+            std::process::id(),
+            u64::from_le_bytes(random)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.join("content.sock");
+        {
+            let socket = bind_content_socket(&path).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                CONTENT_SOCKET_MODE
+            );
+            assert!(matches!(
+                accept_with_deadline(&socket.listener, Duration::from_millis(5)),
+                Err(SpikeError::Deadline)
+            ));
+            let client = UnixStream::connect(&path).unwrap();
+            let server = accept_with_deadline(&socket.listener, Duration::from_millis(20)).unwrap();
+            client.shutdown(Shutdown::Both).unwrap();
+            server.shutdown(Shutdown::Both).unwrap();
+        }
+        std::fs::remove_dir(&directory).unwrap();
+
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        assert_eq!(
+            read_handshake_with_deadline(&receiver, Duration::from_millis(5)),
+            Err(SpikeError::Deadline)
+        );
+        sender
+            .write_all(&vec![1_u8; MAX_CONTENT_HANDSHAKE_BYTES + 1])
+            .unwrap();
+        assert_eq!(
+            read_handshake_with_deadline(&receiver, Duration::from_millis(20)),
+            Err(SpikeError::EncodedLimit)
+        );
     }
 
     #[test]

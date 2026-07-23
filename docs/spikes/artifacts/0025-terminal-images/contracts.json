@@ -5,6 +5,9 @@
     "checkout": "/home/oldjobobo/Playground/foot",
     "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
     "dirty": false,
+    "oracle_binary_sha256": "c27f2e3248077f424d2a879a0cade241b3e653bc6771b6d4b3d3901d19270297",
+    "oracle_provenance": "tools/foot-oracle/provenance.json",
+    "oracle_provenance_sha256": "30bbfa481494eb107125901b059e51e96a6870a94dbb71bb0b1b3e23898c8a3c",
     "sources": {
       "dcs.c": "4110904e6a7bac8faa8db6d7b9bb76fcd927a6cf2490dd95ad66478b2ecc3ef2",
       "grid.c": "de9524a512779457f8a690b6e025b6a4bb13323ee0eaed3f27c3ff2151afac20",
