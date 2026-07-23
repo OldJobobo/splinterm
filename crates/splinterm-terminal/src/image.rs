@@ -464,6 +464,73 @@ impl ImagePlane {
         self.reclaim_unplaced_while_placed();
     }
 
+    /// Rebinds placements whose grid rows received new stable identities.
+    pub fn remap_anchors(
+        &mut self,
+        screen: ActiveScreen,
+        replacements: &BTreeMap<u64, u64>,
+    ) -> bool {
+        let mut changed = false;
+        for placement in self.catalog_mut(screen).placements.values_mut() {
+            if let Some(replacement) = replacements.get(&placement.row_id) {
+                placement.row_id = *replacement;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Removes text-overwrite placements intersecting a cell rectangle.
+    pub fn remove_text_overlaps(
+        &mut self,
+        screen: ActiveScreen,
+        row_order: &[u64],
+        start_row: usize,
+        end_row: usize,
+        start_column: usize,
+        end_column: usize,
+    ) -> bool {
+        if start_row >= end_row || start_column >= end_column {
+            return false;
+        }
+        let row_positions: BTreeMap<_, _> = row_order
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        let removed: Vec<_> = self
+            .catalog(screen)
+            .placements
+            .values()
+            .filter(|placement| {
+                if placement.erase_policy != ImageErasePolicy::TextOverwrite {
+                    return false;
+                }
+                let Some(anchor_row) = row_positions.get(&placement.row_id).copied() else {
+                    return false;
+                };
+                let placement_end_row = anchor_row.saturating_add(placement.destination.rows);
+                let placement_end_column = placement
+                    .column
+                    .saturating_add(placement.destination.columns);
+                anchor_row < end_row
+                    && placement_end_row > start_row
+                    && placement.column < end_column
+                    && placement_end_column > start_column
+            })
+            .map(|placement| placement.id)
+            .collect();
+        for id in &removed {
+            self.catalog_mut(screen).placements.remove(id);
+            self.metrics.placement_count -= 1;
+        }
+        if !removed.is_empty() {
+            self.reclaim_unplaced_while_placed();
+        }
+        !removed.is_empty()
+    }
+
     #[must_use]
     pub fn content_metadata(
         &self,
@@ -741,6 +808,34 @@ mod tests {
         assert!(plane.content(ActiveScreen::Normal, sixel).is_none());
         assert!(plane.content(ActiveScreen::Normal, kitty).is_some());
         assert_eq!(plane.placements(ActiveScreen::Normal).count(), 1);
+    }
+
+    #[test]
+    fn text_overlap_removes_sixel_policy_but_preserves_explicit_policy() {
+        let mut plane = ImagePlane::default();
+        let id = plane
+            .insert_content(
+                ActiveScreen::Normal,
+                content(&[0, 0, 0, 255], ImageRetention::ExplicitDelete),
+            )
+            .unwrap();
+        let removable = plane
+            .insert_placement(ActiveScreen::Normal, placement(id, 10, 0))
+            .unwrap();
+        let mut explicit = placement(id, 10, 1);
+        explicit.erase_policy = ImageErasePolicy::ExplicitDelete;
+        let retained = plane
+            .insert_placement(ActiveScreen::Normal, explicit)
+            .unwrap();
+        assert!(plane.remove_text_overlaps(ActiveScreen::Normal, &[10, 11], 0, 1, 0, 1,));
+        assert_eq!(
+            plane
+                .placements(ActiveScreen::Normal)
+                .map(|placement| placement.id)
+                .collect::<Vec<_>>(),
+            vec![retained]
+        );
+        assert_ne!(removable, retained);
     }
 
     #[test]

@@ -39,6 +39,23 @@ fn placement(content_id: splinterm_terminal::ImageContentId, row_id: u64) -> New
     }
 }
 
+fn insert_at_cursor(
+    terminal: &mut Terminal,
+    retention: ImageRetention,
+    erase_policy: ImageErasePolicy,
+) -> (
+    splinterm_terminal::ImageContentId,
+    splinterm_terminal::ImagePlacementId,
+) {
+    let content_id = terminal
+        .insert_image_content(content(&[0, 0, 255, 255], retention))
+        .unwrap();
+    let mut input = placement(content_id, terminal.cursor_row_id());
+    input.erase_policy = erase_policy;
+    let placement_id = terminal.insert_image_placement(input).unwrap();
+    (content_id, placement_id)
+}
+
 #[test]
 fn terminal_snapshots_reference_images_without_pixel_bodies() {
     let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
@@ -75,6 +92,27 @@ fn terminal_snapshots_reference_images_without_pixel_bodies() {
                     }
             }))
     );
+}
+
+#[test]
+fn bounded_image_update_history_requires_resnapshot_after_a_gap() {
+    let mut terminal = Terminal::new(
+        4,
+        2,
+        TerminalConfig {
+            update_history_limit: 1,
+            ..TerminalConfig::default()
+        },
+    );
+    let base = terminal.revision();
+    insert_at_cursor(
+        &mut terminal,
+        ImageRetention::ExplicitDelete,
+        ImageErasePolicy::ExplicitDelete,
+    );
+    let gap = terminal.updates_since(base).unwrap_err();
+    assert_eq!(gap.requested(), base);
+    assert_eq!(gap.current(), terminal.revision());
 }
 
 #[test]
@@ -128,4 +166,169 @@ fn normal_and_fresh_alternate_image_catalogs_are_isolated() {
     let fresh_alternate = terminal.snapshot(SnapshotRequest::default());
     assert_eq!(fresh_alternate.image_contents().count(), 0);
     assert_eq!(fresh_alternate.image_placements().count(), 0);
+}
+
+#[test]
+fn text_overwrite_and_erase_remove_only_sixel_policy_placements() {
+    let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+    insert_at_cursor(
+        &mut terminal,
+        ImageRetention::WhilePlaced,
+        ImageErasePolicy::TextOverwrite,
+    );
+    terminal.advance(b"x");
+    let overwritten = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(overwritten.image_contents().count(), 0);
+    assert_eq!(overwritten.image_placements().count(), 0);
+
+    let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+    insert_at_cursor(
+        &mut terminal,
+        ImageRetention::ExplicitDelete,
+        ImageErasePolicy::ExplicitDelete,
+    );
+    terminal.advance(b"x\x1b[2K");
+    let explicit = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(explicit.image_contents().count(), 1);
+    assert_eq!(explicit.image_placements().count(), 1);
+
+    let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+    insert_at_cursor(
+        &mut terminal,
+        ImageRetention::WhilePlaced,
+        ImageErasePolicy::TextOverwrite,
+    );
+    terminal.advance(b"\x1b[2K");
+    assert_eq!(
+        terminal
+            .snapshot(SnapshotRequest::default())
+            .image_placements()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn character_edits_overwrite_sixel_policy_placements() {
+    for command in [
+        b"\x1b[@".as_slice(),
+        b"\x1b[P".as_slice(),
+        b"\x1b[X".as_slice(),
+    ] {
+        let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+        insert_at_cursor(
+            &mut terminal,
+            ImageRetention::WhilePlaced,
+            ImageErasePolicy::TextOverwrite,
+        );
+        terminal.advance(command);
+        assert_eq!(terminal.image_metrics().placement_count, 0);
+        assert_eq!(terminal.image_metrics().content_count, 0);
+    }
+}
+
+#[test]
+fn line_insertion_and_deletion_follow_stable_row_anchors() {
+    let mut terminal = Terminal::new(4, 3, TerminalConfig::default());
+    terminal.advance(b"\x1b[2;1H");
+    insert_at_cursor(
+        &mut terminal,
+        ImageRetention::WhilePlaced,
+        ImageErasePolicy::TextOverwrite,
+    );
+    let anchor = terminal
+        .snapshot(SnapshotRequest::default())
+        .image_placements()
+        .next()
+        .unwrap()
+        .row_id;
+    terminal.advance(b"\x1b[L");
+    let inserted = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(inserted.image_placements().next().unwrap().row_id, anchor);
+    assert!(inserted.visible_rows().any(|row| row.id() == Some(anchor)));
+    terminal.advance(b"\x1b[M");
+    let deleted = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(deleted.image_placements().next().unwrap().row_id, anchor);
+    assert!(deleted.visible_rows().any(|row| row.id() == Some(anchor)));
+}
+
+#[test]
+fn history_trim_and_clear_prune_stale_anchors_and_reclaim_sixel_content() {
+    let mut terminal = Terminal::new(
+        2,
+        2,
+        TerminalConfig {
+            scrollback_lines: 2,
+            ..TerminalConfig::default()
+        },
+    );
+    insert_at_cursor(
+        &mut terminal,
+        ImageRetention::WhilePlaced,
+        ImageErasePolicy::TextOverwrite,
+    );
+    let original_anchor = terminal
+        .snapshot(SnapshotRequest::default())
+        .image_placements()
+        .next()
+        .unwrap()
+        .row_id;
+    let base = terminal.revision();
+    terminal.advance(b"\r\n\r\n");
+    let scrolled = terminal.snapshot(SnapshotRequest::default());
+    let placement = scrolled.image_placements().next().unwrap();
+    assert_ne!(placement.row_id, original_anchor);
+    assert!(
+        terminal
+            .updates_since(base)
+            .unwrap()
+            .updates()
+            .any(|update| {
+                update.damage().any(|damage| {
+                    *damage
+                        == TerminalDamage::Images {
+                            screen: ActiveScreen::Normal,
+                        }
+                })
+            })
+    );
+    terminal.advance(b"\x1b[3J");
+    assert_eq!(
+        terminal
+            .snapshot(SnapshotRequest::default())
+            .image_placements()
+            .count(),
+        0
+    );
+    assert_eq!(terminal.image_metrics().content_count, 0);
+
+    insert_at_cursor(
+        &mut terminal,
+        ImageRetention::WhilePlaced,
+        ImageErasePolicy::TextOverwrite,
+    );
+    for _ in 0..10 {
+        terminal.advance(b"\r\n");
+    }
+    assert_eq!(terminal.image_metrics().placement_count, 0);
+    assert_eq!(terminal.image_metrics().content_count, 0);
+}
+
+#[test]
+fn resize_and_reset_apply_explicit_image_lifecycle_rules() {
+    let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+    insert_at_cursor(
+        &mut terminal,
+        ImageRetention::ExplicitDelete,
+        ImageErasePolicy::ExplicitDelete,
+    );
+    terminal.resize(3, 2);
+    let resized = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(resized.image_placements().count(), 0);
+    assert_eq!(resized.image_contents().count(), 1);
+
+    terminal.advance(b"\x1bc");
+    let reset = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(reset.image_placements().count(), 0);
+    assert_eq!(reset.image_contents().count(), 0);
 }

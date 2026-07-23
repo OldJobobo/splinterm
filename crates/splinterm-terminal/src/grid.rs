@@ -238,6 +238,23 @@ impl Grid {
             .collect()
     }
 
+    pub(crate) fn screen_row_ids(&self) -> Vec<u64> {
+        (0..self.screen_rows)
+            .map(|row| {
+                self.row_id(Self::signed_row(row))
+                    .expect("every live-screen row is allocated")
+            })
+            .collect()
+    }
+
+    pub(crate) fn newest_scrollback_row_ids(&self, maximum_rows: usize) -> Vec<u64> {
+        self.snapshot_scrollback_rows(maximum_rows)
+            .0
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     /// Returns an allocated mutable row without allocating it.
     pub fn row_mut(&mut self, relative_row: i32) -> Option<&mut Row> {
         let index = self.absolute_index(relative_row);

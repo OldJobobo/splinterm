@@ -5,7 +5,7 @@
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -62,6 +62,7 @@ struct ActionBaseline {
     title: String,
     palette: [u32; 256],
     default_colors: [u32; 3],
+    image_metrics: ImageMetrics,
     row_before: Option<(i32, crate::Row)>,
     visible_before: Option<Vec<crate::Row>>,
     scrollback_rows: Option<usize>,
@@ -152,7 +153,7 @@ impl Terminal {
             modes: TerminalModes::default(),
             tab_stops: Vec::new(),
             composed: ComposedTable::new(config.composed_limit),
-            images: ImagePlane::default(),
+            images: ImagePlane::new(config.image_limits),
             title: String::new(),
             palette,
             initial_palette: palette,
@@ -212,6 +213,11 @@ impl Terminal {
             .resize_with_reflow(normal_capacity, columns, rows, |key| composed.width(key));
         self.alternate
             .resize_without_reflow(alternate_capacity, columns, rows);
+        let image_metrics = self.images.metrics();
+        self.images
+            .retain_anchors(ActiveScreen::Normal, &self.normal.retained_row_ids());
+        self.images
+            .retain_anchors(ActiveScreen::Alternate, &self.alternate.retained_row_ids());
         self.scroll_region = ScrollRegion::new(0, i32::try_from(rows).expect("rows fit in i32"));
         self.reset_tab_stops(columns);
         let change = self
@@ -222,6 +228,11 @@ impl Terminal {
         change.push(TerminalDamage::Dimensions);
         change.push(TerminalDamage::Viewport);
         change.push(TerminalDamage::Scrollback);
+        if self.images.metrics() != image_metrics {
+            change.push(TerminalDamage::Images {
+                screen: self.active,
+            });
+        }
         self.commit_change();
     }
 
@@ -580,11 +591,67 @@ impl Terminal {
         }
     }
 
+    fn prune_active_image_anchors(&mut self) {
+        let row_ids = self.grid().retained_row_ids();
+        self.images.retain_anchors(self.active, &row_ids);
+    }
+
+    fn overwrite_image_cells(
+        &mut self,
+        start_row: usize,
+        end_row: usize,
+        start_column: usize,
+        end_column: usize,
+    ) {
+        let row_ids = self.grid().screen_row_ids();
+        self.images.remove_text_overlaps(
+            self.active,
+            &row_ids,
+            start_row,
+            end_row,
+            start_column,
+            end_column,
+        );
+    }
+
+    fn scroll_grid(
+        &mut self,
+        direction: ScrollDirection,
+        region: ScrollRegion,
+        rows: usize,
+        background: Color,
+    ) {
+        let before = self.grid().screen_row_ids();
+        let result = self.grid_mut().scroll(direction, region, rows, background);
+        if self.active == ActiveScreen::Normal
+            && direction == ScrollDirection::Forward
+            && region.start() == 0
+            && usize::try_from(region.end()).ok() == Some(before.len())
+            && result.rows > 0
+        {
+            let history = self.normal.newest_scrollback_row_ids(result.rows);
+            let replacements: BTreeMap<_, _> =
+                before.into_iter().take(result.rows).zip(history).collect();
+            if self
+                .images
+                .remap_anchors(ActiveScreen::Normal, &replacements)
+            {
+                self.current_change
+                    .as_mut()
+                    .expect("scroll action has an active transaction")
+                    .push(TerminalDamage::Images {
+                        screen: ActiveScreen::Normal,
+                    });
+            }
+        }
+    }
+
     fn dispatch(&mut self, action: Action) {
         let hint = ActionHint::from_action(&action);
         let baseline = self.action_baseline(hint);
         self.current_change = Some(ChangeSet::default());
         self.dispatch_inner(action);
+        self.prune_active_image_anchors();
         self.record_action_changes(&baseline, hint);
         self.commit_change();
     }
@@ -659,6 +726,7 @@ impl Terminal {
             title: self.title.clone(),
             palette: self.palette,
             default_colors: self.default_colors,
+            image_metrics: self.images.metrics(),
             row_before,
             visible_before,
             scrollback_rows,
@@ -819,6 +887,11 @@ impl Terminal {
         if self.default_colors != before.default_colors {
             change.push(TerminalDamage::Palette { index: None });
         }
+        if self.images.metrics() != before.image_metrics {
+            change.push(TerminalDamage::Images {
+                screen: self.active,
+            });
+        }
     }
 
     fn commit_image_change(&mut self) {
@@ -882,6 +955,8 @@ impl Terminal {
         let mut write_width = width;
         if column + width > columns && self.modes.auto_margin {
             let row_number = cursor.position().row;
+            let row_index = usize::try_from(row_number).expect("cursor row is valid");
+            self.overwrite_image_cells(row_index, row_index + 1, column, columns);
             for pad in column..columns {
                 self.grid_mut().row_mut(row_number).expect("visible row")[pad]
                     .set_content(CellContent::Spacer(0));
@@ -903,6 +978,13 @@ impl Terminal {
         }
 
         let row_number = cursor.position().row;
+        let row_index = usize::try_from(row_number).expect("cursor row is valid");
+        let overwrite_end = if self.modes.insert {
+            columns
+        } else {
+            column + write_width
+        };
+        self.overwrite_image_cells(row_index, row_index + 1, column, overwrite_end);
         if self.modes.insert {
             let background = self.attributes.background();
             self.grid_mut()
@@ -1011,8 +1093,7 @@ impl Terminal {
         if row == self.scroll_region.end() - 1 {
             let background = self.attributes.background();
             let region = self.scroll_region;
-            self.grid_mut()
-                .scroll(ScrollDirection::Forward, region, 1, background);
+            self.scroll_grid(ScrollDirection::Forward, region, 1, background);
         } else {
             let bottom = i32::try_from(self.grid().screen_rows() - 1).unwrap();
             cursor.set_position(Coordinate::new(
@@ -1029,8 +1110,7 @@ impl Terminal {
         if cursor.position().row == self.scroll_region.start() {
             let background = self.attributes.background();
             let region = self.scroll_region;
-            self.grid_mut()
-                .scroll(ScrollDirection::Reverse, region, 1, background);
+            self.scroll_grid(ScrollDirection::Reverse, region, 1, background);
         } else {
             cursor.set_position(Coordinate::new(
                 cursor.position().column,
@@ -1237,6 +1317,8 @@ impl Terminal {
             2 => 0..columns,
             _ => return,
         };
+        let row = usize::try_from(cursor.row).expect("cursor row is valid");
+        self.overwrite_image_cells(row, row + 1, range.start, range.end);
         self.grid_mut()
             .row_mut(cursor.row)
             .expect("visible row")
@@ -1257,6 +1339,8 @@ impl Terminal {
         let background = self.attributes.background();
         match mode {
             0 => {
+                self.overwrite_image_cells(row, row + 1, column, columns);
+                self.overwrite_image_cells(row + 1, rows, 0, columns);
                 self.grid_mut()
                     .row_mut(cursor.row)
                     .unwrap()
@@ -1269,6 +1353,8 @@ impl Terminal {
                 }
             }
             1 => {
+                self.overwrite_image_cells(0, row, 0, columns);
+                self.overwrite_image_cells(row, row + 1, 0, column + 1);
                 for current in 0..row {
                     self.grid_mut()
                         .row_mut(i32::try_from(current).unwrap())
@@ -1281,6 +1367,7 @@ impl Terminal {
                     .erase(0..column + 1, background);
             }
             2 => {
+                self.overwrite_image_cells(0, rows, 0, columns);
                 for current in 0..rows {
                     self.grid_mut()
                         .row_mut(i32::try_from(current).unwrap())
@@ -1296,9 +1383,12 @@ impl Terminal {
     fn insert_characters(&mut self, param: Param) {
         self.clear_deferred_wrap(false);
         let cursor = self.grid().cursor().position();
+        let row = usize::try_from(cursor.row).expect("cursor row is valid");
+        let column = usize::try_from(cursor.column).expect("cursor column is valid");
+        self.overwrite_image_cells(row, row + 1, column, self.grid().columns());
         let background = self.attributes.background();
         self.grid_mut().row_mut(cursor.row).unwrap().insert_cells(
-            usize::try_from(cursor.column).unwrap(),
+            column,
             param_usize(param),
             background,
         );
@@ -1307,9 +1397,12 @@ impl Terminal {
     fn delete_characters(&mut self, param: Param) {
         self.clear_deferred_wrap(false);
         let cursor = self.grid().cursor().position();
+        let row = usize::try_from(cursor.row).expect("cursor row is valid");
+        let column = usize::try_from(cursor.column).expect("cursor column is valid");
+        self.overwrite_image_cells(row, row + 1, column, self.grid().columns());
         let background = self.attributes.background();
         self.grid_mut().row_mut(cursor.row).unwrap().delete_cells(
-            usize::try_from(cursor.column).unwrap(),
+            column,
             param_usize(param),
             background,
         );
@@ -1322,6 +1415,12 @@ impl Terminal {
         let end = start
             .saturating_add(param_usize(param))
             .min(self.grid().columns());
+        self.overwrite_image_cells(
+            usize::try_from(cursor.row).expect("cursor row is valid"),
+            usize::try_from(cursor.row).expect("cursor row is valid") + 1,
+            start,
+            end,
+        );
         let background = self.attributes.background();
         self.grid_mut()
             .row_mut(cursor.row)
@@ -1337,8 +1436,7 @@ impl Terminal {
             let count =
                 param_usize(param).min(usize::try_from(region.end() - region.start()).unwrap());
             let background = self.attributes.background();
-            self.grid_mut()
-                .scroll(ScrollDirection::Reverse, region, count, background);
+            self.scroll_grid(ScrollDirection::Reverse, region, count, background);
         }
     }
 
@@ -1350,8 +1448,7 @@ impl Terminal {
             let count =
                 param_usize(param).min(usize::try_from(region.end() - region.start()).unwrap());
             let background = self.attributes.background();
-            self.grid_mut()
-                .scroll(ScrollDirection::Forward, region, count, background);
+            self.scroll_grid(ScrollDirection::Forward, region, count, background);
         }
     }
 
@@ -1361,7 +1458,7 @@ impl Terminal {
         let count = param_usize(param).min(height);
         let background = self.attributes.background();
         let region = self.scroll_region;
-        self.grid_mut().scroll(direction, region, count, background);
+        self.scroll_grid(direction, region, count, background);
     }
 
     fn set_scroll_region(&mut self, params: &Params) {
