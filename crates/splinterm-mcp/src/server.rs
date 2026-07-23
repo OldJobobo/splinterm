@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -13,7 +13,7 @@ use rmcp::{
         ClientRequest, ErrorCode, Implementation, InitializeRequestParams, InitializeResult,
         ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
         ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, Resource, ResourceTemplate,
-        ServerCapabilities, ServerResult, Tool,
+        ServerCapabilities, ServerResult, SubscribeRequestParams, Tool, UnsubscribeRequestParams,
     },
     service::{NotificationContext, RequestContext, Service},
 };
@@ -21,16 +21,17 @@ use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::{
+    control::ControlRegistry,
     dispatch,
     dto::ToolFailure,
     limits::{AdmissionError, AdmissionGate, MAXIMUM_TOOL_RESPONSE_BYTES},
+    resources::ResourceRegistry,
     tools,
 };
 
 const TOPOLOGY_URI: &str = "splinterm://topology";
 const TERMINAL_TEMPLATE: &str = "splinterm://splints/{splint_id}/terminal";
 const CONTROL_TEMPLATE: &str = "splinterm://splints/{splint_id}/control";
-const RESOURCE_UNAVAILABLE: &str = "resource dispatch is not implemented in this server slice";
 
 #[derive(Debug, Default)]
 struct Lifecycle {
@@ -43,13 +44,21 @@ struct Lifecycle {
 #[derive(Debug, Clone)]
 pub struct SplintermServer {
     lifecycle: Arc<Lifecycle>,
+    cursor_registry: Arc<Mutex<dispatch::CursorRegistry>>,
+    resource_registry: Arc<ResourceRegistry>,
+    control_registry: ControlRegistry,
 }
 
 impl SplintermServer {
     #[must_use]
     pub fn new() -> Self {
+        let resource_registry = Arc::new(ResourceRegistry::default());
+        let control_registry = ControlRegistry::new(Arc::clone(&resource_registry));
         Self {
             lifecycle: Arc::new(Lifecycle::default()),
+            cursor_registry: Arc::new(Mutex::new(dispatch::CursorRegistry::default())),
+            resource_registry,
+            control_registry,
         }
     }
 
@@ -58,6 +67,14 @@ impl SplintermServer {
             inner: self,
             admission: AdmissionGate::new(),
         }
+    }
+
+    pub(crate) fn resource_registry(&self) -> Arc<ResourceRegistry> {
+        Arc::clone(&self.resource_registry)
+    }
+
+    pub(crate) fn control_registry(&self) -> ControlRegistry {
+        self.control_registry.clone()
     }
 
     async fn require_initialized(&self) -> Result<(), ErrorData> {
@@ -77,25 +94,9 @@ impl SplintermServer {
         }
     }
 
+    #[cfg(test)]
     fn known_resource(uri: &str) -> bool {
-        if uri == TOPOLOGY_URI {
-            return true;
-        }
-        let Some(remainder) = uri.strip_prefix("splinterm://splints/") else {
-            return false;
-        };
-        let Some((splint_id, kind)) = remainder.split_once('/') else {
-            return false;
-        };
-        tools::canonical_uuid(splint_id) && matches!(kind, "terminal" | "control")
-    }
-
-    fn unavailable_resource(uri: &str) -> ErrorData {
-        if Self::known_resource(uri) {
-            ErrorData::resource_not_found(RESOURCE_UNAVAILABLE, None)
-        } else {
-            ErrorData::resource_not_found("unknown Splinterm resource", None)
-        }
+        crate::resources::ResourceUri::parse(uri).is_some()
     }
 }
 
@@ -194,6 +195,7 @@ impl ServerHandler for SplintermServer {
         InitializeResult::new(
             ServerCapabilities::builder()
                 .enable_resources()
+                .enable_resources_subscribe()
                 .enable_tools()
                 .build(),
         )
@@ -225,6 +227,10 @@ impl ServerHandler for SplintermServer {
         tools::find(name)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "closed admission, validation, dispatch, and response bounds remain one reviewable path"
+    )]
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -257,15 +263,59 @@ impl ServerHandler for SplintermServer {
                 | "splinterm.list_dojos"
                 | "splinterm.inspect_topology"
                 | "splinterm.inspect_splint"
+                | "splinterm.read_terminal"
+                | "splinterm.read_scrollback"
+                | "splinterm.search_scrollback"
+                | "splinterm.create_dojo"
+                | "splinterm.split_splint"
+                | "splinterm.new_window"
+                | "splinterm.relaunch_splint"
+                | "splinterm.restore_splint"
+                | "splinterm.restore_window"
+                | "splinterm.restore_dojo"
+                | "splinterm.close_splint"
+                | "splinterm.close_window"
+                | "splinterm.kill_splint"
+                | "splinterm.set_split_ratio"
+                | "splinterm.rename_dojo"
+                | "splinterm.rename_window"
+                | "splinterm.rename_splint"
+                | "splinterm.set_window_default_focus"
                 | "splinterm.request_access"
                 | "splinterm.authorization_status"
                 | "splinterm.revoke_access"
                 | "splinterm.inspect_audit"
+                | "splinterm.acquire_control"
+                | "splinterm.request_control_transfer"
+                | "splinterm.decide_control_transfer"
+                | "splinterm.release_control"
+                | "splinterm.input"
+                | "splinterm.resize"
         ) {
             return Ok(structured_failure(ToolFailure::unavailable(&request.name)));
         }
 
-        let value = match dispatch::dispatch(&request.name, &arguments, &context.ct).await {
+        let value = match if matches!(
+            request.name.as_ref(),
+            "splinterm.acquire_control"
+                | "splinterm.request_control_transfer"
+                | "splinterm.decide_control_transfer"
+                | "splinterm.release_control"
+                | "splinterm.input"
+                | "splinterm.resize"
+        ) {
+            self.control_registry
+                .dispatch(&request.name, &arguments, &context.ct)
+                .await
+        } else {
+            dispatch::dispatch(
+                &request.name,
+                &arguments,
+                &context.ct,
+                &self.cursor_registry,
+            )
+            .await
+        } {
             Ok(value) => value,
             Err(failure) => {
                 return Ok(structured_failure(ToolFailure::execution(
@@ -338,10 +388,30 @@ impl ServerHandler for SplintermServer {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, ErrorData> {
         self.require_initialized().await?;
-        Err(Self::unavailable_resource(&request.uri))
+        self.resource_registry.read(&request.uri, &context.ct).await
+    }
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        self.require_initialized().await?;
+        self.resource_registry
+            .subscribe(&request.uri, &context.ct, context.peer)
+            .await
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        self.require_initialized().await?;
+        self.resource_registry.unsubscribe(&request.uri).await
     }
 }
 

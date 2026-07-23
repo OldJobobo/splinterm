@@ -41,10 +41,17 @@ REQUIRED = {
     "usr/share/licenses/splinterm/LICENSE",
     "usr/share/licenses/splinterm/THIRD_PARTY.md",
 }
+MCP_REQUIRED = {
+    "usr/bin/splinterm-mcp",
+    "usr/share/doc/splinterm/mcp.md",
+    "usr/share/licenses/splinterm-mcp/LICENSE",
+    "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
+}
 EXECUTABLES = {
     "usr/bin/generate-omarchy-theme.py",
     "usr/bin/splinterd",
     "usr/bin/splinterm",
+    "usr/bin/splinterm-mcp",
     "usr/bin/splinterm-relay",
     "usr/bin/splinterm-session-picker",
     "usr/bin/splinterm-pty-child",
@@ -76,6 +83,10 @@ def run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
 def package_entries(package: Path) -> set[str]:
     listing = run(["bsdtar", "-tf", str(package)], capture_output=True).stdout
     return {line.removeprefix("./").rstrip("/") for line in listing.splitlines() if line}
+
+
+def package_metadata(package: Path) -> str:
+    return run(["bsdtar", "-xOf", str(package), ".PKGINFO"], capture_output=True).stdout
 
 
 def validate_launcher(root: Path) -> None:
@@ -613,13 +624,13 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 19,
-                "maximum_version": 19,
+                "minimum_version": 22,
+                "maximum_version": 22,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
             hello = read_private_frame(relay_process.stdout)
-            assert hello["type"] == "hello" and hello["version"] == 19
+            assert hello["type"] == "hello" and hello["version"] == 22
             inherited_path = Path(f"/proc/{relay_process.pid}/fd/{inherited_fd}")
             assert not inherited_path.exists() or os.readlink(inherited_path) != inherited_target
 
@@ -678,8 +689,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 19,
-                "maximum_version": 19,
+                "minimum_version": 22,
+                "maximum_version": 22,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
@@ -736,8 +747,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert restarted_relay.stdout is not None
             restarted_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 19,
-                "maximum_version": 19,
+                "minimum_version": 22,
+                "maximum_version": 22,
                 "role": "automation",
             }))
             restarted_relay.stdin.flush()
@@ -773,8 +784,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert broken_output_relay.stdout is not None
             broken_output_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 19,
-                "maximum_version": 19,
+                "minimum_version": 22,
+                "maximum_version": 22,
                 "role": "automation",
             }))
             broken_output_relay.stdin.flush()
@@ -827,16 +838,23 @@ def validate_theme_generator(root: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
+    parser.add_argument("--mcp-package", required=True, type=Path)
     args = parser.parse_args()
     package = args.package.resolve()
-    if not package.is_file() or package.stat().st_size > 256 * 1024 * 1024:
-        raise SystemExit("package is missing or unexpectedly large")
+    mcp_package = args.mcp_package.resolve()
+    for candidate in (package, mcp_package):
+        if not candidate.is_file() or candidate.stat().st_size > 256 * 1024 * 1024:
+            raise SystemExit(f"package is missing or unexpectedly large: {candidate}")
 
     entries = package_entries(package)
+    mcp_entries = package_entries(mcp_package)
     missing = REQUIRED - entries
     assert not missing, f"missing package paths: {sorted(missing)}"
+    missing_mcp = MCP_REQUIRED - mcp_entries
+    assert not missing_mcp, f"missing MCP package paths: {sorted(missing_mcp)}"
+    assert "usr/bin/splinterm-mcp" not in entries, "MCP adapter must remain an opt-in split package"
     forbidden = [
-        entry for entry in entries
+        entry for entry in entries | mcp_entries
         if entry.startswith(("home/", "etc/", "usr/share/omarchy/"))
     ]
     assert not forbidden, f"package mutates forbidden paths: {forbidden}"
@@ -844,10 +862,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="splinterm-package-root-") as directory:
         root = Path(directory)
         run(["bsdtar", "-xf", str(package), "-C", str(root)])
+        run(["bsdtar", "-xf", str(mcp_package), "-C", str(root)])
         for relative in EXECUTABLES:
             mode = (root / relative).stat().st_mode
             assert mode & stat.S_IXUSR, f"{relative} is not executable"
-        for binary in ("splinterm", "splinterd", "splinterm-relay", "splinterm-pty-child"):
+        for binary in ("splinterm", "splinterd", "splinterm-mcp", "splinterm-relay", "splinterm-pty-child"):
             result = run(["ldd", str(root / "usr/bin" / binary)], capture_output=True)
             assert "not found" not in result.stdout
 
@@ -858,12 +877,18 @@ def main() -> int:
         assert "Exec=splinterm-xdg-terminal-exec" in desktop.read_text(encoding="utf-8")
         assert "Icon=com.oldjobobo.splinterm" in desktop.read_text(encoding="utf-8")
 
-        pkginfo = (root / ".PKGINFO").read_text(encoding="utf-8")
+        pkginfo = package_metadata(package)
         dependencies = {
             line.split(" = ", 1)[1].split(">", 1)[0].split("<", 1)[0].split("=", 1)[0]
             for line in pkginfo.splitlines() if line.startswith("depend = ")
         }
         assert RUNTIME_DEPENDENCIES <= dependencies
+        mcp_pkginfo = package_metadata(mcp_package)
+        assert "pkgname = splinterm-mcp" in mcp_pkginfo
+        assert any(
+            line.startswith("depend = splinterm=")
+            for line in mcp_pkginfo.splitlines()
+        ), "MCP split package must depend on the exact main package version"
         validate_systemd_unit(root)
         validate_headless_runtime(
             root / "usr/bin/splinterd",
@@ -882,8 +907,9 @@ def main() -> int:
         )
         validate_theme_generator(root)
         validate_launcher(root)
+        run([sys.executable, str(Path(__file__).with_name("validate-mcp-package.py")), str(root)], timeout=180)
 
-    print(f"Package validation passed: {package}")
+    print(f"Package validation passed: {package} + {mcp_package}")
     return 0
 
 

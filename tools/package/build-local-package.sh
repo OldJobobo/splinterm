@@ -28,7 +28,11 @@ git -C "$root" archive --format=tar.gz --prefix="splinterm-$pkgver/" -o "$archiv
   cd "$package_dir"
   makepkg --cleanbuild --clean --noconfirm --noprogressbar
 )
-package=$(find "$package_dir" -maxdepth 1 -name 'splinterm-*.pkg.tar.*' ! -name 'splinterm-debug-*' -print -quit)
-[[ -n "$package" ]] || { printf 'makepkg produced no package\n' >&2; exit 1; }
-python "$root/tools/package/validate-package.py" "$package"
-printf 'Private package ready: %s\n' "$package"
+package=$(find "$package_dir" -maxdepth 1 -name "splinterm-$pkgver-*.pkg.tar.*" -print -quit)
+mcp_package=$(find "$package_dir" -maxdepth 1 -name "splinterm-mcp-$pkgver-*.pkg.tar.*" -print -quit)
+[[ -n "$package" && -n "$mcp_package" ]] || {
+  printf 'makepkg produced an incomplete split package set\n' >&2
+  exit 1
+}
+python "$root/tools/package/validate-package.py" "$package" --mcp-package "$mcp_package"
+printf 'Private packages ready:\n  %s\n  %s\n' "$package" "$mcp_package"

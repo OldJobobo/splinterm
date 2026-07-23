@@ -13,7 +13,7 @@ use std::{
     collections::VecDeque,
     env,
     io::{self, ErrorKind, Write as _},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -26,7 +26,8 @@ use splinterm_protocol::{
     AutomationScope, ClientFrame, ClientRole, ControlStatus, ControlTransferOutcome, ErrorCode,
     MAX_FRAME_BYTES, PROTOCOL_VERSION, PersistentAuthorizationStatus, Request, Response,
     RestoreLeafResult, ScrollbackPage, SearchPage, ServerFrame, ServerLimits, SplintLifecycle,
-    SplintRuntimeSummary, TerminalSnapshot, TopologyChangeKind, TopologySnapshot, encode_frame,
+    SplintRuntimeSummary, TerminalRow, TerminalSnapshot, TerminalUpdate, TopologyChangeKind,
+    TopologySnapshot, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -279,7 +280,7 @@ struct TerminalActionDataV1 {
 struct TerminalReadRowV1 {
     row_id: Option<u64>,
     linebreak: bool,
-    cells: Vec<TerminalCellV1>,
+    cells: Vec<ProjectedTerminalCell>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -504,7 +505,9 @@ fn checked_public_text(value: &str, label: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
-fn public_cells(row: &splinterm_protocol::TerminalRow) -> Result<Vec<TerminalCellV1>> {
+fn project_terminal_cells(
+    row: &splinterm_protocol::TerminalRow,
+) -> Result<Vec<ProjectedTerminalCell>> {
     let mut cells = Vec::new();
     let mut index = 0;
     while index < row.cells.len() {
@@ -521,10 +524,10 @@ fn public_cells(row: &splinterm_protocol::TerminalRow) -> Result<Vec<TerminalCel
         {
             width += 1;
         }
-        if width > 2 || cell.content.chars().count() > 32 {
+        if width > 2 || cell.content.chars().count() > 64 {
             bail!("terminal cell exceeds public v1 bounds");
         }
-        cells.push(TerminalCellV1 {
+        cells.push(ProjectedTerminalCell {
             text: cell.content.clone(),
             width: u8::try_from(width)?,
         });
@@ -533,13 +536,129 @@ fn public_cells(row: &splinterm_protocol::TerminalRow) -> Result<Vec<TerminalCel
     Ok(cells)
 }
 
-fn public_rows(rows: &[splinterm_protocol::TerminalRow]) -> Result<Vec<TerminalReadRowV1>> {
+/// Projects semantic terminal rows into the shared bounded public shape.
+///
+/// Spacer cells are collapsed into their leading cell, preserving a display width
+/// of one or two columns without exposing terminal attributes or private row IDs.
+pub fn project_terminal_rows(
+    rows: &[splinterm_protocol::TerminalRow],
+) -> Result<Vec<ProjectedTerminalRow>> {
     rows.iter()
         .map(|row| {
+            Ok(ProjectedTerminalRow {
+                linebreak: row.linebreak,
+                cells: project_terminal_cells(row)?,
+            })
+        })
+        .collect()
+}
+
+fn blank_terminal_row(columns: usize) -> TerminalRow {
+    TerminalRow {
+        row_id: None,
+        linebreak: false,
+        cells: Vec::with_capacity(columns),
+    }
+}
+
+/// Applies one validated aggregate update to a retained non-Wayland snapshot.
+///
+/// History replacement, clear, and reflow require an explicit resnapshot and are
+/// rejected rather than presenting retained terminal contents as current.
+pub fn apply_terminal_update(
+    snapshot: &mut TerminalSnapshot,
+    update: TerminalUpdate,
+) -> Result<()> {
+    update
+        .validate_against(
+            snapshot.revision,
+            snapshot.history_generation,
+            snapshot.columns,
+            snapshot.rows,
+        )
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if update.scrollback.as_ref().is_some_and(|scrollback| {
+        !matches!(
+            scrollback.transition,
+            splinterm_protocol::HistoryTransition::Append { .. }
+        )
+    }) {
+        bail!("terminal history replacement requires resynchronization");
+    }
+
+    // Keep the retained state intact unless every dimension, identity, and
+    // projection invariant accepts the complete aggregate update.
+    let mut candidate = snapshot.clone();
+    if let Some(columns) = update.columns {
+        candidate.columns = columns;
+        for row in &mut candidate.visible_rows {
+            row.cells.truncate(columns);
+        }
+    }
+    if let Some(rows) = update.row_count {
+        candidate.rows = rows;
+        candidate
+            .visible_rows
+            .resize_with(rows, || blank_terminal_row(candidate.columns));
+        candidate.visible_rows.truncate(rows);
+    }
+    for patch in update.rows {
+        if patch.index >= candidate.rows || patch.row.cells.len() > candidate.columns {
+            bail!("terminal row patch exceeds current dimensions");
+        }
+        candidate.visible_rows[patch.index] = patch.row;
+    }
+    if let Some(cursor) = update.cursor {
+        candidate.cursor_column = cursor.column;
+        candidate.cursor_row = cursor.row;
+        candidate.cursor_deferred_wrap = cursor.deferred_wrap;
+    }
+    if let Some(title) = update.title {
+        candidate.title = title;
+    }
+    if let Some(modes) = update.input_modes {
+        candidate.input_modes = modes;
+    }
+    if let Some(screen) = update.active_screen {
+        candidate.active_screen = screen;
+    }
+    if let Some(palette) = update.palette {
+        candidate.palette = palette;
+    }
+    if let Some(colors) = update.default_colors {
+        candidate.default_colors = colors;
+    }
+    if let Some(scrollback) = update.scrollback {
+        candidate.history_generation = scrollback.history_generation;
+        candidate.oldest_available_scrollback_row_id = scrollback.oldest_available_row_id;
+        candidate.newest_available_scrollback_row_id = scrollback.newest_available_row_id;
+        candidate.scrollback_rows.clear();
+        candidate.available_scrollback_rows = scrollback.available_rows;
+        candidate.omitted_oldest_scrollback_rows = scrollback.available_rows;
+    }
+    candidate.revision = update.revision;
+    candidate
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    *snapshot = candidate;
+    Ok(())
+}
+
+fn public_rows(rows: &[splinterm_protocol::TerminalRow]) -> Result<Vec<TerminalReadRowV1>> {
+    rows.iter()
+        .zip(project_terminal_rows(rows)?)
+        .map(|(row, projected)| {
+            if projected
+                .cells
+                .iter()
+                .any(|cell| cell.text.chars().count() > 32)
+            {
+                bail!("terminal cell exceeds public v1 bounds");
+            }
             Ok(TerminalReadRowV1 {
                 row_id: row.row_id,
-                linebreak: row.linebreak,
-                cells: public_cells(row)?,
+                linebreak: projected.linebreak,
+                cells: projected.cells,
             })
         })
         .collect()
@@ -1814,16 +1933,18 @@ struct ControlResourceV1 {
     incarnation: u64,
 }
 
+/// One bounded semantic cell in a public terminal projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalCellV1 {
-    text: String,
-    width: u8,
+pub struct ProjectedTerminalCell {
+    pub text: String,
+    pub width: u8,
 }
 
+/// One bounded semantic row in a public terminal projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalRowV1 {
-    linebreak: bool,
-    cells: Vec<TerminalCellV1>,
+pub struct ProjectedTerminalRow {
+    pub linebreak: bool,
+    pub cells: Vec<ProjectedTerminalCell>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1832,7 +1953,7 @@ struct TerminalSnapshotV1 {
     columns: usize,
     rows: usize,
     title: String,
-    visible_rows: Vec<TerminalRowV1>,
+    visible_rows: Vec<ProjectedTerminalRow>,
 }
 
 impl TerminalSnapshotV1 {
@@ -1843,41 +1964,7 @@ impl TerminalSnapshotV1 {
         if snapshot.title.chars().count() > 1_024 {
             bail!("terminal title exceeds public event bounds");
         }
-        let visible_rows = snapshot
-            .visible_rows
-            .iter()
-            .map(|row| {
-                let mut cells = Vec::new();
-                let mut index = 0;
-                while index < row.cells.len() {
-                    let cell = &row.cells[index];
-                    if cell.spacer_remaining.is_some() {
-                        index += 1;
-                        continue;
-                    }
-                    let mut width = 1_usize;
-                    while index + width < row.cells.len()
-                        && row.cells[index + width]
-                            .spacer_remaining
-                            .is_some_and(|remaining| remaining > 0)
-                    {
-                        width += 1;
-                    }
-                    if width > 2 || cell.content.chars().count() > 64 {
-                        bail!("terminal cell exceeds public event bounds");
-                    }
-                    cells.push(TerminalCellV1 {
-                        text: cell.content.clone(),
-                        width: u8::try_from(width)?,
-                    });
-                    index += width;
-                }
-                Ok(TerminalRowV1 {
-                    linebreak: row.linebreak,
-                    cells,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let visible_rows = project_terminal_rows(&snapshot.visible_rows)?;
         Ok(Self {
             content_encoding: "unicode_scalars",
             columns: snapshot.columns,
@@ -2546,6 +2633,15 @@ impl Connection {
         Self::connect_role(ClientRole::Automation).await
     }
 
+    /// Connects as automation to one explicit socket for isolated integration tests.
+    #[doc(hidden)]
+    pub async fn connect_automation_at(socket: &Path) -> Result<Self> {
+        let stream = UnixStream::connect(socket)
+            .await
+            .with_context(|| format!("cannot connect to splinterd at {}", socket.display()))?;
+        Self::connect_stream(stream, ClientRole::Automation).await
+    }
+
     async fn connect_role(role: ClientRole) -> Result<Self> {
         let socket = socket_path()?;
         let stream = UnixStream::connect(&socket)
@@ -2845,15 +2941,23 @@ impl Connection {
     }
 
     /// Acquires a connection-owned controller lease.
-    pub async fn acquire_control(&mut self, splint_id: SplintId, incarnation: u64) -> Result<u64> {
+    pub async fn acquire_control(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        modes: Vec<splinterm_protocol::ControlMode>,
+    ) -> Result<u64> {
         match self
             .request(Request::AcquireControl {
                 splint_id,
                 incarnation,
+                modes,
             })
             .await?
         {
-            Response::ControlGranted { controller_id } if controller_id != 0 => Ok(controller_id),
+            Response::ControlGranted { controller_id, .. } if controller_id != 0 => {
+                Ok(controller_id)
+            }
             _ => bail!("splinterd did not grant a controller lease"),
         }
     }
@@ -2968,6 +3072,61 @@ mod tests {
                 },
             }],
         }
+    }
+
+    #[test]
+    fn shared_terminal_projection_preserves_semantic_cells_and_bounds() {
+        let attributes = reviewed_row().cells[0].attributes;
+        let row = TerminalRow {
+            row_id: Some(9),
+            linebreak: true,
+            cells: vec![
+                TerminalCell {
+                    content: "e\u{301}".to_owned(),
+                    spacer_remaining: None,
+                    attributes,
+                },
+                TerminalCell {
+                    content: "界".to_owned(),
+                    spacer_remaining: None,
+                    attributes,
+                },
+                TerminalCell {
+                    content: String::new(),
+                    spacer_remaining: Some(1),
+                    attributes,
+                },
+                TerminalCell {
+                    content: "\u{fffd}".to_owned(),
+                    spacer_remaining: None,
+                    attributes,
+                },
+            ],
+        };
+        assert_eq!(
+            project_terminal_rows(&[row]).unwrap(),
+            [ProjectedTerminalRow {
+                linebreak: true,
+                cells: vec![
+                    ProjectedTerminalCell {
+                        text: "e\u{301}".to_owned(),
+                        width: 1,
+                    },
+                    ProjectedTerminalCell {
+                        text: "界".to_owned(),
+                        width: 2,
+                    },
+                    ProjectedTerminalCell {
+                        text: "\u{fffd}".to_owned(),
+                        width: 1,
+                    },
+                ],
+            }]
+        );
+
+        let mut oversized = reviewed_row();
+        oversized.cells[0].content = "x".repeat(65);
+        assert!(project_terminal_rows(&[oversized]).is_err());
     }
 
     fn reviewed_topology() -> TopologySnapshot {
@@ -3433,14 +3592,14 @@ mod tests {
                 columns: 2,
                 rows: 1,
                 title: "build".to_owned(),
-                visible_rows: vec![TerminalRowV1 {
+                visible_rows: vec![ProjectedTerminalRow {
                     linebreak: false,
                     cells: vec![
-                        TerminalCellV1 {
+                        ProjectedTerminalCell {
                             text: "A".to_owned(),
                             width: 1,
                         },
-                        TerminalCellV1 {
+                        ProjectedTerminalCell {
                             text: "界".to_owned(),
                             width: 2,
                         },

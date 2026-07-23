@@ -62,6 +62,7 @@ fn timing_summary(samples: &mut [u64]) -> serde_json::Value {
 
 fn approximate_page_bytes(page: &LiveScrollbackPage) -> usize {
     size_of::<LiveScrollbackPage>()
+        + page.title.capacity()
         + page.rows.capacity() * size_of::<LiveRow>()
         + page
             .rows

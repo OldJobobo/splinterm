@@ -8,12 +8,15 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use splinterm_core::{Axis, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision};
+use splinterm_core::{
+    Axis, DojoId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
+};
 use splinterm_protocol::{
-    AccessScope, ClientFrame, ClientRole, ColorSource, ControlTransferDecision,
-    ControlTransferOutcome, ErrorCode, LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS,
-    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SplintLifecycle,
-    SubscriptionEvent, TerminalSnapshot, TopologyChangeKind, encode_frame,
+    AccessScope, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
+    ControlTransferDecision, ControlTransferOutcome, ErrorCode, LaunchParameters, MAX_FRAME_BYTES,
+    MAX_SUBSCRIPTIONS, MutationPreflight, PROTOCOL_VERSION, ProtocolError, Request, Response,
+    ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalProvenance, TerminalSnapshot,
+    TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -305,10 +308,11 @@ impl Connection {
         if let Some(controller_id) = self.controller_id {
             return controller_id;
         }
-        let Response::ControlGranted { controller_id } = self
+        let Response::ControlGranted { controller_id, .. } = self
             .request(Request::AcquireControl {
                 splint_id,
                 incarnation,
+                modes: vec![ControlMode::Input],
             })
             .await
         else {
@@ -367,18 +371,37 @@ impl Connection {
     }
 
     async fn attach(&mut self, splint_id: SplintId, incarnation: u64) -> (u64, TerminalSnapshot) {
+        self.attach_with_scrollback(splint_id, incarnation, 16)
+            .await
+    }
+
+    async fn attach_with_scrollback(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        scrollback_rows: usize,
+    ) -> (u64, TerminalSnapshot) {
         match self
             .request(Request::Attach {
                 splint_id,
-                incarnation,
-                scrollback_rows: 16,
+                incarnation: Some(incarnation),
+                scrollback_rows,
             })
             .await
         {
             Response::Attached {
                 subscription_id,
+                provenance,
                 snapshot,
-            } => (subscription_id, snapshot),
+            } => {
+                assert_eq!(provenance.splint_id, splint_id);
+                assert_eq!(provenance.incarnation, incarnation);
+                assert_eq!(provenance.terminal_revision, snapshot.revision);
+                assert_eq!(provenance.history_generation, snapshot.history_generation);
+                assert_eq!(provenance.title, snapshot.title);
+                assert!(provenance.topology_revision.get() > 0);
+                (subscription_id, snapshot)
+            }
             response => panic!("unexpected attach response: {response:?}"),
         }
     }
@@ -429,6 +452,58 @@ fn snapshot_text(snapshot: &TerminalSnapshot) -> String {
         .flat_map(|row| row.cells.iter())
         .map(|cell| cell.content.as_str())
         .collect()
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "terminal provenance is intentionally complete"
+)]
+fn assert_terminal_provenance(
+    provenance: &TerminalProvenance,
+    dojo_id: DojoId,
+    window_id: WindowId,
+    splint_id: SplintId,
+    incarnation: u64,
+    title: &str,
+    terminal_revision: u64,
+    history_generation: u64,
+) {
+    assert_eq!(provenance.dojo_id, dojo_id);
+    assert_eq!(provenance.window_id, window_id);
+    assert_eq!(provenance.splint_id, splint_id);
+    assert_eq!(provenance.incarnation, incarnation);
+    assert!(provenance.topology_revision.get() > 0);
+    assert_eq!(provenance.title, title);
+    assert_eq!(provenance.terminal_revision, terminal_revision);
+    assert_eq!(provenance.history_generation, history_generation);
+}
+
+async fn visible_snapshot_until(
+    connection: &mut Connection,
+    splint_id: SplintId,
+    incarnation: u64,
+    marker: &str,
+) -> TerminalSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (subscription_id, snapshot) = connection
+            .attach_with_scrollback(splint_id, incarnation, 0)
+            .await;
+        assert_eq!(
+            connection
+                .request(Request::Detach { subscription_id })
+                .await,
+            Response::Acknowledged
+        );
+        if snapshot_text(&snapshot).contains(marker) {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "visible snapshot never contained {marker}"
+        );
+        time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 async fn snapshot_until(
@@ -530,18 +605,29 @@ fn current_metadata_policy(splint_id: SplintId) -> String {
 
 fn scoped_authorization_policy(splint_id: SplintId, incarnation: u64, scopes: &[&str]) -> String {
     let (executable, sha256) = policy_executable_identity();
+    let mut resources = vec![serde_json::json!({
+        "kind": "splint",
+        "splint_id": splint_id,
+        "incarnation": incarnation
+    })];
+    if scopes.contains(&"audit_inspect") {
+        resources.push(serde_json::json!({"kind": "lair"}));
+    }
     serde_json::json!({
         "schema": "splinterm.policy.v1",
         "rules": [{
             "id": "authorization-only-test",
             "executable": {"path": executable, "sha256": sha256},
             "scopes": scopes,
-            "resources": [{
-                "kind": "splint",
-                "splint_id": splint_id,
-                "incarnation": incarnation
-            }],
-            "limits": {"max_returned_bytes": 65536}
+            "resources": resources,
+            "limits": {
+                "max_returned_rows": 16,
+                "max_results": 16,
+                "max_returned_bytes": 1_048_576,
+                "max_live_subscriptions": 2,
+                "max_spawn_count": 1,
+                "deadline_ms": 10
+            }
         }]
     })
     .to_string()
@@ -584,6 +670,749 @@ async fn assert_connection_closed(connection: &mut Connection, reason: &str) {
         .unwrap_or_else(|_| panic!("{reason} did not close the existing client"))
         .unwrap();
     assert_eq!(closed, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one isolated scenario proves the complete mutation preflight authority boundary"
+)]
+async fn mutation_preflight_preserves_exact_scope_cas_and_descendant_denial() {
+    time::timeout(Duration::from_secs(60), async {
+        let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
+        let mut setup = daemon.connect().await;
+        let revision = setup.topology_revision().await;
+        let Response::DojoCreated {
+            dojo, incarnation, ..
+        } = setup
+            .request(Request::CreateDojo {
+                expected_topology_revision: revision,
+                name: "mutation-preflight".to_owned(),
+                launch: LaunchParameters {
+                    cwd: daemon.runtime.clone(),
+                    command: vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        "sleep 3600".to_owned(),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("mutation setup did not create a Dojo")
+        };
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("mutation setup root was not a leaf")
+        };
+        let splint_id = splint.id;
+        let policy = daemon.policy.as_ref().unwrap();
+        fs::write(
+            policy,
+            scoped_authorization_policy(splint_id, incarnation, &["topology_layout_mutate"]),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut setup, "missing process-spawn policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut missing_scope = daemon.connect().await;
+        assert_eq!(
+            missing_scope
+                .request_result(Request::PrepareMutation {
+                    mutation: MutationPreflight::SplitSplint { splint_id },
+                })
+                .await
+                .expect_err("split preflight without process-spawn must fail")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(splint_id, incarnation, &["process_spawn"]),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut missing_scope, "missing layout scope policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut missing_scope = daemon.connect().await;
+        assert_eq!(
+            missing_scope
+                .request_result(Request::PrepareMutation {
+                    mutation: MutationPreflight::SplitSplint { splint_id },
+                })
+                .await
+                .expect_err("split preflight without layout scope must fail")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                splint_id,
+                incarnation,
+                &["process_spawn", "topology_layout_mutate", "audit_inspect"],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut missing_scope, "mutation policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+
+        let mut scoped = daemon.connect().await;
+        assert_eq!(
+            scoped
+                .request_result(Request::InspectTopology)
+                .await
+                .expect_err("mutation-only policy must not permit topology inspection")
+                .code,
+            ErrorCode::Unauthorized
+        );
+        let Response::AuditPage { page: baseline } = scoped
+            .request(Request::AuditInspect {
+                after_audit_id: None,
+                max_records: 16,
+            })
+            .await
+        else {
+            panic!("audit baseline was not returned")
+        };
+        let baseline_audit_id = baseline.records.last().map(|record| record.audit_id);
+
+        // A completed preflight followed by client cancellation/disconnect is not
+        // a committed mutation and must leave no successful mutation audit.
+        let mut cancelled = daemon.connect().await;
+        assert!(matches!(
+            cancelled
+                .request(Request::PrepareMutation {
+                    mutation: MutationPreflight::SplitSplint { splint_id },
+                })
+                .await,
+            Response::MutationPrepared { .. }
+        ));
+        drop(cancelled);
+
+        let Response::MutationPrepared { preparation } = scoped
+            .request(Request::PrepareMutation {
+                mutation: MutationPreflight::SplitSplint { splint_id },
+            })
+            .await
+        else {
+            panic!("split preflight did not return scoped preparation")
+        };
+        assert_eq!(preparation.splint_id, Some(splint_id));
+        assert_eq!(preparation.incarnation, Some(incarnation));
+        assert!(preparation.targets.is_empty());
+        let Response::SplintStarted {
+            splint_id: child_id,
+            topology_revision,
+            ..
+        } = scoped
+            .request(Request::SplitSplintAutomation {
+                expected_topology_revision: preparation.topology_revision,
+                target_splint_id: splint_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: AutomationLaunch {
+                    cwd: Some(daemon.runtime.clone()),
+                    argv: vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        "sleep 3600".to_owned(),
+                    ],
+                },
+            })
+            .await
+        else {
+            panic!("authorized split did not commit")
+        };
+        assert_eq!(
+            topology_revision.get(),
+            preparation.topology_revision.get() + 1
+        );
+        assert_eq!(
+            scoped
+                .request_result(Request::PrepareMutation {
+                    mutation: MutationPreflight::SetSplitRatio {
+                        splint_id: child_id
+                    },
+                })
+                .await
+                .expect_err("new descendant must remain outside publication snapshot")
+                .code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(
+            scoped
+                .request_result(Request::SetSplitRatio {
+                    expected_topology_revision: preparation.topology_revision,
+                    target_splint_id: splint_id,
+                    ratio: SplitRatio::new(400).unwrap(),
+                })
+                .await
+                .expect_err("stale mutation CAS must fail")
+                .code,
+            ErrorCode::StaleTopology
+        );
+        let Response::AuditPage { page } = scoped
+            .request(Request::AuditInspect {
+                after_audit_id: baseline_audit_id,
+                max_records: 16,
+            })
+            .await
+        else {
+            panic!("post-mutation audit page was not returned")
+        };
+        let split_records = page
+            .records
+            .iter()
+            .filter(|record| record.operation == splinterm_protocol::AuditOperation::SplitSplint)
+            .collect::<Vec<_>>();
+        assert_eq!(split_records.len(), 1, "preflight polluted mutation audit");
+        assert_eq!(
+            split_records[0].outcome,
+            Some(splinterm_protocol::AuditOutcome::Succeeded)
+        );
+        assert_eq!(
+            split_records[0].decision,
+            splinterm_protocol::AuditDecision::Matched
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("mutation preflight scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real-daemon lifecycle proves both runtime-only MCP mutation revision contracts"
+)]
+async fn runtime_relaunch_and_restore_preserve_topology_revision() {
+    time::timeout(Duration::from_secs(60), async {
+        let daemon = Daemon::start().await;
+        let mut client = daemon.connect().await;
+        let revision = client.topology_revision().await;
+        let Response::DojoCreated {
+            dojo,
+            incarnation: first_incarnation,
+            topology_revision,
+        } = client
+            .request(Request::CreateDojo {
+                expected_topology_revision: revision,
+                name: "runtime-relaunch".to_owned(),
+                launch: LaunchParameters {
+                    cwd: daemon.runtime.clone(),
+                    command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("runtime relaunch setup did not create a Dojo")
+        };
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("runtime relaunch setup was not a leaf")
+        };
+        let splint_id = splint.id;
+        assert_eq!(topology_revision.get(), revision.get() + 1);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let Response::Splint { runtime, .. } =
+                client.request(Request::InspectSplint { splint_id }).await
+            else {
+                panic!("runtime status was not returned")
+            };
+            if runtime.live_incarnation.is_none() && runtime.restorable {
+                break;
+            }
+            assert!(Instant::now() < deadline, "initial process did not exit");
+            time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let relaunch = splinterm_mcp::dispatch_mutation_for_integration_test(
+            "splinterm.relaunch_splint",
+            &serde_json::json!({
+                "splint_id": splint_id,
+                "cwd": daemon.runtime.to_string_lossy(),
+                "argv": ["/bin/sh", "-c", "exit 0"]
+            }),
+            &daemon.socket,
+        )
+        .await
+        .expect("MCP runtime relaunch did not commit");
+        assert_eq!(relaunch["ok"], true);
+        assert_eq!(
+            relaunch["resource"]["topology_revision"],
+            topology_revision.get()
+        );
+        let second_incarnation = relaunch["resource"]["incarnation"]
+            .as_u64()
+            .expect("MCP relaunch omitted incarnation");
+        assert!(second_incarnation > first_incarnation);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let Response::Splint { runtime, .. } =
+                client.request(Request::InspectSplint { splint_id }).await
+            else {
+                panic!("relaunched runtime status was not returned")
+            };
+            if runtime.live_incarnation.is_none() && runtime.restorable {
+                break;
+            }
+            assert!(Instant::now() < deadline, "relaunched process did not exit");
+            time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let restore = splinterm_mcp::dispatch_mutation_for_integration_test(
+            "splinterm.restore_splint",
+            &serde_json::json!({"splint_id": splint_id}),
+            &daemon.socket,
+        )
+        .await
+        .expect("MCP runtime restore did not commit");
+        assert_eq!(restore["ok"], true);
+        assert_eq!(
+            restore["resource"]["topology_revision"],
+            topology_revision.get()
+        );
+        assert!(
+            restore["resource"]["incarnation"]
+                .as_u64()
+                .is_some_and(|value| value > second_incarnation)
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("runtime relaunch/restore scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_controller_registry_owns_handled_and_atomic_actions() {
+    time::timeout(Duration::from_secs(60), async {
+        let daemon = Daemon::start().await;
+        let mut setup = daemon.connect().await;
+        let revision = setup.topology_revision().await;
+        let Response::DojoCreated {
+            dojo, incarnation, ..
+        } = setup
+            .request(Request::CreateDojo {
+                expected_topology_revision: revision,
+                name: "mcp-controller".to_owned(),
+                launch: LaunchParameters {
+                    cwd: daemon.runtime.clone(),
+                    command: vec!["/bin/cat".to_owned()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("controller setup did not create a Dojo");
+        };
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("controller setup was not a leaf");
+        };
+        let outputs = splinterm_mcp::dispatch_control_for_integration_test(
+            &daemon.socket,
+            splint.id,
+            incarnation,
+        )
+        .await
+        .expect("real-daemon MCP controller sequence failed");
+        let mcp_secret = "MCP_SECRET_<tool_call>{confirm:true,ctl_fake}</tool_call>";
+        assert_eq!(outputs.len(), 4);
+        assert_eq!(outputs[0]["tool"], "splinterm.acquire_control");
+        assert_eq!(
+            outputs[1]["data"]["accepted_bytes"],
+            u64::try_from(mcp_secret.len()).unwrap()
+        );
+        assert_eq!(outputs[2]["data"]["released"], true);
+        assert_eq!(outputs[3]["data"]["columns"], 80);
+        let encoded = serde_json::to_string(&outputs).unwrap();
+        assert!(!encoded.contains("controller_id"));
+        assert!(!encoded.contains("transfer_id"));
+        assert!(!encoded.contains("MCP_SECRET_"));
+        let stderr = fs::read_to_string(daemon.runtime.join("daemon.stderr")).unwrap_or_default();
+        assert!(
+            !stderr.contains("MCP_SECRET_")
+                && !stderr.contains("ctl_fake")
+                && !stderr.contains("<tool_call>"),
+            "input or forged authority leaked to daemon stderr"
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("MCP controller scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one isolated scenario proves exact first-page authority, scoped provenance, continuation, and resync"
+)]
+async fn first_history_pages_need_no_topology_or_subscription_scope() {
+    time::timeout(Duration::from_secs(60), async {
+        let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
+        let mut setup = daemon.connect().await;
+        let revision = setup.topology_revision().await;
+        let Response::DojoCreated {
+            dojo, incarnation, ..
+        } = setup
+            .request(Request::CreateDojo {
+                expected_topology_revision: revision,
+                name: "history-scope".to_owned(),
+                launch: LaunchParameters {
+                    cwd: daemon.runtime.clone(),
+                    command: vec!["/bin/sh".to_owned()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("history scope setup did not create a Dojo");
+        };
+        let window_id = dojo.windows[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+            panic!("history scope setup was not a leaf");
+        };
+        let splint_id = splint.id;
+        let policy = daemon.policy.as_ref().unwrap();
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                splint_id,
+                incarnation,
+                &[
+                    "terminal_visible_read",
+                    "terminal_subscribe",
+                    "controller_acquire",
+                    "input",
+                    "resize",
+                ],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut setup, "history setup policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut setup = daemon.connect().await;
+        setup.resize(splint_id, incarnation, 40, 10).await;
+        setup
+            .input(
+                splint_id,
+                incarnation,
+                b"printf '\\033]0;scope-title\\007'; i=1; while [ $i -le 160 ]; do echo line-$i; i=$((i+1)); done; echo needle; printf '\\163\\143\\157\\160\\145\\055\\162\\145\\141\\144\\171\\n'\n",
+            )
+            .await;
+        let setup_snapshot =
+            visible_snapshot_until(&mut setup, splint_id, incarnation, "scope-ready").await;
+        assert_eq!(setup_snapshot.rows, 10);
+        assert!(
+            setup_snapshot.available_scrollback_rows > 0,
+            "setup snapshot did not retain history: {setup_snapshot:?}"
+        );
+        let Response::Attached {
+            subscription_id,
+            provenance: attached_provenance,
+            snapshot: attached_snapshot,
+        } = setup
+            .request(Request::Attach {
+                splint_id,
+                incarnation: None,
+                scrollback_rows: 0,
+            })
+            .await
+        else {
+            panic!("current-incarnation attach did not return a snapshot");
+        };
+        assert_terminal_provenance(
+            &attached_provenance,
+            dojo.id,
+            window_id,
+            splint_id,
+            incarnation,
+            "scope-title",
+            attached_snapshot.revision,
+            attached_snapshot.history_generation,
+        );
+        assert_eq!(
+            setup.request(Request::Detach { subscription_id }).await,
+            Response::Acknowledged
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(splint_id, incarnation, &["scrollback_read"]),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut setup, "missing-visible-read policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut missing_scope = daemon.connect().await;
+        assert_eq!(
+            missing_scope
+                .request_result(Request::StartScrollbackPage {
+                    splint_id,
+                    incarnation: None,
+                    max_rows: 8,
+                })
+                .await
+                .expect_err("scrollback without terminal-visible scope must fail")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(splint_id, incarnation, &["terminal_visible_read"]),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut missing_scope, "missing-scrollback policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+        let mut missing_scope = daemon.connect().await;
+        assert_eq!(
+            missing_scope
+                .request_result(Request::StartScrollbackPage {
+                    splint_id,
+                    incarnation: None,
+                    max_rows: 8,
+                })
+                .await
+                .expect_err("terminal-visible without scrollback scope must fail")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                splint_id,
+                incarnation,
+                &["terminal_visible_read", "scrollback_read"],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut missing_scope, "history-read policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+
+        let mut scoped = daemon.connect().await;
+        assert_eq!(
+            scoped
+                .request_result(Request::InspectTopology)
+                .await
+                .expect_err("history-only policy must not permit topology reads")
+                .code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(
+            scoped
+                .request_result(Request::Attach {
+                    splint_id,
+                    incarnation: None,
+                    scrollback_rows: 0,
+                })
+                .await
+                .expect_err("history-only policy must not permit terminal subscriptions")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        let Response::ScrollbackPage { provenance, page } = scoped
+            .request(Request::StartScrollbackPage {
+                splint_id,
+                incarnation: None,
+                max_rows: 8,
+            })
+            .await
+        else {
+            panic!("scoped first scrollback page was not returned");
+        };
+        page.validate().unwrap();
+        assert_terminal_provenance(
+            &provenance,
+            dojo.id,
+            window_id,
+            splint_id,
+            incarnation,
+            "scope-title",
+            page.terminal_revision,
+            page.history_generation,
+        );
+        assert!(!page.rows.is_empty(), "first page was empty: {page:?}");
+
+        let before_row_id = page.rows.first().and_then(|row| row.row_id).unwrap();
+        let Response::ScrollbackPage {
+            provenance: continued_provenance,
+            page: continued,
+        } = scoped
+            .request(Request::ScrollbackPage {
+                splint_id,
+                incarnation: provenance.incarnation,
+                terminal_revision: provenance.terminal_revision,
+                history_generation: provenance.history_generation,
+                before_row_id,
+                max_rows: 4,
+            })
+            .await
+        else {
+            panic!("scoped scrollback continuation was not returned");
+        };
+        continued.validate().unwrap();
+        assert_terminal_provenance(
+            &continued_provenance,
+            dojo.id,
+            window_id,
+            splint_id,
+            provenance.incarnation,
+            "scope-title",
+            continued.terminal_revision,
+            continued.history_generation,
+        );
+
+        let Response::ScrollbackResyncRequired {
+            provenance: scrollback_resync,
+            current_revision,
+            history_generation,
+        } = scoped
+            .request(Request::ScrollbackPage {
+                splint_id,
+                incarnation: provenance.incarnation,
+                terminal_revision: provenance.terminal_revision.saturating_add(1),
+                history_generation: provenance.history_generation,
+                before_row_id,
+                max_rows: 4,
+            })
+            .await
+        else {
+            panic!("stale scrollback page did not return resync provenance");
+        };
+        assert_terminal_provenance(
+            &scrollback_resync,
+            dojo.id,
+            window_id,
+            splint_id,
+            provenance.incarnation,
+            "scope-title",
+            current_revision,
+            history_generation,
+        );
+
+        assert_eq!(
+            scoped
+                .request_result(Request::StartSearchScrollback {
+                    splint_id,
+                    incarnation: None,
+                    query: "needle".to_owned(),
+                    case_sensitive: false,
+                    max_results: 4,
+                })
+                .await
+                .expect_err("scrollback-only policy must not permit search")
+                .code,
+            ErrorCode::Unauthorized
+        );
+
+        fs::write(
+            policy,
+            scoped_authorization_policy(
+                splint_id,
+                incarnation,
+                &[
+                    "terminal_visible_read",
+                    "scrollback_read",
+                    "scrollback_search",
+                ],
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut scoped, "history-search policy reload").await;
+        time::sleep(Duration::from_millis(50)).await;
+
+        let mut scoped = daemon.connect().await;
+        let Response::SearchResults {
+            provenance: search_provenance,
+            page: search,
+        } = scoped
+            .request(Request::StartSearchScrollback {
+                splint_id,
+                incarnation: None,
+                query: "needle".to_owned(),
+                case_sensitive: false,
+                max_results: 4,
+            })
+            .await
+        else {
+            panic!("scoped first search page was not returned");
+        };
+        search.validate().unwrap();
+        assert_terminal_provenance(
+            &search_provenance,
+            dojo.id,
+            window_id,
+            splint_id,
+            incarnation,
+            "scope-title",
+            search.terminal_revision,
+            search.history_generation,
+        );
+        assert!(search.matches.iter().any(|item| item.preview.contains("needle")));
+
+        let Response::SearchResyncRequired {
+            provenance: resync,
+            current_revision,
+            history_generation,
+        } = scoped
+            .request(Request::SearchScrollback {
+                splint_id,
+                incarnation: search_provenance.incarnation,
+                terminal_revision: search_provenance.terminal_revision.saturating_add(1),
+                history_generation: search_provenance.history_generation,
+                query: "needle".to_owned(),
+                case_sensitive: false,
+                cursor: None,
+                max_results: 4,
+            })
+            .await
+        else {
+            panic!("stale scoped search did not return resync provenance");
+        };
+        assert_terminal_provenance(
+            &resync,
+            dojo.id,
+            window_id,
+            splint_id,
+            search_provenance.incarnation,
+            "scope-title",
+            current_revision,
+            history_generation,
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("scoped first history page test timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -997,7 +1826,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         let lair_only_denial = connection
             .request_result(Request::Attach {
                 splint_id,
-                incarnation,
+                incarnation: Some(incarnation),
                 scrollback_rows: 0,
             })
             .await
@@ -1267,7 +2096,7 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
         let denied = connection
             .request_result(Request::Attach {
                 splint_id,
-                incarnation,
+                incarnation: Some(incarnation),
                 scrollback_rows: 1,
             })
             .await
@@ -1973,13 +2802,14 @@ async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
             cursor,
             max_results: 1,
         };
-        let Response::SearchResults { page: first } = client.request(search(None)).await else {
+        let Response::SearchResults { page: first, .. } = client.request(search(None)).await else {
             panic!("daemon did not return first search page");
         };
         first.validate().unwrap();
         assert_eq!(first.matches.len(), 1);
         let cursor = first.next_cursor.clone().expect("older match cursor");
-        let Response::SearchResults { page: second } = client.request(search(Some(cursor))).await
+        let Response::SearchResults { page: second, .. } =
+            client.request(search(Some(cursor))).await
         else {
             panic!("daemon did not return second search page");
         };
@@ -2037,10 +2867,11 @@ async fn simultaneous_clients_transfer_control_explicitly() {
         let requester_subscription = requester.subscribe_control(splint_id, incarnation).await;
         let owner_controller = owner.acquire_control(splint_id, incarnation).await;
 
-        let Response::ControlTransferPending { transfer_id } = requester
+        let Response::ControlTransferPending { transfer_id, .. } = requester
             .request(Request::RequestControlTransfer {
                 splint_id,
                 incarnation,
+                modes: vec![ControlMode::Input, ControlMode::Resize],
             })
             .await
         else {
@@ -2062,7 +2893,10 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                     decision: ControlTransferDecision::Deny,
                 })
                 .await,
-            Response::Acknowledged
+            Response::ControlTransferDecided {
+                outcome: ControlTransferOutcome::Denied,
+                controller_id: None,
+            }
         );
         assert!(matches!(
             requester.next_event(requester_subscription).await.1,
@@ -2073,10 +2907,11 @@ async fn simultaneous_clients_transfer_control_explicitly() {
             } if seen == transfer_id
         ));
 
-        let Response::ControlTransferPending { transfer_id } = requester
+        let Response::ControlTransferPending { transfer_id, .. } = requester
             .request(Request::RequestControlTransfer {
                 splint_id,
                 incarnation,
+                modes: vec![ControlMode::Input, ControlMode::Resize],
             })
             .await
         else {
@@ -2091,15 +2926,18 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                 break;
             }
         }
-        assert_eq!(
+        assert!(matches!(
             owner
                 .request(Request::DecideControlTransfer {
                     transfer_id,
                     decision: ControlTransferDecision::Accept,
                 })
                 .await,
-            Response::Acknowledged
-        );
+            Response::ControlTransferDecided {
+                outcome: ControlTransferOutcome::Granted,
+                controller_id: Some(_),
+            }
+        ));
         let transferred_controller = loop {
             if let SubscriptionEvent::ControlTransferResolved {
                 transfer_id: seen,
@@ -2548,7 +3386,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .expect("overflow produced paged history");
         let mut paged_ids = std::collections::BTreeSet::new();
         for _ in 0..4 {
-            let Response::ScrollbackPage { page } = reattached
+            let Response::ScrollbackPage { page, .. } = reattached
                 .request(Request::ScrollbackPage {
                     splint_id,
                     incarnation,

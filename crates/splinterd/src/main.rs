@@ -20,9 +20,9 @@ use anyhow::{Context, Result, bail};
 use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use splinterd::{
-    LiveEvent, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime,
-    ProcessIncarnation, Subscription, SubscriptionReceive, authorization, executable_identity,
-    policy,
+    LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,
+    LiveSplintHandle, LiveSplintRuntime, ProcessIncarnation, Subscription, SubscriptionReceive,
+    authorization, executable_identity, policy,
 };
 use splinterm_core::{
     Dojo, DojoId, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId,
@@ -38,9 +38,10 @@ use splinterm_protocol::{
     ScrollDirection as WireScrollDirection, ScrollbackPage as WireScrollbackPage,
     SearchMatch as WireSearchMatch, SearchPage as WireSearchPage, ServerFrame, ServerLimits,
     SplintLifecycle, SplintRuntimeSummary, SubscriptionEvent, TerminalCell, TerminalCursor,
-    TerminalInputModes, TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate,
-    TerminalSnapshot, TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind,
-    TopologySnapshot, UnderlineStyle as WireUnderlineStyle, encode_frame,
+    TerminalInputModes, TerminalProvenance, TerminalRow, TerminalRowPatch, TerminalScroll,
+    TerminalScrollbackUpdate, TerminalSnapshot, TerminalUpdate as WireTerminalUpdate,
+    TopologyChange, TopologyChangeKind, TopologySnapshot, UnderlineStyle as WireUnderlineStyle,
+    encode_frame,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
@@ -555,9 +556,11 @@ struct DaemonState {
     policy_reloads: broadcast::Sender<u64>,
     controller: Mutex<ControllerState>,
     control_events: broadcast::Sender<ControlNotice>,
+    connection_revocations: broadcast::Sender<u64>,
     grants: Mutex<GrantStore>,
     revocations: broadcast::Sender<Revocation>,
     pty_backend: LinuxPtyBackend,
+    owner_home: Option<PathBuf>,
     development_terminal_access: bool,
 }
 
@@ -628,6 +631,7 @@ async fn main() -> Result<()> {
     };
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
+    let (connection_revocations, _) = broadcast::channel(CONNECTION_LIMIT);
     let (policy_reloads, _) = broadcast::channel(1);
     let mut policy = policy::PolicyStore::default();
     let policy_generation = policy.reload(policy::configured_path().as_deref(), &lair);
@@ -647,9 +651,13 @@ async fn main() -> Result<()> {
         policy_reloads,
         controller: Mutex::new(ControllerState::default()),
         control_events,
+        connection_revocations,
         grants: Mutex::new(GrantStore::default()),
         revocations,
         pty_backend: LinuxPtyBackend::installed()?,
+        owner_home: env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && !path.as_os_str().is_empty()),
         development_terminal_access: env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").as_deref()
             == Some(std::ffi::OsStr::new("1")),
     });
@@ -899,6 +907,9 @@ async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
         publish_control_status(state, lease.splint_id, lease.incarnation).await;
     }
     for transfer in cancelled {
+        let _ = state
+            .connection_revocations
+            .send(transfer.requester_connection_id);
         publish_control_notice(
             state,
             ControlNotice::TransferResolved {
@@ -962,11 +973,17 @@ async fn serve_authenticated(
 
     let mut subscriptions = HashMap::<u64, AbortOnDrop>::new();
     let mut policy_reloads = state.policy_reloads.subscribe();
+    let mut connection_revocations = state.connection_revocations.subscribe();
     let mut last_request_id = 0_u64;
     loop {
         let frame = tokio::select! {
             biased;
             _ = policy_reloads.recv() => break,
+            revoked = connection_revocations.recv() => match revoked {
+                Ok(revoked) if revoked == connection_id => break,
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             frame = read_optional_frame(&mut reader) => frame?,
         };
         let Some(frame) = frame else { break };
@@ -1234,6 +1251,23 @@ async fn publish_control_status(state: &DaemonState, splint_id: SplintId, incarn
     );
 }
 
+fn publish_transfer_timeout(state: &DaemonState, transfer: PendingControlTransfer) {
+    // Closing only the requester connection invalidates its pending adapter
+    // handle immediately. The current owner remains connected and keeps its
+    // controller lease.
+    let _ = state
+        .connection_revocations
+        .send(transfer.requester_connection_id);
+    publish_control_notice(
+        state,
+        ControlNotice::TransferResolved {
+            transfer,
+            outcome: ControlTransferOutcome::TimedOut,
+            controller_id: None,
+        },
+    );
+}
+
 fn schedule_transfer_timeout(state: Arc<DaemonState>, transfer: PendingControlTransfer) {
     tokio::spawn(async move {
         time::sleep(CONTROL_TRANSFER_TIMEOUT).await;
@@ -1249,16 +1283,20 @@ fn schedule_transfer_timeout(state: Arc<DaemonState>, transfer: PendingControlTr
                 splinterm_protocol::AuditOutcome::Cancelled,
             )
             .await;
-            publish_control_notice(
-                &state,
-                ControlNotice::TransferResolved {
-                    transfer,
-                    outcome: ControlTransferOutcome::TimedOut,
-                    controller_id: None,
-                },
-            );
+            publish_transfer_timeout(&state, transfer);
         }
     });
+}
+
+async fn revoke_grant_controllers(state: &DaemonState, grant_id: u64) {
+    let released = state.controller.lock().await.release_grant(grant_id);
+    for lease in released {
+        // Revocation removes both daemon and connection-owned adapter
+        // authority. The connection close makes stale handles and resource
+        // overlays disappear without waiting for reuse.
+        let _ = state.connection_revocations.send(lease.connection_id);
+        publish_control_status(state, lease.splint_id, lease.incarnation).await;
+    }
 }
 
 async fn controlled_handle(
@@ -1698,11 +1736,14 @@ async fn finalize_exit_if_current(
     if current.is_some_and(|current| current != incarnation) {
         return false;
     }
-    state
+    let released = state
         .controller
         .lock()
         .await
         .release_identity(splint_id, incarnation);
+    if let Some(lease) = released {
+        let _ = state.connection_revocations.send(lease.connection_id);
+    }
     publish_control_status(state, splint_id, incarnation).await;
     let revoked =
         state
@@ -1786,22 +1827,29 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::RequestAccess { .. }
             | Request::AuthorizationStatus { .. }
             | Request::RevokeAccess { .. }
+            | Request::PrepareMutation { .. }
             | Request::CreateDojo { .. }
+            | Request::CreateDojoAutomation { .. }
             | Request::SplitSplint { .. }
+            | Request::SplitSplintAutomation { .. }
             | Request::RelaunchSplint { .. }
+            | Request::RelaunchSplintAutomation { .. }
             | Request::RestoreSplint { .. }
             | Request::RestoreWindow { .. }
             | Request::RestoreDojo { .. }
             | Request::CloseSplint { .. }
             | Request::SetSplitRatio { .. }
             | Request::NewWindow { .. }
+            | Request::NewWindowAutomation { .. }
             | Request::CloseWindow { .. }
             | Request::RenameDojo { .. }
             | Request::RenameWindow { .. }
             | Request::SetWindowDefaultFocus { .. }
             | Request::RenameSplint { .. }
             | Request::Attach { .. }
+            | Request::StartScrollbackPage { .. }
             | Request::ScrollbackPage { .. }
+            | Request::StartSearchScrollback { .. }
             | Request::SearchScrollback { .. }
             | Request::AcquireControl { .. }
             | Request::SubscribeControl { .. }
@@ -1829,7 +1877,9 @@ fn consent_capable_request(request: &Request) -> bool {
         request,
         Request::RequestAccess { .. }
             | Request::Attach { .. }
+            | Request::StartScrollbackPage { .. }
             | Request::ScrollbackPage { .. }
+            | Request::StartSearchScrollback { .. }
             | Request::SearchScrollback { .. }
             | Request::AcquireControl { .. }
             | Request::Input { .. }
@@ -1871,6 +1921,22 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                         });
                     }
                 }
+                ConditionalRequirement::RequestedControlModes => {
+                    let (Request::AcquireControl { modes, .. }
+                    | Request::RequestControlTransfer { modes, .. }) = request
+                    else {
+                        return None;
+                    };
+                    if splinterm_protocol::validate_control_modes(modes).is_err() {
+                        return None;
+                    }
+                    for mode in modes {
+                        scopes.push(match mode {
+                            splinterm_protocol::ControlMode::Input => Scope::Input,
+                            splinterm_protocol::ControlMode::Resize => Scope::Resize,
+                        });
+                    }
+                }
                 ConditionalRequirement::AttachScrollback => {
                     if matches!(request, Request::Attach { scrollback_rows, .. } if *scrollback_rows > 0)
                     {
@@ -1900,14 +1966,21 @@ fn requested_limits(request: &Request, active_subscriptions: usize) -> policy::R
         Request::Attach {
             scrollback_rows, ..
         } if *scrollback_rows > 0 => limits.returned_rows = Some(*scrollback_rows),
-        Request::ScrollbackPage { max_rows, .. } => limits.returned_rows = Some(*max_rows),
-        Request::SearchScrollback { max_results, .. } => {
+        Request::StartScrollbackPage { max_rows, .. }
+        | Request::ScrollbackPage { max_rows, .. } => limits.returned_rows = Some(*max_rows),
+        Request::StartSearchScrollback { max_results, .. }
+        | Request::SearchScrollback { max_results, .. } => {
             limits.results = Some(*max_results);
             limits.deadline_ms =
                 Some(u64::try_from(SEARCH_DEADLINE.as_millis()).unwrap_or(u64::MAX));
         }
         Request::AuditInspect { max_records, .. } => limits.results = Some(*max_records),
-        Request::CreateDojo { .. } | Request::SplitSplint { .. } | Request::NewWindow { .. } => {
+        Request::CreateDojo { .. }
+        | Request::CreateDojoAutomation { .. }
+        | Request::SplitSplint { .. }
+        | Request::SplitSplintAutomation { .. }
+        | Request::NewWindow { .. }
+        | Request::NewWindowAutomation { .. } => {
             limits.spawn_count = Some(1);
         }
         _ => {}
@@ -1927,6 +2000,147 @@ fn splint_containment(
         }
     }
     None
+}
+
+async fn terminal_provenance(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+    terminal_revision: u64,
+    history_generation: u64,
+    title: String,
+) -> Result<TerminalProvenance, ProtocolError> {
+    let lair = state.lair.read().await;
+    let topology_revision = lair.revision();
+    let (dojo_id, window_id, _) = splint_containment(&lair, splint_id).ok_or_else(not_found)?;
+    Ok(TerminalProvenance {
+        dojo_id,
+        window_id,
+        splint_id,
+        incarnation,
+        topology_revision,
+        terminal_revision,
+        history_generation,
+        title,
+    })
+}
+
+async fn scrollback_response(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+    page: LiveScrollbackPage,
+) -> Result<Response, ProtocolError> {
+    let terminal_revision = page.terminal_revision.value();
+    let history_generation = page.history_generation;
+    let provenance = terminal_provenance(
+        state,
+        splint_id,
+        incarnation,
+        terminal_revision,
+        history_generation,
+        page.title,
+    )
+    .await?;
+    Ok(Response::ScrollbackPage {
+        provenance,
+        page: WireScrollbackPage {
+            splint_id,
+            incarnation,
+            terminal_revision,
+            history_generation,
+            oldest_available_row_id: page.oldest_available_row_id,
+            newest_available_row_id: page.newest_available_row_id,
+            rows: page.rows.into_iter().map(wire_row).collect(),
+            has_older: page.has_older,
+        },
+    })
+}
+
+async fn scrollback_resync_response(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+    page: LiveScrollbackPage,
+) -> Result<Response, ProtocolError> {
+    let current_revision = page.terminal_revision.value();
+    let history_generation = page.history_generation;
+    Ok(Response::ScrollbackResyncRequired {
+        provenance: terminal_provenance(
+            state,
+            splint_id,
+            incarnation,
+            current_revision,
+            history_generation,
+            page.title,
+        )
+        .await?,
+        current_revision,
+        history_generation,
+    })
+}
+
+async fn search_response(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+    search: LiveSearchPage,
+) -> Result<Response, ProtocolError> {
+    let terminal_revision = search.terminal_revision.value();
+    let history_generation = search.history_generation;
+    let provenance = terminal_provenance(
+        state,
+        splint_id,
+        incarnation,
+        terminal_revision,
+        history_generation,
+        search.title,
+    )
+    .await?;
+    let page = WireSearchPage {
+        splint_id,
+        incarnation,
+        terminal_revision,
+        history_generation,
+        matches: search
+            .page
+            .matches
+            .into_iter()
+            .map(|item| WireSearchMatch {
+                row_id: item.row_id,
+                start_column: item.start_column,
+                end_column: item.end_column,
+                preview: item.preview,
+            })
+            .collect(),
+        next_cursor: search.page.next_offset.map(encode_search_cursor),
+        timed_out: search.page.timed_out,
+    };
+    page.validate()?;
+    Ok(Response::SearchResults { provenance, page })
+}
+
+async fn search_resync_response(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+    search: LiveSearchPage,
+) -> Result<Response, ProtocolError> {
+    let current_revision = search.terminal_revision.value();
+    let history_generation = search.history_generation;
+    Ok(Response::SearchResyncRequired {
+        provenance: terminal_provenance(
+            state,
+            splint_id,
+            incarnation,
+            current_revision,
+            history_generation,
+            search.title,
+        )
+        .await?,
+        current_revision,
+        history_generation,
+    })
 }
 
 fn access_granted_response(
@@ -2135,6 +2349,10 @@ async fn request_policy_resources(
         | Request::InspectTopology
         | Request::SubscribeTopology
         | Request::CreateDojo { .. }
+        | Request::CreateDojoAutomation { .. }
+        | Request::PrepareMutation {
+            mutation: splinterm_protocol::MutationPreflight::CreateDojo,
+        }
         | Request::AuditInspect { .. } => vec![policy::PolicyResource::Lair],
         Request::RevokeAccess { grant_id } => {
             let (splint_id, incarnation) = state.grants.lock().await.grant_resource(*grant_id)?;
@@ -2142,6 +2360,7 @@ async fn request_policy_resources(
         }
         Request::InspectSplint { splint_id }
         | Request::RelaunchSplint { splint_id, .. }
+        | Request::RelaunchSplintAutomation { splint_id, .. }
         | Request::RestoreSplint { splint_id, .. }
         | Request::CloseSplint { splint_id, .. }
         | Request::RenameSplint { splint_id, .. }
@@ -2150,11 +2369,6 @@ async fn request_policy_resources(
             ..
         } => vec![splint(*splint_id, None)?],
         Request::RequestAccess {
-            splint_id,
-            incarnation,
-            ..
-        }
-        | Request::Attach {
             splint_id,
             incarnation,
             ..
@@ -2172,6 +2386,7 @@ async fn request_policy_resources(
         | Request::AcquireControl {
             splint_id,
             incarnation,
+            ..
         }
         | Request::SubscribeControl {
             splint_id,
@@ -2180,6 +2395,7 @@ async fn request_policy_resources(
         | Request::RequestControlTransfer {
             splint_id,
             incarnation,
+            ..
         }
         | Request::Input {
             splint_id,
@@ -2195,20 +2411,38 @@ async fn request_policy_resources(
             splint_id,
             incarnation,
         } => vec![splint(*splint_id, Some(*incarnation))?],
-        Request::AuthorizationStatus {
+        Request::Attach {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::StartScrollbackPage {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::StartSearchScrollback {
+            splint_id,
+            incarnation,
+            ..
+        }
+        | Request::AuthorizationStatus {
             splint_id,
             incarnation,
         } => vec![splint(*splint_id, *incarnation)?],
         Request::SplitSplint {
+            target_splint_id, ..
+        }
+        | Request::SplitSplintAutomation {
             target_splint_id, ..
         } => vec![splint(*target_splint_id, None)?],
         Request::RestoreWindow { window_id, .. } | Request::CloseWindow { window_id, .. } => {
             window(*window_id, true)?
         }
         Request::RestoreDojo { dojo_id, .. } => dojo(*dojo_id, true)?,
-        Request::NewWindow { dojo_id, .. } | Request::RenameDojo { dojo_id, .. } => {
-            dojo(*dojo_id, false)?
-        }
+        Request::NewWindow { dojo_id, .. }
+        | Request::NewWindowAutomation { dojo_id, .. }
+        | Request::RenameDojo { dojo_id, .. } => dojo(*dojo_id, false)?,
         Request::RenameWindow { window_id, .. } => window(*window_id, false)?,
         Request::SetWindowDefaultFocus {
             window_id,
@@ -2219,6 +2453,43 @@ async fn request_policy_resources(
             resources.push(splint(*splint_id, None)?);
             resources
         }
+        Request::PrepareMutation { mutation } => match mutation {
+            splinterm_protocol::MutationPreflight::CreateDojo => unreachable!(),
+            splinterm_protocol::MutationPreflight::SplitSplint { splint_id }
+            | splinterm_protocol::MutationPreflight::RelaunchSplint { splint_id }
+            | splinterm_protocol::MutationPreflight::RestoreSplint { splint_id }
+            | splinterm_protocol::MutationPreflight::CloseSplint { splint_id }
+            | splinterm_protocol::MutationPreflight::SetSplitRatio { splint_id }
+            | splinterm_protocol::MutationPreflight::RenameSplint { splint_id } => {
+                vec![splint(*splint_id, None)?]
+            }
+            splinterm_protocol::MutationPreflight::KillSplint {
+                splint_id,
+                incarnation,
+            } => {
+                vec![splint(*splint_id, Some(*incarnation))?]
+            }
+            splinterm_protocol::MutationPreflight::RestoreWindow { window_id }
+            | splinterm_protocol::MutationPreflight::CloseWindow { window_id } => {
+                window(*window_id, true)?
+            }
+            splinterm_protocol::MutationPreflight::RestoreDojo { dojo_id } => dojo(*dojo_id, true)?,
+            splinterm_protocol::MutationPreflight::NewWindow { dojo_id }
+            | splinterm_protocol::MutationPreflight::RenameDojo { dojo_id } => {
+                dojo(*dojo_id, false)?
+            }
+            splinterm_protocol::MutationPreflight::RenameWindow { window_id } => {
+                window(*window_id, false)?
+            }
+            splinterm_protocol::MutationPreflight::SetWindowDefaultFocus {
+                window_id,
+                splint_id,
+            } => {
+                let mut resources = window(*window_id, false)?;
+                resources.push(splint(*splint_id, None)?);
+                resources
+            }
+        },
     })
 }
 
@@ -2360,6 +2631,13 @@ fn audit_resource(resource: policy::PolicyResource) -> Option<splinterm_protocol
 }
 
 fn spawn_audit_metadata(request: &Request) -> (Option<usize>, Option<String>) {
+    if let Request::CreateDojoAutomation { launch, .. }
+    | Request::SplitSplintAutomation { launch, .. }
+    | Request::RelaunchSplintAutomation { launch, .. }
+    | Request::NewWindowAutomation { launch, .. } = request
+    {
+        return (Some(launch.argv.len().saturating_sub(1)), None);
+    }
     let (Request::CreateDojo { launch, .. }
     | Request::SplitSplint { launch, .. }
     | Request::RelaunchSplint { launch, .. }
@@ -2384,6 +2662,10 @@ struct RequestAuditDisposition {
     decision: splinterm_protocol::AuditDecision,
     reason: &'static str,
     outcome: splinterm_protocol::AuditOutcome,
+}
+
+fn should_append_request_audit(request: &Request, result: &Result<Handled, ProtocolError>) -> bool {
+    !matches!(request, Request::PrepareMutation { .. }) || result.is_err()
 }
 
 async fn append_request_audit(
@@ -2427,6 +2709,370 @@ async fn append_request_audit(
     });
 }
 
+async fn append_request_result_audit(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    request: &Request,
+    authorization: &RequestAuthorizationContext,
+    resource: Option<splinterm_protocol::AuditResource>,
+    result: &Result<Handled, ProtocolError>,
+) {
+    let denied = result.as_ref().err().is_some_and(|error| {
+        matches!(
+            error.code,
+            ErrorCode::Unauthorized | ErrorCode::ConsentDenied | ErrorCode::ConsentUnavailable
+        )
+    });
+    let revoked = result.is_ok() && matches!(request, Request::RevokeAccess { .. });
+    let decision = if denied {
+        splinterm_protocol::AuditDecision::Denied
+    } else if revoked {
+        splinterm_protocol::AuditDecision::Revoked
+    } else if authorization.policy_authorized() {
+        splinterm_protocol::AuditDecision::Matched
+    } else {
+        splinterm_protocol::AuditDecision::Allowed
+    };
+    let reason = if denied {
+        "authorization_denied"
+    } else if revoked {
+        "grant_revoked"
+    } else if authorization.policy_authorized() {
+        "policy_match"
+    } else {
+        "trusted_or_owned_authority"
+    };
+    let outcome = if result.is_ok() {
+        splinterm_protocol::AuditOutcome::Succeeded
+    } else {
+        splinterm_protocol::AuditOutcome::Failed
+    };
+    // A successful scoped preflight establishes no mutation commit. Denials and
+    // failed preflights remain auditable; only the final mutation records success.
+    if should_append_request_audit(request, result) {
+        append_request_audit(
+            state,
+            peer,
+            request,
+            Some(authorization),
+            RequestAuditDisposition {
+                resource,
+                decision,
+                reason,
+                outcome,
+            },
+        )
+        .await;
+    }
+}
+
+async fn bind_current_terminal_incarnation(
+    mut request: Request,
+    state: &DaemonState,
+    peer: &PeerIdentity,
+) -> Result<Request, ProtocolError> {
+    let current = match &request {
+        Request::Attach {
+            splint_id,
+            incarnation: None,
+            ..
+        }
+        | Request::StartScrollbackPage {
+            splint_id,
+            incarnation: None,
+            ..
+        }
+        | Request::StartSearchScrollback {
+            splint_id,
+            incarnation: None,
+            ..
+        } => state
+            .runtimes
+            .lock()
+            .await
+            .handle(*splint_id)
+            .map(|handle| handle.incarnation.value()),
+        _ => return Ok(request),
+    };
+    let Some(current) = current else {
+        append_request_audit(
+            state,
+            peer,
+            &request,
+            None,
+            RequestAuditDisposition {
+                resource: None,
+                decision: splinterm_protocol::AuditDecision::Denied,
+                reason: "resource_unavailable",
+                outcome: splinterm_protocol::AuditOutcome::Failed,
+            },
+        )
+        .await;
+        return Err(not_found());
+    };
+    match &mut request {
+        Request::Attach { incarnation, .. }
+        | Request::StartScrollbackPage { incarnation, .. }
+        | Request::StartSearchScrollback { incarnation, .. } => {
+            *incarnation = Some(current);
+        }
+        _ => unreachable!("only current terminal requests are bound"),
+    }
+    Ok(request)
+}
+
+fn preparation_target(
+    snapshot: &TopologySnapshot,
+    splint_id: SplintId,
+) -> Result<splinterm_protocol::MutationTarget, ProtocolError> {
+    let (dojo_id, window_id, _) =
+        splint_containment(&snapshot.lair, splint_id).ok_or_else(not_found)?;
+    let runtime = snapshot
+        .runtimes
+        .iter()
+        .find(|runtime| runtime.splint_id == splint_id)
+        .ok_or_else(not_found)?;
+    let incarnation = runtime
+        .live_incarnation
+        .or(runtime.last_incarnation)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::StaleIncarnation, "Splint has no incarnation")
+        })?;
+    Ok(splinterm_protocol::MutationTarget {
+        dojo_id,
+        window_id,
+        splint_id,
+        incarnation,
+    })
+}
+
+fn collect_preparation_targets(
+    snapshot: &TopologySnapshot,
+    node: &LayoutNode,
+    output: &mut Vec<splinterm_protocol::MutationTarget>,
+) -> Result<(), ProtocolError> {
+    match node {
+        LayoutNode::Leaf(splint) => output.push(preparation_target(snapshot, splint.id)?),
+        LayoutNode::Branch { first, second, .. } => {
+            collect_preparation_targets(snapshot, first, output)?;
+            collect_preparation_targets(snapshot, second, output)?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed preflight operation-to-provenance table stays contiguous for review"
+)]
+fn prepare_mutation(
+    snapshot: &TopologySnapshot,
+    mutation: splinterm_protocol::MutationPreflight,
+) -> Result<splinterm_protocol::MutationPreparation, ProtocolError> {
+    use splinterm_protocol::MutationPreflight as Preflight;
+    let mut preparation = splinterm_protocol::MutationPreparation {
+        topology_revision: snapshot.revision,
+        dojo_id: None,
+        window_id: None,
+        splint_id: None,
+        incarnation: None,
+        targets: Vec::new(),
+    };
+    match mutation {
+        Preflight::CreateDojo => {}
+        Preflight::SplitSplint { splint_id }
+        | Preflight::RelaunchSplint { splint_id }
+        | Preflight::RestoreSplint { splint_id }
+        | Preflight::CloseSplint { splint_id }
+        | Preflight::SetSplitRatio { splint_id }
+        | Preflight::RenameSplint { splint_id } => {
+            let target = preparation_target(snapshot, splint_id)?;
+            preparation.dojo_id = Some(target.dojo_id);
+            preparation.window_id = Some(target.window_id);
+            preparation.splint_id = Some(target.splint_id);
+            preparation.incarnation = Some(target.incarnation);
+        }
+        Preflight::KillSplint {
+            splint_id,
+            incarnation,
+        } => {
+            let target = preparation_target(snapshot, splint_id)?;
+            let current = snapshot
+                .runtimes
+                .iter()
+                .find(|runtime| runtime.splint_id == splint_id)
+                .and_then(|runtime| runtime.live_incarnation);
+            if current != Some(incarnation) || target.incarnation != incarnation {
+                return Err(ProtocolError::new(
+                    ErrorCode::StaleIncarnation,
+                    "requested incarnation is not current",
+                ));
+            }
+            preparation.dojo_id = Some(target.dojo_id);
+            preparation.window_id = Some(target.window_id);
+            preparation.splint_id = Some(target.splint_id);
+            preparation.incarnation = Some(incarnation);
+        }
+        Preflight::NewWindow { dojo_id } | Preflight::RenameDojo { dojo_id } => {
+            if !snapshot.lair.dojos().any(|dojo| dojo.id == dojo_id) {
+                return Err(not_found());
+            }
+            preparation.dojo_id = Some(dojo_id);
+        }
+        Preflight::RenameWindow { window_id } | Preflight::CloseWindow { window_id } => {
+            let dojo_id = snapshot
+                .lair
+                .dojos()
+                .find(|dojo| dojo.windows.iter().any(|window| window.id == window_id))
+                .map(|dojo| dojo.id)
+                .ok_or_else(not_found)?;
+            preparation.dojo_id = Some(dojo_id);
+            preparation.window_id = Some(window_id);
+        }
+        Preflight::RestoreWindow { window_id } => {
+            let (dojo_id, window) = snapshot
+                .lair
+                .dojos()
+                .find_map(|dojo| {
+                    dojo.windows
+                        .iter()
+                        .find(|window| window.id == window_id)
+                        .map(|window| (dojo.id, window))
+                })
+                .ok_or_else(not_found)?;
+            preparation.dojo_id = Some(dojo_id);
+            preparation.window_id = Some(window_id);
+            collect_preparation_targets(snapshot, &window.root, &mut preparation.targets)?;
+        }
+        Preflight::RestoreDojo { dojo_id } => {
+            let dojo = snapshot
+                .lair
+                .dojos()
+                .find(|dojo| dojo.id == dojo_id)
+                .ok_or_else(not_found)?;
+            preparation.dojo_id = Some(dojo_id);
+            for window in &dojo.windows {
+                collect_preparation_targets(snapshot, &window.root, &mut preparation.targets)?;
+            }
+        }
+        Preflight::SetWindowDefaultFocus {
+            window_id,
+            splint_id,
+        } => {
+            let target = preparation_target(snapshot, splint_id)?;
+            if target.window_id != window_id {
+                return Err(invalid(
+                    "selected Splint does not belong to selected window",
+                ));
+            }
+            preparation.dojo_id = Some(target.dojo_id);
+            preparation.window_id = Some(window_id);
+            preparation.splint_id = Some(splint_id);
+            preparation.incarnation = Some(target.incarnation);
+        }
+    }
+    Ok(preparation)
+}
+
+fn splint_durable_cwd(lair: &Lair, splint_id: SplintId) -> Result<PathBuf, ProtocolError> {
+    lair.find_splint(splint_id)
+        .map(|splint| splint.cwd.clone())
+        .ok_or_else(not_found)
+}
+
+fn dojo_default_cwd(lair: &Lair, dojo_id: DojoId) -> Result<PathBuf, ProtocolError> {
+    let dojo = lair
+        .dojos()
+        .find(|dojo| dojo.id == dojo_id)
+        .ok_or_else(not_found)?;
+    let window = dojo.windows.first().ok_or_else(not_found)?;
+    splint_durable_cwd(lair, window.default_focus)
+}
+
+fn resolved_automation_launch(
+    launch: splinterm_protocol::AutomationLaunch,
+    default_cwd: PathBuf,
+) -> Result<splinterm_protocol::LaunchParameters, ProtocolError> {
+    launch.validate()?;
+    let launch = splinterm_protocol::LaunchParameters {
+        cwd: launch.cwd.unwrap_or(default_cwd),
+        command: launch.argv,
+        shell: None,
+        login_shell: false,
+        scrollback_lines: splinterm_terminal::TerminalConfig::default().scrollback_lines,
+    };
+    launch.validate()?;
+    Ok(launch)
+}
+
+async fn resolve_automation_mutation(
+    request: Request,
+    state: &DaemonState,
+) -> Result<Request, ProtocolError> {
+    Ok(match request {
+        Request::CreateDojoAutomation {
+            expected_topology_revision,
+            name,
+            launch,
+        } => Request::CreateDojo {
+            expected_topology_revision,
+            name,
+            launch: resolved_automation_launch(
+                launch,
+                state.owner_home.clone().ok_or_else(|| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "owner home is unavailable")
+                })?,
+            )?,
+        },
+        Request::SplitSplintAutomation {
+            expected_topology_revision,
+            target_splint_id,
+            axis,
+            side,
+            ratio,
+            launch,
+        } => {
+            let cwd = splint_durable_cwd(&*state.lair.read().await, target_splint_id)?;
+            Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id,
+                axis,
+                side,
+                ratio,
+                launch: resolved_automation_launch(launch, cwd)?,
+            }
+        }
+        Request::RelaunchSplintAutomation {
+            expected_topology_revision,
+            splint_id,
+            launch,
+        } => {
+            let cwd = splint_durable_cwd(&*state.lair.read().await, splint_id)?;
+            Request::RelaunchSplint {
+                expected_topology_revision,
+                splint_id,
+                launch: resolved_automation_launch(launch, cwd)?,
+            }
+        }
+        Request::NewWindowAutomation {
+            expected_topology_revision,
+            dojo_id,
+            title,
+            launch,
+        } => {
+            let cwd = dojo_default_cwd(&*state.lair.read().await, dojo_id)?;
+            Request::NewWindow {
+                expected_topology_revision,
+                dojo_id,
+                title,
+                launch: resolved_automation_launch(launch, cwd)?,
+            }
+        }
+        request => request,
+    })
+}
+
 async fn handle_request(
     request: Request,
     state: &Arc<DaemonState>,
@@ -2435,6 +3081,7 @@ async fn handle_request(
     active_subscriptions: usize,
     trusted_ui_client: bool,
 ) -> Result<Handled, ProtocolError> {
+    let request = bind_current_terminal_incarnation(request, state, peer).await?;
     let audit_resource = request_policy_resources(&request, state)
         .await
         .unwrap_or_default()
@@ -2488,47 +3135,13 @@ async fn handle_request(
             ));
         }
     }
-    let denied = result.as_ref().err().is_some_and(|error| {
-        matches!(
-            error.code,
-            ErrorCode::Unauthorized | ErrorCode::ConsentDenied | ErrorCode::ConsentUnavailable
-        )
-    });
-    let revoked = result.is_ok() && matches!(request, Request::RevokeAccess { .. });
-    let decision = if denied {
-        splinterm_protocol::AuditDecision::Denied
-    } else if revoked {
-        splinterm_protocol::AuditDecision::Revoked
-    } else if authorization.policy_authorized() {
-        splinterm_protocol::AuditDecision::Matched
-    } else {
-        splinterm_protocol::AuditDecision::Allowed
-    };
-    let reason = if denied {
-        "authorization_denied"
-    } else if revoked {
-        "grant_revoked"
-    } else if authorization.policy_authorized() {
-        "policy_match"
-    } else {
-        "trusted_or_owned_authority"
-    };
-    let outcome = if result.is_ok() {
-        splinterm_protocol::AuditOutcome::Succeeded
-    } else {
-        splinterm_protocol::AuditOutcome::Failed
-    };
-    append_request_audit(
+    append_request_result_audit(
         state,
         peer,
         &request,
-        Some(&authorization),
-        RequestAuditDisposition {
-            resource: audit_resource,
-            decision,
-            reason,
-            outcome,
-        },
+        &authorization,
+        audit_resource,
+        &result,
     )
     .await;
     result
@@ -2546,8 +3159,12 @@ async fn handle_authorized_request(
     trusted_ui_client: bool,
     authorization: &RequestAuthorizationContext,
 ) -> Result<Handled, ProtocolError> {
+    let request = resolve_automation_mutation(request, state).await?;
     let response = match request {
         Request::Ping => Response::Pong,
+        Request::PrepareMutation { mutation } => Response::MutationPrepared {
+            preparation: prepare_mutation(&topology_snapshot(state).await, mutation)?,
+        },
         Request::ListDojos => {
             let lair = state.lair.read().await;
             Response::Dojos {
@@ -2740,10 +3357,7 @@ async fn handle_authorized_request(
                 .revoke(grant_id)
                 .ok_or_else(not_found)?;
             drop(transaction);
-            let released = state.controller.lock().await.release_grant(grant_id);
-            for lease in released {
-                publish_control_status(state, lease.splint_id, lease.incarnation).await;
-            }
+            revoke_grant_controllers(state, grant_id).await;
             let _ = state.revocations.send(Revocation { grant_id });
             info!(
                 grant_id,
@@ -3269,6 +3883,7 @@ async fn handle_authorized_request(
             incarnation,
             scrollback_rows,
         } => {
+            let incarnation = incarnation.ok_or_else(internal)?;
             let required = if scrollback_rows == 0 {
                 vec![AccessScope::Observe]
             } else {
@@ -3295,9 +3910,19 @@ async fn handle_authorized_request(
                 .map_err(|_| internal())?;
             let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
             let history = history_state(&snapshot);
+            let provenance = terminal_provenance(
+                state,
+                splint_id,
+                incarnation,
+                snapshot.revision.value(),
+                snapshot.scrollback.history_generation,
+                snapshot.title.clone(),
+            )
+            .await?;
             return Ok(Handled {
                 response: Response::Attached {
                     subscription_id: id,
+                    provenance,
                     snapshot: wire_snapshot(snapshot),
                 },
                 subscription: Some(PendingSubscription::Terminal {
@@ -3312,6 +3937,36 @@ async fn handle_authorized_request(
                     },
                 }),
             });
+        }
+        Request::StartScrollbackPage {
+            splint_id,
+            incarnation,
+            max_rows,
+        } => {
+            let incarnation = incarnation.ok_or_else(internal)?;
+            if max_rows == 0 || max_rows > MAX_SCROLLBACK_PAGE_ROWS {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "scrollback page request exceeds protocol bounds",
+                ));
+            }
+            if !authorization.policy_authorized() {
+                let _ = authorize_scope(
+                    state,
+                    peer,
+                    trusted_ui_client,
+                    splint_id,
+                    incarnation,
+                    &[AccessScope::Observe, AccessScope::Scrollback],
+                )
+                .await?;
+            }
+            let page = current_handle(state, splint_id, incarnation)
+                .await?
+                .start_scrollback_page(max_rows)
+                .await
+                .map_err(|_| internal())?;
+            scrollback_response(state, splint_id, incarnation, page).await?
         }
         Request::ScrollbackPage {
             splint_id,
@@ -3338,23 +3993,8 @@ async fn handle_authorized_request(
                 )
                 .await?;
             }
-            let handle = current_handle(state, splint_id, incarnation).await?;
-            let current = handle
-                .snapshot_with_scrollback(1)
-                .await
-                .map_err(|_| internal())?;
-            if current.revision.value() != terminal_revision
-                || current.scrollback.history_generation != history_generation
-            {
-                return Ok(Handled {
-                    response: Response::ScrollbackResyncRequired {
-                        current_revision: current.revision.value(),
-                        history_generation: current.scrollback.history_generation,
-                    },
-                    subscription: None,
-                });
-            }
-            let page = handle
+            let page = current_handle(state, splint_id, incarnation)
+                .await?
                 .scrollback_page(before_row_id, max_rows)
                 .await
                 .map_err(|_| internal())?;
@@ -3362,25 +4002,45 @@ async fn handle_authorized_request(
                 || page.history_generation != history_generation
             {
                 return Ok(Handled {
-                    response: Response::ScrollbackResyncRequired {
-                        current_revision: page.terminal_revision.value(),
-                        history_generation: page.history_generation,
-                    },
+                    response: scrollback_resync_response(state, splint_id, incarnation, page)
+                        .await?,
                     subscription: None,
                 });
             }
-            Response::ScrollbackPage {
-                page: WireScrollbackPage {
+            scrollback_response(state, splint_id, incarnation, page).await?
+        }
+        Request::StartSearchScrollback {
+            splint_id,
+            incarnation,
+            query,
+            case_sensitive,
+            max_results,
+        } => {
+            let incarnation = incarnation.ok_or_else(internal)?;
+            if query.is_empty()
+                || query.len() > MAX_SEARCH_QUERY_BYTES
+                || max_results == 0
+                || max_results > MAX_SEARCH_RESULTS
+            {
+                return Err(invalid("search request exceeds protocol bounds"));
+            }
+            if !authorization.policy_authorized() {
+                let _ = authorize_scope(
+                    state,
+                    peer,
+                    trusted_ui_client,
                     splint_id,
                     incarnation,
-                    terminal_revision,
-                    history_generation,
-                    oldest_available_row_id: current.scrollback.oldest_available_row_id,
-                    newest_available_row_id: current.scrollback.newest_available_row_id,
-                    rows: page.rows.into_iter().map(wire_row).collect(),
-                    has_older: page.has_older,
-                },
+                    &[AccessScope::Observe, AccessScope::Scrollback],
+                )
+                .await?;
             }
+            let search = current_handle(state, splint_id, incarnation)
+                .await?
+                .search(query, case_sensitive, 0, max_results, SEARCH_DEADLINE)
+                .await
+                .map_err(|_| internal())?;
+            search_response(state, splint_id, incarnation, search).await?
         }
         Request::SearchScrollback {
             splint_id,
@@ -3411,7 +4071,7 @@ async fn handle_authorized_request(
                 )
                 .await?;
             }
-            let page = current_handle(state, splint_id, incarnation)
+            let search = current_handle(state, splint_id, incarnation)
                 .await?
                 .search(
                     query,
@@ -3422,42 +4082,22 @@ async fn handle_authorized_request(
                 )
                 .await
                 .map_err(|_| internal())?;
-            if page.terminal_revision.value() != terminal_revision
-                || page.history_generation != history_generation
+            if search.terminal_revision.value() != terminal_revision
+                || search.history_generation != history_generation
             {
                 return Ok(Handled {
-                    response: Response::SearchResyncRequired {
-                        current_revision: page.terminal_revision.value(),
-                        history_generation: page.history_generation,
-                    },
+                    response: search_resync_response(state, splint_id, incarnation, search).await?,
                     subscription: None,
                 });
             }
-            let page = WireSearchPage {
-                splint_id,
-                incarnation,
-                terminal_revision,
-                history_generation,
-                matches: page
-                    .matches
-                    .into_iter()
-                    .map(|item| WireSearchMatch {
-                        row_id: item.row_id,
-                        start_column: item.start_column,
-                        end_column: item.end_column,
-                        preview: item.preview,
-                    })
-                    .collect(),
-                next_cursor: page.next_offset.map(encode_search_cursor),
-                timed_out: page.timed_out,
-            };
-            page.validate()?;
-            Response::SearchResults { page }
+            search_response(state, splint_id, incarnation, search).await?
         }
         Request::AcquireControl {
             splint_id,
             incarnation,
+            modes,
         } => {
+            splinterm_protocol::validate_control_modes(&modes)?;
             let grant_id = if authorization.policy_authorized()
                 || state.development_terminal_access
                 || trusted_first_party_ui(
@@ -3467,17 +4107,23 @@ async fn handle_authorized_request(
                 ) {
                 None
             } else {
-                let mut grants = state.grants.lock().await;
-                grants
-                    .authorize(peer, splint_id, incarnation, &[AccessScope::Input])
-                    .or_else(|| {
-                        grants.authorize(peer, splint_id, incarnation, &[AccessScope::Resize])
+                let required = modes
+                    .iter()
+                    .map(|mode| match mode {
+                        splinterm_protocol::ControlMode::Input => AccessScope::Input,
+                        splinterm_protocol::ControlMode::Resize => AccessScope::Resize,
                     })
+                    .collect::<Vec<_>>();
+                state
+                    .grants
+                    .lock()
+                    .await
+                    .authorize(peer, splint_id, incarnation, &required)
                     .map(Some)
                     .ok_or_else(|| {
                         ProtocolError::new(
                             ErrorCode::Unauthorized,
-                            "input or resize consent is required",
+                            "requested controller modes require consent",
                         )
                     })?
             };
@@ -3489,8 +4135,12 @@ async fn handle_authorized_request(
                 grant_id,
             )?;
             publish_control_status(state, splint_id, incarnation).await;
+            let (dojo_id, window_id, _) =
+                splint_containment(&*state.lair.read().await, splint_id).ok_or_else(not_found)?;
             Response::ControlGranted {
                 controller_id: lease.id,
+                dojo_id,
+                window_id,
             }
         }
         Request::SubscribeControl {
@@ -3532,7 +4182,9 @@ async fn handle_authorized_request(
         Request::RequestControlTransfer {
             splint_id,
             incarnation,
+            modes,
         } => {
+            splinterm_protocol::validate_control_modes(&modes)?;
             if !authorization.policy_authorized()
                 && !state.development_terminal_access
                 && !trusted_first_party_ui(
@@ -3554,8 +4206,12 @@ async fn handle_authorized_request(
             )?;
             publish_control_notice(state, ControlNotice::TransferRequested(transfer));
             schedule_transfer_timeout(Arc::clone(state), transfer);
+            let (dojo_id, window_id, _) =
+                splint_containment(&*state.lair.read().await, splint_id).ok_or_else(not_found)?;
             Response::ControlTransferPending {
                 transfer_id: transfer.id,
+                dojo_id,
+                window_id,
             }
         }
         Request::DecideControlTransfer {
@@ -3578,7 +4234,10 @@ async fn handle_authorized_request(
             if outcome == ControlTransferOutcome::Granted {
                 publish_control_status(state, transfer.splint_id, transfer.incarnation).await;
             }
-            Response::Acknowledged
+            Response::ControlTransferDecided {
+                outcome,
+                controller_id: lease.map(|lease| lease.id),
+            }
         }
         Request::ForceControlTransfer {
             splint_id,
@@ -3621,8 +4280,12 @@ async fn handle_authorized_request(
                 incarnation,
             )?;
             publish_control_status(state, splint_id, incarnation).await;
+            let (dojo_id, window_id, _) =
+                splint_containment(&*state.lair.read().await, splint_id).ok_or_else(not_found)?;
             Response::ControlGranted {
                 controller_id: lease.id,
+                dojo_id,
+                window_id,
             }
         }
         Request::ReleaseControl { controller_id } => {
@@ -3771,6 +4434,12 @@ async fn handle_authorized_request(
                     signal: status.signal,
                 },
             }
+        }
+        Request::CreateDojoAutomation { .. }
+        | Request::SplitSplintAutomation { .. }
+        | Request::RelaunchSplintAutomation { .. }
+        | Request::NewWindowAutomation { .. } => {
+            unreachable!("automation launch requests are resolved before dispatch")
         }
         Request::AuditInspect {
             after_audit_id,
@@ -4684,9 +5353,11 @@ mod tests {
             policy_reloads: broadcast::channel(1).0,
             controller: Mutex::new(ControllerState::default()),
             control_events,
+            connection_revocations: broadcast::channel(CONNECTION_LIMIT).0,
             grants: Mutex::new(GrantStore::default()),
             revocations,
             pty_backend: LinuxPtyBackend::new("/missing/helper"),
+            owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
         })
     }
@@ -4713,6 +5384,131 @@ mod tests {
         ));
         let peer = PeerIdentity::for_test();
         assert!(!trusted_first_party_ui(false, &peer, &[AccessScope::Input]));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test covers every daemon-owned automation launch default"
+    )]
+    async fn scoped_mutation_preflight_and_daemon_launch_defaults_are_exact() {
+        let state = test_state(false);
+        let dojo = state
+            .lair
+            .write()
+            .await
+            .create_dojo("test", PathBuf::from("/target"))
+            .unwrap()
+            .clone();
+        let dojo_id = dojo.id;
+        let window_id = dojo.windows[0].id;
+        let splint_id = dojo.windows[0].default_focus;
+        let snapshot = TopologySnapshot {
+            revision: state.lair.read().await.revision(),
+            lair: state.lair.read().await.clone(),
+            runtimes: vec![SplintRuntimeSummary {
+                splint_id,
+                live_incarnation: None,
+                last_incarnation: Some(2),
+                restorable: true,
+                lifecycle: SplintLifecycle::Exited,
+                exit_status: None,
+            }],
+        };
+        let rename = prepare_mutation(
+            &snapshot,
+            splinterm_protocol::MutationPreflight::RenameSplint { splint_id },
+        )
+        .unwrap();
+        assert_eq!(rename.dojo_id, Some(dojo_id));
+        assert_eq!(rename.window_id, Some(window_id));
+        assert_eq!(rename.incarnation, Some(2));
+        let restore = prepare_mutation(
+            &snapshot,
+            splinterm_protocol::MutationPreflight::RestoreWindow { window_id },
+        )
+        .unwrap();
+        assert_eq!(restore.targets.len(), 1);
+        assert_eq!(restore.targets[0].splint_id, splint_id);
+
+        for request in [
+            Request::CreateDojoAutomation {
+                expected_topology_revision: snapshot.revision,
+                name: "new".to_owned(),
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: None,
+                    argv: Vec::new(),
+                },
+            },
+            Request::SplitSplintAutomation {
+                expected_topology_revision: snapshot.revision,
+                target_splint_id: splint_id,
+                axis: splinterm_core::Axis::Horizontal,
+                side: splinterm_core::SplitSide::Second,
+                ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: None,
+                    argv: Vec::new(),
+                },
+            },
+            Request::RelaunchSplintAutomation {
+                expected_topology_revision: snapshot.revision,
+                splint_id,
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: None,
+                    argv: Vec::new(),
+                },
+            },
+            Request::NewWindowAutomation {
+                expected_topology_revision: snapshot.revision,
+                dojo_id,
+                title: "window".to_owned(),
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: None,
+                    argv: Vec::new(),
+                },
+            },
+        ] {
+            let resolved = resolve_automation_mutation(request, &state).await.unwrap();
+            let is_create = matches!(resolved, Request::CreateDojo { .. });
+            let (Request::CreateDojo { launch, .. }
+            | Request::SplitSplint { launch, .. }
+            | Request::RelaunchSplint { launch, .. }
+            | Request::NewWindow { launch, .. }) = resolved
+            else {
+                panic!("automation request was not resolved")
+            };
+            assert_eq!(
+                launch.cwd,
+                if is_create {
+                    PathBuf::from("/home/test")
+                } else {
+                    PathBuf::from("/target")
+                }
+            );
+            assert!(launch.command.is_empty());
+            assert!(launch.shell.is_none());
+            assert!(!launch.login_shell);
+        }
+
+        let explicit = resolve_automation_mutation(
+            Request::RelaunchSplintAutomation {
+                expected_topology_revision: snapshot.revision,
+                splint_id,
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: Some(PathBuf::from("/override")),
+                    argv: vec!["sh".to_owned(), String::new()],
+                },
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let Request::RelaunchSplint { launch, .. } = explicit else {
+            panic!("explicit relaunch was not resolved")
+        };
+        assert_eq!(launch.cwd, PathBuf::from("/override"));
+        assert_eq!(launch.command, ["sh", ""]);
     }
 
     #[tokio::test]
@@ -4770,6 +5566,45 @@ mod tests {
             .unwrap_err();
         assert_eq!(wrong_scope.code, ErrorCode::Unauthorized);
         fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[test]
+    fn requested_controller_modes_expand_to_exact_operation_scopes() {
+        let splint_id = SplintId::new();
+        assert_eq!(
+            requested_operation_scopes(&Request::AcquireControl {
+                splint_id,
+                incarnation: 1,
+                modes: vec![splinterm_protocol::ControlMode::Input],
+            }),
+            Some(vec![
+                splinterm_protocol::AutomationScope::ControllerAcquire,
+                splinterm_protocol::AutomationScope::Input,
+            ])
+        );
+        assert_eq!(
+            requested_operation_scopes(&Request::RequestControlTransfer {
+                splint_id,
+                incarnation: 1,
+                modes: vec![
+                    splinterm_protocol::ControlMode::Input,
+                    splinterm_protocol::ControlMode::Resize,
+                ],
+            }),
+            Some(vec![
+                splinterm_protocol::AutomationScope::ControllerTransfer,
+                splinterm_protocol::AutomationScope::Input,
+                splinterm_protocol::AutomationScope::Resize,
+            ])
+        );
+        assert!(
+            requested_operation_scopes(&Request::AcquireControl {
+                splint_id,
+                incarnation: 1,
+                modes: Vec::new(),
+            })
+            .is_none()
+        );
     }
 
     #[tokio::test]
@@ -4845,7 +5680,7 @@ mod tests {
         let error = handle_request(
             Request::Attach {
                 splint_id: SplintId::new(),
-                incarnation: 1,
+                incarnation: Some(1),
                 scrollback_rows: 0,
             },
             &state,
@@ -5171,6 +6006,59 @@ mod tests {
         assert!(controllers.transfer_by_splint.is_empty());
     }
 
+    #[tokio::test]
+    async fn grant_revocation_and_transfer_timeout_signal_only_affected_connections() {
+        let state = test_state(false);
+        let mut revocations = state.connection_revocations.subscribe();
+        let splint_id = SplintId::new();
+        let lease = state
+            .controller
+            .lock()
+            .await
+            .acquire(42, splint_id, 3, Some(9))
+            .unwrap();
+
+        revoke_grant_controllers(&state, 9).await;
+        assert_eq!(revocations.recv().await.unwrap(), 42);
+        assert!(
+            state
+                .controller
+                .lock()
+                .await
+                .authorize(42, lease.id, splint_id, 3)
+                .is_err()
+        );
+
+        let owner = state
+            .controller
+            .lock()
+            .await
+            .acquire(10, splint_id, 3, None)
+            .unwrap();
+        let transfer = state
+            .controller
+            .lock()
+            .await
+            .request_transfer(20, splint_id, 3)
+            .unwrap();
+        let expired = state
+            .controller
+            .lock()
+            .await
+            .expire_transfer(transfer.id)
+            .unwrap();
+        publish_transfer_timeout(&state, expired);
+        assert_eq!(revocations.recv().await.unwrap(), 20);
+        assert!(
+            state
+                .controller
+                .lock()
+                .await
+                .authorize(10, owner.id, splint_id, 3)
+                .is_ok()
+        );
+    }
+
     #[test]
     fn controller_transfer_is_explicit_atomic_and_disconnect_bounded() {
         let splint_id = SplintId::new();
@@ -5197,6 +6085,17 @@ mod tests {
         let owner = controllers.acquire(10, splint_id, 4, None).unwrap();
         let pending = controllers.request_transfer(30, splint_id, 4).unwrap();
         assert_eq!(controllers.cancel_connection_transfers(30), vec![pending]);
+        assert!(controllers.authorize(10, owner.id, splint_id, 4).is_ok());
+
+        let timed_out = controllers.request_transfer(31, splint_id, 4).unwrap();
+        assert_eq!(controllers.expire_transfer(timed_out.id), Some(timed_out));
+        assert_eq!(
+            controllers
+                .decide_transfer(10, timed_out.id, ControlTransferDecision::Accept)
+                .unwrap_err()
+                .code,
+            ErrorCode::RequestNotFound
+        );
         assert!(controllers.authorize(10, owner.id, splint_id, 4).is_ok());
     }
 

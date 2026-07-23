@@ -17,6 +17,7 @@ pub enum OwnedAuthority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionalRequirement {
     RequestedAccessScopes,
+    RequestedControlModes,
     AttachScrollback,
     LiveProcessTermination,
     ExpandedLiveProcessTermination,
@@ -50,6 +51,52 @@ impl RequestAuthorization {
     }
 }
 
+const fn preflight_authorization(
+    mutation: &splinterm_protocol::MutationPreflight,
+) -> RequestAuthorization {
+    use OperationScope as Scope;
+
+    match mutation {
+        splinterm_protocol::MutationPreflight::CreateDojo
+        | splinterm_protocol::MutationPreflight::SplitSplint { .. }
+        | splinterm_protocol::MutationPreflight::NewWindow { .. } => {
+            RequestAuthorization::policy(&[Scope::ProcessSpawn, Scope::TopologyLayoutMutate])
+        }
+        splinterm_protocol::MutationPreflight::RelaunchSplint { .. } => {
+            RequestAuthorization::policy(&[Scope::ProcessSpawn])
+        }
+        splinterm_protocol::MutationPreflight::RestoreSplint { .. }
+        | splinterm_protocol::MutationPreflight::RestoreWindow { .. }
+        | splinterm_protocol::MutationPreflight::RestoreDojo { .. } => {
+            RequestAuthorization::policy(&[Scope::ProcessRestore])
+        }
+        splinterm_protocol::MutationPreflight::CloseSplint { .. } => {
+            RequestAuthorization::Conditional {
+                base: &[Scope::TopologyLayoutMutate],
+                requirement: ConditionalRequirement::LiveProcessTermination,
+            }
+        }
+        splinterm_protocol::MutationPreflight::CloseWindow { .. } => {
+            RequestAuthorization::Conditional {
+                base: &[Scope::TopologyLayoutMutate],
+                requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
+            }
+        }
+        splinterm_protocol::MutationPreflight::KillSplint { .. } => {
+            RequestAuthorization::policy(&[Scope::ProcessTerminate])
+        }
+        splinterm_protocol::MutationPreflight::SetSplitRatio { .. }
+        | splinterm_protocol::MutationPreflight::SetWindowDefaultFocus { .. } => {
+            RequestAuthorization::policy(&[Scope::TopologyLayoutMutate])
+        }
+        splinterm_protocol::MutationPreflight::RenameDojo { .. }
+        | splinterm_protocol::MutationPreflight::RenameWindow { .. }
+        | splinterm_protocol::MutationPreflight::RenameSplint { .. } => {
+            RequestAuthorization::policy(&[Scope::TopologyNameMutate])
+        }
+    }
+}
+
 #[must_use]
 pub const fn for_request(request: &Request) -> RequestAuthorization {
     use OperationScope as Scope;
@@ -70,10 +117,18 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
             RequestAuthorization::policy(&[Scope::AuthorizationInspect])
         }
         Request::RevokeAccess { .. } => RequestAuthorization::policy(&[Scope::AuthorizationRevoke]),
-        Request::CreateDojo { .. } | Request::SplitSplint { .. } | Request::NewWindow { .. } => {
+        Request::PrepareMutation { mutation } => preflight_authorization(mutation),
+        Request::CreateDojo { .. }
+        | Request::CreateDojoAutomation { .. }
+        | Request::SplitSplint { .. }
+        | Request::SplitSplintAutomation { .. }
+        | Request::NewWindow { .. }
+        | Request::NewWindowAutomation { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessSpawn, Scope::TopologyLayoutMutate])
         }
-        Request::RelaunchSplint { .. } => RequestAuthorization::policy(&[Scope::ProcessSpawn]),
+        Request::RelaunchSplint { .. } | Request::RelaunchSplintAutomation { .. } => {
+            RequestAuthorization::policy(&[Scope::ProcessSpawn])
+        }
         Request::RestoreSplint { .. }
         | Request::RestoreWindow { .. }
         | Request::RestoreDojo { .. } => RequestAuthorization::policy(&[Scope::ProcessRestore]),
@@ -97,24 +152,26 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
             base: &[Scope::TerminalVisibleRead, Scope::TerminalSubscribe],
             requirement: ConditionalRequirement::AttachScrollback,
         },
-        Request::ScrollbackPage { .. } => {
+        Request::StartScrollbackPage { .. } | Request::ScrollbackPage { .. } => {
             RequestAuthorization::policy(&[Scope::TerminalVisibleRead, Scope::ScrollbackRead])
         }
-        Request::SearchScrollback { .. } => RequestAuthorization::policy(&[
-            Scope::TerminalVisibleRead,
-            Scope::ScrollbackRead,
-            Scope::ScrollbackSearch,
-        ]),
-        Request::AcquireControl { .. } => RequestAuthorization::Policy {
-            required: &[Scope::ControllerAcquire],
-            any_of: &[Scope::Input, Scope::Resize],
+        Request::StartSearchScrollback { .. } | Request::SearchScrollback { .. } => {
+            RequestAuthorization::policy(&[
+                Scope::TerminalVisibleRead,
+                Scope::ScrollbackRead,
+                Scope::ScrollbackSearch,
+            ])
+        }
+        Request::AcquireControl { .. } => RequestAuthorization::Conditional {
+            base: &[Scope::ControllerAcquire],
+            requirement: ConditionalRequirement::RequestedControlModes,
         },
         Request::SubscribeControl { .. } => {
             RequestAuthorization::policy(&[Scope::TerminalVisibleRead])
         }
-        Request::RequestControlTransfer { .. } => RequestAuthorization::Policy {
-            required: &[Scope::ControllerTransfer],
-            any_of: &[Scope::Input, Scope::Resize],
+        Request::RequestControlTransfer { .. } => RequestAuthorization::Conditional {
+            base: &[Scope::ControllerTransfer],
+            requirement: ConditionalRequirement::RequestedControlModes,
         },
         Request::DecideControlTransfer { .. } => {
             RequestAuthorization::Owned(OwnedAuthority::PendingTransfer)
@@ -178,6 +235,23 @@ mod tests {
     fn sensitive_matrix_keeps_policy_ownership_and_trusted_ui_distinct() {
         let splint_id = SplintId::new();
         assert_eq!(
+            for_request(&Request::StartSearchScrollback {
+                splint_id,
+                incarnation: None,
+                query: "needle".into(),
+                case_sensitive: false,
+                max_results: 1,
+            }),
+            RequestAuthorization::Policy {
+                required: &[
+                    OperationScope::TerminalVisibleRead,
+                    OperationScope::ScrollbackRead,
+                    OperationScope::ScrollbackSearch,
+                ],
+                any_of: &[],
+            }
+        );
+        assert_eq!(
             for_request(&Request::SearchScrollback {
                 splint_id,
                 incarnation: 1,
@@ -194,6 +268,36 @@ mod tests {
                     OperationScope::ScrollbackRead,
                     OperationScope::ScrollbackSearch,
                 ],
+                any_of: &[],
+            }
+        );
+        assert_eq!(
+            for_request(&Request::PrepareMutation {
+                mutation: splinterm_protocol::MutationPreflight::SplitSplint { splint_id },
+            }),
+            RequestAuthorization::Policy {
+                required: &[
+                    OperationScope::ProcessSpawn,
+                    OperationScope::TopologyLayoutMutate,
+                ],
+                any_of: &[],
+            }
+        );
+        assert_eq!(
+            for_request(&Request::PrepareMutation {
+                mutation: splinterm_protocol::MutationPreflight::CloseSplint { splint_id },
+            }),
+            RequestAuthorization::Conditional {
+                base: &[OperationScope::TopologyLayoutMutate],
+                requirement: ConditionalRequirement::LiveProcessTermination,
+            }
+        );
+        assert_eq!(
+            for_request(&Request::PrepareMutation {
+                mutation: splinterm_protocol::MutationPreflight::RenameSplint { splint_id },
+            }),
+            RequestAuthorization::Policy {
+                required: &[OperationScope::TopologyNameMutate],
                 any_of: &[],
             }
         );

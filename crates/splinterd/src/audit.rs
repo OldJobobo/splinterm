@@ -21,23 +21,74 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::RequestAccess { .. } => AuditOperation::RequestAccess,
         Request::AuthorizationStatus { .. } => AuditOperation::AuthorizationStatus,
         Request::RevokeAccess { .. } => AuditOperation::RevokeAccess,
-        Request::CreateDojo { .. } => AuditOperation::CreateDojo,
-        Request::SplitSplint { .. } => AuditOperation::SplitSplint,
-        Request::RelaunchSplint { .. } => AuditOperation::RelaunchSplint,
+        Request::PrepareMutation { mutation } => match mutation {
+            splinterm_protocol::MutationPreflight::CreateDojo => AuditOperation::CreateDojo,
+            splinterm_protocol::MutationPreflight::SplitSplint { .. } => {
+                AuditOperation::SplitSplint
+            }
+            splinterm_protocol::MutationPreflight::NewWindow { .. } => AuditOperation::NewWindow,
+            splinterm_protocol::MutationPreflight::RelaunchSplint { .. } => {
+                AuditOperation::RelaunchSplint
+            }
+            splinterm_protocol::MutationPreflight::RestoreSplint { .. } => {
+                AuditOperation::RestoreSplint
+            }
+            splinterm_protocol::MutationPreflight::RestoreWindow { .. } => {
+                AuditOperation::RestoreWindow
+            }
+            splinterm_protocol::MutationPreflight::RestoreDojo { .. } => {
+                AuditOperation::RestoreDojo
+            }
+            splinterm_protocol::MutationPreflight::CloseSplint { .. } => {
+                AuditOperation::CloseSplint
+            }
+            splinterm_protocol::MutationPreflight::CloseWindow { .. } => {
+                AuditOperation::CloseWindow
+            }
+            splinterm_protocol::MutationPreflight::KillSplint { .. } => AuditOperation::KillSplint,
+            splinterm_protocol::MutationPreflight::SetSplitRatio { .. } => {
+                AuditOperation::SetSplitRatio
+            }
+            splinterm_protocol::MutationPreflight::RenameDojo { .. } => AuditOperation::RenameDojo,
+            splinterm_protocol::MutationPreflight::RenameWindow { .. } => {
+                AuditOperation::RenameWindow
+            }
+            splinterm_protocol::MutationPreflight::RenameSplint { .. } => {
+                AuditOperation::RenameSplint
+            }
+            splinterm_protocol::MutationPreflight::SetWindowDefaultFocus { .. } => {
+                AuditOperation::SetWindowDefaultFocus
+            }
+        },
+        Request::CreateDojo { .. } | Request::CreateDojoAutomation { .. } => {
+            AuditOperation::CreateDojo
+        }
+        Request::SplitSplint { .. } | Request::SplitSplintAutomation { .. } => {
+            AuditOperation::SplitSplint
+        }
+        Request::RelaunchSplint { .. } | Request::RelaunchSplintAutomation { .. } => {
+            AuditOperation::RelaunchSplint
+        }
         Request::RestoreSplint { .. } => AuditOperation::RestoreSplint,
         Request::RestoreWindow { .. } => AuditOperation::RestoreWindow,
         Request::RestoreDojo { .. } => AuditOperation::RestoreDojo,
         Request::CloseSplint { .. } => AuditOperation::CloseSplint,
         Request::SetSplitRatio { .. } => AuditOperation::SetSplitRatio,
-        Request::NewWindow { .. } => AuditOperation::NewWindow,
+        Request::NewWindow { .. } | Request::NewWindowAutomation { .. } => {
+            AuditOperation::NewWindow
+        }
         Request::CloseWindow { .. } => AuditOperation::CloseWindow,
         Request::RenameDojo { .. } => AuditOperation::RenameDojo,
         Request::RenameWindow { .. } => AuditOperation::RenameWindow,
         Request::SetWindowDefaultFocus { .. } => AuditOperation::SetWindowDefaultFocus,
         Request::RenameSplint { .. } => AuditOperation::RenameSplint,
         Request::Attach { .. } => AuditOperation::Attach,
-        Request::ScrollbackPage { .. } => AuditOperation::ScrollbackPage,
-        Request::SearchScrollback { .. } => AuditOperation::SearchScrollback,
+        Request::StartScrollbackPage { .. } | Request::ScrollbackPage { .. } => {
+            AuditOperation::ScrollbackPage
+        }
+        Request::StartSearchScrollback { .. } | Request::SearchScrollback { .. } => {
+            AuditOperation::SearchScrollback
+        }
         Request::AcquireControl { .. } => AuditOperation::AcquireControl,
         Request::SubscribeControl { .. } => AuditOperation::SubscribeControl,
         Request::RequestControlTransfer { .. } => AuditOperation::RequestControlTransfer,
@@ -183,6 +234,41 @@ mod tests {
             argument_count: None,
             executable_basename: None,
         }
+    }
+
+    #[test]
+    fn first_page_requests_reuse_reviewed_history_operations() {
+        let splint_id = splinterm_core::SplintId::new();
+        assert_eq!(
+            operation_for_request(&Request::StartScrollbackPage {
+                splint_id,
+                incarnation: None,
+                max_rows: 16,
+            }),
+            AuditOperation::ScrollbackPage
+        );
+        assert_eq!(
+            operation_for_request(&Request::StartSearchScrollback {
+                splint_id,
+                incarnation: None,
+                query: "needle".into(),
+                case_sensitive: false,
+                max_results: 16,
+            }),
+            AuditOperation::SearchScrollback
+        );
+        assert_eq!(
+            operation_for_request(&Request::PrepareMutation {
+                mutation: splinterm_protocol::MutationPreflight::SplitSplint { splint_id },
+            }),
+            AuditOperation::SplitSplint
+        );
+        assert_eq!(
+            operation_for_request(&Request::PrepareMutation {
+                mutation: splinterm_protocol::MutationPreflight::RenameSplint { splint_id },
+            }),
+            AuditOperation::RenameSplint
+        );
     }
 
     #[test]

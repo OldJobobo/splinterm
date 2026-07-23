@@ -32,9 +32,10 @@ use splinterm_core::{
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen, CellAttributes, ColorSource, ConsentPrompt,
-    ConsentReply, ControlTransferOutcome, ErrorCode, HistoryTransition, LaunchParameters,
-    MAX_CONSENT_FRAME_BYTES, Request, Response, ServerFrame, SubscriptionEvent, TerminalCell,
-    TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
+    ConsentReply, ControlMode, ControlTransferOutcome, ErrorCode, HistoryTransition,
+    LaunchParameters, MAX_CONSENT_FRAME_BYTES, Request, Response, ServerFrame, SubscriptionEvent,
+    TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate,
+    UnderlineStyle,
 };
 use tokio::sync::mpsc;
 
@@ -1787,11 +1788,15 @@ async fn machine_control_envelope(
             Request::AcquireControl {
                 splint_id,
                 incarnation,
+                modes: vec![match command {
+                    MachineControl::Input(_) => ControlMode::Input,
+                    MachineControl::Resize { .. } => ControlMode::Resize,
+                }],
             },
             deadline.saturating_sub(started.elapsed()),
         )
         .await?;
-    let Response::ControlGranted { controller_id } = response else {
+    let Response::ControlGranted { controller_id, .. } = response else {
         bail!("splinterd did not grant a controller lease");
     };
     if controller_id == 0 {
@@ -2050,7 +2055,7 @@ async fn machine_history_context(
         .request_with_deadline(
             Request::Attach {
                 splint_id,
-                incarnation,
+                incarnation: Some(incarnation),
                 scrollback_rows: 0,
             },
             deadline.saturating_sub(started.elapsed()),
@@ -2059,6 +2064,7 @@ async fn machine_history_context(
     let Response::Attached {
         subscription_id,
         snapshot,
+        ..
     } = response
     else {
         bail!("splinterd returned an unexpected attach response");
@@ -2100,6 +2106,10 @@ async fn machine_history_context(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed scrollback/search response matrix remains contiguous for protocol review"
+)]
 async fn machine_history_envelope(
     connection: &mut Connection,
     command: &MachineHistory,
@@ -2140,7 +2150,7 @@ async fn machine_history_envelope(
         .request_with_deadline(request, deadline.saturating_sub(started.elapsed()))
         .await?;
     match response {
-        Response::ScrollbackPage { page }
+        Response::ScrollbackPage { page, .. }
             if matches!(command, MachineHistory::Scrollback { .. }) =>
         {
             if page.splint_id != splint_id
@@ -2156,7 +2166,9 @@ async fn machine_history_envelope(
                 &page,
             )
         }
-        Response::SearchResults { page } if matches!(command, MachineHistory::Search { .. }) => {
+        Response::SearchResults { page, .. }
+            if matches!(command, MachineHistory::Search { .. }) =>
+        {
             if page.splint_id != splint_id
                 || page.incarnation != context.provenance.incarnation
                 || page.terminal_revision != context.provenance.terminal_revision
@@ -2173,6 +2185,7 @@ async fn machine_history_envelope(
         Response::ScrollbackResyncRequired {
             current_revision,
             history_generation,
+            ..
         } if matches!(command, MachineHistory::Scrollback { .. }) => read_resync_envelope(
             command.operation(),
             TerminalReadProvenanceV1 {
@@ -2189,6 +2202,7 @@ async fn machine_history_envelope(
         Response::SearchResyncRequired {
             current_revision,
             history_generation,
+            ..
         } if matches!(command, MachineHistory::Search { .. }) => read_resync_envelope(
             command.operation(),
             TerminalReadProvenanceV1 {
@@ -2305,7 +2319,7 @@ async fn machine_snapshot_envelope(
         .request_with_deadline(
             Request::Attach {
                 splint_id,
-                incarnation,
+                incarnation: Some(incarnation),
                 scrollback_rows: 0,
             },
             deadline.saturating_sub(started.elapsed()),
@@ -2314,6 +2328,7 @@ async fn machine_snapshot_envelope(
     let Response::Attached {
         subscription_id,
         snapshot,
+        ..
     } = attached
     else {
         bail!("splinterd returned an unexpected attach response");
@@ -2522,7 +2537,7 @@ async fn run_terminal_subscription(
         .request_with_deadline(
             Request::Attach {
                 splint_id,
-                incarnation,
+                incarnation: Some(incarnation),
                 scrollback_rows: 0,
             },
             setup_deadline,
@@ -2531,6 +2546,7 @@ async fn run_terminal_subscription(
     let Response::Attached {
         subscription_id,
         snapshot,
+        ..
     } = response
     else {
         bail!("splinterd returned an unexpected attach response");
@@ -3137,7 +3153,7 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
                 connection
                     .request(Request::Attach {
                         splint_id,
-                        incarnation,
+                        incarnation: Some(incarnation),
                         scrollback_rows: 16,
                     })
                     .await?,
@@ -3153,7 +3169,9 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
         } => {
             let incarnation = connection.live_incarnation(splint_id).await?;
             require_incarnation(incarnation, expected_incarnation)?;
-            let controller_id = connection.acquire_control(splint_id, incarnation).await?;
+            let controller_id = connection
+                .acquire_control(splint_id, incarnation, vec![ControlMode::Input])
+                .await?;
             let response = connection
                 .request(Request::Input {
                     controller_id,
@@ -3171,7 +3189,9 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
             rows,
         } => {
             let incarnation = connection.live_incarnation(splint_id).await?;
-            let controller_id = connection.acquire_control(splint_id, incarnation).await?;
+            let controller_id = connection
+                .acquire_control(splint_id, incarnation, vec![ControlMode::Resize])
+                .await?;
             let response = connection
                 .request(Request::Resize {
                     controller_id,
@@ -3642,10 +3662,11 @@ async fn attach(
     let Response::Attached {
         subscription_id,
         snapshot,
+        ..
     } = connection
         .request(Request::Attach {
             splint_id,
-            incarnation,
+            incarnation: Some(incarnation),
             scrollback_rows: splinterm_protocol::MAX_SNAPSHOT_SCROLLBACK_ROWS,
         })
         .await?
@@ -3762,7 +3783,7 @@ async fn fetch_scrollback_pages(
             })
             .await?;
         let page = match response {
-            Response::ScrollbackPage { page } => page,
+            Response::ScrollbackPage { page, .. } => page,
             Response::ScrollbackResyncRequired { .. } => return Ok(None),
             _ => bail!("splinterd did not return a scrollback page"),
         };
@@ -3829,7 +3850,13 @@ async fn ensure_pane_control(
     if let Some(controller_id) = *active_controller {
         return Ok(controller_id);
     }
-    let controller_id = control.acquire_control(splint_id, incarnation).await?;
+    let controller_id = control
+        .acquire_control(
+            splint_id,
+            incarnation,
+            vec![ControlMode::Input, ControlMode::Resize],
+        )
+        .await?;
     *active_controller = Some(controller_id);
     let _ = updates.send(WindowUpdate::Control(true)).await;
     if apply_prepared_resize {
@@ -4091,6 +4118,7 @@ async fn run_controller(
                             .request(Request::RequestControlTransfer {
                                 splint_id,
                                 incarnation,
+                                modes: vec![ControlMode::Input, ControlMode::Resize],
                             })
                             .await?,
                         Response::ControlTransferPending { .. }
@@ -4114,7 +4142,7 @@ async fn run_controller(
                         })
                         .await?
                     {
-                        Response::ControlGranted { controller_id } => Some(controller_id),
+                        Response::ControlGranted { controller_id, .. } => Some(controller_id),
                         _ => bail!("splinterd did not grant forced control"),
                     };
                     let _ = outputs.updates.send(WindowUpdate::Control(true)).await;
@@ -4140,7 +4168,7 @@ async fn run_controller(
                         })
                         .await?
                     {
-                        Response::SearchResults { page } => {
+                        Response::SearchResults { page, .. } => {
                             let _ = outputs
                                 .updates
                                 .send(WindowUpdate::SearchResults(page))
@@ -4167,9 +4195,13 @@ async fn run_controller(
             };
             let expects_terminal_action =
                 matches!(&request, Request::Input { .. } | Request::Resize { .. });
+            let expects_transfer_decision =
+                matches!(&request, Request::DecideControlTransfer { .. });
             let response = control.request(request).await?;
             let acknowledged = if expects_terminal_action {
                 terminal_action_matches(&response, splint_id, incarnation)
+            } else if expects_transfer_decision {
+                matches!(response, Response::ControlTransferDecided { .. })
             } else {
                 matches!(response, Response::Acknowledged)
             };
@@ -4748,7 +4780,13 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     if control_incarnation != incarnation {
         bail!("control connection observed a different process incarnation");
     }
-    let controller_id = control.acquire_control(splint_id, incarnation).await?;
+    let controller_id = control
+        .acquire_control(
+            splint_id,
+            incarnation,
+            vec![ControlMode::Input, ControlMode::Resize],
+        )
+        .await?;
     println!("Controller lease {controller_id} granted for live Splint");
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
     let _theme_watcher = tokio::spawn(watch_theme(
@@ -4993,6 +5031,9 @@ fn print_dojos(dojos: Vec<splinterm_core::Dojo>) {
 fn print_response(response: Response) -> Result<()> {
     match response {
         Response::Pong => println!("splinterd is awake"),
+        Response::MutationPrepared { .. } => {
+            println!("Mutation preflight prepared.");
+        }
         Response::Dojos { dojos, .. } if dojos.is_empty() => println!("No dojos in the lair."),
         Response::Dojos { dojos, .. } => print_dojos(dojos),
         Response::DojoCreated { dojo, .. } => println!("Created dojo '{}'.", dojo.name),
@@ -5014,7 +5055,7 @@ fn print_response(response: Response) -> Result<()> {
             runtime.splint_id, runtime.lifecycle, runtime.live_incarnation, runtime.exit_status
         ),
         Response::Attached { snapshot, .. } => print_snapshot(&snapshot),
-        Response::ScrollbackPage { page } => println!(
+        Response::ScrollbackPage { page, .. } => println!(
             "Scrollback page: {} row(s), has_older={}",
             page.rows.len(),
             page.has_older
@@ -5022,10 +5063,11 @@ fn print_response(response: Response) -> Result<()> {
         Response::ScrollbackResyncRequired {
             current_revision,
             history_generation,
+            ..
         } => println!(
             "Scrollback resync required at revision {current_revision}, generation {history_generation}"
         ),
-        Response::SearchResults { page } => println!(
+        Response::SearchResults { page, .. } => println!(
             "Search page: {} match(es), continuation={}, timed_out={}",
             page.matches.len(),
             page.next_cursor.is_some(),
@@ -5034,6 +5076,7 @@ fn print_response(response: Response) -> Result<()> {
         Response::SearchResyncRequired {
             current_revision,
             history_generation,
+            ..
         } => println!(
             "Search resync required at revision {current_revision}, generation {history_generation}"
         ),
@@ -5055,7 +5098,7 @@ fn print_response(response: Response) -> Result<()> {
                 persistent.len()
             );
         }
-        Response::ControlGranted { controller_id } => {
+        Response::ControlGranted { controller_id, .. } => {
             println!("Controller lease {controller_id} granted.");
         }
         Response::ControlSubscribed {
@@ -5065,8 +5108,11 @@ fn print_response(response: Response) -> Result<()> {
             "Control subscription {subscription_id}: controlled={}, locally_owned={}",
             status.controlled, status.locally_owned,
         ),
-        Response::ControlTransferPending { transfer_id } => {
+        Response::ControlTransferPending { transfer_id, .. } => {
             println!("Control transfer {transfer_id} pending.");
+        }
+        Response::ControlTransferDecided { outcome, .. } => {
+            println!("Control transfer {outcome:?}.");
         }
         Response::AuditPage { page } => println!(
             "Audit page: {} record(s), retention_gap={}, newest={:?}.",

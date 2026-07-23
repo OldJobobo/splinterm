@@ -264,6 +264,13 @@ const DEFINITIONS: &[ToolDefinition] = &[
 ];
 
 const COMMON_SCHEMA: &str = include_str!("../../../dist/schemas/mcp/v1/common.schema.json");
+const ERROR_SCHEMA: &str = include_str!("../../../dist/schemas/mcp/v1/error.schema.json");
+const TOPOLOGY_RESOURCE_SCHEMA: &str =
+    include_str!("../../../dist/schemas/mcp/v1/resources/topology.schema.json");
+const TERMINAL_RESOURCE_SCHEMA: &str =
+    include_str!("../../../dist/schemas/mcp/v1/resources/terminal.schema.json");
+const CONTROL_RESOURCE_SCHEMA: &str =
+    include_str!("../../../dist/schemas/mcp/v1/resources/control.schema.json");
 const MAXIMUM_SCHEMA_DEPTH: usize = 32;
 const MAXIMUM_ARGV_ENCODED_BYTES: usize = 65_536;
 const MAXIMUM_INPUT_TEXT_BYTES: usize = 65_536;
@@ -306,23 +313,77 @@ fn parse_schema(schema: &str) -> Value {
     serde_json::from_str(schema).expect("checked-in MCP schema must remain valid JSON")
 }
 
-fn schema_object(schema: &Value) -> Arc<Map<String, Value>> {
+const COMMON_REFERENCE_PREFIX: &str =
+    "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/";
+
+fn localize_common_references(value: &mut Value) {
+    match value {
+        Value::String(reference) if reference.starts_with(COMMON_REFERENCE_PREFIX) => {
+            *reference = reference.replacen(COMMON_REFERENCE_PREFIX, "#/$defs/", 1);
+        }
+        Value::Array(values) => values.iter_mut().for_each(localize_common_references),
+        Value::Object(object) => object.values_mut().for_each(localize_common_references),
+        _ => {}
+    }
+}
+
+fn wire_schema_object(schema: &Value, common_schema: &Value) -> Arc<Map<String, Value>> {
+    let mut object = schema
+        .as_object()
+        .expect("checked-in MCP schema root must remain an object")
+        .clone();
+    // MCP Tool schemas must be independently usable by strict clients. The
+    // reviewed standalone documents factor common definitions into a sibling
+    // schema, so materialize those definitions and localize their references on
+    // the discovery wire without changing runtime validation semantics.
+    object.insert("type".to_owned(), Value::String("object".to_owned()));
+    object.insert("$defs".to_owned(), common_schema["$defs"].clone());
+    let mut value = Value::Object(object);
+    localize_common_references(&mut value);
     Arc::new(
-        schema
+        value
             .as_object()
-            .expect("checked-in MCP schema root must remain an object")
+            .expect("wire schema remains an object")
+            .clone(),
+    )
+}
+
+fn wire_output_schema_object(
+    success_schema: &Value,
+    common_schema: &Value,
+) -> Arc<Map<String, Value>> {
+    let mut success = success_schema.clone();
+    let mut failure = parse_schema(ERROR_SCHEMA);
+    for schema in [&mut success, &mut failure] {
+        if let Some(object) = schema.as_object_mut() {
+            object.remove("$schema");
+            object.remove("$id");
+        }
+        localize_common_references(schema);
+    }
+    let mut object = Map::new();
+    object.insert("type".to_owned(), Value::String("object".to_owned()));
+    object.insert("oneOf".to_owned(), Value::Array(vec![success, failure]));
+    object.insert("$defs".to_owned(), common_schema["$defs"].clone());
+    let mut value = Value::Object(object);
+    localize_common_references(&mut value);
+    Arc::new(
+        value
+            .as_object()
+            .expect("wire output schema remains an object")
             .clone(),
     )
 }
 
 fn build_tool(definition: ToolDefinition, input_schema: &Value) -> Tool {
     let output_schema = parse_schema(definition.output_schema);
+    let common_schema = parse_schema(COMMON_SCHEMA);
     Tool::new(
         definition.name,
         definition.description,
-        schema_object(input_schema),
+        wire_schema_object(input_schema, &common_schema),
     )
-    .with_raw_output_schema(schema_object(&output_schema))
+    .with_raw_output_schema(wire_output_schema_object(&output_schema, &common_schema))
     .with_annotations(ToolAnnotations::from_raw(
         None,
         Some(definition.read_only),
@@ -354,6 +415,17 @@ pub(crate) fn validate_output(name: &str, output: &Value) -> Result<(), Validati
     )
 }
 
+pub(crate) fn validate_resource(kind: &str, resource: &Value) -> Result<(), ValidationError> {
+    let schema = match kind {
+        "topology" => TOPOLOGY_RESOURCE_SCHEMA,
+        "terminal" => TERMINAL_RESOURCE_SCHEMA,
+        "control" => CONTROL_RESOURCE_SCHEMA,
+        _ => return Err(ValidationError::InvalidArgument),
+    };
+    let catalog = catalog_cache();
+    validate_schema(&parse_schema(schema), resource, &catalog.common_schema, 0)
+}
+
 pub(crate) fn validate_arguments(name: &str, arguments: &Value) -> Result<(), ValidationError> {
     let Some(index) = definition_index(name) else {
         return Err(ValidationError::UnknownTool);
@@ -372,6 +444,14 @@ pub(crate) fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Va
             .get("text")
             .and_then(Value::as_str)
             .is_some_and(|text| text.len() > MAXIMUM_INPUT_TEXT_BYTES)
+    {
+        return Err(ValidationError::InvalidArgument);
+    }
+    if name == "splinterm.search_scrollback"
+        && arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .is_some_and(|query| query.len() > splinterm_protocol::MAX_SEARCH_QUERY_BYTES)
     {
         return Err(ValidationError::InvalidArgument);
     }
@@ -584,6 +664,12 @@ fn matches_frozen_pattern(pattern: &str, value: &str) -> bool {
         "^cur_[A-Za-z0-9_-]{16,256}$" => bounded_handle(value, "cur_"),
         "^ctl_[A-Za-z0-9_-]{16,256}$" => bounded_handle(value, "ctl_"),
         "^xfer_[A-Za-z0-9_-]{16,256}$" => bounded_handle(value, "xfer_"),
+        "^splinterm://splints/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/terminal$" => {
+            resource_uri(value, "terminal")
+        }
+        "^splinterm://splints/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/control$" => {
+            resource_uri(value, "control")
+        }
         _ => false,
     }
 }
@@ -598,6 +684,13 @@ pub(crate) fn canonical_uuid(value: &str) -> bool {
         19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
         _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
     })
+}
+
+fn resource_uri(value: &str, expected_kind: &str) -> bool {
+    value
+        .strip_prefix("splinterm://splints/")
+        .and_then(|remainder| remainder.split_once('/'))
+        .is_some_and(|(uuid, kind)| canonical_uuid(uuid) && kind == expected_kind)
 }
 
 fn bounded_handle(value: &str, prefix: &str) -> bool {

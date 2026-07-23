@@ -1,6 +1,6 @@
 # Plan 0006: headless access and supported automation
 
-- **Status:** In progress
+- **Status:** Complete on 2026-07-23
 - **Roadmap:** Phase 4 — Headless access and supported automation
 - **Foundation:** [Plan 0004](0004-phase3-multiplexing.md), [ADR 0005](../adr/0005-trusted-consent-broker.md), [ADR 0006](../adr/0006-multiplexing-lifecycle.md)
 - **Reference source:** Foot 1.27.0, commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
@@ -627,6 +627,15 @@ narrowly allowed or denied by its exact daemon policy/resource/controller rules;
 a read grant cannot be used for mutation; malicious terminal text remains quoted
 data and cannot create a tool call or broaden authority.
 
+**Status:** complete on 2026-07-23. All 32 tools and three resource forms, exact
+policy/controller enforcement, bounded cleanup, adversarial stdio matrices, the
+optional split package, and the extracted-tree real-daemon scenario pass. The
+approved Plan 0007 evidence-source amendment uses Inspector for the stdio lanes
+its CLI supports and the black-box/extracted-package suites for cancellation and
+durable subscriptions absent from that CLI; unsupported URL-only conformance
+scenarios are recorded without adding HTTP. See
+[`artifacts/0022-mcp-package`](../spikes/artifacts/0022-mcp-package/README.md).
+
 ### Slice 7 — closure, documentation, and package evidence
 
 - Run the complete authorization matrix, schema compatibility suite, isolated
@@ -642,6 +651,12 @@ data and cannot create a tool call or broaden authority.
   and controller ownership.
 - Record deferred work: non-SSH gateways, durable terminal bodies, broader editor
   plugins, public distribution, Nix, and write-capable MCP defaults.
+
+**Status:** complete on 2026-07-23. Package, documentation, extracted-tree,
+schema, authorization, lifecycle, Inspector discovery/success/error, black-box
+cancellation/subscription, dependency, and full non-graphical closure checks
+pass. Core Phase 4 is closed under the reviewed Plan 0007 evidence-source
+amendment.
 
 ## Validation contract for every implementation slice
 

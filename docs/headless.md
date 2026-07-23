@@ -73,8 +73,9 @@ is intended to receive that authority.
 Authorizing the general `splinterm` CLI delegates the selected rule to every
 same-account process able to invoke that exact binary; running inside a Splint
 does not narrow or grant that authority. This can support a supervised CLI-based
-coding agent, but the planned `splinterm-mcp` adapter should use its own exact
-executable identity for a narrower production boundary. Dojo and window rules
+coding agent, but the optional `splinterm-mcp` split package uses its own exact
+executable identity for a narrower production boundary; see [mcp.md](mcp.md).
+Dojo and window rules
 snapshot only resources present when the policy generation is published. To
 authorize a newly created child, review the concrete resource, update policy,
 reload the service, and reconnect; broad future-descendant authority is not part

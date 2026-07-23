@@ -18,8 +18,8 @@ use splinterm_protocol::{
     ClientFrame, ClientRole, ColorSource, ControlStatus, ErrorCode, MouseTracking,
     PROTOCOL_VERSION, PersistentAuthorizationStatus, ProcessExitStatus, ProtocolError, Response,
     RestoreLeafResult, ScrollbackPage, ServerFrame, ServerLimits, SplintLifecycle,
-    SplintRuntimeSummary, SubscriptionEvent, TerminalCell, TerminalInputModes, TerminalRow,
-    TerminalSnapshot, TopologySnapshot, UnderlineStyle, encode_frame,
+    SplintRuntimeSummary, SubscriptionEvent, TerminalCell, TerminalInputModes, TerminalProvenance,
+    TerminalRow, TerminalSnapshot, TopologySnapshot, UnderlineStyle, encode_frame,
 };
 
 static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
@@ -103,6 +103,22 @@ fn reviewed_topology() -> TopologySnapshot {
             lifecycle: SplintLifecycle::Running,
             exit_status: None,
         }],
+    }
+}
+
+fn reviewed_terminal_provenance(
+    terminal_revision: u64,
+    history_generation: u64,
+) -> TerminalProvenance {
+    TerminalProvenance {
+        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+        window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+        splint_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap(),
+        incarnation: 2,
+        topology_revision: TopologyRevision::new(1),
+        terminal_revision,
+        history_generation,
+        title: "build".to_owned(),
     }
 }
 
@@ -216,6 +232,7 @@ fn serve_history_response(search: bool, result: Response) -> (PathBuf, thread::J
             2,
             Response::Attached {
                 subscription_id: 7,
+                provenance: reviewed_terminal_provenance(9, 2),
                 snapshot: reviewed_terminal_snapshot(),
             },
         );
@@ -376,6 +393,7 @@ fn serve_subscription(stream_kind: ExpectedSubscription) -> (PathBuf, thread::Jo
                     2,
                     Response::Attached {
                         subscription_id: 7,
+                        provenance: reviewed_terminal_provenance(9, 2),
                         snapshot: reviewed_terminal_snapshot(),
                     },
                 );
@@ -504,7 +522,11 @@ fn serve_terminal_action(
         send_response(
             &mut stream,
             2,
-            Response::ControlGranted { controller_id: 42 },
+            Response::ControlGranted {
+                controller_id: 42,
+                dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+            },
         );
         let request = read_client_frame(&mut stream);
         assert!(if input {
@@ -768,6 +790,10 @@ fn output_json_reads_use_reviewed_shapes_and_global_flag_placement() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one subprocess fixture proves exact terminal provenance and detach cleanup"
+)]
 fn output_json_snapshot_uses_exact_provenance_and_detaches() {
     let socket = socket_path();
     let listener = UnixListener::bind(&socket).unwrap();
@@ -821,6 +847,7 @@ fn output_json_snapshot_uses_exact_provenance_and_detaches() {
                     request_id: 2,
                     result: Response::Attached {
                         subscription_id: 7,
+                        provenance: reviewed_terminal_provenance(9, 2),
                         snapshot: reviewed_terminal_snapshot(),
                     },
                 })
@@ -903,6 +930,7 @@ fn output_json_history_reads_emit_pages_and_resync_without_query_echo() {
     let (socket, server) = serve_history_response(
         false,
         Response::ScrollbackPage {
+            provenance: reviewed_terminal_provenance(9, 2),
             page: ScrollbackPage {
                 splint_id: terminal.splint_id,
                 incarnation: terminal.incarnation,
@@ -939,6 +967,7 @@ fn output_json_history_reads_emit_pages_and_resync_without_query_echo() {
     let (socket, server) = serve_history_response(
         true,
         Response::SearchResyncRequired {
+            provenance: reviewed_terminal_provenance(10, 3),
             current_revision: 10,
             history_generation: 3,
         },

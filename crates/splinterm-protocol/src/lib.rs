@@ -10,7 +10,7 @@ use splinterm_core::{
     Axis, Dojo, DojoId, Lair, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
 };
 
-pub const PROTOCOL_VERSION: u16 = 19;
+pub const PROTOCOL_VERSION: u16 = 22;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -20,7 +20,7 @@ pub const MAX_AUDIT_PAGE_RECORDS: usize = 128;
 pub const MAX_SEARCH_PREVIEW_BYTES: usize = 256;
 pub const MAX_SEARCH_CURSOR_BYTES: usize = 32;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
-pub const MAX_LAUNCH_ARGUMENTS: usize = 64;
+pub const MAX_LAUNCH_ARGUMENTS: usize = 256;
 pub const MAX_LAUNCH_ARGUMENT_BYTES: usize = 4096;
 pub const MAX_CWD_BYTES: usize = 4096;
 pub const MAX_SCROLLBACK_LINES: usize = 1_000_000;
@@ -107,6 +107,83 @@ impl Default for ServerLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationLaunch {
+    pub cwd: Option<PathBuf>,
+    /// Direct executable plus argv. Empty selects the daemon-owned default shell.
+    pub argv: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum MutationPreflight {
+    CreateDojo,
+    SplitSplint {
+        splint_id: SplintId,
+    },
+    NewWindow {
+        dojo_id: DojoId,
+    },
+    RelaunchSplint {
+        splint_id: SplintId,
+    },
+    RestoreSplint {
+        splint_id: SplintId,
+    },
+    RestoreWindow {
+        window_id: WindowId,
+    },
+    RestoreDojo {
+        dojo_id: DojoId,
+    },
+    CloseSplint {
+        splint_id: SplintId,
+    },
+    CloseWindow {
+        window_id: WindowId,
+    },
+    KillSplint {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+    SetSplitRatio {
+        splint_id: SplintId,
+    },
+    RenameDojo {
+        dojo_id: DojoId,
+    },
+    RenameWindow {
+        window_id: WindowId,
+    },
+    RenameSplint {
+        splint_id: SplintId,
+    },
+    SetWindowDefaultFocus {
+        window_id: WindowId,
+        splint_id: SplintId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationTarget {
+    pub dojo_id: DojoId,
+    pub window_id: WindowId,
+    pub splint_id: SplintId,
+    /// Current incarnation when live, otherwise the last durable incarnation.
+    pub incarnation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationPreparation {
+    pub topology_revision: TopologyRevision,
+    pub dojo_id: Option<DojoId>,
+    pub window_id: Option<WindowId>,
+    pub splint_id: Option<SplintId>,
+    pub incarnation: Option<u64>,
+    /// Exact bounded expansion for aggregate restore validation.
+    pub targets: Vec<MutationTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Ping,
@@ -127,6 +204,33 @@ pub enum Request {
     },
     RevokeAccess {
         grant_id: u64,
+    },
+    PrepareMutation {
+        mutation: MutationPreflight,
+    },
+    CreateDojoAutomation {
+        expected_topology_revision: TopologyRevision,
+        name: String,
+        launch: AutomationLaunch,
+    },
+    SplitSplintAutomation {
+        expected_topology_revision: TopologyRevision,
+        target_splint_id: SplintId,
+        axis: Axis,
+        side: SplitSide,
+        ratio: SplitRatio,
+        launch: AutomationLaunch,
+    },
+    RelaunchSplintAutomation {
+        expected_topology_revision: TopologyRevision,
+        splint_id: SplintId,
+        launch: AutomationLaunch,
+    },
+    NewWindowAutomation {
+        expected_topology_revision: TopologyRevision,
+        dojo_id: DojoId,
+        title: String,
+        launch: AutomationLaunch,
     },
     CreateDojo {
         expected_topology_revision: TopologyRevision,
@@ -199,8 +303,15 @@ pub enum Request {
     },
     Attach {
         splint_id: SplintId,
-        incarnation: u64,
+        /// Exact incarnation, or `None` to bind the current incarnation before authorization.
+        incarnation: Option<u64>,
         scrollback_rows: usize,
+    },
+    StartScrollbackPage {
+        splint_id: SplintId,
+        /// Exact incarnation, or `None` to bind the current incarnation before authorization.
+        incarnation: Option<u64>,
+        max_rows: usize,
     },
     ScrollbackPage {
         splint_id: SplintId,
@@ -209,6 +320,14 @@ pub enum Request {
         history_generation: u64,
         before_row_id: u64,
         max_rows: usize,
+    },
+    StartSearchScrollback {
+        splint_id: SplintId,
+        /// Exact incarnation, or `None` to bind the current incarnation before authorization.
+        incarnation: Option<u64>,
+        query: String,
+        case_sensitive: bool,
+        max_results: usize,
     },
     SearchScrollback {
         splint_id: SplintId,
@@ -223,6 +342,7 @@ pub enum Request {
     AcquireControl {
         splint_id: SplintId,
         incarnation: u64,
+        modes: Vec<ControlMode>,
     },
     SubscribeControl {
         splint_id: SplintId,
@@ -231,6 +351,7 @@ pub enum Request {
     RequestControlTransfer {
         splint_id: SplintId,
         incarnation: u64,
+        modes: Vec<ControlMode>,
     },
     DecideControlTransfer {
         transfer_id: u64,
@@ -275,6 +396,9 @@ pub enum Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Pong,
+    MutationPrepared {
+        preparation: MutationPreparation,
+    },
     Dojos {
         dojos: Vec<Dojo>,
         topology_revision: TopologyRevision,
@@ -340,24 +464,31 @@ pub enum Response {
     },
     Attached {
         subscription_id: u64,
+        provenance: TerminalProvenance,
         snapshot: TerminalSnapshot,
     },
     ScrollbackPage {
+        provenance: TerminalProvenance,
         page: ScrollbackPage,
     },
     ScrollbackResyncRequired {
+        provenance: TerminalProvenance,
         current_revision: u64,
         history_generation: u64,
     },
     SearchResults {
+        provenance: TerminalProvenance,
         page: SearchPage,
     },
     SearchResyncRequired {
+        provenance: TerminalProvenance,
         current_revision: u64,
         history_generation: u64,
     },
     ControlGranted {
         controller_id: u64,
+        dojo_id: DojoId,
+        window_id: WindowId,
     },
     ControlSubscribed {
         subscription_id: u64,
@@ -365,6 +496,12 @@ pub enum Response {
     },
     ControlTransferPending {
         transfer_id: u64,
+        dojo_id: DojoId,
+        window_id: WindowId,
+    },
+    ControlTransferDecided {
+        outcome: ControlTransferOutcome,
+        controller_id: Option<u64>,
     },
     AuditPage {
         page: AuditPage,
@@ -448,6 +585,28 @@ impl TopologyChange {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlMode {
+    Input,
+    Resize,
+}
+
+/// Validates a nonempty, duplicate-free public controller mode set.
+///
+/// # Errors
+/// Returns `InvalidArgument` when no mode, a duplicate, or more than two modes are present.
+pub fn validate_control_modes(modes: &[ControlMode]) -> Result<(), ProtocolError> {
+    let valid = (1..=2).contains(&modes.len()) && !(modes.len() == 2 && modes[0] == modes[1]);
+    if !valid {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "invalid controller modes",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlTransferDecision {
@@ -514,6 +673,39 @@ pub struct LaunchParameters {
     pub scrollback_lines: usize,
 }
 
+impl AutomationLaunch {
+    /// Validates bounded structured automation launch input without resolving defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when an explicit path or argv exceeds protocol bounds.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let argv_bytes = self
+            .argv
+            .iter()
+            .try_fold(0_usize, |total, item| total.checked_add(item.len()));
+        let valid = self.cwd.as_ref().is_none_or(|cwd| {
+            cwd.is_absolute()
+                && !cwd.as_os_str().is_empty()
+                && !cwd.as_os_str().as_encoded_bytes().contains(&0)
+                && cwd.as_os_str().as_encoded_bytes().len() <= MAX_CWD_BYTES
+        }) && self.argv.len() <= MAX_LAUNCH_ARGUMENTS
+            && self
+                .argv
+                .iter()
+                .all(|item| !item.contains('\0') && item.len() <= MAX_LAUNCH_ARGUMENT_BYTES)
+            && self.argv.first().is_none_or(|program| !program.is_empty())
+            && argv_bytes.is_some_and(|bytes| bytes <= MAX_INPUT_BYTES);
+        if !valid {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "automation launch parameters exceed protocol limits",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl LaunchParameters {
     /// Validates wire allocation and launch-policy bounds.
     ///
@@ -526,12 +718,17 @@ impl LaunchParameters {
             .iter()
             .try_fold(0_usize, |total, item| total.checked_add(item.len()));
         let valid = !self.cwd.as_os_str().is_empty()
+            && !self.cwd.as_os_str().as_encoded_bytes().contains(&0)
             && self.cwd.as_os_str().as_encoded_bytes().len() <= MAX_CWD_BYTES
             && self.command.len() <= MAX_LAUNCH_ARGUMENTS
             && self
                 .command
                 .iter()
-                .all(|item| !item.is_empty() && item.len() <= MAX_LAUNCH_ARGUMENT_BYTES)
+                .all(|item| !item.contains('\0') && item.len() <= MAX_LAUNCH_ARGUMENT_BYTES)
+            && self
+                .command
+                .first()
+                .is_none_or(|program| !program.is_empty())
             && command_bytes.is_some_and(|bytes| bytes <= MAX_INPUT_BYTES)
             && self
                 .shell
@@ -1254,6 +1451,23 @@ pub enum ScrollDirection {
     Reverse,
 }
 
+/// Scoped public-facing identity for one authorized terminal result.
+///
+/// This private wire DTO lets non-graphical clients project terminal results
+/// without issuing a broader topology request. Terminal revision and history
+/// generation must match the adjacent snapshot, page, or resync state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalProvenance {
+    pub dojo_id: DojoId,
+    pub window_id: WindowId,
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub topology_revision: TopologyRevision,
+    pub terminal_revision: u64,
+    pub history_generation: u64,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalSnapshot {
     pub splint_id: SplintId,
@@ -1539,6 +1753,95 @@ mod tests {
     }
 
     #[test]
+    fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
+        assert_eq!(PROTOCOL_VERSION, 22);
+        let splint_id = SplintId::new();
+        let attach = Request::Attach {
+            splint_id,
+            incarnation: None,
+            scrollback_rows: 0,
+        };
+        let scrollback = Request::StartScrollbackPage {
+            splint_id,
+            incarnation: None,
+            max_rows: 16,
+        };
+        let search = Request::StartSearchScrollback {
+            splint_id,
+            incarnation: None,
+            query: "needle".to_owned(),
+            case_sensitive: false,
+            max_results: 8,
+        };
+        let attach_json = serde_json::to_string(&attach).unwrap();
+        let scrollback_json = serde_json::to_string(&scrollback).unwrap();
+        let search_json = serde_json::to_string(&search).unwrap();
+        assert!(attach_json.contains("\"type\":\"attach\""));
+        assert!(attach_json.contains("\"incarnation\":null"));
+        assert!(scrollback_json.contains("\"type\":\"start_scrollback_page\""));
+        assert!(search_json.contains("\"type\":\"start_search_scrollback\""));
+        assert_eq!(
+            serde_json::from_str::<Request>(&attach_json).unwrap(),
+            attach
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(&scrollback_json).unwrap(),
+            scrollback
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(&search_json).unwrap(),
+            search
+        );
+    }
+
+    #[test]
+    fn mutation_preflight_and_automation_launch_are_explicit_protocol_v21_shapes() {
+        let splint_id = SplintId::new();
+        let request = Request::PrepareMutation {
+            mutation: MutationPreflight::SplitSplint { splint_id },
+        };
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains("\"type\":\"prepare_mutation\""));
+        assert!(encoded.contains("\"operation\":\"split_splint\""));
+        assert_eq!(serde_json::from_str::<Request>(&encoded).unwrap(), request);
+
+        let launch = AutomationLaunch {
+            cwd: None,
+            argv: Vec::new(),
+        };
+        launch.validate().unwrap();
+        let explicit = AutomationLaunch {
+            cwd: Some(PathBuf::from("/tmp")),
+            argv: vec!["sh".to_owned(), String::new()],
+        };
+        explicit.validate().unwrap();
+        assert!(
+            AutomationLaunch {
+                cwd: Some(PathBuf::from("relative")),
+                argv: Vec::new(),
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            AutomationLaunch {
+                cwd: Some(PathBuf::from("/tmp/has\0nul")),
+                argv: Vec::new(),
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            AutomationLaunch {
+                cwd: None,
+                argv: vec!["sh".to_owned(), "has\0nul".to_owned()],
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
     fn server_limits_are_bounded() {
         let limits = ServerLimits::default();
         assert!(limits.maximum_input_bytes < limits.maximum_frame_bytes);
@@ -1574,10 +1877,16 @@ mod tests {
         invalid.command = vec!["x".into(); MAX_LAUNCH_ARGUMENTS + 1];
         assert!(invalid.validate().is_err());
         let mut invalid = launch.clone();
-        invalid.command.push(String::new());
+        invalid.command[0] = String::new();
+        assert!(invalid.validate().is_err());
+        let mut invalid = launch.clone();
+        invalid.scrollback_lines = MAX_SCROLLBACK_LINES + 1;
+        assert!(invalid.validate().is_err());
+        let mut invalid = launch.clone();
+        invalid.cwd = PathBuf::from("/tmp/has\0nul");
         assert!(invalid.validate().is_err());
         let mut invalid = launch;
-        invalid.scrollback_lines = MAX_SCROLLBACK_LINES + 1;
+        invalid.command.push("has\0nul".to_owned());
         assert!(invalid.validate().is_err());
     }
 
@@ -1601,9 +1910,14 @@ mod tests {
             .is_err()
         );
 
+        assert!(validate_control_modes(&[ControlMode::Input]).is_ok());
+        assert!(validate_control_modes(&[ControlMode::Input, ControlMode::Resize]).is_ok());
+        assert!(validate_control_modes(&[]).is_err());
+        assert!(validate_control_modes(&[ControlMode::Input, ControlMode::Input]).is_err());
         let request = Request::RequestControlTransfer {
             splint_id,
             incarnation: 7,
+            modes: vec![ControlMode::Input],
         };
         let encoded = serde_json::to_string(&request).unwrap();
         assert!(encoded.contains("request_control_transfer"));

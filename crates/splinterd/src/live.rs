@@ -115,8 +115,19 @@ pub struct LiveSnapshot {
 pub struct LiveScrollbackPage {
     pub terminal_revision: TerminalRevision,
     pub history_generation: u64,
+    pub title: String,
+    pub oldest_available_row_id: Option<u64>,
+    pub newest_available_row_id: Option<u64>,
     pub rows: Vec<LiveRow>,
     pub has_older: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveSearchPage {
+    pub terminal_revision: TerminalRevision,
+    pub history_generation: u64,
+    pub title: String,
+    pub page: SearchPage,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -228,6 +239,8 @@ pub enum LiveError {
     InputQueueFull,
     #[error("terminal dimensions must be non-zero")]
     InvalidDimensions,
+    #[error("terminal row identity is exhausted")]
+    RowIdentityExhausted,
     #[error("subscriber capacity must be non-zero")]
     InvalidSubscriberCapacity,
     #[error("PTY reply queue limit exceeded")]
@@ -248,8 +261,8 @@ enum Command {
     Input(Vec<u8>, Reply<()>),
     Resize(PtySize, Reply<()>),
     Snapshot(usize, Reply<LiveSnapshot>),
-    ScrollbackPage(u64, usize, Reply<LiveScrollbackPage>),
-    Search(String, bool, usize, usize, Duration, Reply<SearchPage>),
+    ScrollbackPage(Option<u64>, usize, Reply<LiveScrollbackPage>),
+    Search(String, bool, usize, usize, Duration, Reply<LiveSearchPage>),
     Subscribe(usize, Reply<Subscription>),
     Attach(usize, usize, Reply<(LiveSnapshot, Subscription)>),
     Shutdown(oneshot::Sender<()>),
@@ -336,7 +349,15 @@ impl LiveSplintHandle {
         before_row_id: u64,
         max_rows: usize,
     ) -> Result<LiveScrollbackPage, LiveError> {
-        self.request(|reply| Command::ScrollbackPage(before_row_id, max_rows, reply))
+        self.request(|reply| Command::ScrollbackPage(Some(before_row_id), max_rows, reply))
+            .await
+    }
+
+    pub async fn start_scrollback_page(
+        &self,
+        max_rows: usize,
+    ) -> Result<LiveScrollbackPage, LiveError> {
+        self.request(|reply| Command::ScrollbackPage(None, max_rows, reply))
             .await
     }
 
@@ -347,7 +368,7 @@ impl LiveSplintHandle {
         skip_rows: usize,
         max_results: usize,
         deadline: Duration,
-    ) -> Result<SearchPage, LiveError> {
+    ) -> Result<LiveSearchPage, LiveError> {
         self.request(|reply| {
             Command::Search(
                 query,
@@ -849,6 +870,21 @@ fn handle_command(
             )));
         }
         Command::ScrollbackPage(before_row_id, max_rows, reply) => {
+            let snapshot = terminal.snapshot(SnapshotRequest {
+                max_scrollback_rows: 1,
+            });
+            let scrollback = snapshot.scrollback();
+            let before_row_id = match (before_row_id, scrollback.newest_available_row_id) {
+                (Some(before_row_id), _) => before_row_id,
+                (None, Some(newest_row_id)) => {
+                    let Some(before_row_id) = newest_row_id.checked_add(1) else {
+                        let _ = reply.send(Err(LiveError::RowIdentityExhausted));
+                        return;
+                    };
+                    before_row_id
+                }
+                (None, None) => 1,
+            };
             let page = terminal.scrollback_page(
                 before_row_id,
                 max_rows.min(config.max_scrollback_snapshot_rows),
@@ -856,11 +892,18 @@ fn handle_command(
             let _ = reply.send(Ok(LiveScrollbackPage {
                 terminal_revision: page.terminal_revision,
                 history_generation: page.history_generation,
+                title: snapshot.title().to_owned(),
+                oldest_available_row_id: scrollback.oldest_available_row_id,
+                newest_available_row_id: scrollback.newest_available_row_id,
                 rows: page.rows.into_iter().map(owned_row).collect(),
                 has_older: page.has_older,
             }));
         }
         Command::Search(query, case_sensitive, skip_rows, maximum_results, deadline, reply) => {
+            let snapshot = terminal.snapshot(SnapshotRequest {
+                max_scrollback_rows: 0,
+            });
+            let title = snapshot.title().to_owned();
             let page = terminal.search_normal(
                 &query,
                 case_sensitive,
@@ -868,7 +911,12 @@ fn handle_command(
                 maximum_results,
                 deadline,
             );
-            let _ = reply.send(Ok(page));
+            let _ = reply.send(Ok(LiveSearchPage {
+                terminal_revision: page.terminal_revision,
+                history_generation: page.history_generation,
+                title,
+                page,
+            }));
         }
         Command::Subscribe(capacity, reply) => {
             subscribers.retain(|subscriber| !subscriber.events.is_closed());

@@ -95,8 +95,8 @@ hint.
 ## Automation and coding-agent boundary
 
 The supported path for a coding agent is a least-privileged automation client:
-today the stable JSON/NDJSON CLI, and eventually the separately authorized
-`splinterm-mcp` adapter. Both use the same daemon operations and policy checks;
+the stable JSON/NDJSON CLI or the separately packaged and authorized
+`splinterm-mcp` stdio adapter. Both use the same daemon operations and policy checks;
 neither inherits trusted-UI authority. If an agent shells out to the general
 `splinterm` CLI, the daemon authorizes that CLI executable, so every process able
 to invoke that exact binary can exercise the rule's scopes. The dedicated MCP
@@ -117,7 +117,7 @@ reconcile every hint against current public topology before selection.
 
 ## Private prerelease deployment
 
-The Arch package installs four adjacent runtime executables—`splinterm`,
+The main Arch package installs four adjacent runtime executables—`splinterm`,
 `splinterd`, `splinterm-relay`, and `splinterm-pty-child`—plus the public-CLI-only
 `splinterm-session-picker` reference integration, an on-demand systemd user
 service, xdg launcher/desktop metadata, icon/AppStream metadata, theme generator,
@@ -128,11 +128,14 @@ display variables, preserves them for PTY children when the graphical session
 provides them, strips the unsupported development authorization bypass, loads
 only an optional owner-controlled environment file, uses SIGHUP for atomic
 fail-closed policy reload, and uses SIGINT for graceful child/socket cleanup.
-Policy validation and inspection reuse the daemon's secure loader locally;
+The optional `splinterm-mcp` split package adds only the independently
+policy-identified stdio adapter, its setup guide, and license notices; installation
+or MCP host configuration grants no daemon authority. Policy validation and inspection reuse the daemon's secure loader locally;
 reload remains systemd control rather than an ordinary socket RPC. Package
 scripts do not edit user homes, enable lingering, change SSH policy, or mutate
 Omarchy-owned directories; see [headless.md](headless.md),
-[integrations.md](integrations.md), and [packaging.md](packaging.md).
+[integrations.md](integrations.md), [mcp.md](mcp.md), and
+[packaging.md](packaging.md).
 
 ## Foot reference map
 

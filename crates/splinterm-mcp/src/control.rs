@@ -1,0 +1,1568 @@
+use std::{
+    collections::{HashMap, hash_map::RandomState},
+    hash::BuildHasher,
+    path::PathBuf,
+    sync::{Arc, Weak},
+    time::Duration,
+};
+
+use serde_json::{Value, json};
+use splinterm_automation_client::Connection;
+use splinterm_core::{DojoId, SplintId, WindowId};
+use splinterm_protocol::{
+    ControlMode, ControlTransferDecision, ControlTransferOutcome, Request, Response,
+    validate_control_modes,
+};
+#[cfg(test)]
+use tokio::sync::Notify;
+use tokio::{
+    sync::{Mutex, mpsc, oneshot},
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::{dispatch, resources::ResourceRegistry};
+
+const SCHEMA: &str = "splinterm.mcp.v1";
+const MAXIMUM_CONTROL_HANDLES: usize = 8;
+const TRANSFER_LIFETIME: Duration = Duration::from_secs(16);
+
+#[derive(Debug, Clone)]
+struct Metadata {
+    dojo_id: DojoId,
+    window_id: WindowId,
+    splint_id: SplintId,
+    incarnation: u64,
+    modes: Vec<ControlMode>,
+}
+
+#[derive(Debug)]
+enum ControllerCommand {
+    Request {
+        request: Request,
+        cancellation: CancellationToken,
+        terminate: bool,
+        reply: oneshot::Sender<Result<Response, dispatch::DispatchFailure>>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
+}
+
+#[derive(Debug)]
+enum TransferCommand {
+    Take {
+        reply: oneshot::Sender<Option<Connection>>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
+}
+
+#[derive(Debug)]
+struct ControllerEntry {
+    metadata: Metadata,
+    private_id: u64,
+    sender: mpsc::Sender<ControllerCommand>,
+    task: JoinHandle<()>,
+}
+
+#[derive(Debug)]
+struct TransferEntry {
+    metadata: Metadata,
+    private_id: u64,
+    owner_handle: String,
+    sender: mpsc::Sender<TransferCommand>,
+    task: JoinHandle<()>,
+}
+
+#[derive(Debug)]
+struct State {
+    controllers: HashMap<String, ControllerEntry>,
+    transfers: HashMap<String, TransferEntry>,
+    next_token: u64,
+    next_revision: u64,
+    hashers: [RandomState; 2],
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            controllers: HashMap::new(),
+            transfers: HashMap::new(),
+            next_token: 1,
+            next_revision: 1,
+            hashers: [RandomState::new(), RandomState::new()],
+        }
+    }
+}
+
+impl State {
+    fn count(&self) -> usize {
+        self.controllers.len() + self.transfers.len()
+    }
+
+    fn token(&mut self, prefix: &str) -> Result<String, dispatch::DispatchFailure> {
+        let counter = self.next_token;
+        self.next_token = self
+            .next_token
+            .checked_add(1)
+            .ok_or_else(dispatch::DispatchFailure::resource_limit)?;
+        let first = self.hashers[0].hash_one(("splinterm-mcp-control-v1", prefix, counter));
+        let second = self.hashers[1].hash_one(("splinterm-mcp-control-v1", prefix, counter));
+        Ok(format!("{prefix}_{counter:016x}{first:016x}{second:016x}"))
+    }
+
+    fn revision(&mut self) -> Result<u64, dispatch::DispatchFailure> {
+        let revision = self.next_revision;
+        self.next_revision = self
+            .next_revision
+            .checked_add(1)
+            .ok_or_else(dispatch::DispatchFailure::resource_limit)?;
+        Ok(revision)
+    }
+}
+
+#[derive(Debug)]
+struct Inner {
+    state: Mutex<State>,
+    gate: Mutex<()>,
+    resources: Arc<ResourceRegistry>,
+    shutdown: CancellationToken,
+    socket: Option<PathBuf>,
+    #[cfg(test)]
+    post_commit_hook: std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ControlRegistry(Arc<Inner>);
+
+#[derive(Debug, Clone, Copy)]
+enum RegisteredKind {
+    Controller,
+    Transfer,
+}
+
+#[derive(Debug)]
+struct RegistrationGuard {
+    inner: Weak<Inner>,
+    token: Option<String>,
+    kind: RegisteredKind,
+}
+
+impl RegistrationGuard {
+    fn new(inner: &Arc<Inner>, token: String, kind: RegisteredKind) -> Self {
+        Self {
+            inner: Arc::downgrade(inner),
+            token: Some(token),
+            kind,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.token = None;
+    }
+}
+
+impl Drop for RegistrationGuard {
+    fn drop(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        let inner = self.inner.clone();
+        let kind = self.kind;
+        tokio::spawn(async move {
+            rollback_registration(inner, token, kind).await;
+        });
+    }
+}
+
+#[derive(Debug)]
+struct ModeCleanupGuard {
+    inner: Weak<Inner>,
+    metadata: Option<Metadata>,
+}
+
+impl ModeCleanupGuard {
+    fn new(inner: &Arc<Inner>, metadata: Metadata) -> Self {
+        Self {
+            inner: Arc::downgrade(inner),
+            metadata: Some(metadata),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.metadata = None;
+    }
+}
+
+impl Drop for ModeCleanupGuard {
+    fn drop(&mut self) {
+        let Some(metadata) = self.metadata.take() else {
+            return;
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            clear_modes_if_unowned(inner, metadata).await;
+        });
+    }
+}
+
+impl ControlRegistry {
+    pub(crate) fn new(resources: Arc<ResourceRegistry>) -> Self {
+        Self(Arc::new(Inner {
+            state: Mutex::new(State::default()),
+            gate: Mutex::new(()),
+            resources,
+            shutdown: CancellationToken::new(),
+            socket: None,
+            #[cfg(test)]
+            post_commit_hook: std::sync::Mutex::new(None),
+        }))
+    }
+
+    #[cfg(any(test, feature = "integration-test"))]
+    pub(crate) fn new_at(resources: Arc<ResourceRegistry>, socket: &std::path::Path) -> Self {
+        Self(Arc::new(Inner {
+            state: Mutex::new(State::default()),
+            gate: Mutex::new(()),
+            resources,
+            shutdown: CancellationToken::new(),
+            socket: Some(socket.to_owned()),
+            #[cfg(test)]
+            post_commit_hook: std::sync::Mutex::new(None),
+        }))
+    }
+
+    pub(crate) async fn dispatch(
+        &self,
+        tool: &str,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        match tool {
+            "splinterm.acquire_control" => self.acquire(arguments, cancellation).await,
+            "splinterm.request_control_transfer" => {
+                self.request_transfer(arguments, cancellation).await
+            }
+            "splinterm.decide_control_transfer" => self.decide(arguments, cancellation).await,
+            "splinterm.release_control" => self.release(arguments, cancellation).await,
+            "splinterm.input" => self.input(arguments, cancellation).await,
+            "splinterm.resize" => self.resize(arguments, cancellation).await,
+            _ => Err(dispatch::DispatchFailure::internal()),
+        }
+    }
+
+    async fn acquire(
+        &self,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        let _gate = self.0.gate.lock().await;
+        self.ensure_capacity().await?;
+        let splint_id = parse_splint(arguments)?;
+        let incarnation = parse_incarnation(arguments)?;
+        let modes = parse_modes(arguments)?;
+        let mut connection = self.connect(cancellation).await?;
+        let response = request(
+            &mut connection,
+            Request::AcquireControl {
+                splint_id,
+                incarnation,
+                modes: modes.clone(),
+            },
+            cancellation,
+        )
+        .await?;
+        let Response::ControlGranted {
+            controller_id,
+            dojo_id,
+            window_id,
+        } = response
+        else {
+            return Err(dispatch::DispatchFailure::internal());
+        };
+        if controller_id == 0 {
+            return Err(dispatch::DispatchFailure::internal());
+        }
+        let metadata = Metadata {
+            dojo_id,
+            window_id,
+            splint_id,
+            incarnation,
+            modes,
+        };
+        let handle = self
+            .insert_controller(connection, controller_id, metadata.clone())
+            .await?;
+        let mut registration =
+            RegistrationGuard::new(&self.0, handle.clone(), RegisteredKind::Controller);
+        self.observe_post_commit_cancellation(cancellation).await?;
+        self.publish_modes(&metadata).await;
+        let revision = self.revision().await?;
+        let output = success(
+            "splinterm.acquire_control",
+            resource(&metadata, revision),
+            json!({
+                "committed": true,
+                "controller_handle": handle,
+                "modes": mode_names(&metadata.modes),
+            }),
+        );
+        registration.disarm();
+        Ok(output)
+    }
+
+    async fn request_transfer(
+        &self,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        let _gate = self.0.gate.lock().await;
+        self.ensure_capacity().await?;
+        let splint_id = parse_splint(arguments)?;
+        let incarnation = parse_incarnation(arguments)?;
+        let modes = parse_modes(arguments)?;
+        let owner_handle = {
+            let state = self.0.state.lock().await;
+            state
+                .controllers
+                .iter()
+                .find_map(|(handle, entry)| {
+                    (entry.metadata.splint_id == splint_id
+                        && entry.metadata.incarnation == incarnation)
+                        .then(|| handle.clone())
+                })
+                .ok_or_else(|| {
+                    dispatch::DispatchFailure::new(
+                        "control_transfer_unavailable",
+                        "control transfer is unavailable",
+                        true,
+                    )
+                })?
+        };
+        let mut requester = self.connect(cancellation).await?;
+        let response = request(
+            &mut requester,
+            Request::RequestControlTransfer {
+                splint_id,
+                incarnation,
+                modes: modes.clone(),
+            },
+            cancellation,
+        )
+        .await?;
+        let Response::ControlTransferPending {
+            transfer_id,
+            dojo_id,
+            window_id,
+        } = response
+        else {
+            return Err(dispatch::DispatchFailure::internal());
+        };
+        if transfer_id == 0 {
+            return Err(dispatch::DispatchFailure::internal());
+        }
+        let metadata = Metadata {
+            dojo_id,
+            window_id,
+            splint_id,
+            incarnation,
+            modes,
+        };
+        let handle = self
+            .insert_transfer(requester, transfer_id, owner_handle, metadata.clone())
+            .await?;
+        let mut registration =
+            RegistrationGuard::new(&self.0, handle.clone(), RegisteredKind::Transfer);
+        self.observe_post_commit_cancellation(cancellation).await?;
+        let revision = self.revision().await?;
+        let output = success(
+            "splinterm.request_control_transfer",
+            resource(&metadata, revision),
+            json!({
+                "committed": true,
+                "transfer_handle": handle,
+                "modes": mode_names(&metadata.modes),
+            }),
+        );
+        registration.disarm();
+        Ok(output)
+    }
+
+    async fn decide(
+        &self,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        let _gate = self.0.gate.lock().await;
+        let transfer_handle = arguments["transfer_handle"]
+            .as_str()
+            .ok_or_else(dispatch::DispatchFailure::internal)?;
+        require_handle(transfer_handle, "xfer")?;
+        let decision = match arguments["decision"].as_str() {
+            Some("accept") => ControlTransferDecision::Accept,
+            Some("deny") => ControlTransferDecision::Deny,
+            _ => return Err(dispatch::DispatchFailure::internal()),
+        };
+        let (metadata, private_id, owner_handle, sender) = {
+            let state = self.0.state.lock().await;
+            let entry = state
+                .transfers
+                .get(transfer_handle)
+                .ok_or_else(invalid_handle)?;
+            (
+                entry.metadata.clone(),
+                entry.private_id,
+                entry.owner_handle.clone(),
+                entry.sender.clone(),
+            )
+        };
+        let requester = take_transfer(sender).await.ok_or_else(stale_handle)?;
+        let owner = {
+            let state = self.0.state.lock().await;
+            state
+                .controllers
+                .get(&owner_handle)
+                .map(|entry| entry.sender.clone())
+                .ok_or_else(stale_handle)?
+        };
+        let terminate_owner = decision == ControlTransferDecision::Accept;
+        let response = actor_request(
+            &owner,
+            Request::DecideControlTransfer {
+                transfer_id: private_id,
+                decision,
+            },
+            cancellation,
+            terminate_owner,
+        )
+        .await?;
+        let Response::ControlTransferDecided {
+            outcome,
+            controller_id,
+        } = response
+        else {
+            return Err(dispatch::DispatchFailure::internal());
+        };
+        {
+            let mut state = self.0.state.lock().await;
+            state.transfers.remove(transfer_handle);
+            if decision == ControlTransferDecision::Accept {
+                state.controllers.remove(&owner_handle);
+            }
+        }
+        let (controller_handle, mut registration) = match (decision, outcome, controller_id) {
+            (ControlTransferDecision::Deny, ControlTransferOutcome::Denied, None) => (None, None),
+            (ControlTransferDecision::Accept, ControlTransferOutcome::Granted, Some(id))
+                if id > 0 =>
+            {
+                let handle = self
+                    .insert_controller(requester, id, metadata.clone())
+                    .await?;
+                let guard =
+                    RegistrationGuard::new(&self.0, handle.clone(), RegisteredKind::Controller);
+                self.observe_post_commit_cancellation(cancellation).await?;
+                self.publish_modes(&metadata).await;
+                (Some(handle), Some(guard))
+            }
+            _ => {
+                return Err(dispatch::DispatchFailure::new(
+                    "control_transfer_unavailable",
+                    "control transfer is unavailable",
+                    true,
+                ));
+            }
+        };
+        let revision = self.revision().await?;
+        let output = success(
+            "splinterm.decide_control_transfer",
+            resource(&metadata, revision),
+            json!({
+                "committed": true,
+                "decision": if decision == ControlTransferDecision::Accept { "accepted" } else { "denied" },
+                "controller_handle": controller_handle,
+            }),
+        );
+        if let Some(guard) = &mut registration {
+            guard.disarm();
+        }
+        Ok(output)
+    }
+
+    async fn release(
+        &self,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        let _gate = self.0.gate.lock().await;
+        let handle = arguments["controller_handle"]
+            .as_str()
+            .ok_or_else(dispatch::DispatchFailure::internal)?;
+        require_handle(handle, "ctl")?;
+        let (metadata, private_id, sender) = {
+            let mut state = self.0.state.lock().await;
+            let entry = state
+                .controllers
+                .remove(handle)
+                .ok_or_else(invalid_handle)?;
+            (entry.metadata, entry.private_id, entry.sender)
+        };
+        let mut mode_cleanup = ModeCleanupGuard::new(&self.0, metadata.clone());
+        let response = actor_request(
+            &sender,
+            Request::ReleaseControl {
+                controller_id: private_id,
+            },
+            cancellation,
+            true,
+        )
+        .await;
+        // The actor currently needs the private ID in the request. A failed
+        // actor lookup still closes the connection and clears public authority.
+        self.clear_modes_if_unowned(&metadata).await;
+        mode_cleanup.disarm();
+        match response? {
+            Response::Acknowledged => {}
+            _ => return Err(dispatch::DispatchFailure::internal()),
+        }
+        let revision = self.revision().await?;
+        Ok(success(
+            "splinterm.release_control",
+            resource(&metadata, revision),
+            json!({"committed": true, "released": true}),
+        ))
+    }
+
+    async fn input(
+        &self,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        let text = arguments["text"]
+            .as_str()
+            .ok_or_else(dispatch::DispatchFailure::internal)?;
+        self.action(
+            arguments,
+            Some(text.as_bytes().to_vec()),
+            None,
+            cancellation,
+        )
+        .await
+    }
+
+    async fn resize(
+        &self,
+        arguments: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        let columns = u16::try_from(
+            arguments["columns"]
+                .as_u64()
+                .ok_or_else(dispatch::DispatchFailure::internal)?,
+        )
+        .map_err(|_| dispatch::DispatchFailure::internal())?;
+        let rows = u16::try_from(
+            arguments["rows"]
+                .as_u64()
+                .ok_or_else(dispatch::DispatchFailure::internal)?,
+        )
+        .map_err(|_| dispatch::DispatchFailure::internal())?;
+        self.action(arguments, None, Some((columns, rows)), cancellation)
+            .await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "atomic and retained controller actions share one exact correlation path"
+    )]
+    async fn action(
+        &self,
+        arguments: &Value,
+        input: Option<Vec<u8>>,
+        resize: Option<(u16, u16)>,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        let _gate = self.0.gate.lock().await;
+        let splint_id = parse_splint(arguments)?;
+        let incarnation = parse_incarnation(arguments)?;
+        let needed = if input.is_some() {
+            ControlMode::Input
+        } else {
+            ControlMode::Resize
+        };
+        let handle = arguments.get("controller_handle").and_then(Value::as_str);
+        let mut handled_registration = None;
+        let (metadata, response) = if let Some(handle) = handle {
+            require_handle(handle, "ctl")?;
+            let (metadata, sender, private_id) = {
+                let state = self.0.state.lock().await;
+                let entry = state.controllers.get(handle).ok_or_else(invalid_handle)?;
+                if entry.metadata.splint_id != splint_id
+                    || entry.metadata.incarnation != incarnation
+                    || !entry.metadata.modes.contains(&needed)
+                {
+                    return Err(invalid_handle());
+                }
+                (
+                    entry.metadata.clone(),
+                    entry.sender.clone(),
+                    entry.private_id,
+                )
+            };
+            handled_registration = Some(RegistrationGuard::new(
+                &self.0,
+                handle.to_owned(),
+                RegisteredKind::Controller,
+            ));
+            let request = action_request(private_id, &metadata, input.clone(), resize)?;
+            let response = actor_request(&sender, request, cancellation, false).await?;
+            self.observe_post_commit_cancellation(cancellation).await?;
+            (metadata, response)
+        } else {
+            let modes = vec![needed];
+            let mut connection = self.connect(cancellation).await?;
+            let granted = request(
+                &mut connection,
+                Request::AcquireControl {
+                    splint_id,
+                    incarnation,
+                    modes: modes.clone(),
+                },
+                cancellation,
+            )
+            .await?;
+            let Response::ControlGranted {
+                controller_id,
+                dojo_id,
+                window_id,
+            } = granted
+            else {
+                return Err(dispatch::DispatchFailure::internal());
+            };
+            let metadata = Metadata {
+                dojo_id,
+                window_id,
+                splint_id,
+                incarnation,
+                modes,
+            };
+            let response = request(
+                &mut connection,
+                action_request(controller_id, &metadata, input.clone(), resize)?,
+                cancellation,
+            )
+            .await?;
+            let _ = connection
+                .request_with_deadline(
+                    Request::ReleaseControl { controller_id },
+                    Duration::from_secs(1),
+                )
+                .await;
+            (metadata, response)
+        };
+        let Response::TerminalActionAcknowledged {
+            dojo_id,
+            window_id,
+            splint_id: acknowledged,
+            incarnation: acknowledged_incarnation,
+            terminal_revision,
+            ..
+        } = response
+        else {
+            return Err(dispatch::DispatchFailure::internal());
+        };
+        if dojo_id != metadata.dojo_id
+            || window_id != metadata.window_id
+            || acknowledged != metadata.splint_id
+            || acknowledged_incarnation != metadata.incarnation
+        {
+            return Err(dispatch::DispatchFailure::internal());
+        }
+        let revision = self.revision().await?;
+        let (tool, data) = if let Some(bytes) = input {
+            (
+                "splinterm.input",
+                json!({
+                    "committed": true,
+                    "terminal_revision": terminal_revision,
+                    "accepted_bytes": bytes.len(),
+                }),
+            )
+        } else {
+            let (columns, rows) = resize.expect("one action kind is required");
+            (
+                "splinterm.resize",
+                json!({
+                    "committed": true,
+                    "terminal_revision": terminal_revision,
+                    "columns": columns,
+                    "rows": rows,
+                }),
+            )
+        };
+        let output = success(tool, resource(&metadata, revision), data);
+        if let Some(guard) = &mut handled_registration {
+            guard.disarm();
+        }
+        Ok(output)
+    }
+
+    async fn observe_post_commit_cancellation(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), dispatch::DispatchFailure> {
+        #[cfg(test)]
+        {
+            let hook = self.0.post_commit_hook.lock().unwrap().clone();
+            if let Some((reached, resume)) = hook {
+                reached.notify_one();
+                resume.notified().await;
+            }
+        }
+        // Give a cancellation notification that raced the daemon commit one
+        // fair scheduling point before public handle/result publication.
+        tokio::task::yield_now().await;
+        if cancellation.is_cancelled() {
+            Err(dispatch::DispatchFailure::new(
+                "cancelled",
+                "the tool call was cancelled",
+                true,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    fn install_post_commit_hook(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let reached = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        *self.0.post_commit_hook.lock().unwrap() =
+            Some((Arc::clone(&reached), Arc::clone(&resume)));
+        (reached, resume)
+    }
+
+    #[cfg(test)]
+    fn clear_post_commit_hook(&self) {
+        *self.0.post_commit_hook.lock().unwrap() = None;
+    }
+
+    async fn connect(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<Connection, dispatch::DispatchFailure> {
+        let deadline = dispatch::deadline()?;
+        let connect = async {
+            match &self.0.socket {
+                Some(socket) => Connection::connect_automation_at(socket).await,
+                None => Connection::connect_automation().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(dispatch::DispatchFailure::new("cancelled", "the tool call was cancelled", true)),
+            result = tokio::time::timeout(deadline, connect) => match result {
+                Ok(Ok(connection)) => Ok(connection),
+                Ok(Err(error)) => Err(dispatch::map_client_error(&error)),
+                Err(_) => Err(dispatch::DispatchFailure::new("timeout", "the local automation deadline elapsed", true)),
+            }
+        }
+    }
+
+    async fn ensure_capacity(&self) -> Result<(), dispatch::DispatchFailure> {
+        if self.0.state.lock().await.count() >= MAXIMUM_CONTROL_HANDLES {
+            return Err(dispatch::DispatchFailure::new(
+                "resource_limit",
+                "the controller handle limit was reached",
+                true,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn revision(&self) -> Result<u64, dispatch::DispatchFailure> {
+        self.0.state.lock().await.revision()
+    }
+
+    async fn insert_controller(
+        &self,
+        connection: Connection,
+        private_id: u64,
+        metadata: Metadata,
+    ) -> Result<String, dispatch::DispatchFailure> {
+        let mut state = self.0.state.lock().await;
+        if state.count() >= MAXIMUM_CONTROL_HANDLES {
+            return Err(dispatch::DispatchFailure::resource_limit());
+        }
+        let token = state.token("ctl")?;
+        let (sender, receiver) = mpsc::channel(4);
+        let weak = Arc::downgrade(&self.0);
+        let actor_token = token.clone();
+        let task = tokio::spawn(controller_actor(
+            connection,
+            private_id,
+            receiver,
+            weak,
+            actor_token,
+        ));
+        state.controllers.insert(
+            token.clone(),
+            ControllerEntry {
+                metadata,
+                private_id,
+                sender,
+                task,
+            },
+        );
+        Ok(token)
+    }
+
+    async fn insert_transfer(
+        &self,
+        connection: Connection,
+        private_id: u64,
+        owner_handle: String,
+        metadata: Metadata,
+    ) -> Result<String, dispatch::DispatchFailure> {
+        let mut state = self.0.state.lock().await;
+        if state.count() >= MAXIMUM_CONTROL_HANDLES {
+            return Err(dispatch::DispatchFailure::resource_limit());
+        }
+        let token = state.token("xfer")?;
+        let (sender, receiver) = mpsc::channel(2);
+        let weak = Arc::downgrade(&self.0);
+        let actor_token = token.clone();
+        let task = tokio::spawn(transfer_actor(connection, receiver, weak, actor_token));
+        state.transfers.insert(
+            token.clone(),
+            TransferEntry {
+                metadata,
+                private_id,
+                owner_handle,
+                sender,
+                task,
+            },
+        );
+        Ok(token)
+    }
+
+    async fn publish_modes(&self, metadata: &Metadata) {
+        self.0
+            .resources
+            .set_control_modes(
+                metadata.splint_id,
+                metadata.incarnation,
+                mode_names(&metadata.modes),
+            )
+            .await;
+    }
+
+    async fn clear_modes_if_unowned(&self, metadata: &Metadata) {
+        let owned = self.0.state.lock().await.controllers.values().any(|entry| {
+            entry.metadata.splint_id == metadata.splint_id
+                && entry.metadata.incarnation == metadata.incarnation
+        });
+        if !owned {
+            self.0
+                .resources
+                .set_control_modes(metadata.splint_id, metadata.incarnation, Vec::new())
+                .await;
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.0.shutdown.cancel();
+        let _gate = self.0.gate.lock().await;
+        let (controllers, transfers) = {
+            let mut state = self.0.state.lock().await;
+            (
+                state
+                    .controllers
+                    .drain()
+                    .map(|(_, entry)| entry)
+                    .collect::<Vec<_>>(),
+                state
+                    .transfers
+                    .drain()
+                    .map(|(_, entry)| entry)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for entry in controllers {
+            let metadata = entry.metadata.clone();
+            shutdown_controller(entry).await;
+            self.0
+                .resources
+                .set_control_modes(metadata.splint_id, metadata.incarnation, Vec::new())
+                .await;
+        }
+        for entry in transfers {
+            shutdown_transfer(entry).await;
+        }
+    }
+}
+
+async fn request(
+    connection: &mut Connection,
+    request: Request,
+    cancellation: &CancellationToken,
+) -> Result<Response, dispatch::DispatchFailure> {
+    connection
+        .request_with_cancellation(request, dispatch::deadline()?, cancellation)
+        .await
+        .map_err(|error| dispatch::map_client_error(&error))
+}
+
+async fn controller_actor(
+    mut connection: Connection,
+    private_id: u64,
+    mut commands: mpsc::Receiver<ControllerCommand>,
+    inner: Weak<Inner>,
+    token: String,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            command = commands.recv() => match command {
+                Some(ControllerCommand::Request { request, cancellation, terminate, reply }) => {
+                    let result = connection
+                        .request_with_cancellation(request, dispatch::deadline().unwrap_or(Duration::from_secs(5)), &cancellation)
+                        .await
+                        .map_err(|error| dispatch::map_client_error(&error));
+                    let failed = result.is_err();
+                    let delivered = reply.send(result).is_ok();
+                    if failed || terminate || !delivered { break; }
+                }
+                Some(ControllerCommand::Shutdown { reply }) => {
+                    let _ = connection.request_with_deadline(Request::ReleaseControl { controller_id: private_id }, Duration::from_secs(1)).await;
+                    let _ = reply.send(());
+                    break;
+                }
+                None => break,
+            },
+            frame = connection.next_server_frame() => {
+                let _ = frame;
+                break;
+            }
+        }
+    }
+    cleanup_controller(inner, &token).await;
+}
+
+async fn transfer_actor(
+    mut connection: Connection,
+    mut commands: mpsc::Receiver<TransferCommand>,
+    inner: Weak<Inner>,
+    token: String,
+) {
+    tokio::select! {
+        biased;
+        command = commands.recv() => match command {
+            Some(TransferCommand::Take { reply }) => { let _ = reply.send(Some(connection)); }
+            Some(TransferCommand::Shutdown { reply }) => { let _ = reply.send(()); }
+            None => {}
+        },
+        () = tokio::time::sleep(TRANSFER_LIFETIME) => {},
+        _ = connection.next_server_frame() => {},
+    }
+    cleanup_transfer(inner, &token).await;
+}
+
+async fn cleanup_controller(inner: Weak<Inner>, token: &str) {
+    let Some(inner) = inner.upgrade() else {
+        return;
+    };
+    let metadata = inner
+        .state
+        .lock()
+        .await
+        .controllers
+        .remove(token)
+        .map(|entry| entry.metadata);
+    let Some(metadata) = metadata else {
+        return;
+    };
+    let still_owned = inner.state.lock().await.controllers.values().any(|entry| {
+        entry.metadata.splint_id == metadata.splint_id
+            && entry.metadata.incarnation == metadata.incarnation
+    });
+    if !still_owned {
+        inner
+            .resources
+            .set_control_modes(metadata.splint_id, metadata.incarnation, Vec::new())
+            .await;
+    }
+}
+
+async fn cleanup_transfer(inner: Weak<Inner>, token: &str) {
+    if let Some(inner) = inner.upgrade() {
+        inner.state.lock().await.transfers.remove(token);
+    }
+}
+
+async fn clear_modes_if_unowned(inner: Weak<Inner>, metadata: Metadata) {
+    let Some(inner) = inner.upgrade() else {
+        return;
+    };
+    let still_owned = inner.state.lock().await.controllers.values().any(|entry| {
+        entry.metadata.splint_id == metadata.splint_id
+            && entry.metadata.incarnation == metadata.incarnation
+    });
+    if !still_owned {
+        inner
+            .resources
+            .set_control_modes(metadata.splint_id, metadata.incarnation, Vec::new())
+            .await;
+    }
+}
+
+async fn rollback_registration(inner: Weak<Inner>, token: String, kind: RegisteredKind) {
+    let Some(inner) = inner.upgrade() else {
+        return;
+    };
+    match kind {
+        RegisteredKind::Controller => {
+            let entry = inner.state.lock().await.controllers.remove(&token);
+            let Some(entry) = entry else {
+                return;
+            };
+            let metadata = entry.metadata.clone();
+            shutdown_controller(entry).await;
+            let still_owned = inner.state.lock().await.controllers.values().any(|entry| {
+                entry.metadata.splint_id == metadata.splint_id
+                    && entry.metadata.incarnation == metadata.incarnation
+            });
+            if !still_owned {
+                inner
+                    .resources
+                    .set_control_modes(metadata.splint_id, metadata.incarnation, Vec::new())
+                    .await;
+            }
+        }
+        RegisteredKind::Transfer => {
+            let entry = inner.state.lock().await.transfers.remove(&token);
+            if let Some(entry) = entry {
+                shutdown_transfer(entry).await;
+            }
+        }
+    }
+}
+
+async fn actor_request(
+    sender: &mpsc::Sender<ControllerCommand>,
+    request: Request,
+    cancellation: &CancellationToken,
+    terminate: bool,
+) -> Result<Response, dispatch::DispatchFailure> {
+    let (reply, response) = oneshot::channel();
+    sender
+        .send(ControllerCommand::Request {
+            request,
+            cancellation: cancellation.clone(),
+            terminate,
+            reply,
+        })
+        .await
+        .map_err(|_| stale_handle())?;
+    response.await.map_err(|_| stale_handle())?
+}
+
+async fn take_transfer(sender: mpsc::Sender<TransferCommand>) -> Option<Connection> {
+    let (reply, response) = oneshot::channel();
+    sender.send(TransferCommand::Take { reply }).await.ok()?;
+    response.await.ok().flatten()
+}
+
+async fn shutdown_controller(mut entry: ControllerEntry) {
+    let (reply, response) = oneshot::channel();
+    let _ = entry
+        .sender
+        .send(ControllerCommand::Shutdown { reply })
+        .await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), response).await;
+    if tokio::time::timeout(Duration::from_secs(1), &mut entry.task)
+        .await
+        .is_err()
+    {
+        entry.task.abort();
+    }
+}
+
+async fn shutdown_transfer(mut entry: TransferEntry) {
+    let (reply, response) = oneshot::channel();
+    let _ = entry.sender.send(TransferCommand::Shutdown { reply }).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), response).await;
+    if tokio::time::timeout(Duration::from_secs(1), &mut entry.task)
+        .await
+        .is_err()
+    {
+        entry.task.abort();
+    }
+}
+
+fn parse_splint(arguments: &Value) -> Result<SplintId, dispatch::DispatchFailure> {
+    arguments["splint_id"]
+        .as_str()
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(dispatch::DispatchFailure::internal)
+}
+
+fn parse_incarnation(arguments: &Value) -> Result<u64, dispatch::DispatchFailure> {
+    arguments["incarnation"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(dispatch::DispatchFailure::internal)
+}
+
+fn parse_modes(arguments: &Value) -> Result<Vec<ControlMode>, dispatch::DispatchFailure> {
+    let modes = arguments["modes"]
+        .as_array()
+        .ok_or_else(dispatch::DispatchFailure::internal)?
+        .iter()
+        .map(|mode| match mode.as_str() {
+            Some("input") => Ok(ControlMode::Input),
+            Some("resize") => Ok(ControlMode::Resize),
+            _ => Err(dispatch::DispatchFailure::internal()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_control_modes(&modes).map_err(|_| dispatch::DispatchFailure::internal())?;
+    Ok(modes)
+}
+
+fn mode_names(modes: &[ControlMode]) -> Vec<String> {
+    [ControlMode::Input, ControlMode::Resize]
+        .into_iter()
+        .filter(|mode| modes.contains(mode))
+        .map(|mode| match mode {
+            ControlMode::Input => "input".to_owned(),
+            ControlMode::Resize => "resize".to_owned(),
+        })
+        .collect()
+}
+
+fn action_request(
+    controller_id: u64,
+    metadata: &Metadata,
+    input: Option<Vec<u8>>,
+    resize: Option<(u16, u16)>,
+) -> Result<Request, dispatch::DispatchFailure> {
+    match (input, resize) {
+        (Some(bytes), None) => Ok(Request::Input {
+            controller_id,
+            splint_id: metadata.splint_id,
+            incarnation: metadata.incarnation,
+            bytes,
+        }),
+        (None, Some((columns, rows))) => Ok(Request::Resize {
+            controller_id,
+            splint_id: metadata.splint_id,
+            incarnation: metadata.incarnation,
+            columns,
+            rows,
+            pixel_width: 0,
+            pixel_height: 0,
+        }),
+        _ => Err(dispatch::DispatchFailure::internal()),
+    }
+}
+
+fn resource(metadata: &Metadata, revision: u64) -> Value {
+    json!({
+        "kind": "control",
+        "dojo_id": metadata.dojo_id.to_string(),
+        "window_id": metadata.window_id.to_string(),
+        "splint_id": metadata.splint_id.to_string(),
+        "incarnation": metadata.incarnation,
+        "control_revision": revision,
+    })
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "closed output components move conceptually into the serialized envelope"
+)]
+fn success(tool: &str, resource: Value, data: Value) -> Value {
+    json!({
+        "schema": SCHEMA,
+        "tool": tool,
+        "ok": true,
+        "resource": resource,
+        "data": data,
+        "truncated": false,
+        "content_trust": "trusted_metadata",
+    })
+}
+
+fn require_handle(handle: &str, prefix: &str) -> Result<(), dispatch::DispatchFailure> {
+    let valid = handle.len() == prefix.len() + 1 + 48
+        && handle.starts_with(&format!("{prefix}_"))
+        && handle[prefix.len() + 1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+    if valid { Ok(()) } else { Err(invalid_handle()) }
+}
+
+fn invalid_handle() -> dispatch::DispatchFailure {
+    dispatch::DispatchFailure::new(
+        "invalid_argument",
+        "the controller handle is invalid",
+        false,
+    )
+}
+
+fn stale_handle() -> dispatch::DispatchFailure {
+    dispatch::DispatchFailure::new(
+        "controller_unavailable",
+        "the controller handle is unavailable",
+        true,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        os::unix::net::{UnixListener, UnixStream},
+        path::{Path, PathBuf},
+        thread,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use splinterm_protocol::{ClientFrame, ClientRole, ServerFrame, ServerLimits, encode_frame};
+
+    use super::*;
+
+    fn socket(label: &str) -> (PathBuf, PathBuf) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "splinterm-mcp-control-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        (directory, socket)
+    }
+
+    fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> T {
+        let mut length = [0_u8; 4];
+        stream.read_exact(&mut length).unwrap();
+        let mut body = vec![0_u8; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn write_frame(stream: &mut impl Write, frame: &ServerFrame) {
+        stream.write_all(&encode_frame(frame).unwrap()).unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn accept(listener: &UnixListener) -> UnixStream {
+        let (mut stream, _) = listener.accept().unwrap();
+        assert!(matches!(
+            read_frame::<ClientFrame>(&mut stream),
+            ClientFrame::Hello {
+                role: ClientRole::Automation,
+                ..
+            }
+        ));
+        write_frame(
+            &mut stream,
+            &ServerFrame::Hello {
+                version: splinterm_protocol::PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+            },
+        );
+        stream
+    }
+
+    fn ids() -> (DojoId, WindowId, SplintId) {
+        (
+            "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+            "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+            "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap(),
+        )
+    }
+
+    async fn join(thread: thread::JoinHandle<()>) {
+        tokio::task::spawn_blocking(move || thread.join().unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ordered fake daemon proves both post-registration cancellation boundaries"
+    )]
+    async fn cancellation_after_acquire_and_transfer_registration_rolls_back_authority() {
+        let (directory, socket) = socket("registration-cancel");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (dojo_id, window_id, splint_id) = ids();
+        let daemon = thread::spawn(move || {
+            let mut cancelled_acquire = accept(&listener);
+            let ClientFrame::Request {
+                request_id,
+                request: Request::AcquireControl { .. },
+            } = read_frame(&mut cancelled_acquire)
+            else {
+                panic!("expected cancelled acquisition")
+            };
+            write_frame(
+                &mut cancelled_acquire,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlGranted {
+                        controller_id: 10,
+                        dojo_id,
+                        window_id,
+                    },
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request: Request::ReleaseControl { controller_id: 10 },
+            } = read_frame(&mut cancelled_acquire)
+            else {
+                panic!("expected cancelled acquisition cleanup")
+            };
+            write_frame(
+                &mut cancelled_acquire,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::Acknowledged,
+                },
+            );
+
+            let mut owner = accept(&listener);
+            let ClientFrame::Request {
+                request_id,
+                request: Request::AcquireControl { .. },
+            } = read_frame(&mut owner)
+            else {
+                panic!("expected owner acquisition")
+            };
+            write_frame(
+                &mut owner,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlGranted {
+                        controller_id: 20,
+                        dojo_id,
+                        window_id,
+                    },
+                },
+            );
+            let mut requester = accept(&listener);
+            let ClientFrame::Request {
+                request_id,
+                request: Request::RequestControlTransfer { .. },
+            } = read_frame(&mut requester)
+            else {
+                panic!("expected cancelled transfer")
+            };
+            write_frame(
+                &mut requester,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlTransferPending {
+                        transfer_id: 30,
+                        dojo_id,
+                        window_id,
+                    },
+                },
+            );
+            let mut eof = [0_u8; 1];
+            assert_eq!(requester.read(&mut eof).unwrap(), 0);
+            let ClientFrame::Request {
+                request_id,
+                request: Request::ReleaseControl { controller_id: 20 },
+            } = read_frame(&mut owner)
+            else {
+                panic!("expected owner shutdown")
+            };
+            write_frame(
+                &mut owner,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::Acknowledged,
+                },
+            );
+        });
+
+        let resources = Arc::new(ResourceRegistry::default());
+        let registry = ControlRegistry::new_at(Arc::clone(&resources), Path::new(&socket));
+        let acquire_args = json!({
+            "splint_id": splint_id.to_string(), "incarnation": 2, "modes": ["input"]
+        });
+        let (reached, resume) = registry.install_post_commit_hook();
+        let cancellation = CancellationToken::new();
+        let task_registry = registry.clone();
+        let task_cancel = cancellation.clone();
+        let acquire_task = tokio::spawn(async move {
+            task_registry
+                .dispatch("splinterm.acquire_control", &acquire_args, &task_cancel)
+                .await
+        });
+        reached.notified().await;
+        cancellation.cancel();
+        resume.notify_one();
+        let failure = acquire_task.await.unwrap().unwrap_err();
+        assert_eq!(failure.code, "cancelled");
+        registry.clear_post_commit_hook();
+
+        let owner = registry
+            .dispatch(
+                "splinterm.acquire_control",
+                &json!({"splint_id":splint_id.to_string(),"incarnation":2,"modes":["input"]}),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(owner["data"]["controller_handle"].as_str().is_some());
+
+        let (reached, resume) = registry.install_post_commit_hook();
+        let cancellation = CancellationToken::new();
+        let task_registry = registry.clone();
+        let task_cancel = cancellation.clone();
+        let transfer_task = tokio::spawn(async move {
+            task_registry
+                .dispatch(
+                    "splinterm.request_control_transfer",
+                    &json!({"splint_id":splint_id.to_string(),"incarnation":2,"modes":["input"]}),
+                    &task_cancel,
+                )
+                .await
+        });
+        reached.notified().await;
+        cancellation.cancel();
+        resume.notify_one();
+        let failure = transfer_task.await.unwrap().unwrap_err();
+        assert_eq!(failure.code, "cancelled");
+        registry.clear_post_commit_hook();
+
+        registry.shutdown().await;
+        resources.shutdown().await;
+        join(daemon).await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the shared fake-daemon helper proves committed input and resize cleanup"
+    )]
+    async fn cancelled_handled_action(tool: &'static str) {
+        let (directory, socket) = socket(tool);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (dojo_id, window_id, splint_id) = ids();
+        let daemon = thread::spawn(move || {
+            let mut owner = accept(&listener);
+            let ClientFrame::Request {
+                request_id,
+                request: Request::AcquireControl { .. },
+            } = read_frame(&mut owner)
+            else {
+                panic!("expected owner acquisition")
+            };
+            write_frame(
+                &mut owner,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlGranted {
+                        controller_id: 40,
+                        dojo_id,
+                        window_id,
+                    },
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request,
+            } = read_frame(&mut owner)
+            else {
+                panic!("expected handled action")
+            };
+            assert!(matches!(
+                (&request, tool),
+                (Request::Input { .. }, "splinterm.input")
+                    | (Request::Resize { .. }, "splinterm.resize")
+            ));
+            write_frame(
+                &mut owner,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::TerminalActionAcknowledged {
+                        dojo_id,
+                        window_id,
+                        splint_id,
+                        incarnation: 2,
+                        terminal_revision: 9,
+                        history_generation: 3,
+                    },
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request: Request::ReleaseControl { controller_id: 40 },
+            } = read_frame(&mut owner)
+            else {
+                panic!("expected cancelled handled-action cleanup")
+            };
+            write_frame(
+                &mut owner,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::Acknowledged,
+                },
+            );
+        });
+
+        let resources = Arc::new(ResourceRegistry::default());
+        let registry = ControlRegistry::new_at(Arc::clone(&resources), &socket);
+        let acquired = registry
+            .dispatch(
+                "splinterm.acquire_control",
+                &json!({"splint_id":splint_id.to_string(),"incarnation":2,"modes":[if tool == "splinterm.input" {"input"} else {"resize"}]}),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let handle = acquired["data"]["controller_handle"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let arguments = if tool == "splinterm.input" {
+            json!({"splint_id":splint_id.to_string(),"incarnation":2,"text":"committed","controller_handle":handle})
+        } else {
+            json!({"splint_id":splint_id.to_string(),"incarnation":2,"columns":80,"rows":24,"controller_handle":handle})
+        };
+        let (reached, resume) = registry.install_post_commit_hook();
+        let cancellation = CancellationToken::new();
+        let task_registry = registry.clone();
+        let task_cancel = cancellation.clone();
+        let task =
+            tokio::spawn(
+                async move { task_registry.dispatch(tool, &arguments, &task_cancel).await },
+            );
+        reached.notified().await;
+        cancellation.cancel();
+        resume.notify_one();
+        let failure = task.await.unwrap().unwrap_err();
+        assert_eq!(failure.code, "cancelled");
+        registry.clear_post_commit_hook();
+        registry.shutdown().await;
+        resources.shutdown().await;
+        join(daemon).await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_handled_input_and_resize_cleanup_without_rollback_claims() {
+        cancelled_handled_action("splinterm.input").await;
+        cancelled_handled_action("splinterm.resize").await;
+    }
+}

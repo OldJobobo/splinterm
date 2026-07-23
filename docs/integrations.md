@@ -4,7 +4,8 @@ Splinterm integrations consume the documented `splinterm --output json` and
 `--output ndjson` contracts. They do not connect to the private daemon protocol,
 parse human output, or inherit authority from their logical location. See
 [automation.md](automation.md) for the complete command, schema, error, and
-policy contract.
+policy contract. The optional full-capability stdio adapter and supported host
+configuration are documented separately in [mcp.md](mcp.md).
 
 ## Client-author checklist
 

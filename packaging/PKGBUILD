@@ -1,56 +1,61 @@
 # Maintainer: OldJobobo
-pkgname=splinterm
+pkgbase=splinterm
+pkgname=('splinterm' 'splinterm-mcp')
 pkgver=0.1.0.pre
 pkgrel=1
-pkgdesc='Persistent Omarchy-native Wayland terminal (private prerelease)'
 arch=('x86_64')
 url='https://github.com/oldjobobo/splinterm'
 license=('MIT')
-depends=(
-  'fontconfig'
-  'freetype2'
-  'gcc-libs'
-  'glibc'
-  'hicolor-icon-theme'
-  'libxkbcommon'
-  'noto-fonts-cjk'
-  'noto-fonts-emoji'
-  'pixman'
-  'python'
-  'ttf-jetbrains-mono-nerd-basic'
-  'wayland'
-  'xdg-terminal-exec'
-)
 makedepends=('cargo' 'pkgconf' 'rust')
-optdepends=('fcitx5: Wayland text-input support')
-install=splinterm.install
-source=("$pkgname-$pkgver.tar.gz")
+source=("$pkgbase-$pkgver.tar.gz")
 sha256sums=('SKIP') # Local archive is generated from the reviewed Git commit.
 
 prepare() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgbase-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
 }
 
 build() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgbase-$pkgver"
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
-  cargo build --frozen --release -p splinterm -p splinterd -p splinterm-relay -p splinterm-pty
+  cargo build --frozen --release \
+    -p splinterm -p splinterd -p splinterm-relay -p splinterm-pty -p splinterm-mcp
 }
 
 check() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgbase-$pkgver"
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
   cargo test --frozen --workspace -- --test-threads=1
   python -m unittest tools/automation/test_session_picker.py
 }
 
-package() {
-  cd "$pkgname-$pkgver"
+package_splinterm() {
+  pkgdesc='Persistent Omarchy-native Wayland terminal (private prerelease)'
+  depends=(
+    'fontconfig'
+    'freetype2'
+    'gcc-libs'
+    'glibc'
+    'hicolor-icon-theme'
+    'libxkbcommon'
+    'noto-fonts-cjk'
+    'noto-fonts-emoji'
+    'pixman'
+    'python'
+    'ttf-jetbrains-mono-nerd-basic'
+    'wayland'
+    'xdg-terminal-exec'
+  )
+  optdepends=(
+    'fcitx5: Wayland text-input support'
+    'splinterm-mcp: explicitly configured MCP stdio adapter'
+  )
+  install=splinterm.install
 
+  cd "$pkgbase-$pkgver"
   install -Dm755 target/release/splinterm "$pkgdir/usr/bin/splinterm"
   install -Dm755 target/release/splinterd "$pkgdir/usr/bin/splinterd"
   install -Dm755 target/release/splinterm-relay "$pkgdir/usr/bin/splinterm-relay"
@@ -81,4 +86,15 @@ package() {
   install -Dm644 docs/remote.md "$pkgdir/usr/share/doc/splinterm/remote.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/splinterm/LICENSE"
   install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/licenses/splinterm/THIRD_PARTY.md"
+}
+
+package_splinterm-mcp() {
+  pkgdesc='Policy-scoped MCP stdio adapter for Splinterm'
+  depends=("splinterm=$pkgver-$pkgrel" 'gcc-libs' 'glibc')
+
+  cd "$pkgbase-$pkgver"
+  install -Dm755 target/release/splinterm-mcp "$pkgdir/usr/bin/splinterm-mcp"
+  install -Dm644 docs/mcp.md "$pkgdir/usr/share/doc/splinterm/mcp.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/splinterm-mcp/LICENSE"
+  install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/licenses/splinterm-mcp/THIRD_PARTY.md"
 }

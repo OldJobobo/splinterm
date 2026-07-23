@@ -1,10 +1,9 @@
 # Plan 0007: required full-capability MCP adapter
 
-- **Status:** In progress; stable JSON/NDJSON CLI, publication-snapshotted
-  descendant policy, the SDK/protocol spike, reusable non-Wayland client
-  extraction, frozen MCP v1 schemas and fixtures, and the production MCP
-  tools/resources server skeleton are implemented; daemon-backed handlers
-  remain pending
+- **Status:** Complete on 2026-07-23; all 32 tools, three resource forms,
+  bounded lifecycle/security gates, optional split packaging, extracted-package
+  runtime validation, host setup, Inspector interoperability, and approved
+  fallback evidence for externally unsupported stdio lanes are recorded
 - **Roadmap:** Phase 4 — Headless access and supported automation, Slice 6
 - **Foundation:** [Plan 0006](0006-phase4-headless-automation.md),
   [ADR 0007](../adr/0007-supported-automation-policy.md), and
@@ -694,6 +693,43 @@ stale/tampered cursor, wide/combining cells, invalid Unicode representation,
 maximum pages, oversized output, timeout, cancellation, sequence gaps,
 revocation, unsubscribe, resubscribe, and detach cleanup.
 
+**Status:** complete on 2026-07-22. Private protocol v20 adds current-incarnation
+first-page scrollback/search requests that do not acquire a subscription or
+require topology-read authority, plus scoped Dojo/window/topology and exact
+terminal provenance on attach, page, search, and resync responses. The three
+terminal tools use the extracted non-Wayland semantic-row projection, preserve
+wide/combining/replacement characters, detach temporary subscriptions, never
+echo search queries, and return closed stale/history-resync results. Their
+process-owned one-use continuation cursors are capped at 256, keyed against
+canonical tampering, and bound to tool kind, Splint, search query fingerprint,
+and case mode.
+
+All three resource forms now support bounded one-shot reads and MCP native
+subscriptions. The registry holds at most 16 distinct live resources, publishes
+adapter-owned sequences, applies terminal updates transactionally, validates
+all retained projections against the frozen schemas, and clears terminal or
+topology content before final resync publication. Duplicate subscribe is
+idempotent; unsubscribe is serialized with setup and awaits detach/connection
+cleanup; immediate resubscribe starts again at public sequence one. MCP EOF and
+broken stdout explicitly cancel and await all registry tasks. Control resources
+publish no private controller/transfer identifiers, never claim local ownership,
+and leave the Slice 7 mode overlay empty. Complete tool and resource results are
+limited to 1 MiB and terminal content remains `untrusted_terminal_data`.
+
+Rust 1.88 validation passes 22 automation-client tests, all 15 public automation
+CLI compatibility tests, and 37 serialized `splinterm-mcp` tests (18 library,
+one exact schema inventory, and 18 black-box stdio tests). The complete 13-test
+serialized daemon suite passed for the protocol-v20 milestone; focused exact
+scope/provenance and detach/overflow cleanup scenarios pass after closure fixes.
+The 35/39 automation and 86/30 MCP valid/invalid fixture matrices, formatting,
+touched-package Clippy with warnings denied, and whitespace checks pass. The
+black-box matrix covers the 16/17 subscription boundary, duplicate and raced
+subscribe/unsubscribe, ordered topology/terminal/control updates, malformed and
+cross-resource events, history replacement, revocation, exit, daemon loss,
+resubscribe, no post-unsubscribe notification, EOF, and broken-output cleanup.
+Lifecycle/topology mutations and controller handles remain Slice 6 and Slice 7;
+this status claims neither.
+
 ### Slice 6 — lifecycle, topology mutation, and process tools
 
 **Work**
@@ -716,6 +752,54 @@ body/argv non-echo coverage. Successful mutations return only committed
 identities/revisions and produce resource-complete audit records. Creating a
 resource does not silently grant observation or control of it.
 
+**Status:** complete on 2026-07-22. All 15 frozen lifecycle, topology mutation,
+and process tools now dispatch through a private protocol-v21 mutation-specific
+preflight followed by the independently authorized mutation request. Preflight
+returns only exact selected containment, current-or-last incarnation, aggregate
+restore membership, and topology revision; it requires the same per-tool scopes
+and resources as the mutation, does not require `topology_metadata_read`, does
+not consume spawn/result limits, and exposes no unrelated topology. The actual
+mutation rechecks policy, resource publication snapshot, conditional process
+termination, CAS revision, limits, and audit outcome. New descendants remain
+outside the published policy generation until explicit reload.
+
+The daemon now resolves the narrow private automation-launch shape. Explicit
+absolute cwd and structured argv are preserved exactly. Omitted cwd uses the
+daemon owner's trusted home for Dojo creation, the target Splint durable cwd for
+split/relaunch, and the Dojo's first window default-focus Splint cwd for new
+windows. Empty argv selects the daemon default shell; login-shell is false and
+scrollback uses the daemon terminal default. `splinterm-mcp` does not read cwd,
+HOME, shell configuration, or unrelated environment, and resolved paths,
+commands, and argv are absent from MCP output, errors, and audit text.
+
+Runtime projections correlate every response with its preflight selection.
+Topology mutations must advance exactly once, while relaunch and every restore
+preserve the topology revision because they change runtime state only. Aggregate
+restores require exact membership and the unchanged preflight revision for full,
+partial, and zero-success results; arbitrary future revisions fail closed.
+Created/target identities and kill incarnations remain exact. Partial restore
+returns only counts and a `partial` flag. Close and kill confirmation is rejected
+before connecting, and explicit cwd/argv containing NUL is rejected as
+`invalid_argument` before connecting without echo. Successful preflights create
+no mutation-success audit record; denied or failed preflights remain auditable,
+and only the final committed mutation reports success. Controller/input/resize
+tools remain unavailable for Slice 7. Frozen MCP schemas and fixtures are unchanged.
+
+Rust 1.88 validation passes 11 protocol tests, 31 daemon binary tests, the full
+15-test serialized real-daemon suite, all 15 CLI compatibility tests, and 42
+serialized `splinterm-mcp` tests (19 library, one schema inventory, and 22
+black-box stdio tests). Cancellation after daemon dispatch discards a late
+committed result without claiming rollback; cancellation after preflight leaves
+no false successful mutation audit, and the daemon-side commit/audit truth remains
+authoritative. The real-daemon matrix proves no-topology-read preflight,
+individually missing spawn/layout scopes, exact publication resources, committed
+CAS advancement, stale CAS denial, and new-descendant denial. The black-box
+matrix covers every tool shape, omitted/explicit launch fields, partial restore,
+destructive preflight, response miscorrelation, runtime output schemas, and
+cwd/argv/error non-echo. The 35/39 automation and 86/30 MCP fixture matrices,
+formatting, touched-package Clippy with warnings denied, and whitespace checks
+pass.
+
 ### Slice 7 — controller, input, resize, and transfer tools
 
 **Work**
@@ -734,6 +818,65 @@ Tests cover controller contention, deny/accept/timeout transfer, wrong-process
 and stale handles, mode mismatch, incarnation replacement, input/resize limits,
 read-policy denial, cancellation, client death, and complete cleanup. Terminal
 text cannot manufacture a handle, confirmation, or follow-up mutation.
+
+**Status:** complete on 2026-07-22. All six remaining frozen tools now dispatch,
+so the complete 32-tool catalog is operational. Private protocol v22 adds exact
+requested controller modes to acquire/transfer requests, scoped Dojo/window
+containment to controller results, and an explicit transfer-decision outcome;
+frozen MCP schemas and resources are unchanged. The daemon expands each requested
+mode to its exact `input`/`resize` scope in addition to controller-acquire or
+controller-transfer authority. Consent grants must cover every requested mode,
+and input/resize still independently recheck their operation scope and exact
+owned controller before acting. Forced takeover remains trusted-UI-only and is
+not reachable through MCP.
+
+The adapter now holds a process-owned registry capped at eight combined `ctl_`
+and `xfer_` handles. Handles contain only a counter plus two independently keyed
+tags; private controller/transfer IDs, bodies, and policy data remain inside the
+process. Each durable controller retains its exact daemon connection, Splint,
+incarnation, modes, and containment. Transfers retain a distinct requester
+connection, bind the current adapter-owned controller, expire boundedly, and
+produce a new controller handle only after an exact granted outcome. Tampered,
+wrong-kind, missing, stale, wrong-resource, and mode-mismatched handles fail
+closed. Cancellation-safe registration guards roll back controller or transfer
+authority if a call is dropped after the daemon commits but before public result
+publication. A dropped handled input/resize result does not claim to undo the
+terminal action; it closes the retained controller connection and removes its
+public handle and overlay. Explicit release, failed/cancelled actions, daemon
+loss, policy-driven connection closure, MCP EOF, broken output, and process
+shutdown close their connections and clear public authority. Grant revocation,
+process exit/replacement, and transfer timeout now revoke the affected owning or
+requester connection immediately. A timed-out requester cannot decide late, and
+the valid current owner remains usable.
+
+Input and resize with handles use the retained owning connection. Calls without
+a handle use one temporary connection for atomic acquire, action, and best-effort
+release and retain no authority. Input reports accepted UTF-8 bytes without
+returning text; resize uses zero pixel defaults and exact bounded rows/columns.
+Adapter-owned modes are projected into subscribed control resources with an
+incremented public sequence and update notification, then removed coherently on
+release/cleanup without exposing private IDs. Projection reconciles daemon
+status and the adapter overlay under either ordering: `locally_owned` and modes
+are never published unless daemon status is also controlled.
+
+Rust 1.88 validation passes 11 protocol tests, 33 daemon binary tests, the full
+16-test serialized real-daemon suite, all 15 CLI compatibility tests, and 50
+serialized `splinterm-mcp` tests (22 library, one schema inventory, and 27
+black-box stdio tests). Deterministic unit coverage cancels acquire, transfer,
+handled input, and handled resize after private commit but before public
+publication and proves cleanup without rollback claims. Black-box coverage
+includes acquire, handled input, atomic resize, transfer deny/accept, release,
+mode mismatch, private-ID/body non-echo, eight/nine handle capacity,
+status/overlay ordering, control-resource mode appearance/removal, notification
+coherence, daemon-loss invalidation, EOF cleanup, and broken-output controller
+cleanup. The real-daemon matrix exercises connection-owned handled input,
+atomic resize, release, and exact output projection; daemon controller tests
+prove timeout removes only the requester transfer while preserving owner
+authority, and existing transfer/policy-reload scenarios prove contention,
+deny/grant, disconnect, and revocation foundations. The 35/39
+automation and 86/30 MCP fixture matrices, formatting, strict Clippy, package
+probe syntax, and whitespace checks pass. Slice 8 remains the final adversarial
+cross-tool closure matrix.
 
 ### Slice 8 — adversarial security and lifecycle closure
 
@@ -754,6 +897,43 @@ Every supported third-party operation is reachable with exact authority and
 denied without it; a read policy cannot be used for input/control/process
 operations; malicious terminal text remains inert quoted data; every process,
 connection, controller, transfer, subscription, and task is cleaned up.
+
+**Status:** complete on 2026-07-22. An inventory-locked black-box test now loads
+all 32 frozen valid input fixtures, invokes every advertised tool, and fails if
+any catalog entry is not routed; the same test pins the one fixed resource, two
+resource templates, task support forbidden, and the absence of prompts, roots,
+sampling, elicitation, logging, completions, tasks, experimental capabilities,
+HTTP, OAuth, filesystem, policy-write, forced-takeover, or shell-string
+surfaces. It composes with the Slice 4-7 exact allow/deny, wrong-resource,
+missing-scope, stale incarnation/revision, confirmation, cursor/handle,
+read-only-policy, and committed-result matrices rather than duplicating those
+real-daemon scenarios in one fragile test.
+
+Direct, tool-call-shaped, Markdown/JavaScript, encoded, fake-confirmation, and
+fake-handle prose is projected byte-for-byte only under explicitly
+`untrusted_terminal_data` fields across Dojo names, window/Splint titles,
+terminal cells, scrollback rows, and search previews. The adversarial session
+proves the catalog is unchanged afterward and that no notification or chained
+tool call occurs. Search/input/cwd/argv remain absent from results and errors;
+a real-daemon controller scenario sends a forged-authority/tool-call-shaped
+secret and proves it is absent from MCP results and captured daemon stderr while
+the exact accepted-byte acknowledgement remains available.
+
+The closure matrix also retains the reviewed four-active/32-admitted request
+bound with cancellable waiters, 16/17 resource-subscription bound, combined
+8/9 controller/transfer bound, 256-cursor bound, stalled-daemon timeout and
+cancellation, malformed/oversized framing, policy reload, grant revocation,
+process/incarnation replacement, history and sequence resync, daemon loss,
+unsubscribe/resubscribe, stdin EOF, broken stdout, and awaited task/connection
+cleanup cases. Rust 1.88 validation passes 52 serialized `splinterm-mcp` tests
+(22 library, one exact schema inventory, and 29 black-box stdio tests), 11
+protocol tests, 33 daemon binary tests, the full 16-test serialized real-daemon
+suite, and all 15 CLI compatibility tests. The 35/39 automation and 86/30 MCP
+fixture matrices, workspace all-target check and strict Clippy, formatting,
+package-validator syntax, dependency boundary scan, whitespace, and no-staged
+checks pass. No production behavior, frozen schema, fixture hash, capability,
+or dependency changed in this slice. Packaging and external conformance remain
+Slice 9 and are not claimed here.
 
 ### Slice 9 — packaging, client setup, and conformance evidence
 
@@ -782,6 +962,29 @@ resource, then demonstrates bounded split, structured child launch, observation,
 controller denial handling, and resync reconciliation without claiming native
 Wayland window focus or semantic agent supervision.
 
+**Status:** complete on 2026-07-23. The explicit `splinterm-mcp` Arch split
+package, extracted-tree real-daemon allow/deny/read/mutation/controller/resource
+lifecycle check, exact digest-policy workflow, Claude Code 2.1.218 and VS Code
+1.125.0 host setup, dependency/license inventory, and MCP Inspector 1.0.0
+initialization/discovery/success/error checks pass. Inspector exposed and drove a
+wire-only strict-client correction: advertised tool schemas are now
+self-contained root object schemas and output schemas accept the frozen success
+or frozen error shape; checked-in contracts and runtime validation were not
+weakened. Exact artifacts, hashes, commands, host versions, and package caveats
+are recorded in
+[`artifacts/0022-mcp-package`](../spikes/artifacts/0022-mcp-package/README.md).
+
+A reviewed acceptance amendment approved on 2026-07-23 assigns cancellation and
+durable-subscription checks to the comprehensive black-box stdio and
+extracted-package suites when Inspector CLI has no command for those lanes.
+Inspector remains authoritative for initialization, discovery, successful calls,
+and tool errors. The official `@modelcontextprotocol/conformance` 0.1.16 server
+runner requires `--url` and has no stdio option, so no official scenario supports
+the shipped profile; the plan's existing unsupported-runner fallback applies.
+No HTTP/OAuth transport was added and no conformance pass is claimed. With those
+explicit evidence-source rules, the installed-package gate and Plan 0007
+definition of done are satisfied.
+
 ## Validation contract
 
 After each slice, run the smallest package-specific tests. Before closing the
@@ -800,8 +1003,10 @@ Also run, with versions pinned in CI or documented tooling:
 
 - the black-box stdio MCP protocol suite;
 - supported official MCP conformance scenarios;
-- MCP Inspector initialization, tool-list, successful-call, tool-error, and
-  cancellation checks; and
+- MCP Inspector initialization, tool-list, successful-call, and tool-error
+  checks, with the black-box stdio and extracted-package suites authoritative
+  for cancellation or durable-subscription lanes absent from the pinned
+  Inspector CLI; and
 - one installed-package policy allow/deny scenario in an isolated no-Wayland
   environment.
 

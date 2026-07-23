@@ -17,7 +17,9 @@ persistent multiplexing built in.
 > stable local JSON/NDJSON automation, headless policy administration, bounded
 > audit inspection, dedicated SSH stdio relay, daemon-injected logical context,
 > and public-CLI reference session picker are validated. The full-capability
-> `splinterm-mcp` adapter and public distribution remain future work.
+> `splinterm-mcp` implementation, optional split package, extracted-package
+> runtime, host interoperability, and approved stdio fallback evidence are
+> validated. Core Phase 4 is complete; public distribution remains open.
 
 ## Workspace
 
@@ -28,6 +30,7 @@ crates/
 ├── splinterm-core/      # Lair/Dojo/window/splint state model
 ├── splinterm-protocol/  # versioned client-daemon wire protocol
 ├── splinterm-relay/     # dedicated policy-identified SSH stdio transport
+├── splinterm-mcp/       # optional policy-identified MCP stdio adapter
 ├── splinterm-pty/       # Linux PTY and child-process boundary
 └── splinterm-terminal/  # Foot-derived grid and streaming VT kernel
 docs/
