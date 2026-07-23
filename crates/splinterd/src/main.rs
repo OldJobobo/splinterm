@@ -5149,6 +5149,7 @@ fn wire_update(
             TerminalDamage::Title => title = true,
             TerminalDamage::Palette { .. } => palette = true,
             TerminalDamage::Scrollback => scrollback = true,
+            TerminalDamage::Images { .. } => damaged.fill(true),
         }
     }
     let position = snapshot.cursor.cursor.position();

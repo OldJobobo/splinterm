@@ -1,6 +1,6 @@
 //! Semantic terminal revisions, damage, bounded replay, and resnapshot gaps.
 
-use crate::{Cursor, ScrollDirection, ScrollRegion, TerminalEvent};
+use crate::{ActiveScreen, Cursor, ScrollDirection, ScrollRegion, TerminalEvent};
 
 /// Monotonic semantic terminal revision.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -46,6 +46,9 @@ pub enum TerminalDamage {
     Title,
     Palette {
         index: Option<u16>,
+    },
+    Images {
+        screen: ActiveScreen,
     },
 }
 

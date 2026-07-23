@@ -4,8 +4,9 @@
 //! bookkeeping, wire encodings, and collection ownership choices.
 
 use crate::{
-    ActiveScreen, Attributes, Cell, CellContent, Color, ComposedTable, Coordinate, Cursor, Row,
-    ScrollRegion, TerminalModes, TerminalRevision, UnderlineStyle,
+    ActiveScreen, Attributes, Cell, CellContent, Color, ComposedTable, Coordinate, Cursor,
+    ImageContentMetadata, ImagePlacement, Row, ScrollRegion, TerminalModes, TerminalRevision,
+    UnderlineStyle,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -187,6 +188,8 @@ pub struct TerminalSnapshot<'a> {
     title: &'a str,
     palette: &'a [u32; 256],
     default_colors: &'a [u32; 3],
+    image_contents: Vec<ImageContentMetadata>,
+    image_placements: Vec<ImagePlacement>,
     visible_rows: Vec<RowSnapshot<'a>>,
     scrollback_rows: Vec<RowSnapshot<'a>>,
     scrollback: ScrollbackSnapshot,
@@ -208,6 +211,8 @@ impl<'a> TerminalSnapshot<'a> {
         title: &'a str,
         palette: &'a [u32; 256],
         default_colors: &'a [u32; 3],
+        image_contents: Vec<ImageContentMetadata>,
+        image_placements: Vec<ImagePlacement>,
         visible_rows: Vec<RowSnapshot<'a>>,
         scrollback_rows: Vec<RowSnapshot<'a>>,
         scrollback: ScrollbackSnapshot,
@@ -223,6 +228,8 @@ impl<'a> TerminalSnapshot<'a> {
             title,
             palette,
             default_colors,
+            image_contents,
+            image_placements,
             visible_rows,
             scrollback_rows,
             scrollback,
@@ -268,6 +275,14 @@ impl<'a> TerminalSnapshot<'a> {
     #[must_use]
     pub const fn default_colors(&self) -> &'a [u32; 3] {
         self.default_colors
+    }
+    #[must_use]
+    pub fn image_contents(&self) -> impl ExactSizeIterator<Item = ImageContentMetadata> + '_ {
+        self.image_contents.iter().copied()
+    }
+    #[must_use]
+    pub fn image_placements(&self) -> impl ExactSizeIterator<Item = ImagePlacement> + '_ {
+        self.image_placements.iter().copied()
     }
     #[must_use]
     pub fn visible_rows(&self) -> impl ExactSizeIterator<Item = RowSnapshot<'a>> + '_ {

@@ -15,6 +15,7 @@ mod coord;
 mod cursor;
 mod event;
 mod grid;
+mod image;
 mod mode;
 mod row;
 mod snapshot;
@@ -29,6 +30,11 @@ pub use coord::{Coordinate, CoordinateRange, ScrollRegion};
 pub use cursor::Cursor;
 pub use event::TerminalEvent;
 pub use grid::{Grid, ScrollDirection, ScrollResult};
+pub use image::{
+    CellExtent, ImageAlphaMode, ImageContent, ImageContentId, ImageContentMetadata,
+    ImageErasePolicy, ImageError, ImageLimits, ImageMetrics, ImagePlacement, ImagePlacementId,
+    ImagePlane, ImageRetention, ImageSourceFormat, NewImageContent, NewImagePlacement, PixelRect,
+};
 pub use mode::{ActiveScreen, MouseTracking, TerminalModes};
 pub use row::Row;
 pub use snapshot::{

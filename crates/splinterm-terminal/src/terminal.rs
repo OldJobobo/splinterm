@@ -13,10 +13,12 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     ActiveScreen, Attributes, CellContent, ChangeSet, Color, ColorSource, ComposedTable,
-    Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, MouseTracking, ResnapshotRequired,
-    RowSnapshot, ScrollDirection, ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage,
-    SnapshotRequest, TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes,
-    TerminalRevision, TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
+    Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, ImageContent, ImageContentId, ImageError,
+    ImageMetrics, ImagePlacement, ImagePlacementId, ImagePlane, MouseTracking, NewImageContent,
+    NewImagePlacement, ResnapshotRequired, RowSnapshot, ScrollDirection, ScrollRegion,
+    ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest, TerminalConfig, TerminalDamage,
+    TerminalEvent, TerminalModes, TerminalRevision, TerminalSnapshot, TerminalUpdate,
+    UnderlineStyle, UpdateBatch,
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -34,6 +36,7 @@ pub struct Terminal {
     modes: TerminalModes,
     tab_stops: Vec<bool>,
     composed: ComposedTable,
+    images: ImagePlane,
     title: String,
     palette: [u32; 256],
     initial_palette: [u32; 256],
@@ -149,6 +152,7 @@ impl Terminal {
             modes: TerminalModes::default(),
             tab_stops: Vec::new(),
             composed: ComposedTable::new(config.composed_limit),
+            images: ImagePlane::default(),
             title: String::new(),
             palette,
             initial_palette: palette,
@@ -265,6 +269,87 @@ impl Terminal {
         self.revision
     }
 
+    /// Returns current image-plane accounting and high-water marks.
+    #[must_use]
+    pub const fn image_metrics(&self) -> ImageMetrics {
+        self.images.metrics()
+    }
+
+    /// Returns immutable canonical pixels for one content identity.
+    #[must_use]
+    pub fn image_content(&self, id: ImageContentId) -> Option<&ImageContent> {
+        self.images.content(self.active, id)
+    }
+
+    /// Returns the stable row identity at the active cursor.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the terminal invariant that every cursor row is allocated
+    /// has been violated.
+    #[must_use]
+    pub fn cursor_row_id(&self) -> u64 {
+        self.grid()
+            .row_id(self.grid().cursor().position().row)
+            .expect("the active cursor row is allocated")
+    }
+
+    /// Inserts bounded canonical content on the active screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deterministic image admission error without changing revision.
+    pub fn insert_image_content(
+        &mut self,
+        input: NewImageContent<'_>,
+    ) -> Result<ImageContentId, ImageError> {
+        let id = self.images.insert_content(self.active, input)?;
+        self.commit_image_change();
+        Ok(id)
+    }
+
+    /// Inserts a bounded placement on the active screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an image error for an invalid anchor, crop, content, or budget.
+    pub fn insert_image_placement(
+        &mut self,
+        input: NewImagePlacement,
+    ) -> Result<ImagePlacementId, ImageError> {
+        if !self.grid().retained_row_ids().contains(&input.row_id) {
+            return Err(ImageError::InvalidAnchor);
+        }
+        let id = self.images.insert_placement(self.active, input)?;
+        self.commit_image_change();
+        Ok(id)
+    }
+
+    /// Removes one placement from the active screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImageError::UnknownPlacement`] for absence or double removal.
+    pub fn remove_image_placement(
+        &mut self,
+        id: ImagePlacementId,
+    ) -> Result<ImagePlacement, ImageError> {
+        let placement = self.images.remove_placement(self.active, id)?;
+        self.commit_image_change();
+        Ok(placement)
+    }
+
+    /// Removes content and all of its placements from the active screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImageError::UnknownContent`] for absence or double removal.
+    pub fn remove_image_content(&mut self, id: ImageContentId) -> Result<(), ImageError> {
+        self.images.remove_content(self.active, id)?;
+        self.commit_image_change();
+        Ok(())
+    }
+
     /// Creates a borrowed semantic snapshot without consuming updates/events.
     #[must_use]
     pub fn snapshot(&self, request: SnapshotRequest) -> TerminalSnapshot<'_> {
@@ -308,6 +393,8 @@ impl Terminal {
             &self.title,
             &self.palette,
             &self.default_colors,
+            self.images.content_metadata(self.active).collect(),
+            self.images.ordered_placements(self.active),
             visible_rows,
             scrollback_rows,
             ScrollbackSnapshot {
@@ -732,6 +819,16 @@ impl Terminal {
         if self.default_colors != before.default_colors {
             change.push(TerminalDamage::Palette { index: None });
         }
+    }
+
+    fn commit_image_change(&mut self) {
+        debug_assert!(self.current_change.is_none());
+        let mut change = ChangeSet::default();
+        change.push(TerminalDamage::Images {
+            screen: self.active,
+        });
+        self.current_change = Some(change);
+        self.commit_change();
     }
 
     fn commit_change(&mut self) {
@@ -1367,6 +1464,7 @@ impl Terminal {
             let normal_cursor = self.normal.cursor().position();
             let background = self.attributes.background();
             self.alternate.reset_visible(background);
+            self.images.clear_screen(ActiveScreen::Alternate);
             let alternate_position = clamp_position(&self.alternate, normal_cursor);
             self.alternate.set_cursor(Cursor::new(alternate_position));
             self.active = ActiveScreen::Alternate;

@@ -222,6 +222,22 @@ impl Grid {
         self.rows[self.absolute_index(relative_row)].as_ref()
     }
 
+    /// Returns the stable identity of an allocated offset-relative row.
+    #[must_use]
+    pub fn row_id(&self, relative_row: i32) -> Option<u64> {
+        let index = self.absolute_index(relative_row);
+        self.rows[index].as_ref().map(|_| self.row_ids[index])
+    }
+
+    /// Returns every stable row identity currently retained by the grid.
+    pub(crate) fn retained_row_ids(&self) -> std::collections::HashSet<u64> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| row.as_ref().map(|_| self.row_ids[index]))
+            .collect()
+    }
+
     /// Returns an allocated mutable row without allocating it.
     pub fn row_mut(&mut self, relative_row: i32) -> Option<&mut Row> {
         let index = self.absolute_index(relative_row);
