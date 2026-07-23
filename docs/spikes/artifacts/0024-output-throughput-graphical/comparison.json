@@ -1,0 +1,66 @@
+{
+  "schema": "splinterm.performance.output-throughput-comparison.v1",
+  "seed": 20260724,
+  "warmup_runs": 3,
+  "measured_runs": 10,
+  "lines": 2000,
+  "columns": 80,
+  "before": {
+    "plain": {
+      "child_write_median_ns": 1276625838.0,
+      "trigger_to_visible_median_ns": 1890182460.0,
+      "cpu_ticks_median": 156.5,
+      "rss_growth_median_bytes": 17879040.0
+    },
+    "ansi": {
+      "child_write_median_ns": 1319468229.0,
+      "trigger_to_visible_median_ns": 1865787868.5,
+      "cpu_ticks_median": 158.5,
+      "rss_growth_median_bytes": 22753280.0
+    },
+    "unicode": {
+      "child_write_median_ns": 1379524625.0,
+      "trigger_to_visible_median_ns": 1880100001.5,
+      "cpu_ticks_median": 159.5,
+      "rss_growth_median_bytes": 43046912.0
+    }
+  },
+  "after": {
+    "plain": {
+      "child_write_median_ns": 40214861.5,
+      "child_write_max_ns": 58085392,
+      "trigger_to_visible_median_ns": 532471127.0,
+      "cpu_ticks_median": 10.0,
+      "rss_growth_median_bytes": 15403008.0
+    },
+    "ansi": {
+      "child_write_median_ns": 41420944.5,
+      "child_write_max_ns": 59837665,
+      "trigger_to_visible_median_ns": 511233067.5,
+      "cpu_ticks_median": 10.0,
+      "rss_growth_median_bytes": 19777536.0
+    },
+    "unicode": {
+      "child_write_median_ns": 44806207.0,
+      "child_write_max_ns": 46418236,
+      "trigger_to_visible_median_ns": 529098978.5,
+      "cpu_ticks_median": 11.0,
+      "rss_growth_median_bytes": 35946496.0
+    }
+  },
+  "ratios": {
+    "plain": {
+      "child_write_speedup": 31.75,
+      "visible_speedup": 3.55
+    },
+    "ansi": {
+      "child_write_speedup": 31.86,
+      "visible_speedup": 3.65
+    },
+    "unicode": {
+      "child_write_speedup": 30.79,
+      "visible_speedup": 3.55
+    }
+  },
+  "valid": true
+}

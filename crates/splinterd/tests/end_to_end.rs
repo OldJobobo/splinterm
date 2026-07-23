@@ -532,6 +532,28 @@ async fn snapshot_until(
     }
 }
 
+async fn stable_snapshot_after_marker(
+    connection: &mut Connection,
+    splint_id: SplintId,
+    incarnation: u64,
+    marker: &str,
+) -> TerminalSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut snapshot = snapshot_until(connection, splint_id, incarnation, marker).await;
+    loop {
+        time::sleep(Duration::from_millis(20)).await;
+        let next = snapshot_until(connection, splint_id, incarnation, marker).await;
+        if next.revision == snapshot.revision {
+            return next;
+        }
+        snapshot = next;
+        assert!(
+            Instant::now() < deadline,
+            "snapshot revision did not become quiescent after {marker}"
+        );
+    }
+}
+
 fn policy_executable_identity() -> (PathBuf, String) {
     let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
     let mut file = fs::File::open(&executable).unwrap();
@@ -1790,7 +1812,7 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn headless_policy_reload_fails_closed_and_cleans_up() {
-    time::timeout(TEST_TIMEOUT, async {
+    time::timeout(Duration::from_secs(60), async {
         let mut daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
         let marker = daemon.runtime.join("child-pid");
         let mut connection = daemon.connect().await;
@@ -3370,7 +3392,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         );
         drop(producer);
 
-        let final_snapshot = snapshot_until(
+        let final_snapshot = stable_snapshot_after_marker(
             &mut reattached,
             splint_id,
             incarnation,

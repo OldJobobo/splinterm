@@ -76,19 +76,20 @@ and one pinned shutdown signal.
 - Logical topology automation remains separate from compositor-native window control
 - No network listener in `splinterd` by default
 
-## Phase 4.1 — output throughput stabilization
+## Phase 4.1 — output throughput stabilization (complete)
 
 Detailed plan: [`plans/0009-output-throughput-optimization.md`](plans/0009-output-throughput-optimization.md)
 
-- Instrument PTY drain, terminal parsing, update publication, subscriptions, and rendering
-- Coalesce per-action terminal revisions into bounded semantic transactions
-- Remove 256-byte publication and per-event snapshot amplification
-- Preserve exact update/resync behavior, bounded memory, and small-write latency
-- Revalidate the five-terminal output matrix before image-protocol implementation
+- Instrumented PTY drain, terminal parsing, update publication, subscriptions, and snapshots
+- Removed unconditional full-scrollback enumeration from ordinary parser actions
+- Coalesced already-queued bounded subscription updates before protocol snapshots
+- Preserved action-based revisions, exact resync behavior, bounded memory, and small-write latency
+- Revalidated the randomized five-terminal output matrix before image-protocol implementation
 
-This stabilization pass is recommended before Phase 5 because terminal images
-will add bulk parser, protocol, snapshot, and rendering pressure to the same
-pipeline that currently blocks ordinary text writers.
+The guarded matrix reduced Splinterm's 2,000-line child-write medians from
+1.28–1.38 seconds to 40.2–44.8 milliseconds and visible-marker medians from
+1.87–1.89 seconds to 511–533 milliseconds. All 150 measured cases were valid,
+cleanup was verified, and the complete workspace validation suite passes.
 
 ## Phase 5 — bounded terminal image protocols
 

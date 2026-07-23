@@ -21,8 +21,8 @@ use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use splinterd::{
     LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,
-    LiveSplintHandle, LiveSplintRuntime, ProcessIncarnation, Subscription, SubscriptionReceive,
-    authorization, executable_identity, policy,
+    LiveSplintHandle, LiveSplintRuntime, ProcessExit, ProcessIncarnation, Subscription,
+    SubscriptionReceive, authorization, executable_identity, policy,
 };
 use splinterm_core::{
     Dojo, DojoId, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId,
@@ -4766,6 +4766,42 @@ fn frame_within_policy_limit(frame: &ServerFrame, maximum: Option<usize>) -> boo
     })
 }
 
+enum DrainedSubscription {
+    Open,
+    Exited(ProcessExit),
+    Closed,
+    ResnapshotRequired,
+}
+
+fn drain_pending_subscription(
+    subscription: &mut Subscription,
+    updates: &mut Vec<TerminalUpdate>,
+) -> DrainedSubscription {
+    loop {
+        if subscription.resnapshot_required() {
+            return DrainedSubscription::ResnapshotRequired;
+        }
+        match subscription.events.try_recv() {
+            Ok(LiveEvent::Update {
+                updates: pending, ..
+            }) => updates.extend(pending),
+            Ok(LiveEvent::Exited { status, .. }) => {
+                return DrainedSubscription::Exited(status);
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                return DrainedSubscription::Closed;
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {
+                return if subscription.resnapshot_required() {
+                    DrainedSubscription::ResnapshotRequired
+                } else {
+                    DrainedSubscription::Open
+                };
+            }
+        }
+    }
+}
+
 fn spawn_subscription(
     id: u64,
     mut subscription: Subscription,
@@ -4833,27 +4869,9 @@ fn spawn_subscription(
                     });
                     break;
                 }
-                SubscriptionReceive::Event(LiveEvent::Update { updates, .. }) => {
-                    let Ok(snapshot) = handle
-                        .snapshot_with_scrollback(access.scrollback_rows)
-                        .await
-                    else {
-                        break;
-                    };
-                    let current_history = history_state(&snapshot);
-                    if !revision_advances(previous_history.revision, current_history.revision) {
-                        continue;
-                    }
-                    let event = subscription_update_event(&updates, snapshot, previous_history);
-                    previous_history = current_history;
-                    let frame = ServerFrame::Event {
-                        subscription_id: id,
-                        sequence,
-                        event,
-                    };
-                    if !frame_within_policy_limit(&frame, access.maximum_returned_bytes)
-                        || outputs.outbound.try_send(frame).is_err()
-                    {
+                SubscriptionReceive::Event(LiveEvent::Update { mut updates, .. }) => {
+                    let drained = drain_pending_subscription(&mut subscription, &mut updates);
+                    if matches!(drained, DrainedSubscription::ResnapshotRequired) {
                         let revision = current_revision(&handle, access.scrollback_rows).await;
                         let _ = outputs
                             .control
@@ -4867,7 +4885,54 @@ fn spawn_subscription(
                             .await;
                         break;
                     }
-                    sequence += 1;
+                    let Ok(snapshot) = handle
+                        .snapshot_with_scrollback(access.scrollback_rows)
+                        .await
+                    else {
+                        break;
+                    };
+                    let current_history = history_state(&snapshot);
+                    if revision_advances(previous_history.revision, current_history.revision) {
+                        let event = subscription_update_event(&updates, snapshot, previous_history);
+                        previous_history = current_history;
+                        let frame = ServerFrame::Event {
+                            subscription_id: id,
+                            sequence,
+                            event,
+                        };
+                        if !frame_within_policy_limit(&frame, access.maximum_returned_bytes)
+                            || outputs.outbound.try_send(frame).is_err()
+                        {
+                            let revision = current_revision(&handle, access.scrollback_rows).await;
+                            let _ = outputs
+                                .control
+                                .send(ServerFrame::Event {
+                                    subscription_id: id,
+                                    sequence,
+                                    event: SubscriptionEvent::ResyncRequired {
+                                        current_revision: revision,
+                                    },
+                                })
+                                .await;
+                            break;
+                        }
+                        sequence += 1;
+                    }
+                    match drained {
+                        DrainedSubscription::Exited(status) => {
+                            let _ = outputs.outbound.try_send(ServerFrame::Event {
+                                subscription_id: id,
+                                sequence,
+                                event: SubscriptionEvent::Exited {
+                                    code: status.code,
+                                    signal: status.signal,
+                                },
+                            });
+                            break;
+                        }
+                        DrainedSubscription::Closed => break,
+                        DrainedSubscription::Open | DrainedSubscription::ResnapshotRequired => {}
+                    }
                 }
                 SubscriptionReceive::Closed => break,
             }

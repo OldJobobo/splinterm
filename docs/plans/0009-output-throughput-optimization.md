@@ -1,8 +1,8 @@
 # Plan 0009: PTY output throughput and update-pipeline optimization
 
-- **Status:** In progress — non-graphical root-cause fix validated; graphical closure pending
+- **Status:** Complete
 - **Roadmap:** Phase 4.1 — output throughput stabilization
-- **Evidence:** [five-terminal graphical output benchmark](../benchmarks/artifacts/2026-07-23-five-terminal-output/README.md)
+- **Evidence:** [baseline five-terminal matrix](../benchmarks/artifacts/2026-07-23-five-terminal-output/README.md) and [optimized guarded matrix](../spikes/artifacts/0024-output-throughput-graphical/README.md)
 - **Benchmark method:** [terminal benchmark suite plan](../benchmarks/terminal-benchmark-plan.md)
 - **Foundation:** [Plan 0001](0001-terminal-kernel.md),
   [Plan 0002](0002-omarchy-terminal-mvp.md), and
@@ -29,16 +29,18 @@ baseline as a separate, measurable change series.
 - Row-count work is now conditional on that exact action. The release daemon
   diagnostic improved from 4.740 seconds to a five-sample median of 131.1 ms
   while preserving all 108,056 action-based terminal revisions.
-- Revision coalescing, larger parse batches, and protocol subscription
-  coalescing were investigated and removed rather than retained without a clear
-  correctness/performance case.
+- Revision coalescing and larger parse batches were investigated and removed;
+  action-based revisions and the 256-byte publication bound remain unchanged.
+- The protocol now drains only already-queued bounded live updates before one
+  snapshot, preserving exact revision ranges and existing resync fallback.
 - Non-graphical evidence is recorded in
   [`artifacts/0023-output-throughput`](../spikes/artifacts/0023-output-throughput/README.md).
-- Graphical smoke/matrix validation remains pending.
-- Validation is also blocked by the unrelated
-  `headless_policy_reload_fails_closed_and_cleans_up` test consistently reaching
-  its fixed 20-second outer timeout; restoring original subscription and
-  revision semantics did not clear it.
+- The guarded 150-case matrix passed with all records valid and cleanup verified;
+  optimized evidence is recorded in
+  [`artifacts/0024-output-throughput-graphical`](../spikes/artifacts/0024-output-throughput-graphical/README.md).
+- Lifecycle validation races exposed by the faster path were made explicit: the
+  long policy reload/restart/reap test has a 60-second outer budget, and
+  revision-bound paging waits for terminal output to become quiescent.
 
 ## Problem statement
 
@@ -263,19 +265,28 @@ Stop and reassess rather than broadening the redesign when:
 
 ## Completion record
 
-Current checkpoint:
-
 - **Measured root cause:** unconditional full-scrollback row enumeration before
-  and after every parser action.
-- **Retained fix:** enumerate scrollback rows only for `CSI 3 J` damage
-  accounting; retain action-based revisions and the 256-byte publication bound.
-- **Before:** 4.740 s output completion, 4.740 s output processing, 108,056
-  terminal updates for 126,056 PTY bytes.
-- **After:** five-sample median 131.1 ms output completion and 129.3 ms output
-  processing, with the same 108,056 terminal updates.
+  and after every parser action, followed by per-event snapshot amplification
+  for an attached subscriber.
+- **Retained fixes:** enumerate scrollback rows only for `CSI 3 J` damage
+  accounting and drain already-queued bounded live updates before one protocol
+  snapshot. Action-based revisions, the 256-byte publication bound, overflow
+  resync, and public protocol shapes remain unchanged.
+- **Non-graphical before:** 4.740 s output completion and processing for 126,056
+  PTY bytes and 108,056 terminal updates.
+- **Non-graphical after:** five-sample median 131.1 ms output completion and
+  129.3 ms processing with the same 108,056 terminal updates.
+- **Graphical before:** 1.277–1.380 s child-write medians and 1.866–1.890 s
+  visible-marker medians across plain, ANSI, and Unicode.
+- **Graphical after:** 40.2–44.8 ms child-write medians, 46.4–59.8 ms maximum
+  child-write samples, and 511.2–532.5 ms visible-marker medians.
 - **Evidence:**
-  [`artifacts/0023-output-throughput`](../spikes/artifacts/0023-output-throughput/README.md).
-- **Pending:** guarded graphical evidence, resolution of the policy-reload test
-  timeout, final review, and closure commit references.
-
-Do not mark this plan complete until those pending gates are resolved.
+  [`artifacts/0023-output-throughput`](../spikes/artifacts/0023-output-throughput/README.md)
+  and
+  [`artifacts/0024-output-throughput-graphical`](../spikes/artifacts/0024-output-throughput-graphical/README.md).
+- **Validation:** all workspace tests, all 16 daemon end-to-end tests, 52 MCP
+  tests, automation/MCP fixtures, session-picker tests, formatting, whitespace,
+  JSON integrity, and the guarded 150-case graphical matrix pass.
+- **Remaining debt:** Splinterm still trails Foot in child-write and visible
+  latency, and its output RSS growth remains higher than several peers. Those
+  are follow-up opportunities rather than failures of this plan's closure gates.
