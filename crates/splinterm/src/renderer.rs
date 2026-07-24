@@ -29,13 +29,14 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 
+use splinterm_automation_client::{ImageContentLeaseSet, ImageContentSource};
 use splinterm_core::SplintId;
 use splinterm_filemap::ReadOnlyFileMap;
 use splinterm_freetype::{MAX_PIXEL_SIZE_26_6, MIN_PIXEL_SIZE_26_6, RasterFace};
 use splinterm_protocol::{
-    ActiveScreen, CellAttributes, ColorSource, MAX_COLUMNS, MAX_ROWS, ScrollDirection,
-    TerminalCell, TerminalInputModes, TerminalRow, TerminalScroll, TerminalSnapshot,
-    UnderlineStyle,
+    ActiveScreen, CellAttributes, ColorSource, ImageContentMetadata, ImagePlacement, MAX_COLUMNS,
+    MAX_ROWS, ScrollDirection, TerminalCell, TerminalInputModes, TerminalRow, TerminalScroll,
+    TerminalSnapshot, UnderlineStyle,
 };
 use swash::{
     FontRef,
@@ -1991,6 +1992,92 @@ struct DecorationSpan {
     metrics: DecorationMetrics,
 }
 
+const KITTY_BACKGROUND_Z_THRESHOLD: i32 = -1_073_741_824;
+
+#[derive(Clone, Debug)]
+struct SnapshotImage {
+    metadata: ImageContentMetadata,
+    placement: ImagePlacement,
+    row: u32,
+    source: ImageContentSource,
+}
+
+fn image_tier(z_index: i32) -> u8 {
+    if z_index < KITTY_BACKGROUND_Z_THRESHOLD {
+        0
+    } else if z_index < 0 {
+        1
+    } else {
+        2
+    }
+}
+
+fn compare_snapshot_images(left: &SnapshotImage, right: &SnapshotImage) -> std::cmp::Ordering {
+    image_tier(left.placement.z_index)
+        .cmp(&image_tier(right.placement.z_index))
+        .then_with(|| left.placement.z_index.cmp(&right.placement.z_index))
+        .then_with(|| {
+            match (
+                left.placement.application_image_id,
+                right.placement.application_image_id,
+            ) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left
+                    .placement
+                    .creation_order
+                    .cmp(&right.placement.creation_order),
+            }
+        })
+        .then_with(|| {
+            left.placement
+                .creation_order
+                .cmp(&right.placement.creation_order)
+        })
+}
+
+fn prepare_snapshot_images(
+    snapshot: &TerminalSnapshot,
+    sources: Option<&ImageContentLeaseSet>,
+) -> Result<Vec<SnapshotImage>> {
+    let Some(plane) = &snapshot.images else {
+        return Ok(Vec::new());
+    };
+    let sources = sources.context("snapshot image sources are unavailable")?;
+    let contents = plane
+        .contents
+        .iter()
+        .map(|content| (content.content_id, content))
+        .collect::<HashMap<_, _>>();
+    let rows = snapshot
+        .visible_rows
+        .iter()
+        .enumerate()
+        .filter_map(|(row, value)| value.row_id.map(|id| (id, row)))
+        .collect::<HashMap<_, _>>();
+    let mut images = Vec::with_capacity(plane.placements.len());
+    for placement in &plane.placements {
+        let Some(row) = rows.get(&placement.row_id).copied() else {
+            continue;
+        };
+        let metadata = contents
+            .get(&placement.content_id)
+            .context("image placement references missing content metadata")?;
+        let source = sources
+            .get(metadata)
+            .context("snapshot references an unresolved image source")?;
+        images.push(SnapshotImage {
+            metadata: (*metadata).clone(),
+            placement: placement.clone(),
+            row: u32::try_from(row).context("image anchor row fits u32")?,
+            source,
+        });
+    }
+    images.sort_by(compare_snapshot_images);
+    Ok(images)
+}
+
 /// One immutable, scale-dependent rendering of an owned daemon snapshot.
 pub(crate) struct SnapshotFrame {
     glyphs: Vec<SnapshotGlyph>,
@@ -2020,6 +2107,7 @@ pub(crate) struct SnapshotFrame {
     cursor: Option<(u32, u32)>,
     canvas_background: [u8; 3],
     cursor_color: [u8; 3],
+    images: Vec<SnapshotImage>,
     scale_120: u16,
 }
 
@@ -2030,6 +2118,11 @@ impl SnapshotFrame {
 
     pub(crate) const fn cell_height(&self) -> u32 {
         self.cell_height
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn scale_120(&self) -> u16 {
+        self.scale_120
     }
 
     fn cell_geometry(&self) -> Result<CellGeometry> {
@@ -2158,6 +2251,18 @@ impl SnapshotFrame {
     }
 
     pub(crate) fn load_scaled(snapshot: &TerminalSnapshot, scale_120: u32) -> Result<Self> {
+        Self::load_scaled_with_sources(snapshot, scale_120, None)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "bounded text and image source preparation share one immutable frame transaction"
+    )]
+    pub(crate) fn load_scaled_with_sources(
+        snapshot: &TerminalSnapshot,
+        scale_120: u32,
+        sources: Option<&ImageContentLeaseSet>,
+    ) -> Result<Self> {
         if snapshot.columns > usize::from(MAX_COLUMNS) || snapshot.rows > usize::from(MAX_ROWS) {
             bail!(
                 "snapshot dimensions {}x{} exceed protocol limits {}x{}",
@@ -2230,6 +2335,7 @@ impl SnapshotFrame {
             )?;
         }
         let cursor = snapshot_cursor(snapshot, columns, rows);
+        let images = prepare_snapshot_images(snapshot, sources)?;
         let mut frame = Self {
             glyphs,
             decorations,
@@ -2254,6 +2360,7 @@ impl SnapshotFrame {
             cursor,
             canvas_background: default_background,
             cursor_color,
+            images,
             scale_120,
         };
         frame.enforce_cache_budget();
@@ -2320,6 +2427,15 @@ impl SnapshotFrame {
         self.glyphs.sort_by_key(|glyph| (glyph.row, glyph.column));
         self.decorations.sort_by_key(|span| (span.row, span.column));
         self.enforce_cache_budget();
+        Ok(())
+    }
+
+    pub(crate) fn refresh_images(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        sources: &ImageContentLeaseSet,
+    ) -> Result<()> {
+        self.images = prepare_snapshot_images(snapshot, Some(sources))?;
         Ok(())
     }
 
@@ -2463,6 +2579,31 @@ pub fn capture_final_buffer(
     capture_final_buffer_presented(
         snapshot,
         scale_120,
+        show_cursor,
+        cursor_style,
+        CursorPresentation::FOCUSED_STEADY,
+    )
+}
+
+/// Paints a snapshot with resolved immutable image sources.
+///
+/// # Errors
+/// Returns an error for missing/mismatched sources, geometry, scale, font, or allocation bounds.
+pub fn capture_final_buffer_with_sources(
+    snapshot: &TerminalSnapshot,
+    sources: &ImageContentLeaseSet,
+    scale_120: u32,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+) -> Result<FinalBufferCapture> {
+    snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let frame = SnapshotFrame::load_scaled_with_sources(snapshot, scale_120, Some(sources))?;
+    let geometry = frame.tight_geometry()?;
+    capture_prepared_frame(
+        &frame,
+        geometry,
         show_cursor,
         cursor_style,
         CursorPresentation::FOCUSED_STEADY,
@@ -3812,9 +3953,152 @@ fn paint_effective_cursor(
     }
 }
 
+fn scaled_image_offset(offset: i32, destination_cell: u32, source_cell: Option<u32>) -> i64 {
+    let source_cell = source_cell
+        .filter(|size| *size > 0)
+        .unwrap_or(destination_cell);
+    i64::from(offset) * i64::from(destination_cell) / i64::from(source_cell)
+}
+
 #[allow(
     clippy::too_many_arguments,
-    reason = "one compositor owns all per-cell inputs"
+    clippy::too_many_lines,
+    reason = "image composition keeps bounded source, destination, pane, tier, and damage arithmetic explicit"
+)]
+fn paint_snapshot_images(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
+    region: Rect,
+    dirty_rows: Option<&[bool]>,
+    tier: u8,
+) {
+    let grid = geometry.visible_grid_rect;
+    let clip_left = i64::from(region.x.max(grid.x));
+    let clip_top = i64::from(region.y.max(grid.y));
+    let clip_right = i64::from(
+        region
+            .x
+            .saturating_add(region.width)
+            .min(grid.x.saturating_add(grid.width))
+            .min(width),
+    );
+    let clip_bottom = i64::from(
+        region
+            .y
+            .saturating_add(region.height)
+            .min(grid.y.saturating_add(grid.height))
+            .min(height),
+    );
+    if clip_left >= clip_right || clip_top >= clip_bottom {
+        return;
+    }
+    for image in frame
+        .images
+        .iter()
+        .filter(|image| image_tier(image.placement.z_index) == tier)
+    {
+        let Some((anchor_x, anchor_y, cell_width, cell_height)) = frame.cell_rect(
+            geometry,
+            u32::try_from(image.placement.column).unwrap_or(u32::MAX),
+            image.row,
+        ) else {
+            continue;
+        };
+        let Some(destination_width) = u32::try_from(image.placement.destination_columns)
+            .ok()
+            .and_then(|columns| columns.checked_mul(cell_width))
+        else {
+            continue;
+        };
+        let Some(destination_height) = u32::try_from(image.placement.destination_rows)
+            .ok()
+            .and_then(|rows| rows.checked_mul(cell_height))
+        else {
+            continue;
+        };
+        if destination_width == 0 || destination_height == 0 {
+            continue;
+        }
+        let destination_x = i64::from(anchor_x)
+            + scaled_image_offset(
+                image.placement.x_offset,
+                cell_width,
+                image.placement.source_cell_size.map(|size| size.width),
+            );
+        let destination_y = i64::from(anchor_y)
+            + scaled_image_offset(
+                image.placement.y_offset,
+                cell_height,
+                image.placement.source_cell_size.map(|size| size.height),
+            );
+        let left = destination_x.max(clip_left);
+        let top = destination_y.max(clip_top);
+        let right = destination_x
+            .saturating_add(i64::from(destination_width))
+            .min(clip_right);
+        let bottom = destination_y
+            .saturating_add(i64::from(destination_height))
+            .min(clip_bottom);
+        if left >= right || top >= bottom {
+            continue;
+        }
+        let source = image.source.as_bytes();
+        let source_stride = usize::try_from(image.metadata.width)
+            .ok()
+            .and_then(|width| width.checked_mul(4));
+        let Some(source_stride) = source_stride else {
+            continue;
+        };
+        for target_y in top..bottom {
+            let grid_row = usize::try_from((target_y - i64::from(grid.y)) / i64::from(cell_height))
+                .unwrap_or(usize::MAX);
+            if dirty_rows.is_some_and(|rows| !rows.get(grid_row).copied().unwrap_or(false)) {
+                continue;
+            }
+            let relative_y = u64::try_from(target_y - destination_y).unwrap_or(0);
+            let source_y = u64::from(image.placement.source.y)
+                + relative_y * u64::from(image.placement.source.height)
+                    / u64::from(destination_height);
+            for target_x in left..right {
+                let relative_x = u64::try_from(target_x - destination_x).unwrap_or(0);
+                let source_x = u64::from(image.placement.source.x)
+                    + relative_x * u64::from(image.placement.source.width)
+                        / u64::from(destination_width);
+                let Some(index) = usize::try_from(source_y)
+                    .ok()
+                    .and_then(|row| row.checked_mul(source_stride))
+                    .and_then(|row| {
+                        usize::try_from(source_x)
+                            .ok()
+                            .and_then(|column| column.checked_mul(4))
+                            .and_then(|column| row.checked_add(column))
+                    })
+                else {
+                    continue;
+                };
+                let Some(pixel) = source.get(index..index + 4) else {
+                    continue;
+                };
+                blend_premultiplied_pixel(
+                    canvas,
+                    width,
+                    height,
+                    i32::try_from(target_x).unwrap_or(i32::MAX),
+                    i32::try_from(target_y).unwrap_or(i32::MAX),
+                    [pixel[2], pixel[1], pixel[0], pixel[3]],
+                );
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one layered compositor owns backgrounds, image tiers, text, cursor, and row damage"
 )]
 fn compose_snapshot_rows(
     canvas: &mut [u8],
@@ -3822,35 +4106,54 @@ fn compose_snapshot_rows(
     height: u32,
     frame: &SnapshotFrame,
     geometry: &WindowGeometry,
+    region: Rect,
     dirty_rows: Option<&[bool]>,
     cursor_visible: bool,
     cursor_style: CursorStyle,
     presentation: CursorPresentation,
 ) {
-    let effective = effective_cursor_shape(cursor_style, cursor_visible, presentation);
-    for row in 0..frame.rows {
-        if dirty_rows.is_some_and(|rows| {
-            !rows
-                .get(usize::try_from(row).expect("row fits usize"))
+    let row_is_dirty = |row: u32| {
+        dirty_rows.is_none_or(|rows| {
+            rows.get(usize::try_from(row).expect("row fits usize"))
                 .copied()
                 .unwrap_or(false)
-        }) {
+        })
+    };
+    let canvas_background = premultiplied_rgba(frame.canvas_background, background_alpha_u8());
+    for row in 0..frame.rows {
+        if !row_is_dirty(row) {
             continue;
         }
-        for column in (0..frame.columns).rev() {
-            let index = usize::try_from(row * frame.columns + column).expect("cell index");
+        for column in 0..frame.columns {
             let Some((x, y, cell_width, cell_height)) = frame.cell_rect(geometry, column, row)
             else {
                 continue;
             };
-            let background = frame.backgrounds[index];
-            let foreground = frame.foregrounds[index];
-            let alpha = if frame.default_backgrounds[index] {
-                background_alpha_u8()
-            } else {
-                u8::MAX
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (x, y, cell_width, cell_height),
+                canvas_background,
+            );
+        }
+    }
+    paint_snapshot_images(
+        canvas, width, height, frame, geometry, region, dirty_rows, 0,
+    );
+    for row in 0..frame.rows {
+        if !row_is_dirty(row) {
+            continue;
+        }
+        for column in (0..frame.columns).rev() {
+            let index = usize::try_from(row * frame.columns + column).expect("cell index");
+            if frame.default_backgrounds[index] {
+                continue;
+            }
+            let Some((x, y, cell_width, cell_height)) = frame.cell_rect(geometry, column, row)
+            else {
+                continue;
             };
-            let background_span = frame.cell_spans[index].max(1);
             fill_rect(
                 canvas,
                 width,
@@ -3858,28 +4161,31 @@ fn compose_snapshot_rows(
                 (
                     x,
                     y,
-                    cell_width.saturating_mul(background_span),
+                    cell_width.saturating_mul(frame.cell_spans[index].max(1)),
                     cell_height,
                 ),
-                premultiplied_rgba(background, alpha),
+                [
+                    frame.backgrounds[index][0],
+                    frame.backgrounds[index][1],
+                    frame.backgrounds[index][2],
+                    u8::MAX,
+                ],
             );
-            let has_cursor = frame.cursor == Some((column, row));
-            let span = cursor_span(frame, column, row);
-            let cursor_color =
-                cursor_colors_for_cell(Some(frame.cursor_color), foreground, background).0;
-            if has_cursor && effective == EffectiveCursorShape::Block {
-                paint_effective_cursor(
-                    canvas,
-                    width,
-                    height,
-                    frame,
-                    x,
-                    y,
-                    span,
-                    frame.cell_metrics[index],
-                    [cursor_color[0], cursor_color[1], cursor_color[2], 0xff],
-                    effective,
-                );
+        }
+    }
+    paint_snapshot_images(
+        canvas, width, height, frame, geometry, region, dirty_rows, 1,
+    );
+
+    let effective = effective_cursor_shape(cursor_style, cursor_visible, presentation);
+    for row in 0..frame.rows {
+        if !row_is_dirty(row) {
+            continue;
+        }
+        for column in (0..frame.columns).rev() {
+            let has_block_cursor =
+                frame.cursor == Some((column, row)) && effective == EffectiveCursorShape::Block;
+            if has_block_cursor {
                 continue;
             }
             for placed in frame
@@ -3905,20 +4211,33 @@ fn compose_snapshot_rows(
             {
                 paint_decoration_span(canvas, width, height, frame, geometry, decoration, None);
             }
-            if has_cursor && effective != EffectiveCursorShape::Block {
-                paint_effective_cursor(
-                    canvas,
-                    width,
-                    height,
-                    frame,
-                    x,
-                    y,
-                    span,
-                    frame.cell_metrics[index],
-                    [cursor_color[0], cursor_color[1], cursor_color[2], 0xff],
-                    effective,
-                );
-            }
+        }
+    }
+    paint_snapshot_images(
+        canvas, width, height, frame, geometry, region, dirty_rows, 2,
+    );
+
+    if let Some((column, row)) = frame.cursor.filter(|(_, row)| row_is_dirty(*row)) {
+        let index = usize::try_from(row * frame.columns + column).expect("cursor cell index");
+        if let Some((x, y, _, _)) = frame.cell_rect(geometry, column, row) {
+            let cursor_color = cursor_colors_for_cell(
+                Some(frame.cursor_color),
+                frame.foregrounds[index],
+                frame.backgrounds[index],
+            )
+            .0;
+            paint_effective_cursor(
+                canvas,
+                width,
+                height,
+                frame,
+                x,
+                y,
+                cursor_span(frame, column, row),
+                frame.cell_metrics[index],
+                [cursor_color[0], cursor_color[1], cursor_color[2], 0xff],
+                effective,
+            );
         }
     }
 }
@@ -3986,6 +4305,7 @@ pub(crate) fn paint_snapshot_region_presented(
         height,
         frame,
         geometry,
+        region,
         None,
         cursor_visible,
         cursor_style,
@@ -4035,6 +4355,12 @@ pub(crate) fn paint_snapshot_rows_presented(
         height,
         frame,
         geometry,
+        Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
         Some(dirty_rows),
         cursor_visible,
         cursor_style,
@@ -6178,6 +6504,7 @@ mod tests {
             cursor: None,
             canvas_background: [14, 18, 22],
             cursor_color: [0xeb, 0xeb, 0xeb],
+            images: Vec::new(),
             scale_120: 120,
         };
         let geometry = frame.tight_geometry().unwrap();
@@ -6231,13 +6558,285 @@ mod tests {
             cursor: None,
             canvas_background: [0, 0, 0],
             cursor_color: [255, 255, 255],
+            images: Vec::new(),
             scale_120: 120,
         }
     }
 
+    fn test_snapshot_image(
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        row: u32,
+        source: splinterm_protocol::ImagePixelRect,
+        x_offset: i32,
+        z_index: i32,
+        creation_order: u64,
+    ) -> SnapshotImage {
+        SnapshotImage {
+            metadata: ImageContentMetadata {
+                content_id: creation_order,
+                generation: 1,
+                width,
+                height,
+                source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+                alpha_mode: splinterm_protocol::ImageAlphaMode::Premultiplied,
+                digest: [u8::try_from(creation_order).unwrap_or(1); 32],
+                byte_length: pixels.len(),
+                retention: splinterm_protocol::ImageRetention::WhilePlaced,
+            },
+            placement: ImagePlacement {
+                placement_id: creation_order,
+                content_id: creation_order,
+                row_id: u64::from(row) + 1,
+                column: 0,
+                source,
+                destination_columns: 1,
+                destination_rows: 1,
+                source_cell_size: Some(splinterm_protocol::ImagePixelSize {
+                    width: 2,
+                    height: 2,
+                }),
+                x_offset,
+                y_offset: 0,
+                z_index,
+                application_image_id: None,
+                application_placement_id: None,
+                creation_order,
+                erase_policy: splinterm_protocol::ImageErasePolicy::TextOverwrite,
+            },
+            row,
+            source: ImageContentSource::Buffered(Arc::from(pixels)),
+        }
+    }
+
+    #[test]
+    fn image_compositor_honors_alpha_crop_offset_clip_and_z_tiers() {
+        let mut frame = damage_test_frame();
+        frame.backgrounds[0] = [1, 0, 0];
+        let crop = splinterm_protocol::ImagePixelRect {
+            x: 1,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        frame.images = vec![test_snapshot_image(
+            &[255, 0, 0, 255, 0, 0, 128, 128],
+            2,
+            1,
+            0,
+            crop,
+            1,
+            -1,
+            1,
+        )];
+        let geometry = frame.tight_geometry().unwrap();
+        let mut canvas = vec![0; 2 * 6 * 4];
+        paint_snapshot(
+            &mut canvas,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(&canvas[0..4], &[0, 0, 1, 0xff]);
+        assert_eq!(&canvas[4..8], &[0, 0, 128, 0xff]);
+
+        frame.images[0].placement.x_offset = 0;
+        frame.images[0].placement.z_index = KITTY_BACKGROUND_Z_THRESHOLD - 1;
+        let mut below_background = vec![0; 2 * 6 * 4];
+        paint_snapshot(
+            &mut below_background,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(&below_background[0..4], &[0, 0, 1, 0xff]);
+    }
+
+    #[test]
+    fn image_creation_order_and_row_damage_match_full_composition() {
+        let mut frame = damage_test_frame();
+        frame.backgrounds[0] = [0, 0, 0];
+        let source = splinterm_protocol::ImagePixelRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        frame.images = vec![
+            test_snapshot_image(&[255, 0, 0, 255], 1, 1, 0, source, 0, -1, 1),
+            test_snapshot_image(&[0, 0, 255, 255], 1, 1, 0, source, 0, -1, 2),
+        ];
+        let geometry = frame.tight_geometry().unwrap();
+        let mut full = vec![0; 2 * 6 * 4];
+        paint_snapshot(
+            &mut full,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(&full[0..4], &[0, 0, 255, 0xff]);
+        let mut incremental = vec![77; full.len()];
+        paint_snapshot_rows(
+            &mut incremental,
+            2,
+            6,
+            &frame,
+            &geometry,
+            &[true, true, true],
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(incremental, full);
+    }
+
+    #[test]
+    fn image_order_uses_strict_adr_tier_boundary_and_kitty_application_ids() {
+        assert_eq!(image_tier(KITTY_BACKGROUND_Z_THRESHOLD - 1), 0);
+        assert_eq!(image_tier(KITTY_BACKGROUND_Z_THRESHOLD), 1);
+        assert_eq!(image_tier(-1), 1);
+        assert_eq!(image_tier(0), 2);
+        let source = splinterm_protocol::ImagePixelRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        let mut higher_application = test_snapshot_image(&[1, 0, 0, 255], 1, 1, 0, source, 0, 0, 1);
+        higher_application.placement.application_image_id = Some(20);
+        let mut lower_application = test_snapshot_image(&[2, 0, 0, 255], 1, 1, 0, source, 0, 0, 2);
+        lower_application.placement.application_image_id = Some(10);
+        let mut images = vec![higher_application, lower_application];
+        images.sort_by(compare_snapshot_images);
+        assert_eq!(images[0].placement.application_image_id, Some(10));
+        assert_eq!(images[1].placement.application_image_id, Some(20));
+    }
+
+    #[test]
+    fn prepared_image_sources_survive_cache_eviction_and_follow_row_ids() {
+        use sha2::{Digest as _, Sha256};
+
+        let pixels = vec![3_u8, 2, 1, 255];
+        let metadata = ImageContentMetadata {
+            content_id: 1,
+            generation: 1,
+            width: 1,
+            height: 1,
+            source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+            alpha_mode: splinterm_protocol::ImageAlphaMode::Opaque,
+            digest: Sha256::digest(&pixels).into(),
+            byte_length: pixels.len(),
+            retention: splinterm_protocol::ImageRetention::WhilePlaced,
+        };
+        let placement = ImagePlacement {
+            placement_id: 1,
+            content_id: 1,
+            row_id: 2,
+            column: 0,
+            source: splinterm_protocol::ImagePixelRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            destination_columns: 1,
+            destination_rows: 1,
+            source_cell_size: None,
+            x_offset: 0,
+            y_offset: 0,
+            z_index: -1,
+            application_image_id: None,
+            application_placement_id: None,
+            creation_order: 1,
+            erase_policy: splinterm_protocol::ImageErasePolicy::TextOverwrite,
+        };
+        let mut snapshot = incremental_snapshot();
+        snapshot.input_modes.cursor_visible = false;
+        for row in &mut snapshot.visible_rows {
+            for cell in &mut row.cells {
+                cell.content.clear();
+            }
+        }
+        snapshot.images = Some(Box::new(splinterm_protocol::TerminalImagePlane {
+            screen: ActiveScreen::Normal,
+            contents: vec![metadata.clone()],
+            placements: vec![placement],
+        }));
+        let sources =
+            splinterm_automation_client::SharedImageContentCache::with_maximum_bytes(4).unwrap();
+        sources
+            .insert_source(
+                &metadata,
+                ImageContentSource::Buffered(Arc::from(pixels.clone())),
+            )
+            .unwrap();
+        let leases = sources.lease(std::slice::from_ref(&metadata)).unwrap();
+        let frame = SnapshotFrame::load_scaled_with_sources(&snapshot, 120, Some(&leases)).unwrap();
+        assert_eq!(frame.images.len(), 1);
+        assert_eq!(frame.images[0].row, 1);
+        let capture =
+            capture_final_buffer_with_sources(&snapshot, &leases, 120, false, CursorStyle::Block)
+                .unwrap();
+        let x = usize::try_from(capture.grid_rect.x).unwrap();
+        let y = usize::try_from(capture.grid_rect.y + capture.cell_height).unwrap();
+        let stride = usize::try_from(capture.stride).unwrap();
+        assert_eq!(
+            &capture.pixels[y * stride + x * 4..y * stride + x * 4 + 4],
+            &pixels
+        );
+
+        let replacement_pixels = vec![7_u8, 6, 5, 255];
+        let mut replacement = metadata.clone();
+        replacement.content_id = 2;
+        replacement.digest = Sha256::digest(&replacement_pixels).into();
+        assert!(
+            sources
+                .insert_source(
+                    &replacement,
+                    ImageContentSource::Buffered(Arc::from(replacement_pixels.clone())),
+                )
+                .is_err()
+        );
+        assert!(sources.contains(&metadata).unwrap());
+        assert_eq!(frame.images[0].source.as_bytes(), pixels);
+        drop(frame);
+        drop(leases);
+        sources
+            .insert_source(
+                &replacement,
+                ImageContentSource::Buffered(Arc::from(replacement_pixels)),
+            )
+            .unwrap();
+        assert!(!sources.contains(&metadata).unwrap());
+    }
+
     #[test]
     fn pane_region_paint_preserves_neighbor_pixels() {
-        let frame = damage_test_frame();
+        let mut frame = damage_test_frame();
+        frame.images = vec![test_snapshot_image(
+            &[0, 0, 255, 255],
+            1,
+            1,
+            0,
+            splinterm_protocol::ImagePixelRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            -1,
+            -1,
+            1,
+        )];
         let geometry = frame.tight_geometry().unwrap().translated(2, 0).unwrap();
         let mut canvas = vec![9; 6 * 6 * 4];
         paint_snapshot_region_presented(
@@ -6258,7 +6857,7 @@ mod tests {
         );
         let pixel = |x: usize, y: usize| &canvas[(y * 6 + x) * 4..(y * 6 + x + 1) * 4];
         assert_eq!(pixel(0, 0), [9, 9, 9, 9]);
-        assert_eq!(pixel(2, 0), [0, 0, 1, 0xff]);
+        assert_eq!(pixel(2, 0), [0, 0, 255, 0xff]);
         assert_eq!(pixel(4, 0), [9, 9, 9, 9]);
     }
 
@@ -6362,6 +6961,7 @@ mod tests {
             cursor: None,
             canvas_background: [14, 18, 22],
             cursor_color: [0xeb, 0xeb, 0xeb],
+            images: Vec::new(),
             scale_120: 120,
         };
         assert_eq!(

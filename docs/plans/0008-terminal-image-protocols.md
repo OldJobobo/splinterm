@@ -1,6 +1,6 @@
 # Plan 0008: bounded terminal image protocols
 
-- **Status:** In progress — Slices 0–1 and 3 accepted; Slice 2 graphical closure deferred
+- **Status:** In progress — Slices 0–1 and 3 accepted; Slice 2 graphical closure deferred; Slice 4 in progress
 - **Roadmap:** Phase 5 — bounded terminal image protocols
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md),
   [Plan 0001](0001-terminal-kernel.md),
@@ -83,6 +83,21 @@ cache validation, cancellation-safe active-cap cleanup, and transfer-once cache
 reuse. The serialized 16-case daemon suite covers detach/reattach, subscriber
 overflow/resync, exit, relaunch/stale incarnation, and socket cleanup. No
 graphical command ran for Slice 3.
+
+Slice 4 is in progress. The trusted client now shares one 64 MiB renderer-wide
+exact-identity resident-source registry across panes. Each ordered snapshot or
+update carries an atomic exact lease set; leased mapped/buffered entries cannot
+be evicted or disappear from byte/high-water accounting. `SnapshotFrame` resolves placements by stable displayed row
+ID and retains immutable source handles across cache eviction. The CPU painter
+implements crop-before-scale nearest sampling, source-cell-scaled offsets,
+fractional-scale destination geometry, pane/grid clipping, premultiplied BGRA
+alpha, deterministic application/creation ordering, and the ADR's below-cell,
+below-text, and above-text z tiers with cursor and trusted overlays remaining
+above image content. Image-bearing semantic changes and scrolls conservatively
+force full pane reconstruction; dirty-row painting clears and recomposes all
+layers, and image-free scroll-copy remains unchanged. Placement opacity is not a
+wire property; Slice 4's accepted opacity behavior is canonical source alpha plus
+the existing terminal background opacity.
 
 ## Feasibility and current baseline
 

@@ -73,6 +73,7 @@ use wayland_client::{
     },
 };
 
+use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{
     ActiveScreen, CellAttributes, ColorSource, ControlTransferDecision, ControlTransferOutcome,
@@ -316,8 +317,14 @@ impl Drop for ClipboardWorkerPermit<'_> {
 )]
 #[derive(Debug)]
 pub enum WindowUpdate {
-    Snapshot(TerminalSnapshot),
-    Update(TerminalUpdate),
+    Snapshot {
+        snapshot: TerminalSnapshot,
+        image_sources: ImageContentLeaseSet,
+    },
+    Update {
+        update: TerminalUpdate,
+        image_sources: Option<ImageContentLeaseSet>,
+    },
     ScrollbackPages(Vec<splinterm_protocol::ScrollbackPage>),
     ScrollbackResyncRequired,
     Authority(AuthorityStatus),
@@ -411,12 +418,15 @@ pub struct WindowPaneOptions {
     pub commands: Sender<WindowCommand>,
     pub authority: AuthorityStatus,
     pub controlled: bool,
+    pub image_sources: ImageContentLeaseSet,
 }
 
 pub struct WindowOptions {
     pub capture: Option<PathBuf>,
     /// Initial owned daemon snapshot. `None` retains the deterministic evidence row.
     pub snapshot: Option<TerminalSnapshot>,
+    /// Exact renderer leases paired with the legacy initial snapshot.
+    pub image_sources: ImageContentLeaseSet,
     /// Bounded live-update receiver owned by the Wayland thread.
     pub updates: Option<Receiver<WindowUpdate>>,
     /// Bounded command sender from the Wayland thread to the async protocol owner.
@@ -507,6 +517,7 @@ impl Default for WindowOptions {
         Self {
             capture: None,
             snapshot: None,
+            image_sources: ImageContentLeaseSet::default(),
             updates: None,
             commands: None,
             evidence_close_shortcuts: false,
@@ -559,7 +570,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let snapshot_frame = options
         .snapshot
         .as_ref()
-        .map(|snapshot| SnapshotFrame::load(snapshot, 1))
+        .map(|snapshot| {
+            SnapshotFrame::load_scaled_with_sources(snapshot, 120, Some(&options.image_sources))
+        })
         .transpose()?;
     let (initial_width, initial_height) = snapshot_frame
         .as_ref()
@@ -663,6 +676,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         pane: PaneView {
             snapshot: options.snapshot,
             snapshot_frame,
+            image_sources: options.image_sources,
             scrollback_viewport: ScrollbackViewport::default(),
             painted_history_status: None,
             history_page_pending: false,
@@ -1279,6 +1293,7 @@ struct SearchUiState {
 struct PaneView {
     snapshot: Option<TerminalSnapshot>,
     snapshot_frame: Option<SnapshotFrame>,
+    image_sources: ImageContentLeaseSet,
     scrollback_viewport: ScrollbackViewport,
     painted_history_status: Option<HistoryOverlayStatus>,
     history_page_pending: bool,
@@ -1304,12 +1319,31 @@ struct PaneView {
     hovered_url: Option<(CellPosition, CellPosition, String)>,
 }
 
+fn rebuild_pane_scaled_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool> {
+    let Some(display) = pane.display_snapshot() else {
+        return Ok(false);
+    };
+    pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+        &display,
+        scale_120,
+        Some(&pane.image_sources),
+    )?);
+    pane.rendered_viewport_offset = pane.scrollback_viewport.offset_from_bottom();
+    pane.viewport_dirty = false;
+    Ok(true)
+}
+
 impl PaneView {
     fn from_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
-        let snapshot_frame = Some(SnapshotFrame::load_scaled(&options.snapshot, scale_120)?);
+        let snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+            &options.snapshot,
+            scale_120,
+            Some(&options.image_sources),
+        )?);
         Ok(Self {
             snapshot: Some(options.snapshot),
             snapshot_frame,
+            image_sources: options.image_sources,
             scrollback_viewport: ScrollbackViewport::default(),
             painted_history_status: None,
             history_page_pending: false,
@@ -1449,7 +1483,10 @@ impl PaneView {
         scale_120: u32,
     ) -> Result<bool> {
         match update {
-            WindowUpdate::Snapshot(mut snapshot) => {
+            WindowUpdate::Snapshot {
+                mut snapshot,
+                image_sources,
+            } => {
                 snapshot
                     .validate()
                     .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -1476,13 +1513,21 @@ impl PaneView {
                 );
                 self.clear_local_content_state();
                 self.snapshot = Some(snapshot);
+                self.image_sources = image_sources;
                 let display = self
                     .display_snapshot()
                     .context("background display snapshot")?;
-                self.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, scale_120)?);
+                self.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+                    &display,
+                    scale_120,
+                    Some(&self.image_sources),
+                )?);
                 Ok(true)
             }
-            WindowUpdate::Update(update) => {
+            WindowUpdate::Update {
+                update,
+                image_sources,
+            } => {
                 let changed = terminal_update_changes_visible_content(&update);
                 let previous_generation = self
                     .snapshot
@@ -1505,10 +1550,17 @@ impl PaneView {
                         snapshot,
                     );
                 }
+                if let Some(image_sources) = image_sources {
+                    self.image_sources = image_sources;
+                }
                 let display = self
                     .display_snapshot()
                     .context("background display snapshot")?;
-                let frame = SnapshotFrame::load_scaled(&display, scale_120)?;
+                let frame = SnapshotFrame::load_scaled_with_sources(
+                    &display,
+                    scale_120,
+                    Some(&self.image_sources),
+                )?;
                 if changed {
                     self.clear_local_content_state();
                 }
@@ -3877,6 +3929,14 @@ impl App {
         )
     }
 
+    fn rebuild_scaled_pane_frames(&mut self, scale_120: u32) -> Result<bool> {
+        let mut rebuilt = rebuild_pane_scaled_frame(&mut self.pane, scale_120)?;
+        for pane in &mut self.inactive_panes {
+            rebuilt |= rebuild_pane_scaled_frame(pane, scale_120)?;
+        }
+        Ok(rebuilt)
+    }
+
     fn apply_font_zoom(
         &mut self,
         action: FontZoomAction,
@@ -3897,11 +3957,7 @@ impl App {
         if !raster_changed {
             return Ok(true);
         }
-        if let Some(display) = self.display_snapshot() {
-            self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
-            self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
-            self.pane.viewport_dirty = false;
-        }
+        self.rebuild_scaled_pane_frames(self.scale_120)?;
         self.buffer = None;
         self.backing.clear();
         self.pane.pending_scrolls.clear();
@@ -4358,14 +4414,20 @@ impl App {
             self.theme = theme;
             if let Some(snapshot) = self.pane.snapshot.as_mut() {
                 apply_theme(snapshot, theme);
-                self.pane.snapshot_frame =
-                    Some(SnapshotFrame::load_scaled(snapshot, self.scale_120)?);
+                self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+                    snapshot,
+                    self.scale_120,
+                    Some(&self.pane.image_sources),
+                )?);
             }
             for pane in &mut self.inactive_panes {
                 if let Some(snapshot) = pane.snapshot.as_mut() {
                     apply_theme(snapshot, theme);
-                    pane.snapshot_frame =
-                        Some(SnapshotFrame::load_scaled(snapshot, self.scale_120)?);
+                    pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+                        snapshot,
+                        self.scale_120,
+                        Some(&pane.image_sources),
+                    )?);
                 }
             }
             changed = true;
@@ -4408,7 +4470,10 @@ impl App {
         let mut full_frame_reload = false;
         for update in pending {
             match update {
-                WindowUpdate::Snapshot(mut snapshot) => {
+                WindowUpdate::Snapshot {
+                    mut snapshot,
+                    image_sources,
+                } => {
                     self.pane.history_page_pending = false;
                     snapshot
                         .validate()
@@ -4438,13 +4503,17 @@ impl App {
                         );
                         self.invalidate_local_content_state();
                         self.pane.snapshot = Some(snapshot);
+                        self.pane.image_sources = image_sources;
                         self.full_redraw = true;
                         full_frame_reload = true;
                         visual_changed = true;
                         title_changed = true;
                     }
                 }
-                WindowUpdate::Update(update) => {
+                WindowUpdate::Update {
+                    update,
+                    image_sources,
+                } => {
                     let old_cursor_row = self.pane.snapshot.as_ref().and_then(|snapshot| {
                         usize::try_from(snapshot.cursor_row)
                             .ok()
@@ -4454,11 +4523,13 @@ impl App {
                         update.rows.iter().map(|patch| patch.index).collect();
                     let scrolls = update.scrolls.clone();
                     let history_changed = update.scrollback.is_some();
+                    let image_changed = update.images.is_some();
                     let mut full = update.columns.is_some()
                         || update.row_count.is_some()
                         || update.palette.is_some()
                         || update.default_colors.is_some()
-                        || update.active_screen.is_some();
+                        || update.active_screen.is_some()
+                        || image_changed;
                     let content_changed = terminal_update_changes_visible_content(&update);
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
@@ -4487,6 +4558,9 @@ impl App {
                     if history_changed && !self.pane.scrollback_viewport.is_live() {
                         full = true;
                     }
+                    if !scrolls.is_empty() && snapshot.images.is_some() {
+                        full = true;
+                    }
                     if content_changed {
                         self.reconcile_selection_after_content_change();
                     }
@@ -4496,6 +4570,9 @@ impl App {
                         .as_ref()
                         .context("updated terminal snapshot exists")?;
                     let rows = snapshot.rows;
+                    if let Some(image_sources) = image_sources {
+                        self.pane.image_sources = image_sources;
+                    }
                     self.pane.prepare_dirty_rows.resize(rows, false);
                     self.pane.raster_dirty_rows.resize(rows, false);
                     self.pane.surface_dirty_rows.resize(rows, false);
@@ -4697,8 +4774,11 @@ impl App {
                 || self.pane.snapshot_frame.is_none()
                 || !self.pane.scrollback_viewport.is_live()
             {
-                self.pane.snapshot_frame =
-                    Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+                self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+                    &display,
+                    self.scale_120,
+                    Some(&self.pane.image_sources),
+                )?);
             } else if let Some(frame) = &mut self.pane.snapshot_frame {
                 let snapshot = self
                     .pane
@@ -4706,6 +4786,7 @@ impl App {
                     .as_ref()
                     .context("updated snapshot exists")?;
                 frame.refresh_rows(snapshot, &self.pane.prepare_dirty_rows)?;
+                frame.refresh_images(snapshot, &self.pane.image_sources)?;
                 frame.refresh_cursor(snapshot);
             }
             self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
@@ -4761,11 +4842,7 @@ impl App {
         if !update_output_dpi(observation, self.scale_120)? {
             return Ok(());
         }
-        if let Some(display) = self.display_snapshot() {
-            self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
-            self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
-            self.pane.viewport_dirty = false;
-        }
+        self.rebuild_scaled_pane_frames(self.scale_120)?;
         self.buffer = None;
         self.backing.clear();
         self.full_redraw = true;
@@ -4802,11 +4879,7 @@ impl App {
                 .set_buffer_scale(1)
                 .map_err(|_| anyhow::anyhow!("compositor rejected unit buffer scale"))?;
         }
-        if let Some(display) = self.display_snapshot() {
-            self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled(&display, scale_120)?);
-            self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
-            self.pane.viewport_dirty = false;
-        } else {
+        if !self.rebuild_scaled_pane_frames(scale_120)? {
             self.text_row = Some(TextRow::load(scale_120.div_ceil(SCALE_DENOMINATOR))?);
         }
         self.scale_120 = scale_120;
@@ -4897,14 +4970,17 @@ impl App {
             self.pane.raster_dirty_rows.fill(false);
             self.pane.surface_dirty_rows.fill(false);
             self.pane.pending_scrolls.clear();
-            let incremental =
+            let incremental = if display.images.is_none() {
                 if let (Some(frame), Some(delta)) = (&mut self.pane.snapshot_frame, delta) {
                     let scroll = frame.scroll_viewport_rows(&display, delta)?;
                     frame.refresh_cursor(&display);
                     scroll
                 } else {
                     None
-                };
+                }
+            } else {
+                None
+            };
             if let Some(scroll) = incremental {
                 let count = scroll.rows.min(display.rows);
                 let exposed = match scroll.direction {
@@ -4921,8 +4997,11 @@ impl App {
                 self.pane.surface_dirty_rows.fill(true);
                 self.pane.pending_scrolls.push(scroll);
             } else {
-                self.pane.snapshot_frame =
-                    Some(SnapshotFrame::load_scaled(&display, self.scale_120)?);
+                self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+                    &display,
+                    self.scale_120,
+                    Some(&self.pane.image_sources),
+                )?);
                 self.full_redraw = true;
             }
             self.pane.rendered_viewport_offset = current_offset;
@@ -6322,6 +6401,7 @@ mod tests {
             commands,
             authority: AuthorityStatus::default(),
             controlled: false,
+            image_sources: ImageContentLeaseSet::default(),
         }
     }
 
@@ -6554,7 +6634,10 @@ mod tests {
         update.title = Some("background pane".into());
         assert!(
             pane.apply_background_update(
-                WindowUpdate::Update(update),
+                WindowUpdate::Update {
+                    update,
+                    image_sources: None,
+                },
                 ResolvedTheme::default(),
                 SCALE_DENOMINATOR,
             )
@@ -6568,7 +6651,10 @@ mod tests {
         stale.revision = 3;
         assert!(
             pane.apply_background_update(
-                WindowUpdate::Update(stale),
+                WindowUpdate::Update {
+                    update: stale,
+                    image_sources: None,
+                },
                 ResolvedTheme::default(),
                 SCALE_DENOMINATOR,
             )
@@ -6595,6 +6681,7 @@ mod tests {
                 commands,
                 authority: AuthorityStatus::default(),
                 controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
             },
             SCALE_DENOMINATOR,
         )
@@ -6610,7 +6697,10 @@ mod tests {
         next.visible_rows[0].row_id = Some(4);
         next.visible_rows[0].cells[0].content = "live-four".into();
         pane.apply_background_update(
-            WindowUpdate::Snapshot(next),
+            WindowUpdate::Snapshot {
+                snapshot: next,
+                image_sources: ImageContentLeaseSet::default(),
+            },
             ResolvedTheme::default(),
             SCALE_DENOMINATOR,
         )
@@ -6620,6 +6710,16 @@ mod tests {
         let display = pane.display_snapshot().unwrap();
         assert_eq!(display.visible_rows[0].row_id, Some(2));
         assert_ne!(display.visible_rows[0].cells[0].content, "live-four");
+    }
+
+    #[test]
+    fn active_and_inactive_pane_frames_rebuild_at_fractional_scale() {
+        let mut active = PaneView::from_options(pane_options(SplintId::new()), 120).unwrap();
+        let mut inactive = PaneView::from_options(pane_options(SplintId::new()), 120).unwrap();
+        assert!(rebuild_pane_scaled_frame(&mut active, 150).unwrap());
+        assert!(rebuild_pane_scaled_frame(&mut inactive, 150).unwrap());
+        assert_eq!(active.snapshot_frame.as_ref().unwrap().scale_120(), 150);
+        assert_eq!(inactive.snapshot_frame.as_ref().unwrap().scale_120(), 150);
     }
 
     #[test]
@@ -6634,6 +6734,7 @@ mod tests {
                 commands,
                 authority: AuthorityStatus::default(),
                 controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
             },
             SCALE_DENOMINATOR,
         )

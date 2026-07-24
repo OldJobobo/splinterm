@@ -15,7 +15,7 @@ use std::{
     io::{self, ErrorKind, IoSliceMut, Write as _},
     os::fd::{AsFd, OwnedFd},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -2704,6 +2704,7 @@ async fn receive_image_memfd(
 }
 
 pub const MAX_IMAGE_SOURCE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_RENDERER_IMAGE_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ImageCacheKey {
@@ -2754,6 +2755,13 @@ impl ImageContentSource {
     pub fn is_empty(&self) -> bool {
         self.as_bytes().is_empty()
     }
+
+    fn is_externally_leased(&self) -> bool {
+        match self {
+            Self::Buffered(bytes) => Arc::strong_count(bytes) > 1,
+            Self::Mapped(mapping) => Arc::strong_count(mapping) > 1,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2777,7 +2785,7 @@ impl Default for ImageContentCache {
 
 impl ImageContentCache {
     pub fn with_maximum_bytes(maximum_bytes: usize) -> Result<Self> {
-        if maximum_bytes == 0 || maximum_bytes > MAX_IMAGE_SOURCE_CACHE_BYTES {
+        if maximum_bytes == 0 || maximum_bytes > MAX_RENDERER_IMAGE_RESIDENT_BYTES {
             bail!("image source cache byte limit is invalid");
         }
         Ok(Self {
@@ -2820,10 +2828,19 @@ impl ImageContentCache {
             .checked_add(source.len())
             .is_none_or(|bytes| bytes > self.maximum_bytes)
         {
+            let position = self
+                .order
+                .iter()
+                .position(|key| {
+                    self.entries
+                        .get(key)
+                        .is_some_and(|source| !source.is_externally_leased())
+                })
+                .context("image source cache is full of renderer-leased entries")?;
             let oldest = self
                 .order
-                .pop_front()
-                .context("image cache accounting has no evictable entry")?;
+                .remove(position)
+                .context("image cache eviction position disappeared")?;
             let removed = self
                 .entries
                 .remove(&oldest)
@@ -2847,6 +2864,95 @@ impl ImageContentCache {
     #[must_use]
     pub const fn metrics(&self) -> ImageContentCacheMetrics {
         self.metrics
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ImageContentLeaseSet {
+    entries: HashMap<ImageCacheKey, ImageContentSource>,
+    bytes: usize,
+}
+
+impl ImageContentLeaseSet {
+    #[must_use]
+    pub fn get(&self, metadata: &ImageContentMetadata) -> Option<ImageContentSource> {
+        self.entries.get(&ImageCacheKey::from(metadata)).cloned()
+    }
+
+    #[must_use]
+    pub const fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SharedImageContentCache(Arc<Mutex<ImageContentCache>>);
+
+impl SharedImageContentCache {
+    pub fn with_maximum_bytes(maximum_bytes: usize) -> Result<Self> {
+        Ok(Self(Arc::new(Mutex::new(
+            ImageContentCache::with_maximum_bytes(maximum_bytes)?,
+        ))))
+    }
+
+    pub fn contains(&self, metadata: &ImageContentMetadata) -> Result<bool> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("image source cache lock is poisoned"))?
+            .contains(metadata))
+    }
+
+    pub fn insert_source(
+        &self,
+        metadata: &ImageContentMetadata,
+        source: ImageContentSource,
+    ) -> Result<ImageContentSource> {
+        self.0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("image source cache lock is poisoned"))?
+            .insert_source(metadata, source)
+    }
+
+    pub fn get(&self, metadata: &ImageContentMetadata) -> Result<Option<ImageContentSource>> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("image source cache lock is poisoned"))?
+            .get(metadata))
+    }
+
+    pub fn lease(&self, contents: &[ImageContentMetadata]) -> Result<ImageContentLeaseSet> {
+        let cache = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("image source cache lock is poisoned"))?;
+        let mut entries = HashMap::with_capacity(contents.len());
+        let mut bytes = 0_usize;
+        for metadata in contents {
+            let source = cache
+                .get(metadata)
+                .context("snapshot references an unresolved image source")?;
+            bytes = bytes
+                .checked_add(source.len())
+                .filter(|bytes| *bytes <= cache.maximum_bytes)
+                .context("leased image sources exceed the renderer byte limit")?;
+            entries.insert(ImageCacheKey::from(metadata), source);
+        }
+        Ok(ImageContentLeaseSet { entries, bytes })
+    }
+
+    pub fn metrics(&self) -> Result<ImageContentCacheMetrics> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("image source cache lock is poisoned"))?
+            .metrics())
     }
 }
 
@@ -3476,6 +3582,51 @@ mod tests {
                 high_water_entries: 2,
             }
         );
+    }
+
+    #[test]
+    fn renderer_leases_are_atomic_pinned_and_remain_in_resident_metrics() {
+        let pixels = vec![1_u8, 2, 3, 255];
+        let metadata = ImageContentMetadata {
+            content_id: 1,
+            generation: 1,
+            width: 1,
+            height: 1,
+            source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+            alpha_mode: splinterm_protocol::ImageAlphaMode::Opaque,
+            digest: Sha256::digest(&pixels).into(),
+            byte_length: pixels.len(),
+            retention: splinterm_protocol::ImageRetention::WhilePlaced,
+        };
+        let cache = SharedImageContentCache::with_maximum_bytes(4).unwrap();
+        cache
+            .insert_source(&metadata, ImageContentSource::Buffered(Arc::from(pixels)))
+            .unwrap();
+        let leases = cache.lease(std::slice::from_ref(&metadata)).unwrap();
+        assert_eq!(leases.bytes(), 4);
+        let replacement_pixels = vec![4_u8, 5, 6, 255];
+        let mut replacement = metadata.clone();
+        replacement.content_id = 2;
+        replacement.digest = Sha256::digest(&replacement_pixels).into();
+        assert!(
+            cache
+                .insert_source(
+                    &replacement,
+                    ImageContentSource::Buffered(Arc::from(replacement_pixels.clone())),
+                )
+                .is_err()
+        );
+        assert_eq!(cache.metrics().unwrap().bytes, 4);
+        assert!(cache.contains(&metadata).unwrap());
+        drop(leases);
+        cache
+            .insert_source(
+                &replacement,
+                ImageContentSource::Buffered(Arc::from(replacement_pixels)),
+            )
+            .unwrap();
+        assert!(!cache.contains(&metadata).unwrap());
+        assert!(cache.contains(&replacement).unwrap());
     }
 
     #[tokio::test]

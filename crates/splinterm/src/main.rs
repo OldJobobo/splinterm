@@ -14,15 +14,15 @@ use splinterm::{
     AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowPaneOptions,
     WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
     automation::{
-        CliEnvelopeV1, CliErrorCodeV1, CliEventV1, Connection, ImageContentCache,
-        MutationIdentityV1, PingEnvelopeV1, ReadResyncReasonV1, ResyncReasonV1,
-        TerminalContinuationV1, TerminalReadProvenanceV1, audit_page_envelope,
-        authorization_status_envelope, committed_mutation_envelope, created_mutation_envelope,
-        decode_terminal_cursor, inspect_splint_envelope, inspect_topology_envelope, kill_envelope,
-        list_dojos_envelope, process_started_envelope, protocol_error, public_error_code,
-        read_resync_envelope, response_protocol_error, restore_many_envelope, revoke_envelope,
-        scrollback_page_envelope, search_page_envelope, terminal_action_envelope,
-        terminal_snapshot_envelope, write_json_document,
+        CliEnvelopeV1, CliErrorCodeV1, CliEventV1, Connection, ImageContentLeaseSet,
+        MAX_RENDERER_IMAGE_RESIDENT_BYTES, MutationIdentityV1, PingEnvelopeV1, ReadResyncReasonV1,
+        ResyncReasonV1, SharedImageContentCache, TerminalContinuationV1, TerminalReadProvenanceV1,
+        audit_page_envelope, authorization_status_envelope, committed_mutation_envelope,
+        created_mutation_envelope, decode_terminal_cursor, inspect_splint_envelope,
+        inspect_topology_envelope, kill_envelope, list_dojos_envelope, process_started_envelope,
+        protocol_error, public_error_code, read_resync_envelope, response_protocol_error,
+        restore_many_envelope, revoke_envelope, scrollback_page_envelope, search_page_envelope,
+        terminal_action_envelope, terminal_snapshot_envelope, write_json_document,
     },
     config::{AppConfig, ConfigLoad, ResolvedTheme, load_default, load_theme},
     renderer::{self, RendererOptions},
@@ -4259,7 +4259,11 @@ fn layout_splint_ids(root: &LayoutNode, ids: &mut Vec<SplintId>) {
     }
 }
 
-async fn prepare_live_pane(config: &AppConfig, splint_id: SplintId) -> Result<PreparedPane> {
+async fn prepare_live_pane(
+    config: &AppConfig,
+    splint_id: SplintId,
+    image_cache: SharedImageContentCache,
+) -> Result<PreparedPane> {
     let mut connection = Connection::connect().await?;
     let incarnation = connection.live_incarnation(splint_id).await?;
     let scopes = vec![
@@ -4283,8 +4287,8 @@ async fn prepare_live_pane(config: &AppConfig, splint_id: SplintId) -> Result<Pr
     let authority = load_authority_status(&mut connection, splint_id, incarnation).await?;
     let attachment = attach(&mut connection, splint_id, incarnation).await?;
     let snapshot = attachment.snapshot.clone();
-    let mut image_cache = ImageContentCache::default();
-    resolve_image_contents(&mut connection, &snapshot, &mut image_cache).await?;
+    resolve_image_contents(&mut connection, &snapshot, &image_cache).await?;
+    let image_sources = lease_snapshot_images(&image_cache, &snapshot)?;
     let mut control = Connection::connect().await?;
     if control.live_incarnation(splint_id).await? != incarnation {
         bail!("control connection observed a different process incarnation");
@@ -4315,7 +4319,7 @@ async fn prepare_live_pane(config: &AppConfig, splint_id: SplintId) -> Result<Pr
         task_updates,
         splint_id,
         incarnation,
-        image_cache,
+        image_cache.clone(),
     ));
     Ok(PreparedPane {
         options: WindowPaneOptions {
@@ -4324,23 +4328,45 @@ async fn prepare_live_pane(config: &AppConfig, splint_id: SplintId) -> Result<Pr
             commands: command_sender,
             authority,
             controlled: false,
+            image_sources,
         },
         updates,
         task,
     })
 }
 
+fn lease_snapshot_images(
+    cache: &SharedImageContentCache,
+    snapshot: &TerminalSnapshot,
+) -> Result<ImageContentLeaseSet> {
+    snapshot.images.as_ref().map_or_else(
+        || Ok(ImageContentLeaseSet::default()),
+        |images| cache.lease(&images.contents),
+    )
+}
+
+fn lease_update_images(
+    cache: &SharedImageContentCache,
+    update: &TerminalUpdate,
+) -> Result<Option<ImageContentLeaseSet>> {
+    update
+        .images
+        .as_ref()
+        .map(|images| cache.lease(&images.contents))
+        .transpose()
+}
+
 async fn resolve_image_contents(
     connection: &mut Connection,
     snapshot: &TerminalSnapshot,
-    cache: &mut ImageContentCache,
+    cache: &SharedImageContentCache,
 ) -> Result<()> {
     let Some(images) = &snapshot.images else {
         return Ok(());
     };
     let cancellation = tokio_util::sync::CancellationToken::new();
     for metadata in &images.contents {
-        if !cache.contains(metadata) {
+        if !cache.contains(metadata)? {
             let source = connection
                 .image_content_source(
                     snapshot.splint_id,
@@ -4360,14 +4386,14 @@ async fn resolve_update_images(
     update: &TerminalUpdate,
     splint_id: SplintId,
     incarnation: u64,
-    cache: &mut ImageContentCache,
+    cache: &SharedImageContentCache,
 ) -> Result<()> {
     let Some(images) = &update.images else {
         return Ok(());
     };
     let cancellation = tokio_util::sync::CancellationToken::new();
     for metadata in &images.contents {
-        if !cache.contains(metadata) {
+        if !cache.contains(metadata)? {
             let source = connection
                 .image_content_source(splint_id, incarnation, metadata, &cancellation)
                 .await?;
@@ -4389,7 +4415,7 @@ async fn run_pane_subscription(
     updates: mpsc::Sender<WindowUpdate>,
     splint_id: SplintId,
     incarnation: u64,
-    mut image_cache: ImageContentCache,
+    image_cache: SharedImageContentCache,
 ) -> Result<()> {
     let mut last_revision = attachment.snapshot.revision;
     let mut last_sequence = 0_u64;
@@ -4402,8 +4428,12 @@ async fn run_pane_subscription(
                 ).await?;
                 last_revision = attachment.snapshot.revision;
                 last_sequence = 0;
-                resolve_image_contents(&mut connection, &attachment.snapshot, &mut image_cache).await?;
-                if updates.send(WindowUpdate::Snapshot(attachment.snapshot.clone())).await.is_err() {
+                resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
+                if updates.send(WindowUpdate::Snapshot {
+                    snapshot: attachment.snapshot.clone(),
+                    image_sources,
+                }).await.is_err() {
                     return controller.await.context("pane controller task failed")?;
                 }
             }
@@ -4418,8 +4448,9 @@ async fn run_pane_subscription(
                     EventAction::Snapshot { sequence, snapshot } => {
                         validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
                         last_revision = snapshot.revision;
-                        resolve_image_contents(&mut connection, &snapshot, &mut image_cache).await?;
-                        if updates.send(WindowUpdate::Snapshot(snapshot)).await.is_err() {
+                        resolve_image_contents(&mut connection, &snapshot, &image_cache).await?;
+                        let image_sources = lease_snapshot_images(&image_cache, &snapshot)?;
+                        if updates.send(WindowUpdate::Snapshot { snapshot, image_sources }).await.is_err() {
                             return controller.await.context("pane controller task failed")?;
                         }
                         last_sequence = sequence;
@@ -4432,9 +4463,10 @@ async fn run_pane_subscription(
                             &update,
                             splint_id,
                             incarnation,
-                            &mut image_cache,
+                            &image_cache,
                         ).await?;
-                        if updates.send(WindowUpdate::Update(update)).await.is_err() {
+                        let image_sources = lease_update_images(&image_cache, &update)?;
+                        if updates.send(WindowUpdate::Update { update, image_sources }).await.is_err() {
                             return controller.await.context("pane controller task failed")?;
                         }
                         last_sequence = sequence;
@@ -4445,8 +4477,12 @@ async fn run_pane_subscription(
                         ).await?;
                         last_revision = attachment.snapshot.revision;
                         last_sequence = 0;
-                        resolve_image_contents(&mut connection, &attachment.snapshot, &mut image_cache).await?;
-                        if updates.send(WindowUpdate::Snapshot(attachment.snapshot.clone())).await.is_err() {
+                        resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                        let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
+                        if updates.send(WindowUpdate::Snapshot {
+                            snapshot: attachment.snapshot.clone(),
+                            image_sources,
+                        }).await.is_err() {
                             return controller.await.context("pane controller task failed")?;
                         }
                     }
@@ -4679,6 +4715,7 @@ fn topology_identity_diff(
 
 async fn reconcile_window_topology(
     config: &AppConfig,
+    image_cache: &SharedImageContentCache,
     root: &mut LayoutNode,
     next: LayoutNode,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
@@ -4690,7 +4727,7 @@ async fn reconcile_window_topology(
     let (added_ids, removed) = topology_identity_diff(root, &next);
     let mut added = Vec::new();
     for splint_id in added_ids {
-        let pane = prepare_live_pane(config, splint_id).await?;
+        let pane = prepare_live_pane(config, splint_id, image_cache.clone()).await?;
         pane_tasks.push(pane.task);
         added.push(pane.options);
     }
@@ -4711,6 +4748,7 @@ async fn reconcile_window_topology(
 
 async fn run_topology_manager(
     config: AppConfig,
+    image_cache: SharedImageContentCache,
     window_id: WindowId,
     mut root: LayoutNode,
     mut commands: mpsc::Receiver<WindowTopologyCommand>,
@@ -4737,6 +4775,7 @@ async fn run_topology_manager(
         };
         let reconciled = match reconcile_window_topology(
             &config,
+            &image_cache,
             &mut root,
             authoritative,
             &updates,
@@ -4839,9 +4878,11 @@ async fn run_live_multipane_window(
     let theme = load_theme(&config.theme_path).unwrap_or_default();
     let mut ids = Vec::new();
     layout_splint_ids(&window_model.root, &mut ids);
+    let image_cache =
+        SharedImageContentCache::with_maximum_bytes(MAX_RENDERER_IMAGE_RESIDENT_BYTES)?;
     let mut prepared = Vec::with_capacity(ids.len());
     for splint_id in ids {
-        prepared.push(prepare_live_pane(&config, splint_id).await?);
+        prepared.push(prepare_live_pane(&config, splint_id, image_cache.clone()).await?);
     }
     let theme_senders = prepared
         .iter()
@@ -4880,6 +4921,7 @@ async fn run_live_multipane_window(
     let window_id = window_model.id;
     let topology_manager = tokio::spawn(run_topology_manager(
         config,
+        image_cache,
         window_id,
         manager_root,
         topology_command_receiver,
@@ -4956,6 +4998,10 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     }
     let authority = load_authority_status(&mut connection, splint_id, incarnation).await?;
     let mut attachment = attach(&mut connection, splint_id, incarnation).await?;
+    let image_cache =
+        SharedImageContentCache::with_maximum_bytes(MAX_RENDERER_IMAGE_RESIDENT_BYTES)?;
+    resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+    let initial_image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
     let mut control = Connection::connect().await?;
     let control_incarnation = control.live_incarnation(splint_id).await?;
     if control_incarnation != incarnation {
@@ -4995,6 +5041,7 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     let mut window = tokio::task::spawn_blocking(move || {
         run_window(WindowOptions {
             snapshot: Some(initial_snapshot),
+            image_sources: initial_image_sources,
             updates: Some(receiver),
             commands: Some(command_sender),
             authority,
@@ -5040,8 +5087,13 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
                     splint_id,
                     incarnation,
                 ).await?;
+                resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
                 if updates
-                    .send(WindowUpdate::Snapshot(attachment.snapshot.clone()))
+                    .send(WindowUpdate::Snapshot {
+                        snapshot: attachment.snapshot.clone(),
+                        image_sources,
+                    })
                     .await
                     .is_err()
                 {
@@ -5069,7 +5121,9 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
                         EventAction::Snapshot { sequence, snapshot } => {
                             validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
                             last_revision = snapshot.revision;
-                            if updates.send(WindowUpdate::Snapshot(snapshot)).await.is_err() {
+                            resolve_image_contents(&mut connection, &snapshot, &image_cache).await?;
+                            let image_sources = lease_snapshot_images(&image_cache, &snapshot)?;
+                            if updates.send(WindowUpdate::Snapshot { snapshot, image_sources }).await.is_err() {
                                 let window_result = window.await.context("Wayland window task failed")?;
                                 controller.await.context("window controller task failed")??;
                                 return window_result;
@@ -5079,7 +5133,15 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
                         EventAction::Update { sequence, update }
                             if update_advances_from(&update, last_revision) => {
                             last_revision = update.revision;
-                            if updates.send(WindowUpdate::Update(update)).await.is_err() {
+                            resolve_update_images(
+                                &mut connection,
+                                &update,
+                                splint_id,
+                                incarnation,
+                                &image_cache,
+                            ).await?;
+                            let image_sources = lease_update_images(&image_cache, &update)?;
+                            if updates.send(WindowUpdate::Update { update, image_sources }).await.is_err() {
                                 let window_result = window.await.context("Wayland window task failed")?;
                                 controller.await.context("window controller task failed")??;
                                 return window_result;
@@ -5099,8 +5161,13 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
                                 splint_id,
                                 incarnation,
                             ).await?;
+                            resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                            let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
                             if updates
-                                .send(WindowUpdate::Snapshot(attachment.snapshot.clone()))
+                                .send(WindowUpdate::Snapshot {
+                                    snapshot: attachment.snapshot.clone(),
+                                    image_sources,
+                                })
                                 .await
                                 .is_err()
                             {
@@ -5123,8 +5190,13 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
                                 splint_id,
                                 incarnation,
                             ).await?;
+                            resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                            let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
                             if updates
-                                .send(WindowUpdate::Snapshot(attachment.snapshot.clone()))
+                                .send(WindowUpdate::Snapshot {
+                                    snapshot: attachment.snapshot.clone(),
+                                    image_sources,
+                                })
                                 .await
                                 .is_err()
                             {
