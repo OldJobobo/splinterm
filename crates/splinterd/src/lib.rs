@@ -6,6 +6,7 @@ use anyhow::Result;
 
 pub mod authorization;
 pub mod executable_identity;
+pub mod image_transport;
 mod live;
 pub mod policy;
 

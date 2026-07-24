@@ -62,8 +62,11 @@ to a trusted UI whose executable identity matches Splinterm; automation remains
 image-free by default. The daemon actor resolves immutable pixel backing only
 for the exact active-screen content ID, generation, and digest within the
 already-bound Splint incarnation; stale and unknown content fail distinctly.
-Both content delivery modes remain honestly disabled until the dedicated
-bounded transport lands.
+The transfer admission state machine now issues CSPRNG single-use five-second
+tokens, consumes them before validation, and enforces pending-token and active
+transfer caps with high-water metrics. Both delivery modes remain honestly
+disabled until that admission layer is connected to the dedicated bounded
+content channel.
 
 ## Feasibility and current baseline
 
