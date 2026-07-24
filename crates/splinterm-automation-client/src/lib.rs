@@ -3513,6 +3513,32 @@ mod tests {
         TerminalRow, UnderlineStyle,
     };
 
+    #[tokio::test]
+    async fn untrusted_role_rejects_image_content_source_before_request() {
+        let pixels = [1_u8, 2, 3, 255];
+        let metadata = ImageContentMetadata {
+            content_id: 1,
+            generation: 2,
+            width: 1,
+            height: 1,
+            source_format: splinterm_protocol::ImageSourceFormat::Iterm2,
+            alpha_mode: splinterm_protocol::ImageAlphaMode::Opaque,
+            digest: Sha256::digest(pixels).into(),
+            byte_length: pixels.len(),
+            retention: splinterm_protocol::ImageRetention::WhilePlaced,
+        };
+        let (_server, stream) = UnixStream::pair().unwrap();
+        let mut connection = established(stream);
+        let error = connection
+            .image_content_source(SplintId::new(), 1, &metadata, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "image content transport was not negotiated"
+        );
+    }
+
     #[test]
     fn image_source_cache_deduplicates_exact_identity_and_tracks_bounds() {
         let pixels = vec![1_u8, 2, 3, 255];

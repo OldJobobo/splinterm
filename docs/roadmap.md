@@ -115,8 +115,12 @@ as the bounded practical Kitty static-image subset: selective streaming APC,
 direct/chunked RGB/RGBA/PNG with zlib, transmit/display/query/visible-delete,
 IDs and placements, crop/aspect/offset/cursor/z semantics, process-wide inbound
 admission, exact fixture execution, and pinned `kitten icat`/Chafa trace replay.
-External transports, placeholders, relative placement, and animation remain
-explicitly deferred.
+Slice 6 is accepted with streaming inline-only iTerm2 OSC 1337 PNG support and
+pinned self-contained fixtures. Its external Kitty input security spike rejects
+ambient file, temporary-file, and POSIX-SHM names; those media remain bounded
+`ENOTSUP` unless a future authenticated capability design is approved.
+Placeholders, relative placement, multipart iTerm2 transfers, additional image
+formats, and animation remain explicitly deferred.
 
 - Generic sparse image-content and placement plane without enlarging every cell
 - Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers

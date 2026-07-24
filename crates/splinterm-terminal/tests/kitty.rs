@@ -1,4 +1,4 @@
-use std::io::Write as _;
+use std::{fs, io::Write as _};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flate2::{Compression, write::ZlibEncoder};
@@ -721,6 +721,48 @@ fn resize_scrollback_screen_switch_and_revision_replay_preserve_kitty_identity()
             .image_placements()
             .any(|placement| placement.application_placement_id == Some(10))
     );
+}
+
+#[test]
+fn external_media_never_open_unlink_or_consume_application_named_objects() {
+    let root =
+        std::env::temp_dir().join(format!("splinterm-kitty-external-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).unwrap();
+    let target = root.join("sentinel.png");
+    let link = root.join("replacement.png");
+    fs::write(&target, b"must remain unread and unchanged").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    for (index, medium, named_object) in [
+        (81, 'f', target.as_os_str().as_encoded_bytes()),
+        (82, 't', link.as_os_str().as_encoded_bytes()),
+        (83, 's', b"/splinterm-missing-shm".as_slice()),
+    ] {
+        let mut terminal = terminal();
+        terminal.advance(
+            format!(
+                "\x1b_Ga=T,t={medium},f=100,i={index};{}\x1b\\",
+                STANDARD.encode(named_object)
+            )
+            .as_bytes(),
+        );
+        let reply = writes(&mut terminal).remove(0);
+        assert!(reply.starts_with(format!("\x1b_Gi={index};ENOTSUP:").as_bytes()));
+        assert_eq!(
+            terminal
+                .snapshot(SnapshotRequest::default())
+                .image_contents()
+                .count(),
+            0
+        );
+    }
+    assert_eq!(
+        fs::read(&target).unwrap(),
+        b"must remain unread and unchanged"
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), target);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

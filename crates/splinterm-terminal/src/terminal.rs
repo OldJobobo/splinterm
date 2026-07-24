@@ -21,7 +21,7 @@ use crate::{
     SharedKittyUploadBudget, SnapshotRequest, TerminalConfig, TerminalDamage, TerminalEvent,
     TerminalModes, TerminalRevision, TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
     image::{
-        KittyUploadReservation, MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage,
+        KittyUploadReservation, MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage, iterm,
         kitty::{self, Command as KittyCommand, Error as KittyError},
     },
     vt::{Action, Param, Params, Parser, StringTerminator},
@@ -45,6 +45,7 @@ pub struct Terminal {
     sixel_decoder: Option<Box<SixelDecoder>>,
     kitty_chunk: Option<KittyChunk>,
     kitty_upload: Option<KittyUpload>,
+    iterm_transfer: Option<ItermTransfer>,
     kitty_upload_budget: SharedKittyUploadBudget,
     kitty_image_ids: KittyImageIds,
     cell_pixels: Option<(u32, u32)>,
@@ -65,6 +66,16 @@ pub struct Terminal {
     revision: TerminalRevision,
     update_history: VecDeque<TerminalUpdate>,
     current_change: Option<ChangeSet>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ItermTransfer {
+    metadata: Vec<u8>,
+    metadata_truncated: bool,
+    encoded: Vec<u8>,
+    payload_too_big: bool,
+    payload_no_space: bool,
+    reservation: Option<KittyUploadReservation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -200,6 +211,10 @@ impl ActionHint {
             | Action::KittyData(..)
             | Action::KittyEnd
             | Action::KittyAbort
+            | Action::ItermBegin(..)
+            | Action::ItermData(..)
+            | Action::ItermEnd
+            | Action::ItermAbort
             | Action::SixelBegin(..)
             | Action::SixelData(..)
             | Action::SixelEnd
@@ -264,6 +279,7 @@ impl Terminal {
             sixel_decoder: None,
             kitty_chunk: None,
             kitty_upload: None,
+            iterm_transfer: None,
             kitty_upload_budget: config
                 .shared_kitty_upload_budget
                 .clone()
@@ -322,6 +338,12 @@ impl Terminal {
                         Action::KittyData(byte) => self.put_kitty(byte),
                         Action::KittyEnd => self.end_kitty(),
                         Action::KittyAbort => self.abort_kitty(),
+                        Action::ItermBegin(metadata, truncated) => {
+                            self.begin_iterm(metadata, truncated);
+                        }
+                        Action::ItermData(byte) => self.put_iterm(byte),
+                        Action::ItermEnd => self.end_iterm(),
+                        Action::ItermAbort => self.abort_iterm(),
                         action => self.dispatch(action),
                     }
                 }
@@ -858,6 +880,141 @@ impl Terminal {
                     });
             }
         }
+    }
+
+    fn begin_iterm(&mut self, metadata: Vec<u8>, metadata_truncated: bool) {
+        if let Some(upload) = self.kitty_upload.take() {
+            self.reply_kitty(
+                &upload.command,
+                Err(KittyError::Invalid("interleaved image upload")),
+            );
+        }
+        self.kitty_chunk = None;
+        self.iterm_transfer = Some(ItermTransfer {
+            metadata,
+            metadata_truncated,
+            encoded: Vec::new(),
+            payload_too_big: false,
+            payload_no_space: false,
+            reservation: None,
+        });
+    }
+
+    fn put_iterm(&mut self, byte: u8) {
+        let Some(transfer) = &mut self.iterm_transfer else {
+            return;
+        };
+        if transfer.reservation.is_none() && !transfer.payload_no_space {
+            match self.kitty_upload_budget.reserve(iterm::MAX_ENCODED_BYTES) {
+                Ok(reservation) => transfer.reservation = Some(reservation),
+                Err(_) => transfer.payload_no_space = true,
+            }
+        }
+        if transfer.payload_no_space {
+            return;
+        }
+        if transfer.encoded.len() < iterm::MAX_ENCODED_BYTES {
+            transfer.encoded.push(byte);
+        } else {
+            transfer.payload_too_big = true;
+        }
+    }
+
+    fn abort_iterm(&mut self) {
+        self.iterm_transfer = None;
+    }
+
+    fn end_iterm(&mut self) {
+        let Some(transfer) = self.iterm_transfer.take() else {
+            return;
+        };
+        let baseline = self.action_baseline(ActionHint::Osc);
+        let images_before = self.images.clone();
+        self.current_change = Some(ChangeSet::default());
+        let result = self.process_iterm(&transfer);
+        if result.is_err() {
+            self.images = images_before;
+            self.push_event(TerminalEvent::ImageRejected("iTerm2 inline image"));
+        }
+        self.prune_active_image_anchors();
+        self.record_action_changes(&baseline, ActionHint::Osc);
+        self.commit_change();
+    }
+
+    fn process_iterm(&mut self, transfer: &ItermTransfer) -> Result<(), KittyError> {
+        if transfer.payload_no_space {
+            return Err(KittyError::NoSpace("encoded upload budget exhausted"));
+        }
+        if transfer.payload_too_big {
+            return Err(KittyError::TooBig("encoded iTerm2 payload exceeds limit"));
+        }
+        let command = iterm::parse_metadata(&transfer.metadata, transfer.metadata_truncated)?;
+        let image = iterm::decode_png_payload(&transfer.encoded, command.declared_size)?;
+        self.validate_kitty_dimensions(image.width, image.height)?;
+        let (cell_width, cell_height) = self
+            .cell_pixels
+            .ok_or(KittyError::Invalid("iTerm2 cell geometry is unavailable"))?;
+        let (columns, rows) = iterm_destination_extent(
+            command,
+            image.width,
+            image.height,
+            cell_width,
+            cell_height,
+            self.grid().columns(),
+            self.grid().screen_rows(),
+        )?;
+        let cursor = self.grid().cursor().position();
+        let row = usize::try_from(cursor.row)
+            .map_err(|_| KittyError::Invalid("iTerm2 cursor row is invalid"))?;
+        let column = usize::try_from(cursor.column)
+            .map_err(|_| KittyError::Invalid("iTerm2 cursor column is invalid"))?;
+        let row_id = self
+            .grid()
+            .screen_row_ids()
+            .get(row)
+            .copied()
+            .ok_or(KittyError::Invalid("iTerm2 cursor anchor is unavailable"))?;
+        self.images
+            .insert_content_and_placement(
+                self.active,
+                NewImageContent {
+                    width: image.width,
+                    height: image.height,
+                    source_format: image.format,
+                    alpha_mode: image.alpha_mode,
+                    pixels: &image.pixels,
+                    retention: ImageRetention::WhilePlaced,
+                },
+                row_id,
+                NewImagePlacementOptions {
+                    column,
+                    source: PixelRect {
+                        x: 0,
+                        y: 0,
+                        width: image.width,
+                        height: image.height,
+                    },
+                    destination: crate::CellExtent { columns, rows },
+                    source_cell_size: Some(PixelSize {
+                        width: cell_width,
+                        height: cell_height,
+                    }),
+                    x_offset: 0,
+                    y_offset: 0,
+                    z_index: 0,
+                    application_image_id: None,
+                    application_placement_id: None,
+                    erase_policy: ImageErasePolicy::TextOverwrite,
+                },
+            )
+            .map_err(map_image_error)?;
+        if !command.do_not_move_cursor {
+            self.move_cursor(
+                -i32::try_from(column).unwrap_or(i32::MAX),
+                i32::try_from(rows).unwrap_or(i32::MAX),
+            );
+        }
+        Ok(())
     }
 
     fn begin_kitty(&mut self, control: Vec<u8>, control_truncated: bool) {
@@ -1683,7 +1840,11 @@ impl Terminal {
             | Action::KittyCommand(..)
             | Action::KittyData(..)
             | Action::KittyEnd
-            | Action::KittyAbort => {
+            | Action::KittyAbort
+            | Action::ItermBegin(..)
+            | Action::ItermData(..)
+            | Action::ItermEnd
+            | Action::ItermAbort => {
                 unreachable!("streaming image actions bypass ordinary transactions")
             }
             Action::StringTruncated(kind) => {
@@ -3039,6 +3200,107 @@ fn sixel_palette(initial: &[u32]) -> Box<[u32; MAX_SIXEL_COLORS]> {
     let count = initial.len().min(MAX_SIXEL_COLORS);
     palette[..count].copy_from_slice(&initial[..count]);
     palette
+}
+
+fn iterm_destination_extent(
+    command: iterm::Command,
+    source_width: u32,
+    source_height: u32,
+    cell_width: u32,
+    cell_height: u32,
+    screen_columns: usize,
+    screen_rows: usize,
+) -> Result<(usize, usize), KittyError> {
+    let requested = |extent: iterm::Extent,
+                     source: u32,
+                     cell: u32,
+                     screen_cells: usize|
+     -> Result<u128, KittyError> {
+        match extent {
+            iterm::Extent::Auto => Ok(u128::from(source)),
+            iterm::Extent::Cells(cells) => u128::try_from(cells)
+                .unwrap_or(u128::MAX)
+                .checked_mul(u128::from(cell))
+                .ok_or(KittyError::TooBig("iTerm2 destination extent overflow")),
+            iterm::Extent::Pixels(pixels) => Ok(u128::from(pixels)),
+            iterm::Extent::Percent(percent) => u128::try_from(screen_cells)
+                .unwrap_or(u128::MAX)
+                .checked_mul(u128::from(cell))
+                .and_then(|value| value.checked_mul(u128::from(percent)))
+                .and_then(|value| value.checked_add(99))
+                .map(|value| value / 100)
+                .ok_or(KittyError::TooBig("iTerm2 destination extent overflow")),
+        }
+    };
+    let mut width = requested(command.width, source_width, cell_width, screen_columns)?;
+    let mut height = requested(command.height, source_height, cell_height, screen_rows)?;
+    if command.preserve_aspect_ratio {
+        match (command.width, command.height) {
+            (iterm::Extent::Auto, iterm::Extent::Auto) => {}
+            (iterm::Extent::Auto, _) => {
+                width = height
+                    .checked_mul(u128::from(source_width))
+                    .and_then(|value| {
+                        value
+                            .checked_add(u128::from(source_height) - 1)
+                            .map(|value| value / u128::from(source_height))
+                    })
+                    .ok_or(KittyError::TooBig("iTerm2 destination extent overflow"))?;
+            }
+            (_, iterm::Extent::Auto) => {
+                height = width
+                    .checked_mul(u128::from(source_height))
+                    .and_then(|value| {
+                        value
+                            .checked_add(u128::from(source_width) - 1)
+                            .map(|value| value / u128::from(source_width))
+                    })
+                    .ok_or(KittyError::TooBig("iTerm2 destination extent overflow"))?;
+            }
+            (_, _) => {
+                if width
+                    .checked_mul(u128::from(source_height))
+                    .ok_or(KittyError::TooBig("iTerm2 destination extent overflow"))?
+                    <= height
+                        .checked_mul(u128::from(source_width))
+                        .ok_or(KittyError::TooBig("iTerm2 destination extent overflow"))?
+                {
+                    height = width
+                        .checked_mul(u128::from(source_height))
+                        .and_then(|value| {
+                            value
+                                .checked_add(u128::from(source_width) - 1)
+                                .map(|value| value / u128::from(source_width))
+                        })
+                        .ok_or(KittyError::TooBig("iTerm2 destination extent overflow"))?;
+                } else {
+                    width = height
+                        .checked_mul(u128::from(source_width))
+                        .and_then(|value| {
+                            value
+                                .checked_add(u128::from(source_height) - 1)
+                                .map(|value| value / u128::from(source_height))
+                        })
+                        .ok_or(KittyError::TooBig("iTerm2 destination extent overflow"))?;
+                }
+            }
+        }
+    }
+    let cell_width = u128::from(cell_width);
+    let cell_height = u128::from(cell_height);
+    let columns = width
+        .checked_add(cell_width - 1)
+        .map(|value| value / cell_width)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or(KittyError::TooBig("iTerm2 destination extent overflow"))?;
+    let rows = height
+        .checked_add(cell_height - 1)
+        .map(|value| value / cell_height)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or(KittyError::TooBig("iTerm2 destination extent overflow"))?;
+    Ok((columns, rows))
 }
 
 fn kitty_aspect_extent(

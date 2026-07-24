@@ -101,6 +101,10 @@ pub(crate) enum Action {
     KittyData(u8),
     KittyEnd,
     KittyAbort,
+    ItermBegin(Vec<u8>, bool),
+    ItermData(u8),
+    ItermEnd,
+    ItermAbort,
     StringTruncated(&'static str),
 }
 
@@ -115,6 +119,11 @@ enum State {
     CsiIntermediate,
     CsiIgnore,
     OscString,
+    OscEscape,
+    ItermControl,
+    ItermControlEscape,
+    ItermPayload,
+    ItermPayloadEscape,
     DcsEntry,
     DcsParam,
     DcsIntermediate,
@@ -184,6 +193,14 @@ impl Parser {
         if matches!(byte, 0x18 | 0x1a) {
             let action = if self.sixel_streaming {
                 Action::SixelAbort
+            } else if matches!(
+                self.state,
+                State::ItermControl
+                    | State::ItermControlEscape
+                    | State::ItermPayload
+                    | State::ItermPayloadEscape
+            ) {
+                Action::ItermAbort
             } else {
                 Action::KittyAbort
             };
@@ -197,6 +214,11 @@ impl Parser {
             && !matches!(
                 self.state,
                 State::OscString
+                    | State::OscEscape
+                    | State::ItermControl
+                    | State::ItermControlEscape
+                    | State::ItermPayload
+                    | State::ItermPayloadEscape
                     | State::DcsPassthrough
                     | State::DcsEscape
                     | State::SosPmApcString
@@ -219,7 +241,12 @@ impl Parser {
             State::CsiEntry | State::CsiParam | State::CsiIntermediate | State::CsiIgnore => {
                 self.feed_csi(byte)
             }
-            State::OscString => self.feed_osc(byte),
+            State::OscString
+            | State::OscEscape
+            | State::ItermControl
+            | State::ItermControlEscape
+            | State::ItermPayload
+            | State::ItermPayloadEscape => self.feed_osc(byte),
             State::DcsEntry
             | State::DcsParam
             | State::DcsIntermediate
@@ -250,6 +277,10 @@ impl Parser {
             }
             0xf0..=0xf4 => {
                 self.start_utf8(u32::from(byte & 0x07), 3, 0x1_0000);
+                (None, false)
+            }
+            0x9d => {
+                self.start_string(State::OscString, self.osc_limit);
                 (None, false)
             }
             0x9f => {
@@ -375,19 +406,89 @@ impl Parser {
     }
 
     fn feed_osc(&mut self, byte: u8) -> (Option<Action>, bool) {
-        match byte {
-            0x07 => self.finish_string(true, StringTerminator::Bell),
-            0x1b => {
+        match self.state {
+            State::OscString => match byte {
+                0x07 => self.finish_string(true, StringTerminator::Bell),
+                0x1b => {
+                    self.state = State::OscEscape;
+                    (None, false)
+                }
+                0x9c => self.finish_string(true, StringTerminator::StringTerminator),
+                0x00..=0x1f | 0x7f => (None, false),
+                _ => {
+                    self.push_string(byte);
+                    if self.string == b"1337;File=" {
+                        self.start_string(State::ItermControl, 1024);
+                    }
+                    (None, false)
+                }
+            },
+            State::OscEscape => {
                 let result = self.finish_string(true, StringTerminator::StringTerminator);
-                self.clear_sequence();
-                self.state = State::Escape;
-                result
+                if byte == b'\\' {
+                    result
+                } else {
+                    self.state = State::Escape;
+                    (result.0, true)
+                }
             }
-            0x00..=0x1f | 0x7f => (None, false),
-            _ => {
-                self.push_string(byte);
-                (None, false)
+            State::ItermControl => match byte {
+                b':' => {
+                    let control = std::mem::take(&mut self.string);
+                    let truncated = std::mem::take(&mut self.string_truncated);
+                    self.state = State::ItermPayload;
+                    (Some(Action::ItermBegin(control, truncated)), false)
+                }
+                0x07 | 0x9c => {
+                    self.state = State::Ground;
+                    self.string.clear();
+                    (Some(Action::ItermAbort), false)
+                }
+                0x1b => {
+                    self.state = State::ItermControlEscape;
+                    (None, false)
+                }
+                _ => {
+                    self.push_string(byte);
+                    (None, false)
+                }
+            },
+            State::ItermPayload => match byte {
+                0x07 | 0x9c => {
+                    self.state = State::Ground;
+                    (Some(Action::ItermEnd), false)
+                }
+                0x1b => {
+                    self.state = State::ItermPayloadEscape;
+                    (None, false)
+                }
+                _ => (Some(Action::ItermData(byte)), false),
+            },
+            State::ItermControlEscape => {
+                self.state = if byte == b'\\' {
+                    State::Ground
+                } else {
+                    State::Escape
+                };
+                self.string.clear();
+                (Some(Action::ItermAbort), byte != b'\\')
             }
+            State::ItermPayloadEscape => {
+                self.state = if byte == b'\\' {
+                    State::Ground
+                } else {
+                    State::Escape
+                };
+                (
+                    Some(if byte == b'\\' {
+                        Action::ItermEnd
+                    } else {
+                        Action::ItermAbort
+                    }),
+                    byte != b'\\',
+                )
+            }
+            _ => unreachable!(),
         }
     }
 

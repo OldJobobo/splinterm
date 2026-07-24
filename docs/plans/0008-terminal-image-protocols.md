@@ -1,6 +1,6 @@
 # Plan 0008: bounded terminal image protocols
 
-- **Status:** In progress — Slices 0–1, 3–5 accepted; Slice 2 graphical closure deferred
+- **Status:** In progress — Slices 0–1, 3–6 accepted; Slice 2 graphical closure deferred
 - **Roadmap:** Phase 5 — bounded terminal image protocols
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md),
   [Plan 0001](0001-terminal-kernel.md),
@@ -135,6 +135,31 @@ Slice 5. After explicit approval to retry the two invocation errors, a corrected
 nightly ASan/libFuzzer `terminal-advance` run completed 88,832 executions in 31
 seconds with no crash, timeout, or sanitizer finding; final coverage was 2,401
 edges and 11,804 features.
+
+Slice 6 is implemented and accepted with a deliberately split result. Bounded
+OSC 1337 `File=` inline PNGs stream through selective parser actions into the
+generic image plane; ordinary OSC remains collected under its existing small
+limit. The accepted subset covers inline-only PNG, exact optional `size`,
+discarded validated base64 `name`, cell/pixel/percentage/auto extents, aspect
+preservation, default next-line/column-zero cursor movement, the bounded
+`doNotMoveCursor` extension, BEL, ESC-ST, and C1-ST. Anonymous content uses
+text-overwrite reclamation and the same process-wide encoded and authoritative
+budgets as Kitty. Twelve self-contained official-spec-derived fixtures pin the
+source document hash, PNG bytes/hash, terminal geometry, terminators, cursor,
+and placement results.
+
+The external Kitty input security spike is complete but not accepted for
+production. Ambient file, temporary-file, and POSIX-SHM names would turn
+attacker-controlled PTY output into daemon filesystem authority without a safe
+cross-local/remote/detached namespace or replacement-proof temporary unlink.
+`t=f`, `t=t`, and `t=s` therefore remain disabled, unadvertised, and bounded by
+`ENOTSUP`; adversarial tests prove they commit no image state and leave named
+regular files and symlinks unchanged. A future implementation requires an
+authenticated incarnation-bound capability and private cleanup namespace rather
+than ambient names. A nightly ASan/libFuzzer `terminal-advance` run completed
+39,143 executions in 31 seconds with no crash, timeout, or sanitizer finding;
+final coverage was 2,474 edges and 12,224 features. No graphical command ran for
+Slice 6.
 
 ## Feasibility and current baseline
 

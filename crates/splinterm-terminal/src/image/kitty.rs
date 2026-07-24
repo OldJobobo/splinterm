@@ -323,7 +323,7 @@ fn decode_raw(
     })
 }
 
-fn decode_png(bytes: &[u8]) -> Result<DecodedImage, Error> {
+pub(crate) fn decode_png(bytes: &[u8]) -> Result<DecodedImage, Error> {
     let mut decoder = png::Decoder::new_with_limits(
         Cursor::new(bytes),
         png::Limits {

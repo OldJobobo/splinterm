@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import pathlib
@@ -15,6 +16,7 @@ ARTIFACT = ROOT / "docs/spikes/artifacts/0025-terminal-images"
 CONTRACTS = ARTIFACT / "contracts.json"
 SIXEL = ARTIFACT / "fixtures/sixel-v1.json"
 KITTY = ARTIFACT / "fixtures/kitty-static-v1.json"
+ITERM2 = ARTIFACT / "fixtures/iterm2-inline-v1.json"
 BUDGET = ARTIFACT / "budget-probe.json"
 CLIENTS = ARTIFACT / "representative-clients.json"
 CAPTURES = ARTIFACT / "foot-sixel-captures"
@@ -343,11 +345,59 @@ def validate_kitty(value: dict[str, Any]) -> None:
             require(expected.startswith("\x1b_G") and expected.endswith("\x1b\\"), f"{case_id}: reply")
 
 
+def validate_iterm2(value: dict[str, Any], contracts: dict[str, Any]) -> None:
+    source = value["source"]
+    recorded = contracts["iterm2"]
+    require(source["url"] == recorded["upstream_url"], "iTerm2 source URL")
+    require(
+        source["retrieved_sha256"] == recorded["retrieved_document_sha256"],
+        "iTerm2 document hash drift",
+    )
+    require(source["retrieved_bytes"] == recorded["retrieved_bytes"], "iTerm2 document size")
+    context = value["wire_context"]
+    png = base64.b64decode(context["png_base64"], validate=True)
+    require(hashlib.sha256(png).hexdigest() == context["png_sha256"], "iTerm2 PNG identity")
+    require(
+        context["screen_columns"] == 8
+        and context["screen_rows"] == 4
+        and context["cell_width_pixels"] == 2
+        and context["cell_height_pixels"] == 2,
+        "iTerm2 fixture geometry",
+    )
+    require(
+        context["png_width"] == 2
+        and context["png_height"] == 1
+        and len(bytes.fromhex(context["canonical_bgra_hex"])) == 8,
+        "iTerm2 fixture pixels",
+    )
+    subset = value["advertised_subset"]
+    require(subset["formats"] == ["png"] and subset["inline_only"], "iTerm2 format policy")
+    require(not subset["multipart"] and subset["failure_reply"] is None, "iTerm2 deferred policy")
+    seen: set[str] = set()
+    for case in value["cases"]:
+        case_id = case["id"]
+        require(case_id not in seen, f"duplicate iTerm2 case: {case_id}")
+        seen.add(case_id)
+        metadata = case["metadata"]
+        require(isinstance(metadata, str) and len(metadata.encode()) <= 1024, f"{case_id}: metadata")
+        require(case["terminator_hex"] in {"07", "1b5c", "9c"}, f"{case_id}: terminator")
+        require(isinstance(case["accepted"], bool), f"{case_id}: disposition")
+        if "prelude" in case:
+            require(isinstance(case["prelude"], str), f"{case_id}: prelude")
+        if case["accepted"]:
+            require(case["columns"] > 0 and case["rows"] > 0, f"{case_id}: extent")
+            require(
+                case["cursor_row"] >= 0 and case["cursor_column"] >= 0,
+                f"{case_id}: cursor",
+            )
+
+
 def main() -> int:
     try:
         contracts = load(CONTRACTS, "splinterm.phase5.image-contracts.v1")
         sixel = load(SIXEL, "splinterm.phase5.sixel-fixtures.v1")
         kitty = load(KITTY, "splinterm.phase5.kitty-static-fixtures.v1")
+        iterm2 = load(ITERM2, "splinterm.phase5.iterm2-inline-fixtures.v1")
         budget = load(BUDGET, "splinterm.phase5.image-budget-probe.v1")
         clients = load(CLIENTS, "splinterm.phase5.representative-image-clients.v1")
         validate_provenance(contracts)
@@ -355,6 +405,7 @@ def main() -> int:
         validate_sixel(sixel)
         validate_foot_captures(sixel, contracts)
         validate_kitty(kitty)
+        validate_iterm2(iterm2, contracts)
         validate_budget(budget, contracts)
         validate_clients(clients)
     except (ContractError, KeyError, OSError, ValueError, json.JSONDecodeError) as error:
@@ -363,6 +414,7 @@ def main() -> int:
     print(
         f"Validated Phase 5 contracts: {len(sixel['cases'])} pinned-Foot Sixel fixtures, "
         f"{len(kitty['cases'])} Kitty fixtures, "
+        f"{len(iterm2['cases'])} iTerm2 fixtures, "
         f"{len(clients['clients'])} representative client traces"
     )
     return 0

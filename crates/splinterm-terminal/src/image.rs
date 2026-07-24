@@ -1,5 +1,6 @@
 //! Renderer-independent bounded terminal image content and placements.
 
+pub(crate) mod iterm;
 pub(crate) mod kitty;
 mod sixel;
 

@@ -25,6 +25,14 @@
     "upstream_http_status": 200,
     "retrieved_document_sha256": "d93054846e332ac61c9d28fc3db118ab9ea6c6bdcadd1fd73bba6ed55375c141"
   },
+  "iterm2": {
+    "upstream_url": "https://iterm2.com/documentation-images.html",
+    "upstream_http_status": 200,
+    "retrieved_date": "2026-07-24",
+    "retrieved_bytes": 11284,
+    "retrieved_document_sha256": "d339ce31f07475130bf0b73178d71291b5606ea1102ab8fd217b7f5ce6599961",
+    "fixture": "fixtures/iterm2-inline-v1.json"
+  },
   "canonical_pixels": {
     "format": "premultiplied-bgra8",
     "color_space": "srgb-components",
@@ -109,6 +117,26 @@
     "idle_cpu_p95_ticks": 1,
     "allowed_rss_growth_bytes": 2463129,
     "allowed_idle_cpu_p95_ticks": 1
+  },
+  "practical_iterm2": {
+    "commands": ["inline-file"],
+    "formats": ["png"],
+    "terminators": ["bel", "st", "c1-st"],
+    "extent_units": ["cells", "pixels", "percent", "auto"],
+    "metadata_bytes": 1024,
+    "encoded_bytes": 8388608,
+    "download_enabled": false,
+    "multipart_enabled": false,
+    "failure_reply": null
+  },
+  "kitty_external_inputs": {
+    "decision": "rejected-pending-capability-design",
+    "spike": "docs/spikes/0026-kitty-external-input-security.md",
+    "media": {
+      "file": "ENOTSUP",
+      "temporary_file": "ENOTSUP",
+      "posix_shm": "ENOTSUP"
+    }
   },
   "practical_kitty": {
     "media": ["direct"],
