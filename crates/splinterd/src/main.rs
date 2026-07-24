@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use splinterd::{
-    LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,
+    LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,
     LiveSplintHandle, LiveSplintRuntime, ProcessExit, ProcessIncarnation, Subscription,
     SubscriptionReceive, authorization, executable_identity, policy,
 };
@@ -3187,6 +3187,13 @@ async fn handle_authorized_request(
                     "image content is available only to the trusted local UI",
                 ));
             }
+            let content_id = splinterm_terminal::ImageContentId::new(request.content_id)
+                .ok_or_else(|| invalid("image content identity must be nonzero"))?;
+            let handle = current_handle(state, request.splint_id, request.incarnation).await?;
+            handle
+                .image_content(content_id, request.generation, request.digest)
+                .await
+                .map_err(image_content_error)?;
             return Err(ProtocolError::new(
                 ErrorCode::UnsupportedOperation,
                 "image content transport is not initialized",
@@ -5113,6 +5120,20 @@ fn internal() -> ProtocolError {
 }
 fn not_found() -> ProtocolError {
     ProtocolError::new(ErrorCode::NotFound, "resource not found")
+}
+
+fn image_content_error(error: LiveError) -> ProtocolError {
+    match error {
+        LiveError::ImageContentNotFound => ProtocolError::new(
+            ErrorCode::ImageContentNotFound,
+            "image content does not exist on the active screen",
+        ),
+        LiveError::StaleImageContent => ProtocolError::new(
+            ErrorCode::StaleImageContent,
+            "image content generation or digest is stale",
+        ),
+        _ => internal(),
+    }
 }
 
 #[allow(

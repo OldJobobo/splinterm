@@ -59,8 +59,11 @@ Slice 3 is in progress. Protocol v23 now carries bounded image capabilities,
 limits, metadata, placements, and exact content request/transfer identities.
 Attach snapshots and semantic updates project metadata without pixel bodies only
 to a trusted UI whose executable identity matches Splinterm; automation remains
-image-free by default. Both content delivery modes remain honestly disabled
-until the dedicated bounded transport lands.
+image-free by default. The daemon actor resolves immutable pixel backing only
+for the exact active-screen content ID, generation, and digest within the
+already-bound Splint incarnation; stale and unknown content fail distinctly.
+Both content delivery modes remain honestly disabled until the dedicated
+bounded transport lands.
 
 ## Feasibility and current baseline
 

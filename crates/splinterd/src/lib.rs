@@ -24,7 +24,7 @@ pub fn inspect_policy_file(path: &Path) -> Result<(usize, serde_json::Value)> {
 }
 
 pub use live::{
-    LiveCell, LiveEvent, LiveRow, LiveRuntimeMetrics, LiveScrollbackPage, LiveSearchPage,
-    LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, ProcessExit,
-    ProcessIncarnation, Subscription, SubscriptionReceive,
+    LiveCell, LiveError, LiveEvent, LiveRow, LiveRuntimeMetrics, LiveScrollbackPage,
+    LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime,
+    ProcessExit, ProcessIncarnation, Subscription, SubscriptionReceive,
 };

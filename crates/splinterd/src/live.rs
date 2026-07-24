@@ -16,9 +16,9 @@ use splinterm_pty::{
 };
 use splinterm_terminal::{
     ActiveScreen, CellAttributesSnapshot, CellSnapshotContent, CursorSnapshot, Dimensions,
-    ImageContentMetadata, ImagePlacement, ScrollRegion, ScrollbackSnapshot, SearchPage,
-    SnapshotRequest, Terminal, TerminalConfig, TerminalEvent, TerminalModes, TerminalRevision,
-    TerminalUpdate,
+    ImageContent, ImageContentId, ImageContentMetadata, ImagePlacement, ScrollRegion,
+    ScrollbackSnapshot, SearchPage, SnapshotRequest, Terminal, TerminalConfig, TerminalEvent,
+    TerminalModes, TerminalRevision, TerminalUpdate,
 };
 use thiserror::Error;
 use tokio::{
@@ -250,6 +250,10 @@ pub enum LiveError {
     ReplyQueueFull,
     #[error("child process has already exited")]
     ProcessExited,
+    #[error("image content does not exist on the active screen")]
+    ImageContentNotFound,
+    #[error("image content generation or digest is stale")]
+    StaleImageContent,
     #[error("poll interval must be non-zero")]
     InvalidPollInterval,
     #[error("live Splint task failed: {0}")]
@@ -264,6 +268,7 @@ enum Command {
     Input(Vec<u8>, Reply<()>),
     Resize(PtySize, Reply<()>),
     Snapshot(usize, Reply<LiveSnapshot>),
+    ImageContent(ImageContentId, u64, [u8; 32], Reply<ImageContent>),
     ScrollbackPage(Option<u64>, usize, Reply<LiveScrollbackPage>),
     Search(String, bool, usize, usize, Duration, Reply<LiveSearchPage>),
     Subscribe(usize, Reply<Subscription>),
@@ -368,6 +373,16 @@ impl LiveSplintHandle {
         max_scrollback_rows: usize,
     ) -> Result<LiveSnapshot, LiveError> {
         self.request(|reply| Command::Snapshot(max_scrollback_rows, reply))
+            .await
+    }
+
+    pub async fn image_content(
+        &self,
+        content_id: ImageContentId,
+        generation: u64,
+        digest: [u8; 32],
+    ) -> Result<ImageContent, LiveError> {
+        self.request(|reply| Command::ImageContent(content_id, generation, digest, reply))
             .await
     }
 
@@ -941,6 +956,11 @@ fn handle_command(
             );
             let _ = reply.send(Ok(snapshot));
         }
+        Command::ImageContent(content_id, generation, digest, reply) => {
+            let _ = reply.send(resolve_image_content(
+                terminal, content_id, generation, digest,
+            ));
+        }
         Command::ScrollbackPage(before_row_id, max_rows, reply) => {
             let snapshot = terminal.snapshot(SnapshotRequest {
                 max_scrollback_rows: 1,
@@ -1178,6 +1198,22 @@ fn advance_shutdown(
     }
 }
 
+fn resolve_image_content(
+    terminal: &Terminal,
+    content_id: ImageContentId,
+    generation: u64,
+    digest: [u8; 32],
+) -> Result<ImageContent, LiveError> {
+    let content = terminal
+        .image_content(content_id)
+        .ok_or(LiveError::ImageContentNotFound)?;
+    let metadata = content.metadata();
+    if metadata.generation != generation || metadata.digest != digest {
+        return Err(LiveError::StaleImageContent);
+    }
+    Ok(content.clone())
+}
+
 fn owned_snapshot(
     splint_id: SplintId,
     incarnation: ProcessIncarnation,
@@ -1293,6 +1329,35 @@ mod tests {
             snapshot.image_placements[0].content_id,
             snapshot.image_contents[0].id
         );
+
+        let exact =
+            resolve_image_content(&terminal, metadata.id, metadata.generation, metadata.digest)
+                .expect("exact image identity");
+        let repeated =
+            resolve_image_content(&terminal, metadata.id, metadata.generation, metadata.digest)
+                .expect("repeated immutable image identity");
+        assert!(std::ptr::eq(
+            exact.pixels().as_ptr(),
+            repeated.pixels().as_ptr()
+        ));
+        assert!(matches!(
+            resolve_image_content(
+                &terminal,
+                metadata.id,
+                metadata.generation + 1,
+                metadata.digest,
+            ),
+            Err(LiveError::StaleImageContent)
+        ));
+        assert!(matches!(
+            resolve_image_content(
+                &terminal,
+                ImageContentId::new(u64::MAX).unwrap(),
+                metadata.generation,
+                metadata.digest,
+            ),
+            Err(LiveError::ImageContentNotFound)
+        ));
     }
 
     #[tokio::test]
@@ -1353,6 +1418,47 @@ mod tests {
             .flat_map(|row| row.cells.iter())
             .map(|cell| cell.content.as_str())
             .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_resolves_only_exact_immutable_image_content() {
+        let mut config = fast_config();
+        config.pixel_width = 320;
+        config.pixel_height = 96;
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("printf '\\033Pq#1;2;100;0;0#1~\\033\\\\'; sleep 0.2"),
+            config,
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        time::sleep(Duration::from_millis(50)).await;
+        let snapshot = handle.snapshot().await.unwrap();
+        let metadata = snapshot.image_contents[0];
+        let content = handle
+            .image_content(metadata.id, metadata.generation, metadata.digest)
+            .await
+            .unwrap();
+        assert_eq!(content.metadata(), metadata);
+        assert!(matches!(
+            handle
+                .image_content(metadata.id, metadata.generation + 1, metadata.digest)
+                .await,
+            Err(LiveError::StaleImageContent)
+        ));
+        assert!(matches!(
+            handle
+                .image_content(
+                    ImageContentId::new(u64::MAX).unwrap(),
+                    metadata.generation,
+                    metadata.digest,
+                )
+                .await,
+            Err(LiveError::ImageContentNotFound)
+        ));
+        runtime.wait().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

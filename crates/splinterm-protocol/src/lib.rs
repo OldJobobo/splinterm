@@ -1146,6 +1146,8 @@ pub enum ErrorCode {
     StaleTopology,
     NotFound,
     StaleIncarnation,
+    ImageContentNotFound,
+    StaleImageContent,
     InvalidArgument,
     ResourceLimit,
     Cancelled,

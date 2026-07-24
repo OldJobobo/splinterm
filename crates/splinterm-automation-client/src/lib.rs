@@ -1822,8 +1822,10 @@ pub const fn public_error_code(code: ErrorCode) -> (CliErrorCodeV1, bool) {
         ErrorCode::ControllerUnavailable => (CliErrorCodeV1::ControllerUnavailable, true),
         ErrorCode::ControlTransferUnavailable => (CliErrorCodeV1::ControlTransferUnavailable, true),
         ErrorCode::StaleTopology => (CliErrorCodeV1::StaleTopology, true),
-        ErrorCode::NotFound => (CliErrorCodeV1::NotFound, false),
-        ErrorCode::StaleIncarnation => (CliErrorCodeV1::StaleIncarnation, true),
+        ErrorCode::NotFound | ErrorCode::ImageContentNotFound => (CliErrorCodeV1::NotFound, false),
+        ErrorCode::StaleIncarnation | ErrorCode::StaleImageContent => {
+            (CliErrorCodeV1::StaleIncarnation, true)
+        }
         ErrorCode::InvalidArgument => (CliErrorCodeV1::InvalidArgument, false),
         ErrorCode::ResourceLimit => (CliErrorCodeV1::ResourceLimit, true),
         ErrorCode::Cancelled => (CliErrorCodeV1::Cancelled, true),

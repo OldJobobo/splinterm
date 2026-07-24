@@ -383,10 +383,10 @@ pub(crate) fn map_client_error(error: &Error) -> DispatchFailure {
             true,
         ),
         ErrorCode::StaleTopology => ("stale_topology", "the topology revision is stale", true),
-        ErrorCode::NotFound | ErrorCode::RequestNotFound => {
+        ErrorCode::NotFound | ErrorCode::RequestNotFound | ErrorCode::ImageContentNotFound => {
             ("not_found", "the requested resource was not found", false)
         }
-        ErrorCode::StaleIncarnation => (
+        ErrorCode::StaleIncarnation | ErrorCode::StaleImageContent => (
             "stale_incarnation",
             "the requested Splint incarnation is stale",
             true,
