@@ -52,8 +52,8 @@ use splinterm_protocol::{
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
-    ActiveScreen, ColorSource as TerminalColorSource, ScrollDirection, SharedImageBudget,
-    TerminalDamage, TerminalUpdate,
+    ActiveScreen, ColorSource as TerminalColorSource, DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
+    ScrollDirection, SharedImageBudget, SharedKittyUploadBudget, TerminalDamage, TerminalUpdate,
 };
 use tokio::{
     fs,
@@ -609,6 +609,7 @@ struct DaemonState {
     revocations: broadcast::Sender<Revocation>,
     image_transfers: Mutex<TransferAdmission>,
     shared_image_budget: SharedImageBudget,
+    shared_kitty_upload_budget: SharedKittyUploadBudget,
     pty_backend: LinuxPtyBackend,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
@@ -712,6 +713,9 @@ async fn main() -> Result<()> {
         revocations,
         image_transfers: Mutex::new(TransferAdmission::default()),
         shared_image_budget: SharedImageBudget::new(MAX_IMAGE_BYTES_PER_DAEMON),
+        shared_kitty_upload_budget: SharedKittyUploadBudget::new(
+            DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
+        ),
         pty_backend: LinuxPtyBackend::installed()?,
         owner_home: env::var_os("HOME")
             .map(PathBuf::from)
@@ -1797,6 +1801,7 @@ async fn spawn_runtime(
     let mut config = LiveSplintConfig::default();
     config.terminal.scrollback_lines = launch.scrollback_lines;
     config.terminal.shared_image_budget = Some(state.shared_image_budget.clone());
+    config.terminal.shared_kitty_upload_budget = Some(state.shared_kitty_upload_budget.clone());
     config.incarnation_environment = Some(OsString::from("SPLINTERM_SPLINT_INCARNATION"));
     LiveSplintRuntime::spawn(
         context.splint,
@@ -6145,6 +6150,9 @@ mod tests {
             revocations,
             image_transfers: Mutex::new(TransferAdmission::default()),
             shared_image_budget: SharedImageBudget::new(MAX_IMAGE_BYTES_PER_DAEMON),
+            shared_kitty_upload_budget: SharedKittyUploadBudget::new(
+                DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
+            ),
             pty_backend: LinuxPtyBackend::new("/missing/helper"),
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,

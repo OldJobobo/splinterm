@@ -1,5 +1,6 @@
 //! Renderer-independent bounded terminal image content and placements.
 
+pub(crate) mod kitty;
 mod sixel;
 
 pub(crate) use sixel::{MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage};
@@ -22,6 +23,108 @@ pub const DEFAULT_IMAGE_CONTENTS_PER_TERMINAL: usize = 64;
 pub const DEFAULT_IMAGE_PLACEMENTS_PER_TERMINAL: usize = 256;
 pub const DEFAULT_IMAGE_MAX_DIMENSION: u32 = 4096;
 pub const DEFAULT_IMAGE_MAX_PIXELS: usize = 4_194_304;
+pub const DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SharedKittyUploadBudgetMetrics {
+    pub reserved_bytes: usize,
+    pub high_water_reserved_bytes: usize,
+}
+
+#[derive(Debug)]
+struct SharedKittyUploadBudgetInner {
+    limit: usize,
+    reserved_bytes: AtomicUsize,
+    high_water_reserved_bytes: AtomicUsize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SharedKittyUploadBudget(Arc<SharedKittyUploadBudgetInner>);
+
+impl PartialEq for SharedKittyUploadBudget {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+            || (self.0.limit == other.0.limit && self.metrics() == other.metrics())
+    }
+}
+
+impl Eq for SharedKittyUploadBudget {}
+
+impl SharedKittyUploadBudget {
+    #[must_use]
+    pub fn new(limit: usize) -> Self {
+        Self(Arc::new(SharedKittyUploadBudgetInner {
+            limit,
+            reserved_bytes: AtomicUsize::new(0),
+            high_water_reserved_bytes: AtomicUsize::new(0),
+        }))
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> SharedKittyUploadBudgetMetrics {
+        SharedKittyUploadBudgetMetrics {
+            reserved_bytes: self.0.reserved_bytes.load(Ordering::Acquire),
+            high_water_reserved_bytes: self.0.high_water_reserved_bytes.load(Ordering::Acquire),
+        }
+    }
+
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<KittyUploadReservation, ImageError> {
+        let mut current = self.0.reserved_bytes.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(bytes)
+                .filter(|next| *next <= self.0.limit)
+                .ok_or(ImageError::DaemonBytes)?;
+            match self.0.reserved_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.0
+                        .high_water_reserved_bytes
+                        .fetch_max(next, Ordering::AcqRel);
+                    return Ok(KittyUploadReservation(Arc::new(KittyUploadLease {
+                        budget: Arc::clone(&self.0),
+                        bytes,
+                    })));
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct KittyUploadLease {
+    budget: Arc<SharedKittyUploadBudgetInner>,
+    bytes: usize,
+}
+
+impl Drop for KittyUploadLease {
+    fn drop(&mut self) {
+        let previous = self
+            .budget
+            .reserved_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+        debug_assert!(
+            previous >= self.bytes,
+            "Kitty upload budget release underflow"
+        );
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct KittyUploadReservation(Arc<KittyUploadLease>);
+
+impl PartialEq for KittyUploadReservation {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for KittyUploadReservation {}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SharedImageBudgetMetrics {
@@ -84,7 +187,7 @@ impl SharedImageBudget {
                         .fetch_max(next, Ordering::AcqRel);
                     return Ok(ImageBudgetReservation(Arc::new(ImageBudgetLease {
                         budget: Arc::clone(&self.0),
-                        bytes,
+                        bytes: AtomicUsize::new(bytes),
                     })));
                 }
                 Err(actual) => current = actual,
@@ -96,16 +199,14 @@ impl SharedImageBudget {
 #[derive(Debug)]
 struct ImageBudgetLease {
     budget: Arc<SharedImageBudgetInner>,
-    bytes: usize,
+    bytes: AtomicUsize,
 }
 
 impl Drop for ImageBudgetLease {
     fn drop(&mut self) {
-        let previous = self
-            .budget
-            .content_bytes
-            .fetch_sub(self.bytes, Ordering::AcqRel);
-        debug_assert!(previous >= self.bytes, "image budget release underflow");
+        let bytes = self.bytes.load(Ordering::Acquire);
+        let previous = self.budget.content_bytes.fetch_sub(bytes, Ordering::AcqRel);
+        debug_assert!(previous >= bytes, "image budget release underflow");
     }
 }
 
@@ -119,6 +220,47 @@ impl PartialEq for ImageBudgetReservation {
 }
 
 impl Eq for ImageBudgetReservation {}
+
+impl ImageBudgetReservation {
+    fn resize(&self, bytes: usize) -> Result<(), ImageError> {
+        let old = self.0.bytes.load(Ordering::Acquire);
+        if bytes > old {
+            let delta = bytes - old;
+            let mut current = self.0.budget.content_bytes.load(Ordering::Acquire);
+            loop {
+                let next = current
+                    .checked_add(delta)
+                    .filter(|next| *next <= self.0.budget.limit)
+                    .ok_or(ImageError::DaemonBytes)?;
+                match self.0.budget.content_bytes.compare_exchange_weak(
+                    current,
+                    next,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        self.0
+                            .budget
+                            .high_water_content_bytes
+                            .fetch_max(next, Ordering::AcqRel);
+                        self.0.bytes.store(bytes, Ordering::Release);
+                        return Ok(());
+                    }
+                    Err(actual) => current = actual,
+                }
+            }
+        } else if bytes < old {
+            self.0.bytes.store(bytes, Ordering::Release);
+            let previous = self
+                .0
+                .budget
+                .content_bytes
+                .fetch_sub(old - bytes, Ordering::AcqRel);
+            debug_assert!(previous >= old - bytes, "image budget resize underflow");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ImageContentId(u64);
@@ -511,6 +653,141 @@ impl ImagePlane {
         Ok(id)
     }
 
+    /// Atomically replaces one content object while admitting only a positive
+    /// byte delta against terminal and shared budgets. All old placements are
+    /// removed after validation and admission succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, identity, unknown-content, or budget error without
+    /// changing content or placement state.
+    pub(crate) fn replace_content(
+        &mut self,
+        screen: ActiveScreen,
+        id: ImageContentId,
+        input: NewImageContent<'_>,
+    ) -> Result<ImageContentId, ImageError> {
+        let expected = self.validate_content(&input)?;
+        let previous_charge = self
+            .catalog(screen)
+            .contents
+            .get(&id)
+            .ok_or(ImageError::UnknownContent)?
+            .metadata
+            .byte_charge;
+        let next_bytes = self
+            .metrics
+            .content_bytes
+            .checked_sub(previous_charge)
+            .and_then(|bytes| bytes.checked_add(expected))
+            .filter(|bytes| *bytes <= self.limits.bytes_per_terminal)
+            .ok_or(ImageError::TerminalBytes)?;
+        let generation = self.next_generation;
+        let next_generation = generation
+            .checked_add(1)
+            .ok_or(ImageError::IdentityExhausted)?;
+        if let Some(reservation) = self.catalog(screen).reservations.get(&id) {
+            reservation.resize(expected)?;
+        }
+        let placement_ids = self
+            .catalog(screen)
+            .placements
+            .values()
+            .filter(|placement| placement.content_id == id)
+            .map(|placement| placement.id)
+            .collect::<Vec<_>>();
+        let digest: [u8; 32] = Sha256::digest(input.pixels).into();
+        let content = ImageContent {
+            metadata: ImageContentMetadata {
+                id,
+                generation,
+                width: input.width,
+                height: input.height,
+                source_format: input.source_format,
+                alpha_mode: input.alpha_mode,
+                digest,
+                byte_charge: expected,
+                retention: input.retention,
+            },
+            pixels: Arc::from(input.pixels),
+        };
+        self.next_generation = next_generation;
+        self.metrics.content_bytes = next_bytes;
+        for placement_id in placement_ids {
+            self.catalog_mut(screen).placements.remove(&placement_id);
+            self.metrics.placement_count -= 1;
+        }
+        let replaced = self.catalog_mut(screen).contents.insert(id, content);
+        debug_assert!(replaced.is_some(), "validated replacement content exists");
+        Ok(id)
+    }
+
+    pub(crate) fn preflight_replacement_placement(
+        &self,
+        screen: ActiveScreen,
+        replaced_id: ImageContentId,
+        content: NewImageContent<'_>,
+        placement: NewImagePlacement,
+    ) -> Result<(), ImageError> {
+        let expected = self.validate_content(&content)?;
+        let previous = self
+            .catalog(screen)
+            .contents
+            .get(&replaced_id)
+            .ok_or(ImageError::UnknownContent)?;
+        let _final_bytes = self
+            .metrics
+            .content_bytes
+            .checked_sub(previous.metadata.byte_charge)
+            .and_then(|bytes| bytes.checked_add(expected))
+            .filter(|bytes| *bytes <= self.limits.bytes_per_terminal)
+            .ok_or(ImageError::TerminalBytes)?;
+        if placement.row_id == 0 {
+            return Err(ImageError::InvalidAnchor);
+        }
+        if placement.destination.columns == 0 || placement.destination.rows == 0 {
+            return Err(ImageError::InvalidDestination);
+        }
+        validate_crop(placement.source, content.width, content.height)?;
+        validate_source_cell_size(placement.source_cell_size)?;
+        let removed = self
+            .catalog(screen)
+            .placements
+            .values()
+            .filter(|candidate| candidate.content_id == replaced_id)
+            .count();
+        let final_placements = self
+            .metrics
+            .placement_count
+            .checked_sub(removed)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(ImageError::PlacementCount)?;
+        if final_placements > self.limits.placements_per_terminal {
+            return Err(ImageError::PlacementCount);
+        }
+        self.next_generation
+            .checked_add(1)
+            .and_then(|_| self.next_placement_id.checked_add(1))
+            .and_then(|_| self.next_creation_order.checked_add(1))
+            .ok_or(ImageError::IdentityExhausted)?;
+        if let Some(reservation) = self.catalog(screen).reservations.get(&replaced_id) {
+            let old = reservation.0.bytes.load(Ordering::Acquire);
+            if expected > old {
+                self.shared_budget
+                    .as_ref()
+                    .and_then(|budget| {
+                        budget
+                            .metrics()
+                            .content_bytes
+                            .checked_add(expected - old)
+                            .filter(|bytes| *bytes <= budget.0.limit)
+                    })
+                    .ok_or(ImageError::DaemonBytes)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Atomically stores content and places it at one stable row anchor.
     ///
     /// # Errors
@@ -532,11 +809,7 @@ impl ImagePlane {
             return Err(ImageError::InvalidDestination);
         }
         validate_crop(placement.source, content.width, content.height)?;
-        validate_source_cell_size(
-            placement.source,
-            placement.destination,
-            placement.source_cell_size,
-        )?;
+        validate_source_cell_size(placement.source_cell_size)?;
         if self.metrics.placement_count >= self.limits.placements_per_terminal {
             return Err(ImageError::PlacementCount);
         }
@@ -583,7 +856,7 @@ impl ImagePlane {
             content.metadata.width,
             content.metadata.height,
         )?;
-        validate_source_cell_size(input.source, input.destination, input.source_cell_size)?;
+        validate_source_cell_size(input.source_cell_size)?;
         if self.metrics.placement_count >= self.limits.placements_per_terminal {
             return Err(ImageError::PlacementCount);
         }
@@ -763,7 +1036,7 @@ impl ImagePlane {
         mut placement: NewImagePlacementOptions,
     ) -> Result<(ImageContentId, ImagePlacementId), ImageError> {
         self.validate_content(&content)?;
-        validate_source_cell_size(
+        validate_sixel_source_cell_size(
             placement.source,
             placement.destination,
             placement.source_cell_size,
@@ -1537,7 +1810,14 @@ fn placement_fragments(
     Ok(fragments)
 }
 
-fn validate_source_cell_size(
+fn validate_source_cell_size(cell_size: Option<PixelSize>) -> Result<(), ImageError> {
+    if cell_size.is_some_and(|size| size.width == 0 || size.height == 0) {
+        return Err(ImageError::InvalidDestination);
+    }
+    Ok(())
+}
+
+fn validate_sixel_source_cell_size(
     source: PixelRect,
     destination: CellExtent,
     cell_size: Option<PixelSize>,

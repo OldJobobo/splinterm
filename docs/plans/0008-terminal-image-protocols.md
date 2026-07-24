@@ -1,6 +1,6 @@
 # Plan 0008: bounded terminal image protocols
 
-- **Status:** In progress — Slices 0–1, 3–4 accepted; Slice 2 graphical closure deferred
+- **Status:** In progress — Slices 0–1, 3–5 accepted; Slice 2 graphical closure deferred
 - **Roadmap:** Phase 5 — bounded terminal image protocols
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md),
   [Plan 0001](0001-terminal-kernel.md),
@@ -110,6 +110,31 @@ accepted Slice 0 client-cache value recorded in
 `docs/spikes/artifacts/0025-terminal-images/budget-probe.json`. The no-image path
 retains an empty non-allocating placement vector and the existing image-free
 scroll-copy tests. No graphical command ran for Slice 4.
+
+Slice 5 is implemented and accepted as the practical static-image Kitty subset,
+not full Kitty compatibility. Selective APC `_G` recognition streams bounded
+control and base64 data without retaining unrelated APC. Direct RGB, RGBA, and
+PNG transmission, optional zlib compression, chunk continuation, anonymous
+representative-client display, query, placement, visible deletion, crop,
+one-sided aspect-preserving destination extents, cell offsets, cursor policy,
+and signed z ordering map onto the generic image plane. Encoded uploads share a
+16 MiB daemon admission budget and canonical replacements atomically admit only
+the byte delta. Unsupported transports, animation, relative placement, Unicode
+placeholders, and extra selectors return bounded compatible errors and remain
+unadvertised.
+
+The 15 recorded spec-derived cases in `kitty-static-v1.json` execute as tests.
+Pinned `kitten icat` 0.48.0 and Chafa 1.18.2 byte streams are retained under
+`crates/splinterm-terminal/tests/kitty-data/`, verified against their recorded
+SHA-256 digests, and replay without protocol errors. Headless tests cover C1 and
+7-bit termination, continuation failures and quiet modes, cross-terminal upload
+exhaustion/release, replacement rollback, raw/PNG allocation limits,
+visible-versus-scrollback deletion, resize, reflow/scrollback anchors,
+alternate screen, revision replay, and reset. No graphical command ran for
+Slice 5. A requested 30-second fuzz run did not start: the first invocation used
+stable instead of nightly and the corrected invocation named the target with an
+underscore instead of its hyphenated Cargo name; no fuzz iterations executed,
+and the stop-loss prohibited another automatic retry.
 
 ## Feasibility and current baseline
 

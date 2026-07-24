@@ -5,7 +5,7 @@
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -18,9 +18,12 @@ use crate::{
     ImagePlane, ImageRetention, ImageSourceFormat, MouseTracking, NewImageContent,
     NewImagePlacement, NewImagePlacementOptions, PixelRect, PixelSize, ResnapshotRequired,
     RowSnapshot, ScrollDirection, ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage,
-    SnapshotRequest, TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes,
-    TerminalRevision, TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
-    image::{MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage},
+    SharedKittyUploadBudget, SnapshotRequest, TerminalConfig, TerminalDamage, TerminalEvent,
+    TerminalModes, TerminalRevision, TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
+    image::{
+        KittyUploadReservation, MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage,
+        kitty::{self, Command as KittyCommand, Error as KittyError},
+    },
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -40,6 +43,10 @@ pub struct Terminal {
     composed: ComposedTable,
     images: ImagePlane,
     sixel_decoder: Option<Box<SixelDecoder>>,
+    kitty_chunk: Option<KittyChunk>,
+    kitty_upload: Option<KittyUpload>,
+    kitty_upload_budget: SharedKittyUploadBudget,
+    kitty_image_ids: KittyImageIds,
     cell_pixels: Option<(u32, u32)>,
     sixel_scrolling: bool,
     sixel_cursor_right: bool,
@@ -58,6 +65,76 @@ pub struct Terminal {
     revision: TerminalRevision,
     update_history: VecDeque<TerminalUpdate>,
     current_change: Option<ChangeSet>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct KittyChunk {
+    control: Vec<u8>,
+    control_truncated: bool,
+    encoded: Vec<u8>,
+    encoded_limit: usize,
+    payload_too_big: bool,
+    payload_no_space: bool,
+    reservation: Option<KittyUploadReservation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct KittyCorrelation {
+    image_id: u32,
+    placement_id: u32,
+    quiet: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct KittyUpload {
+    command: KittyCommand,
+    decoded_chunks: Vec<u8>,
+    encoded_bytes: usize,
+    reservations: Vec<KittyUploadReservation>,
+}
+
+impl Drop for KittyUpload {
+    fn drop(&mut self) {
+        self.reservations.clear();
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct KittyImageIds {
+    normal: BTreeMap<u32, ImageContentId>,
+    alternate: BTreeMap<u32, ImageContentId>,
+}
+
+impl KittyImageIds {
+    fn get(&self, screen: ActiveScreen, id: u32) -> Option<ImageContentId> {
+        self.map(screen).get(&id).copied()
+    }
+
+    fn insert(&mut self, screen: ActiveScreen, id: u32, content: ImageContentId) {
+        self.map_mut(screen).insert(id, content);
+    }
+
+    fn remove(&mut self, screen: ActiveScreen, id: u32) {
+        self.map_mut(screen).remove(&id);
+    }
+
+    fn clear(&mut self, screen: ActiveScreen) {
+        self.map_mut(screen).clear();
+    }
+
+    fn map(&self, screen: ActiveScreen) -> &BTreeMap<u32, ImageContentId> {
+        match screen {
+            ActiveScreen::Normal => &self.normal,
+            ActiveScreen::Alternate => &self.alternate,
+        }
+    }
+
+    fn map_mut(&mut self, screen: ActiveScreen) -> &mut BTreeMap<u32, ImageContentId> {
+        match screen {
+            ActiveScreen::Normal => &mut self.normal,
+            ActiveScreen::Alternate => &mut self.alternate,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +195,11 @@ impl ActionHint {
             },
             Action::Osc(..) => Self::Osc,
             Action::Dcs(..)
+            | Action::KittyBegin(..)
+            | Action::KittyCommand(..)
+            | Action::KittyData(..)
+            | Action::KittyEnd
+            | Action::KittyAbort
             | Action::SixelBegin(..)
             | Action::SixelData(..)
             | Action::SixelEnd
@@ -180,6 +262,17 @@ impl Terminal {
                 config.shared_image_budget.clone(),
             ),
             sixel_decoder: None,
+            kitty_chunk: None,
+            kitty_upload: None,
+            kitty_upload_budget: config
+                .shared_kitty_upload_budget
+                .clone()
+                .unwrap_or_else(|| {
+                    SharedKittyUploadBudget::new(
+                        crate::image::DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
+                    )
+                }),
+            kitty_image_ids: KittyImageIds::default(),
             cell_pixels: None,
             sixel_scrolling: true,
             sixel_cursor_right: false,
@@ -220,6 +313,15 @@ impl Terminal {
                         Action::SixelData(byte) => self.put_sixel(byte),
                         Action::SixelEnd => self.end_sixel(),
                         Action::SixelAbort => self.abort_sixel(),
+                        Action::KittyBegin(control, truncated) => {
+                            self.begin_kitty(control, truncated);
+                        }
+                        Action::KittyCommand(control, truncated) => {
+                            self.command_kitty(control, truncated);
+                        }
+                        Action::KittyData(byte) => self.put_kitty(byte),
+                        Action::KittyEnd => self.end_kitty(),
+                        Action::KittyAbort => self.abort_kitty(),
                         action => self.dispatch(action),
                     }
                 }
@@ -758,6 +860,592 @@ impl Terminal {
         }
     }
 
+    fn begin_kitty(&mut self, control: Vec<u8>, control_truncated: bool) {
+        let encoded_limit = if self.kitty_upload.is_some()
+            || kitty::parse_control(&control, control_truncated).is_ok_and(|command| command.more)
+        {
+            kitty::MAX_ENCODED_CHUNK_BYTES
+        } else {
+            kitty::MAX_ENCODED_UPLOAD_BYTES
+        };
+        self.kitty_chunk = Some(KittyChunk {
+            control,
+            control_truncated,
+            encoded: Vec::new(),
+            encoded_limit,
+            payload_too_big: false,
+            payload_no_space: false,
+            reservation: None,
+        });
+    }
+
+    fn command_kitty(&mut self, control: Vec<u8>, control_truncated: bool) {
+        self.begin_kitty(control, control_truncated);
+        self.end_kitty();
+    }
+
+    fn put_kitty(&mut self, byte: u8) {
+        let Some(chunk) = &mut self.kitty_chunk else {
+            return;
+        };
+        if chunk.reservation.is_none() && !chunk.payload_no_space {
+            match self.kitty_upload_budget.reserve(chunk.encoded_limit) {
+                Ok(reservation) => chunk.reservation = Some(reservation),
+                Err(_) => chunk.payload_no_space = true,
+            }
+        }
+        if chunk.payload_no_space {
+            return;
+        }
+        if chunk.encoded.len() < chunk.encoded_limit {
+            chunk.encoded.push(byte);
+        } else {
+            chunk.payload_too_big = true;
+        }
+    }
+
+    fn abort_kitty(&mut self) {
+        self.kitty_chunk = None;
+        self.kitty_upload = None;
+    }
+
+    fn reject_kitty_chunk(
+        &mut self,
+        control: &[u8],
+        fallback: KittyCorrelation,
+        error: KittyError,
+    ) {
+        if let Some(mut upload) = self.kitty_upload.take() {
+            let continuation = kitty_correlation(control);
+            if control
+                .split(|byte| *byte == b',')
+                .any(|field| field.starts_with(b"q="))
+                && continuation.quiet <= 2
+            {
+                upload.command.quiet = continuation.quiet;
+            }
+            self.reply_kitty(&upload.command, Err(error));
+        } else {
+            self.reply_kitty_correlation(fallback, Err(error));
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "chunk finalization keeps upload admission, continuation, and reply ordering atomic"
+    )]
+    fn end_kitty(&mut self) {
+        let Some(mut chunk) = self.kitty_chunk.take() else {
+            return;
+        };
+        let correlation = kitty_correlation(&chunk.control);
+        let command = match kitty::parse_control(&chunk.control, chunk.control_truncated) {
+            Ok(command) => command,
+            Err(error) => {
+                self.reject_kitty_chunk(&chunk.control, correlation, error);
+                return;
+            }
+        };
+        if chunk.payload_no_space {
+            self.reject_kitty_chunk(
+                &chunk.control,
+                correlation,
+                KittyError::NoSpace("encoded upload budget exhausted"),
+            );
+            return;
+        }
+        if chunk.payload_too_big {
+            self.reject_kitty_chunk(
+                &chunk.control,
+                correlation,
+                KittyError::TooBig("encoded chunk exceeds limit"),
+            );
+            return;
+        }
+        if self.kitty_upload.is_some() && command.action == kitty::Action::Delete {
+            self.kitty_upload = None;
+            self.process_kitty(command, Vec::new());
+            return;
+        }
+        if command.more && chunk.encoded.len() % 4 != 0 {
+            self.reject_kitty_chunk(
+                &chunk.control,
+                correlation,
+                KittyError::Invalid("non-final chunk is not base64 aligned"),
+            );
+            return;
+        }
+        let decoded_limit = if command.more || self.kitty_upload.is_some() {
+            3072
+        } else {
+            kitty::MAX_ENCODED_UPLOAD_BYTES
+        };
+        let decoded = match kitty::decode_base64_payload(
+            &chunk.encoded,
+            chunk.encoded_limit,
+            decoded_limit,
+        ) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                self.reject_kitty_chunk(&chunk.control, correlation, error);
+                return;
+            }
+        };
+        if let Some(mut upload) = self.kitty_upload.take() {
+            if !kitty_continuation_control(&chunk.control) {
+                self.reply_kitty(
+                    &upload.command,
+                    Err(KittyError::Invalid("interleaved Kitty upload")),
+                );
+                return;
+            }
+            if upload.command.more && chunk.encoded.len() % 4 != 0 && command.more {
+                self.reply_kitty(
+                    &upload.command,
+                    Err(KittyError::BadMessage(
+                        "non-final chunk is not base64 aligned",
+                    )),
+                );
+                return;
+            }
+            let Some(encoded_bytes) = upload.encoded_bytes.checked_add(chunk.encoded.len()) else {
+                self.reply_kitty(
+                    &upload.command,
+                    Err(KittyError::TooBig("encoded upload overflow")),
+                );
+                return;
+            };
+            if encoded_bytes > kitty::MAX_ENCODED_UPLOAD_BYTES {
+                self.reply_kitty(
+                    &upload.command,
+                    Err(KittyError::TooBig("encoded upload exceeds limit")),
+                );
+                return;
+            }
+            upload.encoded_bytes = encoded_bytes;
+            upload.decoded_chunks.extend_from_slice(&decoded);
+            upload.reservations.extend(chunk.reservation.take());
+            if chunk
+                .control
+                .split(|byte| *byte == b',')
+                .any(|field| field.starts_with(b"q="))
+            {
+                upload.command.quiet = command.quiet;
+            }
+            if command.more {
+                self.kitty_upload = Some(upload);
+            } else {
+                let decoded_chunks = std::mem::take(&mut upload.decoded_chunks);
+                self.process_kitty(upload.command, decoded_chunks);
+            }
+            return;
+        }
+        if command.more {
+            if chunk.encoded.len() % 4 != 0 {
+                self.reply_kitty(
+                    &command,
+                    Err(KittyError::BadMessage(
+                        "non-final chunk is not base64 aligned",
+                    )),
+                );
+                return;
+            }
+            if !matches!(
+                command.action,
+                kitty::Action::Transmit | kitty::Action::TransmitAndDisplay | kitty::Action::Query
+            ) {
+                self.reply_kitty(
+                    &command,
+                    Err(KittyError::Invalid("continuation requires transmission")),
+                );
+                return;
+            }
+            self.kitty_upload = Some(KittyUpload {
+                command,
+                decoded_chunks: decoded,
+                encoded_bytes: chunk.encoded.len(),
+                reservations: chunk.reservation.into_iter().collect(),
+            });
+        } else {
+            self.process_kitty(command, decoded);
+        }
+    }
+
+    fn process_kitty(&mut self, command: KittyCommand, bytes: Vec<u8>) {
+        let hint = ActionHint::Dcs;
+        let baseline = self.action_baseline(hint);
+        let images_before = self.images.clone();
+        let image_ids_before = self.kitty_image_ids.clone();
+        self.current_change = Some(ChangeSet::default());
+        let result = match command.action {
+            kitty::Action::Transmit | kitty::Action::TransmitAndDisplay | kitty::Action::Query => {
+                self.transmit_kitty(&command, bytes)
+            }
+            kitty::Action::Display => self.place_kitty(&command),
+            kitty::Action::Delete => self.delete_kitty(&command),
+        };
+        if result.is_err() {
+            self.images = images_before;
+            self.kitty_image_ids = image_ids_before;
+        }
+        if command.action != kitty::Action::Delete || result.is_err() {
+            self.reply_kitty(&command, result);
+        }
+        self.prune_active_image_anchors();
+        self.record_action_changes(&baseline, hint);
+        self.commit_change();
+    }
+
+    fn transmit_kitty(&mut self, command: &KittyCommand, bytes: Vec<u8>) -> Result<(), KittyError> {
+        if command.medium != kitty::Medium::Direct {
+            return Err(KittyError::Unsupported("unsupported transmission medium"));
+        }
+        let image = kitty::decode_image(command, bytes)?;
+        self.validate_kitty_dimensions(image.width, image.height)?;
+        if command.action == kitty::Action::Query {
+            return Ok(());
+        }
+        let content = NewImageContent {
+            width: image.width,
+            height: image.height,
+            source_format: image.format,
+            alpha_mode: image.alpha_mode,
+            pixels: &image.pixels,
+            retention: if command.image_id == 0 {
+                ImageRetention::WhilePlaced
+            } else {
+                ImageRetention::ExplicitDelete
+            },
+        };
+        let previous = (command.image_id != 0)
+            .then(|| self.kitty_image_ids.get(self.active, command.image_id))
+            .flatten();
+        if command.action == kitty::Action::TransmitAndDisplay
+            && let Some(previous) = previous
+        {
+            let (placement, _, _) = self.kitty_placement_input(
+                command,
+                previous,
+                Some(command.image_id),
+                image.width,
+                image.height,
+            )?;
+            self.images
+                .preflight_replacement_placement(self.active, previous, content, placement)
+                .map_err(map_image_error)?;
+        }
+        let content_id = if let Some(previous) = previous {
+            self.images
+                .replace_content(self.active, previous, content)
+                .map_err(map_image_error)?
+        } else {
+            self.images
+                .insert_content(self.active, content)
+                .map_err(map_image_error)?
+        };
+        if command.image_id != 0 {
+            self.kitty_image_ids
+                .insert(self.active, command.image_id, content_id);
+        }
+        if command.action == kitty::Action::TransmitAndDisplay {
+            self.place_kitty_content(
+                command,
+                content_id,
+                (command.image_id != 0).then_some(command.image_id),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn place_kitty(&mut self, command: &KittyCommand) -> Result<(), KittyError> {
+        if command.image_id == 0 {
+            return Err(KittyError::Invalid("image id is required for placement"));
+        }
+        let content_id = self
+            .kitty_image_ids
+            .get(self.active, command.image_id)
+            .ok_or(KittyError::NotFound("image id does not exist"))?;
+        self.place_kitty_content(command, content_id, Some(command.image_id))
+    }
+
+    fn place_kitty_content(
+        &mut self,
+        command: &KittyCommand,
+        content_id: ImageContentId,
+        application_image_id: Option<u32>,
+    ) -> Result<(), KittyError> {
+        let metadata = self
+            .images
+            .content(self.active, content_id)
+            .ok_or(KittyError::NotFound("image content does not exist"))?
+            .metadata();
+        let (placement, columns, rows) = self.kitty_placement_input(
+            command,
+            content_id,
+            application_image_id,
+            metadata.width,
+            metadata.height,
+        )?;
+        let existing = self
+            .images
+            .placements(self.active)
+            .filter(|placement| {
+                application_image_id.is_some()
+                    && placement.application_image_id == application_image_id
+                    && command.placement_id != 0
+                    && placement.application_placement_id == Some(command.placement_id)
+            })
+            .map(|placement| placement.id)
+            .collect::<Vec<_>>();
+        let mut candidate = self.images.clone();
+        for placement_id in existing {
+            candidate
+                .remove_placement(self.active, placement_id)
+                .map_err(map_image_error)?;
+        }
+        candidate
+            .insert_placement(self.active, placement)
+            .map_err(map_image_error)?;
+        self.images = candidate;
+        if !command.no_cursor_move {
+            self.move_cursor(
+                i32::try_from(columns).unwrap_or(i32::MAX),
+                i32::try_from(rows).unwrap_or(i32::MAX),
+            );
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Kitty crop, aspect, offset, and anchor geometry share one checked constructor"
+    )]
+    fn kitty_placement_input(
+        &self,
+        command: &KittyCommand,
+        content_id: ImageContentId,
+        application_image_id: Option<u32>,
+        content_width: u32,
+        content_height: u32,
+    ) -> Result<(NewImagePlacement, usize, usize), KittyError> {
+        let source_x = command.source_x.min(content_width);
+        let source_y = command.source_y.min(content_height);
+        let source_right = command.source_width.map_or(content_width, |width| {
+            command.source_x.saturating_add(width).min(content_width)
+        });
+        let source_bottom = command.source_height.map_or(content_height, |height| {
+            command.source_y.saturating_add(height).min(content_height)
+        });
+        let source_width = source_right.saturating_sub(source_x);
+        let source_height = source_bottom.saturating_sub(source_y);
+        if source_width == 0 || source_height == 0 {
+            return Err(KittyError::Invalid("source crop is empty"));
+        }
+        let (cell_width, cell_height) = self.cell_pixels.unwrap_or((1, 1));
+        if u32::try_from(command.x_offset).unwrap_or(u32::MAX) >= cell_width
+            || u32::try_from(command.y_offset).unwrap_or(u32::MAX) >= cell_height
+        {
+            return Err(KittyError::Invalid("cell offset exceeds cell size"));
+        }
+        let (columns, rows) = match (command.columns, command.rows) {
+            (Some(columns), Some(rows)) => (columns, rows),
+            (Some(columns), None) => (
+                columns,
+                kitty_aspect_extent(
+                    source_height,
+                    columns,
+                    cell_width,
+                    source_width,
+                    cell_height,
+                )?,
+            ),
+            (None, Some(rows)) => (
+                kitty_aspect_extent(source_width, rows, cell_height, source_height, cell_width)?,
+                rows,
+            ),
+            (None, None) => (
+                usize::try_from(source_width.div_ceil(cell_width)).unwrap_or(usize::MAX),
+                usize::try_from(source_height.div_ceil(cell_height)).unwrap_or(usize::MAX),
+            ),
+        };
+        if columns == 0 || rows == 0 {
+            return Err(KittyError::Invalid("destination extent must be non-zero"));
+        }
+        let cursor = self.grid().cursor().position();
+        let row = usize::try_from(cursor.row)
+            .map_err(|_| KittyError::Invalid("cursor row is invalid"))?;
+        let column = usize::try_from(cursor.column)
+            .map_err(|_| KittyError::Invalid("cursor column is invalid"))?;
+        let row_id = self
+            .grid()
+            .screen_row_ids()
+            .get(row)
+            .copied()
+            .ok_or(KittyError::Invalid("cursor anchor is unavailable"))?;
+        Ok((
+            NewImagePlacement {
+                content_id,
+                row_id,
+                column,
+                source: PixelRect {
+                    x: source_x,
+                    y: source_y,
+                    width: source_width,
+                    height: source_height,
+                },
+                destination: crate::CellExtent { columns, rows },
+                source_cell_size: Some(PixelSize {
+                    width: cell_width,
+                    height: cell_height,
+                }),
+                x_offset: command.x_offset,
+                y_offset: command.y_offset,
+                z_index: command.z_index,
+                application_image_id,
+                application_placement_id: (application_image_id.is_some()
+                    && command.placement_id != 0)
+                    .then_some(command.placement_id),
+                erase_policy: ImageErasePolicy::ExplicitDelete,
+            },
+            columns,
+            rows,
+        ))
+    }
+
+    fn delete_kitty(&mut self, command: &KittyCommand) -> Result<(), KittyError> {
+        let selector = command.delete_selector.unwrap_or(b'a');
+        let remove_content = selector.is_ascii_uppercase();
+        let selector = selector.to_ascii_lowercase();
+        if !matches!(selector, b'a' | b'i') {
+            return Err(KittyError::Unsupported("unsupported delete selector"));
+        }
+        if selector == b'i' && command.image_id == 0 {
+            return Err(KittyError::Invalid("image id is required for selector"));
+        }
+        let ordered_rows = self.grid().ordered_retained_row_ids();
+        let visible_rows = self
+            .grid()
+            .screen_row_ids()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let matching = self
+            .images
+            .placements(self.active)
+            .filter(|placement| {
+                (selector == b'a'
+                    && placement_intersects_rows(placement, &ordered_rows, &visible_rows))
+                    || (placement.application_image_id == Some(command.image_id)
+                        && (command.placement_id == 0
+                            || placement.application_placement_id == Some(command.placement_id)))
+            })
+            .map(|placement| (placement.id, placement.content_id))
+            .collect::<Vec<_>>();
+        for (placement_id, _) in &matching {
+            self.images
+                .remove_placement(self.active, *placement_id)
+                .map_err(map_image_error)?;
+        }
+        if remove_content {
+            let content_ids = if selector == b'a' {
+                matching
+                    .iter()
+                    .filter_map(|(_, content_id)| {
+                        self.images.content(self.active, *content_id).and_then(|_| {
+                            self.kitty_image_ids.map(self.active).iter().find_map(
+                                |(application_id, mapped)| {
+                                    (*mapped == *content_id).then_some((*application_id, *mapped))
+                                },
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                self.kitty_image_ids
+                    .get(self.active, command.image_id)
+                    .map(|content_id| vec![(command.image_id, content_id)])
+                    .unwrap_or_default()
+            };
+            let mut content_ids = content_ids;
+            content_ids.sort_unstable_by_key(|(_, content_id)| content_id.value());
+            content_ids.dedup_by_key(|(_, content_id)| content_id.value());
+            for (application_id, content_id) in content_ids {
+                let still_placed = self
+                    .images
+                    .placements(self.active)
+                    .any(|placement| placement.content_id == content_id);
+                if !still_placed {
+                    self.images
+                        .remove_content(self.active, content_id)
+                        .map_err(map_image_error)?;
+                    self.kitty_image_ids.remove(self.active, application_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_kitty_dimensions(&self, width: u32, height: u32) -> Result<(), KittyError> {
+        let limits = self.config.image_limits;
+        let pixels = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or(KittyError::TooBig("image dimensions overflow"))?;
+        if width == 0
+            || height == 0
+            || width > limits.maximum_dimension
+            || height > limits.maximum_dimension
+            || pixels > limits.maximum_pixels
+        {
+            return Err(KittyError::TooBig("image dimensions exceed limit"));
+        }
+        Ok(())
+    }
+
+    fn reply_kitty(&mut self, command: &KittyCommand, result: Result<(), KittyError>) {
+        let correlation = KittyCorrelation {
+            image_id: command.image_id,
+            placement_id: command.placement_id,
+            quiet: command.quiet,
+        };
+        self.reply_kitty_correlation(correlation, result);
+    }
+
+    fn reply_kitty_correlation(
+        &mut self,
+        correlation: KittyCorrelation,
+        result: Result<(), KittyError>,
+    ) {
+        if correlation.image_id == 0
+            || correlation.quiet == 2
+            || (correlation.quiet == 1 && result.is_ok())
+        {
+            return;
+        }
+        let mut reply = format!("\x1b_Gi={}", correlation.image_id);
+        if correlation.placement_id != 0 {
+            use std::fmt::Write as _;
+            let _ = write!(reply, ",p={}", correlation.placement_id);
+        }
+        reply.push(';');
+        match result {
+            Ok(()) => reply.push_str("OK"),
+            Err(error) => {
+                reply.push_str(error.code());
+                reply.push(':');
+                reply.push_str(error.message());
+                self.push_event(TerminalEvent::ImageRejected("Kitty graphics command"));
+            }
+        }
+        reply.push_str("\x1b\\");
+        if reply.len() <= 512 {
+            self.push_event(TerminalEvent::PtyWrite(reply.into_bytes()));
+        }
+    }
+
     fn begin_sixel(&mut self, params: &Params) {
         if !self.config.sixel.enabled {
             self.sixel_decoder = None;
@@ -990,7 +1678,14 @@ impl Terminal {
             Action::SixelBegin(_)
             | Action::SixelData(_)
             | Action::SixelEnd
-            | Action::SixelAbort => unreachable!("streaming Sixel actions bypass transactions"),
+            | Action::SixelAbort
+            | Action::KittyBegin(..)
+            | Action::KittyCommand(..)
+            | Action::KittyData(..)
+            | Action::KittyEnd
+            | Action::KittyAbort => {
+                unreachable!("streaming image actions bypass ordinary transactions")
+            }
             Action::StringTruncated(kind) => {
                 self.push_event(TerminalEvent::StringTruncated(kind));
             }
@@ -1748,6 +2443,24 @@ impl Terminal {
             }
             2 => {
                 self.overwrite_image_cells(0, rows, 0, columns);
+                let ordered_rows = self.grid().ordered_retained_row_ids();
+                let visible_rows = self
+                    .grid()
+                    .screen_row_ids()
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                let kitty_placements = self
+                    .images
+                    .placements(self.active)
+                    .filter(|placement| {
+                        placement.erase_policy == ImageErasePolicy::ExplicitDelete
+                            && placement_intersects_rows(placement, &ordered_rows, &visible_rows)
+                    })
+                    .map(|placement| placement.id)
+                    .collect::<Vec<_>>();
+                for placement_id in kitty_placements {
+                    let _ = self.images.remove_placement(self.active, placement_id);
+                }
                 for current in 0..rows {
                     self.grid_mut()
                         .row_mut(i32::try_from(current).unwrap())
@@ -1951,6 +2664,7 @@ impl Terminal {
             let background = self.attributes.background();
             self.alternate.reset_visible(background);
             self.images.clear_screen(ActiveScreen::Alternate);
+            self.kitty_image_ids.clear(ActiveScreen::Alternate);
             let alternate_position = clamp_position(&self.alternate, normal_cursor);
             self.alternate.set_cursor(Cursor::new(alternate_position));
             self.active = ActiveScreen::Alternate;
@@ -2325,6 +3039,105 @@ fn sixel_palette(initial: &[u32]) -> Box<[u32; MAX_SIXEL_COLORS]> {
     let count = initial.len().min(MAX_SIXEL_COLORS);
     palette[..count].copy_from_slice(&initial[..count]);
     palette
+}
+
+fn kitty_aspect_extent(
+    source_axis: u32,
+    fixed_cells: usize,
+    fixed_cell_pixels: u32,
+    fixed_source_axis: u32,
+    derived_cell_pixels: u32,
+) -> Result<usize, KittyError> {
+    if fixed_cells == 0 || fixed_source_axis == 0 || derived_cell_pixels == 0 {
+        return Err(KittyError::Invalid("destination extent must be non-zero"));
+    }
+    let numerator = u128::from(source_axis)
+        .checked_mul(u128::try_from(fixed_cells).unwrap_or(u128::MAX))
+        .and_then(|value| value.checked_mul(u128::from(fixed_cell_pixels)))
+        .ok_or(KittyError::TooBig("destination extent overflow"))?;
+    let denominator = u128::from(fixed_source_axis)
+        .checked_mul(u128::from(derived_cell_pixels))
+        .ok_or(KittyError::TooBig("destination extent overflow"))?;
+    let extent = numerator
+        .checked_add(denominator - 1)
+        .map(|value| value / denominator)
+        .ok_or(KittyError::TooBig("destination extent overflow"))?;
+    usize::try_from(extent.max(1)).map_err(|_| KittyError::TooBig("destination extent overflow"))
+}
+
+fn placement_intersects_rows(
+    placement: &ImagePlacement,
+    ordered_rows: &[u64],
+    visible_rows: &HashSet<u64>,
+) -> bool {
+    ordered_rows
+        .iter()
+        .position(|row_id| *row_id == placement.row_id)
+        .is_some_and(|start| {
+            ordered_rows
+                .iter()
+                .skip(start)
+                .take(placement.destination.rows)
+                .any(|row_id| visible_rows.contains(row_id))
+        })
+}
+
+fn kitty_continuation_control(control: &[u8]) -> bool {
+    let mut has_more = false;
+    let valid = control.split(|byte| *byte == b',').all(|field| {
+        field.split_first().is_some_and(|(key, rest)| {
+            has_more |= *key == b'm';
+            matches!(*key, b'm' | b'q') && rest.first() == Some(&b'=')
+        })
+    });
+    valid && has_more
+}
+
+fn kitty_correlation(control: &[u8]) -> KittyCorrelation {
+    let mut correlation = KittyCorrelation {
+        image_id: 0,
+        placement_id: 0,
+        quiet: 0,
+    };
+    for field in control.split(|byte| *byte == b',') {
+        let Some(separator) = field.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let value = &field[separator + 1..];
+        let Ok(value) = std::str::from_utf8(value)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or(())
+        else {
+            continue;
+        };
+        match field.first().copied() {
+            Some(b'i') => correlation.image_id = value,
+            Some(b'p') => correlation.placement_id = value,
+            Some(b'q') => correlation.quiet = u8::try_from(value).unwrap_or(u8::MAX),
+            _ => {}
+        }
+    }
+    correlation
+}
+
+const fn map_image_error(error: ImageError) -> KittyError {
+    match error {
+        ImageError::UnknownContent | ImageError::UnknownPlacement => {
+            KittyError::NotFound("image object does not exist")
+        }
+        ImageError::Dimensions
+        | ImageError::PixelLength
+        | ImageError::InvalidAnchor
+        | ImageError::InvalidCrop
+        | ImageError::InvalidDestination => KittyError::Invalid("invalid image geometry"),
+        ImageError::ContentBytes
+        | ImageError::TerminalBytes
+        | ImageError::DaemonBytes
+        | ImageError::ContentCount
+        | ImageError::PlacementCount => KittyError::NoSpace("image resource limit reached"),
+        ImageError::IdentityExhausted => KittyError::NoSpace("image identity exhausted"),
+    }
 }
 
 fn default_palette() -> [u32; 256] {

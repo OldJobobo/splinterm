@@ -31,10 +31,12 @@ pub use cursor::Cursor;
 pub use event::TerminalEvent;
 pub use grid::{Grid, ScrollDirection, ScrollResult};
 pub use image::{
-    CellExtent, ImageAlphaMode, ImageContent, ImageContentId, ImageContentMetadata,
-    ImageErasePolicy, ImageError, ImageLimits, ImageMetrics, ImagePlacement, ImagePlacementId,
-    ImagePlane, ImageRetention, ImageSourceFormat, NewImageContent, NewImagePlacement,
-    NewImagePlacementOptions, PixelRect, PixelSize, SharedImageBudget, SharedImageBudgetMetrics,
+    CellExtent, DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON, ImageAlphaMode, ImageContent,
+    ImageContentId, ImageContentMetadata, ImageErasePolicy, ImageError, ImageLimits, ImageMetrics,
+    ImagePlacement, ImagePlacementId, ImagePlane, ImageRetention, ImageSourceFormat,
+    NewImageContent, NewImagePlacement, NewImagePlacementOptions, PixelRect, PixelSize,
+    SharedImageBudget, SharedImageBudgetMetrics, SharedKittyUploadBudget,
+    SharedKittyUploadBudgetMetrics,
 };
 pub use mode::{ActiveScreen, MouseTracking, TerminalModes};
 pub use row::Row;

@@ -8,8 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
+flate2.workspace = true
+png.workspace = true
 sha2.workspace = true
 unicode-width.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

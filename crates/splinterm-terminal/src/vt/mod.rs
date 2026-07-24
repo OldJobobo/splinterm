@@ -96,6 +96,11 @@ pub(crate) enum Action {
     SixelData(u8),
     SixelEnd,
     SixelAbort,
+    KittyBegin(Vec<u8>, bool),
+    KittyCommand(Vec<u8>, bool),
+    KittyData(u8),
+    KittyEnd,
+    KittyAbort,
     StringTruncated(&'static str),
 }
 
@@ -118,6 +123,11 @@ enum State {
     DcsEscape,
     SosPmApcString,
     SosPmApcEscape,
+    ApcPrefix,
+    KittyControl,
+    KittyControlEscape,
+    KittyPayload,
+    KittyPayloadEscape,
     Utf8,
 }
 
@@ -172,12 +182,16 @@ impl Parser {
         }
 
         if matches!(byte, 0x18 | 0x1a) {
-            let action = self.sixel_streaming.then_some(Action::SixelAbort);
+            let action = if self.sixel_streaming {
+                Action::SixelAbort
+            } else {
+                Action::KittyAbort
+            };
             self.state = State::Ground;
             self.sixel_streaming = false;
             self.string.clear();
             self.clear_sequence();
-            return (action, false);
+            return (Some(action), false);
         }
         if byte == 0x1b
             && !matches!(
@@ -187,6 +201,11 @@ impl Parser {
                     | State::DcsEscape
                     | State::SosPmApcString
                     | State::SosPmApcEscape
+                    | State::ApcPrefix
+                    | State::KittyControl
+                    | State::KittyControlEscape
+                    | State::KittyPayload
+                    | State::KittyPayloadEscape
             )
         {
             self.clear_sequence();
@@ -208,6 +227,11 @@ impl Parser {
             | State::DcsPassthrough
             | State::DcsEscape => self.feed_dcs(byte),
             State::SosPmApcString | State::SosPmApcEscape => self.feed_ignored_string(byte),
+            State::ApcPrefix
+            | State::KittyControl
+            | State::KittyControlEscape
+            | State::KittyPayload
+            | State::KittyPayloadEscape => self.feed_apc(byte),
             State::Utf8 => unreachable!(),
         }
     }
@@ -226,6 +250,10 @@ impl Parser {
             }
             0xf0..=0xf4 => {
                 self.start_utf8(u32::from(byte & 0x07), 3, 0x1_0000);
+                (None, false)
+            }
+            0x9f => {
+                self.state = State::ApcPrefix;
                 (None, false)
             }
             _ => (None, false),
@@ -252,8 +280,12 @@ impl Parser {
                 self.state = State::DcsEntry;
                 (None, false)
             }
-            b'X' | b'^' | b'_' if self.state == State::Escape => {
+            b'X' | b'^' if self.state == State::Escape => {
                 self.state = State::SosPmApcString;
+                (None, false)
+            }
+            b'_' if self.state == State::Escape => {
+                self.state = State::ApcPrefix;
                 (None, false)
             }
             0x20..=0x2f => {
@@ -433,8 +465,81 @@ impl Parser {
         }
     }
 
+    fn feed_apc(&mut self, byte: u8) -> (Option<Action>, bool) {
+        match self.state {
+            State::ApcPrefix => {
+                if byte == b'G' {
+                    self.start_string(State::KittyControl, 1024);
+                } else if byte == 0x1b {
+                    self.state = State::SosPmApcEscape;
+                } else if byte == 0x9c {
+                    self.state = State::Ground;
+                } else {
+                    self.state = State::SosPmApcString;
+                }
+                (None, false)
+            }
+            State::KittyControl => match byte {
+                b';' => {
+                    let control = std::mem::take(&mut self.string);
+                    let truncated = std::mem::take(&mut self.string_truncated);
+                    self.state = State::KittyPayload;
+                    (Some(Action::KittyBegin(control, truncated)), false)
+                }
+                0x1b => {
+                    self.state = State::KittyControlEscape;
+                    (None, false)
+                }
+                0x9c => self.finish_kitty_command(),
+                _ => {
+                    self.push_string(byte);
+                    (None, false)
+                }
+            },
+            State::KittyPayload => match byte {
+                0x1b => {
+                    self.state = State::KittyPayloadEscape;
+                    (None, false)
+                }
+                0x9c => {
+                    self.state = State::Ground;
+                    (Some(Action::KittyEnd), false)
+                }
+                _ => (Some(Action::KittyData(byte)), false),
+            },
+            State::KittyControlEscape => {
+                if byte == b'\\' {
+                    self.finish_kitty_command()
+                } else {
+                    self.state = State::Escape;
+                    self.string.clear();
+                    (Some(Action::KittyAbort), true)
+                }
+            }
+            State::KittyPayloadEscape => {
+                if byte == b'\\' {
+                    self.state = State::Ground;
+                    (Some(Action::KittyEnd), false)
+                } else {
+                    self.state = State::Escape;
+                    (Some(Action::KittyAbort), true)
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn finish_kitty_command(&mut self) -> (Option<Action>, bool) {
+        self.state = State::Ground;
+        let control = std::mem::take(&mut self.string);
+        let truncated = std::mem::take(&mut self.string_truncated);
+        (Some(Action::KittyCommand(control, truncated)), false)
+    }
+
     fn feed_ignored_string(&mut self, byte: u8) -> (Option<Action>, bool) {
-        if self.state == State::SosPmApcEscape {
+        if byte == 0x9c {
+            self.state = State::Ground;
+        } else if self.state == State::SosPmApcEscape {
             if byte == b'\\' {
                 self.state = State::Ground;
                 return (None, false);
@@ -630,6 +735,70 @@ mod tests {
         assert_eq!(actions[2], Action::SixelData(b'1'));
         assert_eq!(actions[3], Action::SixelData(b'~'));
         assert_eq!(actions[4], Action::SixelEnd);
+    }
+
+    #[test]
+    fn kitty_apc_streams_only_recognized_payloads_and_recovers() {
+        let mut parser = Parser::new(16, 16);
+        let mut actions = Vec::new();
+        for byte in b"\x1b_not-kitty\x1b\\Z\x1b_Gi=7,m=0;AAAA\x1b\\Q" {
+            let (action, mut again) = parser.feed(*byte);
+            if let Some(action) = action {
+                actions.push(action);
+            }
+            while again {
+                let (action, next) = parser.feed(*byte);
+                if let Some(action) = action {
+                    actions.push(action);
+                }
+                again = next;
+            }
+        }
+        assert_eq!(
+            actions,
+            vec![
+                Action::Print('Z'),
+                Action::KittyBegin(b"i=7,m=0".to_vec(), false),
+                Action::KittyData(b'A'),
+                Action::KittyData(b'A'),
+                Action::KittyData(b'A'),
+                Action::KittyData(b'A'),
+                Action::KittyEnd,
+                Action::Print('Q'),
+            ]
+        );
+    }
+
+    #[test]
+    fn kitty_control_only_and_cancel_are_bounded_and_synchronized() {
+        let mut parser = Parser::new(16, 16);
+        let mut actions = Vec::new();
+        let mut input = b"\x1b_Ga=p,i=7\x1b\\\x1b_G".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 1025));
+        input.extend_from_slice(b"\x1b\\\x1b_Ga=t;AAAA\x1aZ");
+        for byte in input {
+            let (action, mut again) = parser.feed(byte);
+            if let Some(action) = action {
+                actions.push(action);
+            }
+            while again {
+                let (action, next) = parser.feed(byte);
+                if let Some(action) = action {
+                    actions.push(action);
+                }
+                again = next;
+            }
+        }
+        assert_eq!(
+            actions.first(),
+            Some(&Action::KittyCommand(b"a=p,i=7".to_vec(), false))
+        );
+        assert!(
+            matches!(actions.get(1), Some(Action::KittyCommand(control, true)) if control.len() == 1024)
+        );
+        assert_eq!(actions.last(), Some(&Action::Print('Z')));
+        assert!(actions.contains(&Action::KittyAbort));
+        assert_eq!(parser.state, State::Ground);
     }
 
     #[test]

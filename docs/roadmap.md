@@ -110,7 +110,13 @@ implemented. Headless lifecycle, cleanup, stale-incarnation, cache-reuse, and
 serialized daemon gates pass. Slice 4 is accepted with atomic bounded pane
 source leases, stable-row placement projection, clipped premultiplied CPU image
 composition, ADR z tiers, fractional geometry, conservative image damage,
-full/incremental identity, and trusted-overlay precedence.
+full/incremental identity, and trusted-overlay precedence. Slice 5 is accepted
+as the bounded practical Kitty static-image subset: selective streaming APC,
+direct/chunked RGB/RGBA/PNG with zlib, transmit/display/query/visible-delete,
+IDs and placements, crop/aspect/offset/cursor/z semantics, process-wide inbound
+admission, exact fixture execution, and pinned `kitten icat`/Chafa trace replay.
+External transports, placeholders, relative placement, and animation remain
+explicitly deferred.
 
 - Generic sparse image-content and placement plane without enlarging every cell
 - Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers
