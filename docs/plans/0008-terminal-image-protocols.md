@@ -131,10 +131,10 @@ SHA-256 digests, and replay without protocol errors. Headless tests cover C1 and
 exhaustion/release, replacement rollback, raw/PNG allocation limits,
 visible-versus-scrollback deletion, resize, reflow/scrollback anchors,
 alternate screen, revision replay, and reset. No graphical command ran for
-Slice 5. A requested 30-second fuzz run did not start: the first invocation used
-stable instead of nightly and the corrected invocation named the target with an
-underscore instead of its hyphenated Cargo name; no fuzz iterations executed,
-and the stop-loss prohibited another automatic retry.
+Slice 5. After explicit approval to retry the two invocation errors, a corrected
+nightly ASan/libFuzzer `terminal-advance` run completed 88,832 executions in 31
+seconds with no crash, timeout, or sanitizer finding; final coverage was 2,401
+edges and 11,804 features.
 
 ## Feasibility and current baseline
 
