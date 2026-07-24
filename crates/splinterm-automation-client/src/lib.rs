@@ -2846,6 +2846,7 @@ impl ImageContentCache {
                 .remove(&oldest)
                 .context("image cache order references a missing entry")?;
             self.metrics.bytes -= removed.len();
+            self.metrics.entries = self.entries.len();
         }
         self.metrics.bytes += source.len();
         self.entries.insert(key, source.clone());
@@ -3627,6 +3628,61 @@ mod tests {
             .unwrap();
         assert!(!cache.contains(&metadata).unwrap());
         assert!(cache.contains(&replacement).unwrap());
+    }
+
+    #[test]
+    fn failed_admission_after_partial_eviction_keeps_exact_metrics() {
+        let metadata = |content_id: u64, pixels: &[u8]| ImageContentMetadata {
+            content_id,
+            generation: 1,
+            width: 1,
+            height: u32::try_from(pixels.len() / 4).unwrap(),
+            source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+            alpha_mode: splinterm_protocol::ImageAlphaMode::Opaque,
+            digest: Sha256::digest(pixels).into(),
+            byte_length: pixels.len(),
+            retention: splinterm_protocol::ImageRetention::WhilePlaced,
+        };
+        let first_pixels = vec![1_u8, 2, 3, 255];
+        let second_pixels = vec![4_u8, 5, 6, 255];
+        let replacement_pixels = vec![7_u8; 8];
+        let first = metadata(1, &first_pixels);
+        let second = metadata(2, &second_pixels);
+        let replacement = metadata(3, &replacement_pixels);
+        let cache = SharedImageContentCache::with_maximum_bytes(8).unwrap();
+        cache
+            .insert_source(
+                &first,
+                ImageContentSource::Buffered(Arc::from(first_pixels)),
+            )
+            .unwrap();
+        cache
+            .insert_source(
+                &second,
+                ImageContentSource::Buffered(Arc::from(second_pixels)),
+            )
+            .unwrap();
+        let leases = cache.lease(std::slice::from_ref(&first)).unwrap();
+        assert!(
+            cache
+                .insert_source(
+                    &replacement,
+                    ImageContentSource::Buffered(Arc::from(replacement_pixels)),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            cache.metrics().unwrap(),
+            ImageContentCacheMetrics {
+                bytes: 4,
+                entries: 1,
+                high_water_bytes: 8,
+                high_water_entries: 2,
+            }
+        );
+        assert!(cache.contains(&first).unwrap());
+        assert!(!cache.contains(&second).unwrap());
+        drop(leases);
     }
 
     #[tokio::test]

@@ -6657,6 +6657,21 @@ mod tests {
             CursorStyle::Block,
         );
         assert_eq!(&below_background[0..4], &[0, 0, 1, 0xff]);
+
+        frame.images[0].placement.z_index = -1;
+        frame.images[0].placement.y_offset = -1;
+        frame.images[0].row = 1;
+        let mut negative_y = vec![0; 2 * 6 * 4];
+        paint_snapshot(
+            &mut negative_y,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(&negative_y[2 * 4..3 * 4], &[0, 0, 128, 0xff]);
     }
 
     #[test]
@@ -6697,6 +6712,91 @@ mod tests {
             CursorStyle::Block,
         );
         assert_eq!(incremental, full);
+
+        frame.images.clear();
+        let mut clean_removed = vec![0; full.len()];
+        paint_snapshot(
+            &mut clean_removed,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        paint_snapshot_rows(
+            &mut full,
+            2,
+            6,
+            &frame,
+            &geometry,
+            &[true, true, true],
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(full, clean_removed);
+    }
+
+    #[test]
+    fn cursor_and_selection_overlay_remain_above_nonnegative_images() {
+        let mut frame = damage_test_frame();
+        frame.images = vec![test_snapshot_image(
+            &[0, 0, 255, 255],
+            1,
+            1,
+            0,
+            splinterm_protocol::ImagePixelRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            0,
+            0,
+            1,
+        )];
+        frame.cursor = Some((0, 0));
+        let geometry = frame.tight_geometry().unwrap();
+        let mut canvas = vec![0; 2 * 6 * 4];
+        paint_snapshot(
+            &mut canvas,
+            2,
+            6,
+            &frame,
+            &geometry,
+            true,
+            CursorStyle::Block,
+        );
+        assert_eq!(&canvas[0..4], &[255, 255, 255, 255]);
+
+        frame.cursor = None;
+        paint_snapshot(
+            &mut canvas,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        let image_pixel = canvas[0..4].to_vec();
+        paint_snapshot_overlays(
+            &mut canvas,
+            2,
+            6,
+            &frame,
+            &geometry,
+            SnapshotOverlays {
+                selection: Some(((0, 0), (0, 0))),
+                hovered_url: None,
+                dirty_rows: None,
+                focused: true,
+                selection_color: 0x0000_ff00,
+                url_color: 0,
+                accent_color: 0,
+            },
+        );
+        assert_ne!(&canvas[0..4], image_pixel);
     }
 
     #[test]
@@ -6791,6 +6891,16 @@ mod tests {
         let stride = usize::try_from(capture.stride).unwrap();
         assert_eq!(
             &capture.pixels[y * stride + x * 4..y * stride + x * 4 + 4],
+            &pixels
+        );
+        let fractional =
+            capture_final_buffer_with_sources(&snapshot, &leases, 150, false, CursorStyle::Block)
+                .unwrap();
+        let x = usize::try_from(fractional.grid_rect.x).unwrap();
+        let y = usize::try_from(fractional.grid_rect.y + fractional.cell_height).unwrap();
+        let stride = usize::try_from(fractional.stride).unwrap();
+        assert_eq!(
+            &fractional.pixels[y * stride + x * 4..y * stride + x * 4 + 4],
             &pixels
         );
 

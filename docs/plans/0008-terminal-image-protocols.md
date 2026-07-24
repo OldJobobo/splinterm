@@ -1,6 +1,6 @@
 # Plan 0008: bounded terminal image protocols
 
-- **Status:** In progress — Slices 0–1 and 3 accepted; Slice 2 graphical closure deferred; Slice 4 in progress
+- **Status:** In progress — Slices 0–1, 3–4 accepted; Slice 2 graphical closure deferred
 - **Roadmap:** Phase 5 — bounded terminal image protocols
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md),
   [Plan 0001](0001-terminal-kernel.md),
@@ -84,7 +84,7 @@ reuse. The serialized 16-case daemon suite covers detach/reattach, subscriber
 overflow/resync, exit, relaunch/stale incarnation, and socket cleanup. No
 graphical command ran for Slice 3.
 
-Slice 4 is in progress. The trusted client now shares one 64 MiB renderer-wide
+Slice 4 is implemented and accepted. The trusted client now shares one 64 MiB renderer-wide
 exact-identity resident-source registry across panes. Each ordered snapshot or
 update carries an atomic exact lease set; leased mapped/buffered entries cannot
 be evicted or disappear from byte/high-water accounting. `SnapshotFrame` resolves placements by stable displayed row
@@ -98,6 +98,18 @@ force full pane reconstruction; dirty-row painting clears and recomposes all
 layers, and image-free scroll-copy remains unchanged. Placement opacity is not a
 wire property; Slice 4's accepted opacity behavior is canonical source alpha plus
 the existing terminal background opacity.
+
+Slice 4's non-graphical gate covers exact alpha/crop/scale/offset vectors,
+fractional 1.25x capture, strict z-tier boundaries and Kitty tie ordering,
+stable detached row IDs, pane clipping, cursor/selection precedence, image
+removal and all-row full/incremental identity, image-scroll full reconstruction,
+active/inactive scale rebuild, and resident-source eviction/admission metrics.
+The renderer uses the existing Wayland backing buffer and allocates no scaled
+surface cache, so SHM remains unchanged; the enforced 64 MiB resident cap is the
+accepted Slice 0 client-cache value recorded in
+`docs/spikes/artifacts/0025-terminal-images/budget-probe.json`. The no-image path
+retains an empty non-allocating placement vector and the existing image-free
+scroll-copy tests. No graphical command ran for Slice 4.
 
 ## Feasibility and current baseline
 

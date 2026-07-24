@@ -1828,6 +1828,16 @@ fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
         || update.images.is_some()
 }
 
+fn terminal_update_requires_full_frame(update: &TerminalUpdate, current_has_images: bool) -> bool {
+    update.columns.is_some()
+        || update.row_count.is_some()
+        || update.palette.is_some()
+        || update.default_colors.is_some()
+        || update.active_screen.is_some()
+        || update.images.is_some()
+        || (current_has_images && !update.scrolls.is_empty())
+}
+
 fn apply_scrollback_update(
     snapshot: &mut TerminalSnapshot,
     scrollback: splinterm_protocol::TerminalScrollbackUpdate,
@@ -4523,13 +4533,13 @@ impl App {
                         update.rows.iter().map(|patch| patch.index).collect();
                     let scrolls = update.scrolls.clone();
                     let history_changed = update.scrollback.is_some();
-                    let image_changed = update.images.is_some();
-                    let mut full = update.columns.is_some()
-                        || update.row_count.is_some()
-                        || update.palette.is_some()
-                        || update.default_colors.is_some()
-                        || update.active_screen.is_some()
-                        || image_changed;
+                    let mut full = terminal_update_requires_full_frame(
+                        &update,
+                        self.pane
+                            .snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.images.is_some()),
+                    );
                     let content_changed = terminal_update_changes_visible_content(&update);
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
@@ -4556,9 +4566,6 @@ impl App {
                         snapshot,
                     );
                     if history_changed && !self.pane.scrollback_viewport.is_live() {
-                        full = true;
-                    }
-                    if !scrolls.is_empty() && snapshot.images.is_some() {
                         full = true;
                     }
                     if content_changed {
@@ -7420,6 +7427,15 @@ mod tests {
             rows: 1,
         });
         assert!(terminal_update_changes_visible_content(&scroll));
+        assert!(!terminal_update_requires_full_frame(&scroll, false));
+        assert!(terminal_update_requires_full_frame(&scroll, true));
+        let mut image_update = empty_update();
+        image_update.images = Some(Box::new(splinterm_protocol::TerminalImagePlane {
+            screen: ActiveScreen::Normal,
+            contents: Vec::new(),
+            placements: Vec::new(),
+        }));
+        assert!(terminal_update_requires_full_frame(&image_update, false));
         let mut colors = empty_update();
         colors.default_colors = Some([1, 2, 3]);
         assert!(terminal_update_changes_visible_content(&colors));

@@ -107,9 +107,10 @@ identities, with metadata exposed only to the executable-verified trusted UI.
 The mandatory dedicated binary content channel, preferred sealed-memfd path,
 bounded client source cache, and authoritative 64 MiB daemon byte admission are
 implemented. Headless lifecycle, cleanup, stale-incarnation, cache-reuse, and
-serialized daemon gates pass. Slice 4 is in progress with shared pane source
-ownership, stable-row placement projection, clipped premultiplied CPU image
-composition, ADR z tiers, fractional geometry, and conservative image damage.
+serialized daemon gates pass. Slice 4 is accepted with atomic bounded pane
+source leases, stable-row placement projection, clipped premultiplied CPU image
+composition, ADR z tiers, fractional geometry, conservative image damage,
+full/incremental identity, and trusted-overlay precedence.
 
 - Generic sparse image-content and placement plane without enlarging every cell
 - Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers
