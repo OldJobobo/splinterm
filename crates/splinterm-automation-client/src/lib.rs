@@ -10,10 +10,11 @@
 //! supported JSON/NDJSON compatibility contract.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     env,
     io::{self, ErrorKind, Write as _},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -2642,6 +2643,100 @@ async fn receive_image_content(
     Ok(pixels)
 }
 
+pub const MAX_IMAGE_SOURCE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ImageCacheKey {
+    content_id: u64,
+    generation: u64,
+    digest: [u8; 32],
+}
+
+impl From<&ImageContentMetadata> for ImageCacheKey {
+    fn from(metadata: &ImageContentMetadata) -> Self {
+        Self {
+            content_id: metadata.content_id,
+            generation: metadata.generation,
+            digest: metadata.digest,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ImageContentCacheMetrics {
+    pub bytes: usize,
+    pub entries: usize,
+    pub high_water_bytes: usize,
+    pub high_water_entries: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct ImageContentCache {
+    entries: HashMap<ImageCacheKey, Arc<[u8]>>,
+    order: VecDeque<ImageCacheKey>,
+    metrics: ImageContentCacheMetrics,
+}
+
+impl ImageContentCache {
+    #[must_use]
+    pub fn contains(&self, metadata: &ImageContentMetadata) -> bool {
+        self.entries.contains_key(&ImageCacheKey::from(metadata))
+    }
+
+    pub fn insert(
+        &mut self,
+        metadata: &ImageContentMetadata,
+        pixels: Vec<u8>,
+    ) -> Result<Arc<[u8]>> {
+        if pixels.len() != metadata.byte_length
+            || pixels.len() > MAX_IMAGE_SOURCE_CACHE_BYTES
+            || Sha256::digest(&pixels)[..] != metadata.digest
+        {
+            bail!("image content does not match cache metadata");
+        }
+        let key = ImageCacheKey::from(metadata);
+        if let Some(existing) = self.entries.get(&key) {
+            return Ok(Arc::clone(existing));
+        }
+        while self
+            .metrics
+            .bytes
+            .checked_add(pixels.len())
+            .is_none_or(|bytes| bytes > MAX_IMAGE_SOURCE_CACHE_BYTES)
+        {
+            let oldest = self
+                .order
+                .pop_front()
+                .context("image cache accounting has no evictable entry")?;
+            let removed = self
+                .entries
+                .remove(&oldest)
+                .context("image cache order references a missing entry")?;
+            self.metrics.bytes -= removed.len();
+        }
+        let pixels: Arc<[u8]> = pixels.into();
+        self.metrics.bytes += pixels.len();
+        self.entries.insert(key, Arc::clone(&pixels));
+        self.order.push_back(key);
+        self.metrics.entries = self.entries.len();
+        self.metrics.high_water_bytes = self.metrics.high_water_bytes.max(self.metrics.bytes);
+        self.metrics.high_water_entries = self.metrics.high_water_entries.max(self.metrics.entries);
+        Ok(pixels)
+    }
+
+    #[must_use]
+    pub fn get(&self, metadata: &ImageContentMetadata) -> Option<Arc<[u8]>> {
+        self.entries
+            .get(&ImageCacheKey::from(metadata))
+            .map(Arc::clone)
+    }
+
+    #[must_use]
+    pub const fn metrics(&self) -> ImageContentCacheMetrics {
+        self.metrics
+    }
+}
+
 /// A negotiated connection to the private local daemon protocol.
 ///
 /// This type is an internal implementation boundary. Public automation
@@ -3157,6 +3252,37 @@ mod tests {
         CellAttributes, ColorSource, ProtocolError, SearchMatch, SubscriptionEvent, TerminalCell,
         TerminalRow, UnderlineStyle,
     };
+
+    #[test]
+    fn image_source_cache_deduplicates_exact_identity_and_tracks_bounds() {
+        let pixels = vec![1_u8, 2, 3, 255];
+        let metadata = ImageContentMetadata {
+            content_id: 1,
+            generation: 2,
+            width: 1,
+            height: 1,
+            source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+            alpha_mode: splinterm_protocol::ImageAlphaMode::Opaque,
+            digest: Sha256::digest(&pixels).into(),
+            byte_length: pixels.len(),
+            retention: splinterm_protocol::ImageRetention::WhilePlaced,
+        };
+        let mut cache = ImageContentCache::default();
+        let first = cache.insert(&metadata, pixels.clone()).unwrap();
+        let second = cache.insert(&metadata, pixels).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(cache.contains(&metadata));
+        assert_eq!(cache.get(&metadata).unwrap().as_ref(), first.as_ref());
+        assert_eq!(
+            cache.metrics(),
+            ImageContentCacheMetrics {
+                bytes: 4,
+                entries: 1,
+                high_water_bytes: 4,
+                high_water_entries: 1,
+            }
+        );
+    }
 
     #[tokio::test]
     async fn binary_image_content_receiver_bounds_chunks_and_verifies_digest() {

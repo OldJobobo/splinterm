@@ -1081,6 +1081,7 @@ dependencies = [
  "splinterm-protocol",
  "swash",
  "tokio",
+ "tokio-util",
  "unicode-width",
  "wayland-client",
 ]

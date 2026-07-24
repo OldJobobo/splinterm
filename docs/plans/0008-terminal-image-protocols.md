@@ -68,7 +68,9 @@ pending-token and active transfer caps with high-water metrics. The mandatory
 fallback is connected through a separate mode-0600 Unix socket using raw chunks
 of at most 64 KiB, a four-chunk acknowledgement window, exact offsets, digest
 verification, cancellation, and five-second I/O deadlines. The trusted client
-receiver validates identity and bounds before allocating. Sealed memfd delivery
+receiver validates identity and bounds before allocating, retains a bounded
+32 MiB exact-identity source cache, and resolves only missing bodies across
+attach, update, and resync so repeated placements reuse one transfer. Sealed memfd delivery
 remains honestly disabled until its dedicated optimization lands.
 
 ## Feasibility and current baseline
