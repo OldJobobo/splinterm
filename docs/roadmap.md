@@ -101,12 +101,13 @@ streaming DCS Sixel path and a bounded decoder matching the five pinned semantic
 fixtures. Foot cursor/scroller modes, XTSMGRAPHICS replies, palettes, cell-aligned
 overwrite/underlay composition, and resize/reflow behavior are implemented. A
 60-second ASan/libFuzzer run completed 258,496 executions without a crash; the
-full pinned differential matrix remains before Slice 2 closes. Slice 3 is now
-in progress: protocol v23 carries bounded image metadata and exact content
+full pinned differential matrix remains before Slice 2 closes. Slice 3 is
+accepted: protocol v23 carries bounded image metadata and exact content
 identities, with metadata exposed only to the executable-verified trusted UI.
 The mandatory dedicated binary content channel, preferred sealed-memfd path,
 bounded client source cache, and authoritative 64 MiB daemon byte admission are
-implemented; Slice 3 lifecycle E2E closure remains.
+implemented. Headless lifecycle, cleanup, stale-incarnation, cache-reuse, and
+serialized daemon gates pass.
 
 - Generic sparse image-content and placement plane without enlarging every cell
 - Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers

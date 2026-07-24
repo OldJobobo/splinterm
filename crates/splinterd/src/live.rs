@@ -1462,6 +1462,80 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_image_budget_rejects_across_actors_and_releases_on_exit() {
+        let budget = splinterm_terminal::SharedImageBudget::new(96);
+        let image_script = "printf '\\033Pq#1;2;100;0;0#1~\\033\\\\'; sleep 5";
+        let config = || {
+            let mut config = fast_config();
+            config.pixel_width = 320;
+            config.pixel_height = 96;
+            config.terminal.shared_image_budget = Some(budget.clone());
+            config
+        };
+        let first =
+            LiveSplintRuntime::spawn(SplintId::new(), backend(), shell(image_script), config())
+                .await
+                .unwrap();
+        let first_handle = first.handle();
+        let second =
+            LiveSplintRuntime::spawn(SplintId::new(), backend(), shell(image_script), config())
+                .await
+                .unwrap();
+        let second_handle = second.handle();
+        time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            first_handle.snapshot().await.unwrap().image_contents.len(),
+            1
+        );
+        assert_eq!(
+            second_handle.snapshot().await.unwrap().image_contents.len(),
+            1
+        );
+        assert_eq!(budget.metrics().content_bytes, 96);
+
+        let rejected =
+            LiveSplintRuntime::spawn(SplintId::new(), backend(), shell(image_script), config())
+                .await
+                .unwrap();
+        let rejected_handle = rejected.handle();
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            rejected_handle
+                .snapshot()
+                .await
+                .unwrap()
+                .image_contents
+                .is_empty()
+        );
+        assert_eq!(budget.metrics().content_bytes, 96);
+
+        first.shutdown().await.unwrap();
+        assert_eq!(budget.metrics().content_bytes, 48);
+        let replacement =
+            LiveSplintRuntime::spawn(SplintId::new(), backend(), shell(image_script), config())
+                .await
+                .unwrap();
+        let replacement_handle = replacement.handle();
+        time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            replacement_handle
+                .snapshot()
+                .await
+                .unwrap()
+                .image_contents
+                .len(),
+            1
+        );
+        assert_eq!(budget.metrics().content_bytes, 96);
+        assert_eq!(budget.metrics().high_water_content_bytes, 96);
+
+        second.shutdown().await.unwrap();
+        rejected.shutdown().await.unwrap();
+        replacement.shutdown().await.unwrap();
+        assert_eq!(budget.metrics().content_bytes, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn detached_actor_keeps_consuming_and_snapshots_current_state() {
         let runtime = LiveSplintRuntime::spawn(
             SplintId::new(),

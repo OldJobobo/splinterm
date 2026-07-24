@@ -5888,6 +5888,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sealed_image_content_channel_passes_one_exact_immutable_descriptor() {
+        use std::io::{IoSliceMut, Read as _, Seek as _, SeekFrom};
+
+        use rustix::{
+            fs::{SealFlags, fcntl_get_seals, fstat},
+            net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, recvmsg},
+        };
+        use splinterm_terminal::{
+            ImageAlphaMode, ImagePlane, ImageRetention, ImageSourceFormat, NewImageContent,
+        };
+
+        let mut plane = ImagePlane::default();
+        let content_id = plane
+            .insert_content(
+                ActiveScreen::Normal,
+                NewImageContent {
+                    width: 1,
+                    height: 1,
+                    source_format: ImageSourceFormat::Sixel,
+                    alpha_mode: ImageAlphaMode::Opaque,
+                    pixels: &[1, 2, 3, 255],
+                    retention: ImageRetention::ExplicitDelete,
+                },
+            )
+            .unwrap();
+        let content = plane
+            .content(ActiveScreen::Normal, content_id)
+            .unwrap()
+            .clone();
+        let metadata = content.metadata();
+        let claimed = splinterd::image_transport::ClaimedTransfer {
+            transfer_id: 1,
+            request: splinterm_protocol::ImageContentRequest {
+                splint_id: SplintId::new(),
+                incarnation: 2,
+                content_id: content_id.value(),
+                generation: metadata.generation,
+                digest: metadata.digest,
+                accepted_transfers: vec![ImageTransferMode::SealedMemfd],
+            },
+            content,
+            mode: ImageTransferMode::SealedMemfd,
+        };
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let sender =
+            tokio::spawn(async move { send_image_content_memfd(&mut server, &claimed).await });
+        client.readable().await.unwrap();
+        let mut marker = [0_u8; 1];
+        let mut iov = [IoSliceMut::new(&mut marker)];
+        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut ancillary = RecvAncillaryBuffer::new(&mut space);
+        let message = recvmsg(
+            client.as_fd(),
+            &mut iov,
+            &mut ancillary,
+            RecvFlags::CMSG_CLOEXEC,
+        )
+        .unwrap();
+        assert_eq!(message.bytes, 1);
+        assert_eq!(marker, [b'F']);
+        assert!(!message.flags.contains(ReturnFlags::CTRUNC));
+        let mut descriptor = None;
+        for item in ancillary.drain() {
+            if let RecvAncillaryMessage::ScmRights(mut descriptors) = item {
+                assert!(descriptor.is_none());
+                descriptor = descriptors.next();
+                assert!(descriptors.next().is_none());
+            }
+        }
+        let descriptor = descriptor.unwrap();
+        assert_eq!(
+            usize::try_from(fstat(&descriptor).unwrap().st_size).unwrap(),
+            4
+        );
+        assert!(
+            fcntl_get_seals(&descriptor)
+                .unwrap()
+                .contains(SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL)
+        );
+        let mut file = std::fs::File::from(descriptor);
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut pixels = [0_u8; 4];
+        file.read_exact(&mut pixels).unwrap();
+        assert_eq!(pixels, [1, 2, 3, 255]);
+        let mut header = [0_u8; IMAGE_MEMFD_HEADER_BYTES];
+        client.read_exact(&mut header).await.unwrap();
+        assert_eq!(&header[0..5], b"SPIF\x01");
+        assert_eq!(u64::from_be_bytes(header[5..13].try_into().unwrap()), 4);
+        assert_eq!(&header[13..45], &metadata.digest);
+        client.write_all(&[1]).await.unwrap();
+        sender.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn dropped_content_sender_releases_active_transfer_capacity() {
         use splinterm_terminal::{
             ImageAlphaMode, ImagePlane, ImageRetention, ImageSourceFormat, NewImageContent,

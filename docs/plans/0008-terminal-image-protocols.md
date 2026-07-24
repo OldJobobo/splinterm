@@ -1,6 +1,6 @@
 # Plan 0008: bounded terminal image protocols
 
-- **Status:** In progress — Slices 0–1 accepted; Slice 2 graphical closure deferred; Slice 3 in progress
+- **Status:** In progress — Slices 0–1 and 3 accepted; Slice 2 graphical closure deferred
 - **Roadmap:** Phase 5 — bounded terminal image protocols
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md),
   [Plan 0001](0001-terminal-kernel.md),
@@ -55,7 +55,7 @@ without a crash. The complete pinned differential matrix remains before Slice 2
 closes. Cursor/scroller placement modes and bounded XTSMGRAPHICS color/geometry
 replies are implemented.
 
-Slice 3 is in progress. Protocol v23 now carries bounded image capabilities,
+Slice 3 is implemented and accepted. Protocol v23 now carries bounded image capabilities,
 limits, metadata, placements, and exact content request/transfer identities.
 Attach snapshots and semantic updates project metadata without pixel bodies only
 to a trusted UI whose executable identity matches Splinterm; automation remains
@@ -76,7 +76,13 @@ received descriptor, recheck all write/grow/shrink/seal seals, map read-only,
 and verify the digest; binary chunks remain the negotiated fallback. One shared
 64 MiB atomic daemon budget now reserves bytes at catalog insertion and releases
 on semantic deletion, reclaim, clear/reset, or actor drop, independently of
-pending/active transfer clones. Slice 3 lifecycle E2E closure remains.
+pending/active transfer clones. Headless actor tests cover cross-Splint
+exhaustion, rejection without mutation, exit release, and replacement admission;
+transport tests cover exact sealed-FD passage, raw fallback windows, digest and
+cache validation, cancellation-safe active-cap cleanup, and transfer-once cache
+reuse. The serialized 16-case daemon suite covers detach/reattach, subscriber
+overflow/resync, exit, relaunch/stale incarnation, and socket cleanup. No
+graphical command ran for Slice 3.
 
 ## Feasibility and current baseline
 
@@ -562,6 +568,19 @@ cargo fuzz run terminal-advance
 
 Fuzz duration and graphical commands are selected explicitly for the slice; they
 are not silently run as part of routine editing.
+
+## Slice 3 validation evidence
+
+- `cargo test -p splinterm-terminal --lib --test images --test memory_layout --test snapshot`
+  passed 135 tests across the selected targets.
+- `cargo test -p splinterm-protocol`, `cargo test -p splinterm-filemap`,
+  `cargo test -p splinterm-automation-client`, and daemon library/binary tests passed.
+- `cargo test -p splinterd --test end_to_end -- --test-threads=1` passed 16/16.
+- `cargo check --workspace --all-targets`, focused warning-denied Clippy for the
+  changed libraries, formatting, and `git diff --check` passed. Workspace-wide
+  warning-denied Clippy remains blocked only by unrelated pre-existing/untracked
+  benchmark-oracle lint findings outside Slice 3.
+- No graphical command ran.
 
 ## Principal risks and mitigations
 
