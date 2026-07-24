@@ -83,6 +83,9 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::SetWindowDefaultFocus { .. } => AuditOperation::SetWindowDefaultFocus,
         Request::RenameSplint { .. } => AuditOperation::RenameSplint,
         Request::Attach { .. } => AuditOperation::Attach,
+        // Keep the frozen public audit vocabulary stable; content reads remain
+        // an exact-incarnation terminal attachment operation in this phase.
+        Request::RequestImageContent { .. } => AuditOperation::Attach,
         Request::StartScrollbackPage { .. } | Request::ScrollbackPage { .. } => {
             AuditOperation::ScrollbackPage
         }

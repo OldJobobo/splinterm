@@ -223,6 +223,7 @@ mod tests {
             scrollback_rows: history.iter().enumerate().map(history_row).collect(),
             available_scrollback_rows: history.len(),
             omitted_oldest_scrollback_rows: 0,
+            images: None,
             exited_code: None,
             exited_signal: None,
         }

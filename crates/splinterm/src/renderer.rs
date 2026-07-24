@@ -1893,6 +1893,7 @@ impl ChromeText {
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
+            images: None,
             exited_code: None,
             exited_signal: None,
         };
@@ -4290,6 +4291,7 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
+            images: None,
             exited_code: None,
             exited_signal: None,
         };
@@ -4778,6 +4780,7 @@ mod tests {
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
+            images: None,
             exited_code: None,
             exited_signal: None,
         }

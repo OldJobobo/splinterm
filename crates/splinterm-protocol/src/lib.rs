@@ -10,7 +10,7 @@ use splinterm_core::{
     Axis, Dojo, DojoId, Lair, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
 };
 
-pub const PROTOCOL_VERSION: u16 = 22;
+pub const PROTOCOL_VERSION: u16 = 23;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -33,6 +33,19 @@ pub const MAX_UPDATE_SCROLLS: usize = MAX_ROWS as usize;
 pub const MAX_CONSENT_FRAME_BYTES: usize = 16 * 1024;
 pub const CONSENT_CAPABILITY_BYTES: usize = 32;
 pub const MAX_ACCESS_SCOPES: usize = 8;
+pub const MAX_IMAGE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES_PER_SPLINT: usize = 32 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES_PER_DAEMON: usize = 64 * 1024 * 1024;
+pub const MAX_IMAGE_CONTENTS_PER_SPLINT: usize = 64;
+pub const MAX_IMAGE_PLACEMENTS_PER_SPLINT: usize = 256;
+pub const MAX_IMAGE_DIMENSION: u32 = 4096;
+pub const MAX_IMAGE_PIXELS: usize = 4_194_304;
+pub const MAX_IMAGE_CHUNK_BYTES: usize = 64 * 1024;
+pub const MAX_IMAGE_CHUNK_WINDOW: usize = 4;
+pub const MAX_IMAGE_TRANSFERS_PER_SPLINT: usize = 2;
+pub const MAX_IMAGE_TRANSFERS_PER_DAEMON: usize = 4;
+pub const IMAGE_TRANSFER_TOKEN_BYTES: usize = 32;
+pub const IMAGE_TRANSFER_TOKEN_TTL_MILLIS: u32 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +95,45 @@ pub enum ServerFrame {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageServerCapabilities {
+    pub metadata_version: u16,
+    pub binary_chunks: bool,
+    pub sealed_memfd: bool,
+    pub maximum_content_bytes: usize,
+    pub maximum_bytes_per_splint: usize,
+    pub maximum_bytes_per_daemon: usize,
+    pub maximum_contents_per_splint: usize,
+    pub maximum_placements_per_splint: usize,
+    pub maximum_dimension: u32,
+    pub maximum_pixels: usize,
+    pub maximum_chunk_bytes: usize,
+    pub maximum_chunk_window: usize,
+    pub maximum_transfers_per_splint: usize,
+    pub maximum_transfers_per_daemon: usize,
+}
+
+impl Default for ImageServerCapabilities {
+    fn default() -> Self {
+        Self {
+            metadata_version: 1,
+            binary_chunks: false,
+            sealed_memfd: false,
+            maximum_content_bytes: MAX_IMAGE_CONTENT_BYTES,
+            maximum_bytes_per_splint: MAX_IMAGE_BYTES_PER_SPLINT,
+            maximum_bytes_per_daemon: MAX_IMAGE_BYTES_PER_DAEMON,
+            maximum_contents_per_splint: MAX_IMAGE_CONTENTS_PER_SPLINT,
+            maximum_placements_per_splint: MAX_IMAGE_PLACEMENTS_PER_SPLINT,
+            maximum_dimension: MAX_IMAGE_DIMENSION,
+            maximum_pixels: MAX_IMAGE_PIXELS,
+            maximum_chunk_bytes: MAX_IMAGE_CHUNK_BYTES,
+            maximum_chunk_window: MAX_IMAGE_CHUNK_WINDOW,
+            maximum_transfers_per_splint: MAX_IMAGE_TRANSFERS_PER_SPLINT,
+            maximum_transfers_per_daemon: MAX_IMAGE_TRANSFERS_PER_DAEMON,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerLimits {
     pub maximum_frame_bytes: usize,
     pub maximum_input_bytes: usize,
@@ -90,6 +142,7 @@ pub struct ServerLimits {
     pub maximum_outstanding_requests: usize,
     pub maximum_subscriptions: usize,
     pub maximum_snapshot_scrollback_rows: usize,
+    pub image: ImageServerCapabilities,
 }
 
 impl Default for ServerLimits {
@@ -102,6 +155,7 @@ impl Default for ServerLimits {
             maximum_outstanding_requests: MAX_OUTSTANDING_REQUESTS,
             maximum_subscriptions: MAX_SUBSCRIPTIONS,
             maximum_snapshot_scrollback_rows: MAX_SNAPSHOT_SCROLLBACK_ROWS,
+            image: ImageServerCapabilities::default(),
         }
     }
 }
@@ -307,6 +361,9 @@ pub enum Request {
         incarnation: Option<u64>,
         scrollback_rows: usize,
     },
+    RequestImageContent {
+        request: ImageContentRequest,
+    },
     StartScrollbackPage {
         splint_id: SplintId,
         /// Exact incarnation, or `None` to bind the current incarnation before authorization.
@@ -466,6 +523,9 @@ pub enum Response {
         subscription_id: u64,
         provenance: TerminalProvenance,
         snapshot: TerminalSnapshot,
+    },
+    ImageContentReady {
+        transfer: ImageContentTransfer,
     },
     ScrollbackPage {
         provenance: TerminalProvenance,
@@ -1195,6 +1255,311 @@ impl ScrollbackPage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageTransferMode {
+    BinaryChunks,
+    SealedMemfd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageContentRequest {
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub content_id: u64,
+    pub generation: u64,
+    pub digest: [u8; 32],
+    pub accepted_transfers: Vec<ImageTransferMode>,
+}
+
+impl ImageContentRequest {
+    /// Validates exact content identity and the bounded transport offer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when identity or transfer metadata is malformed.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.incarnation == 0
+            || self.content_id == 0
+            || self.generation == 0
+            || self.digest == [0; 32]
+            || self.accepted_transfers.is_empty()
+            || self.accepted_transfers.len() > 2
+            || self
+                .accepted_transfers
+                .windows(2)
+                .any(|pair| pair[0] == pair[1])
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "image content request identity or transfer offer is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageContentTransfer {
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub content_id: u64,
+    pub generation: u64,
+    pub digest: [u8; 32],
+    pub byte_length: usize,
+    pub transfer: ImageTransferMode,
+    pub token: [u8; IMAGE_TRANSFER_TOKEN_BYTES],
+    pub token_ttl_millis: u32,
+}
+
+impl ImageContentTransfer {
+    /// Validates a bounded single-use transfer grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when identity or transfer metadata is malformed.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.incarnation == 0
+            || self.content_id == 0
+            || self.generation == 0
+            || self.digest == [0; 32]
+            || self.byte_length == 0
+            || self.byte_length > MAX_IMAGE_CONTENT_BYTES
+            || self.token == [0; IMAGE_TRANSFER_TOKEN_BYTES]
+            || self.token_ttl_millis == 0
+            || self.token_ttl_millis > IMAGE_TRANSFER_TOKEN_TTL_MILLIS
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "image content transfer identity or bounds are invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates this transfer against the exact request and advertised content.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` when identity, length, digest, or negotiated mode differs.
+    pub fn validate_for(
+        &self,
+        request: &ImageContentRequest,
+        metadata: &ImageContentMetadata,
+    ) -> Result<(), ProtocolError> {
+        request.validate()?;
+        self.validate()?;
+        metadata.validate()?;
+        if self.splint_id != request.splint_id
+            || self.incarnation != request.incarnation
+            || self.content_id != request.content_id
+            || self.content_id != metadata.content_id
+            || self.generation != request.generation
+            || self.generation != metadata.generation
+            || self.digest != request.digest
+            || self.digest != metadata.digest
+            || self.byte_length != metadata.byte_length
+            || !request.accepted_transfers.contains(&self.transfer)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "image transfer does not match its request and content metadata",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSourceFormat {
+    Sixel,
+    KittyRgb,
+    KittyRgba,
+    KittyPng,
+    Iterm2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageAlphaMode {
+    Opaque,
+    Premultiplied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageRetention {
+    WhilePlaced,
+    ExplicitDelete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageErasePolicy {
+    TextOverwrite,
+    ExplicitDelete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageContentMetadata {
+    pub content_id: u64,
+    pub generation: u64,
+    pub width: u32,
+    pub height: u32,
+    pub source_format: ImageSourceFormat,
+    pub alpha_mode: ImageAlphaMode,
+    pub digest: [u8; 32],
+    pub byte_length: usize,
+    pub retention: ImageRetention,
+}
+
+impl ImageContentMetadata {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let pixels = usize::try_from(self.width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(self.height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .filter(|pixels| *pixels <= MAX_IMAGE_PIXELS);
+        let expected = pixels.and_then(|pixels| pixels.checked_mul(4));
+        if self.content_id == 0
+            || self.generation == 0
+            || self.width == 0
+            || self.height == 0
+            || self.width > MAX_IMAGE_DIMENSION
+            || self.height > MAX_IMAGE_DIMENSION
+            || self.digest == [0; 32]
+            || expected != Some(self.byte_length)
+            || self.byte_length > MAX_IMAGE_CONTENT_BYTES
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "image content metadata is invalid or exceeds limits",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePixelRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePixelSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePlacement {
+    pub placement_id: u64,
+    pub content_id: u64,
+    pub row_id: u64,
+    pub column: usize,
+    pub source: ImagePixelRect,
+    pub destination_columns: usize,
+    pub destination_rows: usize,
+    pub source_cell_size: Option<ImagePixelSize>,
+    pub x_offset: i32,
+    pub y_offset: i32,
+    pub z_index: i32,
+    pub application_image_id: Option<u32>,
+    pub application_placement_id: Option<u32>,
+    pub creation_order: u64,
+    pub erase_policy: ImageErasePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalImagePlane {
+    pub screen: ActiveScreen,
+    pub contents: Vec<ImageContentMetadata>,
+    pub placements: Vec<ImagePlacement>,
+}
+
+impl TerminalImagePlane {
+    /// Validates bounded image metadata and placement references.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` or `ResourceLimit` for malformed or oversized planes.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.contents.len() > MAX_IMAGE_CONTENTS_PER_SPLINT
+            || self.placements.len() > MAX_IMAGE_PLACEMENTS_PER_SPLINT
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::ResourceLimit,
+                "terminal image plane exceeds object limits",
+            ));
+        }
+        let mut contents = std::collections::BTreeMap::new();
+        let mut total_bytes = 0_usize;
+        for content in &self.contents {
+            content.validate()?;
+            if contents.insert(content.content_id, content).is_some() {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal image plane contains duplicate content identity",
+                ));
+            }
+            total_bytes = total_bytes
+                .checked_add(content.byte_length)
+                .filter(|bytes| *bytes <= MAX_IMAGE_BYTES_PER_SPLINT)
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::ResourceLimit,
+                        "terminal image plane exceeds its byte limit",
+                    )
+                })?;
+        }
+        let mut placement_ids = std::collections::BTreeSet::new();
+        for placement in &self.placements {
+            let Some(content) = contents.get(&placement.content_id) else {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal image placement references unknown content",
+                ));
+            };
+            let source_end_x = placement.source.x.checked_add(placement.source.width);
+            let source_end_y = placement.source.y.checked_add(placement.source.height);
+            let valid_cell_size = placement.source_cell_size.is_none_or(|size| {
+                size.width > 0
+                    && size.height > 0
+                    && size.width <= MAX_IMAGE_DIMENSION
+                    && size.height <= MAX_IMAGE_DIMENSION
+            });
+            if placement.placement_id == 0
+                || placement.row_id == 0
+                || placement.creation_order == 0
+                || !placement_ids.insert(placement.placement_id)
+                || placement.column >= usize::from(MAX_COLUMNS)
+                || placement.source.width == 0
+                || placement.source.height == 0
+                || source_end_x.is_none_or(|end| end > content.width)
+                || source_end_y.is_none_or(|end| end > content.height)
+                || placement.destination_columns == 0
+                || placement.destination_columns > usize::from(MAX_COLUMNS)
+                || placement.destination_rows == 0
+                || placement.destination_rows > usize::from(MAX_ROWS)
+                || !valid_cell_size
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal image placement is invalid or exceeds dimensions",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalUpdate {
     pub base_revision: u64,
@@ -1210,6 +1575,8 @@ pub struct TerminalUpdate {
     pub columns: Option<usize>,
     pub row_count: Option<usize>,
     pub scrollback: Option<TerminalScrollbackUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Box<TerminalImagePlane>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1425,6 +1792,9 @@ impl TerminalUpdate {
                 "terminal update palette must contain 256 colors",
             ));
         }
+        if let Some(images) = &self.images {
+            images.validate()?;
+        }
         Ok(())
     }
 }
@@ -1490,6 +1860,8 @@ pub struct TerminalSnapshot {
     pub scrollback_rows: Vec<TerminalRow>,
     pub available_scrollback_rows: usize,
     pub omitted_oldest_scrollback_rows: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Box<TerminalImagePlane>>,
     pub exited_code: Option<i32>,
     pub exited_signal: Option<i32>,
 }
@@ -1541,6 +1913,9 @@ impl TerminalSnapshot {
                 ErrorCode::InvalidArgument,
                 "terminal snapshot scrollback metadata is inconsistent",
             ));
+        }
+        if let Some(images) = &self.images {
+            images.validate()?;
         }
         Ok(())
     }
@@ -1754,7 +2129,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 22);
+        assert_eq!(PROTOCOL_VERSION, 23);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -1998,6 +2373,7 @@ mod tests {
             columns: None,
             row_count: None,
             scrollback: None,
+            images: None,
         }
     }
 
@@ -2047,6 +2423,7 @@ mod tests {
             ],
             available_scrollback_rows: 2,
             omitted_oldest_scrollback_rows: 0,
+            images: None,
             exited_code: None,
             exited_signal: None,
         }
@@ -2072,6 +2449,119 @@ mod tests {
         assert!(invalid.validate().is_err());
         let mut invalid = snapshot();
         invalid.history_generation = 0;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one compact identity matrix checks every image transfer binding field"
+    )]
+    fn image_wire_contract_binds_identity_and_bounds_metadata() {
+        let content = ImageContentMetadata {
+            content_id: 7,
+            generation: 9,
+            width: 2,
+            height: 1,
+            source_format: ImageSourceFormat::Sixel,
+            alpha_mode: ImageAlphaMode::Premultiplied,
+            digest: [3; 32],
+            byte_length: 8,
+            retention: ImageRetention::WhilePlaced,
+        };
+        let plane = TerminalImagePlane {
+            screen: ActiveScreen::Normal,
+            contents: vec![content.clone()],
+            placements: vec![ImagePlacement {
+                placement_id: 11,
+                content_id: 7,
+                row_id: 5,
+                column: 1,
+                source: ImagePixelRect {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                },
+                destination_columns: 1,
+                destination_rows: 1,
+                source_cell_size: Some(ImagePixelSize {
+                    width: 8,
+                    height: 16,
+                }),
+                x_offset: 0,
+                y_offset: 0,
+                z_index: -1,
+                application_image_id: None,
+                application_placement_id: None,
+                creation_order: 13,
+                erase_policy: ImageErasePolicy::TextOverwrite,
+            }],
+        };
+        assert!(plane.validate().is_ok());
+
+        let mut invalid = plane.clone();
+        invalid.placements[0].content_id = 8;
+        assert_eq!(
+            invalid.validate().unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        let mut invalid = plane.clone();
+        invalid.contents[0].byte_length = MAX_IMAGE_CONTENT_BYTES + 1;
+        assert!(invalid.validate().is_err());
+
+        let request = ImageContentRequest {
+            splint_id: SplintId::new(),
+            incarnation: 2,
+            content_id: 7,
+            generation: 9,
+            digest: [3; 32],
+            accepted_transfers: vec![
+                ImageTransferMode::SealedMemfd,
+                ImageTransferMode::BinaryChunks,
+            ],
+        };
+        assert!(request.validate().is_ok());
+        let transfer = ImageContentTransfer {
+            splint_id: request.splint_id,
+            incarnation: request.incarnation,
+            content_id: request.content_id,
+            generation: request.generation,
+            digest: request.digest,
+            byte_length: 8,
+            transfer: ImageTransferMode::BinaryChunks,
+            token: [4; IMAGE_TRANSFER_TOKEN_BYTES],
+            token_ttl_millis: IMAGE_TRANSFER_TOKEN_TTL_MILLIS,
+        };
+        assert!(transfer.validate().is_ok());
+        assert!(transfer.validate_for(&request, &content).is_ok());
+
+        let mut invalid = transfer.clone();
+        invalid.splint_id = SplintId::new();
+        assert!(invalid.validate_for(&request, &content).is_err());
+        let mut invalid = transfer.clone();
+        invalid.incarnation += 1;
+        assert!(invalid.validate_for(&request, &content).is_err());
+        let mut invalid = transfer.clone();
+        invalid.content_id += 1;
+        assert!(invalid.validate_for(&request, &content).is_err());
+        let mut invalid = transfer.clone();
+        invalid.generation += 1;
+        assert!(invalid.validate_for(&request, &content).is_err());
+        let mut invalid = transfer.clone();
+        invalid.digest = [5; 32];
+        assert!(invalid.validate_for(&request, &content).is_err());
+        let mut invalid = transfer.clone();
+        invalid.byte_length += 4;
+        assert!(invalid.validate_for(&request, &content).is_err());
+        let mut invalid = transfer.clone();
+        invalid.transfer = ImageTransferMode::SealedMemfd;
+        assert!(invalid.validate_for(&request, &content).is_ok());
+        let mut binary_only = request.clone();
+        binary_only.accepted_transfers = vec![ImageTransferMode::BinaryChunks];
+        assert!(invalid.validate_for(&binary_only, &content).is_err());
+        invalid = transfer;
+        invalid.token = [0; IMAGE_TRANSFER_TOKEN_BYTES];
         assert!(invalid.validate().is_err());
     }
 

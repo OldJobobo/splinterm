@@ -176,6 +176,7 @@ fn reviewed_terminal_snapshot() -> TerminalSnapshot {
         scrollback_rows: Vec::new(),
         available_scrollback_rows: 0,
         omitted_oldest_scrollback_rows: 0,
+        images: None,
         exited_code: None,
         exited_signal: None,
     }

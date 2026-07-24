@@ -1773,6 +1773,7 @@ fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
         || update.default_colors.is_some()
         || update.active_screen.is_some()
         || update.scrollback.is_some()
+        || update.images.is_some()
 }
 
 fn apply_scrollback_update(
@@ -1886,6 +1887,9 @@ fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate
     }
     if let Some(scrollback) = update.scrollback {
         apply_scrollback_update(snapshot, scrollback)?;
+    }
+    if let Some(images) = update.images {
+        snapshot.images = Some(images);
     }
     snapshot.revision = update.revision;
     Ok(())
@@ -6293,6 +6297,7 @@ mod tests {
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
+            images: None,
             exited_code: None,
             exited_signal: None,
         }
@@ -6780,6 +6785,11 @@ mod tests {
                     available_rows: 1,
                     omitted_oldest_rows: 0,
                 }),
+                images: Some(Box::new(splinterm_protocol::TerminalImagePlane {
+                    screen: splinterm_protocol::ActiveScreen::Normal,
+                    contents: Vec::new(),
+                    placements: Vec::new(),
+                })),
             },
         )
         .expect("contiguous semantic update");
@@ -6793,6 +6803,7 @@ mod tests {
         assert_eq!(current.newest_available_scrollback_row_id, Some(7));
         assert_eq!(current.available_scrollback_rows, 1);
         assert_eq!(current.scrollback_rows[0].row_id, Some(7));
+        assert!(current.images.is_some());
     }
 
     #[test]
@@ -6852,6 +6863,7 @@ mod tests {
             columns: None,
             row_count: None,
             scrollback: None,
+            images: None,
         }
     }
 

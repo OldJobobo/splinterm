@@ -1217,6 +1217,7 @@ struct SubscriptionAccess {
     grant_id: Option<u64>,
     maximum_returned_bytes: Option<usize>,
     scrollback_rows: usize,
+    include_images: bool,
     history: HistoryState,
 }
 
@@ -1847,6 +1848,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::SetWindowDefaultFocus { .. }
             | Request::RenameSplint { .. }
             | Request::Attach { .. }
+            | Request::RequestImageContent { .. }
             | Request::StartScrollbackPage { .. }
             | Request::ScrollbackPage { .. }
             | Request::StartSearchScrollback { .. }
@@ -1870,6 +1872,13 @@ fn trusted_ui_bypass(
     request: &Request,
 ) -> bool {
     trusted_ui_client && matching_splinterm_executable && trusted_ui_request(request)
+}
+
+const fn include_image_metadata(
+    trusted_ui_client: bool,
+    matching_splinterm_executable: bool,
+) -> bool {
+    trusted_ui_client && matching_splinterm_executable
 }
 
 fn consent_capable_request(request: &Request) -> bool {
@@ -2372,6 +2381,14 @@ async fn request_policy_resources(
             splint_id,
             incarnation,
             ..
+        }
+        | Request::RequestImageContent {
+            request:
+                splinterm_protocol::ImageContentRequest {
+                    splint_id,
+                    incarnation,
+                    ..
+                },
         }
         | Request::ScrollbackPage {
             splint_id,
@@ -3162,6 +3179,19 @@ async fn handle_authorized_request(
     let request = resolve_automation_mutation(request, state).await?;
     let response = match request {
         Request::Ping => Response::Pong,
+        Request::RequestImageContent { request } => {
+            request.validate()?;
+            if !trusted_ui_client || !peer.is_matching_splinterm() {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unauthorized,
+                    "image content is available only to the trusted local UI",
+                ));
+            }
+            return Err(ProtocolError::new(
+                ErrorCode::UnsupportedOperation,
+                "image content transport is not initialized",
+            ));
+        }
         Request::PrepareMutation { mutation } => Response::MutationPrepared {
             preparation: prepare_mutation(&topology_snapshot(state).await, mutation)?,
         },
@@ -3884,6 +3914,8 @@ async fn handle_authorized_request(
             scrollback_rows,
         } => {
             let incarnation = incarnation.ok_or_else(internal)?;
+            let include_images =
+                include_image_metadata(trusted_ui_client, peer.is_matching_splinterm());
             let required = if scrollback_rows == 0 {
                 vec![AccessScope::Observe]
             } else {
@@ -3923,7 +3955,7 @@ async fn handle_authorized_request(
                 response: Response::Attached {
                     subscription_id: id,
                     provenance,
-                    snapshot: wire_snapshot(snapshot),
+                    snapshot: wire_snapshot(snapshot, include_images),
                 },
                 subscription: Some(PendingSubscription::Terminal {
                     id,
@@ -3933,6 +3965,7 @@ async fn handle_authorized_request(
                         grant_id,
                         maximum_returned_bytes: authorization.maximum_returned_bytes(),
                         scrollback_rows,
+                        include_images,
                         history,
                     },
                 }),
@@ -4893,7 +4926,12 @@ fn spawn_subscription(
                     };
                     let current_history = history_state(&snapshot);
                     if revision_advances(previous_history.revision, current_history.revision) {
-                        let event = subscription_update_event(&updates, snapshot, previous_history);
+                        let event = subscription_update_event(
+                            &updates,
+                            snapshot,
+                            previous_history,
+                            access.include_images,
+                        );
                         previous_history = current_history;
                         let frame = ServerFrame::Event {
                             subscription_id: id,
@@ -4969,10 +5007,11 @@ fn subscription_update_event(
     updates: &[TerminalUpdate],
     snapshot: LiveSnapshot,
     previous_history: HistoryState,
+    include_images: bool,
 ) -> SubscriptionEvent {
     if !revisions_match(updates, snapshot.revision.value()) {
         return SubscriptionEvent::Snapshot {
-            snapshot: wire_snapshot(snapshot),
+            snapshot: wire_snapshot(snapshot, include_images),
         };
     }
     match wire_update(
@@ -4980,6 +5019,7 @@ fn subscription_update_event(
         &snapshot,
         previous_history.revision,
         previous_history,
+        include_images,
     ) {
         Ok(update) => SubscriptionEvent::Update { update },
         Err(_) => SubscriptionEvent::ResyncRequired {
@@ -5084,6 +5124,7 @@ fn wire_update(
     snapshot: &LiveSnapshot,
     previous_revision: u64,
     previous_history: HistoryState,
+    include_images: bool,
 ) -> Result<WireTerminalUpdate, ProtocolError> {
     let mut damaged = vec![false; snapshot.visible_rows.len()];
     let mut scrolls = Vec::new();
@@ -5093,6 +5134,7 @@ fn wire_update(
     let mut palette = false;
     let mut dimensions = false;
     let mut scrollback = false;
+    let mut images = false;
     let mut reflow = false;
     let mut appended_rows = 0_usize;
     for damage in updates.iter().flat_map(TerminalUpdate::damage) {
@@ -5105,6 +5147,7 @@ fn wire_update(
                 palette = true;
                 dimensions = true;
                 scrollback = true;
+                images = true;
             }
             TerminalDamage::Viewport => damaged.fill(true),
             TerminalDamage::Rows { start, end } => {
@@ -5149,7 +5192,10 @@ fn wire_update(
             TerminalDamage::Title => title = true,
             TerminalDamage::Palette { .. } => palette = true,
             TerminalDamage::Scrollback => scrollback = true,
-            TerminalDamage::Images { .. } => damaged.fill(true),
+            TerminalDamage::Images { .. } => {
+                damaged.fill(true);
+                images = true;
+            }
         }
     }
     let position = snapshot.cursor.cursor.position();
@@ -5222,12 +5268,14 @@ fn wire_update(
                 rows,
             }
         }),
+        images: (include_images && images).then(|| Box::new(wire_image_plane(snapshot))),
     })
 }
 
-fn wire_snapshot(snapshot: LiveSnapshot) -> TerminalSnapshot {
+fn wire_snapshot(snapshot: LiveSnapshot, include_images: bool) -> TerminalSnapshot {
     let position = snapshot.cursor.cursor.position();
     let exited_code = snapshot.exited.and_then(|status| status.code);
+    let images = include_images.then(|| Box::new(wire_image_plane(&snapshot)));
     let exited_signal = snapshot.exited.and_then(|status| status.signal);
     TerminalSnapshot {
         splint_id: snapshot.splint_id,
@@ -5250,10 +5298,90 @@ fn wire_snapshot(snapshot: LiveSnapshot) -> TerminalSnapshot {
         scrollback_rows: snapshot.scrollback_rows.into_iter().map(wire_row).collect(),
         available_scrollback_rows: snapshot.scrollback.available_rows,
         omitted_oldest_scrollback_rows: snapshot.scrollback.omitted_oldest_rows,
+        images,
         exited_code,
         exited_signal,
     }
 }
+
+fn wire_image_plane(snapshot: &LiveSnapshot) -> splinterm_protocol::TerminalImagePlane {
+    use splinterm_protocol::{
+        ImageAlphaMode as WireAlphaMode, ImageContentMetadata as WireContent,
+        ImageErasePolicy as WireErasePolicy, ImagePixelRect, ImagePixelSize,
+        ImagePlacement as WirePlacement, ImageRetention as WireRetention,
+        ImageSourceFormat as WireSourceFormat,
+    };
+
+    let contents = snapshot
+        .image_contents
+        .iter()
+        .map(|content| WireContent {
+            content_id: content.id.value(),
+            generation: content.generation,
+            width: content.width,
+            height: content.height,
+            source_format: match content.source_format {
+                splinterm_terminal::ImageSourceFormat::Sixel => WireSourceFormat::Sixel,
+                splinterm_terminal::ImageSourceFormat::KittyRgb => WireSourceFormat::KittyRgb,
+                splinterm_terminal::ImageSourceFormat::KittyRgba => WireSourceFormat::KittyRgba,
+                splinterm_terminal::ImageSourceFormat::KittyPng => WireSourceFormat::KittyPng,
+                splinterm_terminal::ImageSourceFormat::Iterm2 => WireSourceFormat::Iterm2,
+            },
+            alpha_mode: match content.alpha_mode {
+                splinterm_terminal::ImageAlphaMode::Opaque => WireAlphaMode::Opaque,
+                splinterm_terminal::ImageAlphaMode::Premultiplied => WireAlphaMode::Premultiplied,
+            },
+            digest: content.digest,
+            byte_length: content.byte_charge,
+            retention: match content.retention {
+                splinterm_terminal::ImageRetention::WhilePlaced => WireRetention::WhilePlaced,
+                splinterm_terminal::ImageRetention::ExplicitDelete => WireRetention::ExplicitDelete,
+            },
+        })
+        .collect();
+    let placements = snapshot
+        .image_placements
+        .iter()
+        .map(|placement| WirePlacement {
+            placement_id: placement.id.value(),
+            content_id: placement.content_id.value(),
+            row_id: placement.row_id,
+            column: placement.column,
+            source: ImagePixelRect {
+                x: placement.source.x,
+                y: placement.source.y,
+                width: placement.source.width,
+                height: placement.source.height,
+            },
+            destination_columns: placement.destination.columns,
+            destination_rows: placement.destination.rows,
+            source_cell_size: placement.source_cell_size.map(|size| ImagePixelSize {
+                width: size.width,
+                height: size.height,
+            }),
+            x_offset: placement.x_offset,
+            y_offset: placement.y_offset,
+            z_index: placement.z_index,
+            application_image_id: placement.application_image_id,
+            application_placement_id: placement.application_placement_id,
+            creation_order: placement.creation_order,
+            erase_policy: match placement.erase_policy {
+                splinterm_terminal::ImageErasePolicy::TextOverwrite => {
+                    WireErasePolicy::TextOverwrite
+                }
+                splinterm_terminal::ImageErasePolicy::ExplicitDelete => {
+                    WireErasePolicy::ExplicitDelete
+                }
+            },
+        })
+        .collect();
+    splinterm_protocol::TerminalImagePlane {
+        screen: wire_active_screen(snapshot.active_screen),
+        contents,
+        placements,
+    }
+}
+
 fn wire_active_screen(screen: ActiveScreen) -> WireActiveScreen {
     match screen {
         ActiveScreen::Normal => WireActiveScreen::Normal,
@@ -5396,6 +5524,23 @@ fn socket_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn image_metadata_and_retrieval_require_the_matching_trusted_ui() {
+        assert!(include_image_metadata(true, true));
+        assert!(!include_image_metadata(true, false));
+        assert!(!include_image_metadata(false, true));
+        assert!(trusted_ui_request(&Request::RequestImageContent {
+            request: splinterm_protocol::ImageContentRequest {
+                splint_id: SplintId::new(),
+                incarnation: 1,
+                content_id: 1,
+                generation: 1,
+                digest: [1; 32],
+                accepted_transfers: vec![splinterm_protocol::ImageTransferMode::BinaryChunks],
+            },
+        }));
+    }
 
     fn test_state(development_terminal_access: bool) -> Arc<DaemonState> {
         let (revocations, _) = broadcast::channel(32);

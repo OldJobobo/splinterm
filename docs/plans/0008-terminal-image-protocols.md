@@ -1,6 +1,6 @@
 # Plan 0008: bounded terminal image protocols
 
-- **Status:** In progress — Slices 0–1 accepted; Slice 2 in progress
+- **Status:** In progress — Slices 0–1 accepted; Slice 2 graphical closure deferred; Slice 3 in progress
 - **Roadmap:** Phase 5 — bounded terminal image protocols
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md),
   [Plan 0001](0001-terminal-kernel.md),
@@ -54,6 +54,13 @@ A 60-second ASan/libFuzzer `terminal-advance` run completed 258,496 executions
 without a crash. The complete pinned differential matrix remains before Slice 2
 closes. Cursor/scroller placement modes and bounded XTSMGRAPHICS color/geometry
 replies are implemented.
+
+Slice 3 is in progress. Protocol v23 now carries bounded image capabilities,
+limits, metadata, placements, and exact content request/transfer identities.
+Attach snapshots and semantic updates project metadata without pixel bodies only
+to a trusted UI whose executable identity matches Splinterm; automation remains
+image-free by default. Both content delivery modes remain honestly disabled
+until the dedicated bounded transport lands.
 
 ## Feasibility and current baseline
 

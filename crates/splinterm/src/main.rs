@@ -3555,6 +3555,7 @@ fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
         scrollback_rows: Vec::new(),
         available_scrollback_rows: 0,
         omitted_oldest_scrollback_rows: 0,
+        images: None,
         exited_code: None,
         exited_signal: None,
     }
@@ -5173,6 +5174,10 @@ fn print_response(response: Response) -> Result<()> {
             runtime.splint_id, runtime.lifecycle, runtime.live_incarnation, runtime.exit_status
         ),
         Response::Attached { snapshot, .. } => print_snapshot(&snapshot),
+        Response::ImageContentReady { transfer } => println!(
+            "Image content {} generation {} ready via {:?} ({} bytes).",
+            transfer.content_id, transfer.generation, transfer.transfer, transfer.byte_length
+        ),
         Response::ScrollbackPage { page, .. } => println!(
             "Scrollback page: {} row(s), has_older={}",
             page.rows.len(),
@@ -5362,6 +5367,7 @@ mod tests {
             scrollback_rows: Vec::new(),
             available_scrollback_rows: 0,
             omitted_oldest_scrollback_rows: 0,
+            images: None,
             exited_code: None,
             exited_signal: None,
         }
@@ -5590,6 +5596,7 @@ mod tests {
             columns: None,
             row_count: None,
             scrollback: None,
+            images: None,
         };
         assert!(update_advances_from(&update, 4));
         assert!(!update_advances_from(&update, 3));

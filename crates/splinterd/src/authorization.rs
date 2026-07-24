@@ -166,7 +166,7 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
             base: &[Scope::ControllerAcquire],
             requirement: ConditionalRequirement::RequestedControlModes,
         },
-        Request::SubscribeControl { .. } => {
+        Request::RequestImageContent { .. } | Request::SubscribeControl { .. } => {
             RequestAuthorization::policy(&[Scope::TerminalVisibleRead])
         }
         Request::RequestControlTransfer { .. } => RequestAuthorization::Conditional {

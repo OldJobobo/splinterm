@@ -402,6 +402,7 @@ fn reviewed_terminal_snapshot() -> TerminalSnapshot {
         scrollback_rows: Vec::new(),
         available_scrollback_rows: 0,
         omitted_oldest_scrollback_rows: 0,
+        images: None,
         exited_code: None,
         exited_signal: None,
     }
@@ -2135,6 +2136,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
                         columns: None,
                         row_count: None,
                         scrollback: None,
+                        images: None,
                     },
                 },
             },
@@ -2337,6 +2339,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                         columns: None,
                         row_count: None,
                         scrollback: None,
+                        images: None,
                     },
                 },
             },

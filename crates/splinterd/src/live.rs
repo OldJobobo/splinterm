@@ -16,8 +16,9 @@ use splinterm_pty::{
 };
 use splinterm_terminal::{
     ActiveScreen, CellAttributesSnapshot, CellSnapshotContent, CursorSnapshot, Dimensions,
-    ScrollRegion, ScrollbackSnapshot, SearchPage, SnapshotRequest, Terminal, TerminalConfig,
-    TerminalEvent, TerminalModes, TerminalRevision, TerminalUpdate,
+    ImageContentMetadata, ImagePlacement, ScrollRegion, ScrollbackSnapshot, SearchPage,
+    SnapshotRequest, Terminal, TerminalConfig, TerminalEvent, TerminalModes, TerminalRevision,
+    TerminalUpdate,
 };
 use thiserror::Error;
 use tokio::{
@@ -105,6 +106,8 @@ pub struct LiveSnapshot {
     pub title: String,
     pub palette: [u32; 256],
     pub default_colors: [u32; 3],
+    pub image_contents: Vec<ImageContentMetadata>,
+    pub image_placements: Vec<ImagePlacement>,
     pub visible_rows: Vec<LiveRow>,
     pub scrollback_rows: Vec<LiveRow>,
     pub scrollback: ScrollbackSnapshot,
@@ -1198,6 +1201,8 @@ fn owned_snapshot(
         title: snapshot.title().to_owned(),
         palette: *snapshot.palette(),
         default_colors: *snapshot.default_colors(),
+        image_contents: snapshot.image_contents().collect(),
+        image_placements: snapshot.image_placements().collect(),
         visible_rows: snapshot.visible_rows().map(owned_row).collect(),
         scrollback_rows: snapshot.scrollback_rows().map(owned_row).collect(),
         scrollback: snapshot.scrollback(),
@@ -1261,6 +1266,34 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn owned_snapshot_retains_image_metadata_without_pixel_bodies() {
+        let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+        terminal.set_cell_pixel_size(8, 16);
+        terminal.advance(b"\x1bPq#1;2;100;0;0#1~\x1b\\");
+
+        let snapshot = owned_snapshot(
+            SplintId::new(),
+            ProcessIncarnation::allocate(),
+            &terminal,
+            0,
+            None,
+        );
+        assert_eq!(snapshot.image_contents.len(), 1);
+        assert_eq!(snapshot.image_placements.len(), 1);
+        let metadata = snapshot.image_contents[0];
+        assert_eq!(
+            metadata.byte_charge,
+            usize::try_from(metadata.width).unwrap()
+                * usize::try_from(metadata.height).unwrap()
+                * 4
+        );
+        assert_eq!(
+            snapshot.image_placements[0].content_id,
+            snapshot.image_contents[0].id
+        );
+    }
 
     #[tokio::test]
     async fn resnapshot_state_wins_over_an_already_queued_event() {
