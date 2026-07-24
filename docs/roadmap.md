@@ -98,9 +98,10 @@ Detailed plan: [`plans/0008-terminal-image-protocols.md`](plans/0008-terminal-im
 Slices 0–1 are accepted: contracts, budgets, pinned-Foot fixtures, and the
 bounded generic image lifecycle are implemented. Slice 2 is in progress with a
 streaming DCS Sixel path and a bounded decoder matching the five pinned semantic
-fixtures. Foot cursor/scroller modes, XTSMGRAPHICS replies, default/configured palettes,
-and private/shared palette behavior are implemented; overlap, reflow, fuzz, and
-full differential work remain before Slice 2 closes.
+fixtures. Foot cursor/scroller modes, XTSMGRAPHICS replies, palettes, cell-aligned
+overwrite/underlay composition, and resize/reflow behavior are implemented. A
+60-second ASan/libFuzzer run completed 258,496 executions without a crash; the
+full pinned differential matrix remains before Slice 2 closes.
 
 - Generic sparse image-content and placement plane without enlarging every cell
 - Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers

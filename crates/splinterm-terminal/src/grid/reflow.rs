@@ -6,6 +6,8 @@
 //! sixel translations are intentionally absent because those features are
 //! outside the current terminal-kernel milestone.
 
+use std::collections::BTreeMap;
+
 use super::Grid;
 use crate::{Cell, CellContent, Coordinate, Row};
 
@@ -27,6 +29,7 @@ struct Builder {
     rows: Vec<Row>,
     current: Vec<Cell>,
     mappings: Mappings,
+    row_mappings: BTreeMap<u64, usize>,
     origins: Origins,
 }
 
@@ -37,6 +40,7 @@ impl Builder {
             rows: Vec::new(),
             current: Vec::with_capacity(columns),
             mappings: Mappings::default(),
+            row_mappings: BTreeMap::new(),
             origins,
         }
     }
@@ -131,7 +135,8 @@ impl Grid {
         new_columns: usize,
         new_screen_rows: usize,
         composed_width: F,
-    ) where
+    ) -> BTreeMap<u64, u64>
+    where
         F: Fn(u32) -> usize,
     {
         let mut dimensions = Grid::new(new_row_capacity, new_columns);
@@ -168,6 +173,9 @@ impl Grid {
             let Some(row) = self.rows[physical_row].as_ref() else {
                 continue;
             };
+            builder
+                .row_mappings
+                .insert(self.row_ids[physical_row], builder.rows.len());
             saw_row = true;
 
             let tracker_column = [
@@ -237,6 +245,13 @@ impl Grid {
             adjust_mapping(&mut builder.mappings.cursor, trimmed);
             adjust_mapping(&mut builder.mappings.saved_cursor, trimmed);
             adjust_mapping(&mut builder.mappings.view, trimmed);
+            builder.row_mappings.retain(|_, row| {
+                let Some(adjusted) = row.checked_sub(trimmed) else {
+                    return false;
+                };
+                *row = adjusted;
+                true
+            });
         }
 
         let output_rows = builder.rows.len();
@@ -297,8 +312,26 @@ impl Grid {
             .checked_add(1)
             .expect("history generation exhausted");
         dimensions.reidentify_allocated_rows_chronologically();
+        let leading_padding = new_screen_rows.saturating_sub(output_rows);
+        let row_mappings = builder
+            .row_mappings
+            .into_iter()
+            .filter_map(|(old_id, row)| {
+                let mapped = if row < output_rows {
+                    Some(row)
+                } else if leading_padding > 0 {
+                    Some(dimensions.absolute_index(Grid::signed_row(leading_padding - 1)))
+                } else {
+                    None
+                }?;
+                dimensions.rows[mapped]
+                    .as_ref()
+                    .map(|_| (old_id, dimensions.row_ids[mapped]))
+            })
+            .collect();
 
         *self = dimensions;
+        row_mappings
     }
 }
 
@@ -333,24 +366,23 @@ where
         return (1, cells_for_composed_width(leader, width));
     }
 
-    if column + 1 < count {
-        if let CellContent::Spacer(first) = row[column + 1].content() {
-            if first > 0 {
-                let width = usize::try_from(first)
-                    .unwrap_or(usize::MAX)
-                    .saturating_add(1);
-                if width <= count - column
-                    && (1..width).all(|offset| {
-                        row[column + offset].content()
-                            == CellContent::Spacer(u32::try_from(width - offset).unwrap())
-                    })
-                {
-                    if width > maximum_width {
-                        return (width, Vec::new());
-                    }
-                    return (width, row.cells()[column..column + width].to_vec());
-                }
+    if column + 1 < count
+        && let CellContent::Spacer(first) = row[column + 1].content()
+        && first > 0
+    {
+        let width = usize::try_from(first)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        if width <= count - column
+            && (1..width).all(|offset| {
+                row[column + offset].content()
+                    == CellContent::Spacer(u32::try_from(width - offset).unwrap())
+            })
+        {
+            if width > maximum_width {
+                return (width, Vec::new());
             }
+            return (width, row.cells()[column..column + width].to_vec());
         }
     }
 
@@ -578,9 +610,15 @@ mod tests {
                         Color::default(),
                     );
                 }
-                1 => grid.resize_without_reflow(16, 6, 4),
-                2 => grid.resize_with_reflow(16, 5, 4, |_| 1),
-                _ => grid.resize_with_reflow(16, 6, 4, |_| 1),
+                1 => {
+                    grid.resize_without_reflow(16, 6, 4);
+                }
+                2 => {
+                    grid.resize_with_reflow(16, 5, 4, |_| 1);
+                }
+                _ => {
+                    grid.resize_with_reflow(16, 6, 4, |_| 1);
+                }
             }
 
             assert!(grid.offset() < grid.row_capacity());

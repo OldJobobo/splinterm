@@ -229,6 +229,17 @@ impl Grid {
         self.rows[index].as_ref().map(|_| self.row_ids[index])
     }
 
+    pub(crate) fn ordered_retained_row_ids(&self) -> Vec<u64> {
+        let start = self.scrollback_start(self.screen_rows);
+        let mask = self.rows.len() - 1;
+        (0..self.rows.len())
+            .filter_map(|distance| {
+                let index = start.wrapping_add(distance) & mask;
+                self.rows[index].as_ref().map(|_| self.row_ids[index])
+            })
+            .collect()
+    }
+
     /// Returns every stable row identity currently retained by the grid.
     pub(crate) fn retained_row_ids(&self) -> std::collections::HashSet<u64> {
         self.rows
@@ -398,14 +409,16 @@ impl Grid {
         new_row_capacity: usize,
         new_columns: usize,
         new_screen_rows: usize,
-    ) {
+    ) -> std::collections::BTreeMap<u64, u64> {
         let mut resized = Self::new(new_row_capacity, new_columns);
         resized.assert_screen_rows(new_screen_rows);
         resized.screen_rows = new_screen_rows;
 
         let copied_rows = self.screen_rows.min(new_screen_rows);
+        let mut copied_row_ids = Vec::with_capacity(copied_rows);
         for row_number in 0..copied_rows {
             let old_index = self.absolute_index(Self::signed_row(row_number));
+            copied_row_ids.push(self.row_ids[old_index]);
             let mut row = self.rows[old_index]
                 .take()
                 .unwrap_or_else(|| Row::new_dirty(self.columns));
@@ -437,7 +450,13 @@ impl Grid {
             .checked_add(1)
             .expect("history generation exhausted");
         resized.reidentify_allocated_rows_chronologically();
+        let row_mappings = copied_row_ids
+            .into_iter()
+            .enumerate()
+            .map(|(row, old_id)| (old_id, resized.row_ids[row]))
+            .collect();
         *self = resized;
+        row_mappings
     }
 
     /// Swaps two rows addressed relative to the live-screen offset.

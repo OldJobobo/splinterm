@@ -47,10 +47,13 @@ limits. Non-graphical tests match all five pinned-Foot semantic fixtures at
 every input split and prove CAN/SUB cancellation recovery. Foot's VT340
 default palette, configurable Sixel enablement, private/shared palette behavior,
 and DEC mode 1070 are implemented, including shared definitions surviving
-cancellation and decoder failure. Remaining Slice 2 work includes overlap and
-reflow details, fuzz evidence, and the complete pinned differential matrix.
-Cursor/scroller placement modes and bounded XTSMGRAPHICS color/geometry replies
-are implemented.
+cancellation and decoder failure. Foot-compatible cell-aligned overwrite,
+transparent/partial-cell underlay composition, stable resize/reflow anchors,
+and reflow collision resolution are implemented with bounded fragment fallback.
+A 60-second ASan/libFuzzer `terminal-advance` run completed 258,496 executions
+without a crash. The complete pinned differential matrix remains before Slice 2
+closes. Cursor/scroller placement modes and bounded XTSMGRAPHICS color/geometry
+replies are implemented.
 
 ## Feasibility and current baseline
 

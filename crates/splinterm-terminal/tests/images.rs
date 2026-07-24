@@ -1,8 +1,8 @@
 use splinterm_terminal::{
     ActiveScreen, CellExtent, ImageAlphaMode, ImageErasePolicy, ImageError, ImageLimits,
     ImageRetention, ImageSourceFormat, NewImageContent, NewImagePlacement,
-    NewImagePlacementOptions, PixelRect, SixelConfig, SnapshotRequest, Terminal, TerminalConfig,
-    TerminalDamage,
+    NewImagePlacementOptions, PixelRect, PixelSize, SixelConfig, SnapshotRequest, Terminal,
+    TerminalConfig, TerminalDamage,
 };
 
 fn content(pixels: &[u8], retention: ImageRetention) -> NewImageContent<'_> {
@@ -31,6 +31,10 @@ fn placement(content_id: splinterm_terminal::ImageContentId, row_id: u64) -> New
             columns: 1,
             rows: 1,
         },
+        source_cell_size: Some(PixelSize {
+            width: 1,
+            height: 1,
+        }),
         x_offset: 0,
         y_offset: 0,
         z_index: 0,
@@ -53,6 +57,10 @@ fn placement_options(erase_policy: ImageErasePolicy) -> NewImagePlacementOptions
             columns: 1,
             rows: 1,
         },
+        source_cell_size: Some(PixelSize {
+            width: 1,
+            height: 1,
+        }),
         x_offset: 0,
         y_offset: 0,
         z_index: 0,
@@ -454,6 +462,47 @@ fn normal_and_fresh_alternate_image_catalogs_are_isolated() {
 }
 
 #[test]
+fn opaque_sixel_overlap_splits_the_older_placement_around_the_new_image() {
+    let mut terminal = Terminal::new(5, 5, TerminalConfig::default());
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(
+        b"\x1bP7;0;0q\"1;1;3;18#1;2;100;0;0#1~~~\x1b\\\x1b[2;2H\x1bP7;0;0q\"1;1;1;6#2;2;0;100;0#2~\x1b\\",
+    );
+    let snapshot = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(snapshot.image_contents().count(), 2);
+    assert_eq!(snapshot.image_placements().count(), 5);
+    let old_id = snapshot.image_contents().next().unwrap().id;
+    let old_fragments = snapshot
+        .image_placements()
+        .filter(|placement| placement.content_id == old_id)
+        .collect::<Vec<_>>();
+    assert_eq!(old_fragments.len(), 4);
+    assert!(old_fragments.iter().all(|placement| {
+        placement.destination.columns * placement.destination.rows == 3
+            || placement.destination.columns * placement.destination.rows == 1
+    }));
+}
+
+#[test]
+fn same_count_sixel_crop_emits_image_damage() {
+    let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(b"\x1bP7;0;0q\"1;1;2;6#1;2;100;0;0#1~~\x1b\\");
+    let base = terminal.revision();
+    terminal.advance(b"X");
+    assert_eq!(terminal.image_metrics().placement_count, 1);
+    let updates = terminal.updates_since(base).unwrap();
+    assert!(updates.updates().any(|update| {
+        update.damage().any(|damage| {
+            *damage
+                == TerminalDamage::Images {
+                    screen: ActiveScreen::Normal,
+                }
+        })
+    }));
+}
+
+#[test]
 fn text_overwrite_and_erase_remove_only_sixel_policy_placements() {
     let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
     insert_at_cursor(
@@ -600,6 +649,73 @@ fn history_trim_and_clear_prune_stale_anchors_and_reclaim_sixel_content() {
 }
 
 #[test]
+fn sixel_anchor_survives_narrow_and_wide_normal_screen_reflow() {
+    let mut terminal = Terminal::new(4, 3, TerminalConfig::default());
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(b"ABCDE\x1bP7;0;0q\"1;1;1;6#1;2;100;0;0#1~\x1b\\");
+    assert_eq!(terminal.image_metrics().placement_count, 1);
+
+    terminal.resize(2, 3);
+    let narrow = terminal.snapshot(SnapshotRequest::default());
+    let placement = narrow.image_placements().next().unwrap();
+    assert_eq!(placement.column, 1);
+    assert!(
+        narrow
+            .visible_rows()
+            .any(|row| row.id() == Some(placement.row_id))
+    );
+
+    terminal.resize(4, 3);
+    let wide = terminal.snapshot(SnapshotRequest::default());
+    let placement = wide.image_placements().next().unwrap();
+    assert!(
+        wide.visible_rows()
+            .any(|row| row.id() == Some(placement.row_id))
+    );
+}
+
+#[test]
+fn normal_resize_preserves_sixel_on_trailing_blank_non_cursor_row() {
+    let mut terminal = Terminal::new(4, 3, TerminalConfig::default());
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(b"\x1b[3;1H\x1bP7;0;0q\"1;1;1;6#1;2;100;0;0#1~\x1b\\\x1b[2;1H");
+    assert_eq!(terminal.image_metrics().placement_count, 1);
+    terminal.resize(2, 3);
+    let snapshot = terminal.snapshot(SnapshotRequest::default());
+    assert_eq!(snapshot.image_placements().count(), 1);
+    let placement = snapshot.image_placements().next().unwrap();
+    assert!(
+        snapshot
+            .visible_rows()
+            .any(|row| row.id() == Some(placement.row_id))
+    );
+}
+
+#[test]
+fn alternate_resize_remaps_visible_sixel_and_drops_out_of_bounds_start_column() {
+    let mut retained = Terminal::new(4, 3, TerminalConfig::default());
+    retained.set_cell_pixel_size(1, 6);
+    retained.advance(b"\x1b[?1049h\x1b[2;2H\x1bP7;0;0q\"1;1;1;6#1;2;100;0;0#1~\x1b\\");
+    retained.resize(2, 3);
+    let snapshot = retained.snapshot(SnapshotRequest::default());
+    assert_eq!(snapshot.image_placements().count(), 1);
+    let placement = snapshot.image_placements().next().unwrap();
+    assert_eq!(placement.column, 1);
+    assert!(
+        snapshot
+            .visible_rows()
+            .any(|row| row.id() == Some(placement.row_id))
+    );
+
+    let mut dropped = Terminal::new(4, 3, TerminalConfig::default());
+    dropped.set_cell_pixel_size(1, 6);
+    dropped.advance(b"\x1b[?1049h\x1b[2;4H\x1bP7;0;0q\"1;1;1;6#1;2;100;0;0#1~\x1b\\");
+    dropped.resize(2, 3);
+    assert_eq!(dropped.image_metrics().placement_count, 0);
+    assert_eq!(dropped.image_metrics().content_count, 0);
+}
+
+#[test]
 fn resize_and_reset_apply_explicit_image_lifecycle_rules() {
     let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
     insert_at_cursor(
@@ -609,7 +725,7 @@ fn resize_and_reset_apply_explicit_image_lifecycle_rules() {
     );
     terminal.resize(3, 2);
     let resized = terminal.snapshot(SnapshotRequest::default());
-    assert_eq!(resized.image_placements().count(), 0);
+    assert_eq!(resized.image_placements().count(), 1);
     assert_eq!(resized.image_contents().count(), 1);
 
     terminal.advance(b"\x1bc");

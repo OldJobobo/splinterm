@@ -92,6 +92,12 @@ pub struct CellExtent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PixelSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ImageContentMetadata {
     pub id: ImageContentId,
     pub generation: u64,
@@ -131,6 +137,7 @@ pub struct ImagePlacement {
     pub column: usize,
     pub source: PixelRect,
     pub destination: CellExtent,
+    pub source_cell_size: Option<PixelSize>,
     pub x_offset: i32,
     pub y_offset: i32,
     pub z_index: i32,
@@ -150,11 +157,19 @@ pub struct NewImageContent<'a> {
     pub retention: ImageRetention,
 }
 
+struct PreparedSixel {
+    width: u32,
+    height: u32,
+    alpha_mode: ImageAlphaMode,
+    pixels: Vec<u8>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NewImagePlacementOptions {
     pub column: usize,
     pub source: PixelRect,
     pub destination: CellExtent,
+    pub source_cell_size: Option<PixelSize>,
     pub x_offset: i32,
     pub y_offset: i32,
     pub z_index: i32,
@@ -172,6 +187,7 @@ impl NewImagePlacementOptions {
             column: self.column,
             source: self.source,
             destination: self.destination,
+            source_cell_size: self.source_cell_size,
             x_offset: self.x_offset,
             y_offset: self.y_offset,
             z_index: self.z_index,
@@ -189,6 +205,7 @@ pub struct NewImagePlacement {
     pub column: usize,
     pub source: PixelRect,
     pub destination: CellExtent,
+    pub source_cell_size: Option<PixelSize>,
     pub x_offset: i32,
     pub y_offset: i32,
     pub z_index: i32,
@@ -330,15 +347,17 @@ impl ImagePlane {
             .filter(|bytes| *bytes <= self.limits.bytes_per_terminal)
             .ok_or(ImageError::TerminalBytes)?;
         let id = ImageContentId::new(self.next_content_id).ok_or(ImageError::IdentityExhausted)?;
-        self.next_content_id = self
+        let next_content_id = self
             .next_content_id
             .checked_add(1)
             .ok_or(ImageError::IdentityExhausted)?;
         let generation = self.next_generation;
-        self.next_generation = self
+        let next_generation = self
             .next_generation
             .checked_add(1)
             .ok_or(ImageError::IdentityExhausted)?;
+        self.next_content_id = next_content_id;
+        self.next_generation = next_generation;
         let digest: [u8; 32] = Sha256::digest(input.pixels).into();
         let content = ImageContent {
             metadata: ImageContentMetadata {
@@ -382,9 +401,20 @@ impl ImagePlane {
             return Err(ImageError::InvalidDestination);
         }
         validate_crop(placement.source, content.width, content.height)?;
+        validate_source_cell_size(
+            placement.source,
+            placement.destination,
+            placement.source_cell_size,
+        )?;
         if self.metrics.placement_count >= self.limits.placements_per_terminal {
             return Err(ImageError::PlacementCount);
         }
+        self.next_content_id
+            .checked_add(1)
+            .and_then(|_| self.next_generation.checked_add(1))
+            .and_then(|_| self.next_placement_id.checked_add(1))
+            .and_then(|_| self.next_creation_order.checked_add(1))
+            .ok_or(ImageError::IdentityExhausted)?;
         let content_id = self.insert_content(screen, content)?;
         match self.insert_placement(screen, placement.bind(content_id, row_id)) {
             Ok(placement_id) => Ok((content_id, placement_id)),
@@ -422,20 +452,23 @@ impl ImagePlane {
             content.metadata.width,
             content.metadata.height,
         )?;
+        validate_source_cell_size(input.source, input.destination, input.source_cell_size)?;
         if self.metrics.placement_count >= self.limits.placements_per_terminal {
             return Err(ImageError::PlacementCount);
         }
         let id =
             ImagePlacementId::new(self.next_placement_id).ok_or(ImageError::IdentityExhausted)?;
-        self.next_placement_id = self
+        let next_placement_id = self
             .next_placement_id
             .checked_add(1)
             .ok_or(ImageError::IdentityExhausted)?;
         let creation_order = self.next_creation_order;
-        self.next_creation_order = self
+        let next_creation_order = self
             .next_creation_order
             .checked_add(1)
             .ok_or(ImageError::IdentityExhausted)?;
+        self.next_placement_id = next_placement_id;
+        self.next_creation_order = next_creation_order;
         self.catalog_mut(screen).placements.insert(
             id,
             ImagePlacement {
@@ -446,6 +479,7 @@ impl ImagePlane {
                 column: input.column,
                 source: input.source,
                 destination: input.destination,
+                source_cell_size: input.source_cell_size,
                 x_offset: input.x_offset,
                 y_offset: input.y_offset,
                 z_index: input.z_index,
@@ -551,7 +585,9 @@ impl ImagePlane {
         changed
     }
 
-    /// Removes text-overwrite placements intersecting a cell rectangle.
+    /// Crops or splits text-overwrite placements intersecting a cell rectangle.
+    /// If fragment admission would exceed a hard bound, the intersecting image
+    /// is removed instead so text mutation always remains bounded and coherent.
     pub fn remove_text_overlaps(
         &mut self,
         screen: ActiveScreen,
@@ -561,8 +597,383 @@ impl ImagePlane {
         start_column: usize,
         end_column: usize,
     ) -> bool {
+        let mut candidate = self.clone();
+        match candidate.split_text_overlaps(
+            screen,
+            row_order,
+            start_row,
+            end_row,
+            start_column,
+            end_column,
+        ) {
+            Ok(true) => {
+                *self = candidate;
+                true
+            }
+            Ok(false) => false,
+            Err(_) => self.remove_text_overlaps_whole(
+                screen,
+                row_order,
+                start_row,
+                end_row,
+                start_column,
+                end_column,
+            ),
+        }
+    }
+
+    pub(crate) fn insert_sixel_content_and_placement(
+        &mut self,
+        screen: ActiveScreen,
+        content: NewImageContent<'_>,
+        row_order: &[u64],
+        row_id: u64,
+        mut placement: NewImagePlacementOptions,
+    ) -> Result<(ImageContentId, ImagePlacementId), ImageError> {
+        self.validate_content(&content)?;
+        validate_source_cell_size(
+            placement.source,
+            placement.destination,
+            placement.source_cell_size,
+        )?;
+        let anchor_row = row_order
+            .iter()
+            .position(|candidate| *candidate == row_id)
+            .ok_or(ImageError::InvalidAnchor)?;
+        let end_row = anchor_row
+            .checked_add(placement.destination.rows)
+            .ok_or(ImageError::InvalidDestination)?;
+        let end_column = placement
+            .column
+            .checked_add(placement.destination.columns)
+            .ok_or(ImageError::InvalidDestination)?;
+        let prepared =
+            self.prepare_sixel_overlap(screen, row_order, anchor_row, end_row, placement, content)?;
+        placement.source.width = prepared.width;
+        placement.source.height = prepared.height;
+        let content = NewImageContent {
+            width: prepared.width,
+            height: prepared.height,
+            source_format: content.source_format,
+            alpha_mode: prepared.alpha_mode,
+            pixels: &prepared.pixels,
+            retention: content.retention,
+        };
+        for preserve_fragments in [true, false] {
+            let mut candidate = self.clone();
+            let overlap = if preserve_fragments {
+                candidate.split_text_overlaps(
+                    screen,
+                    row_order,
+                    anchor_row,
+                    end_row,
+                    placement.column,
+                    end_column,
+                )
+            } else {
+                candidate.remove_text_overlaps_whole(
+                    screen,
+                    row_order,
+                    anchor_row,
+                    end_row,
+                    placement.column,
+                    end_column,
+                );
+                Ok(true)
+            };
+            if overlap.is_err() {
+                continue;
+            }
+            if let Ok(ids) =
+                candidate.insert_content_and_placement(screen, content, row_id, placement)
+            {
+                *self = candidate;
+                return Ok(ids);
+            }
+        }
+        self.insert_content_and_placement(screen, content, row_id, placement)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the bounded Foot underlay composition keeps checked geometry and pixels together"
+    )]
+    fn prepare_sixel_overlap(
+        &self,
+        screen: ActiveScreen,
+        row_order: &[u64],
+        anchor_row: usize,
+        end_row: usize,
+        placement: NewImagePlacementOptions,
+        content: NewImageContent<'_>,
+    ) -> Result<PreparedSixel, ImageError> {
+        let targets = self.text_overlap_targets(
+            screen,
+            row_order,
+            anchor_row,
+            end_row,
+            placement.column,
+            placement
+                .column
+                .saturating_add(placement.destination.columns),
+        );
+        let Some(cell_size) = placement.source_cell_size else {
+            return Ok(PreparedSixel {
+                width: content.width,
+                height: content.height,
+                alpha_mode: content.alpha_mode,
+                pixels: content.pixels.to_vec(),
+            });
+        };
+        if targets.is_empty() {
+            return Ok(PreparedSixel {
+                width: content.width,
+                height: content.height,
+                alpha_mode: content.alpha_mode,
+                pixels: content.pixels.to_vec(),
+            });
+        }
+        let cell_width = usize::try_from(cell_size.width).map_err(|_| ImageError::Dimensions)?;
+        let cell_height = usize::try_from(cell_size.height).map_err(|_| ImageError::Dimensions)?;
+        let full_width = placement
+            .destination
+            .columns
+            .checked_mul(cell_width)
+            .ok_or(ImageError::Dimensions)?;
+        let full_height = placement
+            .destination
+            .rows
+            .checked_mul(cell_height)
+            .ok_or(ImageError::Dimensions)?;
+        let new_origin_x = placement
+            .column
+            .checked_mul(cell_width)
+            .ok_or(ImageError::Dimensions)?;
+        let new_origin_y = anchor_row
+            .checked_mul(cell_height)
+            .ok_or(ImageError::Dimensions)?;
+        let mut output_width =
+            usize::try_from(content.width).map_err(|_| ImageError::Dimensions)?;
+        let mut output_height =
+            usize::try_from(content.height).map_err(|_| ImageError::Dimensions)?;
+        for (old, old_anchor_row) in &targets {
+            if old.source_cell_size != Some(cell_size) {
+                continue;
+            }
+            let old_origin_x = old
+                .column
+                .checked_mul(cell_width)
+                .ok_or(ImageError::Dimensions)?;
+            let old_origin_y = old_anchor_row
+                .checked_mul(cell_height)
+                .ok_or(ImageError::Dimensions)?;
+            let old_end_x = old_origin_x
+                .checked_add(usize::try_from(old.source.width).map_err(|_| ImageError::Dimensions)?)
+                .ok_or(ImageError::Dimensions)?;
+            let old_end_y = old_origin_y
+                .checked_add(
+                    usize::try_from(old.source.height).map_err(|_| ImageError::Dimensions)?,
+                )
+                .ok_or(ImageError::Dimensions)?;
+            if let Some(relative_end) = old_end_x.checked_sub(new_origin_x) {
+                output_width = output_width.max(relative_end.min(full_width));
+            }
+            if let Some(relative_end) = old_end_y.checked_sub(new_origin_y) {
+                output_height = output_height.max(relative_end.min(full_height));
+            }
+        }
+        let width = u32::try_from(output_width).map_err(|_| ImageError::Dimensions)?;
+        let height = u32::try_from(output_height).map_err(|_| ImageError::Dimensions)?;
+        let byte_count = self.validate_content_geometry(width, height)?;
+        let mut pixels = vec![0; byte_count];
+
+        for (old, old_anchor_row) in targets {
+            let Some(old_cell_size) = old.source_cell_size else {
+                continue;
+            };
+            if old_cell_size != cell_size {
+                continue;
+            }
+            let Some(old_content) = self.catalog(screen).contents.get(&old.content_id) else {
+                continue;
+            };
+            let old_origin_x = old
+                .column
+                .checked_mul(usize::try_from(cell_size.width).map_err(|_| ImageError::Dimensions)?)
+                .ok_or(ImageError::Dimensions)?;
+            let old_origin_y = old_anchor_row
+                .checked_mul(usize::try_from(cell_size.height).map_err(|_| ImageError::Dimensions)?)
+                .ok_or(ImageError::Dimensions)?;
+            let old_content_width =
+                usize::try_from(old_content.metadata.width).map_err(|_| ImageError::Dimensions)?;
+            for source_y in
+                0..usize::try_from(old.source.height).map_err(|_| ImageError::Dimensions)?
+            {
+                let global_y = old_origin_y
+                    .checked_add(source_y)
+                    .ok_or(ImageError::Dimensions)?;
+                let Some(output_y) = global_y.checked_sub(new_origin_y) else {
+                    continue;
+                };
+                if output_y >= output_height {
+                    continue;
+                }
+                for source_x in
+                    0..usize::try_from(old.source.width).map_err(|_| ImageError::Dimensions)?
+                {
+                    let global_x = old_origin_x
+                        .checked_add(source_x)
+                        .ok_or(ImageError::Dimensions)?;
+                    let Some(output_x) = global_x.checked_sub(new_origin_x) else {
+                        continue;
+                    };
+                    if output_x >= output_width {
+                        continue;
+                    }
+                    let old_x = usize::try_from(old.source.x)
+                        .map_err(|_| ImageError::Dimensions)?
+                        .checked_add(source_x)
+                        .ok_or(ImageError::Dimensions)?;
+                    let old_y = usize::try_from(old.source.y)
+                        .map_err(|_| ImageError::Dimensions)?
+                        .checked_add(source_y)
+                        .ok_or(ImageError::Dimensions)?;
+                    let old_index = old_y
+                        .checked_mul(old_content_width)
+                        .and_then(|base| base.checked_add(old_x))
+                        .and_then(|pixel| pixel.checked_mul(4))
+                        .ok_or(ImageError::Dimensions)?;
+                    let output_index = output_y
+                        .checked_mul(output_width)
+                        .and_then(|base| base.checked_add(output_x))
+                        .and_then(|pixel| pixel.checked_mul(4))
+                        .ok_or(ImageError::Dimensions)?;
+                    pixels[output_index..output_index + 4]
+                        .copy_from_slice(&old_content.pixels[old_index..old_index + 4]);
+                }
+            }
+        }
+
+        let source_width = usize::try_from(content.width).map_err(|_| ImageError::Dimensions)?;
+        let source_height = usize::try_from(content.height).map_err(|_| ImageError::Dimensions)?;
+        for y in 0..source_height {
+            for x in 0..source_width {
+                let source_index = y
+                    .checked_mul(source_width)
+                    .and_then(|base| base.checked_add(x))
+                    .and_then(|pixel| pixel.checked_mul(4))
+                    .ok_or(ImageError::Dimensions)?;
+                let output_index = y
+                    .checked_mul(output_width)
+                    .and_then(|base| base.checked_add(x))
+                    .and_then(|pixel| pixel.checked_mul(4))
+                    .ok_or(ImageError::Dimensions)?;
+                composite_bgra(
+                    &mut pixels[output_index..output_index + 4],
+                    &content.pixels[source_index..source_index + 4],
+                );
+            }
+        }
+        let alpha_mode = if pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX) {
+            ImageAlphaMode::Opaque
+        } else {
+            ImageAlphaMode::Premultiplied
+        };
+        let prepared = PreparedSixel {
+            width,
+            height,
+            alpha_mode,
+            pixels,
+        };
+        self.validate_content(&NewImageContent {
+            width: prepared.width,
+            height: prepared.height,
+            source_format: content.source_format,
+            alpha_mode: prepared.alpha_mode,
+            pixels: &prepared.pixels,
+            retention: content.retention,
+        })?;
+        Ok(prepared)
+    }
+
+    fn split_text_overlaps(
+        &mut self,
+        screen: ActiveScreen,
+        row_order: &[u64],
+        start_row: usize,
+        end_row: usize,
+        start_column: usize,
+        end_column: usize,
+    ) -> Result<bool, ImageError> {
+        let targets = self.text_overlap_targets(
+            screen,
+            row_order,
+            start_row,
+            end_row,
+            start_column,
+            end_column,
+        );
+        for (placement, anchor_row) in &targets {
+            let fragments = placement_fragments(
+                *placement,
+                *anchor_row,
+                row_order,
+                start_row,
+                end_row,
+                start_column,
+                end_column,
+            )?;
+            self.catalog_mut(screen).placements.remove(&placement.id);
+            self.metrics.placement_count -= 1;
+            for fragment in fragments {
+                self.insert_placement(screen, fragment)?;
+            }
+        }
+        if !targets.is_empty() {
+            self.reclaim_unplaced_while_placed();
+        }
+        Ok(!targets.is_empty())
+    }
+
+    fn remove_text_overlaps_whole(
+        &mut self,
+        screen: ActiveScreen,
+        row_order: &[u64],
+        start_row: usize,
+        end_row: usize,
+        start_column: usize,
+        end_column: usize,
+    ) -> bool {
+        let targets = self.text_overlap_targets(
+            screen,
+            row_order,
+            start_row,
+            end_row,
+            start_column,
+            end_column,
+        );
+        for (placement, _) in &targets {
+            self.catalog_mut(screen).placements.remove(&placement.id);
+            self.metrics.placement_count -= 1;
+        }
+        if !targets.is_empty() {
+            self.reclaim_unplaced_while_placed();
+        }
+        !targets.is_empty()
+    }
+
+    fn text_overlap_targets(
+        &self,
+        screen: ActiveScreen,
+        row_order: &[u64],
+        start_row: usize,
+        end_row: usize,
+        start_column: usize,
+        end_column: usize,
+    ) -> Vec<(ImagePlacement, usize)> {
         if start_row >= end_row || start_column >= end_column {
-            return false;
+            return Vec::new();
         }
         let row_positions: BTreeMap<_, _> = row_order
             .iter()
@@ -570,28 +981,42 @@ impl ImagePlane {
             .enumerate()
             .map(|(index, id)| (id, index))
             .collect();
-        let removed: Vec<_> = self
-            .catalog(screen)
+        self.catalog(screen)
             .placements
             .values()
-            .filter(|placement| {
+            .filter_map(|placement| {
                 if placement.erase_policy != ImageErasePolicy::TextOverwrite {
-                    return false;
+                    return None;
                 }
-                let Some(anchor_row) = row_positions.get(&placement.row_id).copied() else {
-                    return false;
-                };
+                let anchor_row = row_positions.get(&placement.row_id).copied()?;
                 let placement_end_row = anchor_row.saturating_add(placement.destination.rows);
                 let placement_end_column = placement
                     .column
                     .saturating_add(placement.destination.columns);
-                anchor_row < end_row
+                (anchor_row < end_row
                     && placement_end_row > start_row
                     && placement.column < end_column
-                    && placement_end_column > start_column
+                    && placement_end_column > start_column)
+                    .then_some((*placement, anchor_row))
+            })
+            .collect()
+    }
+
+    pub fn remove_text_placements_outside_columns(
+        &mut self,
+        screen: ActiveScreen,
+        columns: usize,
+    ) -> bool {
+        let removed = self
+            .catalog(screen)
+            .placements
+            .values()
+            .filter(|placement| {
+                placement.erase_policy == ImageErasePolicy::TextOverwrite
+                    && placement.column >= columns
             })
             .map(|placement| placement.id)
-            .collect();
+            .collect::<Vec<_>>();
         for id in &removed {
             self.catalog_mut(screen).placements.remove(id);
             self.metrics.placement_count -= 1;
@@ -600,6 +1025,82 @@ impl ImagePlane {
             self.reclaim_unplaced_while_placed();
         }
         !removed.is_empty()
+    }
+
+    pub fn resolve_text_overlaps(&mut self, screen: ActiveScreen, row_order: &[u64]) -> bool {
+        let row_positions: BTreeMap<_, _> = row_order
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        let mut placements = self
+            .catalog(screen)
+            .placements
+            .values()
+            .filter(|placement| placement.erase_policy == ImageErasePolicy::TextOverwrite)
+            .copied()
+            .collect::<Vec<_>>();
+        placements.sort_by_key(|placement| placement.creation_order);
+        let participants = placements
+            .iter()
+            .copied()
+            .filter(|placement| {
+                placements.iter().any(|other| {
+                    placement.id != other.id
+                        && placements_overlap(*placement, *other, &row_positions)
+                })
+            })
+            .collect::<Vec<_>>();
+        if participants.is_empty() {
+            return false;
+        }
+
+        let mut candidate = self.clone();
+        for placement in &participants {
+            candidate
+                .catalog_mut(screen)
+                .placements
+                .remove(&placement.id);
+            candidate.metrics.placement_count -= 1;
+        }
+        for placement in participants {
+            let Some(anchor_row) = row_positions.get(&placement.row_id).copied() else {
+                continue;
+            };
+            let end_row = anchor_row.saturating_add(placement.destination.rows);
+            let end_column = placement
+                .column
+                .saturating_add(placement.destination.columns);
+            if candidate
+                .split_text_overlaps(
+                    screen,
+                    row_order,
+                    anchor_row,
+                    end_row,
+                    placement.column,
+                    end_column,
+                )
+                .is_err()
+            {
+                candidate.remove_text_overlaps_whole(
+                    screen,
+                    row_order,
+                    anchor_row,
+                    end_row,
+                    placement.column,
+                    end_column,
+                );
+            }
+            candidate
+                .catalog_mut(screen)
+                .placements
+                .insert(placement.id, placement);
+            candidate.metrics.placement_count += 1;
+        }
+        candidate.reclaim_unplaced_while_placed();
+        *self = candidate;
+        true
     }
 
     #[must_use]
@@ -647,26 +1148,31 @@ impl ImagePlane {
     }
 
     fn validate_content(&self, input: &NewImageContent<'_>) -> Result<usize, ImageError> {
-        if input.width == 0
-            || input.height == 0
-            || input.width > self.limits.maximum_dimension
-            || input.height > self.limits.maximum_dimension
+        let expected = self.validate_content_geometry(input.width, input.height)?;
+        if input.pixels.len() != expected {
+            return Err(ImageError::PixelLength);
+        }
+        Ok(expected)
+    }
+
+    fn validate_content_geometry(&self, width: u32, height: u32) -> Result<usize, ImageError> {
+        if width == 0
+            || height == 0
+            || width > self.limits.maximum_dimension
+            || height > self.limits.maximum_dimension
         {
             return Err(ImageError::Dimensions);
         }
-        let pixels = usize::try_from(input.width)
+        let pixels = usize::try_from(width)
             .ok()
             .and_then(|width| {
-                usize::try_from(input.height)
+                usize::try_from(height)
                     .ok()
                     .and_then(|height| width.checked_mul(height))
             })
             .filter(|pixels| *pixels <= self.limits.maximum_pixels)
             .ok_or(ImageError::Dimensions)?;
         let expected = pixels.checked_mul(4).ok_or(ImageError::PixelLength)?;
-        if input.pixels.len() != expected {
-            return Err(ImageError::PixelLength);
-        }
         if expected > self.limits.bytes_per_content {
             return Err(ImageError::ContentBytes);
         }
@@ -743,6 +1249,197 @@ impl ImagePlane {
     }
 }
 
+fn composite_bgra(destination: &mut [u8], source: &[u8]) {
+    let inverse_alpha = u16::from(u8::MAX - source[3]);
+    for channel in 0..3 {
+        let value = u16::from(source[channel])
+            + (u16::from(destination[channel]) * inverse_alpha + 127) / 255;
+        destination[channel] = u8::try_from(value.min(u16::from(u8::MAX))).unwrap();
+    }
+    let alpha = u16::from(source[3]) + (u16::from(destination[3]) * inverse_alpha + 127) / 255;
+    destination[3] = u8::try_from(alpha.min(u16::from(u8::MAX))).unwrap();
+}
+
+fn placements_overlap(
+    left: ImagePlacement,
+    right: ImagePlacement,
+    row_positions: &BTreeMap<u64, usize>,
+) -> bool {
+    let (Some(left_row), Some(right_row)) = (
+        row_positions.get(&left.row_id).copied(),
+        row_positions.get(&right.row_id).copied(),
+    ) else {
+        return false;
+    };
+    left_row < right_row.saturating_add(right.destination.rows)
+        && left_row.saturating_add(left.destination.rows) > right_row
+        && left.column < right.column.saturating_add(right.destination.columns)
+        && left.column.saturating_add(left.destination.columns) > right.column
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the four Foot rectangle-subtraction regions share one checked cell-to-pixel mapping"
+)]
+fn placement_fragments(
+    placement: ImagePlacement,
+    anchor_row: usize,
+    row_order: &[u64],
+    start_row: usize,
+    end_row: usize,
+    start_column: usize,
+    end_column: usize,
+) -> Result<Vec<NewImagePlacement>, ImageError> {
+    let Some(cell_size) = placement.source_cell_size else {
+        return Ok(Vec::new());
+    };
+    if cell_size.width == 0 || cell_size.height == 0 {
+        return Err(ImageError::InvalidDestination);
+    }
+    let relative_left = start_column
+        .saturating_sub(placement.column)
+        .min(placement.destination.columns);
+    let relative_right = end_column
+        .saturating_sub(placement.column)
+        .min(placement.destination.columns)
+        .max(relative_left);
+    let relative_top = start_row
+        .saturating_sub(anchor_row)
+        .min(placement.destination.rows);
+    let relative_bottom = end_row
+        .saturating_sub(anchor_row)
+        .min(placement.destination.rows)
+        .max(relative_top);
+
+    let mut fragments = Vec::with_capacity(4);
+    let mut push_fragment =
+        |x: usize, y: usize, columns: usize, rows: usize| -> Result<(), ImageError> {
+            if columns == 0 || rows == 0 {
+                return Ok(());
+            }
+            let pixel_x = u32::try_from(x)
+                .ok()
+                .and_then(|value| value.checked_mul(cell_size.width))
+                .map(|value| value.min(placement.source.width))
+                .ok_or(ImageError::InvalidCrop)?;
+            let pixel_y = u32::try_from(y)
+                .ok()
+                .and_then(|value| value.checked_mul(cell_size.height))
+                .map(|value| value.min(placement.source.height))
+                .ok_or(ImageError::InvalidCrop)?;
+            let pixel_end_x = u32::try_from(x.checked_add(columns).ok_or(ImageError::InvalidCrop)?)
+                .ok()
+                .and_then(|value| value.checked_mul(cell_size.width))
+                .map(|value| value.min(placement.source.width))
+                .ok_or(ImageError::InvalidCrop)?;
+            let pixel_end_y = u32::try_from(y.checked_add(rows).ok_or(ImageError::InvalidCrop)?)
+                .ok()
+                .and_then(|value| value.checked_mul(cell_size.height))
+                .map(|value| value.min(placement.source.height))
+                .ok_or(ImageError::InvalidCrop)?;
+            let width = pixel_end_x
+                .checked_sub(pixel_x)
+                .filter(|value| *value > 0)
+                .ok_or(ImageError::InvalidCrop)?;
+            let height = pixel_end_y
+                .checked_sub(pixel_y)
+                .filter(|value| *value > 0)
+                .ok_or(ImageError::InvalidCrop)?;
+            let row_id = *row_order
+                .get(anchor_row.checked_add(y).ok_or(ImageError::InvalidAnchor)?)
+                .ok_or(ImageError::InvalidAnchor)?;
+            fragments.push(NewImagePlacement {
+                content_id: placement.content_id,
+                row_id,
+                column: placement
+                    .column
+                    .checked_add(x)
+                    .ok_or(ImageError::InvalidDestination)?,
+                source: PixelRect {
+                    x: placement
+                        .source
+                        .x
+                        .checked_add(pixel_x)
+                        .ok_or(ImageError::InvalidCrop)?,
+                    y: placement
+                        .source
+                        .y
+                        .checked_add(pixel_y)
+                        .ok_or(ImageError::InvalidCrop)?,
+                    width,
+                    height,
+                },
+                destination: CellExtent { columns, rows },
+                source_cell_size: placement.source_cell_size,
+                x_offset: if x == 0 { placement.x_offset } else { 0 },
+                y_offset: if y == 0 { placement.y_offset } else { 0 },
+                z_index: placement.z_index,
+                application_image_id: placement.application_image_id,
+                application_placement_id: placement.application_placement_id,
+                erase_policy: placement.erase_policy,
+            });
+            Ok(())
+        };
+
+    push_fragment(0, 0, placement.destination.columns, relative_top)?;
+    push_fragment(
+        0,
+        relative_bottom,
+        placement.destination.columns,
+        placement.destination.rows - relative_bottom,
+    )?;
+    push_fragment(
+        0,
+        relative_top,
+        relative_left,
+        relative_bottom - relative_top,
+    )?;
+    push_fragment(
+        relative_right,
+        relative_top,
+        placement.destination.columns - relative_right,
+        relative_bottom - relative_top,
+    )?;
+    Ok(fragments)
+}
+
+fn validate_source_cell_size(
+    source: PixelRect,
+    destination: CellExtent,
+    cell_size: Option<PixelSize>,
+) -> Result<(), ImageError> {
+    let Some(cell_size) = cell_size else {
+        return Ok(());
+    };
+    if cell_size.width == 0 || cell_size.height == 0 {
+        return Err(ImageError::InvalidDestination);
+    }
+    let columns = u32::try_from(destination.columns).map_err(|_| ImageError::InvalidDestination)?;
+    let rows = u32::try_from(destination.rows).map_err(|_| ImageError::InvalidDestination)?;
+    let maximum_width = columns
+        .checked_mul(cell_size.width)
+        .ok_or(ImageError::InvalidDestination)?;
+    let maximum_height = rows
+        .checked_mul(cell_size.height)
+        .ok_or(ImageError::InvalidDestination)?;
+    let minimum_width = columns
+        .saturating_sub(1)
+        .checked_mul(cell_size.width)
+        .ok_or(ImageError::InvalidDestination)?;
+    let minimum_height = rows
+        .saturating_sub(1)
+        .checked_mul(cell_size.height)
+        .ok_or(ImageError::InvalidDestination)?;
+    if source.width > maximum_width
+        || source.height > maximum_height
+        || source.width <= minimum_width
+        || source.height <= minimum_height
+    {
+        return Err(ImageError::InvalidDestination);
+    }
+    Ok(())
+}
+
 fn validate_crop(crop: PixelRect, width: u32, height: u32) -> Result<(), ImageError> {
     if crop.width == 0
         || crop.height == 0
@@ -787,6 +1484,10 @@ mod tests {
                 columns: 1,
                 rows: 1,
             },
+            source_cell_size: Some(PixelSize {
+                width: 1,
+                height: 1,
+            }),
             x_offset: 0,
             y_offset: 0,
             z_index,
@@ -912,6 +1613,403 @@ mod tests {
             vec![retained]
         );
         assert_ne!(removable, retained);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the four expected Foot subtraction regions are asserted explicitly"
+    )]
+    fn text_overlap_splits_cell_aligned_sixel_fragments_without_copying_content() {
+        let mut plane = ImagePlane::default();
+        let pixels = [0, 0, 255, 255].repeat(9);
+        let content_id = plane
+            .insert_content(
+                ActiveScreen::Normal,
+                NewImageContent {
+                    width: 3,
+                    height: 3,
+                    source_format: ImageSourceFormat::Sixel,
+                    alpha_mode: ImageAlphaMode::Opaque,
+                    pixels: &pixels,
+                    retention: ImageRetention::WhilePlaced,
+                },
+            )
+            .unwrap();
+        let mut input = placement(content_id, 10, 0);
+        input.source = PixelRect {
+            x: 0,
+            y: 0,
+            width: 3,
+            height: 3,
+        };
+        input.destination = CellExtent {
+            columns: 3,
+            rows: 3,
+        };
+        plane.insert_placement(ActiveScreen::Normal, input).unwrap();
+
+        assert!(plane.remove_text_overlaps(ActiveScreen::Normal, &[10, 11, 12], 1, 2, 1, 2,));
+        let fragments = plane
+            .placements(ActiveScreen::Normal)
+            .map(|placement| {
+                (
+                    placement.row_id,
+                    placement.column,
+                    placement.source,
+                    placement.destination,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fragments,
+            vec![
+                (
+                    10,
+                    0,
+                    PixelRect {
+                        x: 0,
+                        y: 0,
+                        width: 3,
+                        height: 1,
+                    },
+                    CellExtent {
+                        columns: 3,
+                        rows: 1,
+                    },
+                ),
+                (
+                    12,
+                    0,
+                    PixelRect {
+                        x: 0,
+                        y: 2,
+                        width: 3,
+                        height: 1,
+                    },
+                    CellExtent {
+                        columns: 3,
+                        rows: 1,
+                    },
+                ),
+                (
+                    11,
+                    0,
+                    PixelRect {
+                        x: 0,
+                        y: 1,
+                        width: 1,
+                        height: 1,
+                    },
+                    CellExtent {
+                        columns: 1,
+                        rows: 1,
+                    },
+                ),
+                (
+                    11,
+                    2,
+                    PixelRect {
+                        x: 2,
+                        y: 1,
+                        width: 1,
+                        height: 1,
+                    },
+                    CellExtent {
+                        columns: 1,
+                        rows: 1,
+                    },
+                ),
+            ]
+        );
+        assert_eq!(plane.metrics().content_count, 1);
+        assert_eq!(plane.metrics().placement_count, 4);
+        assert_eq!(plane.metrics().content_bytes, pixels.len());
+    }
+
+    #[test]
+    fn transparent_and_partial_sixel_overlap_preserve_old_pixels() {
+        let build = |new_pixels: &[u8], new_width: u32, new_height: u32| {
+            let mut plane = ImagePlane::default();
+            let old_pixels = [0, 0, 255, 255].repeat(4);
+            let old_id = plane
+                .insert_content(
+                    ActiveScreen::Normal,
+                    NewImageContent {
+                        width: 2,
+                        height: 2,
+                        source_format: ImageSourceFormat::Sixel,
+                        alpha_mode: ImageAlphaMode::Opaque,
+                        pixels: &old_pixels,
+                        retention: ImageRetention::WhilePlaced,
+                    },
+                )
+                .unwrap();
+            let mut old = placement(old_id, 10, 0);
+            old.source = PixelRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            };
+            old.source_cell_size = Some(PixelSize {
+                width: 2,
+                height: 2,
+            });
+            plane.insert_placement(ActiveScreen::Normal, old).unwrap();
+            let (_, placement_id) = plane
+                .insert_sixel_content_and_placement(
+                    ActiveScreen::Normal,
+                    NewImageContent {
+                        width: new_width,
+                        height: new_height,
+                        source_format: ImageSourceFormat::Sixel,
+                        alpha_mode: ImageAlphaMode::Premultiplied,
+                        pixels: new_pixels,
+                        retention: ImageRetention::WhilePlaced,
+                    },
+                    &[10],
+                    10,
+                    NewImagePlacementOptions {
+                        column: 0,
+                        source: PixelRect {
+                            x: 0,
+                            y: 0,
+                            width: new_width,
+                            height: new_height,
+                        },
+                        destination: CellExtent {
+                            columns: 1,
+                            rows: 1,
+                        },
+                        source_cell_size: Some(PixelSize {
+                            width: 2,
+                            height: 2,
+                        }),
+                        x_offset: 0,
+                        y_offset: 0,
+                        z_index: -1,
+                        application_image_id: None,
+                        application_placement_id: None,
+                        erase_policy: ImageErasePolicy::TextOverwrite,
+                    },
+                )
+                .unwrap();
+            let placement = plane
+                .placements(ActiveScreen::Normal)
+                .find(|placement| placement.id == placement_id)
+                .unwrap();
+            plane
+                .content(ActiveScreen::Normal, placement.content_id)
+                .unwrap()
+                .pixels()
+                .to_vec()
+        };
+
+        assert_eq!(
+            build(&[0, 255, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 2, 2),
+            vec![
+                0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255
+            ]
+        );
+        assert_eq!(
+            build(&[0, 255, 0, 255], 1, 1),
+            vec![
+                0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_overlap_bounds_before_allocation_and_uses_actual_old_edge() {
+        let mut plane = ImagePlane::default();
+        let old_id = plane
+            .insert_content(
+                ActiveScreen::Normal,
+                content(&[0, 0, 255, 255], ImageRetention::WhilePlaced),
+            )
+            .unwrap();
+        let mut old = placement(old_id, 10, 0);
+        old.source_cell_size = Some(PixelSize {
+            width: 4096,
+            height: 4096,
+        });
+        plane.insert_placement(ActiveScreen::Normal, old).unwrap();
+        let transparent = [0, 0, 0, 0];
+        let (new_id, _) = plane
+            .insert_sixel_content_and_placement(
+                ActiveScreen::Normal,
+                NewImageContent {
+                    width: 1,
+                    height: 1,
+                    source_format: ImageSourceFormat::Sixel,
+                    alpha_mode: ImageAlphaMode::Premultiplied,
+                    pixels: &transparent,
+                    retention: ImageRetention::WhilePlaced,
+                },
+                &[10],
+                10,
+                NewImagePlacementOptions {
+                    column: 0,
+                    source: PixelRect {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    },
+                    destination: CellExtent {
+                        columns: 1,
+                        rows: 1,
+                    },
+                    source_cell_size: Some(PixelSize {
+                        width: 4096,
+                        height: 4096,
+                    }),
+                    x_offset: 0,
+                    y_offset: 0,
+                    z_index: -1,
+                    application_image_id: None,
+                    application_placement_id: None,
+                    erase_policy: ImageErasePolicy::TextOverwrite,
+                },
+            )
+            .unwrap();
+        let content = plane.content(ActiveScreen::Normal, new_id).unwrap();
+        assert_eq!(
+            (content.metadata().width, content.metadata().height),
+            (1, 1)
+        );
+        assert_eq!(content.pixels(), &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn partial_edge_cell_crop_uses_original_sixel_cell_geometry() {
+        let mut plane = ImagePlane::default();
+        let pixels = [0, 0, 255, 255].repeat(100);
+        let content_id = plane
+            .insert_content(
+                ActiveScreen::Normal,
+                NewImageContent {
+                    width: 10,
+                    height: 10,
+                    source_format: ImageSourceFormat::Sixel,
+                    alpha_mode: ImageAlphaMode::Opaque,
+                    pixels: &pixels,
+                    retention: ImageRetention::WhilePlaced,
+                },
+            )
+            .unwrap();
+        let mut input = placement(content_id, 10, 0);
+        input.source = PixelRect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        input.destination = CellExtent {
+            columns: 2,
+            rows: 2,
+        };
+        input.source_cell_size = Some(PixelSize {
+            width: 8,
+            height: 8,
+        });
+        plane.insert_placement(ActiveScreen::Normal, input).unwrap();
+
+        assert!(plane.remove_text_overlaps(ActiveScreen::Normal, &[10, 11], 0, 1, 0, 1,));
+        let fragments = plane
+            .placements(ActiveScreen::Normal)
+            .map(|placement| (placement.column, placement.source, placement.destination))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fragments,
+            vec![
+                (
+                    0,
+                    PixelRect {
+                        x: 0,
+                        y: 8,
+                        width: 10,
+                        height: 2,
+                    },
+                    CellExtent {
+                        columns: 2,
+                        rows: 1,
+                    },
+                ),
+                (
+                    1,
+                    PixelRect {
+                        x: 8,
+                        y: 0,
+                        width: 2,
+                        height: 8,
+                    },
+                    CellExtent {
+                        columns: 1,
+                        rows: 1,
+                    },
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn reflow_created_overlap_preserves_newer_sixel_and_crops_older() {
+        let mut plane = ImagePlane::default();
+        let pixels = [0, 0, 255, 255].repeat(3);
+        let content_id = plane
+            .insert_content(
+                ActiveScreen::Normal,
+                NewImageContent {
+                    width: 3,
+                    height: 1,
+                    source_format: ImageSourceFormat::Sixel,
+                    alpha_mode: ImageAlphaMode::Opaque,
+                    pixels: &pixels,
+                    retention: ImageRetention::WhilePlaced,
+                },
+            )
+            .unwrap();
+        let mut older = placement(content_id, 10, 0);
+        older.source.width = 3;
+        older.destination.columns = 3;
+        let older_id = plane.insert_placement(ActiveScreen::Normal, older).unwrap();
+        let mut newer = placement(content_id, 11, 0);
+        newer.column = 1;
+        newer.source.width = 2;
+        newer.destination.columns = 2;
+        let newer_id = plane.insert_placement(ActiveScreen::Normal, newer).unwrap();
+        let mut unrelated = placement(content_id, 12, 0);
+        unrelated.column = 5;
+        let unrelated_id = plane
+            .insert_placement(ActiveScreen::Normal, unrelated)
+            .unwrap();
+
+        assert!(plane.remap_anchors(
+            ActiveScreen::Normal,
+            &BTreeMap::from([(10, 20), (11, 20), (12, 20)]),
+        ));
+        assert!(plane.resolve_text_overlaps(ActiveScreen::Normal, &[20]));
+        let placements = plane.placements(ActiveScreen::Normal).collect::<Vec<_>>();
+        assert_eq!(placements.len(), 3);
+        assert!(placements.iter().all(|placement| placement.id != older_id));
+        assert!(placements.iter().any(|placement| placement.id == newer_id));
+        assert!(
+            placements
+                .iter()
+                .any(|placement| placement.id == unrelated_id)
+        );
+        assert!(placements.iter().any(|placement| {
+            placement.column == 0
+                && placement.destination.columns == 1
+                && placement.source.width == 1
+        }));
+        assert!(placements.iter().any(|placement| {
+            placement.column == 1
+                && placement.destination.columns == 2
+                && placement.source.width == 2
+        }));
     }
 
     #[test]

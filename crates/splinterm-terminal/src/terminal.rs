@@ -16,10 +16,10 @@ use crate::{
     Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, ImageAlphaMode, ImageContent,
     ImageContentId, ImageErasePolicy, ImageError, ImageMetrics, ImagePlacement, ImagePlacementId,
     ImagePlane, ImageRetention, ImageSourceFormat, MouseTracking, NewImageContent,
-    NewImagePlacement, NewImagePlacementOptions, PixelRect, ResnapshotRequired, RowSnapshot,
-    ScrollDirection, ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest,
-    TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision,
-    TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
+    NewImagePlacement, NewImagePlacementOptions, PixelRect, PixelSize, ResnapshotRequired,
+    RowSnapshot, ScrollDirection, ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage,
+    SnapshotRequest, TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes,
+    TerminalRevision, TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
     image::{MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage},
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
@@ -250,18 +250,38 @@ impl Terminal {
             .expect("alternate grid capacity overflow")
             .min(1_usize << 30);
         let composed = &self.composed;
-        self.normal
-            .resize_with_reflow(normal_capacity, columns, rows, |key| composed.width(key));
-        self.alternate
-            .resize_without_reflow(alternate_capacity, columns, rows);
+        let normal_image_anchors =
+            self.normal
+                .resize_with_reflow(normal_capacity, columns, rows, |key| composed.width(key));
+        let alternate_image_anchors =
+            self.alternate
+                .resize_without_reflow(alternate_capacity, columns, rows);
         let image_metrics = self.images.metrics();
+        let mut images_changed = false;
         if self.images.has_placements(ActiveScreen::Normal) {
+            images_changed |= self
+                .images
+                .remap_anchors(ActiveScreen::Normal, &normal_image_anchors);
             self.images
                 .retain_anchors(ActiveScreen::Normal, &self.normal.retained_row_ids());
+            images_changed |= self.images.resolve_text_overlaps(
+                ActiveScreen::Normal,
+                &self.normal.ordered_retained_row_ids(),
+            );
         }
         if self.images.has_placements(ActiveScreen::Alternate) {
+            images_changed |= self
+                .images
+                .remap_anchors(ActiveScreen::Alternate, &alternate_image_anchors);
             self.images
                 .retain_anchors(ActiveScreen::Alternate, &self.alternate.retained_row_ids());
+            images_changed |= self
+                .images
+                .remove_text_placements_outside_columns(ActiveScreen::Alternate, columns);
+            images_changed |= self.images.resolve_text_overlaps(
+                ActiveScreen::Alternate,
+                &self.alternate.ordered_retained_row_ids(),
+            );
         }
         self.scroll_region = ScrollRegion::new(0, i32::try_from(rows).expect("rows fit in i32"));
         self.reset_tab_stops(columns);
@@ -273,7 +293,7 @@ impl Terminal {
         change.push(TerminalDamage::Dimensions);
         change.push(TerminalDamage::Viewport);
         change.push(TerminalDamage::Scrollback);
-        if self.images.metrics() != image_metrics {
+        if images_changed || self.images.metrics() != image_metrics {
             change.push(TerminalDamage::Images {
                 screen: self.active,
             });
@@ -684,14 +704,21 @@ impl Terminal {
             return;
         }
         let row_ids = self.grid().screen_row_ids();
-        self.images.remove_text_overlaps(
+        if self.images.remove_text_overlaps(
             self.active,
             &row_ids,
             start_row,
             end_row,
             start_column,
             end_column,
-        );
+        ) {
+            self.current_change
+                .as_mut()
+                .expect("text overwrite has an active transaction")
+                .push(TerminalDamage::Images {
+                    screen: self.active,
+                });
+        }
     }
 
     fn scroll_grid(
@@ -846,7 +873,8 @@ impl Terminal {
         } else {
             0
         };
-        let Some(row_id) = self.grid().screen_row_ids().get(start_row).copied() else {
+        let row_order = self.grid().screen_row_ids();
+        let Some(row_id) = row_order.get(start_row).copied() else {
             self.push_event(TerminalEvent::ImageRejected("Sixel anchor unavailable"));
             return;
         };
@@ -874,6 +902,10 @@ impl Terminal {
                 columns: usize::try_from(columns).unwrap_or(usize::MAX),
                 rows: destination_rows,
             },
+            source_cell_size: Some(PixelSize {
+                width: cell_width,
+                height: cell_height,
+            }),
             x_offset: 0,
             y_offset: 0,
             z_index: -1,
@@ -885,7 +917,7 @@ impl Terminal {
         self.current_change = Some(ChangeSet::default());
         if self
             .images
-            .insert_content_and_placement(self.active, content, row_id, placement)
+            .insert_sixel_content_and_placement(self.active, content, &row_order, row_id, placement)
             .is_err()
         {
             self.current_change = None;

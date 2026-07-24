@@ -190,12 +190,12 @@ impl ChangeSet {
             .damage
             .iter_mut()
             .find(|item| matches!(item, TerminalDamage::Rows { .. }))
+            && start <= *existing_end
+            && end >= *existing_start
         {
-            if start <= *existing_end && end >= *existing_start {
-                *existing_start = (*existing_start).min(start);
-                *existing_end = (*existing_end).max(end);
-                return;
-            }
+            *existing_start = (*existing_start).min(start);
+            *existing_end = (*existing_end).max(end);
+            return;
         }
         self.damage.push(TerminalDamage::Rows { start, end });
     }
