@@ -92,6 +92,10 @@ pub(crate) enum Action {
     },
     Osc(Vec<u8>, StringTerminator),
     Dcs(Vec<u8>),
+    SixelBegin(Box<Params>),
+    SixelData(u8),
+    SixelEnd,
+    SixelAbort,
     StringTruncated(&'static str),
 }
 
@@ -132,6 +136,7 @@ pub(crate) struct Parser {
     string_truncated: bool,
     osc_limit: usize,
     dcs_limit: usize,
+    sixel_streaming: bool,
     utf8_value: u32,
     utf8_minimum: u32,
     utf8_remaining: u8,
@@ -153,6 +158,7 @@ impl Parser {
             string_truncated: false,
             osc_limit,
             dcs_limit,
+            sixel_streaming: false,
             utf8_value: 0,
             utf8_minimum: 0,
             utf8_remaining: 0,
@@ -166,9 +172,12 @@ impl Parser {
         }
 
         if matches!(byte, 0x18 | 0x1a) {
+            let action = self.sixel_streaming.then_some(Action::SixelAbort);
             self.state = State::Ground;
+            self.sixel_streaming = false;
             self.string.clear();
-            return (None, false);
+            self.clear_sequence();
+            return (action, false);
         }
         if byte == 0x1b
             && !matches!(
@@ -359,6 +368,7 @@ impl Parser {
                 }
                 0x7f => (None, false),
                 0x80..=0x9f => self.finish_dcs(),
+                _ if self.sixel_streaming => (Some(Action::SixelData(byte)), false),
                 _ => {
                     self.push_string(byte);
                     (None, false)
@@ -368,9 +378,11 @@ impl Parser {
                 if byte == b'\\' {
                     self.finish_dcs()
                 } else {
+                    let action = self.sixel_streaming.then_some(Action::SixelAbort);
+                    self.sixel_streaming = false;
                     self.state = State::Escape;
                     self.clear_sequence();
-                    (None, true)
+                    (action, true)
                 }
             }
             State::DcsIgnore => {
@@ -405,7 +417,15 @@ impl Parser {
                         self.collect_intermediate(byte);
                         self.state = State::DcsIntermediate;
                     }
-                    0x40..=0x7e => self.start_string(State::DcsPassthrough, self.dcs_limit),
+                    0x40..=0x7e => {
+                        self.finish_params();
+                        if byte == b'q' && self.private.is_none() && self.intermediate_count == 0 {
+                            self.state = State::DcsPassthrough;
+                            self.sixel_streaming = true;
+                            return (Some(Action::SixelBegin(Box::new(self.params))), false);
+                        }
+                        self.start_string(State::DcsPassthrough, self.dcs_limit);
+                    }
                     _ => self.state = State::DcsIgnore,
                 }
                 (None, false)
@@ -481,6 +501,11 @@ impl Parser {
 
     fn finish_dcs(&mut self) -> (Option<Action>, bool) {
         self.state = State::Ground;
+        if self.sixel_streaming {
+            self.sixel_streaming = false;
+            self.clear_sequence();
+            return (Some(Action::SixelEnd), false);
+        }
         if self.string_truncated {
             self.string.clear();
             (Some(Action::StringTruncated("DCS")), false)
@@ -581,5 +606,58 @@ mod tests {
         }
         assert_eq!(parser.state, State::Ground);
         assert_eq!(parser.feed(b'Z'), (Some(Action::Print('Z')), false));
+    }
+
+    #[test]
+    fn sixel_is_streamed_without_using_the_collected_dcs_limit() {
+        let mut parser = Parser::new(2, 1);
+        let mut actions = Vec::new();
+        for byte in b"\x1bP7;1;0q#1~\x1b\\" {
+            let (action, again) = parser.feed(*byte);
+            assert!(!again);
+            if let Some(action) = action {
+                actions.push(action);
+            }
+        }
+        assert_eq!(actions.len(), 5);
+        let Action::SixelBegin(params) = &actions[0] else {
+            panic!("expected streaming Sixel begin");
+        };
+        assert_eq!(params.get(0).value(0, false), 7);
+        assert_eq!(params.get(1).value(0, false), 1);
+        assert_eq!(params.get(2).value(1, false), 0);
+        assert_eq!(actions[1], Action::SixelData(b'#'));
+        assert_eq!(actions[2], Action::SixelData(b'1'));
+        assert_eq!(actions[3], Action::SixelData(b'~'));
+        assert_eq!(actions[4], Action::SixelEnd);
+    }
+
+    #[test]
+    fn sixel_cancel_aborts_and_recovers_to_ground() {
+        let mut parser = Parser::new(16, 16);
+        let mut actions = Vec::new();
+        for byte in b"\x1bPq~\x18Z" {
+            let (action, mut again) = parser.feed(*byte);
+            if let Some(action) = action {
+                actions.push(action);
+            }
+            while again {
+                let (action, next) = parser.feed(*byte);
+                if let Some(action) = action {
+                    actions.push(action);
+                }
+                again = next;
+            }
+        }
+        assert_eq!(
+            actions,
+            vec![
+                Action::SixelBegin(Box::default()),
+                Action::SixelData(b'~'),
+                Action::SixelAbort,
+                Action::Print('Z'),
+            ]
+        );
+        assert_eq!(parser.state, State::Ground);
     }
 }

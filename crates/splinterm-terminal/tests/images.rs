@@ -79,6 +79,56 @@ fn insert_at_cursor(
 }
 
 #[test]
+fn streamed_sixel_matches_the_pinned_foot_fixture_at_every_chunk_boundary() {
+    let input = b"\x1bP7;0;0q\"1;1;1;6#1;2;100;0;0#1~\x1b\\";
+    let build = |chunks: &[&[u8]]| {
+        let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+        terminal.set_cell_pixel_size(1, 6);
+        for chunk in chunks {
+            terminal.advance(chunk);
+        }
+        terminal
+    };
+    let expected = build(&[input]);
+    assert_eq!(expected.image_metrics().content_count, 1);
+    assert_eq!(expected.image_metrics().placement_count, 1);
+    let snapshot = expected.snapshot(SnapshotRequest::default());
+    let metadata = snapshot.image_contents().next().unwrap();
+    assert_eq!((metadata.width, metadata.height), (1, 6));
+    assert_eq!(
+        expected.image_content(metadata.id).unwrap().pixels(),
+        [0, 0, 255, 255].repeat(6)
+    );
+
+    for split in 0..=input.len() {
+        assert_eq!(build(&[&input[..split], &input[split..]]), expected);
+    }
+    let byte_chunks = input.iter().map(std::slice::from_ref).collect::<Vec<_>>();
+    assert_eq!(build(&byte_chunks), expected);
+}
+
+#[test]
+fn cancelled_sixel_discards_partial_pixels_and_resynchronizes() {
+    let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(b"\x1bP7;0;0q#1;2;100;0;0#1~\x18Z");
+    assert_eq!(terminal.image_metrics().content_count, 0);
+    assert_eq!(terminal.image_metrics().placement_count, 0);
+    assert_eq!(
+        terminal
+            .snapshot(SnapshotRequest::default())
+            .visible_rows()
+            .next()
+            .unwrap()
+            .cells()
+            .next()
+            .unwrap()
+            .content(),
+        splinterm_terminal::CellSnapshotContent::Scalar('Z')
+    );
+}
+
+#[test]
 fn transmit_and_display_is_atomic_and_commits_one_revision() {
     let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
     let base = terminal.revision();

@@ -13,12 +13,14 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     ActiveScreen, Attributes, CellContent, ChangeSet, Color, ColorSource, ComposedTable,
-    Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, ImageContent, ImageContentId, ImageError,
-    ImageMetrics, ImagePlacement, ImagePlacementId, ImagePlane, MouseTracking, NewImageContent,
-    NewImagePlacement, NewImagePlacementOptions, ResnapshotRequired, RowSnapshot, ScrollDirection,
-    ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest, TerminalConfig,
-    TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision, TerminalSnapshot,
-    TerminalUpdate, UnderlineStyle, UpdateBatch,
+    Coordinate, Cursor, CursorSnapshot, Dimensions, Grid, ImageAlphaMode, ImageContent,
+    ImageContentId, ImageErasePolicy, ImageError, ImageMetrics, ImagePlacement, ImagePlacementId,
+    ImagePlane, ImageRetention, ImageSourceFormat, MouseTracking, NewImageContent,
+    NewImagePlacement, NewImagePlacementOptions, PixelRect, ResnapshotRequired, RowSnapshot,
+    ScrollDirection, ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest,
+    TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision,
+    TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
+    image::{SixelDecoder, SixelError},
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -37,6 +39,8 @@ pub struct Terminal {
     tab_stops: Vec<bool>,
     composed: ComposedTable,
     images: ImagePlane,
+    sixel_decoder: Option<Box<SixelDecoder>>,
+    cell_pixels: Option<(u32, u32)>,
     title: String,
     palette: [u32; 256],
     initial_palette: [u32; 256],
@@ -100,7 +104,11 @@ impl ActionHint {
                 first_param: params.get(0).value(0, false),
             },
             Action::Osc(..) => Self::Osc,
-            Action::Dcs(..) => Self::Dcs,
+            Action::Dcs(..)
+            | Action::SixelBegin(..)
+            | Action::SixelData(..)
+            | Action::SixelEnd
+            | Action::SixelAbort => Self::Dcs,
             Action::StringTruncated(..) => Self::Truncated,
         }
     }
@@ -154,6 +162,8 @@ impl Terminal {
             tab_stops: Vec::new(),
             composed: ComposedTable::new(config.composed_limit),
             images: ImagePlane::new(config.image_limits),
+            sixel_decoder: None,
+            cell_pixels: None,
             title: String::new(),
             palette,
             initial_palette: palette,
@@ -177,7 +187,15 @@ impl Terminal {
             while reprocess {
                 let (action, again) = self.parser.feed(byte);
                 if let Some(action) = action {
-                    self.dispatch(action);
+                    match action {
+                        Action::SixelBegin(params) => self.begin_sixel(&params),
+                        Action::SixelData(byte) => self.put_sixel(byte),
+                        Action::SixelEnd => self.end_sixel(),
+                        Action::SixelAbort => {
+                            self.sixel_decoder = None;
+                        }
+                        action => self.dispatch(action),
+                    }
                 }
                 reprocess = again;
             }
@@ -282,6 +300,16 @@ impl Terminal {
     #[must_use]
     pub const fn revision(&self) -> TerminalRevision {
         self.revision
+    }
+
+    /// Sets the pixel dimensions used to convert decoded image pixels into
+    /// cell-relative placement extents. Zero dimensions mark geometry unknown.
+    pub const fn set_cell_pixel_size(&mut self, width: u32, height: u32) {
+        self.cell_pixels = if width == 0 || height == 0 {
+            None
+        } else {
+            Some((width, height))
+        };
     }
 
     /// Returns current image-plane accounting and high-water marks.
@@ -677,6 +705,101 @@ impl Terminal {
         }
     }
 
+    fn begin_sixel(&mut self, params: &Params) {
+        self.sixel_decoder = Some(Box::new(SixelDecoder::new(
+            params.get(0).value(0, true),
+            params.get(1).value(0, false),
+            self.config.image_limits,
+        )));
+    }
+
+    fn put_sixel(&mut self, byte: u8) {
+        let failed = self
+            .sixel_decoder
+            .as_mut()
+            .is_some_and(|decoder| decoder.put(byte).is_err());
+        if failed {
+            self.sixel_decoder = None;
+            self.push_event(TerminalEvent::ImageRejected("Sixel decode limit"));
+        }
+    }
+
+    fn end_sixel(&mut self) {
+        let Some(decoder) = self.sixel_decoder.take() else {
+            return;
+        };
+        let image = match decoder.finish() {
+            Ok(image) => image,
+            Err(
+                SixelError::InputLimit
+                | SixelError::Dimensions
+                | SixelError::ExpansionRatio
+                | SixelError::PixelWrites,
+            ) => {
+                self.push_event(TerminalEvent::ImageRejected("Sixel decode limit"));
+                return;
+            }
+            Err(SixelError::Malformed) => {
+                self.push_event(TerminalEvent::ImageRejected("malformed Sixel"));
+                return;
+            }
+        };
+        let Some((cell_width, cell_height)) = self.cell_pixels else {
+            self.push_event(TerminalEvent::ImageRejected("Sixel geometry unavailable"));
+            return;
+        };
+        let Some(columns) = image
+            .width
+            .checked_add(cell_width - 1)
+            .map(|value| value / cell_width)
+        else {
+            self.push_event(TerminalEvent::ImageRejected("Sixel placement overflow"));
+            return;
+        };
+        let Some(rows) = image
+            .height
+            .checked_add(cell_height - 1)
+            .map(|value| value / cell_height)
+        else {
+            self.push_event(TerminalEvent::ImageRejected("Sixel placement overflow"));
+            return;
+        };
+        let content = NewImageContent {
+            width: image.width,
+            height: image.height,
+            source_format: ImageSourceFormat::Sixel,
+            alpha_mode: if image.opaque {
+                ImageAlphaMode::Opaque
+            } else {
+                ImageAlphaMode::Premultiplied
+            },
+            pixels: &image.pixels,
+            retention: ImageRetention::WhilePlaced,
+        };
+        let placement = NewImagePlacementOptions {
+            column: usize::try_from(self.grid().cursor().position().column).unwrap_or(0),
+            source: PixelRect {
+                x: 0,
+                y: 0,
+                width: image.width,
+                height: image.height,
+            },
+            destination: crate::CellExtent {
+                columns: usize::try_from(columns).unwrap_or(usize::MAX),
+                rows: usize::try_from(rows).unwrap_or(usize::MAX),
+            },
+            x_offset: 0,
+            y_offset: 0,
+            z_index: -1,
+            application_image_id: None,
+            application_placement_id: None,
+            erase_policy: ImageErasePolicy::TextOverwrite,
+        };
+        if self.insert_image_at_cursor(content, placement).is_err() {
+            self.push_event(TerminalEvent::ImageRejected("Sixel image admission"));
+        }
+    }
+
     fn dispatch(&mut self, action: Action) {
         let hint = ActionHint::from_action(&action);
         let baseline = self.action_baseline(hint);
@@ -710,6 +833,10 @@ impl Terminal {
             ),
             Action::Osc(payload, terminator) => self.osc(&payload, terminator),
             Action::Dcs(_) => self.push_event(TerminalEvent::UnsupportedSequence("DCS")),
+            Action::SixelBegin(_)
+            | Action::SixelData(_)
+            | Action::SixelEnd
+            | Action::SixelAbort => unreachable!("streaming Sixel actions bypass transactions"),
             Action::StringTruncated(kind) => {
                 self.push_event(TerminalEvent::StringTruncated(kind));
             }
@@ -2414,7 +2541,7 @@ mod tests {
     #[test]
     fn unsupported_dcs_and_malformed_bytes_recover_without_panicking() {
         let mut terminal = terminal(8, 2);
-        terminal.advance(b"\x1bPqpayload\x1b\\A\xf0(\x8c(B");
+        terminal.advance(b"\x1bPxpayload\x1b\\A\xf0(\x8c(B");
         assert!(
             terminal
                 .drain_events()

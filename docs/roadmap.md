@@ -95,8 +95,11 @@ cleanup was verified, and the complete workspace validation suite passes.
 
 Detailed plan: [`plans/0008-terminal-image-protocols.md`](plans/0008-terminal-image-protocols.md)
 
-Slice 0 contracts, budgets, pinned-Foot fixtures, and transport/decoder evidence
-are accepted; production Slice 1 generic image lifecycle work is open.
+Slices 0–1 are accepted: contracts, budgets, pinned-Foot fixtures, and the
+bounded generic image lifecycle are implemented. Slice 2 is in progress with a
+streaming DCS Sixel path and a bounded decoder matching the five pinned semantic
+fixtures; Foot cursor/scroller, query, reflow, fuzz, and full differential work
+remain before Slice 2 closes.
 
 - Generic sparse image-content and placement plane without enlarging every cell
 - Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers

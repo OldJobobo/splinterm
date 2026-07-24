@@ -555,10 +555,17 @@ impl LiveSplintRuntime {
         io: AsyncFd<std::fs::File>,
         config: LiveSplintConfig,
     ) -> Self {
-        let terminal = Terminal::new(
+        let mut terminal = Terminal::new(
             usize::from(config.columns),
             usize::from(config.rows),
             config.terminal.clone(),
+        );
+        set_terminal_pixel_geometry(
+            &mut terminal,
+            config.columns,
+            config.rows,
+            config.pixel_width,
+            config.pixel_height,
         );
         let (sender, receiver) = mpsc::channel(config.command_capacity.max(1));
         let (exit_sender, exit) = watch::channel(None);
@@ -903,6 +910,13 @@ fn handle_command(
             };
             if result.is_ok() {
                 let base = terminal.revision();
+                set_terminal_pixel_geometry(
+                    terminal,
+                    size.columns,
+                    size.rows,
+                    size.pixel_width,
+                    size.pixel_height,
+                );
                 terminal.resize(usize::from(size.columns), usize::from(size.rows));
                 publish_updates(terminal, base, incarnation, subscribers);
             }
@@ -1068,6 +1082,26 @@ struct ProcessOutputMetrics {
     terminal_updates: u64,
     live_events: u64,
     subscriber_overflows: u64,
+}
+
+fn set_terminal_pixel_geometry(
+    terminal: &mut Terminal,
+    columns: u16,
+    rows: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+) {
+    let cell_width = if pixel_width == 0 {
+        0
+    } else {
+        u32::from(pixel_width) / u32::from(columns)
+    };
+    let cell_height = if pixel_height == 0 {
+        0
+    } else {
+        u32::from(pixel_height) / u32::from(rows)
+    };
+    terminal.set_cell_pixel_size(cell_width, cell_height);
 }
 
 fn process_output(

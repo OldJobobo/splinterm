@@ -1,6 +1,6 @@
 # Plan 0008: bounded terminal image protocols
 
-- **Status:** In progress — Slice 0 accepted; Slice 1 open
+- **Status:** In progress — Slices 0–1 accepted; Slice 2 in progress
 - **Roadmap:** Phase 5 — bounded terminal image protocols
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md),
   [Plan 0001](0001-terminal-kernel.md),
@@ -29,6 +29,25 @@ Wayland and derived rendering resources. It must not make the daemon depend on
 Wayland, enlarge every terminal cell, embed large pixel bodies in ordinary JSON
 snapshots, or create an unbounded decoder, cache, queue, scrollback, or animation
 store.
+
+## Implementation status
+
+Slices 0 and 1 are implemented and accepted. The production terminal now has a
+sparse bounded content/placement plane, stable row anchors, atomic
+transmit-and-display, lifecycle integration, image revision damage, bounded
+replay/resnapshot behavior, and hard accounting/high-water metrics without
+changing `Cell` size.
+
+Slice 2 is in progress. DCS `q` now uses begin/data/end/abort parser actions
+rather than the collected DCS buffer. The safe incremental Sixel decoder covers
+aspect ratio, transparent/opaque backgrounds, raster attributes, repeat,
+palette selection and RGB/HLS definition, carriage return, and graphical
+newline under the accepted input, dimension, decoded-byte, and pixel-write
+limits. Non-graphical tests match all five pinned-Foot semantic fixtures at
+every input split and prove CAN/SUB cancellation recovery. Remaining Slice 2
+work includes Foot cursor/scroller placement, overlap and reflow details,
+XTSMGRAPHICS queries/replies, configuration, fuzz evidence, and the complete
+pinned differential matrix.
 
 ## Feasibility and current baseline
 

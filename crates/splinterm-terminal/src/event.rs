@@ -22,6 +22,8 @@ pub enum TerminalEvent {
     },
     /// A recognized family has no semantic handler in this milestone.
     UnsupportedSequence(&'static str),
+    /// A terminal image command was rejected without committing partial state.
+    ImageRejected(&'static str),
     /// A string exceeded its configured retention limit but remained synced.
     StringTruncated(&'static str),
     /// The bounded one-shot event queue dropped at least one event.

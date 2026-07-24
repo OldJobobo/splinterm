@@ -1,5 +1,9 @@
 //! Renderer-independent bounded terminal image content and placements.
 
+mod sixel;
+
+pub(crate) use sixel::{SixelDecoder, SixelError};
+
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
