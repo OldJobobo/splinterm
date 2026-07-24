@@ -2756,14 +2756,36 @@ impl ImageContentSource {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ImageContentCache {
     entries: HashMap<ImageCacheKey, ImageContentSource>,
     order: VecDeque<ImageCacheKey>,
+    maximum_bytes: usize,
     metrics: ImageContentCacheMetrics,
 }
 
+impl Default for ImageContentCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            maximum_bytes: MAX_IMAGE_SOURCE_CACHE_BYTES,
+            metrics: ImageContentCacheMetrics::default(),
+        }
+    }
+}
+
 impl ImageContentCache {
+    pub fn with_maximum_bytes(maximum_bytes: usize) -> Result<Self> {
+        if maximum_bytes == 0 || maximum_bytes > MAX_IMAGE_SOURCE_CACHE_BYTES {
+            bail!("image source cache byte limit is invalid");
+        }
+        Ok(Self {
+            maximum_bytes,
+            ..Self::default()
+        })
+    }
+
     #[must_use]
     pub fn contains(&self, metadata: &ImageContentMetadata) -> bool {
         self.entries.contains_key(&ImageCacheKey::from(metadata))
@@ -2783,7 +2805,7 @@ impl ImageContentCache {
         source: ImageContentSource,
     ) -> Result<ImageContentSource> {
         if source.len() != metadata.byte_length
-            || source.len() > MAX_IMAGE_SOURCE_CACHE_BYTES
+            || source.len() > self.maximum_bytes
             || Sha256::digest(source.as_bytes())[..] != metadata.digest
         {
             bail!("image content does not match cache metadata");
@@ -2796,7 +2818,7 @@ impl ImageContentCache {
             .metrics
             .bytes
             .checked_add(source.len())
-            .is_none_or(|bytes| bytes > MAX_IMAGE_SOURCE_CACHE_BYTES)
+            .is_none_or(|bytes| bytes > self.maximum_bytes)
         {
             let oldest = self
                 .order
@@ -3415,6 +3437,43 @@ mod tests {
                 entries: 1,
                 high_water_bytes: 4,
                 high_water_entries: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn image_source_cache_evicts_derived_entries_before_exceeding_its_limit() {
+        let metadata = |content_id: u64, pixels: &[u8]| ImageContentMetadata {
+            content_id,
+            generation: 1,
+            width: 1,
+            height: 1,
+            source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+            alpha_mode: splinterm_protocol::ImageAlphaMode::Opaque,
+            digest: Sha256::digest(pixels).into(),
+            byte_length: pixels.len(),
+            retention: splinterm_protocol::ImageRetention::WhilePlaced,
+        };
+        let first_pixels = vec![1, 2, 3, 255];
+        let second_pixels = vec![4, 5, 6, 255];
+        let third_pixels = vec![7, 8, 9, 255];
+        let first = metadata(1, &first_pixels);
+        let second = metadata(2, &second_pixels);
+        let third = metadata(3, &third_pixels);
+        let mut cache = ImageContentCache::with_maximum_bytes(8).unwrap();
+        cache.insert(&first, first_pixels).unwrap();
+        cache.insert(&second, second_pixels).unwrap();
+        cache.insert(&third, third_pixels).unwrap();
+        assert!(!cache.contains(&first));
+        assert!(cache.contains(&second));
+        assert!(cache.contains(&third));
+        assert_eq!(
+            cache.metrics(),
+            ImageContentCacheMetrics {
+                bytes: 8,
+                entries: 2,
+                high_water_bytes: 8,
+                high_water_entries: 2,
             }
         );
     }

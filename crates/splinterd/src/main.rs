@@ -127,9 +127,10 @@ impl ActiveImageTransferGuard {
     async fn finish(mut self) -> Result<(), TransferAdmissionError> {
         let transfer_id = self
             .transfer_id
-            .take()
             .expect("active image transfer guard finishes once");
-        self.state.image_transfers.lock().await.finish(transfer_id)
+        let result = self.state.image_transfers.lock().await.finish(transfer_id);
+        self.transfer_id = None;
+        result
     }
 }
 
@@ -5884,6 +5885,126 @@ mod tests {
         acknowledgement[1..9].copy_from_slice(&4_u64.to_be_bytes());
         client.write_all(&acknowledgement).await.unwrap();
         sender.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_content_sender_releases_active_transfer_capacity() {
+        use splinterm_terminal::{
+            ImageAlphaMode, ImagePlane, ImageRetention, ImageSourceFormat, NewImageContent,
+        };
+
+        let state = test_state(false);
+        let mut plane = ImagePlane::default();
+        let content_id = plane
+            .insert_content(
+                ActiveScreen::Normal,
+                NewImageContent {
+                    width: 1,
+                    height: 1,
+                    source_format: ImageSourceFormat::Sixel,
+                    alpha_mode: ImageAlphaMode::Opaque,
+                    pixels: &[1, 2, 3, 255],
+                    retention: ImageRetention::ExplicitDelete,
+                },
+            )
+            .unwrap();
+        let content = plane
+            .content(ActiveScreen::Normal, content_id)
+            .unwrap()
+            .clone();
+        let metadata = content.metadata();
+        let peer = splinterd::image_transport::TransferPeer {
+            uid: 1000,
+            pid: 2,
+            executable_device: 3,
+            executable_inode: 4,
+            executable_sha256: "5".repeat(64),
+        };
+        let request = splinterm_protocol::ImageContentRequest {
+            splint_id: SplintId::new(),
+            incarnation: 2,
+            content_id: content_id.value(),
+            generation: metadata.generation,
+            digest: metadata.digest,
+            accepted_transfers: vec![ImageTransferMode::BinaryChunks],
+        };
+        let claimed = {
+            let mut admission = state.image_transfers.lock().await;
+            let grant = admission
+                .mint(peer.clone(), &request, content.clone(), Instant::now())
+                .unwrap();
+            admission.claim(grant.token, &peer, Instant::now()).unwrap()
+        };
+        let guard = ActiveImageTransferGuard::new(Arc::clone(&state), claimed.transfer_id);
+        assert_eq!(
+            state
+                .image_transfers
+                .lock()
+                .await
+                .metrics()
+                .active_transfers,
+            1
+        );
+        drop(guard);
+        for _ in 0..8 {
+            if state
+                .image_transfers
+                .lock()
+                .await
+                .metrics()
+                .active_transfers
+                == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            state
+                .image_transfers
+                .lock()
+                .await
+                .metrics()
+                .active_transfers,
+            0
+        );
+
+        let claimed = {
+            let mut admission = state.image_transfers.lock().await;
+            let grant = admission
+                .mint(peer.clone(), &request, content, Instant::now())
+                .unwrap();
+            admission.claim(grant.token, &peer, Instant::now()).unwrap()
+        };
+        let admission_lock = state.image_transfers.lock().await;
+        let guard = ActiveImageTransferGuard::new(Arc::clone(&state), claimed.transfer_id);
+        let finishing = tokio::spawn(guard.finish());
+        tokio::task::yield_now().await;
+        finishing.abort();
+        assert!(finishing.await.unwrap_err().is_cancelled());
+        drop(admission_lock);
+        for _ in 0..8 {
+            if state
+                .image_transfers
+                .lock()
+                .await
+                .metrics()
+                .active_transfers
+                == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            state
+                .image_transfers
+                .lock()
+                .await
+                .metrics()
+                .active_transfers,
+            0
+        );
     }
 
     #[test]
