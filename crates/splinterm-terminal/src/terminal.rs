@@ -20,7 +20,7 @@ use crate::{
     ScrollDirection, ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest,
     TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision,
     TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
-    image::{SixelDecoder, SixelError},
+    image::{MAX_SIXEL_COLORS, SixelDecoder, SixelError},
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -41,6 +41,11 @@ pub struct Terminal {
     images: ImagePlane,
     sixel_decoder: Option<Box<SixelDecoder>>,
     cell_pixels: Option<(u32, u32)>,
+    sixel_scrolling: bool,
+    sixel_cursor_right: bool,
+    sixel_palette_size: usize,
+    sixel_maximum_width: u32,
+    sixel_maximum_height: u32,
     title: String,
     palette: [u32; 256],
     initial_palette: [u32; 256],
@@ -164,6 +169,11 @@ impl Terminal {
             images: ImagePlane::new(config.image_limits),
             sixel_decoder: None,
             cell_pixels: None,
+            sixel_scrolling: true,
+            sixel_cursor_right: false,
+            sixel_palette_size: MAX_SIXEL_COLORS,
+            sixel_maximum_width: config.image_limits.maximum_dimension,
+            sixel_maximum_height: config.image_limits.maximum_dimension,
             title: String::new(),
             palette,
             initial_palette: palette,
@@ -710,6 +720,9 @@ impl Terminal {
             params.get(0).value(0, true),
             params.get(1).value(0, false),
             self.config.image_limits,
+            self.sixel_palette_size,
+            self.sixel_maximum_width,
+            self.sixel_maximum_height,
         )));
     }
 
@@ -764,6 +777,28 @@ impl Terminal {
             self.push_event(TerminalEvent::ImageRejected("Sixel placement overflow"));
             return;
         };
+        let destination_rows = usize::try_from(rows).unwrap_or(usize::MAX);
+        if destination_rows > self.grid().row_capacity() {
+            self.push_event(TerminalEvent::ImageRejected(
+                "Sixel image exceeds row capacity",
+            ));
+            return;
+        }
+        let cursor = self.grid().cursor().position();
+        let start_row = if self.sixel_scrolling {
+            usize::try_from(cursor.row).unwrap_or(0)
+        } else {
+            0
+        };
+        let start_column = if self.sixel_scrolling {
+            usize::try_from(cursor.column).unwrap_or(0)
+        } else {
+            0
+        };
+        let Some(row_id) = self.grid().screen_row_ids().get(start_row).copied() else {
+            self.push_event(TerminalEvent::ImageRejected("Sixel anchor unavailable"));
+            return;
+        };
         let content = NewImageContent {
             width: image.width,
             height: image.height,
@@ -777,7 +812,7 @@ impl Terminal {
             retention: ImageRetention::WhilePlaced,
         };
         let placement = NewImagePlacementOptions {
-            column: usize::try_from(self.grid().cursor().position().column).unwrap_or(0),
+            column: start_column,
             source: PixelRect {
                 x: 0,
                 y: 0,
@@ -786,7 +821,7 @@ impl Terminal {
             },
             destination: crate::CellExtent {
                 columns: usize::try_from(columns).unwrap_or(usize::MAX),
-                rows: usize::try_from(rows).unwrap_or(usize::MAX),
+                rows: destination_rows,
             },
             x_offset: 0,
             y_offset: 0,
@@ -795,9 +830,42 @@ impl Terminal {
             application_placement_id: None,
             erase_policy: ImageErasePolicy::TextOverwrite,
         };
-        if self.insert_image_at_cursor(content, placement).is_err() {
+        let baseline = self.action_baseline(ActionHint::Dcs);
+        self.current_change = Some(ChangeSet::default());
+        if self
+            .images
+            .insert_content_and_placement(self.active, content, row_id, placement)
+            .is_err()
+        {
+            self.current_change = None;
             self.push_event(TerminalEvent::ImageRejected("Sixel image admission"));
+            return;
         }
+        if self.sixel_scrolling {
+            let cursor_rows = image
+                .cursor_pixel_row
+                .checked_add(cell_height - 1)
+                .map_or(0, |value| value / cell_height);
+            for _ in 1..cursor_rows {
+                self.line_feed();
+            }
+            let mut cursor = self.grid().cursor();
+            let column = if self.sixel_cursor_right {
+                start_column
+                    .saturating_add(usize::try_from(columns).unwrap_or(usize::MAX))
+                    .min(self.grid().columns() - 1)
+            } else {
+                start_column
+            };
+            let mut position = cursor.position();
+            position.column = i32::try_from(column).unwrap_or(i32::MAX);
+            cursor.set_position(position);
+            cursor.set_deferred_wrap(false);
+            self.grid_mut().set_cursor(cursor);
+        }
+        self.prune_active_image_anchors();
+        self.record_action_changes(&baseline, ActionHint::Dcs);
+        self.commit_change();
     }
 
     fn dispatch(&mut self, action: Action) {
@@ -1352,6 +1420,10 @@ impl Terminal {
             self.set_private_modes(params, final_byte == b'h');
             return;
         }
+        if private == Some(b'?') && final_byte == b'S' {
+            self.xtsmgraphics(params);
+            return;
+        }
         if private.is_some()
             && !(final_byte == b'c' || (private == Some(b'?') && final_byte == b'n'))
         {
@@ -1396,6 +1468,70 @@ impl Terminal {
             b'c' => self.device_attributes(private),
             _ => {}
         }
+    }
+
+    fn xtsmgraphics(&mut self, params: &Params) {
+        let item = params.get(0).value(0, false);
+        let operation = params.get(1).value(0, false);
+        match (item, operation) {
+            (1, 1) => self.report_sixel_colors(self.sixel_palette_size),
+            (1, 2) => {
+                self.sixel_palette_size = MAX_SIXEL_COLORS;
+                self.report_sixel_colors(self.sixel_palette_size);
+            }
+            (1, 3) => {
+                self.sixel_palette_size = usize::try_from(params.get(2).value(0, false))
+                    .unwrap_or(usize::MAX)
+                    .clamp(2, MAX_SIXEL_COLORS);
+                self.report_sixel_colors(self.sixel_palette_size);
+            }
+            (1, 4) => self.report_sixel_colors(MAX_SIXEL_COLORS),
+            (2, 1) => self.report_sixel_geometry(false),
+            (2, 2) => {
+                self.sixel_maximum_width = self.config.image_limits.maximum_dimension;
+                self.sixel_maximum_height = self.config.image_limits.maximum_dimension;
+                self.report_sixel_geometry(false);
+            }
+            (2, 3) => {
+                self.sixel_maximum_width = params
+                    .get(2)
+                    .value(0, false)
+                    .min(self.config.image_limits.maximum_dimension);
+                self.sixel_maximum_height = params
+                    .get(3)
+                    .value(0, false)
+                    .min(self.config.image_limits.maximum_dimension);
+                self.report_sixel_geometry(false);
+            }
+            (2, 4) => self.report_sixel_geometry(true),
+            _ => {}
+        }
+    }
+
+    fn report_sixel_colors(&mut self, count: usize) {
+        self.push_event(TerminalEvent::PtyWrite(
+            format!("\x1b[?1;0;{count}S").into_bytes(),
+        ));
+    }
+
+    fn report_sixel_geometry(&mut self, maximum: bool) {
+        let (width, height) = if maximum {
+            (self.sixel_maximum_width, self.sixel_maximum_height)
+        } else {
+            let (cell_width, cell_height) = self.cell_pixels.unwrap_or((0, 0));
+            let width = u32::try_from(self.grid().columns())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(cell_width)
+                .min(self.sixel_maximum_width);
+            let height = u32::try_from(self.grid().screen_rows())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(cell_height)
+                .min(self.sixel_maximum_height);
+            (width, height)
+        };
+        self.push_event(TerminalEvent::PtyWrite(
+            format!("\x1b[?2;0;{width};{height}S").into_bytes(),
+        ));
     }
 
     fn move_cursor(&mut self, column_delta: i32, row_delta: i32) {
@@ -1674,6 +1810,8 @@ impl Terminal {
                 45 => self.modes.reverse_wrap = enabled,
                 47 | 1047 => self.select_alternate(enabled, false),
                 66 => self.modes.application_keypad = enabled,
+                80 => self.sixel_scrolling = !enabled,
+                8452 => self.sixel_cursor_right = enabled,
                 1000 => {
                     if enabled {
                         self.modes.mouse_tracking = MouseTracking::Normal;
@@ -1940,6 +2078,7 @@ impl Terminal {
         let config = self.config.clone();
         let normal_history_namespace = self.normal.history_namespace();
         let alternate_history_namespace = self.alternate.history_namespace();
+        let cell_pixels = self.cell_pixels;
         let events = std::mem::take(&mut self.events);
         let event_overflowed = self.event_overflowed;
         let revision = self.revision;
@@ -1950,6 +2089,7 @@ impl Terminal {
             .continue_history_namespace(normal_history_namespace);
         self.alternate
             .continue_history_namespace(alternate_history_namespace);
+        self.cell_pixels = cell_pixels;
         self.events = events;
         self.event_overflowed = event_overflowed;
         self.revision = revision;

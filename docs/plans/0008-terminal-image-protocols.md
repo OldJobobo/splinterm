@@ -45,9 +45,9 @@ palette selection and RGB/HLS definition, carriage return, and graphical
 newline under the accepted input, dimension, decoded-byte, and pixel-write
 limits. Non-graphical tests match all five pinned-Foot semantic fixtures at
 every input split and prove CAN/SUB cancellation recovery. Remaining Slice 2
-work includes Foot cursor/scroller placement, overlap and reflow details,
-XTSMGRAPHICS queries/replies, configuration, fuzz evidence, and the complete
-pinned differential matrix.
+work includes overlap and reflow details, configuration, fuzz evidence, and
+the complete pinned differential matrix. Cursor/scroller placement modes and
+bounded XTSMGRAPHICS color/geometry replies are implemented.
 
 ## Feasibility and current baseline
 

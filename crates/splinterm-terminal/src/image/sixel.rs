@@ -27,6 +27,7 @@ pub(crate) struct SixelImage {
     pub height: u32,
     pub pixels: Vec<u8>,
     pub opaque: bool,
+    pub cursor_pixel_row: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +41,9 @@ enum State {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SixelDecoder {
     limits: ImageLimits,
+    palette_size: usize,
+    maximum_width: u32,
+    maximum_height: u32,
     state: State,
     params: [u32; 5],
     parameter: u32,
@@ -64,7 +68,14 @@ pub(crate) struct SixelDecoder {
 }
 
 impl SixelDecoder {
-    pub(crate) fn new(p1: u32, p2: u32, limits: ImageLimits) -> Self {
+    pub(crate) fn new(
+        p1: u32,
+        p2: u32,
+        limits: ImageLimits,
+        palette_size: usize,
+        maximum_width: u32,
+        maximum_height: u32,
+    ) -> Self {
         let pan = match p1 {
             2 => 5,
             3 | 4 => 3,
@@ -79,6 +90,9 @@ impl SixelDecoder {
         palette[3] = 0xffff_0000;
         Self {
             limits,
+            palette_size: palette_size.clamp(2, MAX_SIXEL_COLORS),
+            maximum_width: maximum_width.min(limits.maximum_dimension),
+            maximum_height: maximum_height.min(limits.maximum_dimension),
             state: State::Data,
             params: [0; 5],
             parameter: 0,
@@ -138,6 +152,17 @@ impl SixelDecoder {
         } else {
             self.height
         };
+        let cursor_pixel_row = if self.column == 0 {
+            self.row
+        } else {
+            let used_rows = (u8::BITS - self.bottom_pixel.leading_zeros())
+                .min(6)
+                .checked_mul(self.pan)
+                .ok_or(SixelError::Dimensions)?;
+            self.row
+                .checked_add(used_rows)
+                .ok_or(SixelError::Dimensions)?
+        };
         self.pixels.truncate(
             usize::try_from(self.width)
                 .ok()
@@ -162,6 +187,7 @@ impl SixelDecoder {
             height,
             pixels,
             opaque: !self.transparent,
+            cursor_pixel_row,
         })
     }
 
@@ -273,7 +299,7 @@ impl SixelDecoder {
         if self.parameter_index > 0 {
             self.color_index = usize::try_from(self.params[0])
                 .unwrap_or(usize::MAX)
-                .min(MAX_SIXEL_COLORS - 1);
+                .min(self.palette_size - 1);
         }
         if self.parameter_index > 4 {
             let c1 = self.params[2];
@@ -353,7 +379,7 @@ impl SixelDecoder {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        if width > self.limits.maximum_dimension || height > self.limits.maximum_dimension {
+        if width > self.maximum_width || height > self.maximum_height {
             return Err(SixelError::Dimensions);
         }
         let pixel_count = usize::try_from(width)
@@ -413,7 +439,15 @@ mod tests {
     use super::*;
 
     fn decode(input: &[u8], p1: u32, p2: u32) -> SixelImage {
-        let mut decoder = SixelDecoder::new(p1, p2, ImageLimits::default());
+        let limits = ImageLimits::default();
+        let mut decoder = SixelDecoder::new(
+            p1,
+            p2,
+            limits,
+            MAX_SIXEL_COLORS,
+            limits.maximum_dimension,
+            limits.maximum_dimension,
+        );
         for byte in input {
             decoder.put(*byte).unwrap();
         }
@@ -458,14 +492,11 @@ mod tests {
 
     #[test]
     fn dimensions_and_work_are_bounded_before_growth() {
-        let mut dimensions = SixelDecoder::new(
-            7,
-            0,
-            ImageLimits {
-                maximum_dimension: 2,
-                ..ImageLimits::default()
-            },
-        );
+        let limits = ImageLimits {
+            maximum_dimension: 2,
+            ..ImageLimits::default()
+        };
+        let mut dimensions = SixelDecoder::new(7, 0, limits, MAX_SIXEL_COLORS, 2, 2);
         for byte in b"!3~" {
             let result = dimensions.put(*byte);
             if *byte == b'~' {
@@ -473,12 +504,27 @@ mod tests {
             }
         }
 
-        let mut writes = SixelDecoder::new(7, 0, ImageLimits::default());
+        let limits = ImageLimits::default();
+        let mut writes = SixelDecoder::new(
+            7,
+            0,
+            limits,
+            MAX_SIXEL_COLORS,
+            limits.maximum_dimension,
+            limits.maximum_dimension,
+        );
         writes.pixel_writes = MAX_SIXEL_PIXEL_WRITES;
         assert_eq!(writes.put(b'~'), Err(SixelError::PixelWrites));
         assert_eq!(writes.finish(), Err(SixelError::PixelWrites));
 
-        let mut expansion = SixelDecoder::new(7, 0, ImageLimits::default());
+        let mut expansion = SixelDecoder::new(
+            7,
+            0,
+            limits,
+            MAX_SIXEL_COLORS,
+            limits.maximum_dimension,
+            limits.maximum_dimension,
+        );
         for byte in b"!100~" {
             expansion.put(*byte).unwrap();
         }

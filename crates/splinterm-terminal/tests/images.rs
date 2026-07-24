@@ -108,6 +108,60 @@ fn streamed_sixel_matches_the_pinned_foot_fixture_at_every_chunk_boundary() {
 }
 
 #[test]
+fn sixel_modes_control_anchor_and_post_image_cursor() {
+    let image = b"\x1bP7;0;0q\"1;1;2;12#1;2;100;0;0#1~~-~~\x1b\\";
+    let mut terminal = Terminal::new(6, 4, TerminalConfig::default());
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(b"\x1b[2;2H\x1b[?8452h");
+    let base = terminal.revision();
+    terminal.advance(image);
+    assert_eq!(terminal.revision().value(), base.value() + 1);
+    let snapshot = terminal.snapshot(SnapshotRequest::default());
+    let placement = snapshot.image_placements().next().unwrap();
+    assert_eq!(placement.column, 1);
+    assert_eq!(placement.destination.columns, 2);
+    assert_eq!(placement.destination.rows, 2);
+    assert_eq!(snapshot.cursor().cursor.position().row, 2);
+    assert_eq!(snapshot.cursor().cursor.position().column, 3);
+
+    let mut display_mode = Terminal::new(6, 4, TerminalConfig::default());
+    display_mode.set_cell_pixel_size(1, 6);
+    display_mode.advance(b"\x1b[3;4H\x1b[?80h");
+    let cursor = display_mode
+        .snapshot(SnapshotRequest::default())
+        .cursor()
+        .cursor;
+    let base = display_mode.revision();
+    display_mode.advance(image);
+    assert_eq!(display_mode.revision().value(), base.value() + 1);
+    let snapshot = display_mode.snapshot(SnapshotRequest::default());
+    let placement = snapshot.image_placements().next().unwrap();
+    assert_eq!(placement.column, 0);
+    assert_eq!(
+        placement.row_id,
+        snapshot.visible_rows().next().unwrap().id().unwrap()
+    );
+    assert_eq!(snapshot.cursor().cursor, cursor);
+}
+
+#[test]
+fn xtsmgraphics_queries_are_bounded_and_ordered_before_later_replies() {
+    let mut terminal = Terminal::new(10, 4, TerminalConfig::default());
+    terminal.set_cell_pixel_size(8, 16);
+    terminal.advance(b"\x1b[?1;3;64S\x1b[?1;1S\x1b[?2;1S\x1b[?2;4S\x1b[c");
+    assert_eq!(
+        terminal.drain_events().collect::<Vec<_>>(),
+        vec![
+            splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?1;0;64S".to_vec()),
+            splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?1;0;64S".to_vec()),
+            splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?2;0;80;64S".to_vec()),
+            splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?2;0;4096;4096S".to_vec()),
+            splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?62;22c".to_vec()),
+        ]
+    );
+}
+
+#[test]
 fn cancelled_sixel_discards_partial_pixels_and_resynchronizes() {
     let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
     terminal.set_cell_pixel_size(1, 6);
