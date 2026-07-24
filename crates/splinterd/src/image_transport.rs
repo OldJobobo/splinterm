@@ -1,8 +1,12 @@
 //! Bounded admission for daemon-to-UI image content transfers.
 
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, os::fd::OwnedFd, time::Instant};
 
-use rustix::rand::{GetRandomFlags, getrandom};
+use rustix::{
+    fs::{MemfdFlags, SealFlags, fcntl_add_seals, fcntl_get_seals, fstat, memfd_create},
+    io::write,
+    rand::{GetRandomFlags, getrandom},
+};
 use splinterm_core::SplintId;
 use splinterm_protocol::{
     IMAGE_TRANSFER_TOKEN_BYTES, IMAGE_TRANSFER_TOKEN_TTL_MILLIS, ImageContentRequest,
@@ -34,6 +38,8 @@ pub enum TransferAdmissionError {
     Token,
     #[error("operating-system randomness is unavailable")]
     Random,
+    #[error("immutable image descriptor creation failed")]
+    Descriptor,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -49,6 +55,7 @@ struct PendingTransfer {
     peer: TransferPeer,
     request: ImageContentRequest,
     content: ImageContent,
+    mode: ImageTransferMode,
     expires_at: Instant,
 }
 
@@ -57,6 +64,7 @@ pub struct ClaimedTransfer {
     pub transfer_id: u64,
     pub request: ImageContentRequest,
     pub content: ImageContent,
+    pub mode: ImageTransferMode,
 }
 
 #[derive(Debug, Default)]
@@ -87,12 +95,22 @@ impl TransferAdmission {
         if request.content_id != metadata.id.value()
             || request.generation != metadata.generation
             || request.digest != metadata.digest
-            || !request
-                .accepted_transfers
-                .contains(&ImageTransferMode::BinaryChunks)
         {
             return Err(TransferAdmissionError::Identity);
         }
+        let mode = if request
+            .accepted_transfers
+            .contains(&ImageTransferMode::SealedMemfd)
+        {
+            ImageTransferMode::SealedMemfd
+        } else if request
+            .accepted_transfers
+            .contains(&ImageTransferMode::BinaryChunks)
+        {
+            ImageTransferMode::BinaryChunks
+        } else {
+            return Err(TransferAdmissionError::Identity);
+        };
         self.expire(now);
         if self.pending.len() >= MAX_PENDING_TOKENS_PER_DAEMON
             || self
@@ -116,6 +134,7 @@ impl TransferAdmission {
                 peer,
                 request: request.clone(),
                 content,
+                mode,
                 expires_at,
             },
         );
@@ -127,7 +146,7 @@ impl TransferAdmission {
             generation: request.generation,
             digest: request.digest,
             byte_length: metadata.byte_charge,
-            transfer: ImageTransferMode::BinaryChunks,
+            transfer: mode,
             token,
             token_ttl_millis: IMAGE_TRANSFER_TOKEN_TTL_MILLIS,
         })
@@ -179,6 +198,7 @@ impl TransferAdmission {
             transfer_id,
             request: pending.request,
             content: pending.content,
+            mode: pending.mode,
         })
     }
 
@@ -229,6 +249,50 @@ impl TransferAdmission {
             .high_water_active_transfers
             .max(self.metrics.active_transfers);
     }
+}
+
+const REQUIRED_IMAGE_SEALS: SealFlags = SealFlags::WRITE
+    .union(SealFlags::GROW)
+    .union(SealFlags::SHRINK)
+    .union(SealFlags::SEAL);
+
+/// Creates one exactly-sized immutable close-on-exec descriptor.
+///
+/// # Errors
+///
+/// Returns a descriptor error when creation, writing, sealing, or verification fails.
+pub fn sealed_image_memfd(bytes: &[u8]) -> Result<OwnedFd, TransferAdmissionError> {
+    if bytes.is_empty() || bytes.len() > splinterm_protocol::MAX_IMAGE_CONTENT_BYTES {
+        return Err(TransferAdmissionError::Descriptor);
+    }
+    let fd = memfd_create(
+        "splinterm-image-content",
+        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+    )
+    .map_err(|_| TransferAdmissionError::Descriptor)?;
+    let mut written = 0;
+    while written < bytes.len() {
+        let count =
+            write(&fd, &bytes[written..]).map_err(|_| TransferAdmissionError::Descriptor)?;
+        if count == 0 {
+            return Err(TransferAdmissionError::Descriptor);
+        }
+        written = written
+            .checked_add(count)
+            .ok_or(TransferAdmissionError::Descriptor)?;
+    }
+    fcntl_add_seals(&fd, REQUIRED_IMAGE_SEALS).map_err(|_| TransferAdmissionError::Descriptor)?;
+    let seals = fcntl_get_seals(&fd).map_err(|_| TransferAdmissionError::Descriptor)?;
+    let size = usize::try_from(
+        fstat(&fd)
+            .map_err(|_| TransferAdmissionError::Descriptor)?
+            .st_size,
+    )
+    .map_err(|_| TransferAdmissionError::Descriptor)?;
+    if !seals.contains(REQUIRED_IMAGE_SEALS) || size != bytes.len() {
+        return Err(TransferAdmissionError::Descriptor);
+    }
+    Ok(fd)
 }
 
 #[cfg(test)]
@@ -332,6 +396,33 @@ mod tests {
             admission.metrics().high_water_pending_tokens,
             MAX_PENDING_TOKENS_PER_PEER
         );
+    }
+
+    #[test]
+    fn sealed_memfd_is_preferred_and_exactly_immutable() {
+        let now = Instant::now();
+        let content = image();
+        let splint_id = SplintId::new();
+        let mut request = request(&content, splint_id, 8);
+        request.accepted_transfers = vec![
+            ImageTransferMode::SealedMemfd,
+            ImageTransferMode::BinaryChunks,
+        ];
+        let mut admission = TransferAdmission::default();
+        let grant = admission
+            .mint(peer(4), &request, content.clone(), now)
+            .unwrap();
+        assert_eq!(grant.transfer, ImageTransferMode::SealedMemfd);
+        let claimed = admission.claim(grant.token, &peer(4), now).unwrap();
+        assert_eq!(claimed.mode, ImageTransferMode::SealedMemfd);
+
+        let fd = sealed_image_memfd(content.pixels()).unwrap();
+        assert_eq!(
+            usize::try_from(fstat(&fd).unwrap().st_size).unwrap(),
+            content.pixels().len()
+        );
+        assert!(fcntl_get_seals(&fd).unwrap().contains(REQUIRED_IMAGE_SEALS));
+        assert!(write(&fd, b"x").is_err());
     }
 
     #[test]

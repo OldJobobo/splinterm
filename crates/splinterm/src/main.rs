@@ -4341,15 +4341,15 @@ async fn resolve_image_contents(
     let cancellation = tokio_util::sync::CancellationToken::new();
     for metadata in &images.contents {
         if !cache.contains(metadata) {
-            let pixels = connection
-                .image_content(
+            let source = connection
+                .image_content_source(
                     snapshot.splint_id,
                     snapshot.incarnation,
                     metadata,
                     &cancellation,
                 )
                 .await?;
-            cache.insert(metadata, pixels)?;
+            cache.insert_source(metadata, source)?;
         }
     }
     Ok(())
@@ -4368,10 +4368,10 @@ async fn resolve_update_images(
     let cancellation = tokio_util::sync::CancellationToken::new();
     for metadata in &images.contents {
         if !cache.contains(metadata) {
-            let pixels = connection
-                .image_content(splint_id, incarnation, metadata, &cancellation)
+            let source = connection
+                .image_content_source(splint_id, incarnation, metadata, &cancellation)
                 .await?;
-            cache.insert(metadata, pixels)?;
+            cache.insert_source(metadata, source)?;
         }
     }
     Ok(())

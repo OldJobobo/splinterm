@@ -9,10 +9,12 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 splinterm-core = { path = "../splinterm-core" }
+splinterm-filemap = { path = "../splinterm-filemap" }
 splinterm-protocol = { path = "../splinterm-protocol" }
 tokio.workspace = true
 tokio-util.workspace = true

@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 memmap2.workspace = true
+rustix.workspace = true
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

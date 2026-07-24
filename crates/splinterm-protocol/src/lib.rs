@@ -124,7 +124,7 @@ impl Default for ImageServerCapabilities {
         Self {
             metadata_version: 1,
             binary_chunks: true,
-            sealed_memfd: false,
+            sealed_memfd: cfg!(target_os = "linux"),
             maximum_content_bytes: MAX_IMAGE_CONTENT_BYTES,
             maximum_bytes_per_splint: MAX_IMAGE_BYTES_PER_SPLINT,
             maximum_bytes_per_daemon: MAX_IMAGE_BYTES_PER_DAEMON,

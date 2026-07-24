@@ -104,8 +104,9 @@ overwrite/underlay composition, and resize/reflow behavior are implemented. A
 full pinned differential matrix remains before Slice 2 closes. Slice 3 is now
 in progress: protocol v23 carries bounded image metadata and exact content
 identities, with metadata exposed only to the executable-verified trusted UI.
-The mandatory dedicated binary content channel and bounded client source cache
-are implemented; sealed-memfd optimization and Slice 3 lifecycle closure remain.
+The mandatory dedicated binary content channel, preferred sealed-memfd path,
+bounded client source cache, and authoritative 64 MiB daemon byte admission are
+implemented; Slice 3 lifecycle E2E closure remains.
 
 - Generic sparse image-content and placement plane without enlarging every cell
 - Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers

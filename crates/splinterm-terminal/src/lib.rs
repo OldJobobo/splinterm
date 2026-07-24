@@ -34,7 +34,7 @@ pub use image::{
     CellExtent, ImageAlphaMode, ImageContent, ImageContentId, ImageContentMetadata,
     ImageErasePolicy, ImageError, ImageLimits, ImageMetrics, ImagePlacement, ImagePlacementId,
     ImagePlane, ImageRetention, ImageSourceFormat, NewImageContent, NewImagePlacement,
-    NewImagePlacementOptions, PixelRect, PixelSize,
+    NewImagePlacementOptions, PixelRect, PixelSize, SharedImageBudget, SharedImageBudgetMetrics,
 };
 pub use mode::{ActiveScreen, MouseTracking, TerminalModes};
 pub use row::Row;

@@ -12,17 +12,20 @@
 use std::{
     collections::{HashMap, VecDeque},
     env,
-    io::{self, ErrorKind, Write as _},
+    io::{self, ErrorKind, IoSliceMut, Write as _},
+    os::fd::{AsFd, OwnedFd},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, recvmsg};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use splinterm_core::{DojoId, LayoutNode, SplintId, TopologyRevision, WindowId};
+use splinterm_filemap::ReadOnlyFileMap;
 use splinterm_protocol::{
     AccessGrant, AccessScope, AuditDecision, AuditOperation, AuditOutcome, AuditPage,
     AutomationScope, ClientFrame, ClientRole, ControlStatus, ControlTransferOutcome, ErrorCode,
@@ -2585,6 +2588,7 @@ impl CliEventV1 {
 }
 
 const IMAGE_CONTENT_HEADER_BYTES: usize = 53;
+const IMAGE_MEMFD_HEADER_BYTES: usize = 45;
 
 async fn receive_image_content(
     stream: &mut UnixStream,
@@ -2643,6 +2647,62 @@ async fn receive_image_content(
     Ok(pixels)
 }
 
+async fn receive_image_memfd(
+    stream: &mut UnixStream,
+    metadata: &ImageContentMetadata,
+) -> Result<ReadOnlyFileMap> {
+    let descriptor = loop {
+        stream.readable().await?;
+        let mut marker = [0_u8; 1];
+        let mut iov = [IoSliceMut::new(&mut marker)];
+        let mut ancillary_space =
+            [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut ancillary = RecvAncillaryBuffer::new(&mut ancillary_space);
+        let message = match recvmsg(
+            stream.as_fd(),
+            &mut iov,
+            &mut ancillary,
+            RecvFlags::CMSG_CLOEXEC,
+        ) {
+            Ok(message) => message,
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if message.bytes != 1 || marker != [b'F'] || message.flags.contains(ReturnFlags::CTRUNC) {
+            bail!("image descriptor message is malformed or truncated");
+        }
+        let mut descriptor: Option<OwnedFd> = None;
+        for item in ancillary.drain() {
+            if let RecvAncillaryMessage::ScmRights(mut descriptors) = item {
+                if descriptor.is_some() {
+                    bail!("image descriptor message contains multiple rights records");
+                }
+                descriptor = descriptors.next();
+                if descriptors.next().is_some() {
+                    bail!("image descriptor message contains multiple descriptors");
+                }
+            }
+        }
+        break descriptor.context("image descriptor message contains no descriptor")?;
+    };
+    let mut header = [0_u8; IMAGE_MEMFD_HEADER_BYTES];
+    stream.read_exact(&mut header).await?;
+    if &header[0..5] != b"SPIF\x01"
+        || header[13..45] != metadata.digest
+        || usize::try_from(u64::from_be_bytes(header[5..13].try_into().unwrap())).ok()
+            != Some(metadata.byte_length)
+    {
+        bail!("image descriptor header does not match negotiated metadata");
+    }
+    let mapping = ReadOnlyFileMap::from_sealed_fd(descriptor, metadata.byte_length)
+        .context("image descriptor is not exactly sized and immutable")?;
+    if Sha256::digest(&*mapping).as_slice() != metadata.digest {
+        bail!("mapped image content digest does not match metadata");
+    }
+    stream.write_all(&[1]).await?;
+    Ok(mapping)
+}
+
 pub const MAX_IMAGE_SOURCE_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2670,9 +2730,35 @@ pub struct ImageContentCacheMetrics {
     pub high_water_entries: usize,
 }
 
+#[derive(Clone, Debug)]
+pub enum ImageContentSource {
+    Buffered(Arc<[u8]>),
+    Mapped(Arc<ReadOnlyFileMap>),
+}
+
+impl ImageContentSource {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Buffered(bytes) => bytes,
+            Self::Mapped(mapping) => mapping,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.as_bytes().len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.as_bytes().is_empty()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ImageContentCache {
-    entries: HashMap<ImageCacheKey, Arc<[u8]>>,
+    entries: HashMap<ImageCacheKey, ImageContentSource>,
     order: VecDeque<ImageCacheKey>,
     metrics: ImageContentCacheMetrics,
 }
@@ -2687,21 +2773,29 @@ impl ImageContentCache {
         &mut self,
         metadata: &ImageContentMetadata,
         pixels: Vec<u8>,
-    ) -> Result<Arc<[u8]>> {
-        if pixels.len() != metadata.byte_length
-            || pixels.len() > MAX_IMAGE_SOURCE_CACHE_BYTES
-            || Sha256::digest(&pixels)[..] != metadata.digest
+    ) -> Result<ImageContentSource> {
+        self.insert_source(metadata, ImageContentSource::Buffered(pixels.into()))
+    }
+
+    pub fn insert_source(
+        &mut self,
+        metadata: &ImageContentMetadata,
+        source: ImageContentSource,
+    ) -> Result<ImageContentSource> {
+        if source.len() != metadata.byte_length
+            || source.len() > MAX_IMAGE_SOURCE_CACHE_BYTES
+            || Sha256::digest(source.as_bytes())[..] != metadata.digest
         {
             bail!("image content does not match cache metadata");
         }
         let key = ImageCacheKey::from(metadata);
         if let Some(existing) = self.entries.get(&key) {
-            return Ok(Arc::clone(existing));
+            return Ok(existing.clone());
         }
         while self
             .metrics
             .bytes
-            .checked_add(pixels.len())
+            .checked_add(source.len())
             .is_none_or(|bytes| bytes > MAX_IMAGE_SOURCE_CACHE_BYTES)
         {
             let oldest = self
@@ -2714,21 +2808,18 @@ impl ImageContentCache {
                 .context("image cache order references a missing entry")?;
             self.metrics.bytes -= removed.len();
         }
-        let pixels: Arc<[u8]> = pixels.into();
-        self.metrics.bytes += pixels.len();
-        self.entries.insert(key, Arc::clone(&pixels));
+        self.metrics.bytes += source.len();
+        self.entries.insert(key, source.clone());
         self.order.push_back(key);
         self.metrics.entries = self.entries.len();
         self.metrics.high_water_bytes = self.metrics.high_water_bytes.max(self.metrics.bytes);
         self.metrics.high_water_entries = self.metrics.high_water_entries.max(self.metrics.entries);
-        Ok(pixels)
+        Ok(source)
     }
 
     #[must_use]
-    pub fn get(&self, metadata: &ImageContentMetadata) -> Option<Arc<[u8]>> {
-        self.entries
-            .get(&ImageCacheKey::from(metadata))
-            .map(Arc::clone)
+    pub fn get(&self, metadata: &ImageContentMetadata) -> Option<ImageContentSource> {
+        self.entries.get(&ImageCacheKey::from(metadata)).cloned()
     }
 
     #[must_use]
@@ -2857,16 +2948,24 @@ impl Connection {
         self.limits
     }
 
-    /// Retrieves one exact missing image body over the dedicated binary channel.
-    pub async fn image_content(
+    /// Retrieves one exact missing image body using the preferred negotiated source.
+    pub async fn image_content_source(
         &mut self,
         splint_id: SplintId,
         incarnation: u64,
         metadata: &ImageContentMetadata,
         cancellation: &CancellationToken,
-    ) -> Result<Vec<u8>> {
-        if !self.trusted_ui || !self.limits.image.binary_chunks {
-            bail!("binary image content transport was not negotiated");
+    ) -> Result<ImageContentSource> {
+        if !self.trusted_ui || (!self.limits.image.binary_chunks && !self.limits.image.sealed_memfd)
+        {
+            bail!("image content transport was not negotiated");
+        }
+        let mut accepted_transfers = Vec::with_capacity(2);
+        if self.limits.image.sealed_memfd {
+            accepted_transfers.push(ImageTransferMode::SealedMemfd);
+        }
+        if self.limits.image.binary_chunks {
+            accepted_transfers.push(ImageTransferMode::BinaryChunks);
         }
         let request = ImageContentRequest {
             splint_id,
@@ -2874,7 +2973,7 @@ impl Connection {
             content_id: metadata.content_id,
             generation: metadata.generation,
             digest: metadata.digest,
-            accepted_transfers: vec![ImageTransferMode::BinaryChunks],
+            accepted_transfers,
         };
         let response = self
             .request_with_cancellation(
@@ -2900,24 +2999,56 @@ impl Connection {
             .context("cannot connect to the image content socket")?;
         stream.write_all(&transfer.token).await?;
         let outcome = {
-            let receive = tokio::time::timeout(
-                Duration::from_millis(u64::from(transfer.token_ttl_millis)),
-                receive_image_content(&mut stream, metadata),
-            );
+            let receive = async {
+                match transfer.transfer {
+                    ImageTransferMode::BinaryChunks => receive_image_content(&mut stream, metadata)
+                        .await
+                        .map(|bytes| ImageContentSource::Buffered(bytes.into())),
+                    ImageTransferMode::SealedMemfd => receive_image_memfd(&mut stream, metadata)
+                        .await
+                        .map(|mapping| ImageContentSource::Mapped(Arc::new(mapping))),
+                }
+            };
             tokio::pin!(receive);
+            let timeout =
+                tokio::time::sleep(Duration::from_millis(u64::from(transfer.token_ttl_millis)));
+            tokio::pin!(timeout);
             tokio::select! {
-                result = &mut receive => Some(result.context("image content transfer timed out")?),
-                () = cancellation.cancelled() => None,
+                result = &mut receive => Ok(Some(result)),
+                () = cancellation.cancelled() => Ok(None),
+                () = &mut timeout => Err(anyhow::anyhow!("image content transfer timed out")),
             }
-        };
+        }?;
         if let Some(result) = outcome {
+            if result.is_err() && transfer.transfer == ImageTransferMode::SealedMemfd {
+                let _ = stream.write_all(&[2]).await;
+            }
             result
         } else {
-            let mut cancel = [0_u8; 9];
-            cancel[0] = 2;
-            let _ = stream.write_all(&cancel).await;
+            if transfer.transfer == ImageTransferMode::BinaryChunks {
+                let mut cancel = [0_u8; 9];
+                cancel[0] = 2;
+                let _ = stream.write_all(&cancel).await;
+            } else {
+                let _ = stream.write_all(&[2]).await;
+            }
             bail!("image content transfer was cancelled")
         }
+    }
+
+    /// Retrieves one exact missing image body into a bounded owned buffer.
+    pub async fn image_content(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        metadata: &ImageContentMetadata,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<u8>> {
+        Ok(self
+            .image_content_source(splint_id, incarnation, metadata, cancellation)
+            .await?
+            .as_bytes()
+            .to_vec())
     }
 
     /// Sends one request and waits for its correlated response.
@@ -3270,9 +3401,13 @@ mod tests {
         let mut cache = ImageContentCache::default();
         let first = cache.insert(&metadata, pixels.clone()).unwrap();
         let second = cache.insert(&metadata, pixels).unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
+        assert!(matches!(
+            (&first, &second),
+            (ImageContentSource::Buffered(first), ImageContentSource::Buffered(second))
+                if Arc::ptr_eq(first, second)
+        ));
         assert!(cache.contains(&metadata));
-        assert_eq!(cache.get(&metadata).unwrap().as_ref(), first.as_ref());
+        assert_eq!(cache.get(&metadata).unwrap().as_bytes(), first.as_bytes());
         assert_eq!(
             cache.metrics(),
             ImageContentCacheMetrics {
@@ -3282,6 +3417,69 @@ mod tests {
                 high_water_entries: 1,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn sealed_memfd_receiver_validates_and_maps_immutable_content() {
+        use rustix::{
+            fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create},
+            io::write,
+            net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg},
+        };
+
+        let pixels = [1_u8, 2, 3, 255];
+        let digest: [u8; 32] = Sha256::digest(pixels).into();
+        let metadata = ImageContentMetadata {
+            content_id: 1,
+            generation: 2,
+            width: 1,
+            height: 1,
+            source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+            alpha_mode: splinterm_protocol::ImageAlphaMode::Opaque,
+            digest,
+            byte_length: pixels.len(),
+            retention: splinterm_protocol::ImageRetention::WhilePlaced,
+        };
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let sender = tokio::spawn(async move {
+            let fd = memfd_create(
+                "splinterm-client-memfd-test",
+                MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+            )
+            .unwrap();
+            write(&fd, &pixels).unwrap();
+            fcntl_add_seals(
+                &fd,
+                SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+            )
+            .unwrap();
+            server.writable().await.unwrap();
+            let descriptors = [fd.as_fd()];
+            let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+            let mut ancillary = SendAncillaryBuffer::new(&mut space);
+            assert!(ancillary.push(SendAncillaryMessage::ScmRights(&descriptors)));
+            assert_eq!(
+                sendmsg(
+                    server.as_fd(),
+                    &[std::io::IoSlice::new(b"F")],
+                    &mut ancillary,
+                    SendFlags::empty(),
+                )
+                .unwrap(),
+                1
+            );
+            let mut header = [0_u8; IMAGE_MEMFD_HEADER_BYTES];
+            header[0..5].copy_from_slice(b"SPIF\x01");
+            header[5..13].copy_from_slice(&4_u64.to_be_bytes());
+            header[13..45].copy_from_slice(&digest);
+            server.write_all(&header).await.unwrap();
+            let mut acknowledgement = [0_u8; 1];
+            server.read_exact(&mut acknowledgement).await.unwrap();
+            assert_eq!(acknowledgement, [1]);
+        });
+        let mapping = receive_image_memfd(&mut client, &metadata).await.unwrap();
+        assert_eq!(&*mapping, &pixels);
+        sender.await.unwrap();
     }
 
     #[tokio::test]

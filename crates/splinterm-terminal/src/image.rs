@@ -6,7 +6,10 @@ pub(crate) use sixel::{MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage};
 
 use std::{
     collections::{BTreeMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use sha2::{Digest, Sha256};
@@ -19,6 +22,103 @@ pub const DEFAULT_IMAGE_CONTENTS_PER_TERMINAL: usize = 64;
 pub const DEFAULT_IMAGE_PLACEMENTS_PER_TERMINAL: usize = 256;
 pub const DEFAULT_IMAGE_MAX_DIMENSION: u32 = 4096;
 pub const DEFAULT_IMAGE_MAX_PIXELS: usize = 4_194_304;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SharedImageBudgetMetrics {
+    pub content_bytes: usize,
+    pub high_water_content_bytes: usize,
+}
+
+#[derive(Debug)]
+struct SharedImageBudgetInner {
+    limit: usize,
+    content_bytes: AtomicUsize,
+    high_water_content_bytes: AtomicUsize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SharedImageBudget(Arc<SharedImageBudgetInner>);
+
+impl PartialEq for SharedImageBudget {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for SharedImageBudget {}
+
+impl SharedImageBudget {
+    #[must_use]
+    pub fn new(limit: usize) -> Self {
+        Self(Arc::new(SharedImageBudgetInner {
+            limit,
+            content_bytes: AtomicUsize::new(0),
+            high_water_content_bytes: AtomicUsize::new(0),
+        }))
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> SharedImageBudgetMetrics {
+        SharedImageBudgetMetrics {
+            content_bytes: self.0.content_bytes.load(Ordering::Acquire),
+            high_water_content_bytes: self.0.high_water_content_bytes.load(Ordering::Acquire),
+        }
+    }
+
+    fn reserve(&self, bytes: usize) -> Result<ImageBudgetReservation, ImageError> {
+        let mut current = self.0.content_bytes.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(bytes)
+                .filter(|next| *next <= self.0.limit)
+                .ok_or(ImageError::DaemonBytes)?;
+            match self.0.content_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.0
+                        .high_water_content_bytes
+                        .fetch_max(next, Ordering::AcqRel);
+                    return Ok(ImageBudgetReservation(Arc::new(ImageBudgetLease {
+                        budget: Arc::clone(&self.0),
+                        bytes,
+                    })));
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ImageBudgetLease {
+    budget: Arc<SharedImageBudgetInner>,
+    bytes: usize,
+}
+
+impl Drop for ImageBudgetLease {
+    fn drop(&mut self) {
+        let previous = self
+            .budget
+            .content_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+        debug_assert!(previous >= self.bytes, "image budget release underflow");
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ImageBudgetReservation(Arc<ImageBudgetLease>);
+
+impl PartialEq for ImageBudgetReservation {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ImageBudgetReservation {}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ImageContentId(u64);
@@ -253,6 +353,7 @@ pub enum ImageError {
     PixelLength,
     ContentBytes,
     TerminalBytes,
+    DaemonBytes,
     ContentCount,
     PlacementCount,
     UnknownContent,
@@ -266,6 +367,7 @@ pub enum ImageError {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct ImageCatalog {
     contents: BTreeMap<ImageContentId, ImageContent>,
+    reservations: BTreeMap<ImageContentId, ImageBudgetReservation>,
     placements: BTreeMap<ImagePlacementId, ImagePlacement>,
 }
 
@@ -274,6 +376,7 @@ pub struct ImagePlane {
     normal: ImageCatalog,
     alternate: ImageCatalog,
     limits: ImageLimits,
+    shared_budget: Option<SharedImageBudget>,
     metrics: ImageMetrics,
     next_content_id: u64,
     next_placement_id: u64,
@@ -289,17 +392,28 @@ impl Default for ImagePlane {
 
 impl ImagePlane {
     #[must_use]
-    pub const fn new(limits: ImageLimits) -> Self {
+    pub fn new(limits: ImageLimits) -> Self {
+        Self::new_with_shared_budget(limits, None)
+    }
+
+    #[must_use]
+    pub fn new_with_shared_budget(
+        limits: ImageLimits,
+        shared_budget: Option<SharedImageBudget>,
+    ) -> Self {
         Self {
             normal: ImageCatalog {
                 contents: BTreeMap::new(),
+                reservations: BTreeMap::new(),
                 placements: BTreeMap::new(),
             },
             alternate: ImageCatalog {
                 contents: BTreeMap::new(),
+                reservations: BTreeMap::new(),
                 placements: BTreeMap::new(),
             },
             limits,
+            shared_budget,
             metrics: ImageMetrics {
                 content_bytes: 0,
                 content_count: 0,
@@ -356,6 +470,11 @@ impl ImagePlane {
             .next_generation
             .checked_add(1)
             .ok_or(ImageError::IdentityExhausted)?;
+        let reservation = self
+            .shared_budget
+            .as_ref()
+            .map(|budget| budget.reserve(expected))
+            .transpose()?;
         self.next_content_id = next_content_id;
         self.next_generation = next_generation;
         let digest: [u8; 32] = Sha256::digest(input.pixels).into();
@@ -373,7 +492,19 @@ impl ImagePlane {
             },
             pixels: Arc::from(input.pixels),
         };
-        self.catalog_mut(screen).contents.insert(id, content);
+        let catalog = self.catalog_mut(screen);
+        let replaced = catalog.contents.insert(id, content);
+        debug_assert!(
+            replaced.is_none(),
+            "new image content identity must be unique"
+        );
+        if let Some(reservation) = reservation {
+            let replaced = catalog.reservations.insert(id, reservation);
+            debug_assert!(
+                replaced.is_none(),
+                "new image reservation identity must be unique"
+            );
+        }
         self.metrics.content_bytes = next_bytes;
         self.metrics.content_count += 1;
         self.update_high_water();
@@ -548,6 +679,7 @@ impl ImagePlane {
         let content_count = catalog.contents.len();
         let placement_count = catalog.placements.len();
         catalog.contents.clear();
+        catalog.reservations.clear();
         catalog.placements.clear();
         self.metrics.content_bytes -= bytes;
         self.metrics.content_count -= content_count;
@@ -1189,6 +1321,8 @@ impl ImagePlane {
             .contents
             .remove(&id)
             .ok_or(ImageError::UnknownContent)?;
+        let reservation = self.catalog_mut(screen).reservations.remove(&id);
+        debug_assert_eq!(reservation.is_some(), self.shared_budget.is_some());
         self.metrics.content_bytes -= content.metadata.byte_charge;
         self.metrics.content_count -= 1;
         Ok(())
@@ -1495,6 +1629,78 @@ mod tests {
             application_placement_id: None,
             erase_policy: ImageErasePolicy::TextOverwrite,
         }
+    }
+
+    #[test]
+    fn shared_authoritative_budget_is_exact_across_planes_clones_and_release() {
+        let budget = SharedImageBudget::new(8);
+        let mut first =
+            ImagePlane::new_with_shared_budget(ImageLimits::default(), Some(budget.clone()));
+        let mut second =
+            ImagePlane::new_with_shared_budget(ImageLimits::default(), Some(budget.clone()));
+        let first_id = first
+            .insert_content(
+                ActiveScreen::Normal,
+                content(&[1, 2, 3, 255], ImageRetention::ExplicitDelete),
+            )
+            .unwrap();
+        let second_id = second
+            .insert_content(
+                ActiveScreen::Normal,
+                content(&[4, 5, 6, 255], ImageRetention::ExplicitDelete),
+            )
+            .unwrap();
+        assert_eq!(
+            budget.metrics(),
+            SharedImageBudgetMetrics {
+                content_bytes: 8,
+                high_water_content_bytes: 8,
+            }
+        );
+        assert_eq!(
+            second.insert_content(
+                ActiveScreen::Normal,
+                content(&[7, 8, 9, 255], ImageRetention::ExplicitDelete),
+            ),
+            Err(ImageError::DaemonBytes)
+        );
+        assert_eq!(budget.metrics().content_bytes, 8);
+
+        let cloned_plane = first.clone();
+        first
+            .remove_content(ActiveScreen::Normal, first_id)
+            .unwrap();
+        assert_eq!(budget.metrics().content_bytes, 8);
+        drop(cloned_plane);
+        assert_eq!(budget.metrics().content_bytes, 4);
+
+        let transfer_clone = second
+            .content(ActiveScreen::Normal, second_id)
+            .unwrap()
+            .clone();
+        second
+            .remove_content(ActiveScreen::Normal, second_id)
+            .unwrap();
+        assert_eq!(budget.metrics().content_bytes, 0);
+        assert_eq!(transfer_clone.pixels(), &[4, 5, 6, 255]);
+
+        first
+            .insert_content(
+                ActiveScreen::Normal,
+                NewImageContent {
+                    width: 1,
+                    height: 2,
+                    source_format: ImageSourceFormat::Sixel,
+                    alpha_mode: ImageAlphaMode::Opaque,
+                    pixels: &[1, 2, 3, 255, 4, 5, 6, 255],
+                    retention: ImageRetention::ExplicitDelete,
+                },
+            )
+            .unwrap();
+        assert_eq!(budget.metrics().content_bytes, 8);
+        drop(first);
+        assert_eq!(budget.metrics().content_bytes, 0);
+        assert_eq!(budget.metrics().high_water_content_bytes, 8);
     }
 
     #[test]

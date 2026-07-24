@@ -6,8 +6,11 @@ use std::{
     collections::HashMap,
     env,
     ffi::OsString,
-    io::ErrorKind,
-    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    io::{ErrorKind, IoSlice},
+    os::{
+        fd::AsFd,
+        unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -19,11 +22,12 @@ use std::{
 use anyhow::{Context, Result, bail};
 use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
+use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 use splinterd::{
     LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,
     LiveSplintHandle, LiveSplintRuntime, ProcessExit, ProcessIncarnation, Subscription,
     SubscriptionReceive, authorization, executable_identity,
-    image_transport::{TransferAdmission, TransferAdmissionError},
+    image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     policy,
 };
 use splinterm_core::{
@@ -33,8 +37,9 @@ use splinterm_core::{
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
     ClientRole, ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome,
-    ErrorCode, HistoryTransition, MAX_COLUMNS, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_ROWS,
-    MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_FRAME_BYTES,
+    MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS,
+    MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
     MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking,
     PROTOCOL_VERSION, ProcessExitStatus, ProtocolError, Request, Response, RestoreLeafResult,
     ScrollDirection as WireScrollDirection, ScrollbackPage as WireScrollbackPage,
@@ -47,8 +52,8 @@ use splinterm_protocol::{
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
-    ActiveScreen, ColorSource as TerminalColorSource, ScrollDirection, TerminalDamage,
-    TerminalUpdate,
+    ActiveScreen, ColorSource as TerminalColorSource, ScrollDirection, SharedImageBudget,
+    TerminalDamage, TerminalUpdate,
 };
 use tokio::{
     fs,
@@ -70,6 +75,7 @@ const CONNECTION_LIMIT: usize = 32;
 const IMAGE_CONTENT_CONNECTION_LIMIT: usize = 8;
 const IMAGE_CONTENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const IMAGE_CONTENT_HEADER_BYTES: usize = 53;
+const IMAGE_MEMFD_HEADER_BYTES: usize = 45;
 const MAX_LIVE_SPLINTS: usize = 256;
 const TOPOLOGY_QUEUE: usize = 16;
 const OUTBOUND_QUEUE: usize = 32;
@@ -101,6 +107,42 @@ impl AbortOnDrop {
     async fn join(mut self) {
         if let Some(task) = self.task.take() {
             let _ = task.await;
+        }
+    }
+}
+
+struct ActiveImageTransferGuard {
+    state: Arc<DaemonState>,
+    transfer_id: Option<u64>,
+}
+
+impl ActiveImageTransferGuard {
+    fn new(state: Arc<DaemonState>, transfer_id: u64) -> Self {
+        Self {
+            state,
+            transfer_id: Some(transfer_id),
+        }
+    }
+
+    async fn finish(mut self) -> Result<(), TransferAdmissionError> {
+        let transfer_id = self
+            .transfer_id
+            .take()
+            .expect("active image transfer guard finishes once");
+        self.state.image_transfers.lock().await.finish(transfer_id)
+    }
+}
+
+impl Drop for ActiveImageTransferGuard {
+    fn drop(&mut self) {
+        let Some(transfer_id) = self.transfer_id.take() else {
+            return;
+        };
+        let state = Arc::clone(&self.state);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = state.image_transfers.lock().await.finish(transfer_id);
+            });
         }
     }
 }
@@ -565,6 +607,7 @@ struct DaemonState {
     grants: Mutex<GrantStore>,
     revocations: broadcast::Sender<Revocation>,
     image_transfers: Mutex<TransferAdmission>,
+    shared_image_budget: SharedImageBudget,
     pty_backend: LinuxPtyBackend,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
@@ -667,6 +710,7 @@ async fn main() -> Result<()> {
         grants: Mutex::new(GrantStore::default()),
         revocations,
         image_transfers: Mutex::new(TransferAdmission::default()),
+        shared_image_budget: SharedImageBudget::new(MAX_IMAGE_BYTES_PER_DAEMON),
         pty_backend: LinuxPtyBackend::installed()?,
         owner_home: env::var_os("HOME")
             .map(PathBuf::from)
@@ -840,14 +884,73 @@ async fn serve_image_content_client(mut stream: UnixStream, state: Arc<DaemonSta
             .await
             .claim(token, &transfer_peer, Instant::now())
             .map_err(|error| anyhow::anyhow!(error))?;
-        let transfer_id = claimed.transfer_id;
-        let result = send_image_content_chunks(&mut stream, &claimed).await;
-        let finish = state.image_transfers.lock().await.finish(transfer_id);
+        let guard = ActiveImageTransferGuard::new(Arc::clone(&state), claimed.transfer_id);
+        let result = match claimed.mode {
+            ImageTransferMode::BinaryChunks => {
+                send_image_content_chunks(&mut stream, &claimed).await
+            }
+            ImageTransferMode::SealedMemfd => send_image_content_memfd(&mut stream, &claimed).await,
+        };
+        let finish = guard.finish().await;
         result?;
         finish.map_err(|error| anyhow::anyhow!(error))
     };
     let _peer_monitor = peer_monitor;
     transfer.await
+}
+
+async fn send_image_content_memfd(
+    stream: &mut UnixStream,
+    claimed: &splinterd::image_transport::ClaimedTransfer,
+) -> Result<()> {
+    let pixels = claimed.content.pixels();
+    let metadata = claimed.content.metadata();
+    let fd = sealed_image_memfd(pixels).map_err(|error| anyhow::anyhow!(error))?;
+    let descriptors = [fd.as_fd()];
+    loop {
+        time::timeout(IMAGE_CONTENT_IO_TIMEOUT, stream.writable())
+            .await
+            .context("image descriptor send timed out")??;
+        let mut ancillary_space =
+            [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut ancillary = SendAncillaryBuffer::new(&mut ancillary_space);
+        if !ancillary.push(SendAncillaryMessage::ScmRights(&descriptors)) {
+            bail!("image descriptor ancillary buffer is too small");
+        }
+        match sendmsg(
+            stream.as_fd(),
+            &[IoSlice::new(b"F")],
+            &mut ancillary,
+            SendFlags::empty(),
+        ) {
+            Ok(1) => break,
+            Ok(_) => bail!("image descriptor marker write was incomplete"),
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => continue,
+            Err(error) => return Err(error).context("image descriptor send failed"),
+        }
+    }
+    let mut header = [0_u8; IMAGE_MEMFD_HEADER_BYTES];
+    header[0..5].copy_from_slice(b"SPIF\x01");
+    header[5..13].copy_from_slice(
+        &u64::try_from(pixels.len())
+            .context("image content length exceeds u64")?
+            .to_be_bytes(),
+    );
+    header[13..45].copy_from_slice(&metadata.digest);
+    time::timeout(IMAGE_CONTENT_IO_TIMEOUT, stream.write_all(&header))
+        .await
+        .context("image descriptor header write timed out")??;
+    let mut acknowledgement = [0_u8; 1];
+    time::timeout(
+        IMAGE_CONTENT_IO_TIMEOUT,
+        stream.read_exact(&mut acknowledgement),
+    )
+    .await
+    .context("image descriptor acknowledgement timed out")??;
+    if acknowledgement != [1] {
+        bail!("image descriptor transfer was cancelled or rejected");
+    }
+    Ok(())
 }
 
 async fn send_image_content_chunks(
@@ -1692,6 +1795,7 @@ async fn spawn_runtime(
     .env("SPLINTERM_SPLINT_ID", context.splint.to_string());
     let mut config = LiveSplintConfig::default();
     config.terminal.scrollback_lines = launch.scrollback_lines;
+    config.terminal.shared_image_budget = Some(state.shared_image_budget.clone());
     config.incarnation_environment = Some(OsString::from("SPLINTERM_SPLINT_INCARNATION"));
     LiveSplintRuntime::spawn(
         context.splint,
@@ -5288,7 +5392,7 @@ fn image_transfer_error(error: &TransferAdmissionError) -> ProtocolError {
             ErrorCode::ResourceLimit,
             "image transfer capacity is exhausted",
         ),
-        TransferAdmissionError::Random => internal(),
+        TransferAdmissionError::Random | TransferAdmissionError::Descriptor => internal(),
     }
 }
 
@@ -5752,6 +5856,7 @@ mod tests {
                 accepted_transfers: vec![splinterm_protocol::ImageTransferMode::BinaryChunks],
             },
             content,
+            mode: ImageTransferMode::BinaryChunks,
         };
         let (mut server, mut client) = UnixStream::pair().unwrap();
         let sender =
@@ -5824,6 +5929,7 @@ mod tests {
             grants: Mutex::new(GrantStore::default()),
             revocations,
             image_transfers: Mutex::new(TransferAdmission::default()),
+            shared_image_budget: SharedImageBudget::new(MAX_IMAGE_BYTES_PER_DAEMON),
             pty_backend: LinuxPtyBackend::new("/missing/helper"),
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,

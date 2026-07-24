@@ -70,8 +70,13 @@ of at most 64 KiB, a four-chunk acknowledgement window, exact offsets, digest
 verification, cancellation, and five-second I/O deadlines. The trusted client
 receiver validates identity and bounds before allocating, retains a bounded
 32 MiB exact-identity source cache, and resolves only missing bodies across
-attach, update, and resync so repeated placements reuse one transfer. Sealed memfd delivery
-remains honestly disabled until its dedicated optimization lands.
+attach, update, and resync so repeated placements reuse one transfer. Linux
+clients prefer one exactly-sized immutable sealed memfd, require one close-on-exec
+received descriptor, recheck all write/grow/shrink/seal seals, map read-only,
+and verify the digest; binary chunks remain the negotiated fallback. One shared
+64 MiB atomic daemon budget now reserves bytes at catalog insertion and releases
+on semantic deletion, reclaim, clear/reset, or actor drop, independently of
+pending/active transfer clones. Slice 3 lifecycle E2E closure remains.
 
 ## Feasibility and current baseline
 

@@ -1,6 +1,6 @@
 //! Terminal-kernel configuration and parser hard limits.
 
-use crate::ImageLimits;
+use crate::{ImageLimits, SharedImageBudget};
 
 /// Foot-compatible defaults for the VT340 Sixel color map.
 pub const DEFAULT_SIXEL_PALETTE: [u32; 16] = [
@@ -63,6 +63,8 @@ pub struct TerminalConfig {
     pub update_history_limit: usize,
     /// Hard canonical image content, placement, dimension, and byte limits.
     pub image_limits: ImageLimits,
+    /// Optional process-wide authoritative image-content byte admission.
+    pub shared_image_budget: Option<SharedImageBudget>,
     /// Initial Sixel protocol policy and palette.
     pub sixel: SixelConfig,
 }
@@ -78,6 +80,7 @@ impl Default for TerminalConfig {
             event_limit: 1_024,
             update_history_limit: 256,
             image_limits: ImageLimits::default(),
+            shared_image_budget: None,
             sixel: SixelConfig::default(),
         }
     }

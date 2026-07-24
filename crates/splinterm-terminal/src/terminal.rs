@@ -175,7 +175,10 @@ impl Terminal {
             modes: TerminalModes::default(),
             tab_stops: Vec::new(),
             composed: ComposedTable::new(config.composed_limit),
-            images: ImagePlane::new(config.image_limits),
+            images: ImagePlane::new_with_shared_budget(
+                config.image_limits,
+                config.shared_image_budget.clone(),
+            ),
             sixel_decoder: None,
             cell_pixels: None,
             sixel_scrolling: true,
