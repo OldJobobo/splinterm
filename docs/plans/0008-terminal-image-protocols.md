@@ -63,10 +63,13 @@ image-free by default. The daemon actor resolves immutable pixel backing only
 for the exact active-screen content ID, generation, and digest within the
 already-bound Splint incarnation; stale and unknown content fail distinctly.
 The transfer admission state machine now issues CSPRNG single-use five-second
-tokens, consumes them before validation, and enforces pending-token and active
-transfer caps with high-water metrics. Both delivery modes remain honestly
-disabled until that admission layer is connected to the dedicated bounded
-content channel.
+tokens, consumes them before validation, expires abandoned grants, and enforces
+pending-token and active transfer caps with high-water metrics. The mandatory
+fallback is connected through a separate mode-0600 Unix socket using raw chunks
+of at most 64 KiB, a four-chunk acknowledgement window, exact offsets, digest
+verification, cancellation, and five-second I/O deadlines. The trusted client
+receiver validates identity and bounds before allocating. Sealed memfd delivery
+remains honestly disabled until its dedicated optimization lands.
 
 ## Feasibility and current baseline
 

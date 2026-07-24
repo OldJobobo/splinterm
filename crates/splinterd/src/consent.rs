@@ -109,6 +109,18 @@ impl PeerIdentity {
         })
     }
 
+    pub fn transfer_peer(&self) -> Option<splinterd::image_transport::TransferPeer> {
+        self.persistent_executable.as_ref().map(|executable| {
+            splinterd::image_transport::TransferPeer {
+                uid: self.uid,
+                pid: self.pid,
+                executable_device: executable.device,
+                executable_inode: executable.inode,
+                executable_sha256: executable.sha256.clone(),
+            }
+        })
+    }
+
     pub fn is_matching_splinterm(&self) -> bool {
         let Ok(expected) = std::env::current_exe().map(|path| path.with_file_name("splinterm"))
         else {

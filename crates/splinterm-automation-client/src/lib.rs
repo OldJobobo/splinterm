@@ -20,14 +20,16 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use splinterm_core::{DojoId, LayoutNode, SplintId, TopologyRevision, WindowId};
 use splinterm_protocol::{
     AccessGrant, AccessScope, AuditDecision, AuditOperation, AuditOutcome, AuditPage,
     AutomationScope, ClientFrame, ClientRole, ControlStatus, ControlTransferOutcome, ErrorCode,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, PersistentAuthorizationStatus, Request, Response,
-    RestoreLeafResult, ScrollbackPage, SearchPage, ServerFrame, ServerLimits, SplintLifecycle,
-    SplintRuntimeSummary, TerminalRow, TerminalSnapshot, TerminalUpdate, TopologyChangeKind,
-    TopologySnapshot, encode_frame,
+    ImageContentMetadata, ImageContentRequest, ImageTransferMode, MAX_FRAME_BYTES,
+    MAX_IMAGE_CHUNK_BYTES, MAX_IMAGE_CHUNK_WINDOW, PROTOCOL_VERSION, PersistentAuthorizationStatus,
+    Request, Response, RestoreLeafResult, ScrollbackPage, SearchPage, ServerFrame, ServerLimits,
+    SplintLifecycle, SplintRuntimeSummary, TerminalRow, TerminalSnapshot, TerminalUpdate,
+    TopologyChangeKind, TopologySnapshot, encode_frame, image_content_socket_path,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -2581,6 +2583,65 @@ impl CliEventV1 {
     }
 }
 
+const IMAGE_CONTENT_HEADER_BYTES: usize = 53;
+
+async fn receive_image_content(
+    stream: &mut UnixStream,
+    metadata: &ImageContentMetadata,
+) -> Result<Vec<u8>> {
+    let mut header = [0_u8; IMAGE_CONTENT_HEADER_BYTES];
+    stream.read_exact(&mut header).await?;
+    if &header[0..5] != b"SPIM\x01"
+        || header[13..45] != metadata.digest
+        || usize::try_from(u64::from_be_bytes(header[5..13].try_into().unwrap())).ok()
+            != Some(metadata.byte_length)
+        || usize::try_from(u32::from_be_bytes(header[45..49].try_into().unwrap())).ok()
+            != Some(MAX_IMAGE_CHUNK_BYTES)
+        || usize::try_from(u32::from_be_bytes(header[49..53].try_into().unwrap())).ok()
+            != Some(MAX_IMAGE_CHUNK_WINDOW)
+    {
+        bail!("image content header does not match negotiated metadata");
+    }
+    let mut pixels = Vec::with_capacity(metadata.byte_length);
+    let mut chunks_in_window = 0_usize;
+    while pixels.len() < metadata.byte_length {
+        let mut chunk_header = [0_u8; 12];
+        stream.read_exact(&mut chunk_header).await?;
+        let offset = usize::try_from(u64::from_be_bytes(chunk_header[0..8].try_into().unwrap()))
+            .context("image chunk offset exceeds usize")?;
+        let length = usize::try_from(u32::from_be_bytes(chunk_header[8..12].try_into().unwrap()))
+            .expect("u32 image chunk length fits usize");
+        if offset != pixels.len()
+            || length == 0
+            || length > MAX_IMAGE_CHUNK_BYTES
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > metadata.byte_length)
+        {
+            bail!("image content chunk is out of window or exceeds bounds");
+        }
+        let start = pixels.len();
+        pixels.resize(start + length, 0);
+        stream.read_exact(&mut pixels[start..]).await?;
+        chunks_in_window += 1;
+        if chunks_in_window == MAX_IMAGE_CHUNK_WINDOW || pixels.len() == metadata.byte_length {
+            let mut acknowledgement = [0_u8; 9];
+            acknowledgement[0] = 1;
+            acknowledgement[1..9].copy_from_slice(
+                &u64::try_from(pixels.len())
+                    .context("image acknowledgement offset exceeds u64")?
+                    .to_be_bytes(),
+            );
+            stream.write_all(&acknowledgement).await?;
+            chunks_in_window = 0;
+        }
+    }
+    if Sha256::digest(&pixels).as_slice() != metadata.digest {
+        bail!("image content digest does not match metadata");
+    }
+    Ok(pixels)
+}
+
 /// A negotiated connection to the private local daemon protocol.
 ///
 /// This type is an internal implementation boundary. Public automation
@@ -2593,6 +2654,8 @@ pub struct Connection {
     queued_events: VecDeque<(ServerFrame, usize)>,
     queued_event_bytes: usize,
     limits: ServerLimits,
+    socket_path: Option<PathBuf>,
+    trusted_ui: bool,
     unusable: bool,
 }
 
@@ -2641,7 +2704,7 @@ impl Connection {
         let stream = UnixStream::connect(socket)
             .await
             .with_context(|| format!("cannot connect to splinterd at {}", socket.display()))?;
-        Self::connect_stream(stream, ClientRole::Automation).await
+        Self::connect_stream_at(stream, ClientRole::Automation, Some(socket.to_owned())).await
     }
 
     async fn connect_role(role: ClientRole) -> Result<Self> {
@@ -2649,10 +2712,19 @@ impl Connection {
         let stream = UnixStream::connect(&socket)
             .await
             .with_context(|| format!("cannot connect to splinterd at {}", socket.display()))?;
-        Self::connect_stream(stream, role).await
+        Self::connect_stream_at(stream, role, Some(socket)).await
     }
 
-    async fn connect_stream(mut stream: UnixStream, role: ClientRole) -> Result<Self> {
+    #[cfg(test)]
+    async fn connect_stream(stream: UnixStream, role: ClientRole) -> Result<Self> {
+        Self::connect_stream_at(stream, role, None).await
+    }
+
+    async fn connect_stream_at(
+        mut stream: UnixStream,
+        role: ClientRole,
+        socket_path: Option<PathBuf>,
+    ) -> Result<Self> {
         write_frame(
             &mut stream,
             &ClientFrame::Hello {
@@ -2678,6 +2750,8 @@ impl Connection {
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             limits,
+            socket_path,
+            trusted_ui: role == ClientRole::TrustedUi,
             unusable: false,
         })
     }
@@ -2686,6 +2760,69 @@ impl Connection {
     #[must_use]
     pub const fn limits(&self) -> ServerLimits {
         self.limits
+    }
+
+    /// Retrieves one exact missing image body over the dedicated binary channel.
+    pub async fn image_content(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        metadata: &ImageContentMetadata,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<u8>> {
+        if !self.trusted_ui || !self.limits.image.binary_chunks {
+            bail!("binary image content transport was not negotiated");
+        }
+        let request = ImageContentRequest {
+            splint_id,
+            incarnation,
+            content_id: metadata.content_id,
+            generation: metadata.generation,
+            digest: metadata.digest,
+            accepted_transfers: vec![ImageTransferMode::BinaryChunks],
+        };
+        let response = self
+            .request_with_cancellation(
+                Request::RequestImageContent {
+                    request: request.clone(),
+                },
+                Duration::from_secs(5),
+                cancellation,
+            )
+            .await?;
+        let Response::ImageContentReady { transfer } = response else {
+            bail!("splinterd returned an invalid image content response");
+        };
+        transfer
+            .validate_for(&request, metadata)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let control_socket = self
+            .socket_path
+            .as_deref()
+            .context("image content socket path is unavailable")?;
+        let mut stream = UnixStream::connect(image_content_socket_path(control_socket))
+            .await
+            .context("cannot connect to the image content socket")?;
+        stream.write_all(&transfer.token).await?;
+        let outcome = {
+            let receive = tokio::time::timeout(
+                Duration::from_millis(u64::from(transfer.token_ttl_millis)),
+                receive_image_content(&mut stream, metadata),
+            );
+            tokio::pin!(receive);
+            tokio::select! {
+                result = &mut receive => Some(result.context("image content transfer timed out")?),
+                () = cancellation.cancelled() => None,
+            }
+        };
+        if let Some(result) = outcome {
+            result
+        } else {
+            let mut cancel = [0_u8; 9];
+            cancel[0] = 2;
+            let _ = stream.write_all(&cancel).await;
+            bail!("image content transfer was cancelled")
+        }
     }
 
     /// Sends one request and waits for its correlated response.
@@ -3021,6 +3158,50 @@ mod tests {
         TerminalRow, UnderlineStyle,
     };
 
+    #[tokio::test]
+    async fn binary_image_content_receiver_bounds_chunks_and_verifies_digest() {
+        let pixels = [1_u8, 2, 3, 255];
+        let digest: [u8; 32] = Sha256::digest(pixels).into();
+        let metadata = ImageContentMetadata {
+            content_id: 1,
+            generation: 2,
+            width: 1,
+            height: 1,
+            source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+            alpha_mode: splinterm_protocol::ImageAlphaMode::Opaque,
+            digest,
+            byte_length: pixels.len(),
+            retention: splinterm_protocol::ImageRetention::WhilePlaced,
+        };
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let sender = tokio::spawn(async move {
+            let mut header = [0_u8; IMAGE_CONTENT_HEADER_BYTES];
+            header[0..5].copy_from_slice(b"SPIM\x01");
+            header[5..13].copy_from_slice(&4_u64.to_be_bytes());
+            header[13..45].copy_from_slice(&digest);
+            header[45..49]
+                .copy_from_slice(&u32::try_from(MAX_IMAGE_CHUNK_BYTES).unwrap().to_be_bytes());
+            header[49..53]
+                .copy_from_slice(&u32::try_from(MAX_IMAGE_CHUNK_WINDOW).unwrap().to_be_bytes());
+            server.write_all(&header).await.unwrap();
+            server.write_all(&0_u64.to_be_bytes()).await.unwrap();
+            server.write_all(&4_u32.to_be_bytes()).await.unwrap();
+            server.write_all(&pixels).await.unwrap();
+            let mut acknowledgement = [0_u8; 9];
+            server.read_exact(&mut acknowledgement).await.unwrap();
+            assert_eq!(acknowledgement[0], 1);
+            assert_eq!(
+                u64::from_be_bytes(acknowledgement[1..9].try_into().unwrap()),
+                4
+            );
+        });
+        assert_eq!(
+            receive_image_content(&mut client, &metadata).await.unwrap(),
+            pixels
+        );
+        sender.await.unwrap();
+    }
+
     async fn read_client_frame(stream: &mut UnixStream) -> ClientFrame {
         let mut length = [0_u8; 4];
         stream.read_exact(&mut length).await.unwrap();
@@ -3037,6 +3218,8 @@ mod tests {
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             limits: ServerLimits::default(),
+            socket_path: None,
+            trusted_ui: false,
             unusable: false,
         }
     }

@@ -3,7 +3,7 @@
 //! Terminal DTOs in this crate are intentionally distinct from the borrowed
 //! `splinterm-terminal` and daemon runtime representations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use splinterm_core::{
@@ -46,6 +46,13 @@ pub const MAX_IMAGE_TRANSFERS_PER_SPLINT: usize = 2;
 pub const MAX_IMAGE_TRANSFERS_PER_DAEMON: usize = 4;
 pub const IMAGE_TRANSFER_TOKEN_BYTES: usize = 32;
 pub const IMAGE_TRANSFER_TOKEN_TTL_MILLIS: u32 = 5_000;
+
+#[must_use]
+pub fn image_content_socket_path(control_socket: &Path) -> PathBuf {
+    let mut name = control_socket.as_os_str().to_os_string();
+    name.push(".content");
+    PathBuf::from(name)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,7 +123,7 @@ impl Default for ImageServerCapabilities {
     fn default() -> Self {
         Self {
             metadata_version: 1,
-            binary_chunks: false,
+            binary_chunks: true,
             sealed_memfd: false,
             maximum_content_bytes: MAX_IMAGE_CONTENT_BYTES,
             maximum_bytes_per_splint: MAX_IMAGE_BYTES_PER_SPLINT,

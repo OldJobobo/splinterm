@@ -13,7 +13,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -22,7 +22,9 @@ use persistence::MetadataStore;
 use splinterd::{
     LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,
     LiveSplintHandle, LiveSplintRuntime, ProcessExit, ProcessIncarnation, Subscription,
-    SubscriptionReceive, authorization, executable_identity, policy,
+    SubscriptionReceive, authorization, executable_identity,
+    image_transport::{TransferAdmission, TransferAdmissionError},
+    policy,
 };
 use splinterm_core::{
     Dojo, DojoId, Lair, LairDocument, LairError, LayoutNode, Splint, SplintId,
@@ -41,7 +43,7 @@ use splinterm_protocol::{
     TerminalInputModes, TerminalProvenance, TerminalRow, TerminalRowPatch, TerminalScroll,
     TerminalScrollbackUpdate, TerminalSnapshot, TerminalUpdate as WireTerminalUpdate,
     TopologyChange, TopologyChangeKind, TopologySnapshot, UnderlineStyle as WireUnderlineStyle,
-    encode_frame,
+    encode_frame, image_content_socket_path,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
@@ -65,6 +67,9 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const CONNECTION_LIMIT: usize = 32;
+const IMAGE_CONTENT_CONNECTION_LIMIT: usize = 8;
+const IMAGE_CONTENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const IMAGE_CONTENT_HEADER_BYTES: usize = 53;
 const MAX_LIVE_SPLINTS: usize = 256;
 const TOPOLOGY_QUEUE: usize = 16;
 const OUTBOUND_QUEUE: usize = 32;
@@ -559,6 +564,7 @@ struct DaemonState {
     connection_revocations: broadcast::Sender<u64>,
     grants: Mutex<GrantStore>,
     revocations: broadcast::Sender<Revocation>,
+    image_transfers: Mutex<TransferAdmission>,
     pty_backend: LinuxPtyBackend,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
@@ -611,6 +617,12 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind {}", socket.display()))?;
     fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).await?;
     verify_socket(&socket).await?;
+    let image_socket = image_content_socket_path(&socket);
+    remove_stale_socket(&image_socket).await?;
+    let image_listener = UnixListener::bind(&image_socket)
+        .with_context(|| format!("failed to bind {}", image_socket.display()))?;
+    fs::set_permissions(&image_socket, std::fs::Permissions::from_mode(0o600)).await?;
+    verify_socket(&image_socket).await?;
 
     let daemon_identity = tokio::task::spawn_blocking(|| {
         executable_identity::ExecutableIdentity::from_pid(std::process::id())
@@ -654,6 +666,7 @@ async fn main() -> Result<()> {
         connection_revocations,
         grants: Mutex::new(GrantStore::default()),
         revocations,
+        image_transfers: Mutex::new(TransferAdmission::default()),
         pty_backend: LinuxPtyBackend::installed()?,
         owner_home: env::var_os("HOME")
             .map(PathBuf::from)
@@ -663,12 +676,15 @@ async fn main() -> Result<()> {
     });
     record_policy_reload(&state, &policy_generation).await;
     let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
+    let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
     let mut connection_tasks = tokio::task::JoinSet::new();
-    info!(socket = %socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
+    info!(socket = %socket.display(), image_socket = %image_socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
     let shutdown_signal = signal::ctrl_c();
     tokio::pin!(shutdown_signal);
     let mut reload_signal = signal::unix::signal(signal::unix::SignalKind::hangup())
         .context("failed to listen for policy reload signal")?;
+    let mut image_transfer_expiry = time::interval(Duration::from_secs(1));
+    image_transfer_expiry.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -676,6 +692,9 @@ async fn main() -> Result<()> {
             result = &mut shutdown_signal => {
                 result.context("failed to listen for shutdown signal")?;
                 break;
+            }
+            _ = image_transfer_expiry.tick() => {
+                state.image_transfers.lock().await.expire(Instant::now());
             }
             received = reload_signal.recv() => {
                 if received.is_none() {
@@ -729,6 +748,20 @@ async fn main() -> Result<()> {
                 } else {
                     info!(generation = generation.id, rules = generation.document.rule_count(), released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reloaded atomically; disconnected clients");
                 }
+            }
+            accepted = image_listener.accept() => {
+                let (stream, _) = accepted.context("failed to accept image content client")?;
+                let Ok(permit) = Arc::clone(&image_connections).try_acquire_owned() else {
+                    warn!("image content connection limit reached");
+                    continue;
+                };
+                let state = Arc::clone(&state);
+                connection_tasks.spawn(async move {
+                    let _permit = permit;
+                    if let Err(error) = serve_image_content_client(stream, state).await {
+                        warn!(%error, "image content connection closed");
+                    }
+                });
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("failed to accept client")?;
@@ -784,8 +817,122 @@ async fn main() -> Result<()> {
     }
     .await;
     let socket_removal = fs::remove_file(&socket).await;
+    let image_socket_removal = fs::remove_file(&image_socket).await;
     shutdown_result?;
     socket_removal?;
+    image_socket_removal?;
+    Ok(())
+}
+
+async fn serve_image_content_client(mut stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
+    let (peer, peer_monitor) = verify_peer(&stream).await?;
+    let transfer_peer = peer
+        .transfer_peer()
+        .context("persistent image content peer identity is unavailable")?;
+    let transfer = async {
+        let mut token = [0_u8; splinterm_protocol::IMAGE_TRANSFER_TOKEN_BYTES];
+        time::timeout(IMAGE_CONTENT_IO_TIMEOUT, stream.read_exact(&mut token))
+            .await
+            .context("image content handshake timed out")??;
+        let claimed = state
+            .image_transfers
+            .lock()
+            .await
+            .claim(token, &transfer_peer, Instant::now())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let transfer_id = claimed.transfer_id;
+        let result = send_image_content_chunks(&mut stream, &claimed).await;
+        let finish = state.image_transfers.lock().await.finish(transfer_id);
+        result?;
+        finish.map_err(|error| anyhow::anyhow!(error))
+    };
+    let _peer_monitor = peer_monitor;
+    transfer.await
+}
+
+async fn send_image_content_chunks(
+    stream: &mut UnixStream,
+    claimed: &splinterd::image_transport::ClaimedTransfer,
+) -> Result<()> {
+    let pixels = claimed.content.pixels();
+    let metadata = claimed.content.metadata();
+    let mut header = [0_u8; IMAGE_CONTENT_HEADER_BYTES];
+    header[0..4].copy_from_slice(b"SPIM");
+    header[4] = 1;
+    header[5..13].copy_from_slice(
+        &u64::try_from(pixels.len())
+            .context("image content length exceeds u64")?
+            .to_be_bytes(),
+    );
+    header[13..45].copy_from_slice(&metadata.digest);
+    header[45..49].copy_from_slice(
+        &u32::try_from(splinterm_protocol::MAX_IMAGE_CHUNK_BYTES)
+            .expect("image chunk bound fits u32")
+            .to_be_bytes(),
+    );
+    header[49..53].copy_from_slice(
+        &u32::try_from(splinterm_protocol::MAX_IMAGE_CHUNK_WINDOW)
+            .expect("image chunk window fits u32")
+            .to_be_bytes(),
+    );
+    time::timeout(IMAGE_CONTENT_IO_TIMEOUT, stream.write_all(&header))
+        .await
+        .context("image content header write timed out")??;
+
+    let mut offset = 0_usize;
+    while offset < pixels.len() {
+        let window_end = offset
+            .saturating_add(
+                splinterm_protocol::MAX_IMAGE_CHUNK_BYTES
+                    * splinterm_protocol::MAX_IMAGE_CHUNK_WINDOW,
+            )
+            .min(pixels.len());
+        while offset < window_end {
+            let end = offset
+                .saturating_add(splinterm_protocol::MAX_IMAGE_CHUNK_BYTES)
+                .min(window_end);
+            let mut chunk_header = [0_u8; 12];
+            chunk_header[0..8].copy_from_slice(
+                &u64::try_from(offset)
+                    .context("image content offset exceeds u64")?
+                    .to_be_bytes(),
+            );
+            chunk_header[8..12].copy_from_slice(
+                &u32::try_from(end - offset)
+                    .expect("bounded image chunk fits u32")
+                    .to_be_bytes(),
+            );
+            time::timeout(IMAGE_CONTENT_IO_TIMEOUT, stream.write_all(&chunk_header))
+                .await
+                .context("image chunk header write timed out")??;
+            time::timeout(
+                IMAGE_CONTENT_IO_TIMEOUT,
+                stream.write_all(&pixels[offset..end]),
+            )
+            .await
+            .context("image chunk write timed out")??;
+            offset = end;
+        }
+        let mut acknowledgement = [0_u8; 9];
+        time::timeout(
+            IMAGE_CONTENT_IO_TIMEOUT,
+            stream.read_exact(&mut acknowledgement),
+        )
+        .await
+        .context("image acknowledgement timed out")??;
+        if acknowledgement[0] == 2 {
+            bail!("image content transfer cancelled");
+        }
+        let acknowledged = usize::try_from(u64::from_be_bytes(
+            acknowledgement[1..9]
+                .try_into()
+                .expect("acknowledgement offset has fixed width"),
+        ))
+        .context("image acknowledgement offset exceeds usize")?;
+        if acknowledgement[0] != 1 || acknowledged != offset {
+            bail!("image acknowledgement is out of window");
+        }
+    }
     Ok(())
 }
 
@@ -3190,14 +3337,23 @@ async fn handle_authorized_request(
             let content_id = splinterm_terminal::ImageContentId::new(request.content_id)
                 .ok_or_else(|| invalid("image content identity must be nonzero"))?;
             let handle = current_handle(state, request.splint_id, request.incarnation).await?;
-            handle
+            let content = handle
                 .image_content(content_id, request.generation, request.digest)
                 .await
-                .map_err(image_content_error)?;
-            return Err(ProtocolError::new(
-                ErrorCode::UnsupportedOperation,
-                "image content transport is not initialized",
-            ));
+                .map_err(|error| image_content_error(&error))?;
+            let transfer_peer = peer.transfer_peer().ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::AuthenticationFailed,
+                    "persistent peer identity is required for image transfer",
+                )
+            })?;
+            let transfer = state
+                .image_transfers
+                .lock()
+                .await
+                .mint(transfer_peer, &request, content, Instant::now())
+                .map_err(|error| image_transfer_error(&error))?;
+            Response::ImageContentReady { transfer }
         }
         Request::PrepareMutation { mutation } => Response::MutationPrepared {
             preparation: prepare_mutation(&topology_snapshot(state).await, mutation)?,
@@ -5122,7 +5278,21 @@ fn not_found() -> ProtocolError {
     ProtocolError::new(ErrorCode::NotFound, "resource not found")
 }
 
-fn image_content_error(error: LiveError) -> ProtocolError {
+fn image_transfer_error(error: &TransferAdmissionError) -> ProtocolError {
+    match error {
+        TransferAdmissionError::Identity | TransferAdmissionError::Token => ProtocolError::new(
+            ErrorCode::StaleImageContent,
+            "image transfer identity is stale or mismatched",
+        ),
+        TransferAdmissionError::Capacity => ProtocolError::new(
+            ErrorCode::ResourceLimit,
+            "image transfer capacity is exhausted",
+        ),
+        TransferAdmissionError::Random => internal(),
+    }
+}
+
+fn image_content_error(error: &LiveError) -> ProtocolError {
     match error {
         LiveError::ImageContentNotFound => ProtocolError::new(
             ErrorCode::ImageContentNotFound,
@@ -5546,6 +5716,71 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[tokio::test]
+    async fn binary_image_content_channel_is_raw_windowed_and_acknowledged() {
+        use splinterm_terminal::{
+            ImageAlphaMode, ImagePlane, ImageRetention, ImageSourceFormat, NewImageContent,
+        };
+
+        let mut plane = ImagePlane::default();
+        let content_id = plane
+            .insert_content(
+                ActiveScreen::Normal,
+                NewImageContent {
+                    width: 1,
+                    height: 1,
+                    source_format: ImageSourceFormat::Sixel,
+                    alpha_mode: ImageAlphaMode::Opaque,
+                    pixels: &[1, 2, 3, 255],
+                    retention: ImageRetention::ExplicitDelete,
+                },
+            )
+            .unwrap();
+        let content = plane
+            .content(ActiveScreen::Normal, content_id)
+            .unwrap()
+            .clone();
+        let metadata = content.metadata();
+        let claimed = splinterd::image_transport::ClaimedTransfer {
+            transfer_id: 1,
+            request: splinterm_protocol::ImageContentRequest {
+                splint_id: SplintId::new(),
+                incarnation: 2,
+                content_id: content_id.value(),
+                generation: metadata.generation,
+                digest: metadata.digest,
+                accepted_transfers: vec![splinterm_protocol::ImageTransferMode::BinaryChunks],
+            },
+            content,
+        };
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let sender =
+            tokio::spawn(async move { send_image_content_chunks(&mut server, &claimed).await });
+        let mut header = [0_u8; IMAGE_CONTENT_HEADER_BYTES];
+        client.read_exact(&mut header).await.unwrap();
+        assert_eq!(&header[0..5], b"SPIM\x01");
+        assert_eq!(u64::from_be_bytes(header[5..13].try_into().unwrap()), 4);
+        assert_eq!(&header[13..45], &metadata.digest);
+        let mut chunk_header = [0_u8; 12];
+        client.read_exact(&mut chunk_header).await.unwrap();
+        assert_eq!(
+            u64::from_be_bytes(chunk_header[0..8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u32::from_be_bytes(chunk_header[8..12].try_into().unwrap()),
+            4
+        );
+        let mut pixels = [0_u8; 4];
+        client.read_exact(&mut pixels).await.unwrap();
+        assert_eq!(pixels, [1, 2, 3, 255]);
+        let mut acknowledgement = [0_u8; 9];
+        acknowledgement[0] = 1;
+        acknowledgement[1..9].copy_from_slice(&4_u64.to_be_bytes());
+        client.write_all(&acknowledgement).await.unwrap();
+        sender.await.unwrap().unwrap();
+    }
+
     #[test]
     fn image_metadata_and_retrieval_require_the_matching_trusted_ui() {
         assert!(include_image_metadata(true, true));
@@ -5588,6 +5823,7 @@ mod tests {
             connection_revocations: broadcast::channel(CONNECTION_LIMIT).0,
             grants: Mutex::new(GrantStore::default()),
             revocations,
+            image_transfers: Mutex::new(TransferAdmission::default()),
             pty_backend: LinuxPtyBackend::new("/missing/helper"),
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,

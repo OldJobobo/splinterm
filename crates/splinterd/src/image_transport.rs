@@ -21,6 +21,7 @@ pub struct TransferPeer {
     pub pid: u32,
     pub executable_device: u64,
     pub executable_inode: u64,
+    pub executable_sha256: String,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -266,6 +267,7 @@ mod tests {
             pid,
             executable_device: 2,
             executable_inode: 3,
+            executable_sha256: "4".repeat(64),
         }
     }
 
