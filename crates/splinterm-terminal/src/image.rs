@@ -2,7 +2,7 @@
 
 mod sixel;
 
-pub(crate) use sixel::{MAX_SIXEL_COLORS, SixelDecoder, SixelError};
+pub(crate) use sixel::{MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage};
 
 use std::{
     collections::{BTreeMap, HashSet},

@@ -2,6 +2,48 @@
 
 use crate::ImageLimits;
 
+/// Foot-compatible defaults for the VT340 Sixel color map.
+pub const DEFAULT_SIXEL_PALETTE: [u32; 16] = [
+    0xff00_0000,
+    0xff33_33cc,
+    0xffcc_2121,
+    0xff33_cc33,
+    0xffcc_33cc,
+    0xff33_cccc,
+    0xffcc_cc33,
+    0xff87_8787,
+    0xff42_4242,
+    0xff54_5499,
+    0xff99_4242,
+    0xff54_9954,
+    0xff99_5499,
+    0xff54_9999,
+    0xff99_9954,
+    0xffcc_cccc,
+];
+
+/// Initial Sixel policy and palette.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SixelConfig {
+    /// Whether DCS `q` graphics are decoded. Disabled graphics are discarded.
+    pub enabled: bool,
+    /// Whether each image starts from the configured palette. DEC private mode
+    /// 1070 may change this at runtime; shared mode retains color definitions.
+    pub private_palette: bool,
+    /// Initial VT340-compatible palette entries.
+    pub palette: [u32; 16],
+}
+
+impl Default for SixelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            private_palette: true,
+            palette: DEFAULT_SIXEL_PALETTE,
+        }
+    }
+}
+
 /// Configuration independent of PTY, renderer, and daemon policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalConfig {
@@ -21,6 +63,8 @@ pub struct TerminalConfig {
     pub update_history_limit: usize,
     /// Hard canonical image content, placement, dimension, and byte limits.
     pub image_limits: ImageLimits,
+    /// Initial Sixel protocol policy and palette.
+    pub sixel: SixelConfig,
 }
 
 impl Default for TerminalConfig {
@@ -34,6 +78,7 @@ impl Default for TerminalConfig {
             event_limit: 1_024,
             update_history_limit: 256,
             image_limits: ImageLimits::default(),
+            sixel: SixelConfig::default(),
         }
     }
 }

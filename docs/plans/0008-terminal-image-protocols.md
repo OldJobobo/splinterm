@@ -44,10 +44,13 @@ aspect ratio, transparent/opaque backgrounds, raster attributes, repeat,
 palette selection and RGB/HLS definition, carriage return, and graphical
 newline under the accepted input, dimension, decoded-byte, and pixel-write
 limits. Non-graphical tests match all five pinned-Foot semantic fixtures at
-every input split and prove CAN/SUB cancellation recovery. Remaining Slice 2
-work includes overlap and reflow details, configuration, fuzz evidence, and
-the complete pinned differential matrix. Cursor/scroller placement modes and
-bounded XTSMGRAPHICS color/geometry replies are implemented.
+every input split and prove CAN/SUB cancellation recovery. Foot's VT340
+default palette, configurable Sixel enablement, private/shared palette behavior,
+and DEC mode 1070 are implemented, including shared definitions surviving
+cancellation and decoder failure. Remaining Slice 2 work includes overlap and
+reflow details, fuzz evidence, and the complete pinned differential matrix.
+Cursor/scroller placement modes and bounded XTSMGRAPHICS color/geometry replies
+are implemented.
 
 ## Feasibility and current baseline
 

@@ -28,6 +28,7 @@ pub(crate) struct SixelImage {
     pub pixels: Vec<u8>,
     pub opaque: bool,
     pub cursor_pixel_row: u32,
+    pub palette: Box<[u32; MAX_SIXEL_COLORS]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +76,7 @@ impl SixelDecoder {
         palette_size: usize,
         maximum_width: u32,
         maximum_height: u32,
+        initial_palette: &[u32],
     ) -> Self {
         let pan = match p1 {
             2 => 5,
@@ -82,12 +84,9 @@ impl SixelDecoder {
             7..=9 => 1,
             _ => 2,
         };
-        let mut palette = Box::new([0xff00_0000; MAX_SIXEL_COLORS]);
-        // The first ANSI colors provide deterministic useful defaults. Protocol
-        // color definitions replace these entries for oracle fixtures.
-        palette[1] = 0xff00_00ff;
-        palette[2] = 0xff00_ff00;
-        palette[3] = 0xffff_0000;
+        let mut palette = Box::new([0; MAX_SIXEL_COLORS]);
+        let initial_count = initial_palette.len().min(MAX_SIXEL_COLORS);
+        palette[..initial_count].copy_from_slice(&initial_palette[..initial_count]);
         Self {
             limits,
             palette_size: palette_size.clamp(2, MAX_SIXEL_COLORS),
@@ -115,6 +114,10 @@ impl SixelDecoder {
             pixel_writes: 0,
             failed: None,
         }
+    }
+
+    pub(crate) fn palette(&self) -> &[u32; MAX_SIXEL_COLORS] {
+        &self.palette
     }
 
     pub(crate) fn put(&mut self, byte: u8) -> Result<(), SixelError> {
@@ -188,6 +191,7 @@ impl SixelDecoder {
             pixels,
             opaque: !self.transparent,
             cursor_pixel_row,
+            palette: self.palette,
         })
     }
 
@@ -447,6 +451,7 @@ mod tests {
             MAX_SIXEL_COLORS,
             limits.maximum_dimension,
             limits.maximum_dimension,
+            &crate::DEFAULT_SIXEL_PALETTE,
         );
         for byte in input {
             decoder.put(*byte).unwrap();
@@ -496,7 +501,15 @@ mod tests {
             maximum_dimension: 2,
             ..ImageLimits::default()
         };
-        let mut dimensions = SixelDecoder::new(7, 0, limits, MAX_SIXEL_COLORS, 2, 2);
+        let mut dimensions = SixelDecoder::new(
+            7,
+            0,
+            limits,
+            MAX_SIXEL_COLORS,
+            2,
+            2,
+            &crate::DEFAULT_SIXEL_PALETTE,
+        );
         for byte in b"!3~" {
             let result = dimensions.put(*byte);
             if *byte == b'~' {
@@ -512,6 +525,7 @@ mod tests {
             MAX_SIXEL_COLORS,
             limits.maximum_dimension,
             limits.maximum_dimension,
+            &crate::DEFAULT_SIXEL_PALETTE,
         );
         writes.pixel_writes = MAX_SIXEL_PIXEL_WRITES;
         assert_eq!(writes.put(b'~'), Err(SixelError::PixelWrites));
@@ -524,6 +538,7 @@ mod tests {
             MAX_SIXEL_COLORS,
             limits.maximum_dimension,
             limits.maximum_dimension,
+            &crate::DEFAULT_SIXEL_PALETTE,
         );
         for byte in b"!100~" {
             expansion.put(*byte).unwrap();

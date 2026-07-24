@@ -1,7 +1,8 @@
 use splinterm_terminal::{
     ActiveScreen, CellExtent, ImageAlphaMode, ImageErasePolicy, ImageError, ImageLimits,
     ImageRetention, ImageSourceFormat, NewImageContent, NewImagePlacement,
-    NewImagePlacementOptions, PixelRect, SnapshotRequest, Terminal, TerminalConfig, TerminalDamage,
+    NewImagePlacementOptions, PixelRect, SixelConfig, SnapshotRequest, Terminal, TerminalConfig,
+    TerminalDamage,
 };
 
 fn content(pixels: &[u8], retention: ImageRetention) -> NewImageContent<'_> {
@@ -105,6 +106,126 @@ fn streamed_sixel_matches_the_pinned_foot_fixture_at_every_chunk_boundary() {
     }
     let byte_chunks = input.iter().map(std::slice::from_ref).collect::<Vec<_>>();
     assert_eq!(build(&byte_chunks), expected);
+}
+
+#[test]
+fn sixel_configuration_uses_foot_palette_and_can_disable_graphics() {
+    let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(b"\x1bP7;0;0q\"1;1;1;6#2~\x1b\\");
+    let metadata = terminal
+        .snapshot(SnapshotRequest::default())
+        .image_contents()
+        .next()
+        .unwrap();
+    assert_eq!(
+        terminal.image_content(metadata.id).unwrap().pixels(),
+        [0x21, 0x21, 0xcc, 0xff].repeat(6)
+    );
+
+    let mut disabled = Terminal::new(
+        4,
+        2,
+        TerminalConfig {
+            sixel: SixelConfig {
+                enabled: false,
+                ..SixelConfig::default()
+            },
+            ..TerminalConfig::default()
+        },
+    );
+    disabled.set_cell_pixel_size(1, 6);
+    disabled.advance(b"\x1bP7;0;0q#1~\x1b\\X");
+    assert_eq!(disabled.image_metrics().content_count, 0);
+    assert_eq!(
+        disabled
+            .snapshot(SnapshotRequest::default())
+            .visible_rows()
+            .next()
+            .unwrap()
+            .cells()
+            .next()
+            .unwrap()
+            .content(),
+        splinterm_terminal::CellSnapshotContent::Scalar('X')
+    );
+}
+
+#[test]
+fn sixel_shared_palette_persists_definitions_and_private_mode_resets_them() {
+    let mut terminal = Terminal::new(
+        4,
+        3,
+        TerminalConfig {
+            sixel: SixelConfig {
+                private_palette: false,
+                ..SixelConfig::default()
+            },
+            ..TerminalConfig::default()
+        },
+    );
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(
+        b"\x1bP7;0;0q\"1;1;1;6#31;2;100;0;0#31~\x1b\\\x1b[2;1H\x1bP7;0;0q\"1;1;1;6#31~\x1b\\",
+    );
+    let snapshot = terminal.snapshot(SnapshotRequest::default());
+    let pixels = snapshot
+        .image_contents()
+        .map(|content| {
+            terminal
+                .image_content(content.id)
+                .unwrap()
+                .pixels()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pixels.len(), 2);
+    assert!(
+        pixels
+            .iter()
+            .all(|pixels| *pixels == [0, 0, 255, 255].repeat(6))
+    );
+
+    terminal.advance(b"\x1b[?1070h\x1b[3;1H\x1bP7;0;0q\"1;1;1;6#31~\x1b\\");
+    let snapshot = terminal.snapshot(SnapshotRequest::default());
+    let last = snapshot.image_contents().last().unwrap();
+    assert_eq!(
+        terminal.image_content(last.id).unwrap().pixels(),
+        [0, 0, 0, 0].repeat(6)
+    );
+}
+
+#[test]
+fn sixel_shared_palette_survives_cancel_and_decoder_failure() {
+    let mut terminal = Terminal::new(
+        4,
+        3,
+        TerminalConfig {
+            sixel: SixelConfig {
+                private_palette: false,
+                ..SixelConfig::default()
+            },
+            ..TerminalConfig::default()
+        },
+    );
+    terminal.set_cell_pixel_size(1, 6);
+    terminal.advance(b"\x1bP7;0;0q#31;2;100;0;0#31?\x18\x1bP7;0;0q\"1;1;1;6#31~\x1b\\");
+    terminal.advance(b"\x1b[2;1H\x1bP7;0;0q#32;2;0;100;0#32?/\x1b\\\x1bP7;0;0q\"1;1;1;6#32~\x1b\\");
+    let snapshot = terminal.snapshot(SnapshotRequest::default());
+    let pixels = snapshot
+        .image_contents()
+        .map(|content| {
+            terminal
+                .image_content(content.id)
+                .unwrap()
+                .pixels()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pixels,
+        vec![[0, 0, 255, 255].repeat(6), [0, 255, 0, 255].repeat(6)]
+    );
 }
 
 #[test]

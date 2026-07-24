@@ -25,7 +25,7 @@ mod vt;
 
 pub use cell::{Attributes, Cell, CellContent, Color, ColorSource, UnderlineStyle};
 pub(crate) use composed::ComposedTable;
-pub use config::TerminalConfig;
+pub use config::{DEFAULT_SIXEL_PALETTE, SixelConfig, TerminalConfig};
 pub use coord::{Coordinate, CoordinateRange, ScrollRegion};
 pub use cursor::Cursor;
 pub use event::TerminalEvent;

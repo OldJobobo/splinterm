@@ -20,7 +20,7 @@ use crate::{
     ScrollDirection, ScrollRegion, ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest,
     TerminalConfig, TerminalDamage, TerminalEvent, TerminalModes, TerminalRevision,
     TerminalSnapshot, TerminalUpdate, UnderlineStyle, UpdateBatch,
-    image::{MAX_SIXEL_COLORS, SixelDecoder, SixelError},
+    image::{MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage},
     vt::{Action, Param, Params, Parser, StringTerminator},
 };
 
@@ -43,6 +43,8 @@ pub struct Terminal {
     cell_pixels: Option<(u32, u32)>,
     sixel_scrolling: bool,
     sixel_cursor_right: bool,
+    sixel_palette_mode: SixelPaletteMode,
+    sixel_shared_palette: Box<[u32; MAX_SIXEL_COLORS]>,
     sixel_palette_size: usize,
     sixel_maximum_width: u32,
     sixel_maximum_height: u32,
@@ -75,6 +77,12 @@ struct ActionBaseline {
     row_before: Option<(i32, crate::Row)>,
     visible_before: Option<Vec<crate::Row>>,
     scrollback_rows: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SixelPaletteMode {
+    Private,
+    Shared,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,6 +163,7 @@ impl Terminal {
 
         let palette = default_palette();
         let default_colors = [0x00ff_ffff, 0x0000_0000, 0x00ff_ffff];
+        let sixel_shared_palette = sixel_palette(&config.sixel.palette);
         let mut terminal = Self {
             normal: Grid::with_screen_size(normal_capacity, columns, rows),
             alternate: Grid::with_screen_size(alternate_capacity, columns, rows),
@@ -171,6 +180,12 @@ impl Terminal {
             cell_pixels: None,
             sixel_scrolling: true,
             sixel_cursor_right: false,
+            sixel_palette_mode: if config.sixel.private_palette {
+                SixelPaletteMode::Private
+            } else {
+                SixelPaletteMode::Shared
+            },
+            sixel_shared_palette,
             sixel_palette_size: MAX_SIXEL_COLORS,
             sixel_maximum_width: config.image_limits.maximum_dimension,
             sixel_maximum_height: config.image_limits.maximum_dimension,
@@ -201,9 +216,7 @@ impl Terminal {
                         Action::SixelBegin(params) => self.begin_sixel(&params),
                         Action::SixelData(byte) => self.put_sixel(byte),
                         Action::SixelEnd => self.end_sixel(),
-                        Action::SixelAbort => {
-                            self.sixel_decoder = None;
-                        }
+                        Action::SixelAbort => self.abort_sixel(),
                         action => self.dispatch(action),
                     }
                 }
@@ -716,6 +729,17 @@ impl Terminal {
     }
 
     fn begin_sixel(&mut self, params: &Params) {
+        if !self.config.sixel.enabled {
+            self.sixel_decoder = None;
+            return;
+        }
+        let private_palette;
+        let initial_palette = if self.sixel_palette_mode == SixelPaletteMode::Private {
+            private_palette = sixel_palette(&self.config.sixel.palette);
+            private_palette.as_slice()
+        } else {
+            self.sixel_shared_palette.as_slice()
+        };
         self.sixel_decoder = Some(Box::new(SixelDecoder::new(
             params.get(0).value(0, true),
             params.get(1).value(0, false),
@@ -723,6 +747,7 @@ impl Terminal {
             self.sixel_palette_size,
             self.sixel_maximum_width,
             self.sixel_maximum_height,
+            initial_palette,
         )));
     }
 
@@ -732,17 +757,30 @@ impl Terminal {
             .as_mut()
             .is_some_and(|decoder| decoder.put(byte).is_err());
         if failed {
-            self.sixel_decoder = None;
+            self.abort_sixel();
             self.push_event(TerminalEvent::ImageRejected("Sixel decode limit"));
         }
     }
 
-    fn end_sixel(&mut self) {
+    fn abort_sixel(&mut self) {
         let Some(decoder) = self.sixel_decoder.take() else {
             return;
         };
-        let image = match decoder.finish() {
-            Ok(image) => image,
+        if self.sixel_palette_mode == SixelPaletteMode::Shared {
+            self.sixel_shared_palette
+                .as_mut_slice()
+                .copy_from_slice(decoder.palette());
+        }
+    }
+
+    fn finish_sixel_decoder(&mut self, decoder: SixelDecoder) -> Option<SixelImage> {
+        match decoder.finish() {
+            Ok(image) => {
+                if self.sixel_palette_mode == SixelPaletteMode::Shared {
+                    self.sixel_shared_palette.clone_from(&image.palette);
+                }
+                Some(image)
+            }
             Err(
                 SixelError::InputLimit
                 | SixelError::Dimensions
@@ -750,12 +788,25 @@ impl Terminal {
                 | SixelError::PixelWrites,
             ) => {
                 self.push_event(TerminalEvent::ImageRejected("Sixel decode limit"));
-                return;
+                None
             }
             Err(SixelError::Malformed) => {
                 self.push_event(TerminalEvent::ImageRejected("malformed Sixel"));
-                return;
+                None
             }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "pinned Foot placement, scrolling, and cursor effects commit as one image transaction"
+    )]
+    fn end_sixel(&mut self) {
+        let Some(decoder) = self.sixel_decoder.take() else {
+            return;
+        };
+        let Some(image) = self.finish_sixel_decoder(*decoder) else {
+            return;
         };
         let Some((cell_width, cell_height)) = self.cell_pixels else {
             self.push_event(TerminalEvent::ImageRejected("Sixel geometry unavailable"));
@@ -1811,6 +1862,13 @@ impl Terminal {
                 47 | 1047 => self.select_alternate(enabled, false),
                 66 => self.modes.application_keypad = enabled,
                 80 => self.sixel_scrolling = !enabled,
+                1070 => {
+                    self.sixel_palette_mode = if enabled {
+                        SixelPaletteMode::Private
+                    } else {
+                        SixelPaletteMode::Shared
+                    };
+                }
                 8452 => self.sixel_cursor_right = enabled,
                 1000 => {
                     if enabled {
@@ -2225,6 +2283,13 @@ fn parse_rgb(spec: &str) -> Option<u32> {
     let green = component(components.next()?)?;
     let blue = component(components.next()?)?;
     Some((red << 16) | (green << 8) | blue)
+}
+
+fn sixel_palette(initial: &[u32]) -> Box<[u32; MAX_SIXEL_COLORS]> {
+    let mut palette = Box::new([0; MAX_SIXEL_COLORS]);
+    let count = initial.len().min(MAX_SIXEL_COLORS);
+    palette[..count].copy_from_slice(&initial[..count]);
+    palette
 }
 
 fn default_palette() -> [u32; 256] {
