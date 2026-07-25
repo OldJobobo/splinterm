@@ -89,8 +89,10 @@ exact-identity resident-source registry across panes. Each ordered snapshot or
 update carries an atomic exact lease set; leased mapped/buffered entries cannot
 be evicted or disappear from byte/high-water accounting. `SnapshotFrame` resolves placements by stable displayed row
 ID and retains immutable source handles across cache eviction. The CPU painter
-implements crop-before-scale nearest sampling, source-cell-scaled offsets,
-fractional-scale destination geometry, pane/grid clipping, premultiplied BGRA
+implements crop-before-scale deterministic bilinear sampling with pixel-center
+mapping and crop-edge clamping in premultiplied BGRA8 component space,
+source-cell-scaled offsets, fractional-scale destination geometry, pane/grid
+clipping, premultiplied BGRA
 alpha, deterministic application/creation ordering, and the ADR's below-cell,
 below-text, and above-text z tiers with cursor and trusted overlays remaining
 above image content. Image-bearing semantic changes and scrolls conservatively
@@ -100,6 +102,7 @@ wire property; Slice 4's accepted opacity behavior is canonical source alpha plu
 the existing terminal background opacity.
 
 Slice 4's non-graphical gate covers exact alpha/crop/scale/offset vectors,
+byte-exact identity sampling, bilinear upscale/downscale and crop-edge vectors,
 fractional 1.25x capture, strict z-tier boundaries and Kitty tie ordering,
 stable detached row IDs, pane clipping, cursor/selection precedence, image
 removal and all-row full/incremental identity, image-scroll full reconstruction,
@@ -109,7 +112,13 @@ surface cache, so SHM remains unchanged; the enforced 64 MiB resident cap is the
 accepted Slice 0 client-cache value recorded in
 `docs/spikes/artifacts/0025-terminal-images/budget-probe.json`. The no-image path
 retains an empty non-allocating placement vector and the existing image-free
-scroll-copy tests. No graphical command ran for Slice 4.
+scroll-copy tests. No graphical command ran for Slice 4. A post-acceptance image-quality
+correction replaces nearest sampling with the deterministic bilinear contract
+above; exact headless vectors cover the filter. An approved guarded live smoke on
+DP-2/workspace 8 displayed iTerm2 and Sixel renditions of the same source in
+60-by-22-cell boxes without taking focus, and the user visually accepted the
+result. Reproducible captured comparison evidence and image-active composition
+latency remain Slice 8 evidence.
 
 Slice 5 is implemented and accepted as the practical static-image Kitty subset,
 not full Kitty compatibility. Selective APC `_G` recognition streams bounded
@@ -534,16 +543,19 @@ bounded.
 
 - Add read-only source surfaces and a renderer-wide byte budget.
 - Composite clipped alpha content in exact z/creation order.
-- Support source crops, destination scaling, offsets, panes, fractional scale,
-  opacity, and terminal background interaction.
+- Support source crops, deterministic pixel-center bilinear destination scaling
+  with crop-edge clamping over premultiplied BGRA8 components, offsets, panes,
+  fractional scale, opacity, and terminal background interaction.
 - Integrate image rectangles with full redraw, row damage, scroll-copy, theme
   repaint, font zoom, output scale, selection, cursor, and overlays.
 - Ensure inactive panes and detached history display the correct image plane.
 
 **Gate**
 
-Non-graphical final-buffer tests prove alpha, clipping, crop, scale, z-order,
-pane isolation, trusted-overlay precedence, and full-versus-incremental identity.
+Non-graphical final-buffer tests prove alpha, clipping, crop, byte-exact identity
+sampling, bilinear upscale/downscale and edge clamping, fractional scale,
+z-order, pane isolation, trusted-overlay precedence, and full-versus-incremental
+identity.
 Image cache eviction cannot alter pixels. CPU/RSS/SHM metrics remain within the
 Slice 0 budgets.
 

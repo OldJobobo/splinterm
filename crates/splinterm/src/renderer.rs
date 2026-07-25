@@ -3960,6 +3960,153 @@ fn scaled_image_offset(offset: i32, destination_cell: u32, source_cell: Option<u
     i64::from(offset) * i64::from(destination_cell) / i64::from(source_cell)
 }
 
+const IMAGE_FILTER_ONE: u64 = 1 << 16;
+const IMAGE_FILTER_HALF: u64 = IMAGE_FILTER_ONE / 2;
+type BilinearAxis = (u32, u32, u64);
+
+fn bilinear_axis_from_center(center: u64, source_extent: u32) -> Option<BilinearAxis> {
+    let maximum = u64::from(source_extent.checked_sub(1)?) * IMAGE_FILTER_ONE;
+    let position = center.saturating_sub(IMAGE_FILTER_HALF).min(maximum);
+    let lower = u32::try_from(position / IMAGE_FILTER_ONE).unwrap_or(source_extent - 1);
+    let upper = lower.saturating_add(1).min(source_extent - 1);
+    Some((lower, upper, position % IMAGE_FILTER_ONE))
+}
+
+fn bilinear_axis(
+    destination_coordinate: u64,
+    source_extent: u32,
+    destination_extent: u32,
+) -> Option<BilinearAxis> {
+    if source_extent == 0 || destination_extent == 0 {
+        return None;
+    }
+    let center = u64::try_from(
+        (u128::from(destination_coordinate) * 2 + 1)
+            * u128::from(source_extent)
+            * u128::from(IMAGE_FILTER_ONE)
+            / (u128::from(destination_extent) * 2),
+    )
+    .ok()?;
+    bilinear_axis_from_center(center, source_extent)
+}
+
+struct BilinearAxisStepper {
+    center: u64,
+    remainder: u128,
+    denominator: u128,
+    step: u64,
+    step_remainder: u128,
+    source_extent: u32,
+}
+
+impl BilinearAxisStepper {
+    fn new(
+        destination_coordinate: u64,
+        source_extent: u32,
+        destination_extent: u32,
+    ) -> Option<Self> {
+        if source_extent == 0 || destination_extent == 0 {
+            return None;
+        }
+        let denominator = u128::from(destination_extent) * 2;
+        let numerator = (u128::from(destination_coordinate) * 2 + 1)
+            * u128::from(source_extent)
+            * u128::from(IMAGE_FILTER_ONE);
+        let increment = u128::from(source_extent) * u128::from(IMAGE_FILTER_ONE) * 2;
+        Some(Self {
+            center: u64::try_from(numerator / denominator).ok()?,
+            remainder: numerator % denominator,
+            denominator,
+            step: u64::try_from(increment / denominator).ok()?,
+            step_remainder: increment % denominator,
+            source_extent,
+        })
+    }
+}
+
+impl Iterator for BilinearAxisStepper {
+    type Item = BilinearAxis;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sample = bilinear_axis_from_center(self.center, self.source_extent)?;
+        self.center = self.center.checked_add(self.step)?;
+        self.remainder += self.step_remainder;
+        if self.remainder >= self.denominator {
+            self.remainder -= self.denominator;
+            self.center = self.center.checked_add(1)?;
+        }
+        Some(sample)
+    }
+}
+
+fn image_source_pixel(source: &[u8], source_stride: usize, x: u32, y: u32) -> Option<&[u8]> {
+    usize::try_from(y)
+        .ok()
+        .and_then(|row| row.checked_mul(source_stride))
+        .and_then(|row| {
+            usize::try_from(x)
+                .ok()
+                .and_then(|column| column.checked_mul(4))
+                .and_then(|column| row.checked_add(column))
+        })
+        .and_then(|index| source.get(index..index + 4))
+}
+
+fn bilinear_premultiplied_bgra_from_axes(
+    source: &[u8],
+    source_stride: usize,
+    crop: splinterm_protocol::ImagePixelRect,
+    x_axis: BilinearAxis,
+    y_axis: BilinearAxis,
+) -> Option<[u8; 4]> {
+    let (x0, x1, x_weight) = x_axis;
+    let (y0, y1, y_weight) = y_axis;
+    let x0 = crop.x.checked_add(x0)?;
+    let x1 = crop.x.checked_add(x1)?;
+    let y0 = crop.y.checked_add(y0)?;
+    let y1 = crop.y.checked_add(y1)?;
+    let top_left = image_source_pixel(source, source_stride, x0, y0)?;
+    let top_right = image_source_pixel(source, source_stride, x1, y0)?;
+    let bottom_left = image_source_pixel(source, source_stride, x0, y1)?;
+    let bottom_right = image_source_pixel(source, source_stride, x1, y1)?;
+    let x_inverse = IMAGE_FILTER_ONE - x_weight;
+    let y_inverse = IMAGE_FILTER_ONE - y_weight;
+    let weights = [
+        x_inverse * y_inverse,
+        x_weight * y_inverse,
+        x_inverse * y_weight,
+        x_weight * y_weight,
+    ];
+    let mut result = [0; 4];
+    for (channel, output) in result.iter_mut().enumerate() {
+        let value = u64::from(top_left[channel]) * weights[0]
+            + u64::from(top_right[channel]) * weights[1]
+            + u64::from(bottom_left[channel]) * weights[2]
+            + u64::from(bottom_right[channel]) * weights[3];
+        *output = u8::try_from((value + (1 << 31)) >> 32).unwrap_or(u8::MAX);
+    }
+    Some(result)
+}
+
+#[cfg(test)]
+fn bilinear_premultiplied_bgra(
+    source: &[u8],
+    source_stride: usize,
+    crop: splinterm_protocol::ImagePixelRect,
+    destination_x: u64,
+    destination_y: u64,
+    destination_width: u32,
+    destination_height: u32,
+) -> Option<[u8; 4]> {
+    bilinear_premultiplied_bgra_from_axes(
+        source,
+        source_stride,
+        crop,
+        bilinear_axis(destination_x, crop.width, destination_width)?,
+        bilinear_axis(destination_y, crop.height, destination_height)?,
+    )
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -4052,6 +4199,8 @@ fn paint_snapshot_images(
         let Some(source_stride) = source_stride else {
             continue;
         };
+        let identity_scale = image.placement.source.width == destination_width
+            && image.placement.source.height == destination_height;
         for target_y in top..bottom {
             let grid_row = usize::try_from((target_y - i64::from(grid.y)) / i64::from(cell_height))
                 .unwrap_or(usize::MAX);
@@ -4059,27 +4208,50 @@ fn paint_snapshot_images(
                 continue;
             }
             let relative_y = u64::try_from(target_y - destination_y).unwrap_or(0);
-            let source_y = u64::from(image.placement.source.y)
-                + relative_y * u64::from(image.placement.source.height)
-                    / u64::from(destination_height);
+            let y_axis = (!identity_scale)
+                .then(|| {
+                    bilinear_axis(
+                        relative_y,
+                        image.placement.source.height,
+                        destination_height,
+                    )
+                })
+                .flatten();
+            let relative_left = u64::try_from(left - destination_x).unwrap_or(0);
+            let mut x_axis = (!identity_scale)
+                .then(|| {
+                    BilinearAxisStepper::new(
+                        relative_left,
+                        image.placement.source.width,
+                        destination_width,
+                    )
+                })
+                .flatten();
             for target_x in left..right {
                 let relative_x = u64::try_from(target_x - destination_x).unwrap_or(0);
-                let source_x = u64::from(image.placement.source.x)
-                    + relative_x * u64::from(image.placement.source.width)
-                        / u64::from(destination_width);
-                let Some(index) = usize::try_from(source_y)
-                    .ok()
-                    .and_then(|row| row.checked_mul(source_stride))
-                    .and_then(|row| {
-                        usize::try_from(source_x)
-                            .ok()
-                            .and_then(|column| column.checked_mul(4))
-                            .and_then(|column| row.checked_add(column))
+                let pixel = if identity_scale {
+                    u32::try_from(relative_x)
+                        .ok()
+                        .and_then(|x| image.placement.source.x.checked_add(x))
+                        .and_then(|x| {
+                            u32::try_from(relative_y)
+                                .ok()
+                                .and_then(|y| image.placement.source.y.checked_add(y))
+                                .and_then(|y| image_source_pixel(source, source_stride, x, y))
+                        })
+                        .and_then(|pixel| pixel.try_into().ok())
+                } else {
+                    x_axis.as_mut().and_then(Iterator::next).and_then(|x| {
+                        bilinear_premultiplied_bgra_from_axes(
+                            source,
+                            source_stride,
+                            image.placement.source,
+                            x,
+                            y_axis?,
+                        )
                     })
-                else {
-                    continue;
                 };
-                let Some(pixel) = source.get(index..index + 4) else {
+                let Some(pixel) = pixel else {
                     continue;
                 };
                 blend_premultiplied_pixel(
@@ -6608,6 +6780,181 @@ mod tests {
             row,
             source: ImageContentSource::Buffered(Arc::from(pixels)),
         }
+    }
+
+    #[test]
+    fn bilinear_image_sampling_is_exact_clamped_and_premultiplied() {
+        let full = splinterm_protocol::ImagePixelRect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+        let identity = [
+            10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255,
+        ];
+        for y in 0..2 {
+            for x in 0..2 {
+                let index = usize::try_from((y * 2 + x) * 4).unwrap();
+                assert_eq!(
+                    bilinear_premultiplied_bgra(&identity, 8, full, x, y, 2, 2),
+                    Some(identity[index..index + 4].try_into().unwrap())
+                );
+            }
+        }
+        let two_dimensional = [
+            0, 0, 0, 255, 64, 64, 64, 255, 128, 128, 128, 255, 255, 255, 255, 255,
+        ];
+        assert_eq!(
+            bilinear_premultiplied_bgra(&two_dimensional, 8, full, 1, 1, 3, 3),
+            Some([112, 112, 112, 255])
+        );
+
+        let mut stepped = BilinearAxisStepper::new(3, 7, 11).unwrap();
+        for coordinate in 3..11 {
+            assert_eq!(stepped.next(), bilinear_axis(coordinate, 7, 11));
+        }
+
+        let opaque_ramp = [0, 0, 0, 255, 200, 200, 200, 255];
+        let row = splinterm_protocol::ImagePixelRect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        let upscaled = (0..4)
+            .map(|x| bilinear_premultiplied_bgra(&opaque_ramp, 8, row, x, 0, 4, 1).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            upscaled,
+            [
+                [0, 0, 0, 255],
+                [50, 50, 50, 255],
+                [150, 150, 150, 255],
+                [200, 200, 200, 255],
+            ]
+        );
+
+        let downscale = [
+            0, 0, 0, 255, 100, 100, 100, 255, 200, 200, 200, 255, 255, 255, 255, 255,
+        ];
+        let wide = splinterm_protocol::ImagePixelRect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 1,
+        };
+        assert_eq!(
+            bilinear_premultiplied_bgra(&downscale, 16, wide, 0, 0, 2, 1),
+            Some([50, 50, 50, 255])
+        );
+        assert_eq!(
+            bilinear_premultiplied_bgra(&downscale, 16, wide, 1, 0, 2, 1),
+            Some([228, 228, 228, 255])
+        );
+
+        let crop_source = [
+            10, 10, 10, 255, 20, 20, 20, 255, 220, 220, 220, 255, 240, 240, 240, 255,
+        ];
+        let crop = splinterm_protocol::ImagePixelRect {
+            x: 1,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        let cropped = (0..4)
+            .map(|x| bilinear_premultiplied_bgra(&crop_source, 16, crop, x, 0, 4, 1).unwrap()[0])
+            .collect::<Vec<_>>();
+        assert_eq!(cropped, [20, 70, 170, 220]);
+
+        let alpha = [0, 0, 0, 0, 0, 0, 128, 128];
+        assert_eq!(
+            bilinear_premultiplied_bgra(&alpha, 8, row, 1, 0, 4, 1),
+            Some([0, 0, 32, 32])
+        );
+        let empty = splinterm_protocol::ImagePixelRect { width: 0, ..row };
+        assert_eq!(
+            bilinear_premultiplied_bgra(&alpha, 8, empty, 0, 0, 1, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn image_compositor_uses_bilinear_phase_across_clipping() {
+        let mut frame = damage_test_frame();
+        frame.backgrounds.fill([0, 0, 0]);
+        let geometry = frame.tight_geometry().unwrap();
+        let identity_source = splinterm_protocol::ImagePixelRect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+        let identity = [
+            10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255,
+        ];
+        frame.images = vec![test_snapshot_image(
+            &identity,
+            2,
+            2,
+            0,
+            identity_source,
+            0,
+            -1,
+            1,
+        )];
+        let mut identity_canvas = vec![0; 2 * 6 * 4];
+        paint_snapshot(
+            &mut identity_canvas,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(&identity_canvas[0..8], &identity[0..8]);
+        assert_eq!(&identity_canvas[8..16], &identity[8..16]);
+
+        let source = splinterm_protocol::ImagePixelRect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let mut pixels = Vec::with_capacity(4 * 4 * 4);
+        for y in 0_u8..4 {
+            for x in 0_u8..4 {
+                pixels.extend_from_slice(&[x * 40, y * 50, (x + y) * 10, 255]);
+            }
+        }
+        frame.images = vec![test_snapshot_image(&pixels, 4, 4, 0, source, 0, -1, 1)];
+        let mut full = vec![0; 2 * 6 * 4];
+        paint_snapshot(
+            &mut full,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(&full[0..4], &[20, 25, 10, 255]);
+        assert_eq!(&full[4..8], &[100, 25, 30, 255]);
+
+        frame.images[0].placement.x_offset = -1;
+        frame.images[0].placement.y_offset = -1;
+        let mut clipped = vec![0; 2 * 6 * 4];
+        paint_snapshot(
+            &mut clipped,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(&clipped[0..4], &[100, 125, 50, 255]);
     }
 
     #[test]

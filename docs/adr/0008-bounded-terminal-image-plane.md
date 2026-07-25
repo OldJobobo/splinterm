@@ -48,6 +48,13 @@ Pixels are immutable shared backing, not copied into snapshots or updates.
 `Cell` remains unchanged and its 24-byte memory-layout assertion remains a
 release gate.
 
+The CPU compositor maps destination pixel centers into the selected source crop
+and applies deterministic 16.16 fixed-point bilinear filtering. Samples clamp
+to the crop edges and interpolate the canonical premultiplied BGRA8 components
+directly in sRGB component space, including alpha; identity scaling remains
+byte-exact. Filtering allocates no scaled surface and does not change the client
+source-cache or SHM budgets.
+
 ### Ownership and lifecycle
 
 The live Splint actor and its terminal own authoritative image semantics and
