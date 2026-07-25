@@ -29,6 +29,10 @@ use crate::{
 
 /// Renderer-independent terminal state and streaming VT parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent parser and protocol modes are explicit terminal state"
+)]
 pub struct Terminal {
     normal: Grid,
     alternate: Grid,
@@ -39,6 +43,8 @@ pub struct Terminal {
     saved_attributes: Attributes,
     scroll_region: ScrollRegion,
     modes: TerminalModes,
+    synchronized_updates: bool,
+    synchronized_change: ChangeSet,
     tab_stops: Vec<bool>,
     composed: ComposedTable,
     images: ImagePlane,
@@ -270,6 +276,8 @@ impl Terminal {
             saved_attributes: Attributes::default(),
             scroll_region: ScrollRegion::new(0, i32::try_from(rows).expect("rows fit in i32")),
             modes: TerminalModes::default(),
+            synchronized_updates: false,
+            synchronized_change: ChangeSet::default(),
             tab_stops: Vec::new(),
             composed: ComposedTable::new(config.composed_limit),
             images: ImagePlane::new_with_shared_budget(
@@ -447,6 +455,22 @@ impl Terminal {
     #[must_use]
     pub const fn modes(&self) -> TerminalModes {
         self.modes
+    }
+
+    /// Whether application synchronized-update publication is currently active.
+    #[must_use]
+    pub const fn synchronized_updates(&self) -> bool {
+        self.synchronized_updates
+    }
+
+    /// Ends a synchronized-update episode and commits its bounded final state.
+    pub fn expire_synchronized_updates(&mut self) {
+        if !self.synchronized_updates {
+            return;
+        }
+        self.synchronized_updates = false;
+        self.current_change = Some(ChangeSet::default());
+        self.commit_change();
     }
 
     /// Returns the current title.
@@ -2073,9 +2097,34 @@ impl Terminal {
     }
 
     fn commit_change(&mut self) {
-        let Some(change) = self.current_change.take() else {
+        let Some(mut change) = self.current_change.take() else {
             return;
         };
+        if self.synchronized_updates {
+            if !change.is_empty() {
+                self.synchronized_change.full();
+                let available = self
+                    .config
+                    .event_limit
+                    .saturating_sub(self.synchronized_change.events.len());
+                self.synchronized_change
+                    .events
+                    .extend(change.events.into_iter().take(available));
+            }
+            return;
+        }
+        if !self.synchronized_change.is_empty() {
+            self.synchronized_change.full();
+            let mut synchronized = std::mem::take(&mut self.synchronized_change);
+            let available = self
+                .config
+                .event_limit
+                .saturating_sub(synchronized.events.len());
+            synchronized
+                .events
+                .extend(change.events.into_iter().take(available));
+            change = synchronized;
+        }
         if change.is_empty() {
             return;
         }
@@ -2360,6 +2409,17 @@ impl Terminal {
         }
         if private == Some(b'?') && matches!(final_byte, b'h' | b'l') {
             self.set_private_modes(params, final_byte == b'h');
+            return;
+        }
+        // Cava 0.10.7 emits non-private CSI 2026 h/l followed by ST instead
+        // of DECSET/DECRST. Accept that exact mode as a narrow compatibility
+        // quirk; the trailing ST is harmless in ground state.
+        if private.is_none()
+            && matches!(final_byte, b'h' | b'l')
+            && params.count() == 1
+            && params.get(0).value(0, false) == 2026
+        {
+            self.synchronized_updates = final_byte == b'h';
             return;
         }
         if private == Some(b'?') && final_byte == b'S' {
@@ -2811,6 +2871,7 @@ impl Terminal {
                 1049 => self.select_alternate(enabled, true),
                 1004 => self.modes.focus_reporting = enabled,
                 2004 => self.modes.bracketed_paste = enabled,
+                2026 => self.synchronized_updates = enabled,
                 _ => {}
             }
         }
@@ -3851,6 +3912,38 @@ mod tests {
         assert_eq!(wide.matches.len(), 1);
         assert!(wide.matches[0].end_column > wide.matches[0].start_column);
         assert_eq!(first.history_generation, second.history_generation);
+    }
+
+    #[test]
+    fn synchronized_update_modes_accept_dec_and_cava_boundaries() {
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        assert!(!terminal.synchronized_updates());
+
+        terminal.advance(b"\x1b[?2026h");
+        assert!(terminal.synchronized_updates());
+        terminal.advance(b"A");
+        terminal.advance(b"\x1b[?2026l");
+        assert!(!terminal.synchronized_updates());
+
+        terminal.advance(b"\x1b[2026h\x1b\\B\x1b[2026l\x1b\\C");
+        assert!(!terminal.synchronized_updates());
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[0].content(),
+            CellContent::Scalar('A')
+        );
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[1].content(),
+            CellContent::Scalar('B')
+        );
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[2].content(),
+            CellContent::Scalar('C')
+        );
+
+        terminal.advance(b"\x1b[2026h");
+        assert!(terminal.synchronized_updates());
+        terminal.advance(b"\x1bc");
+        assert!(!terminal.synchronized_updates());
     }
 
     #[test]

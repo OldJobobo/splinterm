@@ -31,6 +31,8 @@ use tokio::{
 static NEXT_INCARNATION: AtomicU64 = AtomicU64::new(1);
 const PARSE_BATCH: usize = 256;
 const READ_BUFFER: usize = 16 * 1024;
+const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_SUBSCRIBER_QUEUE_CAPACITY: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ProcessIncarnation(u64);
@@ -177,6 +179,11 @@ impl Subscription {
             changed = self.resnapshot.changed() => {
                 if changed.is_ok() && *self.resnapshot.borrow() {
                     SubscriptionReceive::ResnapshotRequired
+                } else if changed.is_err() {
+                    self.events.try_recv().map_or(
+                        SubscriptionReceive::Closed,
+                        SubscriptionReceive::Event,
+                    )
                 } else {
                     SubscriptionReceive::Closed
                 }
@@ -635,6 +642,46 @@ impl LiveSplintRuntime {
 struct Subscriber {
     events: mpsc::Sender<LiveEvent>,
     resnapshot: watch::Sender<bool>,
+    published_revision: TerminalRevision,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SynchronizedPublication {
+    published_revision: TerminalRevision,
+    active: bool,
+    timed_out: bool,
+    deadline: Option<Instant>,
+}
+
+impl SynchronizedPublication {
+    fn new(revision: TerminalRevision) -> Self {
+        Self {
+            published_revision: revision,
+            active: false,
+            timed_out: false,
+            deadline: None,
+        }
+    }
+
+    fn observe(&mut self, active: bool, now: Instant) {
+        if active && !self.active {
+            self.timed_out = false;
+            self.deadline = Some(now + SYNCHRONIZED_UPDATE_TIMEOUT);
+        } else if !active {
+            self.timed_out = false;
+            self.deadline = None;
+        }
+        self.active = active;
+    }
+
+    const fn suppresses_publication(self) -> bool {
+        self.active && !self.timed_out
+    }
+
+    fn expire(&mut self) {
+        self.timed_out = true;
+        self.deadline = None;
+    }
 }
 
 #[derive(Default)]
@@ -738,6 +785,7 @@ async fn run_actor_body(
     metrics: &RuntimeMetrics,
 ) -> Result<ProcessExit, LiveError> {
     let mut subscribers = Vec::<Subscriber>::new();
+    let mut publication = SynchronizedPublication::new(terminal.revision());
     let mut user_writes = WriteQueue::default();
     let mut reply_writes = WriteQueue::default();
     let mut interval = time::interval(config.poll_interval);
@@ -770,6 +818,7 @@ async fn run_actor_body(
                         session,
                         &mut terminal,
                         &mut subscribers,
+                        &mut publication,
                         &mut user_writes,
                         &mut shutdown,
                         &mut shutdown_replies,
@@ -808,6 +857,7 @@ async fn run_actor_body(
                                 &mut terminal,
                                 &mut reply_writes,
                                 &mut subscribers,
+                                &mut publication,
                                 config.reply_byte_limit,
                             )?;
                             metrics.output_parse_batches.fetch_add(
@@ -863,6 +913,12 @@ async fn run_actor_body(
                     }
                 }
             }
+            () = time::sleep_until(publication.deadline.unwrap_or_else(Instant::now)), if publication.deadline.is_some() => {
+                terminal.expire_synchronized_updates();
+                publication.observe(false, Instant::now());
+                publication.expire();
+                publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+            }
             _ = interval.tick() => {
                 if child_exit.is_none() {
                     if let Some(status) = session.try_wait()? {
@@ -876,6 +932,10 @@ async fn run_actor_body(
     }
 
     let status = child_exit.expect("actor only completes after observing child exit");
+    terminal.expire_synchronized_updates();
+    publication.observe(false, Instant::now());
+    publication.expire();
+    publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
     publish(
         &mut subscribers,
         LiveEvent::Exited {
@@ -887,6 +947,16 @@ async fn run_actor_body(
         let _ = reply.send(());
     }
     Ok(status)
+}
+
+fn subscriber_channel_capacity(requested: usize, configured: usize) -> Result<usize, LiveError> {
+    let effective = requested.min(configured);
+    if effective == 0 || effective > MAX_SUBSCRIBER_QUEUE_CAPACITY {
+        return Err(LiveError::InvalidSubscriberCapacity);
+    }
+    effective
+        .checked_add(1)
+        .ok_or(LiveError::InvalidSubscriberCapacity)
 }
 
 #[allow(
@@ -901,6 +971,7 @@ fn handle_command(
     session: &mut LinuxPtySession,
     terminal: &mut Terminal,
     subscribers: &mut Vec<Subscriber>,
+    publication: &mut SynchronizedPublication,
     writes: &mut WriteQueue,
     shutdown: &mut Option<ShutdownStage>,
     shutdown_replies: &mut Vec<oneshot::Sender<()>>,
@@ -927,7 +998,6 @@ fn handle_command(
                 })
             };
             if result.is_ok() {
-                let base = terminal.revision();
                 set_terminal_pixel_geometry(
                     terminal,
                     size.columns,
@@ -936,7 +1006,10 @@ fn handle_command(
                     size.pixel_height,
                 );
                 terminal.resize(usize::from(size.columns), usize::from(size.rows));
-                publish_updates(terminal, base, incarnation, subscribers);
+                publication.observe(terminal.synchronized_updates(), Instant::now());
+                if !publication.suppresses_publication() {
+                    publish_updates(terminal, publication, incarnation, subscribers);
+                }
             }
             let _ = reply.send(result);
         }
@@ -1012,19 +1085,22 @@ fn handle_command(
         }
         Command::Subscribe(capacity, reply) => {
             subscribers.retain(|subscriber| !subscriber.events.is_closed());
-            if capacity == 0 {
+            let Ok(event_capacity) =
+                subscriber_channel_capacity(capacity, config.subscriber_capacity)
+            else {
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
-            }
+            };
             if subscribers.len() >= config.max_subscribers {
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
             }
-            let (event_sender, events) = mpsc::channel(capacity.min(config.subscriber_capacity));
+            let (event_sender, events) = mpsc::channel(event_capacity);
             let (resnapshot, resnapshot_receiver) = watch::channel(false);
             subscribers.push(Subscriber {
                 events: event_sender,
                 resnapshot,
+                published_revision: terminal.revision(),
             });
             let _ = reply.send(Ok(Subscription {
                 events,
@@ -1033,7 +1109,13 @@ fn handle_command(
         }
         Command::Attach(max_rows, capacity, reply) => {
             subscribers.retain(|subscriber| !subscriber.events.is_closed());
-            if capacity == 0 || subscribers.len() >= config.max_subscribers {
+            let Ok(event_capacity) =
+                subscriber_channel_capacity(capacity, config.subscriber_capacity)
+            else {
+                let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
+                return;
+            };
+            if subscribers.len() >= config.max_subscribers {
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
             }
@@ -1050,11 +1132,12 @@ fn handle_command(
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                 Ordering::Relaxed,
             );
-            let (event_sender, events) = mpsc::channel(capacity.min(config.subscriber_capacity));
+            let (event_sender, events) = mpsc::channel(event_capacity);
             let (resnapshot, resnapshot_receiver) = watch::channel(false);
             subscribers.push(Subscriber {
                 events: event_sender,
                 resnapshot,
+                published_revision: terminal.revision(),
             });
             let subscription = Subscription {
                 events,
@@ -1074,28 +1157,51 @@ fn handle_command(
 
 fn publish_updates(
     terminal: &Terminal,
-    base: TerminalRevision,
+    publication: &mut SynchronizedPublication,
     incarnation: ProcessIncarnation,
     subscribers: &mut Vec<Subscriber>,
 ) -> (usize, usize) {
-    let updates = terminal
-        .updates_since(base)
-        .expect("immediate update history cannot have a revision gap")
-        .updates()
-        .cloned()
-        .collect::<Vec<_>>();
-    let update_count = updates.len();
-    let overflows = if updates.is_empty() {
-        0
-    } else {
-        publish(
-            subscribers,
-            LiveEvent::Update {
-                incarnation,
-                updates,
-            },
-        )
-    };
+    let update_count = terminal
+        .updates_since(publication.published_revision)
+        .map_or(0, |batch| batch.updates().len());
+    publication.published_revision = terminal.revision();
+
+    let mut overflows = 0_usize;
+    subscribers.retain_mut(|subscriber| {
+        if subscriber.events.is_closed() {
+            return false;
+        }
+        let Ok(batch) = terminal.updates_since(subscriber.published_revision) else {
+            subscriber.resnapshot.send_replace(true);
+            overflows = overflows.saturating_add(1);
+            return false;
+        };
+        let updates = batch.updates().cloned().collect::<Vec<_>>();
+        if updates.is_empty() {
+            return true;
+        }
+        // One internal slot is reserved for the terminal Exited event.
+        if subscriber.events.capacity() <= 1 {
+            subscriber.resnapshot.send_replace(true);
+            overflows = overflows.saturating_add(1);
+            return false;
+        }
+        match subscriber.events.try_send(LiveEvent::Update {
+            incarnation,
+            updates,
+        }) {
+            Ok(()) => {
+                subscriber.published_revision = terminal.revision();
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                subscriber.resnapshot.send_replace(true);
+                overflows = overflows.saturating_add(1);
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    });
     (update_count, overflows)
 }
 
@@ -1133,12 +1239,12 @@ fn process_output(
     terminal: &mut Terminal,
     reply_writes: &mut WriteQueue,
     subscribers: &mut Vec<Subscriber>,
+    publication: &mut SynchronizedPublication,
     reply_limit: usize,
 ) -> Result<ProcessOutputMetrics, LiveError> {
     let mut metrics = ProcessOutputMetrics::default();
     for batch in bytes.chunks(PARSE_BATCH) {
         metrics.parse_batches = metrics.parse_batches.saturating_add(1);
-        let base = terminal.revision();
         let image_metrics_before = terminal.image_metrics();
         let parse_started = Instant::now();
         terminal.advance(batch);
@@ -1154,14 +1260,18 @@ fn process_output(
                 image_metrics.placement_count,
             );
         }
-        let (updates, overflows) = publish_updates(terminal, base, incarnation, subscribers);
-        metrics.terminal_updates = metrics
-            .terminal_updates
-            .saturating_add(u64::try_from(updates).unwrap_or(u64::MAX));
-        metrics.live_events = metrics.live_events.saturating_add(u64::from(updates > 0));
-        metrics.subscriber_overflows = metrics
-            .subscriber_overflows
-            .saturating_add(u64::try_from(overflows).unwrap_or(u64::MAX));
+        publication.observe(terminal.synchronized_updates(), Instant::now());
+        if !publication.suppresses_publication() {
+            let (updates, overflows) =
+                publish_updates(terminal, publication, incarnation, subscribers);
+            metrics.terminal_updates = metrics
+                .terminal_updates
+                .saturating_add(u64::try_from(updates).unwrap_or(u64::MAX));
+            metrics.live_events = metrics.live_events.saturating_add(u64::from(updates > 0));
+            metrics.subscriber_overflows = metrics
+                .subscriber_overflows
+                .saturating_add(u64::try_from(overflows).unwrap_or(u64::MAX));
+        }
         for event in terminal.drain_events() {
             if let TerminalEvent::PtyWrite(bytes) = event {
                 reply_writes
@@ -1316,6 +1426,190 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    fn synchronized_test_subscriber(
+        terminal: &Terminal,
+    ) -> (Subscriber, mpsc::Receiver<LiveEvent>, watch::Receiver<bool>) {
+        let (events, receiver) = mpsc::channel(4);
+        let (resnapshot, resnapshot_receiver) = watch::channel(false);
+        (
+            Subscriber {
+                events,
+                resnapshot,
+                published_revision: terminal.revision(),
+            },
+            receiver,
+            resnapshot_receiver,
+        )
+    }
+
+    #[test]
+    fn synchronized_publication_defers_updates_but_not_pty_replies() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let (subscriber, mut receiver, _) = synchronized_test_subscriber(&terminal);
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+        let mut replies = WriteQueue::default();
+
+        let metrics = process_output(
+            b"\x1b[2026hA\x1b[5n",
+            incarnation,
+            &mut terminal,
+            &mut replies,
+            &mut subscribers,
+            &mut publication,
+            1024,
+        )
+        .unwrap();
+        assert!(publication.suppresses_publication());
+        assert_eq!(metrics.terminal_updates, 0);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(
+            !replies.is_empty(),
+            "DSR reply must not wait for synchronized rendering"
+        );
+
+        process_output(
+            b"B\x1b[2026l\x1b\\C",
+            incarnation,
+            &mut terminal,
+            &mut replies,
+            &mut subscribers,
+            &mut publication,
+            1024,
+        )
+        .unwrap();
+        assert!(!publication.suppresses_publication());
+        let LiveEvent::Update { updates, .. } = receiver.try_recv().unwrap() else {
+            panic!("expected one deferred update batch");
+        };
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn capacity_one_preserves_final_synchronized_update_before_exit() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let (events, receiver) = mpsc::channel(2);
+        let (resnapshot, resnapshot_receiver) = watch::channel(false);
+        let mut subscribers = vec![Subscriber {
+            events,
+            resnapshot,
+            published_revision: terminal.revision(),
+        }];
+        let mut subscription = Subscription {
+            events: receiver,
+            resnapshot: resnapshot_receiver,
+        };
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+        terminal.advance(b"\x1b[?2026hfinal\x1b[?2026l");
+        publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+        let status = ProcessExit {
+            code: Some(0),
+            signal: None,
+        };
+        assert_eq!(
+            publish(
+                &mut subscribers,
+                LiveEvent::Exited {
+                    incarnation,
+                    status,
+                },
+            ),
+            0
+        );
+        drop(subscribers);
+
+        assert!(matches!(
+            subscription.recv().await,
+            SubscriptionReceive::Event(LiveEvent::Update { .. })
+        ));
+        assert!(matches!(
+            subscription.recv().await,
+            SubscriptionReceive::Event(LiveEvent::Exited {
+                incarnation: event_incarnation,
+                status: event_status,
+            }) if event_incarnation == incarnation && event_status == status
+        ));
+    }
+
+    #[test]
+    fn subscriber_capacity_reserves_exit_slot_and_rejects_extremes() {
+        assert_eq!(subscriber_channel_capacity(1, 64).unwrap(), 2);
+        assert_eq!(
+            subscriber_channel_capacity(MAX_SUBSCRIBER_QUEUE_CAPACITY, usize::MAX).unwrap(),
+            MAX_SUBSCRIBER_QUEUE_CAPACITY + 1
+        );
+        assert!(subscriber_channel_capacity(0, 64).is_err());
+        assert!(subscriber_channel_capacity(usize::MAX, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn synchronized_publication_timeout_is_fixed_and_commits_one_frame() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut config = TerminalConfig::default();
+        config.update_history_limit = 4;
+        let mut terminal = Terminal::new(8, 2, config);
+        let initial_revision = terminal.revision();
+        let (subscriber, mut receiver, resnapshot) = synchronized_test_subscriber(&terminal);
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+        let mut replies = WriteQueue::default();
+        let started = Instant::now();
+
+        process_output(
+            b"\x1b[?2026hABCDEFGHIJK",
+            incarnation,
+            &mut terminal,
+            &mut replies,
+            &mut subscribers,
+            &mut publication,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(terminal.revision(), initial_revision);
+        let deadline = publication.deadline.unwrap();
+        publication.observe(true, started + Duration::from_millis(900));
+        assert_eq!(publication.deadline, Some(deadline));
+        terminal.expire_synchronized_updates();
+        publication.observe(false, Instant::now());
+        publication.expire();
+        let (updates, overflows) =
+            publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+        assert_eq!((updates, overflows), (1, 0));
+        assert_eq!(subscribers.len(), 1);
+        assert!(!*resnapshot.borrow());
+        let LiveEvent::Update { updates, .. } = receiver.try_recv().unwrap() else {
+            panic!("expected timeout frame");
+        };
+        assert_eq!(updates.len(), 1);
+    }
+
+    #[test]
+    fn publication_history_gap_requests_resnapshot_without_panicking() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut config = TerminalConfig::default();
+        config.update_history_limit = 4;
+        let mut terminal = Terminal::new(8, 2, config);
+        let (subscriber, _receiver, resnapshot) = synchronized_test_subscriber(&terminal);
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+        terminal.advance(b"ABCDEFGHIJK");
+
+        let (_, overflows) =
+            publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+        assert_eq!(overflows, 1);
+        assert!(subscribers.is_empty());
+        assert!(*resnapshot.borrow());
+    }
 
     #[test]
     fn owned_snapshot_retains_image_metadata_without_pixel_bodies() {
