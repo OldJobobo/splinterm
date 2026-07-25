@@ -1,0 +1,65 @@
+{
+  "files": [
+    {
+      "path": "crates/splinterm/src/wayland.rs",
+      "sha256": "f035a284b15d0d5269d37426b819dc3da9e40eafb5c3ae56ca809ce473264f0a"
+    },
+    {
+      "path": "tools/benchmark/latency.py",
+      "sha256": "cb0dcbac703bb6f6f1f4200b67ed63ab9198bc25fbeabda1f4c6a386830f1640"
+    },
+    {
+      "path": "tools/benchmark/latency-schema.json",
+      "sha256": "686bbaf28a05e51e58941b39760debf7b22b95e9454a8ddc43ad61a05fa4af12"
+    },
+    {
+      "path": "tools/benchmark/run-graphical-latency.py",
+      "sha256": "f3fca7f23404c99035026ea5949e1e15d302de3b40cca64653e1c3842a2d1e64"
+    },
+    {
+      "path": "tools/benchmark/run-latency-matrix.py",
+      "sha256": "5ed0e52eb7cb4b56bfc18baf62d535133d7b16f905a5014f5920285a6174d2fb"
+    },
+    {
+      "path": "tools/benchmark/run-graphical-idle.py",
+      "sha256": "eda4233f7f1797d9f05adf29537b1cd5294b06bfa1382e18aeb578386337a46b"
+    },
+    {
+      "path": "tools/benchmark/run-graphical-output.py",
+      "sha256": "68b5a09fe1e24fb75533beb39a411ebaeaa2cd6215f364cf79e5a0c4f35cf929"
+    },
+    {
+      "path": "tools/benchmark/workloads/bench-child.py",
+      "sha256": "07526735a57ad5eddd336155e4f38090f19085364c37e59470f9f325cad7ff12"
+    },
+    {
+      "path": "tools/benchmark/profiles/foot.ini",
+      "sha256": "d64cc0d6f410366c64c9ef498c56bfd96fe92822646cccaf4de30339be699763"
+    },
+    {
+      "path": "tools/benchmark/profiles/kitty.conf",
+      "sha256": "88d96c123c506d2894346fceb6c919655699419a9c96aba5446d21047e728a0f"
+    },
+    {
+      "path": "tools/benchmark/profiles/ghostty.conf",
+      "sha256": "beed80f25cf3da78b28dad2157255e85ede644b22ea40a3a410a15fb0a888f6d"
+    },
+    {
+      "path": "tools/benchmark/profiles/alacritty.toml",
+      "sha256": "1c807321e00c6019d7cc003541ab0e5e70fb838b744d9423df74ff8e1aab46f1"
+    },
+    {
+      "path": "tools/benchmark/profiles/splinterm.ini",
+      "sha256": "3064357df791d12fceefae5166612dc703765904e7d0b84101bef066c0c03425"
+    },
+    {
+      "path": "tools/benchmark/manifest.py",
+      "sha256": "2c4c94586ab1113060f2ea6de9ef7b0e860c1cc90adaff2ba7cd9aa5325c29d3"
+    },
+    {
+      "path": "tools/benchmark/adapters/splinterm.py",
+      "sha256": "6de2128057745ec1dd25624af318fa330434965d6a65de0b645e67da665b8b04"
+    }
+  ],
+  "schema": "splinterm.benchmark.implementation-snapshot.v1"
+}

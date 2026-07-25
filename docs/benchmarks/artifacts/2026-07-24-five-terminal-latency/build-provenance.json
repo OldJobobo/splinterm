@@ -1,0 +1,24 @@
+{
+  "base_commit": "38d65e5199060443ce25db9bf504d88cc18cf3b9",
+  "binaries_used": {
+    "splinterd_sha256": "bfb6565d45a272c81c5a327f7464eb7024cc20391c71f3570ad54587cc0fe9a1",
+    "splinterm_pty_child_sha256": "5c5b9a0aa275e7f87b98eacb9892c0d1c342987f85335bb10e27361074ea808d",
+    "splinterm_sha256": "7cf2d1c8addd5914805ff20fbc3cd9dbfd135cc37cbd29f7a63406375715bc62"
+  },
+  "patch": {
+    "path": "implementation/frame-callback-and-update-wake.patch",
+    "sha256": "b31e2af56be88e114edec56d3ae880570af56aadce712f0a4f213e20ffdbdc54"
+  },
+  "patched_source": {
+    "path": "implementation/crates/splinterm/src/wayland.rs",
+    "sha256": "f035a284b15d0d5269d37426b819dc3da9e40eafb5c3ae56ca809ce473264f0a"
+  },
+  "reason": "The live worktree contained unrelated incomplete iTerm and renderer changes. The reviewed frame-callback and calloop update-wake fixes were built and tested in an isolated worktree at base_commit; explicit benchmark path overrides avoided replacing live binaries.",
+  "schema": "splinterm.benchmark.isolated-build-provenance.v1",
+  "validation": {
+    "benchmark_pytest": "14 passed; 2 optional jsonschema skips",
+    "cargo_test_splinterm_lib": "159 passed; 0 failed",
+    "graphical_latency_smoke": "190.93 ms; valid; cleanup verified",
+    "graphical_output_smoke": "2000-line plain output valid; cleanup verified"
+  }
+}

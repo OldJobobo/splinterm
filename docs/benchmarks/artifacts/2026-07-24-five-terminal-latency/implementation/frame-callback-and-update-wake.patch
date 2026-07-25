@@ -1,0 +1,465 @@
+diff --git a/crates/splinterm/src/wayland.rs b/crates/splinterm/src/wayland.rs
+index 7f2b3c6..27cbc7f 100644
+--- a/crates/splinterm/src/wayland.rs
++++ b/crates/splinterm/src/wayland.rs
+@@ -9,17 +9,19 @@ use std::{
+     io,
+     os::fd::{AsFd, OwnedFd},
+     path::PathBuf,
++    pin::Pin,
+     process::Command,
+     sync::{
+         Arc,
+         atomic::{AtomicUsize, Ordering},
+         mpsc::{self as std_mpsc, Receiver as StdReceiver, Sender as StdSender},
+     },
++    task::{Context as TaskContext, Poll, Wake, Waker},
+     time::{Duration, Instant},
+ };
+
+ use rustix::event::{PollFd, PollFlags, Timespec, poll};
+-use tokio::sync::mpsc::{Receiver, Sender, error::TryRecvError, error::TrySendError};
++use tokio::sync::mpsc::{Receiver, Sender, error::TrySendError};
+ use unicode_width::UnicodeWidthChar;
+
+ use anyhow::{Context, Result};
+@@ -42,7 +44,10 @@ use smithay_client_toolkit::{
+         selection::{PrimarySelectionSource, PrimarySelectionSourceHandler},
+     },
+     reexports::{
+-        calloop::{EventLoop, LoopHandle},
++        calloop::{
++            EventLoop, LoopHandle,
++            ping::{Ping, make_ping},
++        },
+         calloop_wayland_source::WaylandSource,
+     },
+     registry::{ProvidesRegistryState, RegistryState},
+@@ -129,8 +134,36 @@ const SCALE_DENOMINATOR: u32 = 120;
+ const MIN_SCALE_120: u32 = 120;
+ const MAX_SCALE_120: u32 = 960;
+ const MAX_PREEDIT_BYTES: usize = 4 * 1024;
+-const IDLE_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
++const EVENT_LOOP_TICK_INTERVAL: Duration = Duration::from_millis(50);
++const MAX_SHM_BUFFERS: usize = 2;
+ const BTN_RIGHT: u32 = 0x111;
++
++struct UpdateWake(Ping);
++
++impl Wake for UpdateWake {
++    fn wake(self: Arc<Self>) {
++        self.0.ping();
++    }
++
++    fn wake_by_ref(self: &Arc<Self>) {
++        self.0.ping();
++    }
++}
++
++enum ReceiverPoll<T> {
++    Item(T),
++    Pending,
++    Disconnected,
++}
++
++fn poll_receiver<T>(receiver: &mut Receiver<T>, waker: &Waker) -> ReceiverPoll<T> {
++    let mut context = TaskContext::from_waker(waker);
++    match Pin::new(receiver).poll_recv(&mut context) {
++        Poll::Ready(Some(item)) => ReceiverPoll::Item(item),
++        Poll::Ready(None) => ReceiverPoll::Disconnected,
++        Poll::Pending => ReceiverPoll::Pending,
++    }
++}
+ static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+ #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+@@ -587,6 +620,12 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
+     WaylandSource::new(connection.clone(), event_queue)
+         .insert(event_loop.handle())
+         .context("register Wayland source")?;
++    let (update_ping, update_ping_source) = make_ping().context("create update wake source")?;
++    event_loop
++        .handle()
++        .insert_source(update_ping_source, |(), _, _| {})
++        .context("register update wake source")?;
++    let update_waker = Waker::from(Arc::new(UpdateWake(update_ping)));
+
+     let compositor = CompositorState::bind(&globals, &queue_handle)
+         .context("compositor does not provide wl_compositor")?;
+@@ -723,7 +762,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
+         font_zoom_steps: 0,
+         capture: options.capture,
+         capture_scale: options.capture_scale,
+-        buffer: None,
++        buffers: Vec::new(),
+         backing: Vec::new(),
+         full_redraw: true,
+         keyboard: None,
+@@ -743,6 +782,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
+         vertical_wheel: WheelAccumulator::default(),
+         scrollback_wheel: WheelAccumulator::default(),
+         loop_handle: event_loop.handle(),
++        update_waker,
+         logical_width: initial_width,
+         logical_height: initial_height,
+         configured: false,
+@@ -750,6 +790,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
+         failure: None,
+         frame_pending: false,
+         redraw_pending: false,
++        terminal_redraw_pending: false,
+         cursor_blink_visible: true,
+         last_cursor_blink: Instant::now(),
+         scale_120: SCALE_DENOMINATOR,
+@@ -761,11 +802,20 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
+
+     while !app.exit {
+         app.apply_updates(&queue_handle)?;
++        if app.redraw_pending
++            && !pending_draw_waits_for_frame(app.frame_pending, app.terminal_redraw_pending)
++        {
++            if app.terminal_redraw_pending {
++                app.schedule_terminal_draw(&queue_handle)?;
++            } else {
++                app.schedule_draw(&queue_handle)?;
++            }
++        }
+         app.tick_signoff(&queue_handle)?;
+         app.apply_clipboard_reads()?;
+         app.tick_cursor_blink(&queue_handle)?;
+         event_loop
+-            .dispatch(IDLE_EVENT_POLL_INTERVAL, &mut app)
++            .dispatch(EVENT_LOOP_TICK_INTERVAL, &mut app)
+             .context("dispatch Wayland events")?;
+     }
+     if let Some(error) = app.failure {
+@@ -1662,7 +1712,7 @@ struct App {
+     font_zoom_steps: i16,
+     capture: Option<PathBuf>,
+     capture_scale: Option<u32>,
+-    buffer: Option<Buffer>,
++    buffers: Vec<Buffer>,
+     backing: Vec<u8>,
+     full_redraw: bool,
+     keyboard: Option<wl_keyboard::WlKeyboard>,
+@@ -1682,6 +1732,7 @@ struct App {
+     vertical_wheel: WheelAccumulator,
+     scrollback_wheel: WheelAccumulator,
+     loop_handle: LoopHandle<'static, App>,
++    update_waker: Waker,
+     logical_width: u32,
+     logical_height: u32,
+     configured: bool,
+@@ -1689,6 +1740,7 @@ struct App {
+     failure: Option<anyhow::Error>,
+     frame_pending: bool,
+     redraw_pending: bool,
++    terminal_redraw_pending: bool,
+     cursor_blink_visible: bool,
+     last_cursor_blink: Instant,
+     scale_120: u32,
+@@ -2789,6 +2841,20 @@ fn window_title(
+     }
+ }
+
++fn terminal_draw_waits_for_frame(frame_pending: bool, buffer_available: bool) -> bool {
++    frame_pending && !buffer_available
++}
++
++fn pending_draw_waits_for_frame(frame_pending: bool, terminal_priority: bool) -> bool {
++    frame_pending && !terminal_priority
++}
++
++fn take_full_surface_damage(full_redraw: &mut bool, snapshot_frame_present: bool) -> bool {
++    let damage_full_surface = !snapshot_frame_present || *full_redraw;
++    *full_redraw = false;
++    damage_full_surface
++}
++
+ fn try_clipboard_worker(active: &AtomicUsize) -> Option<ClipboardWorkerPermit<'_>> {
+     active
+         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+@@ -3968,7 +4034,7 @@ impl App {
+             return Ok(true);
+         }
+         self.rebuild_scaled_pane_frames(self.scale_120)?;
+-        self.buffer = None;
++        self.buffers.clear();
+         self.backing.clear();
+         self.pane.pending_scrolls.clear();
+         self.full_redraw = true;
+@@ -4320,10 +4386,10 @@ impl App {
+         let mut pending = Vec::new();
+         if let Some(updates) = &mut self.topology_updates {
+             loop {
+-                match updates.try_recv() {
+-                    Ok(update) => pending.push(update),
+-                    Err(TryRecvError::Empty) => break,
+-                    Err(TryRecvError::Disconnected) => {
++                match poll_receiver(updates, &self.update_waker) {
++                    ReceiverPoll::Item(update) => pending.push(update),
++                    ReceiverPoll::Pending => break,
++                    ReceiverPoll::Disconnected => {
+                         self.topology_updates = None;
+                         break;
+                     }
+@@ -4396,10 +4462,10 @@ impl App {
+             let mut disconnected = false;
+             if let Some(updates) = &mut pane.updates {
+                 loop {
+-                    match updates.try_recv() {
+-                        Ok(update) => pending.push(update),
+-                        Err(TryRecvError::Empty) => break,
+-                        Err(TryRecvError::Disconnected) => {
++                    match poll_receiver(updates, &self.update_waker) {
++                        ReceiverPoll::Item(update) => pending.push(update),
++                        ReceiverPoll::Pending => break,
++                        ReceiverPoll::Disconnected => {
+                             disconnected = true;
+                             break;
+                         }
+@@ -4453,14 +4519,24 @@ impl App {
+         reason = "bounded update draining and semantic damage coalescing stay adjacent"
+     )]
+     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
++        let topology_changed = self.apply_topology_updates()?;
++        if self.exit {
++            return Ok(());
++        }
++        if topology_changed {
++            self.emit_resize()?;
++        }
++
++        // Topology may promote a newly added pane to focus. Drain and arm the
++        // post-topology focused receiver so it cannot fall back to the timed tick.
+         let mut pending = Vec::new();
+         let mut disconnected = false;
+         if let Some(updates) = &mut self.pane.updates {
+             loop {
+-                match updates.try_recv() {
+-                    Ok(update) => pending.push(update),
+-                    Err(TryRecvError::Empty) => break,
+-                    Err(TryRecvError::Disconnected) => {
++                match poll_receiver(updates, &self.update_waker) {
++                    ReceiverPoll::Item(update) => pending.push(update),
++                    ReceiverPoll::Pending => break,
++                    ReceiverPoll::Disconnected => {
+                         disconnected = true;
+                         break;
+                     }
+@@ -4471,10 +4547,6 @@ impl App {
+             self.exit = true;
+             return Ok(());
+         }
+-        let topology_changed = self.apply_topology_updates()?;
+-        if topology_changed {
+-            self.emit_resize()?;
+-        }
+         let mut visual_changed = topology_changed | self.apply_inactive_updates()?;
+         let mut title_changed = false;
+         let mut full_frame_reload = false;
+@@ -4808,7 +4880,7 @@ impl App {
+                 self.emit_resize()?;
+             }
+             if self.configured {
+-                self.schedule_draw(queue_handle)?;
++                self.schedule_terminal_draw(queue_handle)?;
+             }
+         }
+         if title_changed {
+@@ -4850,7 +4922,7 @@ impl App {
+             return Ok(());
+         }
+         self.rebuild_scaled_pane_frames(self.scale_120)?;
+-        self.buffer = None;
++        self.buffers.clear();
+         self.backing.clear();
+         self.full_redraw = true;
+         self.refresh_ime_preedit()?;
+@@ -4890,7 +4962,7 @@ impl App {
+             self.text_row = Some(TextRow::load(scale_120.div_ceil(SCALE_DENOMINATOR))?);
+         }
+         self.scale_120 = scale_120;
+-        self.buffer = None;
++        self.buffers.clear();
+         self.backing.clear();
+         self.full_redraw = true;
+         self.refresh_ime_preedit()?;
+@@ -4958,12 +5030,31 @@ impl App {
+         }
+     }
+
++    fn schedule_terminal_draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
++        self.terminal_redraw_pending = true;
++        let draw_capacity_available = self.buffers.len() < MAX_SHM_BUFFERS
++            || self
++                .buffers
++                .iter()
++                .any(|buffer| self.pool.canvas(buffer).is_some());
++        if terminal_draw_waits_for_frame(self.frame_pending, draw_capacity_available) {
++            self.redraw_pending = true;
++            Ok(())
++        } else {
++            // A released buffer may be committed again even when its earlier frame
++            // callback is delayed. Reusing it avoids both callback latency and an
++            // unbounded replacement-buffer path.
++            self.draw(queue_handle)
++        }
++    }
++
+     #[allow(
+         clippy::too_many_lines,
+         reason = "SHM acquisition, persistent backing updates, damage submission, and commit form one transaction"
+     )]
+     fn draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
+         self.redraw_pending = false;
++        let terminal_priority = std::mem::take(&mut self.terminal_redraw_pending);
+         let draw_started = Instant::now();
+         let scroll_started = self.pane.scroll_started_at.take();
+         if self.pane.viewport_dirty {
+@@ -5066,26 +5157,33 @@ impl App {
+             selection_display_bounds(snapshot, &display, selection)
+                 .map(|(start, end)| ((start.row, start.column), (end.row, end.column)))
+         });
+-        let buffer = if let Some(buffer) = self.buffer.as_mut() {
+-            buffer
+-        } else {
++        let mut buffer_index = None;
++        for (index, buffer) in self.buffers.iter().enumerate() {
++            if self.pool.canvas(buffer).is_some() {
++                buffer_index = Some(index);
++                break;
++            }
++        }
++        let buffer_index = if let Some(index) = buffer_index {
++            index
++        } else if self.buffers.len() < MAX_SHM_BUFFERS {
+             let buffer = self
+                 .pool
+                 .create_buffer(width_i32, height_i32, stride, wl_shm::Format::Argb8888)
+-                .context("create SHM buffer")?
++                .context("create bounded SHM buffer")?
+                 .0;
+-            self.buffer.insert(buffer)
+-        };
+-        let canvas = if let Some(canvas) = self.pool.canvas(buffer) {
+-            canvas
++            self.buffers.push(buffer);
++            self.buffers.len() - 1
+         } else {
+-            let (next, canvas) = self
+-                .pool
+-                .create_buffer(width_i32, height_i32, stride, wl_shm::Format::Argb8888)
+-                .context("create replacement SHM buffer")?;
+-            *buffer = next;
+-            canvas
++            self.redraw_pending = true;
++            self.terminal_redraw_pending = terminal_priority;
++            return Ok(());
+         };
++        let buffer = &self.buffers[buffer_index];
++        let canvas = self
++            .pool
++            .canvas(buffer)
++            .context("selected SHM buffer became unavailable")?;
+
+         let backing_len = usize::try_from(
+             width
+@@ -5257,7 +5355,9 @@ impl App {
+         }
+         let history_status =
+             history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref());
+-        if self.pane.snapshot_frame.is_none() || self.full_redraw {
++        let damage_full_surface =
++            take_full_surface_damage(&mut self.full_redraw, self.pane.snapshot_frame.is_some());
++        if damage_full_surface {
+             self.window
+                 .wl_surface()
+                 .damage_buffer(0, 0, width_i32, height_i32);
+@@ -5285,7 +5385,6 @@ impl App {
+             }
+         }
+         self.pane.painted_history_status = history_status;
+-        self.full_redraw = false;
+         self.pane.raster_dirty_rows.fill(false);
+         self.pane.surface_dirty_rows.fill(false);
+         self.pane.pending_scrolls.clear();
+@@ -5454,7 +5553,7 @@ impl WindowHandler for App {
+                     }
+                 }
+             }
+-            self.buffer = None;
++            self.buffers.clear();
+             self.full_redraw = true;
+             self.update_ime_cursor_rectangle();
+         }
+@@ -6352,6 +6451,69 @@ mod tests {
+     use splinterm_core::{Axis, Splint, SplitRatio};
+     use splinterm_protocol::ActiveScreen;
+
++    #[test]
++    fn terminal_draw_bypasses_delayed_frame_only_with_a_released_buffer() {
++        assert!(!terminal_draw_waits_for_frame(false, false));
++        assert!(!terminal_draw_waits_for_frame(false, true));
++        assert!(!terminal_draw_waits_for_frame(true, true));
++        assert!(terminal_draw_waits_for_frame(true, false));
++    }
++
++    #[test]
++    fn terminal_priority_retries_pending_draw_before_delayed_frame() {
++        assert!(!pending_draw_waits_for_frame(false, false));
++        assert!(!pending_draw_waits_for_frame(false, true));
++        assert!(pending_draw_waits_for_frame(true, false));
++        assert!(!pending_draw_waits_for_frame(true, true));
++    }
++
++    #[test]
++    fn pending_update_receiver_wakes_calloop_and_coalesces_pings() {
++        let mut event_loop = EventLoop::<usize>::try_new().unwrap();
++        let (ping, source) = make_ping().unwrap();
++        event_loop
++            .handle()
++            .insert_source(source, |(), _, wake_count| *wake_count += 1)
++            .unwrap();
++        let waker = Waker::from(Arc::new(UpdateWake(ping)));
++        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
++
++        assert!(matches!(
++            poll_receiver(&mut receiver, &waker),
++            ReceiverPoll::Pending
++        ));
++        sender.try_send(1).unwrap();
++        sender.try_send(2).unwrap();
++
++        let mut wake_count = 0;
++        event_loop
++            .dispatch(Duration::ZERO, &mut wake_count)
++            .unwrap();
++        assert_eq!(wake_count, 1);
++        assert!(matches!(
++            poll_receiver(&mut receiver, &waker),
++            ReceiverPoll::Item(1)
++        ));
++        assert!(matches!(
++            poll_receiver(&mut receiver, &waker),
++            ReceiverPoll::Item(2)
++        ));
++        assert!(matches!(
++            poll_receiver(&mut receiver, &waker),
++            ReceiverPoll::Pending
++        ));
++    }
++
++    #[test]
++    fn full_redraw_damage_survives_redraw_state_reset() {
++        let mut full_redraw = true;
++        assert!(take_full_surface_damage(&mut full_redraw, true));
++        assert!(!full_redraw);
++
++        assert!(!take_full_surface_damage(&mut full_redraw, true));
++        assert!(take_full_surface_damage(&mut full_redraw, false));
++    }
++
+     fn snapshot(splint_id: SplintId, incarnation: u64, revision: u64) -> TerminalSnapshot {
+         TerminalSnapshot {
+             splint_id,

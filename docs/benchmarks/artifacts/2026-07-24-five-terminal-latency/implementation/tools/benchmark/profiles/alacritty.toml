@@ -1,0 +1,25 @@
+# Controlled Splinterbench profile. Hyprland fixes the outer pixel size.
+live_config_reload = false
+
+[window]
+dimensions = { columns = 80, lines = 24 }
+padding = { x = 12, y = 12 }
+dynamic_padding = false
+decorations = "None"
+opacity = 1.0
+
+[scrolling]
+history = 1000
+
+[font]
+size = 10.5
+normal = { family = "JetBrains Mono Nerd Font", style = "Regular" }
+bold = { family = "JetBrains Mono Nerd Font", style = "Bold" }
+italic = { family = "JetBrains Mono Nerd Font", style = "Italic" }
+bold_italic = { family = "JetBrains Mono Nerd Font", style = "Bold Italic" }
+
+[cursor]
+style = { shape = "Block", blinking = "Never" }
+
+[bell]
+duration = 0

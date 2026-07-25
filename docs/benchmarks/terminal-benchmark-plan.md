@@ -36,10 +36,12 @@ lane may measure output-to-visible with a high-contrast marker and guarded,
 tightly cropped screenshots. Screenshot polling is an approximation and must be
 reported as such.
 
-Input-to-child and input-to-visible require equal synthetic input delivery. On
-this development system, benchmark windows may never receive focus. Those cases
-therefore remain deferred until a nested compositor or virtual-input mechanism
-can inject input without violating the workspace guard.
+Input-to-child and input-to-visible use identical targeted `x` and Return
+shortcuts through Hyprland's `hl.dsp.send_shortcut` dispatcher. The selector is
+the owned benchmark-window address, so the reserved window remains unfocused.
+Input-to-child ends at the child's atomic monotonic receipt record;
+input-to-visible ends at cropped screenshot polling detection and remains an
+approximation. Compositor presentation feedback is not measured or inferred.
 
 ### Correctness and capabilities
 
@@ -140,8 +142,12 @@ A benchmark command must not make graphical execution the default.
    PTY-write and screenshot-visible boundaries separate.
 4. **Correctness report:** reuse Foot fixtures and add only portable external
    observations where terminal-private state is unavailable.
-5. **Presentation and input latency:** implement only after a common, auditable
-   nested-compositor or virtual-input boundary exists.
+5. **Targeted input latency (implemented):** equal address-targeted Hyprland
+   shortcuts reach each unfocused terminal; child receipt and screenshot-visible
+   marker detection are recorded separately. True compositor presentation
+   remains explicitly `not-measured`. The retained 3-warmup/10-sample matrix
+   records Splinterm at 184.88 ms versus peer medians of 179.53–189.21 ms,
+   improved from the original 371.45 ms result.
 
 ## Current commands
 
@@ -173,6 +179,11 @@ python tools/benchmark/run-resize-matrix.py /tmp/splinterbench-resize \
   --warmup-runs 3 --samples 10 --seed 20260725
 python tools/benchmark/run-retention-matrix.py /tmp/splinterbench-retention \
   --warmup-runs 3 --samples 10 --seed 20260726 --lines 5000
+python tools/benchmark/run.py probe-latency-boundary --json
+python tools/benchmark/run-graphical-latency.py /tmp/splinterbench-latency-smoke \
+  --terminal splinterm
+python tools/benchmark/run-latency-matrix.py /tmp/splinterbench-latency \
+  --warmup-runs 3 --samples 10 --seed 20260729
 ```
 
 Run Splinterm first as the guarded smoke. Run Foot only after the first result

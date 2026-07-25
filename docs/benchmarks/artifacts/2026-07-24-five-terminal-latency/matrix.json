@@ -1,0 +1,251 @@
+{
+  "boundary": "host-hyprland-targeted-shortcut",
+  "completed_measured_cases": 50,
+  "error": null,
+  "expected_measured_cases": 50,
+  "implementation_snapshot": "implementation.json",
+  "orders": [
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "terminals": [
+        "kitty",
+        "splinterm",
+        "foot",
+        "alacritty",
+        "ghostty"
+      ]
+    },
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "terminals": [
+        "ghostty",
+        "alacritty",
+        "splinterm",
+        "foot",
+        "kitty"
+      ]
+    },
+    {
+      "iteration": 2,
+      "phase": "warmup",
+      "terminals": [
+        "alacritty",
+        "splinterm",
+        "ghostty",
+        "kitty",
+        "foot"
+      ]
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "foot",
+        "alacritty",
+        "kitty",
+        "ghostty"
+      ]
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "ghostty",
+        "alacritty",
+        "foot",
+        "kitty"
+      ]
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "terminals": [
+        "kitty",
+        "ghostty",
+        "foot",
+        "alacritty",
+        "splinterm"
+      ]
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "kitty",
+        "foot",
+        "ghostty",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "kitty",
+        "alacritty",
+        "foot",
+        "ghostty"
+      ]
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "terminals": [
+        "ghostty",
+        "foot",
+        "splinterm",
+        "kitty",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "terminals": [
+        "foot",
+        "ghostty",
+        "kitty",
+        "alacritty",
+        "splinterm"
+      ]
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "terminals": [
+        "kitty",
+        "splinterm",
+        "alacritty",
+        "ghostty",
+        "foot"
+      ]
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "foot",
+        "alacritty",
+        "ghostty",
+        "kitty"
+      ]
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "terminals": [
+        "alacritty",
+        "kitty",
+        "foot",
+        "ghostty",
+        "splinterm"
+      ]
+    }
+  ],
+  "presentation_status": "not-measured",
+  "sample_runs": 10,
+  "schema": "splinterm.benchmark.input-latency-matrix.v1",
+  "seed": 20260729,
+  "summary": {
+    "alacritty": {
+      "input_to_child_ns": {
+        "count": 10,
+        "max": 12148172,
+        "median": 8522576.0,
+        "median_absolute_deviation": 233933.5,
+        "min": 8092786,
+        "p95": 9983658.0
+      },
+      "input_to_visible_marker_ns": {
+        "count": 10,
+        "max": 250230615,
+        "median": 189206643.0,
+        "median_absolute_deviation": 9512345.0,
+        "min": 174775187,
+        "p95": 229101353.0
+      }
+    },
+    "foot": {
+      "input_to_child_ns": {
+        "count": 10,
+        "max": 22913993,
+        "median": 8773520.0,
+        "median_absolute_deviation": 366099.0,
+        "min": 7988118,
+        "p95": 12006183.0
+      },
+      "input_to_visible_marker_ns": {
+        "count": 10,
+        "max": 227718278,
+        "median": 179526530.5,
+        "median_absolute_deviation": 7610850.5,
+        "min": 169602052,
+        "p95": 190790627.0
+      }
+    },
+    "ghostty": {
+      "input_to_child_ns": {
+        "count": 10,
+        "max": 10746915,
+        "median": 8856848.5,
+        "median_absolute_deviation": 430049.5,
+        "min": 8005059,
+        "p95": 10560913.0
+      },
+      "input_to_visible_marker_ns": {
+        "count": 10,
+        "max": 203608422,
+        "median": 180038014.5,
+        "median_absolute_deviation": 6365650.5,
+        "min": 170484810,
+        "p95": 188092563.0
+      }
+    },
+    "kitty": {
+      "input_to_child_ns": {
+        "count": 10,
+        "max": 9685083,
+        "median": 8872784.5,
+        "median_absolute_deviation": 429248.0,
+        "min": 8161345,
+        "p95": 9548925.0
+      },
+      "input_to_visible_marker_ns": {
+        "count": 10,
+        "max": 264768699,
+        "median": 187551586.5,
+        "median_absolute_deviation": 5796244.5,
+        "min": 178969769,
+        "p95": 204577762.0
+      }
+    },
+    "splinterm": {
+      "input_to_child_ns": {
+        "count": 10,
+        "max": 32094468,
+        "median": 13980549.0,
+        "median_absolute_deviation": 1369190.0,
+        "min": 11947910,
+        "p95": 20383074.0
+      },
+      "input_to_visible_marker_ns": {
+        "count": 10,
+        "max": 242732610,
+        "median": 184880100.0,
+        "median_absolute_deviation": 4973064.5,
+        "min": 178434827,
+        "p95": 210401653.0
+      }
+    }
+  },
+  "valid": true,
+  "visible_boundary": "host_window_screenshot_polling_approximation",
+  "warmup_runs": 3
+}
