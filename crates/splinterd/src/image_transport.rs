@@ -221,6 +221,14 @@ impl TransferAdmission {
     }
 
     #[must_use]
+    pub fn next_expiry(&self) -> Option<Instant> {
+        self.pending
+            .values()
+            .map(|pending| pending.expires_at)
+            .min()
+    }
+
+    #[must_use]
     pub const fn metrics(&self) -> TransferAdmissionMetrics {
         self.metrics
     }
@@ -361,6 +369,12 @@ mod tests {
         let grant = admission
             .mint(peer(4), &request, content.clone(), now)
             .unwrap();
+        assert_eq!(
+            admission.next_expiry(),
+            now.checked_add(Duration::from_millis(u64::from(
+                IMAGE_TRANSFER_TOKEN_TTL_MILLIS
+            )))
+        );
         assert_eq!(grant.byte_length, 4);
         assert!(matches!(
             admission.claim(grant.token, &peer(5), now),

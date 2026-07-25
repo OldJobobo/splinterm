@@ -2855,6 +2855,25 @@ fn take_full_surface_damage(full_redraw: &mut bool, snapshot_frame_present: bool
     damage_full_surface
 }
 
+const fn deterministic_capture_ready(
+    scale_ready: bool,
+    minimum_images: usize,
+    available_images: usize,
+) -> bool {
+    scale_ready && available_images >= minimum_images
+}
+
+fn capture_minimum_images() -> Result<usize> {
+    let explicit = std::env::var("SPLINTERM_CAPTURE_MIN_IMAGES")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .context("SPLINTERM_CAPTURE_MIN_IMAGES must be a nonnegative integer")?;
+    Ok(explicit.unwrap_or_else(|| {
+        usize::from(std::env::var_os("SPLINTERM_CAPTURE_REQUIRE_IMAGE").is_some())
+    }))
+}
+
 fn try_clipboard_worker(active: &AtomicUsize) -> Option<ClipboardWorkerPermit<'_>> {
     active
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -5197,7 +5216,29 @@ impl App {
             self.backing.resize(backing_len, 0);
             self.full_redraw = true;
         }
+        let capture_minimum_images = capture_minimum_images()?;
+        let capture_image_count = self
+            .pane
+            .snapshot_frame
+            .as_ref()
+            .map_or(0, SnapshotFrame::image_count)
+            .saturating_add(
+                self.inactive_panes
+                    .iter()
+                    .filter_map(|pane| pane.snapshot_frame.as_ref())
+                    .map(SnapshotFrame::image_count)
+                    .sum(),
+            );
+        let image_composition_started = (std::env::var_os("SPLINTERM_IMAGE_TRACE").is_some()
+            && capture_image_count > 0)
+            .then(Instant::now);
         if let (Some(frame), Some(geometry)) = (&self.pane.snapshot_frame, &window_geometry) {
+            if self.capture.is_some()
+                && capture_minimum_images > 0
+                && capture_image_count >= capture_minimum_images
+            {
+                self.full_redraw = true;
+            }
             if self.full_redraw {
                 if let Some(layout) = pane_layout.as_ref() {
                     let [_, red, green, blue] = self.theme.background.to_be_bytes();
@@ -5339,19 +5380,28 @@ impl App {
         } else {
             anyhow::bail!("window has no prepared renderer content");
         }
-        let capture_ready = self
+        if let Some(started) = image_composition_started {
+            eprintln!(
+                "phase5-image-trace composition_ns={} image_count={capture_image_count}",
+                started.elapsed().as_nanos(),
+            );
+        }
+        let capture_scale_ready = self
             .capture_scale
             .is_none_or(|expected| expected.saturating_mul(120) == self.scale_120);
-        if capture_ready {
-            if let Some(path) = self.capture.take() {
-                write_ppm(&path, canvas, width, height)
-                    .with_context(|| format!("write {}", path.display()))?;
-                eprintln!(
-                    "Wrote deterministic row capture at {}x scale to {}",
-                    f64::from(self.scale_120) / 120.0,
-                    path.display()
-                );
-            }
+        if deterministic_capture_ready(
+            capture_scale_ready,
+            capture_minimum_images,
+            capture_image_count,
+        ) && let Some(path) = self.capture.take()
+        {
+            write_ppm(&path, canvas, width, height)
+                .with_context(|| format!("write {}", path.display()))?;
+            eprintln!(
+                "Wrote deterministic row capture at {}x scale to {}",
+                f64::from(self.scale_120) / 120.0,
+                path.display()
+            );
         }
         let history_status =
             history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref());
@@ -6512,6 +6562,14 @@ mod tests {
 
         assert!(!take_full_surface_damage(&mut full_redraw, true));
         assert!(take_full_surface_damage(&mut full_redraw, false));
+    }
+
+    #[test]
+    fn deterministic_capture_waits_for_required_images_and_scale() {
+        assert!(deterministic_capture_ready(true, 0, 0));
+        assert!(!deterministic_capture_ready(false, 0, 2));
+        assert!(!deterministic_capture_ready(true, 2, 1));
+        assert!(deterministic_capture_ready(true, 2, 2));
     }
 
     fn snapshot(splint_id: SplintId, incarnation: u64, revision: u64) -> TerminalSnapshot {

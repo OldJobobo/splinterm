@@ -79,6 +79,15 @@ authority, development bypass, controller state, pending transfer decisions,
 and the local search surface visibly indicated. Search focus, query, match
 selection, and viewport position remain client-local.
 
+Terminal images remain sparse protocol-independent content and placement
+records in the daemon-owned terminal state. Trusted UI snapshots carry bounded
+metadata only; immutable pixel bodies are fetched on demand through sealed
+memfd or a separate bounded binary socket and retained under one renderer-wide
+source budget. The client composes premultiplied BGRA into its existing CPU
+backing/Wayland SHM path, clipped independently per pane. Public automation,
+audit, and relay records never expose image bodies. See [images.md](images.md)
+for the compatibility and resource matrix.
+
 The graphical identity is fixed to `com.oldjobobo.splinterm` across Wayland and
 desktop metadata. `splinterm launch` is the `xdg-terminal-exec` boundary.
 Client-owned configuration controls renderer/window policy; a generated,

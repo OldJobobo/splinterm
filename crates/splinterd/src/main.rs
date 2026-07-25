@@ -63,7 +63,7 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
     signal,
-    sync::{Mutex, RwLock, Semaphore, broadcast, mpsc},
+    sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc},
     task::JoinHandle,
     time,
 };
@@ -608,11 +608,23 @@ struct DaemonState {
     grants: Mutex<GrantStore>,
     revocations: broadcast::Sender<Revocation>,
     image_transfers: Mutex<TransferAdmission>,
+    image_transfer_expiry_changed: Notify,
     shared_image_budget: SharedImageBudget,
     shared_kitty_upload_budget: SharedKittyUploadBudget,
     pty_backend: LinuxPtyBackend,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
+}
+
+async fn image_transfer_expiry_deadline(state: &DaemonState, expire: bool) -> time::Instant {
+    let mut transfers = state.image_transfers.lock().await;
+    if expire {
+        transfers.expire(Instant::now());
+    }
+    transfers.next_expiry().map_or_else(
+        || time::Instant::now() + Duration::from_secs(365 * 24 * 60 * 60),
+        time::Instant::from_std,
+    )
 }
 
 // Local PTY and Unix-socket work is asynchronous; bounding workers also bounds
@@ -712,6 +724,7 @@ async fn main() -> Result<()> {
         grants: Mutex::new(GrantStore::default()),
         revocations,
         image_transfers: Mutex::new(TransferAdmission::default()),
+        image_transfer_expiry_changed: Notify::new(),
         shared_image_budget: SharedImageBudget::new(MAX_IMAGE_BYTES_PER_DAEMON),
         shared_kitty_upload_budget: SharedKittyUploadBudget::new(
             DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
@@ -732,8 +745,9 @@ async fn main() -> Result<()> {
     tokio::pin!(shutdown_signal);
     let mut reload_signal = signal::unix::signal(signal::unix::SignalKind::hangup())
         .context("failed to listen for policy reload signal")?;
-    let mut image_transfer_expiry = time::interval(Duration::from_secs(1));
-    image_transfer_expiry.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let image_transfer_expiry =
+        time::sleep_until(image_transfer_expiry_deadline(&state, false).await);
+    tokio::pin!(image_transfer_expiry);
 
     loop {
         tokio::select! {
@@ -742,8 +756,15 @@ async fn main() -> Result<()> {
                 result.context("failed to listen for shutdown signal")?;
                 break;
             }
-            _ = image_transfer_expiry.tick() => {
-                state.image_transfers.lock().await.expire(Instant::now());
+            _ = &mut image_transfer_expiry => {
+                image_transfer_expiry
+                    .as_mut()
+                    .reset(image_transfer_expiry_deadline(&state, true).await);
+            }
+            () = state.image_transfer_expiry_changed.notified() => {
+                image_transfer_expiry
+                    .as_mut()
+                    .reset(image_transfer_expiry_deadline(&state, false).await);
             }
             received = reload_signal.recv() => {
                 if received.is_none() {
@@ -3463,6 +3484,7 @@ async fn handle_authorized_request(
                 .await
                 .mint(transfer_peer, &request, content, Instant::now())
                 .map_err(|error| image_transfer_error(&error))?;
+            state.image_transfer_expiry_changed.notify_one();
             Response::ImageContentReady { transfer }
         }
         Request::PrepareMutation { mutation } => Response::MutationPrepared {
@@ -6149,6 +6171,7 @@ mod tests {
             grants: Mutex::new(GrantStore::default()),
             revocations,
             image_transfers: Mutex::new(TransferAdmission::default()),
+            image_transfer_expiry_changed: Notify::new(),
             shared_image_budget: SharedImageBudget::new(MAX_IMAGE_BYTES_PER_DAEMON),
             shared_kitty_upload_budget: SharedKittyUploadBudget::new(
                 DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,

@@ -1139,7 +1139,21 @@ fn process_output(
     for batch in bytes.chunks(PARSE_BATCH) {
         metrics.parse_batches = metrics.parse_batches.saturating_add(1);
         let base = terminal.revision();
+        let image_metrics_before = terminal.image_metrics();
+        let parse_started = Instant::now();
         terminal.advance(batch);
+        if std::env::var_os("SPLINTERM_IMAGE_TRACE").is_some()
+            && terminal.image_metrics() != image_metrics_before
+        {
+            let image_metrics = terminal.image_metrics();
+            eprintln!(
+                "phase5-image-trace decode_ns={} content_bytes={} content_count={} placement_count={}",
+                parse_started.elapsed().as_nanos(),
+                image_metrics.content_bytes,
+                image_metrics.content_count,
+                image_metrics.placement_count,
+            );
+        }
         let (updates, overflows) = publish_updates(terminal, base, incarnation, subscribers);
         metrics.terminal_updates = metrics
             .terminal_updates

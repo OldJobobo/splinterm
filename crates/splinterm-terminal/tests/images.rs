@@ -87,33 +87,111 @@ fn insert_at_cursor(
     (content_id, placement_id)
 }
 
-#[test]
-fn streamed_sixel_matches_the_pinned_foot_fixture_at_every_chunk_boundary() {
-    let input = b"\x1bP7;0;0q\"1;1;1;6#1;2;100;0;0#1~\x1b\\";
-    let build = |chunks: &[&[u8]]| {
-        let mut terminal = Terminal::new(4, 2, TerminalConfig::default());
-        terminal.set_cell_pixel_size(1, 6);
-        for chunk in chunks {
-            terminal.advance(chunk);
-        }
-        terminal
-    };
-    let expected = build(&[input]);
-    assert_eq!(expected.image_metrics().content_count, 1);
-    assert_eq!(expected.image_metrics().placement_count, 1);
-    let snapshot = expected.snapshot(SnapshotRequest::default());
-    let metadata = snapshot.image_contents().next().unwrap();
-    assert_eq!((metadata.width, metadata.height), (1, 6));
-    assert_eq!(
-        expected.image_content(metadata.id).unwrap().pixels(),
-        [0, 0, 255, 255].repeat(6)
-    );
+fn decode_fixture_hex(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() % 2, 0);
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
+}
 
-    for split in 0..=input.len() {
-        assert_eq!(build(&[&input[..split], &input[split..]]), expected);
+fn expand_fixture_rows(expected: &serde_json::Value) -> Vec<u8> {
+    expected["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| {
+            row.as_array().unwrap().iter().flat_map(|run| {
+                let run = run.as_array().unwrap();
+                let count = usize::try_from(run[0].as_u64().unwrap()).unwrap();
+                decode_fixture_hex(run[1].as_str().unwrap()).repeat(count)
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn streamed_sixel_matches_every_pinned_foot_fixture_at_every_chunk_boundary() {
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/spikes/artifacts/0025-terminal-images/fixtures/sixel-v1.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        fixtures["authority"]["commit"],
+        "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+    );
+    let cases = fixtures["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 5);
+
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+        let input = decode_fixture_hex(case["input_hex"].as_str().unwrap());
+        let build = |chunks: &[&[u8]]| {
+            let mut terminal = Terminal::new(4, 3, TerminalConfig::default());
+            terminal.set_cell_pixel_size(1, 6);
+            for chunk in chunks {
+                terminal.advance(chunk);
+            }
+            terminal
+        };
+        let expected = build(&[&input]);
+        assert_eq!(expected.image_metrics().content_count, 1, "{id}");
+        assert_eq!(expected.image_metrics().placement_count, 1, "{id}");
+        let snapshot = expected.snapshot(SnapshotRequest::default());
+        let metadata = snapshot.image_contents().next().unwrap();
+        let expected_width = u32::try_from(case["expected"]["width"].as_u64().unwrap()).unwrap();
+        let expected_height = u32::try_from(case["expected"]["height"].as_u64().unwrap()).unwrap();
+        assert_eq!(
+            (metadata.width, metadata.height),
+            (expected_width, expected_height),
+            "{id}"
+        );
+        assert_eq!(
+            metadata.alpha_mode,
+            if case["expected"]["opaque"].as_bool().unwrap() {
+                ImageAlphaMode::Opaque
+            } else {
+                ImageAlphaMode::Premultiplied
+            },
+            "{id}"
+        );
+        assert_eq!(
+            expected.image_content(metadata.id).unwrap().pixels(),
+            expand_fixture_rows(&case["expected"]),
+            "{id}"
+        );
+
+        for split in 0..=input.len() {
+            assert_eq!(
+                build(&[&input[..split], &input[split..]]),
+                expected,
+                "{id} split {split}"
+            );
+        }
+        let byte_chunks = input.iter().map(std::slice::from_ref).collect::<Vec<_>>();
+        assert_eq!(build(&byte_chunks), expected, "{id} bytewise");
     }
-    let byte_chunks = input.iter().map(std::slice::from_ref).collect::<Vec<_>>();
-    assert_eq!(build(&byte_chunks), expected);
+}
+
+#[test]
+fn phase5_scaled_sixel_payload_decodes_with_live_cell_geometry() {
+    let mut terminal = Terminal::new(80, 24, TerminalConfig::default());
+    terminal.set_cell_pixel_size(7, 17);
+    terminal.advance(b"\x1bP7;0;0q\"1;1;10;12#1;2;100;0;0#1!10~-!10~\x1b\\");
+
+    assert_eq!(terminal.image_metrics().content_count, 1);
+    assert_eq!(terminal.image_metrics().placement_count, 1);
+    let snapshot = terminal.snapshot(SnapshotRequest::default());
+    let metadata = snapshot
+        .image_contents()
+        .next()
+        .expect("scaled Sixel image");
+    assert_eq!((metadata.width, metadata.height), (10, 12));
+    assert_eq!(
+        terminal.image_content(metadata.id).unwrap().pixels().len(),
+        10 * 12 * 4
+    );
 }
 
 #[test]

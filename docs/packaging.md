@@ -50,8 +50,8 @@ versioned immutable source URL and checksum.
   `/usr/bin/splinterm-session-picker` reference client, and
   `/usr/bin/generate-omarchy-theme.py`;
 - desktop entry, AppStream metadata, scalable icon, and user service;
-- headless lifecycle/policy guidance and integration snippets under
-  `/usr/share/doc/splinterm/`; and
+- headless lifecycle/policy guidance, the exact terminal-image compatibility
+  matrix, and integration snippets under `/usr/share/doc/splinterm/`; and
 - MIT/project third-party notices under `/usr/share/licenses/splinterm/`.
 
 The package does not modify a user's home, enable a service or lingering,

@@ -33,6 +33,7 @@ REQUIRED = {
     "usr/share/doc/splinterm/config.ini",
     "usr/share/doc/splinterm/headless.md",
     "usr/share/doc/splinterm/integrations.md",
+    "usr/share/doc/splinterm/images.md",
     "usr/share/doc/splinterm/omarchy/10-splinterm.sh",
     "usr/share/doc/splinterm/packaging.md",
     "usr/share/doc/splinterm/remote.md",
@@ -624,13 +625,13 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 22,
-                "maximum_version": 22,
+                "minimum_version": 23,
+                "maximum_version": 23,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
             hello = read_private_frame(relay_process.stdout)
-            assert hello["type"] == "hello" and hello["version"] == 22
+            assert hello["type"] == "hello" and hello["version"] == 23
             inherited_path = Path(f"/proc/{relay_process.pid}/fd/{inherited_fd}")
             assert not inherited_path.exists() or os.readlink(inherited_path) != inherited_target
 
@@ -689,8 +690,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 22,
-                "maximum_version": 22,
+                "minimum_version": 23,
+                "maximum_version": 23,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
@@ -747,8 +748,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert restarted_relay.stdout is not None
             restarted_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 22,
-                "maximum_version": 22,
+                "minimum_version": 23,
+                "maximum_version": 23,
                 "role": "automation",
             }))
             restarted_relay.stdin.flush()
@@ -784,8 +785,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert broken_output_relay.stdout is not None
             broken_output_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 22,
-                "maximum_version": 22,
+                "minimum_version": 23,
+                "maximum_version": 23,
                 "role": "automation",
             }))
             broken_output_relay.stdin.flush()

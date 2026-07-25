@@ -83,6 +83,7 @@ package_splinterm() {
   install -Dm644 docs/headless.md "$pkgdir/usr/share/doc/splinterm/headless.md"
   install -Dm644 docs/automation.md "$pkgdir/usr/share/doc/splinterm/automation.md"
   install -Dm644 docs/integrations.md "$pkgdir/usr/share/doc/splinterm/integrations.md"
+  install -Dm644 docs/images.md "$pkgdir/usr/share/doc/splinterm/images.md"
   install -Dm644 docs/remote.md "$pkgdir/usr/share/doc/splinterm/remote.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/splinterm/LICENSE"
   install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/licenses/splinterm/THIRD_PARTY.md"

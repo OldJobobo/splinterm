@@ -9,7 +9,11 @@ between the socket and stdin/stdout.
 The relay does not parse terminal content, frames, requests, responses, or
 cancellation. It cannot mint authority or claim the SSH client's identity. The
 remote client still negotiates the daemon protocol, owns request IDs, observes
-revision/resynchronization rules, and sends cancellation frames itself.
+revision/resynchronization rules, and sends cancellation frames itself. Image
+pixel bodies remain restricted to the executable-verified trusted local UI and
+its separate local content channel; public relay automation does not receive
+those bodies or turn terminal-supplied Kitty paths/SHM names into host access.
+See [images.md](images.md).
 
 ## Security boundary
 

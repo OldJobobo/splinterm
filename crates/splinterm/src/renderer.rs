@@ -2120,6 +2120,10 @@ impl SnapshotFrame {
         self.cell_height
     }
 
+    pub(crate) const fn image_count(&self) -> usize {
+        self.images.len()
+    }
+
     #[cfg(test)]
     pub(crate) const fn scale_120(&self) -> u16 {
         self.scale_120
@@ -4154,16 +4158,33 @@ fn paint_snapshot_images(
         ) else {
             continue;
         };
-        let Some(destination_width) = u32::try_from(image.placement.destination_columns)
+        let cell_destination = u32::try_from(image.placement.destination_columns)
             .ok()
             .and_then(|columns| columns.checked_mul(cell_width))
-        else {
-            continue;
-        };
-        let Some(destination_height) = u32::try_from(image.placement.destination_rows)
-            .ok()
-            .and_then(|rows| rows.checked_mul(cell_height))
-        else {
+            .zip(
+                u32::try_from(image.placement.destination_rows)
+                    .ok()
+                    .and_then(|rows| rows.checked_mul(cell_height)),
+            );
+        let destination =
+            if image.metadata.source_format == splinterm_protocol::ImageSourceFormat::Sixel {
+                image
+                    .placement
+                    .source_cell_size
+                    .and_then(|source_cell| {
+                        let width = u64::from(image.placement.source.width)
+                            .checked_mul(u64::from(cell_width))?
+                            .div_ceil(u64::from(source_cell.width));
+                        let height = u64::from(image.placement.source.height)
+                            .checked_mul(u64::from(cell_height))?
+                            .div_ceil(u64::from(source_cell.height));
+                        Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+                    })
+                    .or(cell_destination)
+            } else {
+                cell_destination
+            };
+        let Some((destination_width, destination_height)) = destination else {
             continue;
         };
         if destination_width == 0 || destination_height == 0 {
@@ -6751,7 +6772,7 @@ mod tests {
                 generation: 1,
                 width,
                 height,
-                source_format: splinterm_protocol::ImageSourceFormat::Sixel,
+                source_format: splinterm_protocol::ImageSourceFormat::KittyRgba,
                 alpha_mode: splinterm_protocol::ImageAlphaMode::Premultiplied,
                 digest: [u8::try_from(creation_order).unwrap_or(1); 32],
                 byte_length: pixels.len(),
@@ -6779,6 +6800,107 @@ mod tests {
             },
             row,
             source: ImageContentSource::Buffered(Arc::from(pixels)),
+        }
+    }
+
+    fn expand_sixel_fixture_pixels(expected: &serde_json::Value) -> Vec<u8> {
+        expected["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|row| {
+                row.as_array().unwrap().iter().flat_map(|run| {
+                    let run = run.as_array().unwrap();
+                    let count = usize::try_from(run[0].as_u64().unwrap()).unwrap();
+                    let pixel = run[1].as_str().unwrap();
+                    let bytes = (0..pixel.len())
+                        .step_by(2)
+                        .map(|index| u8::from_str_radix(&pixel[index..index + 2], 16).unwrap())
+                        .collect::<Vec<_>>();
+                    bytes.repeat(count)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sixel_identity_pixels_match_every_retained_foot_final_buffer() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/spikes/artifacts/0025-terminal-images/fixtures/sixel-v1.json"
+        ))
+        .unwrap();
+        let artifact_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/spikes/artifacts/0025-terminal-images/foot-sixel-captures");
+
+        for case in fixtures["cases"].as_array().unwrap() {
+            let id = case["id"].as_str().unwrap();
+            let source_width = u32::try_from(case["expected"]["width"].as_u64().unwrap()).unwrap();
+            let source_height =
+                u32::try_from(case["expected"]["height"].as_u64().unwrap()).unwrap();
+            let source = expand_sixel_fixture_pixels(&case["expected"]);
+            let foot_metadata: serde_json::Value = serde_json::from_slice(
+                &fs::read(artifact_root.join(id).join("foot.json")).unwrap(),
+            )
+            .unwrap();
+            let foot = fs::read(artifact_root.join(id).join("foot.argb")).unwrap();
+            let foot_stride = usize::try_from(foot_metadata["stride"].as_u64().unwrap()).unwrap();
+            let foot_origin_x =
+                usize::try_from(foot_metadata["origin"]["x"].as_u64().unwrap()).unwrap();
+            let foot_origin_y =
+                usize::try_from(foot_metadata["origin"]["y"].as_u64().unwrap()).unwrap();
+            let cell_width =
+                u32::try_from(foot_metadata["cell"]["width"].as_u64().unwrap()).unwrap();
+            let cell_height =
+                u32::try_from(foot_metadata["cell"]["height"].as_u64().unwrap()).unwrap();
+
+            let mut frame = damage_test_frame();
+            frame.rows = 1;
+            frame.canvas_background = [14, 18, 22];
+            frame.cell_width = cell_width;
+            frame.cell_height = cell_height;
+            frame.ascent = cell_height.saturating_sub(4);
+            frame.descent = cell_height.saturating_sub(frame.ascent);
+            frame.baseline = i32::try_from(frame.ascent).unwrap();
+            frame.backgrounds.truncate(1);
+            frame.backgrounds[0] = [14, 18, 22];
+            frame.default_backgrounds.truncate(1);
+            frame.default_backgrounds[0] = true;
+            frame.foregrounds.truncate(1);
+            frame.cell_metrics.truncate(1);
+            frame.cell_spans.truncate(1);
+            let crop = splinterm_protocol::ImagePixelRect {
+                x: 0,
+                y: 0,
+                width: source_width,
+                height: source_height,
+            };
+            let mut image =
+                test_snapshot_image(&source, source_width, source_height, 0, crop, 0, 0, 1);
+            image.metadata.source_format = splinterm_protocol::ImageSourceFormat::Sixel;
+            image.placement.source_cell_size = Some(splinterm_protocol::ImagePixelSize {
+                width: cell_width,
+                height: cell_height,
+            });
+            frame.images = vec![image];
+
+            let mut canvas = vec![0; usize::try_from(cell_width * cell_height * 4).unwrap()];
+            let geometry = frame.tight_geometry().unwrap();
+            paint_snapshot(
+                &mut canvas,
+                cell_width,
+                cell_height,
+                &frame,
+                &geometry,
+                false,
+                CursorStyle::Block,
+            );
+            let expected_cell = (0..usize::try_from(cell_height).unwrap())
+                .flat_map(|row| {
+                    let start = (foot_origin_y + row) * foot_stride + foot_origin_x * 4;
+                    foot[start..start + usize::try_from(cell_width).unwrap() * 4].to_vec()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(canvas, expected_cell, "{id}");
         }
     }
 

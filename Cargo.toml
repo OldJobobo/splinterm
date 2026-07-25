@@ -50,6 +50,10 @@ unicode-width = "0.2"
 uuid = { version = "1.18", features = ["serde", "v4"] }
 wayland-client = "0.31.14"
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

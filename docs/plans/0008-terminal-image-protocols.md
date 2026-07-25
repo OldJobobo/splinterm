@@ -1,6 +1,6 @@
 # Plan 0008: bounded terminal image protocols
 
-- **Status:** In progress — Slices 0–1, 3–6 accepted; Slice 2 graphical closure deferred
+- **Status:** Complete — Slices 0–6 and 8 accepted; optional Slice 7 deferred
 - **Roadmap:** Phase 5 — bounded terminal image protocols
 - **Foundation:** [ADR 0001](../adr/0001-foot-rust-port.md),
   [Plan 0001](0001-terminal-kernel.md),
@@ -38,22 +38,32 @@ transmit-and-display, lifecycle integration, image revision damage, bounded
 replay/resnapshot behavior, and hard accounting/high-water metrics without
 changing `Cell` size.
 
-Slice 2 is in progress. DCS `q` now uses begin/data/end/abort parser actions
-rather than the collected DCS buffer. The safe incremental Sixel decoder covers
-aspect ratio, transparent/opaque backgrounds, raster attributes, repeat,
-palette selection and RGB/HLS definition, carriage return, and graphical
-newline under the accepted input, dimension, decoded-byte, and pixel-write
-limits. Non-graphical tests match all five pinned-Foot semantic fixtures at
-every input split and prove CAN/SUB cancellation recovery. Foot's VT340
-default palette, configurable Sixel enablement, private/shared palette behavior,
-and DEC mode 1070 are implemented, including shared definitions surviving
-cancellation and decoder failure. Foot-compatible cell-aligned overwrite,
-transparent/partial-cell underlay composition, stable resize/reflow anchors,
-and reflow collision resolution are implemented with bounded fragment fallback.
-A 60-second ASan/libFuzzer `terminal-advance` run completed 258,496 executions
-without a crash. The complete pinned differential matrix remains before Slice 2
-closes. Cursor/scroller placement modes and bounded XTSMGRAPHICS color/geometry
-replies are implemented.
+Slice 2 is implemented and accepted. DCS `q` uses begin/data/end/abort parser
+actions rather than the collected DCS buffer. The safe incremental Sixel
+decoder covers aspect ratio, transparent/opaque backgrounds, raster attributes,
+repeat, palette selection and RGB/HLS definition, carriage return, and
+graphical newline under the accepted input, dimension, decoded-byte, and
+pixel-write limits. Non-graphical tests match all five pinned-Foot semantic
+fixtures for whole input, every split, and bytewise delivery, and prove CAN/SUB
+cancellation recovery. Foot's VT340 default palette, configurable Sixel
+enablement, private/shared palette behavior, and DEC mode 1070 are implemented,
+including shared definitions surviving cancellation and decoder failure.
+Foot-compatible cell-aligned overwrite, transparent/partial-cell underlay
+composition, stable resize/reflow anchors, and reflow collision resolution are
+implemented with bounded fragment fallback. Cursor/scroller placement modes and
+bounded XTSMGRAPHICS color/geometry replies are implemented.
+
+The final reviewed guarded matrix under
+`docs/spikes/artifacts/0025-terminal-images/slice2-splinterm-sixel-2026-07-25-reviewed/`
+matches all five retained Foot final-buffer cells byte-for-byte. Every report
+records workspace 8 on DP-2, no initial focus, workspace/window inactivity,
+preserved placement, and verified cleanup. A fresh 60-second ASan/libFuzzer
+`terminal-advance` run completed 117,896 executions in 61 seconds without a
+crash. Focused tests, the serialized 16-case daemon gate, formatting, checksum
+validation, and two fresh read-only reviews pass. Workspace-wide Clippy remains
+blocked only by unrelated pre-existing benchmark/oracle worktree warnings, and
+the broad contract validator reports an unrelated host Kitty-document hash
+drift before its retained Sixel checks.
 
 Slice 3 is implemented and accepted. Protocol v23 now carries bounded image capabilities,
 limits, metadata, placements, and exact content request/transfer identities.
@@ -169,6 +179,33 @@ than ambient names. A nightly ASan/libFuzzer `terminal-advance` run completed
 39,143 executions in 31 seconds with no crash, timeout, or sanitizer finding;
 final coverage was 2,474 edges and 12,224 features. No graphical command ran for
 Slice 6.
+
+Slice 8's implementation and runtime gates pass, but final acceptance remains
+blocked. The final image-closure candidate guarded matrix under
+`docs/spikes/artifacts/0025-terminal-images/slice8-graphical-final/` passes one
+Kitty scale smoke, one bounded Sixel scale case, and horizontal and vertical
+two-pane Kitty cases. Every report records exact color-region checks, bounded
+one-batch decoder/compositor probe timings, daemon/client RSS/PSS/SHM mappings,
+content/cache bytes, common release hashes, workspace 8 / DP-2 placement, no
+focus, and clean cleanup. The final ten-sample no-image matrix under
+`docs/spikes/artifacts/0025-terminal-images/slice8-no-image-idle-2026-07-25-final/`
+records 1,773,568 bytes median RSS growth against the 2,463,129-byte allowance
+and a one-tick nearest-rank p95/maximum idle CPU result; both gates pass.
+Image-token expiry is event-driven only while tokens exist, unchanged themes
+avoid JSON parsing in both window paths without changing the 500 ms cadence,
+and Thin release LTO keeps RSS inside the accepted envelope.
+
+The complete serialized workspace suite and a fresh 103,027-execution fuzz run
+pass; the final matrix records those commands in `VALIDATION.md`. Package-source
+manifests and image compatibility, architecture, remote-security, provenance,
+and user documentation are updated. Eager default-focus control acquisition now
+falls back to an uncontrolled observer when another client owns the exclusive
+lease, while retaining eager ownership when available. The clean committed main
+and MCP packages build and pass extracted runtime validation, including the
+canonical protocol-v23 relay handshake and installed image documentation.
+Workspace Clippy's pre-existing Rust 1.91 style findings and installed
+Kitty-document hash drift remain separately recorded host/worktree issues and
+do not invalidate the accepted focused gates. Slice 8 and Phase 5 are accepted.
 
 ## Feasibility and current baseline
 

@@ -95,14 +95,16 @@ cleanup was verified, and the complete workspace validation suite passes.
 
 Detailed plan: [`plans/0008-terminal-image-protocols.md`](plans/0008-terminal-image-protocols.md)
 
-Slices 0–1 are accepted: contracts, budgets, pinned-Foot fixtures, and the
-bounded generic image lifecycle are implemented. Slice 2 is in progress with a
-streaming DCS Sixel path and a bounded decoder matching the five pinned semantic
-fixtures. Foot cursor/scroller modes, XTSMGRAPHICS replies, palettes, cell-aligned
-overwrite/underlay composition, and resize/reflow behavior are implemented. A
-60-second ASan/libFuzzer run completed 258,496 executions without a crash; the
-full pinned differential matrix remains before Slice 2 closes. Slice 3 is
-accepted: protocol v23 carries bounded image metadata and exact content
+Slices 0–2 are accepted: contracts, budgets, the bounded generic image
+lifecycle, and Foot-compatible Sixel are implemented. The streaming DCS Sixel
+path and bounded decoder match all five pinned semantic fixtures for whole,
+every-split, and bytewise input. Foot cursor/scroller modes, XTSMGRAPHICS
+replies, palettes, cell-aligned overwrite/underlay composition, and
+resize/reflow behavior are implemented. The reviewed guarded matrix matches all
+five retained Foot final-buffer cells byte-for-byte on workspace 8 / DP-2 with
+no focus or placement violation, and a fresh 60-second ASan/libFuzzer run
+completed 117,896 executions without a crash. Slice 3 is accepted: protocol v23
+carries bounded image metadata and exact content
 identities, with metadata exposed only to the executable-verified trusted UI.
 The mandatory dedicated binary content channel, preferred sealed-memfd path,
 bounded client source cache, and authoritative 64 MiB daemon byte admission are
@@ -120,7 +122,12 @@ pinned self-contained fixtures. Its external Kitty input security spike rejects
 ambient file, temporary-file, and POSIX-SHM names; those media remain bounded
 `ENOTSUP` unless a future authenticated capability design is approved.
 Placeholders, relative placement, multipart iTerm2 transfers, additional image
-formats, and animation remain explicitly deferred.
+formats, and animation remain explicitly deferred. Slice 8's final guarded
+Sixel/Kitty scale-and-pane matrix, no-image RSS gate, and one-tick p95 idle CPU
+gate pass. Eager default-focus control acquisition now falls back to an
+uncontrolled observer when the exclusive lease is already owned. Clean
+committed main and MCP packages pass extracted runtime validation. Phase 5 is
+complete; optional Slice 7 remains explicitly deferred.
 
 - Generic sparse image-content and placement plane without enlarging every cell
 - Streaming, bounded graphics parsing rather than whole-image OSC/DCS/APC buffers

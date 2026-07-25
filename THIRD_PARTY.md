@@ -27,6 +27,26 @@ Foot is Copyright (c) 2019 Daniel Eklöf and is distributed under the MIT
 License. Splinterm's MIT `LICENSE` preserves the applicable permission and
 warranty terms for these translations.
 
+## png
+
+The bounded Kitty and iTerm2 static-image subset decodes PNG through the Rust
+`png` crate.
+
+- Source: <https://github.com/image-rs/image-png>
+- Version: 0.18.1
+- License: MIT OR Apache-2.0
+
+## flate2
+
+The bounded Kitty static-image subset decodes explicitly requested zlib streams
+through `flate2`'s safe Rust backend.
+
+- Source: <https://github.com/rust-lang/flate2-rs>
+- Version: 1.1.9
+- License: MIT OR Apache-2.0
+- Native zlib dependency: none; the workspace uses the Rust backend selected by
+  the resolved feature graph
+
 ## rmcp
 
 The optional `splinterm-mcp` split package uses the official Rust Model Context

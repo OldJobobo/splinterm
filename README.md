@@ -172,6 +172,14 @@ interpolation. Project-owned configuration and Omarchy theme templates live in
 [`docs/configuration.md`](docs/configuration.md) for the supported Foot subset
 and migration guide.
 
+Bounded static terminal images are implemented through one daemon-owned image
+plane: Foot-compatible Sixel, the documented practical Kitty RGB/RGBA/PNG
+subset, and inline-only iTerm2 PNG. Pixel bodies use a trusted on-demand binary
+channel rather than public automation JSON. External Kitty file/SHM transports,
+placeholders, and animation remain unsupported or deferred; see
+[`docs/images.md`](docs/images.md) for the exact compatibility matrix, limits,
+and evidence.
+
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. Override it
 for development with `SPLINTERM_SOCKET=/path/to/socket`. The packaged daemon is
 Wayland-independent and supports on-demand or persistent systemd user-service

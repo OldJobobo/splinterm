@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     io::{self, IsTerminal, Read, Write},
-    os::unix::process::CommandExt,
+    os::unix::{fs::MetadataExt, process::CommandExt},
     path::PathBuf,
     process::Command as ProcessCommand,
     sync::mpsc as std_mpsc,
@@ -3849,17 +3849,23 @@ async fn ensure_pane_control(
     splint_id: SplintId,
     incarnation: u64,
     apply_prepared_resize: bool,
-) -> Result<u64> {
+) -> Result<Option<u64>> {
     if let Some(controller_id) = *active_controller {
-        return Ok(controller_id);
+        return Ok(Some(controller_id));
     }
-    let controller_id = control
-        .acquire_control(
-            splint_id,
-            incarnation,
-            vec![ControlMode::Input, ControlMode::Resize],
-        )
-        .await?;
+    let Some(controller_id) = optional_pane_controller(
+        control
+            .acquire_control(
+                splint_id,
+                incarnation,
+                vec![ControlMode::Input, ControlMode::Resize],
+            )
+            .await,
+    )?
+    else {
+        let _ = updates.send(WindowUpdate::Control(false)).await;
+        return Ok(None);
+    };
     *active_controller = Some(controller_id);
     let _ = updates.send(WindowUpdate::Control(true)).await;
     if apply_prepared_resize {
@@ -3880,7 +3886,7 @@ async fn ensure_pane_control(
             }
         }
     }
-    Ok(controller_id)
+    Ok(Some(controller_id))
 }
 
 async fn handle_scrollback_fetch(
@@ -3926,7 +3932,7 @@ async fn active_resize_request(
     identity: (SplintId, u64),
     resize: PaneResize,
     resize_delay_ms: u64,
-) -> Result<Request> {
+) -> Result<Option<Request>> {
     if resize_delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(resize_delay_ms)).await;
     }
@@ -3941,7 +3947,7 @@ async fn active_resize_request(
         false,
     )
     .await?;
-    Ok(Request::Resize {
+    Ok(controller_id.map(|controller_id| Request::Resize {
         controller_id,
         splint_id,
         incarnation,
@@ -3949,7 +3955,7 @@ async fn active_resize_request(
         rows: resize.1,
         pixel_width: resize.2,
         pixel_height: resize.3,
-    })
+    }))
 }
 
 async fn handle_control_event(
@@ -4049,7 +4055,7 @@ async fn run_controller(
             let Some(command) = command else { break };
             let request = match command {
                 WindowCommand::Input(bytes) => {
-                    let controller_id = ensure_pane_control(
+                    let Some(controller_id) = ensure_pane_control(
                         &mut control,
                         &mut active_controller,
                         &mut prepared_resize,
@@ -4058,7 +4064,10 @@ async fn run_controller(
                         incarnation,
                         true,
                     )
-                    .await?;
+                    .await?
+                    else {
+                        continue;
+                    };
                     Request::Input {
                         controller_id,
                         splint_id,
@@ -4072,7 +4081,7 @@ async fn run_controller(
                     pixel_width,
                     pixel_height,
                 } => {
-                    active_resize_request(
+                    let Some(request) = active_resize_request(
                         &mut control,
                         &mut active_controller,
                         &mut prepared_resize,
@@ -4082,6 +4091,10 @@ async fn run_controller(
                         resize_delay_ms,
                     )
                     .await?
+                    else {
+                        continue;
+                    };
+                    request
                 }
                 WindowCommand::PrepareResize {
                     columns,
@@ -4221,15 +4234,32 @@ async fn run_controller(
     result
 }
 
+fn theme_file_fingerprint(path: &std::path::Path) -> Option<(u64, u64, u64, i64, i64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+    ))
+}
+
 async fn watch_theme(
     path: PathBuf,
     mut current: ResolvedTheme,
     updates: mpsc::Sender<WindowUpdate>,
 ) {
+    let mut observed = theme_file_fingerprint(&path);
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         poll.tick().await;
+        let next_fingerprint = theme_file_fingerprint(&path);
+        if next_fingerprint == observed {
+            continue;
+        }
+        observed = next_fingerprint;
         match load_theme(&path) {
             Ok(next) if next != current => {
                 current = next;
@@ -4249,6 +4279,10 @@ struct PreparedPane {
     task: tokio::task::JoinHandle<Result<()>>,
 }
 
+fn pane_claims_initial_control(splint_id: SplintId, default_focus: SplintId) -> bool {
+    splint_id == default_focus
+}
+
 fn layout_splint_ids(root: &LayoutNode, ids: &mut Vec<SplintId>) {
     match root {
         LayoutNode::Leaf(splint) => ids.push(splint.id),
@@ -4259,10 +4293,24 @@ fn layout_splint_ids(root: &LayoutNode, ids: &mut Vec<SplintId>) {
     }
 }
 
+fn optional_pane_controller(result: Result<u64>) -> Result<Option<u64>> {
+    match result {
+        Ok(controller_id) => Ok(Some(controller_id)),
+        Err(error)
+            if protocol_error(&error)
+                .is_some_and(|error| error.code == ErrorCode::ControllerUnavailable) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn prepare_live_pane(
     config: &AppConfig,
     splint_id: SplintId,
     image_cache: SharedImageContentCache,
+    claim_control: bool,
 ) -> Result<PreparedPane> {
     let mut connection = Connection::connect().await?;
     let incarnation = connection.live_incarnation(splint_id).await?;
@@ -4293,6 +4341,19 @@ async fn prepare_live_pane(
     if control.live_incarnation(splint_id).await? != incarnation {
         bail!("control connection observed a different process incarnation");
     }
+    let controller_id = if claim_control {
+        optional_pane_controller(
+            control
+                .acquire_control(
+                    splint_id,
+                    incarnation,
+                    vec![ControlMode::Input, ControlMode::Resize],
+                )
+                .await,
+        )?
+    } else {
+        None
+    };
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
     let (resync_sender, resyncs) = mpsc::channel(1);
@@ -4305,7 +4366,7 @@ async fn prepare_live_pane(
             updates: controller_updates,
             resyncs: resync_sender,
         },
-        None,
+        controller_id,
         splint_id,
         incarnation,
         resize_delay_ms,
@@ -4327,7 +4388,7 @@ async fn prepare_live_pane(
             updates: receiver,
             commands: command_sender,
             authority,
-            controlled: false,
+            controlled: controller_id.is_some(),
             image_sources,
         },
         updates,
@@ -4727,7 +4788,7 @@ async fn reconcile_window_topology(
     let (added_ids, removed) = topology_identity_diff(root, &next);
     let mut added = Vec::new();
     for splint_id in added_ids {
-        let pane = prepare_live_pane(config, splint_id, image_cache.clone()).await?;
+        let pane = prepare_live_pane(config, splint_id, image_cache.clone(), false).await?;
         pane_tasks.push(pane.task);
         added.push(pane.options);
     }
@@ -4882,7 +4943,15 @@ async fn run_live_multipane_window(
         SharedImageContentCache::with_maximum_bytes(MAX_RENDERER_IMAGE_RESIDENT_BYTES)?;
     let mut prepared = Vec::with_capacity(ids.len());
     for splint_id in ids {
-        prepared.push(prepare_live_pane(&config, splint_id, image_cache.clone()).await?);
+        prepared.push(
+            prepare_live_pane(
+                &config,
+                splint_id,
+                image_cache.clone(),
+                pane_claims_initial_control(splint_id, window_model.default_focus),
+            )
+            .await?,
+        );
     }
     let theme_senders = prepared
         .iter()
@@ -4891,9 +4960,16 @@ async fn run_live_multipane_window(
     let theme_path = config.theme_path.clone();
     let theme_task = tokio::spawn(async move {
         let mut current = theme;
+        let mut observed = theme_file_fingerprint(&theme_path);
         let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             poll.tick().await;
+            let next_fingerprint = theme_file_fingerprint(&theme_path);
+            if next_fingerprint == observed {
+                continue;
+            }
+            observed = next_fingerprint;
             if let Ok(next) = load_theme(&theme_path) {
                 if next != current {
                     current = next;
@@ -5466,6 +5542,20 @@ mod tests {
     use super::*;
     use splinterm_protocol::{ActiveScreen, TerminalInputModes};
 
+    #[test]
+    fn theme_fingerprint_changes_without_parsing_unchanged_content() {
+        let path = std::env::temp_dir().join(format!(
+            "splinterm-theme-fingerprint-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"one").unwrap();
+        let first = theme_file_fingerprint(&path).unwrap();
+        assert_eq!(theme_file_fingerprint(&path), Some(first));
+        std::fs::write(&path, b"different-length").unwrap();
+        assert_ne!(theme_file_fingerprint(&path), Some(first));
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn snapshot(revision: u64) -> TerminalSnapshot {
         TerminalSnapshot {
             splint_id: SplintId::new(),
@@ -5858,6 +5948,22 @@ mod tests {
     }
 
     #[test]
+    fn control_conflict_falls_back_to_observer_without_hiding_other_errors() {
+        let unavailable = response_protocol_error(splinterm_protocol::ProtocolError::new(
+            ErrorCode::ControllerUnavailable,
+            "live Splint already has a controller",
+        ));
+        assert_eq!(optional_pane_controller(Err(unavailable)).unwrap(), None);
+        assert_eq!(optional_pane_controller(Ok(42)).unwrap(), Some(42));
+
+        let invalid = response_protocol_error(splinterm_protocol::ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "bad control request",
+        ));
+        assert!(optional_pane_controller(Err(invalid)).is_err());
+    }
+
+    #[test]
     fn topology_diff_and_parent_ratio_are_identity_local() {
         let first = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
         let first_id = first.id;
@@ -5887,6 +5993,8 @@ mod tests {
         assert!(removed.is_empty());
         assert_eq!(parent_ratio(&nested, first_id).unwrap().get(), 400);
         assert_eq!(parent_ratio(&nested, second_id).unwrap().get(), 650);
+        assert!(pane_claims_initial_control(second_id, second_id));
+        assert!(!pane_claims_initial_control(first_id, second_id));
         assert_eq!(parent_ratio(&nested, third_id).unwrap().get(), 650);
     }
 
