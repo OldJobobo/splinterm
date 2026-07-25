@@ -166,7 +166,7 @@ def main() -> int:
             )
             daemon_log = (state / "daemon.log").open("w", encoding="utf-8")
             daemon = subprocess.Popen(
-                [str(ROOT / "target/release/splinterd")],
+                [str(COMMON.splinterd_executable())],
                 env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=daemon_log,

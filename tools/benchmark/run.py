@@ -11,11 +11,13 @@ from typing import Any
 
 from adapters import all_adapters
 from manifest import collect
+from latency import probe as probe_latency_boundary
 from metrics import read_cgroup_v2, snapshot_process_tree
 from summary import summarize_samples
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEMA = pathlib.Path(__file__).with_name("result-schema.json")
+LATENCY_SCHEMA = pathlib.Path(__file__).with_name("latency-schema.json")
 
 
 def emit(value: Any, as_json: bool) -> None:
@@ -104,22 +106,48 @@ def command_summarize(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_validate(args: argparse.Namespace) -> int:
+def validate_document(result: pathlib.Path, schema_path: pathlib.Path) -> str | None:
     try:
         import jsonschema
     except ImportError:
-        print("Validation unavailable: install jsonschema.", file=sys.stderr)
-        return 2
+        return "validation unavailable: install jsonschema"
     try:
-        document = json.loads(args.result.read_text(encoding="utf-8"))
-        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        document = json.loads(result.read_text(encoding="utf-8"))
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
         jsonschema.Draft202012Validator(
             schema, format_checker=jsonschema.FormatChecker()
         ).validate(document)
     except (OSError, json.JSONDecodeError, jsonschema.ValidationError) as error:
+        return str(error)
+    return None
+
+
+def command_validate(args: argparse.Namespace) -> int:
+    if error := validate_document(args.result, SCHEMA):
         print(f"Validation failed: {error}", file=sys.stderr)
-        return 1
+        return 2 if error.startswith("validation unavailable") else 1
     print(f"Valid benchmark result: {args.result}")
+    return 0
+
+
+def command_probe_latency(args: argparse.Namespace) -> int:
+    value = probe_latency_boundary()
+    if args.json:
+        emit(value, True)
+    else:
+        print("Targeted input latency boundary")
+        print(f"  Backend       {value['backend']}")
+        print(f"  Input         {value['input_protocol']}")
+        print(f"  Capture       {value['capture_protocol']}")
+        print(f"  Supported     {value['supported']}")
+    return 0 if value["supported"] else 1
+
+
+def command_validate_latency(args: argparse.Namespace) -> int:
+    if error := validate_document(args.result, LATENCY_SCHEMA):
+        print(f"Latency validation failed: {error}", file=sys.stderr)
+        return 2 if error.startswith("validation unavailable") else 1
+    print(f"Valid input-latency result: {args.result}")
     return 0
 
 
@@ -174,6 +202,19 @@ def parser() -> argparse.ArgumentParser:
     )
     validate.add_argument("result", type=pathlib.Path)
     validate.set_defaults(handler=command_validate)
+
+    latency_probe = commands.add_parser(
+        "probe-latency-boundary",
+        help="probe targeted-input and screenshot dependencies without opening windows",
+    )
+    latency_probe.add_argument("--json", action="store_true")
+    latency_probe.set_defaults(handler=command_probe_latency)
+
+    validate_latency = commands.add_parser(
+        "validate-latency", help="validate one targeted input-latency result"
+    )
+    validate_latency.add_argument("result", type=pathlib.Path)
+    validate_latency.set_defaults(handler=command_validate_latency)
     return root
 
 

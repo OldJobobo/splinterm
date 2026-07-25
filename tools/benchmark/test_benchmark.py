@@ -22,6 +22,15 @@ from metrics import (  # noqa: E402
     snapshot_process_tree,
 )
 from summary import summarize_samples, summarize_values  # noqa: E402
+import latency as latency_boundary  # noqa: E402
+
+
+def load_module(path: pathlib.Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class ExampleAdapter(TerminalAdapter):
@@ -128,8 +137,139 @@ def test_workload_child_writes_side_channel_records(tmp_path: pathlib.Path) -> N
     assert completion["pid"] > 0
 
 
-def test_graphical_commands_are_controlled_and_terminal_specific(
+def test_input_child_records_receipt_before_visible_marker(
     tmp_path: pathlib.Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    start = tmp_path / "start"
+    received = tmp_path / "received.json"
+    done = tmp_path / "done.json"
+    start.touch()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK / "workloads/bench-child.py"),
+            "input",
+            "--ready-file",
+            str(ready),
+            "--start-file",
+            str(start),
+            "--received-file",
+            str(received),
+            "--done-file",
+            str(done),
+        ],
+        input=b"x\n",
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(received.read_text())
+    completion = json.loads(done.read_text())
+    assert receipt["event"] == "input_received"
+    assert receipt["token"] == "x"
+    assert receipt["monotonic_ns"] <= completion["monotonic_ns"]
+    assert b"SPLINTERBENCH_DONE" in result.stdout
+    assert b"\x1b[48;2;17;239;113m" in result.stdout
+
+
+def test_latency_boundary_is_targeted_and_does_not_require_nested_tools() -> None:
+    value = latency_boundary.probe()
+    assert value["backend"] == "host-hyprland-targeted-shortcut"
+    assert value["input_protocol"] == "Hyprland hl.dsp.send_shortcut targeted window"
+    assert value["visible_boundary"] == "host_window_screenshot_polling_approximation"
+    assert "wtype" not in value["tools"]
+    assert "gamescope" not in value["tools"]
+    assert value["tools"]["Pillow"]["available"] is True
+
+    source = (BENCHMARK / "run-graphical-latency.py").read_text()
+    assert "hl.dsp.send_shortcut" in source
+    assert "window = {selector}" in source
+    assert "focused_address() != original_focus" in source
+
+
+def test_latency_matrix_keeps_input_and_visible_boundaries_separate() -> None:
+    module = load_module(BENCHMARK / "run-latency-matrix.py", "latency_matrix")
+    record = {
+        "terminal": "splinterm",
+        "result": {
+            "input": {"input_to_child_ns": 10},
+            "visible": {"input_to_visible_marker_ns": 30},
+        },
+    }
+    summary = module.summaries([record])
+    assert summary["splinterm"]["input_to_child_ns"]["median"] == 10
+    assert summary["splinterm"]["input_to_visible_marker_ns"]["median"] == 30
+    markdown = module.markdown(summary, 1, 7)
+    assert "not compositor presentation" in markdown
+
+    safe = {
+        "schema": "splinterm.benchmark.input-latency.v1",
+        "terminal": "splinterm",
+        "valid": True,
+        "notes": [],
+        "boundary": {
+            "backend": "host-hyprland-targeted-shortcut",
+            "width": 960,
+            "height": 600,
+            "refresh_hz": 60,
+            "scale": 1,
+            "input_protocol": "Hyprland hl.dsp.send_shortcut targeted window",
+            "capture_protocol": "zwlr_screencopy_manager_v1 via grim",
+            "targeted_window_verified": True,
+        },
+        "input": {
+            "token": "x",
+            "clock": "CLOCK_MONOTONIC shared host namespace",
+            "injector_returncode": 0,
+            "input_to_child_ns": 10,
+        },
+        "isolation": {
+            "workspace": 8,
+            "monitor": "DP-2",
+            "no_initial_focus": True,
+            "targeted_input_without_focus": True,
+            "host_focus_unchanged": True,
+            "host_workspace_unchanged": True,
+            "cleanup_verified": True,
+        },
+        "presentation": {
+            "status": "not-measured",
+            "input_to_compositor_presentation_ns": None,
+        },
+        "visible": {
+            "boundary": "host_window_screenshot_polling_approximation",
+            "poll_interval_ms": 10,
+            "input_to_visible_marker_ns": 30,
+        },
+    }
+    module.validate_case(safe)
+    mutations = (
+        ("host_workspace_unchanged", ("isolation", "host_workspace_unchanged"), False),
+        ("workspace", ("isolation", "workspace"), 9),
+        ("monitor", ("isolation", "monitor"), "DP-1"),
+        ("backend", ("boundary", "backend"), "global-input"),
+        ("input_protocol", ("boundary", "input_protocol"), "global"),
+    )
+    for expected, path, value in mutations:
+        unsafe = json.loads(json.dumps(safe))
+        unsafe[path[0]][path[1]] = value
+        with pytest.raises(RuntimeError, match=expected):
+            module.validate_case(unsafe)
+
+
+def test_latency_snapshot_includes_isolated_binary_selection_provenance() -> None:
+    path = BENCHMARK / "run-latency-matrix.py"
+    spec = importlib.util.spec_from_file_location("latency_snapshot_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "tools/benchmark/manifest.py" in module.IMPLEMENTATION_FILES
+    assert "tools/benchmark/adapters/splinterm.py" in module.IMPLEMENTATION_FILES
+
+
+def test_graphical_commands_are_controlled_and_terminal_specific(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = BENCHMARK / "run-graphical-idle.py"
     spec = importlib.util.spec_from_file_location("graphical_idle_test", path)
@@ -149,6 +289,20 @@ def test_graphical_commands_are_controlled_and_terminal_specific(
     assert splinterm[1:4] == ["launch", "--new", "--name"]
     assert environment["SPLINTERM_SOCKET"] == str(tmp_path / "socket")
     assert environment["SPLINTERM_CONFIG"].endswith("profiles/splinterm.ini")
+    isolated_client = tmp_path / "isolated-splinterm"
+    isolated_daemon = tmp_path / "isolated-splinterd"
+    monkeypatch.setenv("SPLINTERBENCH_SPLINTERM_CLIENT", str(isolated_client))
+    monkeypatch.setenv("SPLINTERBENCH_SPLINTERM_DAEMON", str(isolated_daemon))
+    overridden, _ = module.launch_command(
+        "splinterm", tmp_path, tmp_path / "socket", 30
+    )
+    assert pathlib.Path(overridden[0]) == isolated_client
+    assert module.splinterd_executable() == isolated_daemon
+    input_command, _ = module.launch_command(
+        "foot", tmp_path, tmp_path / "socket", 1, case="input"
+    )
+    assert "--received-file" in input_command
+    assert str(tmp_path / "input-received.json") in input_command
 
     kitty, _ = module.launch_command("kitty", tmp_path, tmp_path / "socket", 30)
     assert pathlib.Path(kitty[0]).name == "kitty"

@@ -87,7 +87,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Emit a deterministic terminal workload"
     )
-    parser.add_argument("case", choices=(*WORKLOADS, "idle"))
+    parser.add_argument("case", choices=(*WORKLOADS, "idle", "input"))
     parser.add_argument("--lines", type=int, default=1000)
     parser.add_argument("--idle-seconds", type=float, default=60.0)
     parser.add_argument("--columns", type=int, default=80)
@@ -95,6 +95,8 @@ def main() -> int:
     parser.add_argument("--start-file", type=pathlib.Path)
     parser.add_argument("--start-timeout", type=float, default=30.0)
     parser.add_argument("--done-file", type=pathlib.Path)
+    parser.add_argument("--received-file", type=pathlib.Path)
+    parser.add_argument("--input-token", default="x")
     parser.add_argument("--hold-seconds", type=float, default=0.0)
     args = parser.parse_args()
     if args.lines < 0:
@@ -106,8 +108,12 @@ def main() -> int:
     if args.start_timeout <= 0 or not 0 <= args.hold_seconds <= 3600:
         parser.error("start timeout must be positive and hold seconds must be bounded")
 
+    if len(args.input_token) != 1 or not args.input_token.isascii():
+        parser.error("--input-token must be one ASCII character")
     payload = (
-        b"" if args.case == "idle" else WORKLOADS[args.case](args.lines, args.columns)
+        b""
+        if args.case in ("idle", "input")
+        else WORKLOADS[args.case](args.lines, args.columns)
     )
     ready_ns = time.monotonic_ns()
     write_record(
@@ -130,6 +136,26 @@ def main() -> int:
                 return 1
             time.sleep(0.002)
     started_ns = time.monotonic_ns()
+    if args.case == "input":
+        received = sys.stdin.buffer.readline(16)
+        received_ns = time.monotonic_ns()
+        expected = f"{args.input_token}\n".encode()
+        if received != expected:
+            print(
+                f"unexpected benchmark input: {received!r}, expected {expected!r}",
+                file=sys.stderr,
+            )
+            return 1
+        write_record(
+            args.received_file,
+            {
+                "schema": "splinterm.benchmark.child.v1",
+                "event": "input_received",
+                "monotonic_ns": received_ns,
+                "pid": os.getpid(),
+                "token": args.input_token,
+            },
+        )
     output = sys.stdout.buffer
     output.write(payload)
     output.write(f"\x1b[0m{MARKER}\n".encode())

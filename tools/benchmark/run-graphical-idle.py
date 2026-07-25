@@ -44,13 +44,25 @@ def load_oracle():
 V1 = load_oracle()
 
 
+def splinterm_executable() -> pathlib.Path:
+    return pathlib.Path(
+        os.environ.get("SPLINTERBENCH_SPLINTERM_CLIENT", ROOT / "target/release/splinterm")
+    ).expanduser()
+
+
+def splinterd_executable() -> pathlib.Path:
+    return pathlib.Path(
+        os.environ.get("SPLINTERBENCH_SPLINTERM_DAEMON", ROOT / "target/release/splinterd")
+    ).expanduser()
+
+
 def splinterm_client(
     socket: pathlib.Path, *arguments: str
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(SPLINTERM_SOCKET=str(socket), SPLINTERM_ENABLE_DEV_ATTACH="1")
     return subprocess.run(
-        [str(ROOT / "target/release/splinterm"), *arguments],
+        [str(splinterm_executable()), *arguments],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -122,6 +134,8 @@ def launch_command(
                 "10",
             )
         )
+        if case == "input":
+            child.extend(("--received-file", str(state / "input-received.json")))
     if terminal == "foot":
         return (
             [
@@ -176,7 +190,7 @@ def launch_command(
         )
     return (
         [
-            str(ROOT / "target/release/splinterm"),
+            str(splinterm_executable()),
             "launch",
             "--new",
             "--name",
@@ -321,7 +335,7 @@ def main() -> int:
             )
             daemon_log = (state / "daemon.log").open("w", encoding="utf-8")
             daemon = subprocess.Popen(
-                [str(ROOT / "target/release/splinterd")],
+                [str(splinterd_executable())],
                 env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=daemon_log,
