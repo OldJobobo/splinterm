@@ -52,7 +52,21 @@ pub(crate) fn generate(
     }
     match character {
         '▀' => mask.fill(0, 0, width, height.div_ceil(2)),
-        '▄' => mask.fill(0, height / 2, width, height),
+        '▁' | '▂' | '▃' | '▄' | '▅' | '▆' | '▇' => {
+            let eighths = match character {
+                '▁' => 1_u64,
+                '▂' => 2,
+                '▃' => 3,
+                '▄' => 4,
+                '▅' => 5,
+                '▆' => 6,
+                '▇' => 7,
+                _ => unreachable!(),
+            };
+            let extent = u32::try_from((u64::from(height) * eighths + 4) / 8)
+                .expect("rounded fractional block extent fits u32");
+            mask.fill(0, height.saturating_sub(extent), width, height);
+        }
         '█' => mask.fill(0, 0, width, height),
         '▌' => mask.fill(0, 0, width.div_ceil(2), height),
         '▐' => mask.fill(width / 2, 0, width, height),
@@ -61,7 +75,22 @@ pub(crate) fn generate(
         '▓' => mask.draw_shade(3),
         _ => {}
     }
-    if matches!(character, '▀' | '▄' | '█' | '▌' | '▐' | '░' | '▒' | '▓') {
+    if matches!(
+        character,
+        '▀' | '▁'
+            | '▂'
+            | '▃'
+            | '▄'
+            | '▅'
+            | '▆'
+            | '▇'
+            | '█'
+            | '▌'
+            | '▐'
+            | '░'
+            | '▒'
+            | '▓'
+    ) {
         return Some(mask);
     }
     let horizontal_y = height.saturating_sub(thickness) / 2;
@@ -386,6 +415,23 @@ mod tests {
         let lower = generate('▄', 13, 30, 1).expect("lower block");
         assert!((0..13).all(|x| pixel(&lower, x, 0) == 0));
         assert!((0..13).all(|x| pixel(&lower, x, 29) == 0xff));
+        for (character, extent) in [
+            ('▁', 4_u32),
+            ('▂', 8),
+            ('▃', 11),
+            ('▄', 15),
+            ('▅', 19),
+            ('▆', 23),
+            ('▇', 26),
+        ] {
+            let mask = generate(character, 13, 30, 1).expect("fractional lower block");
+            let start = 30 - extent;
+            assert!((0..13).all(|x| pixel(&mask, x, 29) == 0xff));
+            assert!((start..30).all(|y| (0..13).all(|x| pixel(&mask, x, y) == 0xff)));
+            if start > 0 {
+                assert!((0..13).all(|x| pixel(&mask, x, start - 1) == 0));
+            }
+        }
         for shade in ['░', '▒', '▓'] {
             let mask = generate(shade, 13, 30, 1).expect("shade");
             assert!(mask.data.contains(&0));
