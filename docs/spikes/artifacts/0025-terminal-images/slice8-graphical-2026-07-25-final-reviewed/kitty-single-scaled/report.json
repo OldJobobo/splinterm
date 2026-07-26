@@ -1,0 +1,97 @@
+{
+  "binaries": {
+    "splinterd_sha256": "4abbf0075aefb04359140f9ebbab8ae600340c22323182b10cadb8d15f9da262",
+    "splinterm_pty_child_sha256": "b6ae12c038b8e4928c946497facf02eba080065779de3de2ab38ac91531582d4",
+    "splinterm_sha256": "faafa5b535cb946fdc37b267d79666c118721ad2bce8526394a54076db5198d8"
+  },
+  "capture_sha256": "3fc110a02fec4564138944fffb22dbf4b2cd4c89a57f99b78c33cddd0213cb56",
+  "case": "kitty-single-scaled",
+  "destination_scale": {
+    "kitty_cells": [
+      16,
+      8
+    ],
+    "sixel_source_pixels": [
+      10,
+      12
+    ]
+  },
+  "error": null,
+  "idle": {
+    "client": {
+      "context_switches": 0,
+      "cpu_ticks": 0
+    },
+    "daemon": {
+      "context_switches": 0,
+      "cpu_ticks": 1
+    },
+    "seconds": 2.0
+  },
+  "isolation": {
+    "active_window_unchanged": true,
+    "active_workspace_unchanged": true,
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "pointer_unchanged": false,
+    "user_state_changes_are_informational": true,
+    "window_never_active": true,
+    "window_placement_preserved": true,
+    "workspace": 8,
+    "workspace_never_active": true
+  },
+  "latency_ns": {
+    "composition_samples": [
+      2173456
+    ],
+    "decode_samples": [
+      62277
+    ],
+    "trigger_to_composed_capture": 1661943346
+  },
+  "pane_axis": null,
+  "pane_count": 1,
+  "pixels": {
+    "green_bounds": null,
+    "green_count": 0,
+    "red_bounds": [
+      12,
+      12,
+      124,
+      148
+    ],
+    "red_count": 15232
+  },
+  "protocols": [
+    "kitty"
+  ],
+  "resources": {
+    "authoritative_content_bytes": 4,
+    "client": {
+      "context_switches": 17,
+      "cpu_ticks": 166,
+      "pss_bytes": 20097024,
+      "rss_bytes": 26992640,
+      "shm_mapping_bytes": 2310144
+    },
+    "client_resident_source_bytes": 4,
+    "daemon": {
+      "context_switches": 28,
+      "cpu_ticks": 5,
+      "pss_bytes": 7908352,
+      "rss_bytes": 10452992,
+      "shm_mapping_bytes": 0
+    },
+    "frame_pacing": {
+      "applicable": false,
+      "reason": "static-image milestone; animation deferred with Slice 7"
+    }
+  },
+  "schema": "splinterm.phase5.graphical-closure.v1",
+  "surface": {
+    "height": 600,
+    "width": 960
+  },
+  "valid": true
+}

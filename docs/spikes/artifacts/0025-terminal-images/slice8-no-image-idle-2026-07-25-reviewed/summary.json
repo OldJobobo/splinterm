@@ -1,0 +1,40 @@
+{
+  "all_isolation_and_cleanup_passed": true,
+  "allowed_growth_bytes": 2463129,
+  "baseline_maximum_rss_bytes": 49418240,
+  "baseline_median_rss_bytes": 49262592,
+  "idle_cpu_gate_passed": true,
+  "idle_cpu_tick_samples": [
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0
+  ],
+  "maximum_rss_bytes": 52711424,
+  "maximum_rss_growth_bytes": 3293184,
+  "median_idle_cpu_ticks": 0.0,
+  "median_rss_bytes": 52584448,
+  "median_rss_growth_bytes": 3321856,
+  "p95_idle_cpu_ticks": 1,
+  "rss_gate_passed": false,
+  "rss_samples": [
+    52441088,
+    52580352,
+    52539392,
+    52682752,
+    52428800,
+    52711424,
+    52588544,
+    52625408,
+    52662272,
+    52408320
+  ],
+  "samples": 10,
+  "schema": "splinterm.phase5.no-image-idle-summary.v1"
+}

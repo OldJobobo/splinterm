@@ -1,0 +1,35 @@
+{
+  "capture_sha256": "e97d60ba0647db8f7df0239a8850230155153d78899f1f458ce7938b21139dd5",
+  "case": "opaque-red-column-1x6",
+  "compared_cell": {
+    "height": 17,
+    "width": 7
+  },
+  "error": "Splinterm Sixel cell pixels differ from retained pinned Foot",
+  "exact": false,
+  "final_buffer_exact": false,
+  "fixture_sha256": "76afd6fd61ae9f685d85c27dcf01fff32a3caced64c55210c105e9058459e772",
+  "foot_argb_sha256": "96d7fc281356ab8458105f4d793c458ec84da853dc43f6da448beba317c8e9e6",
+  "foot_commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+  "isolation": {
+    "active_window_unchanged": true,
+    "active_workspace_unchanged": true,
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "pointer_unchanged": true,
+    "user_state_changes_are_informational": true,
+    "window_never_active": true,
+    "window_placement_preserved": true,
+    "workspace": 8,
+    "workspace_never_active": true
+  },
+  "schema": "splinterm.phase5.splinterm-sixel-comparison.v1",
+  "splinterd_binary_sha256": "39d40f484b4469dcb50b9dcba829b112a6a03b0d39c0f6cbb3bea8f232078c26",
+  "splinterm_binary_sha256": "d66cd7e22c94c21d7ca9b25134668284c4ef5f5a1edf801f4ef02a5071fb310c",
+  "splinterm_pty_child_binary_sha256": "3ef12d89d9ef39e105ab36b10e19def2dfa76e9fc8f7246d29eee53acc6248ea",
+  "surface": {
+    "height": 600,
+    "width": 960
+  }
+}

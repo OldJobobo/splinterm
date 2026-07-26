@@ -1,0 +1,35 @@
+{
+  "capture_sha256": "eeb13c43631c6fa0aa5b721ed3a4c76a91e38ad632128a3282c1eee3ac8f7399",
+  "case": "opaque-red-column-1x6",
+  "compared_cell": {
+    "height": 17,
+    "width": 7
+  },
+  "error": "truncated PPM payload in /home/oldjobobo/Projects/splinterm/docs/spikes/artifacts/0025-terminal-images/slice2-splinterm-sixel-2026-07-25-v5/opaque-red-column-1x6/splinterm.ppm",
+  "exact": false,
+  "final_buffer_exact": false,
+  "fixture_sha256": "76afd6fd61ae9f685d85c27dcf01fff32a3caced64c55210c105e9058459e772",
+  "foot_argb_sha256": "96d7fc281356ab8458105f4d793c458ec84da853dc43f6da448beba317c8e9e6",
+  "foot_commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+  "isolation": {
+    "active_window_unchanged": true,
+    "active_workspace_unchanged": true,
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "pointer_unchanged": false,
+    "user_state_changes_are_informational": true,
+    "window_never_active": true,
+    "window_placement_preserved": true,
+    "workspace": 8,
+    "workspace_never_active": true
+  },
+  "schema": "splinterm.phase5.splinterm-sixel-comparison.v1",
+  "splinterd_binary_sha256": "39d40f484b4469dcb50b9dcba829b112a6a03b0d39c0f6cbb3bea8f232078c26",
+  "splinterm_binary_sha256": "47d729c0bbc08daada8cde2e6ca836513654948b32f3471a5be529bd2bb7f0ba",
+  "splinterm_pty_child_binary_sha256": "3ef12d89d9ef39e105ab36b10e19def2dfa76e9fc8f7246d29eee53acc6248ea",
+  "surface": {
+    "height": 0,
+    "width": 0
+  }
+}

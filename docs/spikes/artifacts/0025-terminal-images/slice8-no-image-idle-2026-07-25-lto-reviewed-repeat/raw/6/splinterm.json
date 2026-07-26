@@ -1,0 +1,33 @@
+{
+  "boundaries": {
+    "launch_to_child_ready_ns": 73074049,
+    "launch_to_window_map_ns": 113168120
+  },
+  "idle": {
+    "context_switches": 2,
+    "cpu_ticks": 0,
+    "rss_bytes": 51113984,
+    "sample_seconds": 2.0,
+    "warmup_seconds": 1.0
+  },
+  "isolation": {
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "workspace": 8
+  },
+  "launch_mode": "prestarted_daemon_client_launch",
+  "notes": [],
+  "processes": {
+    "child_included": true,
+    "child_pid": 698212,
+    "count": 3,
+    "root_pids": [
+      698198,
+      698207
+    ]
+  },
+  "schema": "splinterm.benchmark.graphical-idle.v1",
+  "terminal": "splinterm",
+  "valid": true
+}

@@ -1,0 +1,35 @@
+{
+  "capture_sha256": null,
+  "case": "opaque-red-column-1x6",
+  "compared_cell": {
+    "height": 17,
+    "width": 7
+  },
+  "error": "Sixel producer did not exit after authoritative PTY output ingestion",
+  "exact": false,
+  "final_buffer_exact": false,
+  "fixture_sha256": "76afd6fd61ae9f685d85c27dcf01fff32a3caced64c55210c105e9058459e772",
+  "foot_argb_sha256": "96d7fc281356ab8458105f4d793c458ec84da853dc43f6da448beba317c8e9e6",
+  "foot_commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+  "isolation": {
+    "active_window_unchanged": true,
+    "active_workspace_unchanged": true,
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "pointer_unchanged": true,
+    "user_state_changes_are_informational": true,
+    "window_never_active": true,
+    "window_placement_preserved": true,
+    "workspace": 8,
+    "workspace_never_active": true
+  },
+  "schema": "splinterm.phase5.splinterm-sixel-comparison.v1",
+  "splinterd_binary_sha256": "39d40f484b4469dcb50b9dcba829b112a6a03b0d39c0f6cbb3bea8f232078c26",
+  "splinterm_binary_sha256": "b20d2b54602846846b1b8b65f46d130cbf1e3796492f0d47bbe7a9dc281a89ed",
+  "splinterm_pty_child_binary_sha256": "351c488ae86526804d202f9f72bb1ebfe21166aae51df95a74cb6a2ffbf653fd",
+  "surface": {
+    "height": 0,
+    "width": 0
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "binaries": {
+    "splinterd_sha256": "4abbf0075aefb04359140f9ebbab8ae600340c22323182b10cadb8d15f9da262",
+    "splinterm_pty_child_sha256": "b6ae12c038b8e4928c946497facf02eba080065779de3de2ab38ac91531582d4",
+    "splinterm_sha256": "81cebf0fe50a55b5b3542c9d8d66a069208f43cac96d67ce19a9ee1041374f00"
+  },
+  "capture_sha256": "ec4ccbf351a066106d9727117ea98c5c97543fd4115ad11bbddd0402022d5dc4",
+  "case": "kitty-vertical-panes",
+  "destination_scale": {
+    "kitty_cells": [
+      16,
+      8
+    ],
+    "sixel_source_pixels": [
+      10,
+      12
+    ]
+  },
+  "error": null,
+  "idle": {
+    "client": {
+      "context_switches": 0,
+      "cpu_ticks": 0
+    },
+    "daemon": {
+      "context_switches": 0,
+      "cpu_ticks": 0
+    },
+    "seconds": 2.0
+  },
+  "isolation": {
+    "active_window_unchanged": true,
+    "active_workspace_unchanged": true,
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "pointer_unchanged": true,
+    "user_state_changes_are_informational": true,
+    "window_never_active": true,
+    "window_placement_preserved": true,
+    "workspace": 8,
+    "workspace_never_active": true
+  },
+  "latency_ns": {
+    "composition_samples": [
+      2030207,
+      3011288
+    ],
+    "decode_samples": [
+      46057,
+      51477
+    ],
+    "trigger_to_composed_capture": 1668730020
+  },
+  "pane_axis": "vertical",
+  "pane_count": 2,
+  "pixels": {
+    "green_bounds": [
+      12,
+      320,
+      124,
+      456
+    ],
+    "green_count": 15232,
+    "red_bounds": [
+      12,
+      12,
+      124,
+      148
+    ],
+    "red_count": 15232
+  },
+  "protocols": [
+    "kitty"
+  ],
+  "resources": {
+    "authoritative_content_bytes": 8,
+    "client": {
+      "context_switches": 28,
+      "cpu_ticks": 170,
+      "pss_bytes": 16847872,
+      "rss_bytes": 23752704,
+      "shm_mapping_bytes": 8654848
+    },
+    "client_resident_source_bytes": 8,
+    "daemon": {
+      "context_switches": 39,
+      "cpu_ticks": 9,
+      "pss_bytes": 5033984,
+      "rss_bytes": 7532544,
+      "shm_mapping_bytes": 0
+    },
+    "frame_pacing": {
+      "applicable": false,
+      "reason": "static-image milestone; animation deferred with Slice 7"
+    }
+  },
+  "schema": "splinterm.phase5.graphical-closure.v1",
+  "surface": {
+    "height": 600,
+    "width": 960
+  },
+  "valid": true
+}

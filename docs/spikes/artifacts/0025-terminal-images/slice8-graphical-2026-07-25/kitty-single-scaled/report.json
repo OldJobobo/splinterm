@@ -1,0 +1,20 @@
+{
+  "capture_sha256": "3fc110a02fec4564138944fffb22dbf4b2cd4c89a57f99b78c33cddd0213cb56",
+  "case": "kitty-single-scaled",
+  "error": "authoritative image snapshots did not become ready",
+  "isolation": {
+    "active_window_unchanged": true,
+    "active_workspace_unchanged": true,
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "pointer_unchanged": false,
+    "user_state_changes_are_informational": true,
+    "window_never_active": true,
+    "window_placement_preserved": true,
+    "workspace": 8,
+    "workspace_never_active": true
+  },
+  "schema": "splinterm.phase5.graphical-closure.v1",
+  "valid": false
+}

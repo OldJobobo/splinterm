@@ -1,0 +1,32 @@
+{
+  "capture_sha256": null,
+  "case": "opaque-red-column-1x6",
+  "compared_cell": {
+    "height": 17,
+    "width": 7
+  },
+  "error": "[Errno 26] Text file busy: '/home/oldjobobo/Projects/splinterm/target/release/splinterm'",
+  "exact": false,
+  "final_buffer_exact": false,
+  "fixture_sha256": "76afd6fd61ae9f685d85c27dcf01fff32a3caced64c55210c105e9058459e772",
+  "foot_argb_sha256": "96d7fc281356ab8458105f4d793c458ec84da853dc43f6da448beba317c8e9e6",
+  "foot_commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+  "isolation": {
+    "active_window_unchanged": true,
+    "active_workspace_unchanged": true,
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "pointer_unchanged": false,
+    "user_state_changes_are_informational": true,
+    "window_never_active": true,
+    "window_placement_preserved": true,
+    "workspace": 8,
+    "workspace_never_active": true
+  },
+  "schema": "splinterm.phase5.splinterm-sixel-comparison.v1",
+  "surface": {
+    "height": 0,
+    "width": 0
+  }
+}
