@@ -1455,7 +1455,11 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
                 name: "authorization-scope".to_owned(),
                 launch: LaunchParameters {
                     cwd: daemon.runtime.clone(),
-                    command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
+                    command: vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        "sleep 300".to_owned(),
+                    ],
                     shell: None,
                     login_shell: false,
                     scrollback_lines: 100,
@@ -1488,7 +1492,11 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
                 name: "authorization-other".to_owned(),
                 launch: LaunchParameters {
                     cwd: daemon.runtime.clone(),
-                    command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
+                    command: vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        "sleep 300".to_owned(),
+                    ],
                     shell: None,
                     login_shell: false,
                     scrollback_lines: 100,
