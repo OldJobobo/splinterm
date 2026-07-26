@@ -135,7 +135,9 @@ const SCALE_DENOMINATOR: u32 = 120;
 const MIN_SCALE_120: u32 = 120;
 const MAX_SCALE_120: u32 = 960;
 const MAX_PREEDIT_BYTES: usize = 4 * 1024;
-const EVENT_LOOP_TICK_INTERVAL: Duration = Duration::from_millis(50);
+const SIGNOFF_TICK_INTERVAL: Duration = Duration::from_millis(50);
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+const IDLE_EVENT_LOOP_TIMEOUT: Duration = Duration::from_secs(60);
 const RECEIVER_DRAIN_BUDGET: usize = 8;
 const MAX_SHM_BUFFERS: usize = 2;
 const BTN_RIGHT: u32 = 0x111;
@@ -903,8 +905,11 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         app.tick_signoff(&queue_handle)?;
         app.apply_clipboard_reads()?;
         app.tick_cursor_blink(&queue_handle)?;
+        let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
+            break;
+        };
         event_loop
-            .dispatch(EVENT_LOOP_TICK_INTERVAL, &mut app)
+            .dispatch(dispatch_timeout, &mut app)
             .context("dispatch Wayland events")?;
     }
     if let Some(error) = app.failure {
@@ -2868,6 +2873,22 @@ fn cursor_blink_enabled(reduced_motion: bool, focused: bool, modes: TerminalInpu
     !reduced_motion && focused && modes.cursor_visible && modes.cursor_blink
 }
 
+fn event_loop_timeout(
+    exiting: bool,
+    signoff_active: bool,
+    cursor_blink_elapsed: Option<Duration>,
+) -> Option<Duration> {
+    if exiting {
+        None
+    } else if signoff_active {
+        Some(SIGNOFF_TICK_INTERVAL)
+    } else if let Some(elapsed) = cursor_blink_elapsed {
+        Some(CURSOR_BLINK_INTERVAL.saturating_sub(elapsed))
+    } else {
+        Some(IDLE_EVENT_LOOP_TIMEOUT)
+    }
+}
+
 fn offset_cursor_rectangle(
     cursor: (i32, i32, i32, i32),
     pane: Rect,
@@ -3175,7 +3196,12 @@ fn write_clipboard_with_deadline(
     Ok(())
 }
 
-fn spawn_clipboard_read(fd: OwnedFd, target: PasteTarget, tx: StdSender<ClipboardRead>) {
+fn spawn_clipboard_read(
+    fd: OwnedFd,
+    target: PasteTarget,
+    tx: StdSender<ClipboardRead>,
+    waker: Waker,
+) {
     let Some(permit) = try_clipboard_worker(&ACTIVE_CLIPBOARD_WORKERS) else {
         let _ = tx.send(ClipboardRead {
             target,
@@ -3184,12 +3210,14 @@ fn spawn_clipboard_read(fd: OwnedFd, target: PasteTarget, tx: StdSender<Clipboar
                 "clipboard worker limit reached",
             )),
         });
+        waker.wake();
         return;
     };
     std::thread::spawn(move || {
         let _permit = permit;
         let bytes = read_clipboard_with_deadline(&fd, CLIPBOARD_IO_TIMEOUT);
         let _ = tx.send(ClipboardRead { target, bytes });
+        waker.wake();
     });
 }
 
@@ -3990,6 +4018,7 @@ impl App {
 
     fn begin_clipboard_read(&mut self, target: PasteTarget) {
         let tx = self.clipboard_tx.clone();
+        let waker = self.update_waker.clone();
         match target {
             PasteTarget::Clipboard => {
                 let Some(offer) = self.clipboard_offer.clone() else {
@@ -3998,7 +4027,7 @@ impl App {
                 let mime = offer.with_mime_types(accepted_text_mime);
                 let Some(mime) = mime else { return };
                 if let Ok(pipe) = offer.receive(mime) {
-                    spawn_clipboard_read(pipe.into(), target, tx);
+                    spawn_clipboard_read(pipe.into(), target, tx, waker);
                 }
             }
             PasteTarget::Primary => {
@@ -4008,7 +4037,7 @@ impl App {
                 let mime = offer.with_mime_types(accepted_text_mime);
                 let Some(mime) = mime else { return };
                 if let Ok(pipe) = offer.receive(mime) {
-                    spawn_clipboard_read(pipe.into(), target, tx);
+                    spawn_clipboard_read(pipe.into(), target, tx, waker);
                 }
             }
         }
@@ -5244,16 +5273,29 @@ impl App {
         Ok(())
     }
 
-    fn tick_cursor_blink(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        let blinking = self.cursor_blink
+    fn cursor_is_blinking(&self) -> bool {
+        self.cursor_blink
             && self.pane.snapshot.as_ref().is_some_and(|snapshot| {
                 cursor_blink_enabled(
                     self.reduced_motion,
                     self.keyboard_focused,
                     snapshot.input_modes,
                 )
-            });
-        if blinking && self.last_cursor_blink.elapsed() >= Duration::from_millis(500) {
+            })
+    }
+
+    fn event_loop_dispatch_timeout(&self) -> Option<Duration> {
+        event_loop_timeout(
+            self.exit,
+            self.signoff.is_some(),
+            self.cursor_is_blinking()
+                .then(|| self.last_cursor_blink.elapsed()),
+        )
+    }
+
+    fn tick_cursor_blink(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
+        let blinking = self.cursor_is_blinking();
+        if blinking && self.last_cursor_blink.elapsed() >= CURSOR_BLINK_INTERVAL {
             self.cursor_blink_visible = !self.cursor_blink_visible;
             self.last_cursor_blink = Instant::now();
             if let Some(snapshot) = &self.pane.snapshot {
@@ -8617,6 +8659,27 @@ mod tests {
         assert!(cursor_blink_enabled(false, true, modes));
         assert!(!cursor_blink_enabled(true, true, modes));
         assert!(!cursor_blink_enabled(false, false, modes));
+    }
+
+    #[test]
+    fn event_loop_timeout_is_event_driven_except_for_active_deadlines() {
+        assert_eq!(
+            event_loop_timeout(false, false, None),
+            Some(IDLE_EVENT_LOOP_TIMEOUT)
+        );
+        assert_eq!(
+            event_loop_timeout(false, false, Some(Duration::from_millis(125))),
+            Some(Duration::from_millis(375))
+        );
+        assert_eq!(
+            event_loop_timeout(false, false, Some(Duration::from_secs(1))),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            event_loop_timeout(false, true, Some(Duration::ZERO)),
+            Some(SIGNOFF_TICK_INTERVAL)
+        );
+        assert_eq!(event_loop_timeout(true, false, None), None);
     }
 
     #[test]
