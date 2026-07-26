@@ -1,0 +1,15 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object","additionalProperties":false,
+  "required":["schema","terminal","child_exit_ns","window_unmap_ns","window_persisted","residual_process_count","isolation","valid","notes"],
+  "properties":{
+    "schema":{"const":"splinterm.benchmark.lifecycle.v1"},
+    "terminal":{"enum":["splinterm","foot","kitty","ghostty","alacritty"]},
+    "child_exit_ns":{"type":"integer","minimum":0},
+    "window_unmap_ns":{"type":["integer","null"],"minimum":0},
+    "window_persisted":{"type":"boolean"},
+    "residual_process_count":{"type":"integer","minimum":0},
+    "isolation":{"type":"object","required":["workspace","monitor","no_initial_focus","cleanup_verified"],"properties":{"workspace":{"const":8},"monitor":{"const":"DP-2"},"no_initial_focus":{"const":true},"cleanup_verified":{"type":"boolean"}},"additionalProperties":false},
+    "valid":{"type":"boolean"},"notes":{"type":"array","items":{"type":"string"}}
+  }
+}

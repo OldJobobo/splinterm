@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Splinterbench scrollback profile result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "terminal", "scrollback_lines", "profile", "result", "valid"],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.scrollback.v1" },
+    "terminal": { "enum": ["splinterm", "foot", "kitty", "ghostty", "alacritty"] },
+    "scrollback_lines": { "enum": [0, 100000] },
+    "profile": { "enum": ["disabled", "large"] },
+    "result": { "type": "object" },
+    "valid": { "type": "boolean" }
+  }
+}

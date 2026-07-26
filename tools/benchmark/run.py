@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import subprocess
 import sys
 from typing import Any
 
 from adapters import all_adapters
+from correctness import build_report, write_report
 from manifest import collect
 from latency import probe as probe_latency_boundary
 from metrics import read_cgroup_v2, snapshot_process_tree
@@ -17,6 +19,7 @@ from summary import summarize_samples
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEMA = pathlib.Path(__file__).with_name("result-schema.json")
+CORRECTNESS_SCHEMA = pathlib.Path(__file__).with_name("correctness-schema.json")
 LATENCY_SCHEMA = pathlib.Path(__file__).with_name("latency-schema.json")
 
 
@@ -130,6 +133,26 @@ def command_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_correctness_report(args: argparse.Namespace) -> int:
+    try:
+        report = build_report()
+        write_report(args.output, report)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Correctness report failed: {error}", file=sys.stderr)
+        return 1
+    print(f"Correctness report written: {args.output}")
+    print(f"Non-graphical checks: {'PASS' if report['valid'] else 'FAIL'}")
+    return 0 if report["valid"] else 1
+
+
+def command_validate_correctness(args: argparse.Namespace) -> int:
+    if error := validate_document(args.report, CORRECTNESS_SCHEMA):
+        print(f"Correctness validation failed: {error}", file=sys.stderr)
+        return 2 if error.startswith("validation unavailable") else 1
+    print(f"Valid correctness report: {args.report}")
+    return 0
+
+
 def command_probe_latency(args: argparse.Namespace) -> int:
     value = probe_latency_boundary()
     if args.json:
@@ -202,6 +225,19 @@ def parser() -> argparse.ArgumentParser:
     )
     validate.add_argument("result", type=pathlib.Path)
     validate.set_defaults(handler=command_validate)
+
+    correctness = commands.add_parser(
+        "correctness-report",
+        help="run non-graphical correctness checks and write bounded evidence",
+    )
+    correctness.add_argument("output", type=pathlib.Path)
+    correctness.set_defaults(handler=command_correctness_report)
+
+    validate_correctness = commands.add_parser(
+        "validate-correctness", help="validate a correctness report"
+    )
+    validate_correctness.add_argument("report", type=pathlib.Path)
+    validate_correctness.set_defaults(handler=command_validate_correctness)
 
     latency_probe = commands.add_parser(
         "probe-latency-boundary",

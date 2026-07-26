@@ -1,0 +1,285 @@
+{
+  "completed_measured_cases": 50,
+  "error": null,
+  "expected_measured_cases": 50,
+  "orders": [
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "terminals": [
+        "kitty",
+        "splinterm",
+        "alacritty",
+        "ghostty",
+        "foot"
+      ]
+    },
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "terminals": [
+        "splinterm",
+        "alacritty",
+        "kitty",
+        "ghostty",
+        "foot"
+      ]
+    },
+    {
+      "iteration": 2,
+      "phase": "warmup",
+      "terminals": [
+        "ghostty",
+        "foot",
+        "splinterm",
+        "kitty",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "terminals": [
+        "kitty",
+        "alacritty",
+        "ghostty",
+        "foot",
+        "splinterm"
+      ]
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "terminals": [
+        "foot",
+        "alacritty",
+        "ghostty",
+        "splinterm",
+        "kitty"
+      ]
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "terminals": [
+        "ghostty",
+        "kitty",
+        "foot",
+        "alacritty",
+        "splinterm"
+      ]
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "terminals": [
+        "ghostty",
+        "alacritty",
+        "splinterm",
+        "foot",
+        "kitty"
+      ]
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "terminals": [
+        "foot",
+        "alacritty",
+        "ghostty",
+        "kitty",
+        "splinterm"
+      ]
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "terminals": [
+        "foot",
+        "kitty",
+        "splinterm",
+        "ghostty",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "kitty",
+        "ghostty",
+        "foot",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "ghostty",
+        "kitty",
+        "foot",
+        "alacritty"
+      ]
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "terminals": [
+        "foot",
+        "alacritty",
+        "kitty",
+        "ghostty",
+        "splinterm"
+      ]
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "terminals": [
+        "splinterm",
+        "alacritty",
+        "ghostty",
+        "foot",
+        "kitty"
+      ]
+    }
+  ],
+  "sample_runs": 10,
+  "schema": "splinterm.benchmark.lifecycle-matrix.v1",
+  "seed": 20260728,
+  "summary": {
+    "alacritty": {
+      "child_exit_ns": {
+        "count": 10,
+        "max": 267729245,
+        "median": 250688877.0,
+        "median_absolute_deviation": 2401915.5,
+        "min": 243536824,
+        "p95": 256945897.0
+      },
+      "persisted_count": 0,
+      "residual_process_count": {
+        "count": 10,
+        "max": 1,
+        "median": 0.0,
+        "median_absolute_deviation": 0.0,
+        "min": 0,
+        "p95": 0.0
+      },
+      "window_unmap_ns": {
+        "count": 10,
+        "max": 267729245,
+        "median": 249910795.5,
+        "median_absolute_deviation": 2943316.0,
+        "min": 236363799,
+        "p95": 253487129.0
+      }
+    },
+    "foot": {
+      "child_exit_ns": {
+        "count": 10,
+        "max": 259582963,
+        "median": 252903119.0,
+        "median_absolute_deviation": 3839830.5,
+        "min": 247608201,
+        "p95": 259215156.0
+      },
+      "persisted_count": 0,
+      "residual_process_count": {
+        "count": 10,
+        "max": 0,
+        "median": 0.0,
+        "median_absolute_deviation": 0.0,
+        "min": 0,
+        "p95": 0.0
+      },
+      "window_unmap_ns": {
+        "count": 10,
+        "max": 259215156,
+        "median": 251751297.0,
+        "median_absolute_deviation": 3760701.5,
+        "min": 240246769,
+        "p95": 257646660.0
+      }
+    },
+    "ghostty": {
+      "child_exit_ns": {
+        "count": 10,
+        "max": 273901167,
+        "median": 252313168.5,
+        "median_absolute_deviation": 1310634.0,
+        "min": 246157286,
+        "p95": 261249008.0
+      },
+      "persisted_count": 0,
+      "residual_process_count": {
+        "count": 10,
+        "max": 1,
+        "median": 1.0,
+        "median_absolute_deviation": 0.0,
+        "min": 0,
+        "p95": 1.0
+      },
+      "window_unmap_ns": {
+        "count": 10,
+        "max": 273901167,
+        "median": 263650509.0,
+        "median_absolute_deviation": 8761812.0,
+        "min": 250975559,
+        "p95": 273794998.0
+      }
+    },
+    "kitty": {
+      "child_exit_ns": {
+        "count": 10,
+        "max": 297513996,
+        "median": 252376689.5,
+        "median_absolute_deviation": 9254608.0,
+        "min": 239832291,
+        "p95": 265921824.0
+      },
+      "persisted_count": 0,
+      "residual_process_count": {
+        "count": 10,
+        "max": 3,
+        "median": 3.0,
+        "median_absolute_deviation": 0.0,
+        "min": 3,
+        "p95": 3.0
+      },
+      "window_unmap_ns": {
+        "count": 10,
+        "max": 297513996,
+        "median": 260129436.5,
+        "median_absolute_deviation": 5757006.0,
+        "min": 250166113,
+        "p95": 265921824.0
+      }
+    },
+    "splinterm": {
+      "child_exit_ns": {
+        "count": 10,
+        "max": 213397636,
+        "median": 204698159.0,
+        "median_absolute_deviation": 7647782.0,
+        "min": 122763652,
+        "p95": 212732133.0
+      },
+      "persisted_count": 10,
+      "residual_process_count": {
+        "count": 10,
+        "max": 2,
+        "median": 2.0,
+        "median_absolute_deviation": 0.0,
+        "min": 2,
+        "p95": 2.0
+      },
+      "window_unmap_ns": null
+    }
+  },
+  "valid": true,
+  "warmup_runs": 3
+}

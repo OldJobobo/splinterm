@@ -108,6 +108,8 @@ def launch_command(
     case: str = "idle",
     lines: int = 1000,
     columns: int = 80,
+    scrollback_lines: int | None = None,
+    hold_window: bool = True,
 ) -> tuple[list[str], dict[str, str]]:
     ready = state / "ready.json"
     child = [
@@ -137,56 +139,55 @@ def launch_command(
         if case == "input":
             child.extend(("--received-file", str(state / "input-received.json")))
     if terminal == "foot":
-        return (
-            [
-                shutil.which("foot") or "foot",
-                "-c",
-                str(PROFILES / "foot.ini"),
-                "-a",
-                APP_IDS[terminal],
-                "-w",
-                "960x600",
-                "--hold",
-                *child,
-            ],
-            {},
-        )
+        command = [shutil.which("foot") or "foot", "-c", str(PROFILES / "foot.ini")]
+        if scrollback_lines is not None:
+            command.extend(("-o", f"scrollback.lines={scrollback_lines}"))
+        command.extend(("-a", APP_IDS[terminal], "-w", "960x600"))
+        if hold_window:
+            command.append("--hold")
+        command.extend(child)
+        return command, {}
     if terminal == "kitty":
-        return (
-            [
-                shutil.which("kitty") or "kitty",
-                "--config",
-                str(PROFILES / "kitty.conf"),
-                "--class",
-                APP_IDS[terminal],
-                "--hold",
-                *child,
-            ],
-            {},
-        )
+        command = [
+            shutil.which("kitty") or "kitty",
+            "--config",
+            str(PROFILES / "kitty.conf"),
+        ]
+        if scrollback_lines is not None:
+            command.extend(("--override", f"scrollback_lines={scrollback_lines}"))
+        command.extend(("--class", APP_IDS[terminal]))
+        if hold_window:
+            command.append("--hold")
+        command.extend(child)
+        return command, {}
     if terminal == "ghostty":
-        return (
-            [
-                shutil.which("ghostty") or "ghostty",
-                f"--config-file={PROFILES / 'ghostty.conf'}",
-                "-e",
-                *child,
-            ],
-            {},
-        )
+        command = [
+            shutil.which("ghostty") or "ghostty",
+            f"--config-file={PROFILES / 'ghostty.conf'}",
+        ]
+        if scrollback_lines is not None:
+            command.append(f"--scrollback-limit={scrollback_lines}")
+        command.extend(("-e", *child))
+        return command, {}
     if terminal == "alacritty":
-        return (
-            [
-                shutil.which("alacritty") or "alacritty",
-                "--config-file",
-                str(PROFILES / "alacritty.toml"),
-                "--class",
-                APP_IDS[terminal],
-                "--hold",
-                "-e",
-                *child,
-            ],
-            {},
+        command = [
+            shutil.which("alacritty") or "alacritty",
+            "--config-file",
+            str(PROFILES / "alacritty.toml"),
+        ]
+        if scrollback_lines is not None:
+            command.extend(("-o", f"scrolling.history={scrollback_lines}"))
+        command.extend(("--class", APP_IDS[terminal]))
+        if hold_window:
+            command.append("--hold")
+        command.extend(("-e", *child))
+        return command, {}
+    profile_path = PROFILES / "splinterm.ini"
+    if scrollback_lines is not None:
+        profile_path = state / "splinterm.ini"
+        profile = (PROFILES / "splinterm.ini").read_text(encoding="utf-8")
+        profile_path.write_text(
+            profile.replace("lines=1000", f"lines={scrollback_lines}"), encoding="utf-8"
         )
     return (
         [
@@ -201,7 +202,7 @@ def launch_command(
         {
             "SPLINTERM_SOCKET": str(socket),
             "SPLINTERM_ENABLE_DEV_ATTACH": "1",
-            "SPLINTERM_CONFIG": str(PROFILES / "splinterm.ini"),
+            "SPLINTERM_CONFIG": str(profile_path),
             "XDG_STATE_HOME": str(state / "xdg-state"),
         },
     )

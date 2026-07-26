@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.invalid/schema/benchmark-correctness-v1.json",
+  "title": "Splinterbench correctness report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "valid", "repository", "oracle", "semantic_fixtures", "final_buffer_evidence", "checks", "feature_coverage", "fuzzing", "capability_matrix", "external_observations", "claim_policy"],
+  "properties": {
+    "schema": {"const": "splinterm.benchmark.correctness.v1"},
+    "valid": {"type": "boolean"},
+    "repository": {
+      "type": "object", "additionalProperties": false, "required": ["revision", "dirty"],
+      "properties": {"revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "dirty": {"type": "boolean"}}
+    },
+    "oracle": {
+      "type": "object", "additionalProperties": false, "required": ["name", "version", "commit", "authority"],
+      "properties": {
+        "name": {"const": "foot"}, "version": {"const": "1.27.0"},
+        "commit": {"const": "3c5b584b0eafa772eb4376fb6eaf6643399e190e"},
+        "authority": {"const": "behavioral-reference"}
+      }
+    },
+    "semantic_fixtures": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "fixture_count", "fixtures", "rust_test", "scope"],
+      "properties": {
+        "status": {"const": "covered"}, "fixture_count": {"const": 5},
+        "fixtures": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/fileEvidence"}},
+        "rust_test": {"type": "string"}, "scope": {"type": "string"}
+      }
+    },
+    "final_buffer_evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/exactEvidence"}},
+    "checks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/check"}},
+    "feature_coverage": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/feature"}},
+    "fuzzing": {
+      "type": "object", "additionalProperties": false, "required": ["target", "status", "recorded_duration_seconds"],
+      "properties": {"target": {"type": "string"}, "status": {"enum": ["available-not-run", "passed", "failed"]}, "recorded_duration_seconds": {"type": ["integer", "null"], "minimum": 1}}
+    },
+    "capability_matrix": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/capability"}},
+    "external_observations": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/observation"}},
+    "claim_policy": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fileEvidence": {
+      "type": "object", "additionalProperties": false, "required": ["id", "path", "sha256", "verification"],
+      "properties": {"id": {"type": "string"}, "path": {"type": "string"}, "sha256": {"$ref": "#/$defs/digest"}, "verification": {"const": "oracle_verified"}}
+    },
+    "exactEvidence": {
+      "type": "object", "additionalProperties": false, "required": ["lane", "path", "sha256", "schema", "case_count", "exact"],
+      "properties": {"lane": {"type": "string"}, "path": {"type": "string"}, "sha256": {"$ref": "#/$defs/digest"}, "schema": {"type": "string"}, "case_count": {"type": "integer", "minimum": 1}, "exact": {"const": true}}
+    },
+    "check": {
+      "type": "object", "additionalProperties": false, "required": ["check", "required", "command", "returncode", "status", "output"],
+      "properties": {"check": {"type": "string"}, "required": {"type": "boolean"}, "command": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "returncode": {"type": "integer"}, "status": {"enum": ["passed", "failed"]}, "output": {"type": "string", "maxLength": 4000}}
+    },
+    "feature": {
+      "type": "object", "additionalProperties": false, "required": ["feature", "status", "evidence"],
+      "properties": {"feature": {"type": "string"}, "status": {"enum": ["covered", "partial", "unsupported", "unknown", "available-not-run"]}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "note": {"type": "string"}}
+    },
+    "statuses": {
+      "type": "object", "additionalProperties": false, "required": ["splinterm", "foot", "kitty", "ghostty", "alacritty"],
+      "properties": {"splinterm": {"$ref": "#/$defs/capabilityStatus"}, "foot": {"$ref": "#/$defs/capabilityStatus"}, "kitty": {"$ref": "#/$defs/capabilityStatus"}, "ghostty": {"$ref": "#/$defs/capabilityStatus"}, "alacritty": {"$ref": "#/$defs/capabilityStatus"}}
+    },
+    "capabilityStatus": {"enum": ["supported", "partial", "unsupported", "unknown", "not-tested"]},
+    "capability": {
+      "type": "object", "additionalProperties": false, "required": ["capability", "statuses", "evidence", "note"],
+      "properties": {"capability": {"type": "string"}, "statuses": {"$ref": "#/$defs/statuses"}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "note": {"type": "string"}}
+    },
+    "observation": {
+      "type": "object", "additionalProperties": false, "required": ["observation", "path", "sha256", "terminals", "measured_cases", "status", "claim_limit"],
+      "properties": {"observation": {"type": "string"}, "path": {"type": "string"}, "sha256": {"$ref": "#/$defs/digest"}, "terminals": {"type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"enum": ["splinterm", "foot", "kitty", "ghostty", "alacritty"]}}, "measured_cases": {"type": "integer", "minimum": 1}, "status": {"const": "observed"}, "claim_limit": {"type": "string", "minLength": 1}}
+    }
+  }
+}

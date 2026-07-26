@@ -15,6 +15,7 @@ BENCHMARK = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCHMARK))
 
 from adapters.base import TerminalAdapter, file_sha256  # noqa: E402
+from correctness import build_report, write_report  # noqa: E402
 from metrics import (  # noqa: E402
     process_tree,
     read_cgroup_v2,
@@ -298,6 +299,10 @@ def test_graphical_commands_are_controlled_and_terminal_specific(
     )
     assert pathlib.Path(overridden[0]) == isolated_client
     assert module.splinterd_executable() == isolated_daemon
+    no_hold, _ = module.launch_command(
+        "foot", tmp_path, tmp_path / "socket", 1, hold_window=False
+    )
+    assert "--hold" not in no_hold
     input_command, _ = module.launch_command(
         "foot", tmp_path, tmp_path / "socket", 1, case="input"
     )
@@ -430,3 +435,80 @@ def test_manifest_matches_result_schema(tmp_path: pathlib.Path) -> None:
     jsonschema.Draft202012Validator(
         schema, format_checker=jsonschema.FormatChecker()
     ).validate(document)
+
+
+def _successful_correctness_run(
+    command: list[str] | tuple[str, ...],
+) -> subprocess.CompletedProcess[str]:
+    if list(command) == ["git", "rev-parse", "HEAD"]:
+        return subprocess.CompletedProcess(command, 0, "0" * 40 + "\n", "")
+    if list(command) == ["git", "status", "--porcelain"]:
+        return subprocess.CompletedProcess(command, 0, "", "")
+    return subprocess.CompletedProcess(command, 0, "checked\n", "")
+
+
+def test_semantic_fixture_vectors_are_current() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK / "generate-semantic-fixture-vectors.py"),
+            "--check",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "match 5 canonical Foot fixtures" in result.stdout
+
+
+def test_correctness_report_is_evidence_bounded_and_schema_valid(
+    tmp_path: pathlib.Path,
+) -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    report = build_report(_successful_correctness_run)
+
+    assert report["valid"] is True
+    assert report["oracle"]["commit"] == "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+    assert report["semantic_fixtures"]["fixture_count"] == 5
+    assert all(item["exact"] for item in report["final_buffer_evidence"])
+    assert report["fuzzing"]["status"] == "available-not-run"
+    assert report["fuzzing"]["recorded_duration_seconds"] is None
+    assert {item["status"] for item in report["external_observations"]} == {
+        "observed"
+    }
+    assert all(
+        "private" in item["claim_limit"]
+        or "does not prove" in item["claim_limit"]
+        for item in report["external_observations"]
+    )
+    sixel = next(
+        item for item in report["capability_matrix"] if item["capability"] == "sixel"
+    )
+    assert sixel["statuses"]["splinterm"] == "partial"
+    assert sixel["statuses"]["foot"] == "unknown"
+
+    output = tmp_path / "correctness"
+    write_report(output, report)
+    document = json.loads((output / "report.json").read_text())
+    schema = json.loads((BENCHMARK / "correctness-schema.json").read_text())
+    jsonschema.Draft202012Validator(schema).validate(document)
+    markdown = (output / "README.md").read_text()
+    assert "Correctness is reported separately from performance" in markdown
+    assert "available-not-run" in markdown
+
+
+def test_correctness_report_does_not_hide_failed_checks() -> None:
+    def failing_run(command: list[str] | tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        if list(command)[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(command, 0, "1" * 40 + "\n", "")
+        if list(command)[:2] == ["git", "status"]:
+            return subprocess.CompletedProcess(command, 0, " M file\n", "")
+        return subprocess.CompletedProcess(command, 7, "", "failed")
+
+    report = build_report(failing_run)
+    assert report["valid"] is False
+    assert report["repository"]["dirty"] is True
+    assert all(check["status"] == "failed" for check in report["checks"])
+    assert all(check["returncode"] == 7 for check in report["checks"])

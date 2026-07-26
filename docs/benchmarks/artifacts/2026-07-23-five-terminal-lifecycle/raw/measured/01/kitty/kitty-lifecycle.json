@@ -1,0 +1,16 @@
+{
+  "child_exit_ns": 254017394,
+  "isolation": {
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "workspace": 8
+  },
+  "notes": [],
+  "residual_process_count": 3,
+  "schema": "splinterm.benchmark.lifecycle.v1",
+  "terminal": "kitty",
+  "valid": true,
+  "window_persisted": false,
+  "window_unmap_ns": 254017394
+}

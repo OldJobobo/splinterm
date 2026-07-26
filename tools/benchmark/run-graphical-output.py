@@ -122,11 +122,17 @@ def main() -> int:
     parser.add_argument("--columns", type=int, default=80)
     parser.add_argument("--settle-seconds", type=float, default=1.0)
     parser.add_argument("--retain-screenshot", action="store_true")
+    parser.add_argument("--scrollback-lines", type=int)
     args = parser.parse_args()
     if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         parser.error("a running Hyprland session is required")
     if args.lines <= 0 or args.columns < 20 or args.settle_seconds < 0:
         parser.error("invalid workload dimensions or settle duration")
+    if (
+        args.scrollback_lines is not None
+        and not 0 <= args.scrollback_lines <= 1_000_000
+    ):
+        parser.error("scrollback lines must be between 0 and 1,000,000")
     if shutil.which("grim") is None:
         parser.error("grim is required for visible-marker approximation")
     if Image is None:
@@ -184,6 +190,7 @@ def main() -> int:
             case=args.case,
             lines=args.lines,
             columns=args.columns,
+            scrollback_lines=args.scrollback_lines,
         )
         launcher = state / "launch.sh"
         COMMON.write_launcher(launcher, command, environment)

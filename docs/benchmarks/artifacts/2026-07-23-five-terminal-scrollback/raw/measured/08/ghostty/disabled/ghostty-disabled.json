@@ -1,0 +1,48 @@
+{
+  "profile": "disabled",
+  "result": {
+    "case": "plain",
+    "isolation": {
+      "cleanup_verified": true,
+      "monitor": "DP-2",
+      "no_initial_focus": true,
+      "workspace": 8
+    },
+    "launch_mode": "standalone_process_launch",
+    "notes": [],
+    "processes": {
+      "child_included": true,
+      "child_pid": 76554,
+      "count_after": 2,
+      "count_before": 2,
+      "root_pids": [
+        76418
+      ]
+    },
+    "resources": {
+      "context_switches": 2328,
+      "cpu_ticks": 6,
+      "rss_after_bytes": 397225984,
+      "rss_before_bytes": 393605120,
+      "rss_growth_bytes": 3620864
+    },
+    "schema": "splinterm.benchmark.graphical-output.v1",
+    "terminal": "ghostty",
+    "valid": true,
+    "workload": {
+      "child_write_duration_ns": 30877957,
+      "columns": 80,
+      "lines": 5000,
+      "payload_bytes": 405000,
+      "total_bytes": 405126,
+      "trigger_to_visible_marker_ns": 522344046,
+      "trigger_to_write_complete_ns": 31571033,
+      "visible_boundary": "screenshot_polling_approximation",
+      "visible_marker_pixels": 10240
+    }
+  },
+  "schema": "splinterm.benchmark.scrollback.v1",
+  "scrollback_lines": 0,
+  "terminal": "ghostty",
+  "valid": true
+}

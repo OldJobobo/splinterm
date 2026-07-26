@@ -137,17 +137,28 @@ A benchmark command must not make graphical execution the default.
    fixed-size idle case, child-inclusive process-forest accounting, separate
    child-ready/window-map boundaries, and cleanup verification.
 3. **Five-terminal baseline (implemented):** randomized startup/idle,
-   trigger-gated plain/ANSI/Unicode, twelve-step resize, and mixed-output
-   retention blocks are implemented for all adapters. Output records keep
-   PTY-write and screenshot-visible boundaries separate.
-4. **Correctness report:** reuse Foot fixtures and add only portable external
-   observations where terminal-private state is unavailable.
+   trigger-gated plain/ANSI/Unicode, disabled-versus-large scrollback,
+   twelve-step resize, mixed-output retention, and no-hold process-exit
+   lifecycle blocks are implemented for
+   all adapters. Output records keep PTY-write and screenshot-visible
+   boundaries separate.
+4. **Correctness report (implemented):** a checked generator converts all five
+   pinned Foot semantic fixtures into dependency-free Rust parity vectors across
+   whole, bytewise, split, and deterministic chunking; the non-graphical report
+   inventories exact final-buffer evidence,
+   parser/fuzz and feature status, graphics capabilities, and only bounded
+   external observations where terminal-private state is unavailable.
 5. **Targeted input latency (implemented):** equal address-targeted Hyprland
    shortcuts reach each unfocused terminal; child receipt and screenshot-visible
    marker detection are recorded separately. True compositor presentation
-   remains explicitly `not-measured`. The retained 3-warmup/10-sample matrix
-   records Splinterm at 184.88 ms versus peer medians of 179.53–189.21 ms,
-   improved from the original 371.45 ms result.
+   remains explicitly `not-measured`. The 3-warmup/10-sample development matrix
+   is retained under
+   `docs/benchmarks/artifacts/2026-07-24-five-terminal-latency/`. Removing the
+   hard frame-callback redraw gate with a bounded two-buffer terminal-update path,
+   then armed Tokio update receivers with a coalescing calloop wake source. Together
+   these reduced Splinterm's screenshot-visible median from 371.45 ms to 184.88 ms;
+   the bounded frame fix alone measured 203.22 ms, and current peer medians are
+   179.53–189.21 ms.
 
 ## Current commands
 
@@ -160,6 +171,9 @@ python tools/benchmark/run.py manifest /tmp/splinterbench-manifest.json
 python tools/benchmark/run.py validate /tmp/splinterbench-manifest.json
 python tools/benchmark/run.py summarize /tmp/splinterbench-manifest.json
 python tools/benchmark/run.py sample-process $$ --json
+python tools/benchmark/run.py correctness-report /tmp/splinterbench-correctness
+python tools/benchmark/run.py validate-correctness \
+  /tmp/splinterbench-correctness/report.json
 python tools/benchmark/workloads/bench-child.py plain --lines 1000 >/dev/null
 ```
 
@@ -179,6 +193,10 @@ python tools/benchmark/run-resize-matrix.py /tmp/splinterbench-resize \
   --warmup-runs 3 --samples 10 --seed 20260725
 python tools/benchmark/run-retention-matrix.py /tmp/splinterbench-retention \
   --warmup-runs 3 --samples 10 --seed 20260726 --lines 5000
+python tools/benchmark/run-scrollback-matrix.py /tmp/splinterbench-scrollback \
+  --warmup-runs 3 --samples 10 --seed 20260727 --lines 5000
+python tools/benchmark/run-lifecycle-matrix.py /tmp/splinterbench-lifecycle \
+  --warmup-runs 3 --samples 10 --seed 20260728
 python tools/benchmark/run.py probe-latency-boundary --json
 python tools/benchmark/run-graphical-latency.py /tmp/splinterbench-latency-smoke \
   --terminal splinterm
