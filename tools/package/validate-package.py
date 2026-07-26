@@ -625,8 +625,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 23,
-                "maximum_version": 23,
+                "minimum_version": 24,
+                "maximum_version": 24,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
@@ -690,8 +690,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 23,
-                "maximum_version": 23,
+                "minimum_version": 24,
+                "maximum_version": 24,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
@@ -748,8 +748,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert restarted_relay.stdout is not None
             restarted_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 23,
-                "maximum_version": 23,
+                "minimum_version": 24,
+                "maximum_version": 24,
                 "role": "automation",
             }))
             restarted_relay.stdin.flush()
@@ -785,8 +785,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert broken_output_relay.stdout is not None
             broken_output_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 23,
-                "maximum_version": 23,
+                "minimum_version": 24,
+                "maximum_version": 24,
                 "role": "automation",
             }))
             broken_output_relay.stdin.flush()
