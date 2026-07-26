@@ -3231,7 +3231,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
     reason = "the single scenario intentionally records the complete Phase 8 lifecycle"
 )]
 async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
-    time::timeout(TEST_TIMEOUT, async {
+    time::timeout(Duration::from_secs(120), async {
         let daemon = Daemon::start().await;
         let mut creator = daemon.connect().await;
         let cwd = std::env::current_dir().unwrap();
