@@ -147,6 +147,9 @@ def main() -> int:
 
     state = pathlib.Path(f"/tmp/splinterm-cava-side-by-side-{os.getpid()}")
     state.mkdir(mode=0o700)
+    trace_dir = state / "trace"
+    if args.trace:
+        trace_dir.mkdir()
     socket = state / "splinterd.sock"
     addresses: list[str] = []
     daemon: subprocess.Popen[str] | None = None
@@ -161,6 +164,12 @@ def main() -> int:
             SPLINTERM_CONFIG=str(COMMON.PROFILES / "splinterm.ini"),
             XDG_STATE_HOME=str(state / "xdg-state"),
         )
+        if args.trace:
+            daemon_environment.update(
+                SPLINTERM_PERF_TRACE_DIR=str(trace_dir),
+                SPLINTERM_PERF_RUN_ID="pipewire-cava",
+                SPLINTERM_PERF_TRACE_MAX_EVENTS="32768",
+            )
         daemon_log = (state / "daemon.log").open("w", encoding="utf-8")
         daemon = subprocess.Popen(
             [str(COMMON.splinterd_executable())],
@@ -183,9 +192,7 @@ def main() -> int:
         splinter_command, splinter_environment = COMMON.launch_command(
             "splinterm", splinter_state, socket, args.duration_seconds
         )
-        trace_dir = state / "trace"
         if args.trace:
-            trace_dir.mkdir()
             splinter_environment.update(
                 SPLINTERM_PERF_TRACE_DIR=str(trace_dir),
                 SPLINTERM_PERF_RUN_ID="pipewire-cava",
