@@ -802,6 +802,22 @@ impl Terminal {
         }
     }
 
+    /// Returns the number of contiguous retained updates after `base` without
+    /// materializing or cloning their contents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResnapshotRequired`] when `base` is in the future or older
+    /// than the retained update-history window.
+    pub fn update_count_since(&self, base: TerminalRevision) -> Result<usize, ResnapshotRequired> {
+        self.validate_update_base(base)?;
+        Ok(self
+            .update_history
+            .iter()
+            .filter(|update| update.revision() > base)
+            .count())
+    }
+
     /// Returns contiguous retained updates after `base` or requires a snapshot.
     ///
     /// # Errors
@@ -809,15 +825,7 @@ impl Terminal {
     /// Returns [`ResnapshotRequired`] when `base` is in the future or older
     /// than the retained update-history window.
     pub fn updates_since(&self, base: TerminalRevision) -> Result<UpdateBatch, ResnapshotRequired> {
-        if base == self.revision {
-            return Ok(UpdateBatch::new(base, self.revision, Vec::new()));
-        }
-        let oldest_base = self.update_history.front().map_or(self.revision, |update| {
-            TerminalRevision::new(update.revision().value() - 1)
-        });
-        if base > self.revision || base < oldest_base {
-            return Err(ResnapshotRequired::new(base, oldest_base, self.revision));
-        }
+        self.validate_update_base(base)?;
         let updates = self
             .update_history
             .iter()
@@ -825,6 +833,16 @@ impl Terminal {
             .cloned()
             .collect();
         Ok(UpdateBatch::new(base, self.revision, updates))
+    }
+
+    fn validate_update_base(&self, base: TerminalRevision) -> Result<(), ResnapshotRequired> {
+        let oldest_base = self.update_history.front().map_or(self.revision, |update| {
+            TerminalRevision::new(update.revision().value() - 1)
+        });
+        if base > self.revision || base < oldest_base {
+            return Err(ResnapshotRequired::new(base, oldest_base, self.revision));
+        }
+        Ok(())
     }
 
     /// Drains one-shot semantic effects in parser order.
@@ -2122,29 +2140,14 @@ impl Terminal {
             return;
         };
         if self.synchronized_updates {
-            if !change.is_empty() {
-                self.synchronized_change.full();
-                let available = self
-                    .config
-                    .event_limit
-                    .saturating_sub(self.synchronized_change.events.len());
-                self.synchronized_change
-                    .events
-                    .extend(change.events.into_iter().take(available));
-            }
+            self.synchronized_change
+                .merge(change, self.config.event_limit);
             return;
         }
         if !self.synchronized_change.is_empty() {
-            self.synchronized_change.full();
-            let mut synchronized = std::mem::take(&mut self.synchronized_change);
-            let available = self
-                .config
-                .event_limit
-                .saturating_sub(synchronized.events.len());
-            synchronized
-                .events
-                .extend(change.events.into_iter().take(available));
-            change = synchronized;
+            self.synchronized_change
+                .merge(change, self.config.event_limit);
+            change = std::mem::take(&mut self.synchronized_change);
         }
         if change.is_empty() {
             return;
@@ -3971,12 +3974,33 @@ mod tests {
     #[test]
     fn synchronized_boundary_advance_stops_before_the_next_cava_frame() {
         let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let base_revision = terminal.revision();
         let bytes = b"\x1b[2026lA\x1b[2026h\x1b\\\x1b[2026lB";
         let (consumed, completed) = terminal.advance_to_synchronized_boundary(bytes);
 
         assert!(completed);
         assert_eq!(&bytes[..consumed], b"\x1b[2026lA\x1b[2026h");
         assert!(!terminal.synchronized_updates());
+        let updates = terminal
+            .updates_since(base_revision)
+            .expect("Cava update batch");
+        assert_eq!(updates.updates().len(), 1);
+        let damage = updates
+            .updates()
+            .next()
+            .expect("Cava update")
+            .damage()
+            .collect::<Vec<_>>();
+        assert!(
+            damage
+                .iter()
+                .any(|damage| matches!(damage, TerminalDamage::Rows { .. }))
+        );
+        assert!(
+            damage
+                .iter()
+                .all(|damage| !matches!(damage, TerminalDamage::FullSnapshot))
+        );
         assert_eq!(
             terminal.grid().row(0).unwrap()[0].content(),
             CellContent::Scalar('A')

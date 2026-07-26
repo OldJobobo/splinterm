@@ -11,6 +11,7 @@ use std::{
 };
 
 use splinterm_core::SplintId;
+use splinterm_protocol::perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled};
 use splinterm_pty::{
     LinuxPtyBackend, LinuxPtySession, PtyCommand, PtyError, PtySession, PtySignal, PtySize,
 };
@@ -1196,8 +1197,8 @@ fn publish_updates(
     subscribers: &mut Vec<Subscriber>,
 ) -> (usize, usize) {
     let update_count = terminal
-        .updates_since(publication.published_revision)
-        .map_or(0, |batch| batch.updates().len());
+        .update_count_since(publication.published_revision)
+        .unwrap_or(0);
     publication.published_revision = terminal.revision();
 
     let mut overflows = 0_usize;
@@ -1210,7 +1211,7 @@ fn publish_updates(
             overflows = overflows.saturating_add(1);
             return false;
         };
-        let updates = batch.updates().cloned().collect::<Vec<_>>();
+        let updates = batch.into_updates();
         if updates.is_empty() {
             return true;
         }
@@ -1291,6 +1292,10 @@ fn process_output(
     reply_limit: usize,
 ) -> Result<ProcessOutputMetrics, LiveError> {
     let mut metrics = ProcessOutputMetrics::default();
+    let trace_enabled = perf_trace_enabled();
+    let trace_base_revision = terminal.revision();
+    let mut mutation_ns = 0_u64;
+    let mut publication_ns = 0_u64;
     for batch in bytes.chunks(PARSE_BATCH) {
         metrics.parse_batches = metrics.parse_batches.saturating_add(1);
         let image_metrics_before = terminal.image_metrics();
@@ -1298,7 +1303,13 @@ fn process_output(
         let mut remaining = batch;
         while !remaining.is_empty() {
             let revision_before = terminal.revision();
+            let mutation_started = trace_enabled.then(Instant::now);
             let (consumed, completed_frame) = terminal.advance_to_synchronized_boundary(remaining);
+            if let Some(started) = mutation_started {
+                mutation_ns = mutation_ns.saturating_add(
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                );
+            }
             debug_assert!(consumed > 0 && consumed <= remaining.len());
             remaining = &remaining[consumed..];
             let now = Instant::now();
@@ -1309,14 +1320,21 @@ fn process_output(
                 !terminal.synchronized_updates() && terminal.revision() != revision_before
             };
             let (updates, overflows) = if publish_now {
-                publish_updates(
+                let publication_started = trace_enabled.then(Instant::now);
+                let result = publish_updates(
                     splint_id,
                     terminal,
                     publication,
                     incarnation,
                     child_exit,
                     subscribers,
-                )
+                );
+                if let Some(started) = publication_started {
+                    publication_ns = publication_ns.saturating_add(
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    );
+                }
+                result
             } else {
                 (0, 0)
             };
@@ -1347,6 +1365,35 @@ fn process_output(
                     .map_err(|_| LiveError::ReplyQueueFull)?;
             }
         }
+    }
+    if trace_enabled {
+        let common = PerfTraceEvent {
+            splint_id: Some(splint_id),
+            incarnation: Some(incarnation.value()),
+            base_revision: Some(trace_base_revision.value()),
+            revision: Some(terminal.revision().value()),
+            bytes: Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+            count: Some(metrics.parse_batches),
+            ..PerfTraceEvent::default()
+        };
+        emit_perf_trace(
+            "splinterd",
+            "terminal_mutation",
+            PerfTraceEvent {
+                duration_ns: Some(mutation_ns),
+                ..common
+            },
+        );
+        emit_perf_trace(
+            "splinterd",
+            "daemon_publication",
+            PerfTraceEvent {
+                duration_ns: Some(publication_ns),
+                count: Some(metrics.live_events),
+                resync: Some(metrics.subscriber_overflows > 0),
+                ..common
+            },
+        );
     }
     Ok(metrics)
 }
@@ -1413,10 +1460,11 @@ fn owned_snapshot(
     max_rows: usize,
     exited: Option<ProcessExit>,
 ) -> LiveSnapshot {
+    let trace_started = perf_trace_enabled().then(Instant::now);
     let snapshot = terminal.snapshot(SnapshotRequest {
         max_scrollback_rows: max_rows,
     });
-    LiveSnapshot {
+    let owned = LiveSnapshot {
         splint_id,
         incarnation,
         revision: snapshot.revision(),
@@ -1435,7 +1483,33 @@ fn owned_snapshot(
         scrollback_rows: snapshot.scrollback_rows().map(owned_row).collect(),
         scrollback: snapshot.scrollback(),
         exited,
+    };
+    if let Some(started) = trace_started {
+        emit_perf_trace(
+            "splinterd",
+            "owned_snapshot",
+            PerfTraceEvent {
+                splint_id: Some(splint_id),
+                incarnation: Some(incarnation.value()),
+                revision: Some(owned.revision.value()),
+                duration_ns: Some(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)),
+                rows: Some(
+                    u64::try_from(owned.visible_rows.len() + owned.scrollback_rows.len())
+                        .unwrap_or(u64::MAX),
+                ),
+                cells: Some(
+                    owned
+                        .visible_rows
+                        .iter()
+                        .chain(&owned.scrollback_rows)
+                        .map(|row| u64::try_from(row.cells.len()).unwrap_or(u64::MAX))
+                        .fold(0_u64, u64::saturating_add),
+                ),
+                ..PerfTraceEvent::default()
+            },
+        );
     }
+    owned
 }
 
 fn owned_row(row: splinterm_terminal::RowSnapshot<'_>) -> LiveRow {

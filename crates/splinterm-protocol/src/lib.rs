@@ -3,6 +3,8 @@
 //! Terminal DTOs in this crate are intentionally distinct from the borrowed
 //! `splinterm-terminal` and daemon runtime representations.
 
+pub mod perf_trace;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use splinterm_core::{
     Axis, Dojo, DojoId, Lair, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
 };
 
-pub const PROTOCOL_VERSION: u16 = 23;
+pub const PROTOCOL_VERSION: u16 = 24;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -1964,7 +1966,9 @@ pub enum MouseTracking {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub linebreak: bool,
     pub cells: Vec<TerminalCell>,
 }
@@ -2013,8 +2017,11 @@ fn valid_scrollback_identity(
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalCell {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spacer_remaining: Option<u32>,
+    #[serde(default, skip_serializing_if = "cell_attributes_are_default")]
     pub attributes: CellAttributes,
 }
 
@@ -2054,14 +2061,25 @@ fn color_value_is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+fn bool_is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn cell_attributes_are_default(attributes: &CellAttributes) -> bool {
+    *attributes == CellAttributes::default()
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "wire rendition flags are independent terminal semantics"
 )]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellAttributes {
+    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub bold: bool,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub dim: bool,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub italic: bool,
     #[serde(default, skip_serializing_if = "underline_is_none")]
     pub underline: UnderlineStyle,
@@ -2069,13 +2087,21 @@ pub struct CellAttributes {
     pub underline_color_source: ColorSource,
     #[serde(default, skip_serializing_if = "color_value_is_zero")]
     pub underline_color: u32,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub strikethrough: bool,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub blink: bool,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub conceal: bool,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub reverse: bool,
+    #[serde(default, skip_serializing_if = "color_source_is_default")]
     pub foreground_source: ColorSource,
+    #[serde(default, skip_serializing_if = "color_value_is_zero")]
     pub foreground: u32,
+    #[serde(default, skip_serializing_if = "color_source_is_default")]
     pub background_source: ColorSource,
+    #[serde(default, skip_serializing_if = "color_value_is_zero")]
     pub background: u32,
 }
 
@@ -2094,14 +2120,15 @@ pub enum ColorSource {
 /// # Errors
 /// Returns a serialization error or [`FrameEncodeError::TooLarge`].
 pub fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, FrameEncodeError> {
-    let body = serde_json::to_vec(value).map_err(FrameEncodeError::Serialize)?;
-    if body.len() > MAX_FRAME_BYTES || body.len() > u32::MAX as usize {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0; 4]);
+    serde_json::to_writer(&mut frame, value).map_err(FrameEncodeError::Serialize)?;
+    let body_len = frame.len() - 4;
+    if body_len > MAX_FRAME_BYTES || body_len > u32::MAX as usize {
         return Err(FrameEncodeError::TooLarge);
     }
-    let length = u32::try_from(body.len()).map_err(|_| FrameEncodeError::TooLarge)?;
-    let mut frame = Vec::with_capacity(body.len() + 4);
-    frame.extend_from_slice(&length.to_be_bytes());
-    frame.extend_from_slice(&body);
+    let length = u32::try_from(body_len).map_err(|_| FrameEncodeError::TooLarge)?;
+    frame[..4].copy_from_slice(&length.to_be_bytes());
     Ok(frame)
 }
 
@@ -2119,16 +2146,18 @@ mod tests {
 
     #[test]
     fn frames_are_length_prefixed_and_explicit() {
-        let frame = encode_frame(&ClientFrame::Hello {
+        let value = ClientFrame::Hello {
             minimum_version: PROTOCOL_VERSION,
             maximum_version: PROTOCOL_VERSION,
             role: ClientRole::Automation,
-        })
-        .unwrap();
+        };
+        let expected_body = serde_json::to_vec(&value).unwrap();
+        let frame = encode_frame(&value).unwrap();
         assert_eq!(
             u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize,
             frame.len() - 4
         );
+        assert_eq!(&frame[4..], expected_body);
         assert!(
             std::str::from_utf8(&frame[4..])
                 .unwrap()
@@ -2137,8 +2166,41 @@ mod tests {
     }
 
     #[test]
+    fn default_terminal_cells_use_compact_backward_readable_json() {
+        let empty = TerminalCell {
+            content: String::new(),
+            spacer_remaining: None,
+            attributes: CellAttributes::default(),
+        };
+        let encoded = serde_json::to_value(&empty).unwrap();
+        assert_eq!(encoded, serde_json::json!({}));
+        assert_eq!(
+            serde_json::from_value::<TerminalCell>(encoded).unwrap(),
+            empty
+        );
+
+        let space = TerminalCell {
+            content: " ".into(),
+            ..empty.clone()
+        };
+        let encoded = serde_json::to_value(&space).unwrap();
+        assert_eq!(encoded, serde_json::json!({"content": " "}));
+        assert_eq!(
+            serde_json::from_value::<TerminalCell>(encoded).unwrap(),
+            space
+        );
+
+        let mut bold = space;
+        bold.attributes.bold = true;
+        assert_eq!(
+            serde_json::to_value(&bold).unwrap(),
+            serde_json::json!({"content": " ", "attributes": {"bold": true}})
+        );
+    }
+
+    #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 23);
+        assert_eq!(PROTOCOL_VERSION, 24);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

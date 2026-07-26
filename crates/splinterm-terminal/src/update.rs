@@ -124,6 +124,12 @@ impl UpdateBatch {
     pub fn updates(&self) -> impl ExactSizeIterator<Item = &TerminalUpdate> {
         self.updates.iter()
     }
+
+    /// Consumes the batch and returns its already-owned updates.
+    #[must_use]
+    pub fn into_updates(self) -> Vec<TerminalUpdate> {
+        self.updates
+    }
 }
 
 /// The requested update base is unavailable; the caller must take a snapshot.
@@ -214,6 +220,26 @@ impl ChangeSet {
         {
             self.damage.push(damage);
         }
+    }
+
+    pub(crate) fn merge(&mut self, mut other: Self, event_limit: usize) {
+        let self_is_full = self
+            .damage
+            .iter()
+            .any(|damage| matches!(damage, TerminalDamage::FullSnapshot));
+        let other_is_full = other
+            .damage
+            .iter()
+            .any(|damage| matches!(damage, TerminalDamage::FullSnapshot));
+        if other_is_full {
+            self.full();
+        } else if !self_is_full {
+            // Preserve parser order, particularly for repeated scroll operations.
+            // Wire publication coalesces row/metadata flags against the final snapshot.
+            self.damage.append(&mut other.damage);
+        }
+        let available = event_limit.saturating_sub(self.events.len());
+        self.events.extend(other.events.into_iter().take(available));
     }
 
     pub(crate) fn is_empty(&self) -> bool {

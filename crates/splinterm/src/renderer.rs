@@ -14,7 +14,7 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicI32, AtomicU16, Ordering},
     },
     time::Instant,
 };
@@ -70,6 +70,7 @@ static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 6], String>> = OnceLock::new()
 static RENDERER_OPTIONS: OnceLock<RendererOptions> = OnceLock::new();
 static OUTPUT_DPI: OnceLock<Mutex<OutputDpiObservation>> = OnceLock::new();
 static FONT_ZOOM_STEPS: AtomicI32 = AtomicI32::new(0);
+static BACKGROUND_ALPHA: AtomicU16 = AtomicU16::new(u16::MAX);
 const FONT_ZOOM_STEP_POINTS: f32 = 0.5;
 
 #[derive(Clone, Debug)]
@@ -111,9 +112,12 @@ pub fn configure(options: RendererOptions) -> Result<()> {
         120,
         options.physical_dpi,
     )?;
+    let background_alpha = options.background_alpha;
     RENDERER_OPTIONS
         .set(options)
-        .map_err(|_| anyhow::anyhow!("renderer is already configured"))
+        .map_err(|_| anyhow::anyhow!("renderer is already configured"))?;
+    BACKGROUND_ALPHA.store(background_alpha, Ordering::Relaxed);
+    Ok(())
 }
 
 fn renderer_options() -> &'static RendererOptions {
@@ -1520,17 +1524,31 @@ fn fill_rect(
     color: [u8; 4],
 ) {
     let (x, y, width, height) = rect;
-    for dy in 0..height {
-        for dx in 0..width {
-            put_pixel(
-                canvas,
-                canvas_width,
-                canvas_height,
-                x + i32::try_from(dx).expect("rectangle x fits i32"),
-                y + i32::try_from(dy).expect("rectangle y fits i32"),
-                color,
-            );
-        }
+    let left = i64::from(x).clamp(0, i64::from(canvas_width));
+    let top = i64::from(y).clamp(0, i64::from(canvas_height));
+    let right = (i64::from(x) + i64::from(width)).clamp(0, i64::from(canvas_width));
+    let bottom = (i64::from(y) + i64::from(height)).clamp(0, i64::from(canvas_height));
+    if left >= right || top >= bottom {
+        return;
+    }
+    let stride = usize::try_from(canvas_width).expect("canvas width fits usize") * 4;
+    let left = usize::try_from(left).expect("clipped rectangle left fits usize") * 4;
+    let right = usize::try_from(right).expect("clipped rectangle right fits usize") * 4;
+    let top = usize::try_from(top).expect("clipped rectangle top fits usize");
+    let bottom = usize::try_from(bottom).expect("clipped rectangle bottom fits usize");
+    let first_start = top * stride + left;
+    let first_end = top * stride + right;
+    let bgra = [color[2], color[1], color[0], color[3]];
+    canvas[first_start..first_start + 4].copy_from_slice(&bgra);
+    let mut filled = 4;
+    while first_start + filled < first_end {
+        let copied = filled.min(first_end - first_start - filled);
+        canvas.copy_within(first_start..first_start + copied, first_start + filled);
+        filled += copied;
+    }
+    for row in top + 1..bottom {
+        let target = row * stride + left;
+        canvas.copy_within(first_start..first_end, target);
     }
 }
 
@@ -1653,13 +1671,6 @@ fn pixel_index(width: u32, height: u32, x: i32, y: i32) -> Option<usize> {
         .checked_mul(4)
 }
 
-fn put_pixel(canvas: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgba: [u8; 4]) {
-    let Some(index) = pixel_index(width, height, x, y) else {
-        return;
-    };
-    canvas[index..index + 4].copy_from_slice(&[rgba[2], rgba[1], rgba[0], rgba[3]]);
-}
-
 fn pixman_multiply_unorm8(value: u8, alpha: u32) -> u32 {
     let product = u32::from(value) * alpha + 0x80;
     ((product >> 8) + product) >> 8
@@ -1670,7 +1681,11 @@ fn alpha_u8(alpha: u16) -> u8 {
 }
 
 fn background_alpha_u8() -> u8 {
-    alpha_u8(renderer_options().background_alpha)
+    alpha_u8(BACKGROUND_ALPHA.load(Ordering::Relaxed))
+}
+
+pub(crate) fn set_background_alpha(alpha: u16) {
+    BACKGROUND_ALPHA.store(alpha, Ordering::Relaxed);
 }
 
 fn premultiplied_rgba(rgb: [u8; 3], alpha: u8) -> [u8; 4] {
@@ -2087,6 +2102,7 @@ pub(crate) struct SnapshotFrame {
     default_backgrounds: Vec<bool>,
     foregrounds: Vec<[u8; 3]>,
     cell_metrics: Vec<DecorationMetrics>,
+    primary_metrics: [DecorationMetrics; 4],
     cell_spans: Vec<u32>,
     columns: u32,
     rows: u32,
@@ -2348,6 +2364,7 @@ impl SnapshotFrame {
             default_backgrounds,
             foregrounds,
             cell_metrics,
+            primary_metrics,
             cell_spans,
             columns,
             rows,
@@ -2387,15 +2404,25 @@ impl SnapshotFrame {
         let font_size = effective_font_size(u32::from(self.scale_120))?;
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
-        let primary_metrics = primary_decoration_metrics(faces, font_size)?;
         let mut shape_context = ShapeContext::new();
+        self.glyphs.retain(|glyph| {
+            !usize::try_from(glyph.row)
+                .ok()
+                .and_then(|row| dirty_rows.get(row))
+                .copied()
+                .unwrap_or(false)
+        });
+        self.decorations.retain(|decoration| {
+            !usize::try_from(decoration.row)
+                .ok()
+                .and_then(|row| dirty_rows.get(row))
+                .copied()
+                .unwrap_or(false)
+        });
         for (row_index, dirty) in dirty_rows.iter().copied().enumerate().take(snapshot.rows) {
             if !dirty {
                 continue;
             }
-            let row_number = u32::try_from(row_index).context("row fits u32")?;
-            self.glyphs.retain(|glyph| glyph.row != row_number);
-            self.decorations.retain(|span| span.row != row_number);
             let start = row_index
                 .checked_mul(snapshot.columns)
                 .context("snapshot row start overflow")?;
@@ -2416,7 +2443,7 @@ impl SnapshotFrame {
                 self.baseline,
                 default_foreground,
                 default_background,
-                &primary_metrics,
+                &self.primary_metrics,
                 &mut shape_context,
                 &mut self.backgrounds,
                 &mut self.default_backgrounds,
@@ -2860,25 +2887,36 @@ fn prepare_snapshot_row(
         if !cell_is_renderable(cell) {
             continue;
         }
-        if cell.content.chars().count() == 1 {
-            let character = cell.content.chars().next().context("cell has content")?;
-            let thickness = box_drawing::default_thickness(cell_width, cell_height, scale);
-            if let Some(mask) = box_drawing::generate(character, cell_width, cell_height, thickness)
-            {
-                let key = GlyphKey {
-                    face: BOX_DRAWING_FACE,
-                    glyph: u16::try_from(u32::from(character)).context("box codepoint fits u16")?,
-                };
-                cache.entry(key).or_insert_with(|| {
-                    Arc::new(CachedGlyph {
-                        content: Content::Mask,
-                        left: 0,
-                        top: baseline,
-                        width: mask.width,
-                        height: mask.height,
-                        data: mask.data,
-                    })
-                });
+        let mut characters = cell.content.chars();
+        if let (Some(character), None) = (characters.next(), characters.next())
+            && let Ok(glyph) = u16::try_from(u32::from(character))
+        {
+            let key = GlyphKey {
+                face: BOX_DRAWING_FACE,
+                glyph,
+            };
+            let generated = if cache.contains_key(&key) {
+                true
+            } else {
+                let thickness = box_drawing::default_thickness(cell_width, cell_height, scale);
+                box_drawing::generate(character, cell_width, cell_height, thickness).is_some_and(
+                    |mask| {
+                        cache.insert(
+                            key,
+                            Arc::new(CachedGlyph {
+                                content: Content::Mask,
+                                left: 0,
+                                top: baseline,
+                                width: mask.width,
+                                height: mask.height,
+                                data: mask.data,
+                            }),
+                        );
+                        true
+                    },
+                )
+            };
+            if generated {
                 glyphs.push(SnapshotGlyph {
                     key,
                     column,
@@ -2941,7 +2979,10 @@ fn prepare_snapshot_row(
 }
 
 fn cell_is_renderable(cell: &splinterm_protocol::TerminalCell) -> bool {
-    !cell.content.is_empty() && cell.spacer_remaining.is_none() && !cell.attributes.conceal
+    !cell.content.is_empty()
+        && !cell.content.bytes().all(|byte| byte == b' ')
+        && cell.spacer_remaining.is_none()
+        && !cell.attributes.conceal
 }
 
 fn leader_span(cells: &[splinterm_protocol::TerminalCell], leader: usize) -> u32 {
@@ -3716,6 +3757,26 @@ fn paint_placed_glyph(
     let grid_top = i32::try_from(grid.y).unwrap_or(i32::MAX);
     let grid_right = i32::try_from(grid.x.saturating_add(grid.width)).unwrap_or(i32::MAX);
     let grid_bottom = i32::try_from(grid.y.saturating_add(grid.height)).unwrap_or(i32::MAX);
+    if placed.key.face == BOX_DRAWING_FACE {
+        let character = char::from_u32(u32::from(placed.key.glyph));
+        if let Some((rect_x, rect_y, rect_width, rect_height)) = character.and_then(|character| {
+            box_drawing::opaque_block_rect(character, glyph.width, glyph.height)
+        }) {
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    pen_x + glyph.left + i32::try_from(rect_x).expect("block x fits i32"),
+                    baseline - glyph.top + i32::try_from(rect_y).expect("block y fits i32"),
+                    rect_width,
+                    rect_height,
+                ),
+                [foreground[0], foreground[1], foreground[2], 0xff],
+            );
+            return;
+        }
+    }
     blend_glyph(
         canvas,
         width,
@@ -4313,23 +4374,26 @@ fn compose_snapshot_rows(
         })
     };
     let canvas_background = premultiplied_rgba(frame.canvas_background, background_alpha_u8());
+    let visible_columns = frame.columns.min(geometry.columns);
     for row in 0..frame.rows {
-        if !row_is_dirty(row) {
+        if !row_is_dirty(row) || visible_columns == 0 {
             continue;
         }
-        for column in 0..frame.columns {
-            let Some((x, y, cell_width, cell_height)) = frame.cell_rect(geometry, column, row)
-            else {
-                continue;
-            };
-            fill_rect(
-                canvas,
-                width,
-                height,
-                (x, y, cell_width, cell_height),
-                canvas_background,
-            );
-        }
+        let Some((x, y, cell_width, cell_height)) = frame.cell_rect(geometry, 0, row) else {
+            continue;
+        };
+        fill_rect(
+            canvas,
+            width,
+            height,
+            (
+                x,
+                y,
+                cell_width.saturating_mul(visible_columns),
+                cell_height,
+            ),
+            canvas_background,
+        );
     }
     paint_snapshot_images(
         canvas, width, height, frame, geometry, region, dirty_rows, 0,
@@ -4375,35 +4439,50 @@ fn compose_snapshot_rows(
         if !row_is_dirty(row) {
             continue;
         }
+        let glyph_start = frame.glyphs.partition_point(|glyph| glyph.row < row);
+        let glyph_end = frame.glyphs.partition_point(|glyph| glyph.row <= row);
+        let row_glyphs = &frame.glyphs[glyph_start..glyph_end];
+        let decoration_start = frame
+            .decorations
+            .partition_point(|decoration| decoration.row < row);
+        let decoration_end = frame
+            .decorations
+            .partition_point(|decoration| decoration.row <= row);
+        let row_decorations = &frame.decorations[decoration_start..decoration_end];
+        let mut glyph_end = row_glyphs.len();
+        let mut decoration_end = row_decorations.len();
         for column in (0..frame.columns).rev() {
             let has_block_cursor =
                 frame.cursor == Some((column, row)) && effective == EffectiveCursorShape::Block;
-            if has_block_cursor {
-                continue;
+            let mut glyph_start = glyph_end;
+            while glyph_start > 0 && row_glyphs[glyph_start - 1].column == column {
+                glyph_start -= 1;
             }
-            for placed in frame
-                .glyphs
-                .iter()
-                .filter(|glyph| glyph.row == row && glyph.column == column)
-                .rev()
-            {
-                paint_placed_glyph(
-                    canvas,
-                    width,
-                    height,
-                    frame,
-                    geometry,
-                    placed,
-                    placed.foreground,
-                );
+            if !has_block_cursor {
+                for placed in row_glyphs[glyph_start..glyph_end].iter().rev() {
+                    paint_placed_glyph(
+                        canvas,
+                        width,
+                        height,
+                        frame,
+                        geometry,
+                        placed,
+                        placed.foreground,
+                    );
+                }
             }
-            for decoration in frame
-                .decorations
-                .iter()
-                .filter(|span| span.row == row && span.column == column)
-            {
-                paint_decoration_span(canvas, width, height, frame, geometry, decoration, None);
+            glyph_end = glyph_start;
+
+            let mut decoration_start = decoration_end;
+            while decoration_start > 0 && row_decorations[decoration_start - 1].column == column {
+                decoration_start -= 1;
             }
+            if !has_block_cursor {
+                for decoration in &row_decorations[decoration_start..decoration_end] {
+                    paint_decoration_span(canvas, width, height, frame, geometry, decoration, None);
+                }
+            }
+            decoration_end = decoration_start;
         }
     }
     paint_snapshot_images(
@@ -4814,10 +4893,17 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             exited_code: None,
             exited_signal: None,
         };
+        let mut block_snapshot = snapshot.clone();
+        for row in &mut block_snapshot.visible_rows {
+            for cell in &mut row.cells {
+                cell.content = "█".into();
+            }
+        }
         let cold_started = Instant::now();
         let mut frame = SnapshotFrame::load(&snapshot, 1)?;
         let cold_ns = u64::try_from(cold_started.elapsed().as_nanos())
             .context("cold frame duration fits u64")?;
+        let mut block_frame = SnapshotFrame::load(&block_snapshot, 1)?;
         let geometry = frame.tight_geometry()?;
         let width = geometry.buffer_width();
         let height = geometry.buffer_height();
@@ -4833,8 +4919,13 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
         let mut full = Vec::with_capacity(samples);
         let mut row_prepare = Vec::with_capacity(samples);
         let mut row_damage = Vec::with_capacity(samples);
+        let mut all_rows_prepare = Vec::with_capacity(samples);
+        let mut all_rows_damage = Vec::with_capacity(samples);
+        let mut block_all_rows_prepare = Vec::with_capacity(samples);
+        let mut block_all_rows_damage = Vec::with_capacity(samples);
         let mut dirty = vec![false; rows];
         dirty[rows / 2] = true;
+        let all_dirty = vec![true; rows];
         for _ in 0..samples {
             let started = Instant::now();
             std::hint::black_box(SnapshotFrame::load(&snapshot, 1)?);
@@ -4844,6 +4935,20 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             frame.refresh_rows(&snapshot, &dirty)?;
             row_prepare.push(
                 u64::try_from(started.elapsed().as_nanos()).context("row preparation duration")?,
+            );
+
+            let started = Instant::now();
+            frame.refresh_rows(&snapshot, &all_dirty)?;
+            all_rows_prepare.push(
+                u64::try_from(started.elapsed().as_nanos())
+                    .context("all-row preparation duration")?,
+            );
+
+            let started = Instant::now();
+            block_frame.refresh_rows(&block_snapshot, &all_dirty)?;
+            block_all_rows_prepare.push(
+                u64::try_from(started.elapsed().as_nanos())
+                    .context("block all-row preparation duration")?,
             );
 
             let started = Instant::now();
@@ -4873,6 +4978,39 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             std::hint::black_box(&canvas);
             row_damage
                 .push(u64::try_from(started.elapsed().as_nanos()).context("row paint duration")?);
+
+            let started = Instant::now();
+            paint_snapshot_rows(
+                &mut canvas,
+                width,
+                height,
+                &frame,
+                &geometry,
+                &all_dirty,
+                true,
+                CursorStyle::Block,
+            );
+            std::hint::black_box(&canvas);
+            all_rows_damage.push(
+                u64::try_from(started.elapsed().as_nanos()).context("all-row paint duration")?,
+            );
+
+            let started = Instant::now();
+            paint_snapshot_rows(
+                &mut canvas,
+                width,
+                height,
+                &block_frame,
+                &geometry,
+                &all_dirty,
+                true,
+                CursorStyle::Block,
+            );
+            std::hint::black_box(&canvas);
+            block_all_rows_damage.push(
+                u64::try_from(started.elapsed().as_nanos())
+                    .context("block all-row paint duration")?,
+            );
         }
         let evicted_entries = evict_snapshot_glyphs();
         let repopulate_started = Instant::now();
@@ -4904,8 +5042,12 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
             "cold_frame_ns": cold_ns,
             "warm_full_prepare_ns": timing_summary(&mut warm),
             "one_row_prepare_ns": timing_summary(&mut row_prepare),
+            "all_rows_prepare_ns": timing_summary(&mut all_rows_prepare),
+            "block_all_rows_prepare_ns": timing_summary(&mut block_all_rows_prepare),
             "full_paint_ns": timing_summary(&mut full),
             "one_row_paint_ns": timing_summary(&mut row_damage),
+            "all_rows_paint_ns": timing_summary(&mut all_rows_damage),
+            "block_all_rows_paint_ns": timing_summary(&mut block_all_rows_damage),
             "forced_eviction": { "entries": evicted_entries, "repopulate_ns": repopulate_ns },
             "scale_invalidation_ns": { "change": scale_change_ns, "return": scale_return_ns },
             "theme_invalidation_ns": { "change": theme_change_ns, "return": theme_return_ns },
@@ -6512,6 +6654,10 @@ mod tests {
             attributes,
         };
         assert!(!cell_is_renderable(&cell));
+        cell.content = "   ".into();
+        assert!(!cell_is_renderable(&cell));
+        cell.content = "\u{00a0}".into();
+        assert!(cell_is_renderable(&cell));
         cell.content = "x".into();
         cell.spacer_remaining = Some(1);
         assert!(!cell_is_renderable(&cell));
@@ -6681,6 +6827,12 @@ mod tests {
                 };
                 2
             ],
+            primary_metrics: [DecorationMetrics {
+                underline_position: -1,
+                underline_thickness: 1,
+                strike_position: 1,
+                strike_thickness: 1,
+            }; 4],
             cell_spans: vec![2, 0],
             columns: 2,
             rows: 1,
@@ -6735,6 +6887,12 @@ mod tests {
                 };
                 3
             ],
+            primary_metrics: [DecorationMetrics {
+                underline_position: 0,
+                underline_thickness: 1,
+                strike_position: 0,
+                strike_thickness: 1,
+            }; 4],
             cell_spans: vec![1; 3],
             columns: 1,
             rows: 3,
@@ -7524,6 +7682,12 @@ mod tests {
             default_backgrounds: Vec::new(),
             foregrounds: Vec::new(),
             cell_metrics: Vec::new(),
+            primary_metrics: [DecorationMetrics {
+                underline_position: -2,
+                underline_thickness: 1,
+                strike_position: 5,
+                strike_thickness: 1,
+            }; 4],
             cell_spans: Vec::new(),
             columns: 0,
             rows: 0,

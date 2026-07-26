@@ -353,10 +353,29 @@ fn bounded_history_forces_resnapshot_on_gaps_and_future_bases() {
         .unwrap_err();
     assert_eq!(gap.oldest_available().value(), 2);
     assert_eq!(gap.current().value(), 4);
+    assert_eq!(
+        terminal
+            .update_count_since(TerminalRevision::default())
+            .unwrap_err(),
+        gap
+    );
 
+    assert_eq!(
+        terminal
+            .update_count_since(TerminalRevision::new(2))
+            .unwrap(),
+        2
+    );
     let retained = terminal.updates_since(TerminalRevision::new(2)).unwrap();
+    let expected = retained.updates().cloned().collect::<Vec<_>>();
+    assert_eq!(retained.clone().into_updates(), expected);
     assert_eq!(retained.updates().count(), 2);
     assert!(terminal.updates_since(TerminalRevision::new(9)).is_err());
+    assert!(
+        terminal
+            .update_count_since(TerminalRevision::new(9))
+            .is_err()
+    );
     assert_eq!(
         terminal
             .updates_since(terminal.revision())
@@ -365,6 +384,7 @@ fn bounded_history_forces_resnapshot_on_gaps_and_future_bases() {
             .count(),
         0
     );
+    assert_eq!(terminal.update_count_since(terminal.revision()).unwrap(), 0);
 }
 
 #[test]

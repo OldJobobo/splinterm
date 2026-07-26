@@ -37,8 +37,9 @@ pub struct AppConfig {
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub resize_delay_ms: u64,
-    /// Foot-compatible 16-bit background alpha (`[colors] alpha`).
-    pub background_alpha: u16,
+    /// Optional Foot-compatible background-alpha override (`[colors] alpha`).
+    /// When absent, the active theme owns background translucency.
+    pub background_alpha: Option<u16>,
     pub theme_path: PathBuf,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
@@ -83,7 +84,7 @@ impl Default for AppConfig {
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             resize_delay_ms: 0,
-            background_alpha: u16::MAX,
+            background_alpha: None,
             theme_path: default_config_dir().join("theme.json"),
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
@@ -290,7 +291,7 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
             }
             "colors.alpha" => {
                 let alpha = parse_range(value, 0.0_f32, 1.0_f32, index)?;
-                config.background_alpha = foot_alpha(alpha);
+                config.background_alpha = Some(foot_alpha(alpha));
                 false
             }
             "scrollback.lines" => {
@@ -400,7 +401,7 @@ fn expand_path(value: &str) -> PathBuf {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThemePalette {
     pub background: String,
@@ -409,6 +410,8 @@ pub struct ThemePalette {
     pub selection: String,
     pub url: String,
     pub ui_accent: String,
+    #[serde(default = "opaque_alpha")]
+    pub alpha: f32,
     #[serde(default)]
     pub pane_border: Option<String>,
     #[serde(default)]
@@ -426,6 +429,7 @@ pub struct ResolvedTheme {
     pub ui_accent: u32,
     pub pane_border: u32,
     pub pane_border_active: u32,
+    pub background_alpha: u16,
     pub ansi: [u32; 16],
 }
 
@@ -440,11 +444,26 @@ impl Default for ResolvedTheme {
             ui_accent: 0x78d2ff,
             pane_border: 0x7c7e80,
             pane_border_active: 0x78d2ff,
+            background_alpha: u16::MAX,
             ansi: [
                 0x1d2021, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
                 0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
             ],
         }
+    }
+}
+
+const fn opaque_alpha() -> f32 {
+    1.0
+}
+
+impl ResolvedTheme {
+    #[must_use]
+    pub fn with_background_alpha_override(mut self, alpha: Option<u16>) -> Self {
+        if let Some(alpha) = alpha {
+            self.background_alpha = alpha;
+        }
+        self
     }
 }
 
@@ -457,6 +476,9 @@ impl ThemePalette {
         let mut ansi = [0; 16];
         for (out, value) in ansi.iter_mut().zip(&self.ansi) {
             *out = parse_color(value)?;
+        }
+        if !self.alpha.is_finite() || !(0.0..=1.0).contains(&self.alpha) {
+            bail!("theme alpha must be between 0.0 and 1.0");
         }
         let background = parse_color(&self.background)?;
         let foreground = parse_color(&self.foreground)?;
@@ -480,6 +502,7 @@ impl ThemePalette {
                 .map(parse_color)
                 .transpose()?
                 .unwrap_or(ui_accent),
+            background_alpha: foot_alpha(self.alpha),
             ansi,
         })
     }
@@ -612,8 +635,9 @@ mod tests {
                 .unwrap()
                 .config
                 .background_alpha,
-            foot_alpha(0.888)
+            Some(foot_alpha(0.888))
         );
+        assert_eq!(parse("").unwrap().config.background_alpha, None);
         assert!(parse("[colors]\nalpha=-0.1\n").is_err());
         assert!(parse("[colors]\nalpha=1.1\n").is_err());
     }
@@ -657,6 +681,7 @@ mod tests {
         assert_eq!(resolved.ui_accent, 6);
         assert_eq!(resolved.pane_border, 2);
         assert_eq!(resolved.pane_border_active, 6);
+        assert_eq!(resolved.background_alpha, u16::MAX);
         assert_eq!(resolved.ansi[15], 15);
 
         let explicit = json.replace(
@@ -669,5 +694,26 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.pane_border, 7);
         assert_eq!(resolved.pane_border_active, 8);
+
+        let themed = json.replace("\"ui_accent\"", "\"alpha\":0.85,\"ui_accent\"");
+        let resolved = serde_json::from_str::<ThemePalette>(&themed)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(resolved.background_alpha, foot_alpha(0.85));
+        assert_eq!(
+            resolved
+                .with_background_alpha_override(Some(foot_alpha(0.7)))
+                .background_alpha,
+            foot_alpha(0.7)
+        );
+        assert!(
+            serde_json::from_str::<ThemePalette>(
+                &json.replace("\"ui_accent\"", "\"alpha\":1.1,\"ui_accent\"")
+            )
+            .unwrap()
+            .resolve()
+            .is_err()
+        );
     }
 }

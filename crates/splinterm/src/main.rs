@@ -6,6 +6,7 @@ use std::{
     path::PathBuf,
     process::Command as ProcessCommand,
     sync::mpsc as std_mpsc,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -38,6 +39,7 @@ use splinterm_protocol::{
     LaunchParameters, MAX_CONSENT_FRAME_BYTES, Request, Response, ServerFrame, SubscriptionEvent,
     TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot, TerminalUpdate,
     UnderlineStyle,
+    perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use tokio::sync::mpsc;
 
@@ -4247,6 +4249,7 @@ fn theme_file_fingerprint(path: &std::path::Path) -> Option<(u64, u64, u64, i64,
 
 async fn watch_theme(
     path: PathBuf,
+    alpha_override: Option<u16>,
     mut current: ResolvedTheme,
     updates: mpsc::Sender<WindowUpdate>,
 ) {
@@ -4260,7 +4263,7 @@ async fn watch_theme(
             continue;
         }
         observed = next_fingerprint;
-        match load_theme(&path) {
+        match load_theme(&path).map(|theme| theme.with_background_alpha_override(alpha_override)) {
             Ok(next) if next != current => {
                 current = next;
                 if updates.send(WindowUpdate::Theme(next)).await.is_err() {
@@ -4518,6 +4521,23 @@ async fn run_pane_subscription(
                     }
                     EventAction::Update { sequence, update }
                         if update_advances_from(&update, last_revision) => {
+                        if perf_trace_enabled() {
+                            emit_perf_trace(
+                                "splinterm",
+                                "client_receive",
+                                PerfTraceEvent {
+                                    splint_id: Some(splint_id),
+                                    incarnation: Some(incarnation),
+                                    base_revision: Some(update.base_revision),
+                                    revision: Some(update.revision),
+                                    subscription_id: Some(attachment.subscription_id),
+                                    transaction_sequence: Some(sequence),
+                                    rows: Some(u64::try_from(update.rows.len()).unwrap_or(u64::MAX)),
+                                    count: Some(1),
+                                    ..PerfTraceEvent::default()
+                                },
+                            );
+                        }
                         last_revision = update.revision;
                         resolve_update_images(
                             &mut connection,
@@ -4527,8 +4547,34 @@ async fn run_pane_subscription(
                             &image_cache,
                         ).await?;
                         let image_sources = lease_update_images(&image_cache, &update)?;
+                        let base_revision = update.base_revision;
+                        let revision = update.revision;
+                        let queue_depth = updates.max_capacity().saturating_sub(updates.capacity());
+                        let enqueue_started = perf_trace_enabled().then(Instant::now);
                         if updates.send(WindowUpdate::Update { update, image_sources }).await.is_err() {
                             return controller.await.context("pane controller task failed")?;
+                        }
+                        if let Some(started) = enqueue_started {
+                            emit_perf_trace(
+                                "splinterm",
+                                "client_enqueue",
+                                PerfTraceEvent {
+                                    splint_id: Some(splint_id),
+                                    incarnation: Some(incarnation),
+                                    base_revision: Some(base_revision),
+                                    revision: Some(revision),
+                                    subscription_id: Some(attachment.subscription_id),
+                                    transaction_sequence: Some(sequence),
+                                    duration_ns: Some(
+                                        u64::try_from(started.elapsed().as_nanos())
+                                            .unwrap_or(u64::MAX),
+                                    ),
+                                    queue_depth: Some(
+                                        u64::try_from(queue_depth).unwrap_or(u64::MAX),
+                                    ),
+                                    ..PerfTraceEvent::default()
+                                },
+                            );
                         }
                         last_sequence = sequence;
                     }
@@ -4928,15 +4974,17 @@ async fn run_live_multipane_window(
     config: AppConfig,
     window_model: splinterm_core::Window,
 ) -> Result<()> {
+    let theme = load_theme(&config.theme_path)
+        .unwrap_or_default()
+        .with_background_alpha_override(config.background_alpha);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
         physical_dpi: 96.0,
         padding: config.padding,
-        background_alpha: config.background_alpha,
+        background_alpha: theme.background_alpha,
     })?;
-    let theme = load_theme(&config.theme_path).unwrap_or_default();
     let mut ids = Vec::new();
     layout_splint_ids(&window_model.root, &mut ids);
     let image_cache =
@@ -4958,6 +5006,7 @@ async fn run_live_multipane_window(
         .map(|pane| pane.updates.clone())
         .collect::<Vec<_>>();
     let theme_path = config.theme_path.clone();
+    let alpha_override = config.background_alpha;
     let theme_task = tokio::spawn(async move {
         let mut current = theme;
         let mut observed = theme_file_fingerprint(&theme_path);
@@ -4970,7 +5019,9 @@ async fn run_live_multipane_window(
                 continue;
             }
             observed = next_fingerprint;
-            if let Ok(next) = load_theme(&theme_path) {
+            if let Ok(next) = load_theme(&theme_path)
+                .map(|theme| theme.with_background_alpha_override(alpha_override))
+            {
                 if next != current {
                     current = next;
                     for sender in &theme_senders {
@@ -5040,18 +5091,20 @@ async fn run_live_multipane_window(
     reason = "subscription resync, controller ownership, and window task shutdown are one lifecycle"
 )]
 async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
+    let theme = load_theme(&config.theme_path)
+        .unwrap_or_else(|error| {
+            eprintln!("splinterm theme: {error:#}; using safe fallback palette");
+            ResolvedTheme::default()
+        })
+        .with_background_alpha_override(config.background_alpha);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
         physical_dpi: 96.0,
         padding: config.padding,
-        background_alpha: config.background_alpha,
+        background_alpha: theme.background_alpha,
     })?;
-    let theme = load_theme(&config.theme_path).unwrap_or_else(|error| {
-        eprintln!("splinterm theme: {error:#}; using safe fallback palette");
-        ResolvedTheme::default()
-    });
     let mut connection = Connection::connect().await?;
     let incarnation = connection.live_incarnation(splint_id).await?;
     let requested_scopes = vec![
@@ -5094,6 +5147,7 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
     let _theme_watcher = tokio::spawn(watch_theme(
         config.theme_path.clone(),
+        config.background_alpha,
         theme,
         updates.clone(),
     ));

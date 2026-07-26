@@ -295,7 +295,7 @@ def main() -> int:
         launcher.write_text("#!/bin/sh\nexec " + shlex.join(command) + f" >{shlex.quote(str(case_dir / 'client.stdout'))} 2>{shlex.quote(str(case_dir / 'client.stderr'))}\n", encoding="utf-8")
         launcher.chmod(0o700)
         existing = {item["address"] for item in V1.all_clients()}
-        expression = f"hl.exec_cmd({json.dumps(str(launcher))}, {{ workspace = '8 silent', float = true, size = '960 600', no_initial_focus = true }})"
+        expression = f"hl.exec_cmd({json.dumps(str(launcher))}, {{ workspace = '8 silent', float = true, size = '960 600', opacity = '1 1', no_initial_focus = true, no_focus = true }})"
         dispatched = run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
         if dispatched.returncode:
             raise RuntimeError(dispatched.stderr.strip() or dispatched.stdout.strip())

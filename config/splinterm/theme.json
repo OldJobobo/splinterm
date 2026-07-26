@@ -1,5 +1,6 @@
 {
   "background": "#0e1216",
+  "alpha": 1.0,
   "foreground": "#ebebeb",
   "cursor": "#78d2ff",
   "selection": "#354a60",

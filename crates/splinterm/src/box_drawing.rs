@@ -46,51 +46,21 @@ pub(crate) fn generate(
         height,
         data: vec![0; usize::try_from(width.checked_mul(height)?).ok()?],
     };
+    if let Some((x, y, rect_width, rect_height)) = opaque_block_rect(character, width, height) {
+        mask.fill(x, y, x + rect_width, y + rect_height);
+        return Some(mask);
+    }
     if ('\u{2800}'..='\u{28ff}').contains(&character) {
         mask.draw_braille(u8::try_from(u32::from(character) - 0x2800).ok()?);
         return Some(mask);
     }
     match character {
-        '▀' => mask.fill(0, 0, width, height.div_ceil(2)),
-        '▁' | '▂' | '▃' | '▄' | '▅' | '▆' | '▇' => {
-            let eighths = match character {
-                '▁' => 1_u64,
-                '▂' => 2,
-                '▃' => 3,
-                '▄' => 4,
-                '▅' => 5,
-                '▆' => 6,
-                '▇' => 7,
-                _ => unreachable!(),
-            };
-            let extent = u32::try_from((u64::from(height) * eighths + 4) / 8)
-                .expect("rounded fractional block extent fits u32");
-            mask.fill(0, height.saturating_sub(extent), width, height);
-        }
-        '█' => mask.fill(0, 0, width, height),
-        '▌' => mask.fill(0, 0, width.div_ceil(2), height),
-        '▐' => mask.fill(width / 2, 0, width, height),
         '░' => mask.draw_shade(1),
         '▒' => mask.draw_shade(2),
         '▓' => mask.draw_shade(3),
         _ => {}
     }
-    if matches!(
-        character,
-        '▀' | '▁'
-            | '▂'
-            | '▃'
-            | '▄'
-            | '▅'
-            | '▆'
-            | '▇'
-            | '█'
-            | '▌'
-            | '▐'
-            | '░'
-            | '▒'
-            | '▓'
-    ) {
+    if matches!(character, '░' | '▒' | '▓') {
         return Some(mask);
     }
     let horizontal_y = height.saturating_sub(thickness) / 2;
@@ -153,6 +123,33 @@ pub(crate) fn generate(
         _ => return None,
     }
     Some(mask)
+}
+
+/// Returns the exact opaque rectangle represented by a solid block element.
+/// Coordinates are relative to the complete cell mask generated above.
+pub(crate) fn opaque_block_rect(
+    character: char,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let lower_extent = |eighths: u64| {
+        u32::try_from((u64::from(height) * eighths + 4) / 8)
+            .expect("rounded fractional block extent fits u32")
+    };
+    match character {
+        '▀' => Some((0, 0, width, height.div_ceil(2))),
+        '▁' => Some((0, height - lower_extent(1), width, lower_extent(1))),
+        '▂' => Some((0, height - lower_extent(2), width, lower_extent(2))),
+        '▃' => Some((0, height - lower_extent(3), width, lower_extent(3))),
+        '▄' => Some((0, height - lower_extent(4), width, lower_extent(4))),
+        '▅' => Some((0, height - lower_extent(5), width, lower_extent(5))),
+        '▆' => Some((0, height - lower_extent(6), width, lower_extent(6))),
+        '▇' => Some((0, height - lower_extent(7), width, lower_extent(7))),
+        '█' => Some((0, 0, width, height)),
+        '▌' => Some((0, 0, width.div_ceil(2), height)),
+        '▐' => Some((width / 2, 0, width - width / 2, height)),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -407,6 +404,19 @@ mod tests {
 
     #[test]
     fn block_elements_cover_cell_edges_without_font_bearing_gaps() {
+        for character in ['▀', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▌', '▐']
+        {
+            let mask = generate(character, 13, 30, 1).expect("solid block");
+            let (x, y, width, height) =
+                opaque_block_rect(character, 13, 30).expect("opaque rectangle");
+            for mask_y in 0..mask.height {
+                for mask_x in 0..mask.width {
+                    let expected =
+                        mask_x >= x && mask_x < x + width && mask_y >= y && mask_y < y + height;
+                    assert_eq!(pixel(&mask, mask_x, mask_y) == 0xff, expected);
+                }
+            }
+        }
         let full = generate('█', 13, 30, 1).expect("full block");
         assert!(full.data.iter().all(|alpha| *alpha == 0xff));
         let upper = generate('▀', 13, 30, 1).expect("upper block");

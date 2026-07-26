@@ -49,6 +49,7 @@ use splinterm_protocol::{
     TerminalScrollbackUpdate, TerminalSnapshot, TerminalUpdate as WireTerminalUpdate,
     TopologyChange, TopologyChangeKind, TopologySnapshot, UnderlineStyle as WireUnderlineStyle,
     encode_frame, image_content_socket_path,
+    perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
 use splinterm_terminal::{
@@ -5230,8 +5231,14 @@ fn spawn_subscription(
                     }
                     let current_history = history_state(&snapshot);
                     if revision_advances(previous_history.revision, current_history.revision) {
-                        let next_visible_rows = snapshot.visible_rows.clone();
-                        let event = subscription_update_event(
+                        let materialize_started = perf_trace_enabled().then(Instant::now);
+                        let materialized_rows = snapshot.visible_rows.len();
+                        let materialized_cells = snapshot
+                            .visible_rows
+                            .iter()
+                            .map(|row| row.cells.len())
+                            .sum::<usize>();
+                        let (event, next_visible_rows) = subscription_update_event(
                             &updates,
                             *snapshot,
                             previous_history,
@@ -5240,6 +5247,32 @@ fn spawn_subscription(
                         );
                         previous_history = current_history;
                         previous_visible_rows = next_visible_rows;
+                        if let Some(started) = materialize_started {
+                            emit_perf_trace(
+                                "splinterd",
+                                "wire_materialize",
+                                PerfTraceEvent {
+                                    splint_id: Some(handle.splint_id),
+                                    incarnation: Some(handle.incarnation.value()),
+                                    base_revision: Some(event_base_revision(&event)),
+                                    revision: Some(current_history.revision),
+                                    subscription_id: Some(id),
+                                    transaction_sequence: Some(sequence),
+                                    duration_ns: Some(
+                                        u64::try_from(started.elapsed().as_nanos())
+                                            .unwrap_or(u64::MAX),
+                                    ),
+                                    rows: Some(
+                                        u64::try_from(materialized_rows).unwrap_or(u64::MAX),
+                                    ),
+                                    cells: Some(
+                                        u64::try_from(materialized_cells).unwrap_or(u64::MAX),
+                                    ),
+                                    count: Some(u64::try_from(updates.len()).unwrap_or(u64::MAX)),
+                                    ..PerfTraceEvent::default()
+                                },
+                            );
+                        }
                         let frame = ServerFrame::Event {
                             subscription_id: id,
                             sequence,
@@ -5312,17 +5345,21 @@ fn revision_advances(previous_revision: u64, current_revision: u64) -> bool {
 
 fn subscription_update_event(
     updates: &[TerminalUpdate],
-    snapshot: LiveSnapshot,
+    mut snapshot: LiveSnapshot,
     previous_history: HistoryState,
     previous_visible_rows: &[splinterd::LiveRow],
     include_images: bool,
-) -> SubscriptionEvent {
+) -> (SubscriptionEvent, Vec<splinterd::LiveRow>) {
     if !revisions_match(updates, snapshot.revision.value()) {
-        return SubscriptionEvent::Snapshot {
-            snapshot: wire_snapshot(snapshot, include_images),
-        };
+        let next_visible_rows = snapshot.visible_rows.clone();
+        return (
+            SubscriptionEvent::Snapshot {
+                snapshot: wire_snapshot(snapshot, include_images),
+            },
+            next_visible_rows,
+        );
     }
-    match wire_update(
+    let event = match wire_update(
         updates,
         &snapshot,
         previous_history.revision,
@@ -5334,6 +5371,41 @@ fn subscription_update_event(
         Err(_) => SubscriptionEvent::ResyncRequired {
             current_revision: snapshot.revision.value(),
         },
+    };
+    (event, std::mem::take(&mut snapshot.visible_rows))
+}
+
+fn event_base_revision(event: &SubscriptionEvent) -> u64 {
+    match event {
+        SubscriptionEvent::Update { update } => update.base_revision,
+        SubscriptionEvent::Snapshot { snapshot } => snapshot.revision,
+        _ => 0,
+    }
+}
+
+fn frame_trace_identity(frame: &ServerFrame) -> Option<(u64, u64, u64, u64)> {
+    let ServerFrame::Event {
+        subscription_id,
+        sequence,
+        event,
+    } = frame
+    else {
+        return None;
+    };
+    match event {
+        SubscriptionEvent::Update { update } => Some((
+            *subscription_id,
+            *sequence,
+            update.base_revision,
+            update.revision,
+        )),
+        SubscriptionEvent::Snapshot { snapshot } => Some((
+            *subscription_id,
+            *sequence,
+            snapshot.revision,
+            snapshot.revision,
+        )),
+        _ => None,
     }
 }
 
@@ -5345,14 +5417,55 @@ async fn write_frames(
     loop {
         let frame = tokio::select! { biased; frame = control.recv() => frame, frame = normal.recv() => frame };
         let Some(frame) = frame else { break };
+        let identity = frame_trace_identity(&frame);
+        let encode_started = perf_trace_enabled().then(Instant::now);
         let Ok(encoded) = encode_frame(&frame) else {
             break;
         };
+        if let (Some(started), Some((subscription_id, sequence, base_revision, revision))) =
+            (encode_started, identity)
+        {
+            emit_perf_trace(
+                "splinterd",
+                "frame_encode",
+                PerfTraceEvent {
+                    base_revision: Some(base_revision),
+                    revision: Some(revision),
+                    subscription_id: Some(subscription_id),
+                    transaction_sequence: Some(sequence),
+                    duration_ns: Some(
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    ),
+                    bytes: Some(u64::try_from(encoded.len()).unwrap_or(u64::MAX)),
+                    ..PerfTraceEvent::default()
+                },
+            );
+        }
+        let write_started = perf_trace_enabled().then(Instant::now);
         if time::timeout(WRITE_TIMEOUT, writer.write_all(&encoded))
             .await
             .is_err()
         {
             break;
+        }
+        if let (Some(started), Some((subscription_id, sequence, base_revision, revision))) =
+            (write_started, identity)
+        {
+            emit_perf_trace(
+                "splinterd",
+                "socket_write",
+                PerfTraceEvent {
+                    base_revision: Some(base_revision),
+                    revision: Some(revision),
+                    subscription_id: Some(subscription_id),
+                    transaction_sequence: Some(sequence),
+                    duration_ns: Some(
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    ),
+                    bytes: Some(u64::try_from(encoded.len()).unwrap_or(u64::MAX)),
+                    ..PerfTraceEvent::default()
+                },
+            );
         }
     }
 }

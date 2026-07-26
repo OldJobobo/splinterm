@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 splinterm-core = { path = "../splinterm-core" }

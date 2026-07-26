@@ -366,7 +366,8 @@ def capture_foot(
     launcher.chmod(0o700)
     expression = (
         f"hl.exec_cmd({json.dumps(str(launcher))}, "
-        f"{{ workspace = '{workspace} silent', float = true, size = '{width} {height}', no_initial_focus = true }})"
+        f"{{ workspace = '{workspace} silent', float = true, size = '{width} {height}', "
+        "opacity = '1 1', no_initial_focus = true, no_focus = true })"
     )
     dispatched = run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
     if dispatched.returncode:

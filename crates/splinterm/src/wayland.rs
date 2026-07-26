@@ -84,6 +84,7 @@ use splinterm_protocol::{
     ActiveScreen, CellAttributes, ColorSource, ControlTransferDecision, ControlTransferOutcome,
     HistoryTransition, MouseTracking, SearchMatch, SearchPage, TerminalCell, TerminalInputModes,
     TerminalRow, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
+    perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 
 use smithay_client_toolkit::reexports::protocols::wp::{
@@ -113,7 +114,7 @@ use crate::renderer::{
     configured_background_bgra, history_overlay_layout, paint, paint_box_drawing_cell,
     paint_history_overlay, paint_snapshot_overlays, paint_snapshot_presented,
     paint_snapshot_region_presented, paint_snapshot_rows_presented, scroll_snapshot_pixels,
-    set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
+    set_background_alpha, set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
 };
 use crate::viewport::ScrollbackViewport;
 
@@ -300,6 +301,45 @@ impl SignoffProbe {
             cache_window: None,
             evidence: Vec::new(),
         }))
+    }
+}
+
+struct GraphicalInputProbe {
+    target_revisions: usize,
+    observed_revisions: HashSet<(SplintId, u64, u64)>,
+}
+
+impl GraphicalInputProbe {
+    fn from_environment(development_bypass: bool) -> Result<Option<Self>> {
+        let Some(value) = std::env::var_os("SPLINTERM_GRAPHICAL_INPUT_AFTER_COMMITS") else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            development_bypass,
+            "SPLINTERM_GRAPHICAL_INPUT_AFTER_COMMITS requires SPLINTERM_ENABLE_DEV_ATTACH=1"
+        );
+        let value = value
+            .to_str()
+            .context("SPLINTERM_GRAPHICAL_INPUT_AFTER_COMMITS must be UTF-8")?;
+        let remaining_revisions = value
+            .parse::<usize>()
+            .context("SPLINTERM_GRAPHICAL_INPUT_AFTER_COMMITS must be a positive integer")?;
+        anyhow::ensure!(
+            (1..=1024).contains(&remaining_revisions),
+            "SPLINTERM_GRAPHICAL_INPUT_AFTER_COMMITS must be between 1 and 1024"
+        );
+        Ok(Some(Self {
+            target_revisions: remaining_revisions,
+            observed_revisions: HashSet::with_capacity(remaining_revisions),
+        }))
+    }
+
+    fn observe_commit(&mut self, identity: Option<(SplintId, u64, u64)>) -> bool {
+        let Some(identity) = identity else {
+            return false;
+        };
+        self.observed_revisions.insert(identity);
+        self.observed_revisions.len() >= self.target_revisions
     }
 }
 
@@ -740,6 +780,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     .context("initial SHM pool size fits usize")?;
     let pool = SlotPool::new(pool_size, &shm).context("create SHM pool")?;
     let signoff = SignoffProbe::from_environment(options.authority.development_bypass)?;
+    let graphical_input_probe =
+        GraphicalInputProbe::from_environment(options.authority.development_bypass)?;
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &queue_handle),
@@ -794,6 +836,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         topology_updates: options.topology_updates,
         topology_commands: options.topology_commands,
         signoff,
+        graphical_input_probe,
         scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
         trusted_consent,
         cursor_style: options.cursor_style,
@@ -1744,6 +1787,7 @@ struct App {
     topology_updates: Option<Receiver<WindowTopologyUpdate>>,
     topology_commands: Option<Sender<WindowTopologyCommand>>,
     signoff: Option<SignoffProbe>,
+    graphical_input_probe: Option<GraphicalInputProbe>,
     scroll_trace: bool,
     trusted_consent: Option<TrustedConsentUi>,
     cursor_style: CursorStyle,
@@ -1926,14 +1970,31 @@ fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
         || update.images.is_some()
 }
 
-fn terminal_update_requires_full_frame(update: &TerminalUpdate, current_has_images: bool) -> bool {
-    update.columns.is_some()
-        || update.row_count.is_some()
-        || update.palette.is_some()
-        || update.default_colors.is_some()
-        || update.active_screen.is_some()
-        || update.images.is_some()
-        || (current_has_images && !update.scrolls.is_empty())
+fn terminal_update_full_frame_reasons(
+    update: &TerminalUpdate,
+    current_active_screen: ActiveScreen,
+    current_has_images: bool,
+) -> u64 {
+    u64::from(update.columns.is_some())
+        | (u64::from(update.row_count.is_some()) << 1)
+        | (u64::from(update.palette.is_some()) << 2)
+        | (u64::from(update.default_colors.is_some()) << 3)
+        | (u64::from(
+            update
+                .active_screen
+                .is_some_and(|active_screen| active_screen != current_active_screen),
+        ) << 4)
+        | (u64::from(update.images.is_some()) << 5)
+        | (u64::from(current_has_images && !update.scrolls.is_empty()) << 6)
+}
+
+#[cfg(test)]
+fn terminal_update_requires_full_frame(
+    update: &TerminalUpdate,
+    current_active_screen: ActiveScreen,
+    current_has_images: bool,
+) -> bool {
+    terminal_update_full_frame_reasons(update, current_active_screen, current_has_images) != 0
 }
 
 fn apply_scrollback_update(
@@ -4540,6 +4601,7 @@ impl App {
             }
         }
         if let Some(theme) = next_theme {
+            set_background_alpha(theme.background_alpha);
             self.theme = theme;
             if let Some(snapshot) = self.pane.snapshot.as_mut() {
                 apply_theme(snapshot, theme);
@@ -4642,6 +4704,10 @@ impl App {
                     update,
                     image_sources,
                 } => {
+                    let apply_started = perf_trace_enabled().then(Instant::now);
+                    let trace_base_revision = update.base_revision;
+                    let trace_revision = update.revision;
+                    let trace_rows = update.rows.len();
                     let old_cursor_row = self.pane.snapshot.as_ref().and_then(|snapshot| {
                         usize::try_from(snapshot.cursor_row)
                             .ok()
@@ -4651,13 +4717,17 @@ impl App {
                         update.rows.iter().map(|patch| patch.index).collect();
                     let scrolls = update.scrolls.clone();
                     let history_changed = update.scrollback.is_some();
-                    let mut full = terminal_update_requires_full_frame(
+                    let current = self
+                        .pane
+                        .snapshot
+                        .as_ref()
+                        .context("terminal update arrived before initial snapshot")?;
+                    let full_frame_reasons = terminal_update_full_frame_reasons(
                         &update,
-                        self.pane
-                            .snapshot
-                            .as_ref()
-                            .is_some_and(|snapshot| snapshot.images.is_some()),
+                        current.active_screen,
+                        current.images.is_some(),
                     );
+                    let mut full = full_frame_reasons != 0;
                     let content_changed = terminal_update_changes_visible_content(&update);
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
@@ -4754,6 +4824,27 @@ impl App {
                     visual_changed |= full
                         || cursor_changed
                         || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty);
+                    if let Some(started) = apply_started {
+                        emit_perf_trace(
+                            "splinterm",
+                            "client_apply",
+                            PerfTraceEvent {
+                                splint_id: Some(snapshot.splint_id),
+                                incarnation: Some(snapshot.incarnation),
+                                base_revision: Some(trace_base_revision),
+                                revision: Some(trace_revision),
+                                duration_ns: Some(
+                                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                                ),
+                                rows: Some(u64::try_from(trace_rows).unwrap_or(u64::MAX)),
+                                // Bitset: columns, rows, palette, defaults, screen, images,
+                                // or an image-bearing scroll in ascending bit order.
+                                count: Some(full_frame_reasons),
+                                full_reload: Some(full),
+                                ..PerfTraceEvent::default()
+                            },
+                        );
+                    }
                 }
                 WindowUpdate::ScrollbackPages(pages) => {
                     self.pane.history_page_pending = false;
@@ -4864,6 +4955,7 @@ impl App {
                     self.full_redraw = true;
                 }
                 WindowUpdate::Theme(theme) => {
+                    set_background_alpha(theme.background_alpha);
                     self.theme = theme;
                     if let Some(snapshot) = self.pane.snapshot.as_mut() {
                         apply_theme(snapshot, theme);
@@ -4894,29 +4986,59 @@ impl App {
         if visual_changed {
             self.cursor_blink_visible = true;
             self.last_cursor_blink = Instant::now();
-            let display = self.display_snapshot().context("updated snapshot exists")?;
-            if full_frame_reload
-                || self.pane.snapshot_frame.is_none()
-                || !self.pane.scrollback_viewport.is_live()
-            {
+            let prepare_started = perf_trace_enabled().then(Instant::now);
+            let trace_dirty_rows = self
+                .pane
+                .prepare_dirty_rows
+                .iter()
+                .filter(|dirty| **dirty)
+                .count();
+            let live_viewport = self.pane.scrollback_viewport.is_live();
+            let display_owned = if live_viewport {
+                None
+            } else {
+                Some(self.display_snapshot().context("updated snapshot exists")?)
+            };
+            let display = display_owned
+                .as_ref()
+                .or(self.pane.snapshot.as_ref())
+                .context("updated snapshot exists")?;
+            if full_frame_reload || self.pane.snapshot_frame.is_none() || !live_viewport {
                 self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
-                    &display,
+                    display,
                     self.scale_120,
                     Some(&self.pane.image_sources),
                 )?);
             } else if let Some(frame) = &mut self.pane.snapshot_frame {
-                let snapshot = self
-                    .pane
-                    .snapshot
-                    .as_ref()
-                    .context("updated snapshot exists")?;
-                frame.refresh_rows(snapshot, &self.pane.prepare_dirty_rows)?;
-                frame.refresh_images(snapshot, &self.pane.image_sources)?;
-                frame.refresh_cursor(snapshot);
+                frame.refresh_rows(display, &self.pane.prepare_dirty_rows)?;
+                frame.refresh_images(display, &self.pane.image_sources)?;
+                frame.refresh_cursor(display);
             }
             self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
             self.pane.viewport_dirty = false;
             self.pane.prepare_dirty_rows.fill(false);
+            if let Some(started) = prepare_started {
+                emit_perf_trace(
+                    "splinterm",
+                    "frame_prepare",
+                    PerfTraceEvent {
+                        splint_id: Some(display.splint_id),
+                        incarnation: Some(display.incarnation),
+                        revision: Some(display.revision),
+                        duration_ns: Some(
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        ),
+                        rows: Some(u64::try_from(display.rows).unwrap_or(u64::MAX)),
+                        cells: Some(
+                            u64::try_from(display.rows.saturating_mul(display.columns))
+                                .unwrap_or(u64::MAX),
+                        ),
+                        count: Some(u64::try_from(trace_dirty_rows).unwrap_or(u64::MAX)),
+                        full_reload: Some(full_frame_reload),
+                        ..PerfTraceEvent::default()
+                    },
+                );
+            }
             self.refresh_ime_preedit()?;
             self.update_ime_cursor_rectangle();
             if terminal_resize_allowed(
@@ -5475,6 +5597,52 @@ impl App {
             .attach_to(self.window.wl_surface())
             .context("attach SHM buffer")?;
         self.window.commit();
+        let committed_identity = self
+            .pane
+            .snapshot
+            .as_ref()
+            .map(|snapshot| (snapshot.splint_id, snapshot.incarnation, snapshot.revision));
+        if perf_trace_enabled() {
+            let snapshot = self.pane.snapshot.as_ref();
+            emit_perf_trace(
+                "splinterm",
+                "draw_commit",
+                PerfTraceEvent {
+                    splint_id: snapshot.map(|snapshot| snapshot.splint_id),
+                    incarnation: snapshot.map(|snapshot| snapshot.incarnation),
+                    revision: snapshot.map(|snapshot| snapshot.revision),
+                    duration_ns: Some(
+                        u64::try_from(draw_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    ),
+                    bytes: Some(u64::try_from(backing_len).unwrap_or(u64::MAX)),
+                    rows: snapshot.map(|snapshot| u64::try_from(snapshot.rows).unwrap_or(u64::MAX)),
+                    full_reload: Some(damage_full_surface),
+                    ..PerfTraceEvent::default()
+                },
+            );
+        }
+        let inject_graphical_input = self
+            .graphical_input_probe
+            .as_mut()
+            .is_some_and(|probe| probe.observe_commit(committed_identity));
+        if inject_graphical_input {
+            self.graphical_input_probe = None;
+            self.send_input(vec![b'q'])?;
+            if perf_trace_enabled() {
+                emit_perf_trace(
+                    "splinterm",
+                    "graphical_input",
+                    PerfTraceEvent {
+                        splint_id: committed_identity.map(|identity| identity.0),
+                        incarnation: committed_identity.map(|identity| identity.1),
+                        revision: committed_identity.map(|identity| identity.2),
+                        bytes: Some(1),
+                        count: Some(1),
+                        ..PerfTraceEvent::default()
+                    },
+                );
+            }
+        }
         if self.scroll_trace {
             if let Some(scroll_started) = scroll_started {
                 eprintln!(
@@ -6552,6 +6720,20 @@ mod tests {
         assert!(!pending_draw_waits_for_frame(false, true));
         assert!(pending_draw_waits_for_frame(true, false));
         assert!(!pending_draw_waits_for_frame(true, true));
+    }
+
+    #[test]
+    fn graphical_input_probe_counts_only_distinct_committed_revisions() {
+        let splint_id = SplintId::new();
+        let mut probe = GraphicalInputProbe {
+            target_revisions: 3,
+            observed_revisions: HashSet::with_capacity(3),
+        };
+        assert!(!probe.observe_commit(None));
+        assert!(!probe.observe_commit(Some((splint_id, 1, 7))));
+        assert!(!probe.observe_commit(Some((splint_id, 1, 8))));
+        assert!(!probe.observe_commit(Some((splint_id, 1, 7))));
+        assert!(probe.observe_commit(Some((splint_id, 1, 9))));
     }
 
     #[test]
@@ -7762,15 +7944,42 @@ mod tests {
             rows: 1,
         });
         assert!(terminal_update_changes_visible_content(&scroll));
-        assert!(!terminal_update_requires_full_frame(&scroll, false));
-        assert!(terminal_update_requires_full_frame(&scroll, true));
+        assert!(!terminal_update_requires_full_frame(
+            &scroll,
+            ActiveScreen::Normal,
+            false
+        ));
+        assert!(terminal_update_requires_full_frame(
+            &scroll,
+            ActiveScreen::Normal,
+            true
+        ));
+
+        let mut screen = empty_update();
+        screen.active_screen = Some(ActiveScreen::Normal);
+        assert!(!terminal_update_requires_full_frame(
+            &screen,
+            ActiveScreen::Normal,
+            false
+        ));
+        screen.active_screen = Some(ActiveScreen::Alternate);
+        assert!(terminal_update_requires_full_frame(
+            &screen,
+            ActiveScreen::Normal,
+            false
+        ));
+
         let mut image_update = empty_update();
         image_update.images = Some(Box::new(splinterm_protocol::TerminalImagePlane {
             screen: ActiveScreen::Normal,
             contents: Vec::new(),
             placements: Vec::new(),
         }));
-        assert!(terminal_update_requires_full_frame(&image_update, false));
+        assert!(terminal_update_requires_full_frame(
+            &image_update,
+            ActiveScreen::Normal,
+            false
+        ));
         let mut colors = empty_update();
         colors.default_colors = Some([1, 2, 3]);
         assert!(terminal_update_changes_visible_content(&colors));

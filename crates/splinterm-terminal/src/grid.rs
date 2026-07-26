@@ -795,16 +795,12 @@ impl Grid {
 
     fn reidentify_newest_history_rows(&mut self, count: usize) {
         let history_capacity = self.rows.len() - self.screen_rows;
-        let start = self.scrollback_start(self.screen_rows);
-        let mut indices = (0..history_capacity)
-            .filter_map(|distance| {
-                let index = start.wrapping_add(distance) & (self.rows.len() - 1);
-                self.rows[index].is_some().then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let first = indices.len().saturating_sub(count);
-        for index in indices.drain(first..) {
-            self.assign_new_row_id(index);
+        let mask = self.rows.len() - 1;
+        for distance in (1..=count.min(history_capacity)).rev() {
+            let index = self.offset.wrapping_sub(distance) & mask;
+            if self.rows[index].is_some() {
+                self.assign_new_row_id(index);
+            }
         }
     }
 
@@ -1085,6 +1081,35 @@ mod tests {
         assert_eq!(grid.row(-3).unwrap()[0].content(), CellContent::Scalar('a'));
         assert_eq!(grid.row(-2).unwrap()[0].content(), CellContent::Scalar('b'));
         assert_eq!(grid.row(-1).unwrap()[0].content(), CellContent::Scalar('c'));
+        let ids = grid
+            .snapshot_scrollback_rows(usize::MAX)
+            .0
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn forward_scroll_skips_unallocated_lazy_history_slots() {
+        let mut grid = Grid::new(8, 1);
+        grid.row_or_allocate(-1);
+        let older_id = grid.row_ids[7];
+        let next_row_id = grid.next_row_id;
+        grid.scroll(
+            ScrollDirection::Forward,
+            ScrollRegion::new(0, 1),
+            1,
+            Color::default(),
+        );
+
+        let history = grid.snapshot_scrollback_rows(usize::MAX).0;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0, older_id);
+        assert_eq!(grid.row_ids[7], older_id);
+        assert_eq!(grid.next_row_id, next_row_id + 1);
+        assert!(grid.row(0).is_some());
     }
 
     #[test]

@@ -23,7 +23,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `main.resize-delay-ms` | bounded delay before resize command | 0–1000; 0 |
 | `main.dpi-aware` | deprecated **legacy Splinterm** key: `yes` maps only to `output-scale`; `no` fails with migration guidance | unset |
 | `main.theme` | generated JSON role map | `~/.config/splinterm/theme.json` |
-| `colors.alpha` | Foot-compatible default-background translucency | 0.0–1.0; 1.0 |
+| `colors.alpha` | optional Foot-compatible override for theme background translucency | 0.0–1.0; unset (theme-owned) |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | block |
 | `cursor.blink` | permit cursor blink | yes |
@@ -31,10 +31,12 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 
 Malformed supported values fail startup. Unknown sections and keys print
-line-numbered diagnostics. `[colors] alpha` follows Foot's default alpha mode:
-only cells whose background source is default are translucent; explicit and
-reverse-video backgrounds remain opaque. `alpha-mode` and blur are not yet
-supported. Other `[colors]` options direct users to generated `theme.json`, and
+line-numbered diagnostics. Background alpha normally comes from the active
+Omarchy theme's `foot.ini`; `[colors] alpha` is an explicit user override.
+Whichever source wins follows Foot's default alpha mode: only cells whose
+background source is default are translucent; explicit and reverse-video
+backgrounds remain opaque. `alpha-mode` and blur are not yet supported. Other
+`[colors]` options direct users to generated `theme.json`, and
 `[key-bindings]` options explain that MVP bindings are not remappable. This
 avoids claiming arbitrary `foot.ini` compatibility.
 
@@ -89,11 +91,12 @@ this MVP and produce diagnostics when represented as unknown keys.
 
 ## Theme role bridge
 
-`tools/generate-omarchy-theme.py THEME/colors.toml` maps Omarchy `bg`, `fg`,
-ANSI roles, accent, selection, muted pane border, active pane border, and blue
-URL roles into a strict project-owned JSON file. Writes are atomic. Splinterm
-polls that file every 500 ms, validates all roles and colors, and repaints the
-terminal palette, cursor, selection, URL, and focus chrome without restarting
+`tools/generate-omarchy-theme.py THEME/colors.toml` maps semantic or legacy
+Omarchy palette roles into a strict project-owned JSON file. It reads background
+alpha from the sibling theme `foot.ini`; absent alpha defaults opaque. Writes
+are atomic. Splinterm polls that file every 500 ms, validates all roles, colors,
+and alpha, and repaints the terminal palette, translucency, cursor, selection,
+URL, and focus chrome without restarting
 the daemon or shell. The optional `pane_border` role defaults to a midpoint of
 background and foreground, while `pane_border_active` defaults to `ui_accent`,
 so older generated themes remain valid. Invalid changes are rejected and the

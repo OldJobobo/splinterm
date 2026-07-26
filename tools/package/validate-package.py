@@ -631,7 +631,7 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             }))
             relay_process.stdin.flush()
             hello = read_private_frame(relay_process.stdout)
-            assert hello["type"] == "hello" and hello["version"] == 23
+            assert hello["type"] == "hello" and hello["version"] == 24
             inherited_path = Path(f"/proc/{relay_process.pid}/fd/{inherited_fd}")
             assert not inherited_path.exists() or os.readlink(inherited_path) != inherited_target
 
@@ -828,11 +828,13 @@ def validate_theme_generator(root: Path) -> None:
         directory = Path(directory)
         source = directory / "colors.toml"
         source.write_text("".join(f'{key} = "{value}"\n' for key, value in colors.items()))
+        (directory / "foot.ini").write_text("[colors-dark]\nalpha=0.85\n")
         output = directory / "theme.json"
         run([str(root / "usr/bin/generate-omarchy-theme.py"), str(source), "--output", str(output)])
         generated = json.loads(output.read_text(encoding="utf-8"))
         assert generated["background"] == colors["bg"]
         assert generated["cursor"] == colors["accent"]
+        assert generated["alpha"] == 0.85
         assert len(generated["ansi"]) == 16
 
 

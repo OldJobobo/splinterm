@@ -283,7 +283,8 @@ def main() -> int:
         existing = {item["address"] for item in V1.all_clients()}
         expression = (
             f"hl.exec_cmd({json.dumps(str(launcher))}, "
-            "{ workspace = '8 silent', float = true, size = '960 600', no_initial_focus = true })"
+            "{ workspace = '8 silent', float = true, size = '960 600', "
+            "opacity = '1 1', no_initial_focus = true, no_focus = true })"
         )
         dispatched = run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
         if dispatched.returncode:
