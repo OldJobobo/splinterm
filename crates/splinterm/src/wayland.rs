@@ -1763,6 +1763,11 @@ struct CachedFrameTitle {
     clippy::struct_excessive_bools,
     reason = "independent Wayland lifecycle and evidence-mode flags are not one state machine"
 )]
+struct ShmFrameBuffer {
+    buffer: Buffer,
+    stale: BackingDamage,
+}
+
 struct App {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -1802,7 +1807,7 @@ struct App {
     font_zoom_steps: i16,
     capture: Option<PathBuf>,
     capture_scale: Option<u32>,
-    buffers: Vec<Buffer>,
+    buffers: Vec<ShmFrameBuffer>,
     backing: Vec<u8>,
     full_redraw: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -2960,6 +2965,100 @@ fn take_full_surface_damage(full_redraw: &mut bool, snapshot_frame_present: bool
     let damage_full_surface = !snapshot_frame_present || *full_redraw;
     *full_redraw = false;
     damage_full_surface
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BackingDamage {
+    Clean,
+    Rows(Vec<bool>),
+    Full,
+}
+
+impl BackingDamage {
+    fn mark_rows(&mut self, dirty_rows: &[bool]) {
+        if matches!(self, Self::Full) || !dirty_rows.iter().any(|dirty| *dirty) {
+            return;
+        }
+        if matches!(self, Self::Clean) {
+            *self = Self::Rows(vec![false; dirty_rows.len()]);
+        }
+        let Self::Rows(stale_rows) = self else {
+            return;
+        };
+        stale_rows.resize(dirty_rows.len(), false);
+        for (stale, dirty) in stale_rows.iter_mut().zip(dirty_rows) {
+            *stale |= *dirty;
+        }
+    }
+
+    fn mark_full(&mut self) {
+        *self = Self::Full;
+    }
+}
+
+fn sync_backing_damage(
+    canvas: &mut [u8],
+    backing: &[u8],
+    width: u32,
+    height: u32,
+    geometry: Option<&WindowGeometry>,
+    damage: &BackingDamage,
+) -> usize {
+    let full_copy = |canvas: &mut [u8]| {
+        canvas.copy_from_slice(backing);
+        backing.len()
+    };
+    let BackingDamage::Rows(dirty_rows) = damage else {
+        return if matches!(damage, BackingDamage::Full) {
+            full_copy(canvas)
+        } else {
+            0
+        };
+    };
+    let Some(geometry) = geometry else {
+        return full_copy(canvas);
+    };
+    let Some(stride) = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+    else {
+        return full_copy(canvas);
+    };
+    let mut ranges = Vec::new();
+    for (row, dirty) in dirty_rows.iter().copied().enumerate() {
+        if !dirty {
+            continue;
+        }
+        let Some((_, y, _, row_height)) = snapshot_row_rect(geometry, row) else {
+            return full_copy(canvas);
+        };
+        let (Ok(top), Ok(row_height)) = (u32::try_from(y), u32::try_from(row_height)) else {
+            return full_copy(canvas);
+        };
+        let bottom = top.saturating_add(row_height).min(height);
+        let Some(start) = usize::try_from(top)
+            .ok()
+            .and_then(|top| top.checked_mul(stride))
+        else {
+            return full_copy(canvas);
+        };
+        let Some(end) = usize::try_from(bottom)
+            .ok()
+            .and_then(|bottom| bottom.checked_mul(stride))
+        else {
+            return full_copy(canvas);
+        };
+        if start > end || end > backing.len() || end > canvas.len() {
+            return full_copy(canvas);
+        }
+        ranges.push(start..end);
+    }
+    let mut copied = 0;
+    for range in ranges {
+        canvas[range.clone()].copy_from_slice(&backing[range.clone()]);
+        copied += range.len();
+    }
+    copied
 }
 
 const fn deterministic_capture_ready(
@@ -5204,7 +5303,7 @@ impl App {
             || self
                 .buffers
                 .iter()
-                .any(|buffer| self.pool.canvas(buffer).is_some());
+                .any(|buffer| self.pool.canvas(&buffer.buffer).is_some());
         if terminal_draw_waits_for_frame(self.frame_pending, draw_capacity_available) {
             self.redraw_pending = true;
             Ok(())
@@ -5327,7 +5426,7 @@ impl App {
         });
         let mut buffer_index = None;
         for (index, buffer) in self.buffers.iter().enumerate() {
-            if self.pool.canvas(buffer).is_some() {
+            if self.pool.canvas(&buffer.buffer).is_some() {
                 buffer_index = Some(index);
                 break;
             }
@@ -5340,17 +5439,19 @@ impl App {
                 .create_buffer(width_i32, height_i32, stride, wl_shm::Format::Argb8888)
                 .context("create bounded SHM buffer")?
                 .0;
-            self.buffers.push(buffer);
+            self.buffers.push(ShmFrameBuffer {
+                buffer,
+                stale: BackingDamage::Full,
+            });
             self.buffers.len() - 1
         } else {
             self.redraw_pending = true;
             self.terminal_redraw_pending = terminal_priority;
             return Ok(());
         };
-        let buffer = &self.buffers[buffer_index];
         let canvas = self
             .pool
-            .canvas(buffer)
+            .canvas(&self.buffers[buffer_index].buffer)
             .context("selected SHM buffer became unavailable")?;
 
         let backing_len = usize::try_from(
@@ -5364,7 +5465,12 @@ impl App {
         if resized_backing {
             self.backing.resize(backing_len, 0);
             self.full_redraw = true;
+            for buffer in &mut self.buffers {
+                buffer.stale.mark_full();
+            }
         }
+        let mut copied_backing_bytes = 0;
+        let backing_scroll_changed = !self.pane.pending_scrolls.is_empty();
         let capture_minimum_images = capture_minimum_images()?;
         let capture_image_count = self
             .pane
@@ -5470,7 +5576,33 @@ impl App {
                 .hovered_url
                 .as_ref()
                 .map(|(start, end, _)| ((start.row, start.column), (end.row, end.column)));
-            canvas.copy_from_slice(&self.backing);
+            let history_status =
+                history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref());
+            // Pane chrome is deterministically repainted after synchronization, so
+            // row scanline copies may overwrite it without contaminating reuse.
+            let transient_canvas_content = selection.is_some()
+                || hovered_url.is_some()
+                || history_status.is_some()
+                || self.trusted_consent.is_some();
+            let full_backing_sync =
+                self.full_redraw || capture_image_count > 0 || backing_scroll_changed;
+            for buffer in &mut self.buffers {
+                if full_backing_sync {
+                    buffer.stale.mark_full();
+                } else {
+                    buffer.stale.mark_rows(&self.pane.raster_dirty_rows);
+                }
+            }
+            let stale =
+                std::mem::replace(&mut self.buffers[buffer_index].stale, BackingDamage::Clean);
+            copied_backing_bytes = sync_backing_damage(
+                canvas,
+                &self.backing,
+                width,
+                height,
+                window_geometry.as_ref(),
+                &stale,
+            );
             paint_snapshot_overlays(
                 canvas,
                 width,
@@ -5517,15 +5649,25 @@ impl App {
             if self.trusted_consent.is_some() {
                 paint_trusted_consent_chrome(canvas, width, height);
             }
+            if transient_canvas_content {
+                self.buffers[buffer_index].stale.mark_full();
+            }
         } else if self.pane.snapshot_frame.is_some() {
             let [_, red, green, blue] = self.theme.background.to_be_bytes();
             let background = configured_background_bgra([red, green, blue]);
             for pixel in self.backing.chunks_exact_mut(4) {
                 pixel.copy_from_slice(&background);
             }
-            canvas.copy_from_slice(&self.backing);
+            for buffer in &mut self.buffers {
+                buffer.stale.mark_full();
+            }
+            let stale =
+                std::mem::replace(&mut self.buffers[buffer_index].stale, BackingDamage::Clean);
+            copied_backing_bytes =
+                sync_backing_damage(canvas, &self.backing, width, height, None, &stale);
         } else if let Some(row) = &self.text_row {
             paint(canvas, width, height, row);
+            self.buffers[buffer_index].stale.mark_full();
         } else {
             anyhow::bail!("window has no prepared renderer content");
         }
@@ -5593,7 +5735,8 @@ impl App {
                 .frame(queue_handle, self.window.wl_surface().clone());
             self.frame_pending = true;
         }
-        buffer
+        self.buffers[buffer_index]
+            .buffer
             .attach_to(self.window.wl_surface())
             .context("attach SHM buffer")?;
         self.window.commit();
@@ -5614,7 +5757,7 @@ impl App {
                     duration_ns: Some(
                         u64::try_from(draw_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                     ),
-                    bytes: Some(u64::try_from(backing_len).unwrap_or(u64::MAX)),
+                    bytes: Some(u64::try_from(copied_backing_bytes).unwrap_or(u64::MAX)),
                     rows: snapshot.map(|snapshot| u64::try_from(snapshot.rows).unwrap_or(u64::MAX)),
                     full_reload: Some(damage_full_surface),
                     ..PerfTraceEvent::default()
@@ -6859,6 +7002,133 @@ mod tests {
 
         assert!(!take_full_surface_damage(&mut full_redraw, true));
         assert!(take_full_surface_damage(&mut full_redraw, false));
+    }
+
+    #[test]
+    fn backing_damage_accumulates_independently_across_reused_buffers() {
+        let mut buffers = [BackingDamage::Clean, BackingDamage::Clean];
+        for damage in &mut buffers {
+            damage.mark_rows(&[true, false, false]);
+        }
+        let first = std::mem::replace(&mut buffers[0], BackingDamage::Clean);
+        assert_eq!(first, BackingDamage::Rows(vec![true, false, false]));
+
+        for damage in &mut buffers {
+            damage.mark_rows(&[false, false, true]);
+        }
+        assert_eq!(buffers[0], BackingDamage::Rows(vec![false, false, true]));
+        assert_eq!(buffers[1], BackingDamage::Rows(vec![true, false, true]));
+        buffers[1].mark_full();
+        buffers[1].mark_rows(&[false, true, false]);
+        assert_eq!(buffers[1], BackingDamage::Full);
+    }
+
+    #[test]
+    fn backing_damage_copies_only_stale_row_scanlines() {
+        let cell = crate::geometry::CellGeometry::from_metrics(2, 2, 1, 1, 1).unwrap();
+        let geometry = WindowGeometry::for_grid(
+            2,
+            3,
+            cell,
+            crate::geometry::TerminalPadding::uniform(0),
+            120,
+        )
+        .unwrap();
+        let (width, height, _) = geometry.buffer_layout().unwrap();
+        let len = usize::try_from(width * height * 4).unwrap();
+        let backing = (0..len)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect::<Vec<_>>();
+        let mut canvas = vec![0xff; len];
+        let copied = sync_backing_damage(
+            &mut canvas,
+            &backing,
+            width,
+            height,
+            Some(&geometry),
+            &BackingDamage::Rows(vec![false, true, false]),
+        );
+        let stride = usize::try_from(width).unwrap() * 4;
+        assert_eq!(copied, stride * 2);
+        assert!(canvas[..stride * 2].iter().all(|byte| *byte == 0xff));
+        assert_eq!(
+            &canvas[stride * 2..stride * 4],
+            &backing[stride * 2..stride * 4]
+        );
+        assert!(canvas[stride * 4..].iter().all(|byte| *byte == 0xff));
+    }
+
+    #[test]
+    fn alternating_backing_buffers_repair_every_missed_row_update() {
+        let cell = crate::geometry::CellGeometry::from_metrics(2, 2, 1, 1, 1).unwrap();
+        let geometry = WindowGeometry::for_grid(
+            2,
+            3,
+            cell,
+            crate::geometry::TerminalPadding::uniform(0),
+            120,
+        )
+        .unwrap();
+        let (width, height, _) = geometry.buffer_layout().unwrap();
+        let stride = usize::try_from(width).unwrap() * 4;
+        let mut backing = vec![0; stride * usize::try_from(height).unwrap()];
+        let mut canvases = [backing.clone(), backing.clone()];
+        let mut damage = [BackingDamage::Clean, BackingDamage::Clean];
+
+        backing[..stride * 2].fill(1);
+        for stale in &mut damage {
+            stale.mark_rows(&[true, false, false]);
+        }
+        let first = std::mem::replace(&mut damage[0], BackingDamage::Clean);
+        sync_backing_damage(
+            &mut canvases[0],
+            &backing,
+            width,
+            height,
+            Some(&geometry),
+            &first,
+        );
+        assert_eq!(canvases[0], backing);
+        assert_ne!(canvases[1], backing);
+
+        backing[stride * 4..stride * 6].fill(2);
+        for stale in &mut damage {
+            stale.mark_rows(&[false, false, true]);
+        }
+        let second = std::mem::replace(&mut damage[1], BackingDamage::Clean);
+        sync_backing_damage(
+            &mut canvases[1],
+            &backing,
+            width,
+            height,
+            Some(&geometry),
+            &second,
+        );
+        assert_eq!(canvases[1], backing);
+        assert_ne!(canvases[0], backing);
+
+        let first = std::mem::replace(&mut damage[0], BackingDamage::Clean);
+        sync_backing_damage(
+            &mut canvases[0],
+            &backing,
+            width,
+            height,
+            Some(&geometry),
+            &first,
+        );
+        assert_eq!(canvases[0], backing);
+        assert_eq!(canvases[1], backing);
+    }
+
+    #[test]
+    fn backing_full_damage_restores_transient_canvas_bytes() {
+        let backing = vec![7; 32];
+        let mut canvas = vec![9; 32];
+        assert_eq!(
+            sync_backing_damage(&mut canvas, &backing, 4, 2, None, &BackingDamage::Full),
+            backing.len()
+        );
+        assert_eq!(canvas, backing);
     }
 
     #[test]
