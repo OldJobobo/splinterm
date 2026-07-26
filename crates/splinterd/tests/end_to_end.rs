@@ -540,13 +540,19 @@ async fn stable_snapshot_after_marker(
 ) -> TerminalSnapshot {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut snapshot = snapshot_until(connection, splint_id, incarnation, marker).await;
+    let mut stable_samples = 0;
     loop {
         time::sleep(Duration::from_millis(20)).await;
         let next = snapshot_until(connection, splint_id, incarnation, marker).await;
         if next.revision == snapshot.revision {
-            return next;
+            stable_samples += 1;
+            if stable_samples == 5 {
+                return next;
+            }
+        } else {
+            stable_samples = 0;
+            snapshot = next;
         }
-        snapshot = next;
         assert!(
             Instant::now() < deadline,
             "snapshot revision did not become quiescent after {marker}"
@@ -3416,7 +3422,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .expect("overflow produced paged history");
         let mut paged_ids = std::collections::BTreeSet::new();
         for _ in 0..4 {
-            let Response::ScrollbackPage { page, .. } = reattached
+            let response = reattached
                 .request(Request::ScrollbackPage {
                     splint_id,
                     incarnation,
@@ -3425,9 +3431,9 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     before_row_id,
                     max_rows: splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS,
                 })
-                .await
-            else {
-                panic!("daemon did not return a scrollback page");
+                .await;
+            let Response::ScrollbackPage { page, .. } = response else {
+                panic!("daemon did not return a scrollback page: {response:?}");
             };
             page.validate().expect("daemon page is valid");
             assert_eq!(page.rows.len(), splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS);
