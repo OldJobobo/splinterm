@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
-import os
 import pathlib
 import platform
 import subprocess
@@ -15,12 +15,46 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 THRESHOLDS = ROOT / "tools/performance/phase9-thresholds.json"
+RENDERER_BINARY = ROOT / "target/release/examples/phase4-renderer-benchmark"
+PTY_HELPER_BINARY = ROOT / "target/release/splinterm-pty-child"
+DAEMON_BINARY = ROOT / "target/release/examples/phase9-daemon-benchmark"
+BUILD_COMMANDS = (
+    (
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "splinterm",
+        "--example",
+        "phase4-renderer-benchmark",
+    ),
+    (
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "splinterm-pty",
+        "--bin",
+        "splinterm-pty-child",
+    ),
+    (
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "splinterd",
+        "--example",
+        "phase9-daemon-benchmark",
+    ),
+)
 
 
 def run(command: list[str], *, stdout: pathlib.Path | None = None) -> None:
     target = stdout.open("w", encoding="utf-8") if stdout else None
     try:
-        result = subprocess.run(command, cwd=ROOT, text=True, stdout=target, check=False)
+        result = subprocess.run(
+            command, cwd=ROOT, text=True, stdout=target, check=False
+        )
     finally:
         if target:
             target.close()
@@ -29,22 +63,48 @@ def run(command: list[str], *, stdout: pathlib.Path | None = None) -> None:
 
 
 def output(command: list[str]) -> str:
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
     if result.returncode:
         raise RuntimeError(f"command failed ({result.returncode}): {' '.join(command)}")
     return result.stdout.strip()
 
 
-def host_context() -> dict[str, Any]:
+def require_clean_repository() -> dict[str, str | bool]:
+    commit = output(["git", "rev-parse", "HEAD"])
+    status = output(["git", "status", "--porcelain"])
+    if status:
+        raise RuntimeError("Phase 9 baseline requires a clean repository")
+    return {"commit": commit, "dirty": False}
+
+
+def binary_identity(path: pathlib.Path) -> dict[str, str | int]:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return {
+        "path": str(path.relative_to(ROOT)),
+        "sha256": digest.hexdigest(),
+        "size_bytes": path.stat().st_size,
+    }
+
+
+def host_context(repository: dict[str, str | bool]) -> dict[str, Any]:
     os_release = {}
-    for line in pathlib.Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+    for line in (
+        pathlib.Path("/etc/os-release").read_text(encoding="utf-8").splitlines()
+    ):
         if "=" in line:
             key, value = line.split("=", 1)
             os_release[key] = value.strip().strip('"')
     cpu = next(
         (
             line.split(":", 1)[1].strip()
-            for line in pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
+            for line in pathlib.Path("/proc/cpuinfo")
+            .read_text(encoding="utf-8")
+            .splitlines()
             if line.startswith("model name")
         ),
         platform.processor() or "unknown",
@@ -57,8 +117,8 @@ def host_context() -> dict[str, Any]:
         "cpu": cpu,
         "rustc": output(["rustc", "--version"]),
         "cargo": output(["cargo", "--version"]),
-        "git_commit": output(["git", "rev-parse", "HEAD"]),
-        "git_dirty": bool(output(["git", "status", "--porcelain"])),
+        "git_commit": repository["commit"],
+        "git_dirty": repository["dirty"],
     }
 
 
@@ -79,7 +139,9 @@ def validate_renderer(
             failures.append(f"renderer grid missing: {key}")
             continue
         budget = thresholds[key]
-        check_max(failures, f"{key}.cold", grid["cold_frame_ns"], budget["cold_frame_ns_max"])
+        check_max(
+            failures, f"{key}.cold", grid["cold_frame_ns"], budget["cold_frame_ns_max"]
+        )
         check_max(
             failures,
             f"{key}.warm_prepare_p95",
@@ -111,9 +173,13 @@ def validate_renderer(
             budget["repopulate_ns_max"],
         )
         for name, value in grid["scale_invalidation_ns"].items():
-            check_max(failures, f"{key}.scale_{name}", value, budget["invalidation_ns_max"])
+            check_max(
+                failures, f"{key}.scale_{name}", value, budget["invalidation_ns_max"]
+            )
         for name, value in grid["theme_invalidation_ns"].items():
-            check_max(failures, f"{key}.theme_{name}", value, budget["invalidation_ns_max"])
+            check_max(
+                failures, f"{key}.theme_{name}", value, budget["invalidation_ns_max"]
+            )
         check_max(
             failures,
             f"{key}.rss",
@@ -134,7 +200,9 @@ def validate_daemon(
 ) -> None:
     if report.get("profile") != "release":
         failures.append("daemon benchmark was not a release build")
-    check_max(failures, "daemon.output", report.get("output_ns"), thresholds["output_ns_max"])
+    check_max(
+        failures, "daemon.output", report.get("output_ns"), thresholds["output_ns_max"]
+    )
     check_max(
         failures,
         "daemon.snapshot_p95",
@@ -153,7 +221,12 @@ def validate_daemon(
         report.get("paging", {}).get("approximate_retained_bytes"),
         thresholds["page_bytes_max"],
     )
-    check_max(failures, "daemon.resize", report.get("resize", {}).get("ns"), thresholds["resize_ns_max"])
+    check_max(
+        failures,
+        "daemon.resize",
+        report.get("resize", {}).get("ns"),
+        thresholds["resize_ns_max"],
+    )
     check_max(
         failures,
         "daemon.input_response",
@@ -177,9 +250,13 @@ def validate_daemon(
     bounds = report.get("bounds", {})
     if metrics.get("command_queue_high_water", 0) > bounds.get("command_capacity", -1):
         failures.append("daemon command queue exceeded capacity")
-    if metrics.get("user_write_queue_high_water_bytes", 0) > bounds.get("input_byte_limit", -1):
+    if metrics.get("user_write_queue_high_water_bytes", 0) > bounds.get(
+        "input_byte_limit", -1
+    ):
         failures.append("daemon user write queue exceeded byte limit")
-    if metrics.get("reply_write_queue_high_water_bytes", 0) > bounds.get("reply_byte_limit", -1):
+    if metrics.get("reply_write_queue_high_water_bytes", 0) > bounds.get(
+        "reply_byte_limit", -1
+    ):
         failures.append("daemon reply write queue exceeded byte limit")
     if metrics.get("pty_read_calls", 0) <= 0:
         failures.append("daemon did not record PTY read calls")
@@ -207,17 +284,27 @@ def main() -> int:
     args = parser.parse_args()
     if args.samples <= 0:
         parser.error("--samples must be positive")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     renderer_path = args.output_dir / "renderer.json"
     daemon_path = args.output_dir / "daemon.json"
     summary_path = args.output_dir / "summary.json"
     try:
+        repository = require_clean_repository()
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        build_commands = [list(command) for command in BUILD_COMMANDS]
+        benchmark_commands = [
+            [str(RENDERER_BINARY), str(args.samples)],
+            [str(DAEMON_BINARY)],
+        ]
         if not args.skip_build:
-            run(["cargo", "build", "--release", "-p", "splinterm", "--example", "phase4-renderer-benchmark"])
-            run(["cargo", "build", "--release", "-p", "splinterm-pty", "--bin", "splinterm-pty-child"])
-            run(["cargo", "build", "--release", "-p", "splinterd", "--example", "phase9-daemon-benchmark"])
-        run([str(ROOT / "target/release/examples/phase4-renderer-benchmark"), str(args.samples)], stdout=renderer_path)
-        run([str(ROOT / "target/release/examples/phase9-daemon-benchmark")], stdout=daemon_path)
+            for command in build_commands:
+                run(command)
+        binaries = {
+            "renderer": binary_identity(RENDERER_BINARY),
+            "pty_helper": binary_identity(PTY_HELPER_BINARY),
+            "daemon": binary_identity(DAEMON_BINARY),
+        }
+        run(benchmark_commands[0], stdout=renderer_path)
+        run(benchmark_commands[1], stdout=daemon_path)
         renderer = json.loads(renderer_path.read_text(encoding="utf-8"))
         daemon = json.loads(daemon_path.read_text(encoding="utf-8"))
         thresholds = json.loads(THRESHOLDS.read_text(encoding="utf-8"))
@@ -227,20 +314,33 @@ def main() -> int:
         summary = {
             "schema": "splinterm.performance.phase9.v1",
             "exact": not failures,
-            "host": host_context(),
+            "host": host_context(repository),
+            "binaries": binaries,
+            "invocation": {
+                "samples": args.samples,
+                "skip_build": args.skip_build,
+                "build_commands": build_commands,
+                "benchmark_commands": benchmark_commands,
+            },
             "thresholds": thresholds,
             "renderer": renderer,
             "daemon": daemon,
             "failures": failures,
         }
-        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        summary_path.write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         if failures:
             print("\n".join(failures), file=sys.stderr)
             return 1
         print(f"Phase 9 baseline passed: {summary_path}")
         return 0
     except (OSError, ValueError, KeyError, RuntimeError) as error:
-        summary_path.write_text(json.dumps({"exact": False, "error": str(error)}, indent=2) + "\n", encoding="utf-8")
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(
+            json.dumps({"exact": False, "error": str(error)}, indent=2) + "\n",
+            encoding="utf-8",
+        )
         print(f"phase9 baseline error: {error}", file=sys.stderr)
         return 1
 

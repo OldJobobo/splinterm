@@ -71,7 +71,8 @@ def launch_window(socket: pathlib.Path, existing: set[str]) -> dict[str, Any]:
     launcher.chmod(0o700)
     expression = (
         f"hl.exec_cmd({json.dumps(str(launcher))}, "
-        "{ workspace = '8 silent', float = true, size = '960 600', no_initial_focus = true })"
+        "{ workspace = '8 silent', float = true, size = '960 600', "
+        "opacity = '1 1', no_initial_focus = true, no_focus = true })"
     )
     result = V1.run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
     if result.returncode:

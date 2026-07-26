@@ -47,6 +47,40 @@ class ExampleAdapter(TerminalAdapter):
         return (self.executable,)
 
 
+def test_phase9_binary_identity_records_exact_release_artifact(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_module(
+        ROOT / "tools/performance/run-phase9-baseline.py", "phase9_baseline_identity"
+    )
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    executable = tmp_path / "target/release/example"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"release artifact")
+
+    assert module.binary_identity(executable) == {
+        "path": "target/release/example",
+        "sha256": "133cfccb5b503cf4040c95f3dfad56d07c1574283a1e39066b594f6ee33711ba",
+        "size_bytes": 16,
+    }
+
+
+def test_phase9_baseline_rejects_dirty_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module(
+        ROOT / "tools/performance/run-phase9-baseline.py", "phase9_baseline_clean"
+    )
+    responses = {
+        ("git", "rev-parse", "HEAD"): "0" * 40,
+        ("git", "status", "--porcelain"): " M source.rs",
+    }
+    monkeypatch.setattr(module, "output", lambda command: responses[tuple(command)])
+
+    with pytest.raises(RuntimeError, match="requires a clean repository"):
+        module.require_clean_repository()
+
+
 def test_adapter_probe_records_exact_executable(tmp_path: pathlib.Path) -> None:
     executable = tmp_path / "terminal"
     executable.write_text("#!/bin/sh\nprintf 'example 1.2.3\\n'\n", encoding="utf-8")
@@ -136,6 +170,18 @@ def test_workload_child_writes_side_channel_records(tmp_path: pathlib.Path) -> N
     assert completion["total_bytes"] == len(result.stdout)
     assert completion["duration_ns"] >= 0
     assert completion["pid"] > 0
+
+
+def test_visible_marker_detection_survives_inactive_window_composition() -> None:
+    module = load_module(
+        BENCHMARK / "run-graphical-output.py", "graphical_output_marker"
+    )
+    assert module.is_visible_marker_pixel(17, 239, 113)
+    assert module.is_visible_marker_pixel(14, 189, 90)
+    assert module.is_visible_marker_pixel(14, 196, 93)
+    assert not module.is_visible_marker_pixel(9, 10, 9)
+    assert not module.is_visible_marker_pixel(200, 200, 200)
+    assert not module.is_visible_marker_pixel(14, 196, 180)
 
 
 def test_input_child_records_receipt_before_visible_marker(
@@ -269,6 +315,66 @@ def test_latency_snapshot_includes_isolated_binary_selection_provenance() -> Non
     assert "tools/benchmark/adapters/splinterm.py" in module.IMPLEMENTATION_FILES
 
 
+def test_graphical_launchers_apply_permanent_no_focus_rules() -> None:
+    launchers = []
+    for launcher in (ROOT / "tools").rglob("*.py"):
+        if launcher.name.startswith("test_"):
+            continue
+        source = launcher.read_text(encoding="utf-8")
+        if "workspace = '8 silent'" in source and "no_initial_focus = true" in source:
+            launchers.append(launcher)
+            no_initial_focus = source.count("no_initial_focus = true")
+            assert source.count("no_focus = true") >= no_initial_focus, launcher
+            assert source.count("opacity = '1 1'") >= no_initial_focus, launcher
+    assert len(launchers) >= 7
+
+
+def test_cava_side_by_side_is_native_tiled_pipewire_and_focus_safe() -> None:
+    source = (ROOT / "tools/performance/run-cava-side-by-side.py").read_text(
+        encoding="utf-8"
+    )
+    assert "method = pipewire" in source
+    assert "source = auto" in source
+    assert '["pgrep", "-x", "cava"]' in source
+    assert "ambient Cava processes would pollute the comparison" in source
+    assert 'stty cols 120 rows 40' in source
+    assert "float = false" in source
+    assert "no_initial_focus = true" in source
+    assert "no_focus = true" in source
+    assert "movewindowpixel" not in source
+    assert "produce-audio" not in source
+    assert "audio.fifo" not in source
+
+
+def test_hyprland_056_absolute_window_move_uses_lua_dispatcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = BENCHMARK / "run-graphical-idle.py"
+    spec = importlib.util.spec_from_file_location("graphical_move_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(module.V1, "run", run)
+    module.move_window_absolute("0xabc", 650, -1060)
+    assert calls == [
+        (
+            [
+                "hyprctl",
+                "eval",
+                'hl.dispatch(hl.dsp.window.move({ x = 650, y = -1060, relative = false, window = "address:0xabc" }))',
+            ],
+            {"capture_output": True, "timeout": 5},
+        )
+    ]
+    assert "movewindowpixel" not in calls[0][0][2]
+
+
 def test_graphical_commands_are_controlled_and_terminal_specific(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -283,6 +389,9 @@ def test_graphical_commands_are_controlled_and_terminal_specific(
     assert pathlib.Path(foot[0]).name == "foot"
     assert "com.oldjobobo.splinterbench.Foot" in foot
     assert foot_environment == {}
+    monkeypatch.setenv("SPLINTERM_PERF_TRACE_DIR", str(tmp_path / "trace"))
+    monkeypatch.setenv("SPLINTERM_PERF_RUN_ID", "graphical-test")
+    monkeypatch.setenv("SPLINTERM_PERF_TRACE_MAX_EVENTS", "123")
     splinterm, environment = module.launch_command(
         "splinterm", tmp_path, tmp_path / "socket", 30
     )
@@ -290,6 +399,9 @@ def test_graphical_commands_are_controlled_and_terminal_specific(
     assert splinterm[1:4] == ["launch", "--new", "--name"]
     assert environment["SPLINTERM_SOCKET"] == str(tmp_path / "socket")
     assert environment["SPLINTERM_CONFIG"].endswith("profiles/splinterm.ini")
+    assert environment["SPLINTERM_PERF_TRACE_DIR"] == str(tmp_path / "trace")
+    assert environment["SPLINTERM_PERF_RUN_ID"] == "graphical-test"
+    assert environment["SPLINTERM_PERF_TRACE_MAX_EVENTS"] == "123"
     isolated_client = tmp_path / "isolated-splinterm"
     isolated_daemon = tmp_path / "isolated-splinterd"
     monkeypatch.setenv("SPLINTERBENCH_SPLINTERM_CLIENT", str(isolated_client))
@@ -417,6 +529,203 @@ def test_statistics_retain_invalid_counts_and_use_nearest_rank() -> None:
     assert invalid_only[0]["metric"] is None
     assert invalid_only[0]["statistics"] is None
     assert invalid_only[0]["invalid_samples"] == 1
+
+
+def test_omarchy_theme_generator_uses_foot_alpha_and_legacy_roles(
+    tmp_path: pathlib.Path,
+) -> None:
+    module = load_module(
+        ROOT / "tools/generate-omarchy-theme.py", "generate_omarchy_theme"
+    )
+    legacy = {
+        "accent": "#010203",
+        "background": "#101112",
+        "foreground": "#d0d1d2",
+        "selection_background": "#202122",
+        **{f"color{index}": f"#{index:06x}" for index in range(16)},
+    }
+    generated = module.generate(legacy, 0.85)
+    assert generated["alpha"] == 0.85
+    assert generated["background"] == legacy["background"]
+    assert generated["ansi"][0] == legacy["color0"]
+    assert generated["ansi"][15] == legacy["color15"]
+
+    assert module.theme_alpha(tmp_path) == 1.0
+    (tmp_path / "foot.ini").write_text(
+        "[colors-dark]\nalpha=0.72\n", encoding="utf-8"
+    )
+    assert module.theme_alpha(tmp_path) == 0.72
+    (tmp_path / "foot.ini").write_text(
+        "[colors-dark]\nalpha=1.1\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="between"):
+        module.theme_alpha(tmp_path)
+
+
+def test_stage_overhead_bootstrap_is_deterministic_and_one_sided() -> None:
+    module = load_module(
+        ROOT / "tools/performance/run-stage-overhead.py", "stage_overhead"
+    )
+    first = module.bootstrap_regression([100.0] * 10, [101.0] * 10, 17, 1000)
+    second = module.bootstrap_regression([100.0] * 10, [101.0] * 10, 17, 1000)
+    assert first == second
+    assert first["point_percent"] == pytest.approx(1.0)
+    assert first["one_sided_95_upper_percent"] == pytest.approx(1.0)
+    assert module.percentile(list(range(1, 11)), 95) == 10
+
+
+def test_stage_trace_summary_correlates_body_free_revision_records(
+    tmp_path: pathlib.Path,
+) -> None:
+    run_id = "test-run"
+    trace = tmp_path / f"{run_id}-10.jsonl"
+    common = {
+        "schema": "splinterm.performance.stage.v1",
+        "run_id": run_id,
+        "process": "splinterm",
+        "pid": 10,
+        "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+        "splint_id": "00000000-0000-0000-0000-000000000001",
+        "incarnation": 2,
+        "subscription_id": 3,
+        "revision": 4,
+    }
+    trace.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    **common,
+                    "sequence": sequence,
+                    "monotonic_raw_ns": timestamp,
+                    "stage": stage,
+                    "duration_ns": duration,
+                }
+            )
+            for sequence, timestamp, stage, duration in (
+                (0, 100, "wire_materialize", 10),
+                (1, 160, "draw_commit", 20),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "summary.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools/performance/summarize-stage-trace.py"),
+            str(tmp_path),
+            str(output),
+            "--run-id",
+            run_id,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(output.read_text(encoding="utf-8"))
+    assert summary["record_count"] == 2
+    assert summary["correlated_wire_to_commit"]["count"] == 1
+    assert summary["correlated_wire_to_commit"]["duration"]["median_ns"] == 60
+
+    with trace.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    **common,
+                    "sequence": 2,
+                    "monotonic_raw_ns": 10_000,
+                    "stage": "draw_commit",
+                    "duration_ns": 20,
+                }
+            )
+            + "\n"
+        )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools/performance/summarize-stage-trace.py"),
+            str(tmp_path),
+            str(output),
+            "--run-id",
+            run_id,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    ambiguous = json.loads(output.read_text(encoding="utf-8"))
+    assert ambiguous["correlated_wire_to_commit"]["count"] == 0
+
+    with trace.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    **common,
+                    "sequence": 3,
+                    "monotonic_raw_ns": 10_001,
+                    "stage": "trace_saturated",
+                }
+            )
+            + "\n"
+        )
+    saturated = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools/performance/summarize-stage-trace.py"),
+            str(tmp_path),
+            str(output),
+            "--run-id",
+            run_id,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert saturated.returncode != 0
+    assert "trace event bound was exhausted" in saturated.stderr
+
+
+def test_graphical_cava_progress_counts_distinct_body_free_revisions(
+    tmp_path: pathlib.Path,
+) -> None:
+    module = load_module(
+        ROOT / "tools/performance/run-graphical-cava.py", "graphical_cava"
+    )
+    run_id = "cava-test"
+    trace = tmp_path / f"{run_id}-1.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "stage": stage,
+                    "revision": revision,
+                }
+            )
+            for stage, revision in (
+                ("client_apply", 1),
+                ("client_apply", 2),
+                ("draw_commit", 1),
+                ("draw_commit", 2),
+                ("draw_commit", 2),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    progress = module.trace_progress(tmp_path, run_id)
+    assert progress["records"] == 5
+    assert progress["distinct_revisions"] == {"client_apply": 2, "draw_commit": 2}
+    assert module.advanced_revision_counts(
+        {"client_apply": {1, 2}, "draw_commit": {1, 2}},
+        {"client_apply": {1, 2, 3}, "draw_commit": {1, 2, 4}},
+    ) == {"client_apply": 1, "draw_commit": 1}
 
 
 def test_manifest_matches_result_schema(tmp_path: pathlib.Path) -> None:

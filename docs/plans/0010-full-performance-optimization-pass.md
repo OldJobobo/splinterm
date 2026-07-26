@@ -1,6 +1,6 @@
 # Plan 0010: full terminal performance optimization pass
 
-- **Status:** Proposed
+- **Status:** In progress — Slice 0 recorded; partial Slice 1 instrumentation and measured Slice 3 development candidates retained provisionally
 - **Roadmap:** post-Phase 5 performance stabilization
 - **Primary evidence:** [five-terminal benchmark suite](../benchmarks/terminal-benchmark-plan.md), [output-throughput closure](../spikes/artifacts/0024-output-throughput-graphical/README.md), [targeted-input matrix](../benchmarks/artifacts/2026-07-24-five-terminal-latency/README.md), and [image closure](../spikes/artifacts/0025-terminal-images/slice8-graphical-final/README.md)
 - **Foundation:** [Plan 0008](0008-terminal-image-protocols.md) and [Plan 0009](0009-output-throughput-optimization.md)
@@ -35,6 +35,28 @@ All numbers are retained development evidence from one host, not measurements of
 | Lifecycle | child exit 204.7 ms; window persisted 10/10 | peers unmap near 250 ms | Persistence and two residual Splinterm processes are intended architecture, not a performance failure. |
 | Correctness | Foot-derived semantic fixtures and final-buffer suites exact | Foot oracle pinned | Performance closure must retain this evidence. The checked report did not itself run the fuzz target. |
 | Images | static Kitty/Sixel composition closure passed; no-image idle gate passed | no comparable streamed matrix | Tiny one-batch fixture timings are boundary probes, not general image-throughput evidence. |
+
+## Current execution note (2026-07-26)
+
+A partial Slice 1 implementation now has opt-in, body-free
+`CLOCK_MONOTONIC_RAW` stage tracing from terminal mutation through Wayland
+commit. PTY readiness/drain, input, callback, retained-memory attribution, and a
+complete queue-wait reconciliation remain open, so the Slice 1 gate is not
+claimed. Disabled tracing passed the interleaved
+5-warmup/20-sample overhead gate: one-sided 95% upper regressions were +1.27%
+output completion, -1.00% process CPU, and +1.12% small writes.
+
+The trace justified two bounded Slice 3 copy reductions: direct frame-prefix
+backfill encoding and moving the owned visible-row snapshot into the next daemon
+semantic-diff baseline after borrowed materialization. Deterministic encoding
+median improved 6.4%; traced wire-materialization median improved 9.0% and
+nearest-rank p95 23.2%. Full workspace tests, release scrollback/search, and overflow/resync pass.
+A guarded exact pre-review Slice 3 3-warmup/10-sample matrix is valid, and a
+deterministic real-Cava graphical observation advanced ten distinct applied and
+committed revisions. Post-review trace-integrity hardening changed binary
+identity, so fresh exact-binary graphical evidence remains required.
+The absolute bulk/visible/CPU/RSS gates and retained 5-warmup/20-sample Slice 3
+comparison remain open, so Slice 3 closure is not claimed.
 
 ## Primary questions
 
@@ -347,6 +369,13 @@ Stop and reassess when:
 - a guarded smoke violates workspace, monitor, focus, or cleanup isolation;
 - two controlled experiments fail to improve the hypothesized stage; or
 - the dominant bottleneck moves outside the authorized slice.
+
+## Progress record
+
+- [First measured optimization pass](../spikes/artifacts/0026-performance-optimization-pass/README.md):
+  accepted terminal scroll/update ownership improvements, rejected unsafe or
+  regressing experiments, complete sequential workspace validation, two review
+  rounds, and remaining Foot gaps. This is development evidence, not closure.
 
 ## Expected completion record
 

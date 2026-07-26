@@ -189,6 +189,19 @@ def launch_command(
         profile_path.write_text(
             profile.replace("lines=1000", f"lines={scrollback_lines}"), encoding="utf-8"
         )
+    environment = {
+        "SPLINTERM_SOCKET": str(socket),
+        "SPLINTERM_ENABLE_DEV_ATTACH": "1",
+        "SPLINTERM_CONFIG": str(profile_path),
+        "XDG_STATE_HOME": str(state / "xdg-state"),
+    }
+    for key in (
+        "SPLINTERM_PERF_TRACE_DIR",
+        "SPLINTERM_PERF_RUN_ID",
+        "SPLINTERM_PERF_TRACE_MAX_EVENTS",
+    ):
+        if value := os.environ.get(key):
+            environment[key] = value
     return (
         [
             str(splinterm_executable()),
@@ -199,12 +212,7 @@ def launch_command(
             "--",
             *child,
         ],
-        {
-            "SPLINTERM_SOCKET": str(socket),
-            "SPLINTERM_ENABLE_DEV_ATTACH": "1",
-            "SPLINTERM_CONFIG": str(profile_path),
-            "XDG_STATE_HOME": str(state / "xdg-state"),
-        },
+        environment,
     )
 
 
@@ -212,7 +220,23 @@ def dispatch_launcher(launcher: pathlib.Path) -> None:
     expression = (
         f"hl.exec_cmd({json.dumps(str(launcher))}, "
         "{ workspace = '8 silent', float = true, size = '960 600', "
-        "no_initial_focus = true })"
+        "opacity = '1 1', no_initial_focus = true, no_focus = true })"
+    )
+    result = V1.run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+
+
+def move_window_absolute(address: str, x: int, y: int) -> None:
+    """Move one known window without focusing it through Hyprland 0.56's Lua API."""
+    # Hyprland v0.56.0 LuaBindingsDispatchers.cpp `hlWindowMove` accepts
+    # { x, y, relative?, window? }. Do not regress to the removed legacy form
+    # `hyprctl dispatch movewindowpixel ...`, which hyprctl now parses as Lua.
+    selector = f"address:{address}"
+    expression = (
+        "hl.dispatch(hl.dsp.window.move({ "
+        f"x = {int(x)}, y = {int(y)}, relative = false, "
+        f"window = {json.dumps(selector)} }}))"
     )
     result = V1.run(["hyprctl", "eval", expression], capture_output=True, timeout=5)
     if result.returncode:

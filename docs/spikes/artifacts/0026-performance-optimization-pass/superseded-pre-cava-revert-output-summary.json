@@ -1,0 +1,233 @@
+{
+  "valid": true,
+  "warmups": 3,
+  "samples": 10,
+  "seed": 10017,
+  "orders": [
+    {
+      "phase": "warmup",
+      "iteration": 0,
+      "cases": [
+        "plain",
+        "ansi",
+        "unicode"
+      ]
+    },
+    {
+      "phase": "warmup",
+      "iteration": 1,
+      "cases": [
+        "plain",
+        "unicode",
+        "ansi"
+      ]
+    },
+    {
+      "phase": "warmup",
+      "iteration": 2,
+      "cases": [
+        "unicode",
+        "ansi",
+        "plain"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 0,
+      "cases": [
+        "ansi",
+        "plain",
+        "unicode"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 1,
+      "cases": [
+        "ansi",
+        "unicode",
+        "plain"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 2,
+      "cases": [
+        "plain",
+        "ansi",
+        "unicode"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 3,
+      "cases": [
+        "unicode",
+        "plain",
+        "ansi"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 4,
+      "cases": [
+        "unicode",
+        "ansi",
+        "plain"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 5,
+      "cases": [
+        "ansi",
+        "plain",
+        "unicode"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 6,
+      "cases": [
+        "unicode",
+        "ansi",
+        "plain"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 7,
+      "cases": [
+        "unicode",
+        "plain",
+        "ansi"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 8,
+      "cases": [
+        "ansi",
+        "plain",
+        "unicode"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 9,
+      "cases": [
+        "plain",
+        "ansi",
+        "unicode"
+      ]
+    }
+  ],
+  "binary_sha256": {
+    "splinterm": "367c03dfad263f8d90c016c728ab866baf2fb49290ce1e3790a614d4efd945d2",
+    "splinterd": "4d9b1c98204035de35a871a257452ae488dbc9eed36859b5ce87ddca1c415bc8"
+  },
+  "summary": {
+    "plain": {
+      "child_write_duration_ns": {
+        "count": 10,
+        "min": 51090019,
+        "median": 52841668.0,
+        "p95": 55474699,
+        "max": 82106746,
+        "mad": 942418.0
+      },
+      "trigger_to_visible_marker_ns": {
+        "count": 10,
+        "min": 341386371,
+        "median": 361742031.0,
+        "p95": 373523300,
+        "max": 389439412,
+        "mad": 7520820.0
+      },
+      "rss_growth_bytes": {
+        "count": 10,
+        "min": 44900352,
+        "median": 45047808.0,
+        "p95": 45244416,
+        "max": 45338624,
+        "mad": 102400.0
+      },
+      "cpu_ticks": {
+        "count": 10,
+        "min": 11,
+        "median": 12.0,
+        "p95": 14,
+        "max": 16,
+        "mad": 1.0
+      }
+    },
+    "ansi": {
+      "child_write_duration_ns": {
+        "count": 10,
+        "min": 51937568,
+        "median": 53571027.0,
+        "p95": 57593008,
+        "max": 98575481,
+        "mad": 694537.5
+      },
+      "trigger_to_visible_marker_ns": {
+        "count": 10,
+        "min": 345799888,
+        "median": 364042341.5,
+        "p95": 389434737,
+        "max": 478028971,
+        "mad": 13488578.0
+      },
+      "rss_growth_bytes": {
+        "count": 10,
+        "min": 49565696,
+        "median": 49719296.0,
+        "p95": 49868800,
+        "max": 49885184,
+        "mad": 73728.0
+      },
+      "cpu_ticks": {
+        "count": 10,
+        "min": 11,
+        "median": 12.5,
+        "p95": 14,
+        "max": 17,
+        "mad": 1.0
+      }
+    },
+    "unicode": {
+      "child_write_duration_ns": {
+        "count": 10,
+        "min": 52356553,
+        "median": 55144617.5,
+        "p95": 59785116,
+        "max": 72040386,
+        "mad": 1618360.5
+      },
+      "trigger_to_visible_marker_ns": {
+        "count": 10,
+        "min": 348531194,
+        "median": 357542614.5,
+        "p95": 363944611,
+        "max": 396537467,
+        "mad": 5111534.0
+      },
+      "rss_growth_bytes": {
+        "count": 10,
+        "min": 69464064,
+        "median": 69580800.0,
+        "p95": 69836800,
+        "max": 69971968,
+        "mad": 65536.0
+      },
+      "cpu_ticks": {
+        "count": 10,
+        "min": 14,
+        "median": 15.0,
+        "p95": 16,
+        "max": 16,
+        "mad": 1.0
+      }
+    }
+  }
+}

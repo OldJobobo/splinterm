@@ -1,0 +1,53 @@
+{
+  "schema": "splinterm.performance.graphical-cava-frame.v1",
+  "valid": true,
+  "run_id": "cava-1356952",
+  "notes": [
+    "Reclassified after review: valid only for frame advancement; not a full input smoke."
+  ],
+  "splint_id": "05f20c68-02b5-4dca-87ee-23ed78257881",
+  "frame_progress": {
+    "records": 160,
+    "stage_counts": {
+      "owned_snapshot": 14,
+      "terminal_mutation": 28,
+      "daemon_publication": 28,
+      "wire_materialize": 11,
+      "frame_encode": 11,
+      "socket_write": 11,
+      "client_receive": 11,
+      "client_enqueue": 11,
+      "client_apply": 11,
+      "frame_prepare": 12,
+      "draw_commit": 12
+    },
+    "distinct_revisions": {
+      "client_apply": 11,
+      "client_enqueue": 11,
+      "client_receive": 11,
+      "daemon_publication": 19,
+      "draw_commit": 10,
+      "frame_encode": 11,
+      "frame_prepare": 11,
+      "owned_snapshot": 12,
+      "socket_write": 11,
+      "terminal_mutation": 19,
+      "wire_materialize": 11
+    }
+  },
+  "isolation": {
+    "workspace": 8,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "cleanup_verified": true
+  },
+  "input": {
+    "action": "skipped",
+    "reason": "frame-only renderer smoke"
+  },
+  "trace_directory": "docs/spikes/artifacts/0026-performance-optimization-pass/slice4/cava-renderer-smoke-rerun-trace",
+  "mode": "frame_only",
+  "claims": [
+    "frame_advancement"
+  ]
+}

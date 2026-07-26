@@ -41,6 +41,18 @@ COMMON = load_idle_runner()
 V1 = COMMON.V1
 
 
+def is_visible_marker_pixel(red: int, green: int, blue: int) -> bool:
+    """Match the marker before or after bounded inactive-window alpha composition."""
+
+    return (
+        red <= 35
+        and 175 <= green <= 245
+        and 70 <= blue <= 125
+        and green - red >= 140
+        and green - blue >= 80
+    )
+
+
 def screenshot_marker(window: dict[str, Any], path: pathlib.Path) -> int:
     x, y = window["at"]
     width, height = window["size"]
@@ -65,7 +77,7 @@ def screenshot_marker(window: dict[str, Any], path: pathlib.Path) -> int:
         return sum(
             1
             for red, green, blue in pixels
-            if 0 <= red <= 35 and 215 <= green <= 245 and 95 <= blue <= 125
+            if is_visible_marker_pixel(red, green, blue)
         )
 
 

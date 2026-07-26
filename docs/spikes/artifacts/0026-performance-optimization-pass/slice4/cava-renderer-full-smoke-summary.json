@@ -1,0 +1,241 @@
+{
+  "schema": "splinterm.performance.stage-summary.v1",
+  "valid": true,
+  "run_id": "cava-1445133",
+  "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+  "files": [
+    "docs/spikes/artifacts/0026-performance-optimization-pass/slice4/cava-renderer-full-smoke-trace/cava-1445133-1445151.jsonl",
+    "docs/spikes/artifacts/0026-performance-optimization-pass/slice4/cava-renderer-full-smoke-trace/cava-1445133-1445161.jsonl"
+  ],
+  "record_count": 187,
+  "processes": [
+    [
+      "splinterd",
+      1445151
+    ],
+    [
+      "splinterm",
+      1445161
+    ]
+  ],
+  "stage_order": [
+    "terminal_mutation",
+    "owned_snapshot",
+    "daemon_publication",
+    "wire_materialize",
+    "frame_encode",
+    "socket_write",
+    "client_receive",
+    "client_enqueue",
+    "client_apply",
+    "frame_prepare",
+    "draw_commit",
+    "graphical_input"
+  ],
+  "interval_ownership": {
+    "terminal_mutation": "terminal parser/state active work only",
+    "owned_snapshot": "borrowed terminal state to owned LiveSnapshot",
+    "daemon_publication": "subscriber history lookup, snapshot, and queue admission",
+    "wire_materialize": "LiveSnapshot/update batch to one bounded protocol event",
+    "frame_encode": "protocol event JSON/frame encoding",
+    "socket_write": "awaited local-socket write including backpressure",
+    "client_receive": "timestamp after complete frame decode/classification",
+    "client_enqueue": "awaited bounded Wayland update-queue admission",
+    "client_apply": "protocol update validation and snapshot mutation",
+    "frame_prepare": "display snapshot plus full/incremental SnapshotFrame preparation",
+    "draw_commit": "SHM acquisition, composition/copy, damage, attach, and wl_surface.commit",
+    "graphical_input": "development-only graphical client input queued after committed revisions"
+  },
+  "stages": {
+    "terminal_mutation": {
+      "records": 29,
+      "duration": {
+        "count": 29,
+        "total_ns": 675886,
+        "median_ns": 17063,
+        "p95_ns": 53031,
+        "max_ns": 85352
+      },
+      "bytes": 3745,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    },
+    "owned_snapshot": {
+      "records": 17,
+      "duration": {
+        "count": 17,
+        "total_ns": 876447,
+        "median_ns": 34896,
+        "p95_ns": 159714,
+        "max_ns": 159714
+      },
+      "bytes": 0,
+      "rows": 475,
+      "cells": 52911,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    },
+    "daemon_publication": {
+      "records": 29,
+      "duration": {
+        "count": 29,
+        "total_ns": 497755,
+        "median_ns": 0,
+        "p95_ns": 50566,
+        "max_ns": 51948
+      },
+      "bytes": 3745,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    },
+    "wire_materialize": {
+      "records": 13,
+      "duration": {
+        "count": 13,
+        "total_ns": 752721,
+        "median_ns": 40757,
+        "p95_ns": 167418,
+        "max_ns": 167418
+      },
+      "bytes": 0,
+      "rows": 360,
+      "cells": 41232,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    },
+    "frame_encode": {
+      "records": 13,
+      "duration": {
+        "count": 13,
+        "total_ns": 6009128,
+        "median_ns": 319648,
+        "p95_ns": 1990873,
+        "max_ns": 1990873
+      },
+      "bytes": 4439024,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    },
+    "socket_write": {
+      "records": 13,
+      "duration": {
+        "count": 13,
+        "total_ns": 3177608,
+        "median_ns": 84260,
+        "p95_ns": 2333234,
+        "max_ns": 2333234
+      },
+      "bytes": 4439024,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    },
+    "client_receive": {
+      "records": 13,
+      "duration": null,
+      "bytes": 0,
+      "rows": 139,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    },
+    "client_enqueue": {
+      "records": 13,
+      "duration": {
+        "count": 13,
+        "total_ns": 57228,
+        "median_ns": 4148,
+        "p95_ns": 9458,
+        "max_ns": 9458
+      },
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    },
+    "client_apply": {
+      "records": 13,
+      "duration": {
+        "count": 13,
+        "total_ns": 177611,
+        "median_ns": 12254,
+        "p95_ns": 34205,
+        "max_ns": 34205
+      },
+      "bytes": 0,
+      "rows": 139,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 13,
+      "resyncs": 0
+    },
+    "frame_prepare": {
+      "records": 16,
+      "duration": {
+        "count": 16,
+        "total_ns": 58460155,
+        "median_ns": 3985043,
+        "p95_ns": 5676037,
+        "max_ns": 5676037
+      },
+      "bytes": 0,
+      "rows": 444,
+      "cells": 51060,
+      "max_queue_depth": 0,
+      "full_reloads": 13,
+      "resyncs": 0
+    },
+    "draw_commit": {
+      "records": 17,
+      "duration": {
+        "count": 17,
+        "total_ns": 41837766,
+        "median_ns": 2019879,
+        "p95_ns": 5554836,
+        "max_ns": 5554836
+      },
+      "bytes": 38202624,
+      "rows": 468,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 17,
+      "resyncs": 0
+    },
+    "graphical_input": {
+      "records": 1,
+      "duration": null,
+      "bytes": 1,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0
+    }
+  },
+  "correlated_wire_to_commit": {
+    "count": 10,
+    "duration": {
+      "count": 10,
+      "total_ns": 98853181,
+      "median_ns": 9645641,
+      "p95_ns": 13407157,
+      "max_ns": 13407157
+    }
+  }
+}
