@@ -135,6 +135,7 @@ const MIN_SCALE_120: u32 = 120;
 const MAX_SCALE_120: u32 = 960;
 const MAX_PREEDIT_BYTES: usize = 4 * 1024;
 const EVENT_LOOP_TICK_INTERVAL: Duration = Duration::from_millis(50);
+const RECEIVER_DRAIN_BUDGET: usize = 8;
 const MAX_SHM_BUFFERS: usize = 2;
 const BTN_RIGHT: u32 = 0x111;
 
@@ -156,12 +157,57 @@ enum ReceiverPoll<T> {
     Disconnected,
 }
 
+struct ReceiverDrain<T> {
+    items: Vec<T>,
+    disconnected: bool,
+}
+
 fn poll_receiver<T>(receiver: &mut Receiver<T>, waker: &Waker) -> ReceiverPoll<T> {
     let mut context = TaskContext::from_waker(waker);
     match Pin::new(receiver).poll_recv(&mut context) {
         Poll::Ready(Some(item)) => ReceiverPoll::Item(item),
         Poll::Ready(None) => ReceiverPoll::Disconnected,
         Poll::Pending => ReceiverPoll::Pending,
+    }
+}
+
+fn drain_receiver<T>(receiver: &mut Receiver<T>, waker: &Waker) -> ReceiverDrain<T> {
+    let mut items = Vec::with_capacity(RECEIVER_DRAIN_BUDGET);
+    for _ in 0..RECEIVER_DRAIN_BUDGET {
+        match poll_receiver(receiver, waker) {
+            ReceiverPoll::Item(item) => items.push(item),
+            ReceiverPoll::Pending => {
+                return ReceiverDrain {
+                    items,
+                    disconnected: false,
+                };
+            }
+            ReceiverPoll::Disconnected => {
+                return ReceiverDrain {
+                    items,
+                    disconnected: true,
+                };
+            }
+        }
+    }
+    if receiver.is_closed() {
+        // A closed producer cannot refill the queue, so preserve the previous
+        // drain-before-disconnect behavior without risking starvation.
+        while let Ok(item) = receiver.try_recv() {
+            items.push(item);
+        }
+        return ReceiverDrain {
+            items,
+            disconnected: true,
+        };
+    }
+    // Yield to drawing and Wayland dispatch even when a producer refills the
+    // bounded channel as quickly as items are consumed. Re-arm this loop so
+    // the retained backlog is handled without waiting for the periodic tick.
+    waker.wake_by_ref();
+    ReceiverDrain {
+        items,
+        disconnected: false,
     }
 }
 static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
@@ -623,7 +669,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let (update_ping, update_ping_source) = make_ping().context("create update wake source")?;
     event_loop
         .handle()
-        .insert_source(update_ping_source, |(), _, _| {})
+        .insert_source(update_ping_source, |(), (), _| {})
         .context("register update wake source")?;
     let update_waker = Waker::from(Arc::new(UpdateWake(update_ping)));
 
@@ -4404,15 +4450,10 @@ impl App {
     fn apply_topology_updates(&mut self) -> Result<bool> {
         let mut pending = Vec::new();
         if let Some(updates) = &mut self.topology_updates {
-            loop {
-                match poll_receiver(updates, &self.update_waker) {
-                    ReceiverPoll::Item(update) => pending.push(update),
-                    ReceiverPoll::Pending => break,
-                    ReceiverPoll::Disconnected => {
-                        self.topology_updates = None;
-                        break;
-                    }
-                }
+            let drained = drain_receiver(updates, &self.update_waker);
+            pending = drained.items;
+            if drained.disconnected {
+                self.topology_updates = None;
             }
         }
         let mut changed = false;
@@ -4480,16 +4521,9 @@ impl App {
             let mut pending = Vec::new();
             let mut disconnected = false;
             if let Some(updates) = &mut pane.updates {
-                loop {
-                    match poll_receiver(updates, &self.update_waker) {
-                        ReceiverPoll::Item(update) => pending.push(update),
-                        ReceiverPoll::Pending => break,
-                        ReceiverPoll::Disconnected => {
-                            disconnected = true;
-                            break;
-                        }
-                    }
-                }
+                let drained = drain_receiver(updates, &self.update_waker);
+                pending = drained.items;
+                disconnected = drained.disconnected;
             }
             if disconnected {
                 pane.controller_active = false;
@@ -4551,16 +4585,9 @@ impl App {
         let mut pending = Vec::new();
         let mut disconnected = false;
         if let Some(updates) = &mut self.pane.updates {
-            loop {
-                match poll_receiver(updates, &self.update_waker) {
-                    ReceiverPoll::Item(update) => pending.push(update),
-                    ReceiverPoll::Pending => break,
-                    ReceiverPoll::Disconnected => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
+            let drained = drain_receiver(updates, &self.update_waker);
+            pending = drained.items;
+            disconnected = drained.disconnected;
         }
         if disconnected {
             self.exit = true;
@@ -6501,6 +6528,16 @@ mod tests {
     use splinterm_core::{Axis, Splint, SplitRatio};
     use splinterm_protocol::ActiveScreen;
 
+    fn update_test_waker() -> (EventLoop<'static, usize>, Waker) {
+        let event_loop = EventLoop::<usize>::try_new().unwrap();
+        let (ping, source) = make_ping().unwrap();
+        event_loop
+            .handle()
+            .insert_source(source, |(), _, wake_count| *wake_count += 1)
+            .unwrap();
+        (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
+    }
+
     #[test]
     fn terminal_draw_bypasses_delayed_frame_only_with_a_released_buffer() {
         assert!(!terminal_draw_waits_for_frame(false, false));
@@ -6552,6 +6589,84 @@ mod tests {
             poll_receiver(&mut receiver, &waker),
             ReceiverPoll::Pending
         ));
+    }
+
+    #[test]
+    fn receiver_drain_yields_at_budget_and_rearms_calloop() {
+        let mut event_loop = EventLoop::<usize>::try_new().unwrap();
+        let (ping, source) = make_ping().unwrap();
+        event_loop
+            .handle()
+            .insert_source(source, |(), _, wake_count| *wake_count += 1)
+            .unwrap();
+        let waker = Waker::from(Arc::new(UpdateWake(ping)));
+        let item_count = RECEIVER_DRAIN_BUDGET * 2;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(item_count);
+        for item in 0..item_count {
+            sender.try_send(item).unwrap();
+        }
+
+        let first = drain_receiver(&mut receiver, &waker);
+        assert_eq!(first.items, (0..RECEIVER_DRAIN_BUDGET).collect::<Vec<_>>());
+        assert!(!first.disconnected);
+        assert_eq!(receiver.len(), RECEIVER_DRAIN_BUDGET);
+
+        let mut wake_count = 0;
+        event_loop
+            .dispatch(Duration::ZERO, &mut wake_count)
+            .unwrap();
+        assert_eq!(wake_count, 1);
+
+        let second = drain_receiver(&mut receiver, &waker);
+        assert_eq!(
+            second.items,
+            (RECEIVER_DRAIN_BUDGET..item_count).collect::<Vec<_>>()
+        );
+        assert!(!second.disconnected);
+    }
+
+    #[test]
+    fn receiver_drain_reports_boundary_disconnect_after_finite_tail() {
+        let (_event_loop, waker) = update_test_waker();
+        let item_count = RECEIVER_DRAIN_BUDGET + 4;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(item_count);
+        for item in 0..item_count {
+            sender.try_send(item).unwrap();
+        }
+        drop(sender);
+
+        let drained = drain_receiver(&mut receiver, &waker);
+        assert_eq!(drained.items, (0..item_count).collect::<Vec<_>>());
+        assert!(drained.disconnected);
+    }
+
+    #[test]
+    fn receiver_drain_yields_to_a_concurrently_refilling_producer() {
+        let event_loop = EventLoop::<usize>::try_new().unwrap();
+        let (ping, source) = make_ping().unwrap();
+        event_loop
+            .handle()
+            .insert_source(source, |(), _, wake_count| *wake_count += 1)
+            .unwrap();
+        let waker = Waker::from(Arc::new(UpdateWake(ping)));
+        let item_count = RECEIVER_DRAIN_BUDGET * 8;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let producer = std::thread::spawn(move || {
+            for item in 0..item_count {
+                sender.blocking_send(item).unwrap();
+            }
+        });
+        let mut items_seen = Vec::with_capacity(item_count);
+        let mut disconnected = false;
+        while !disconnected {
+            let drained = drain_receiver(&mut receiver, &waker);
+            assert!(drained.items.len() <= RECEIVER_DRAIN_BUDGET);
+            items_seen.extend(drained.items);
+            disconnected = drained.disconnected;
+            std::thread::yield_now();
+        }
+        producer.join().unwrap();
+        assert_eq!(items_seen, (0..item_count).collect::<Vec<_>>());
     }
 
     #[test]
