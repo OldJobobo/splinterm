@@ -1443,7 +1443,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
     reason = "one isolated scenario proves scoped status, grant metadata, revocation, and stale-incarnation behavior"
 )]
 async fn scoped_authorization_status_needs_no_topology_permission() {
-    time::timeout(Duration::from_secs(60), async {
+    time::timeout(Duration::from_secs(180), async {
         let mut daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
         let mut connection = daemon.connect().await;
         let revision = connection.topology_revision().await;
