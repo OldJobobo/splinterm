@@ -327,7 +327,24 @@ impl Terminal {
 
     /// Feeds arbitrary bytes into the persistent parser state.
     pub fn advance(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
+        self.advance_inner(bytes, false);
+    }
+
+    /// Feeds bytes through the next synchronized-frame completion boundary.
+    ///
+    /// Returns the number of consumed bytes. A caller can capture immutable
+    /// state at that boundary before feeding the returned suffix.
+    pub fn advance_to_synchronized_boundary(&mut self, bytes: &[u8]) -> (usize, bool) {
+        self.advance_inner(bytes, true)
+    }
+
+    fn advance_inner(
+        &mut self,
+        bytes: &[u8],
+        stop_at_synchronized_boundary: bool,
+    ) -> (usize, bool) {
+        for (offset, &byte) in bytes.iter().enumerate() {
+            let synchronized_before = self.synchronized_updates;
             let mut reprocess = true;
             while reprocess {
                 let (action, again) = self.parser.feed(byte);
@@ -357,7 +374,11 @@ impl Terminal {
                 }
                 reprocess = again;
             }
+            if stop_at_synchronized_boundary && synchronized_before && !self.synchronized_updates {
+                return (offset + 1, true);
+            }
         }
+        (bytes.len(), false)
     }
 
     /// Reflows the normal screen and resizes the alternate screen without
@@ -2411,15 +2432,16 @@ impl Terminal {
             self.set_private_modes(params, final_byte == b'h');
             return;
         }
-        // Cava 0.10.7 emits non-private CSI 2026 h/l followed by ST instead
-        // of DECSET/DECRST. Accept that exact mode as a narrow compatibility
-        // quirk; the trailing ST is harmless in ground state.
+        // Cava 0.10.7 emits non-private CSI 2026 l/h followed by ST,
+        // with reset beginning a frame and set ending it. Accept that exact
+        // reversed mode as a narrow compatibility quirk; standard private
+        // DECSET/DECRST semantics above remain unchanged.
         if private.is_none()
             && matches!(final_byte, b'h' | b'l')
             && params.count() == 1
             && params.get(0).value(0, false) == 2026
         {
-            self.synchronized_updates = final_byte == b'h';
+            self.synchronized_updates = final_byte == b'l';
             return;
         }
         if private == Some(b'?') && final_byte == b'S' {
@@ -3925,7 +3947,7 @@ mod tests {
         terminal.advance(b"\x1b[?2026l");
         assert!(!terminal.synchronized_updates());
 
-        terminal.advance(b"\x1b[2026h\x1b\\B\x1b[2026l\x1b\\C");
+        terminal.advance(b"\x1b[2026l\x1b\\B\x1b[2026h\x1b\\C");
         assert!(!terminal.synchronized_updates());
         assert_eq!(
             terminal.grid().row(0).unwrap()[0].content(),
@@ -3940,10 +3962,36 @@ mod tests {
             CellContent::Scalar('C')
         );
 
-        terminal.advance(b"\x1b[2026h");
+        terminal.advance(b"\x1b[2026l");
         assert!(terminal.synchronized_updates());
         terminal.advance(b"\x1bc");
         assert!(!terminal.synchronized_updates());
+    }
+
+    #[test]
+    fn synchronized_boundary_advance_stops_before_the_next_cava_frame() {
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let bytes = b"\x1b[2026lA\x1b[2026h\x1b\\\x1b[2026lB";
+        let (consumed, completed) = terminal.advance_to_synchronized_boundary(bytes);
+
+        assert!(completed);
+        assert_eq!(&bytes[..consumed], b"\x1b[2026lA\x1b[2026h");
+        assert!(!terminal.synchronized_updates());
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[0].content(),
+            CellContent::Scalar('A')
+        );
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[1].content(),
+            CellContent::Empty
+        );
+
+        terminal.advance(&bytes[consumed..]);
+        assert!(terminal.synchronized_updates());
+        assert_eq!(
+            terminal.grid().row(0).unwrap()[1].content(),
+            CellContent::Scalar('B')
+        );
     }
 
     #[test]

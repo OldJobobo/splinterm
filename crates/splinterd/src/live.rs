@@ -32,6 +32,7 @@ static NEXT_INCARNATION: AtomicU64 = AtomicU64::new(1);
 const PARSE_BATCH: usize = 256;
 const READ_BUFFER: usize = 16 * 1024;
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
+const SYNCHRONIZED_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const MAX_SUBSCRIBER_QUEUE_CAPACITY: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -140,6 +141,7 @@ pub enum LiveEvent {
     Update {
         incarnation: ProcessIncarnation,
         updates: Vec<TerminalUpdate>,
+        snapshot: Box<LiveSnapshot>,
     },
     Exited {
         incarnation: ProcessIncarnation,
@@ -278,7 +280,7 @@ enum Command {
     ImageContent(ImageContentId, u64, [u8; 32], Reply<ImageContent>),
     ScrollbackPage(Option<u64>, usize, Reply<LiveScrollbackPage>),
     Search(String, bool, usize, usize, Duration, Reply<LiveSearchPage>),
-    Subscribe(usize, Reply<Subscription>),
+    Subscribe(usize, usize, Reply<Subscription>),
     Attach(usize, usize, Reply<(LiveSnapshot, Subscription)>),
     Shutdown(oneshot::Sender<()>),
 }
@@ -465,7 +467,7 @@ impl LiveSplintHandle {
         &self,
         capacity: usize,
     ) -> Result<Subscription, LiveError> {
-        self.request(|reply| Command::Subscribe(capacity, reply))
+        self.request(|reply| Command::Subscribe(capacity, self.default_snapshot_rows, reply))
             .await
     }
 
@@ -643,6 +645,7 @@ struct Subscriber {
     events: mpsc::Sender<LiveEvent>,
     resnapshot: watch::Sender<bool>,
     published_revision: TerminalRevision,
+    snapshot_rows: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -651,6 +654,7 @@ struct SynchronizedPublication {
     active: bool,
     timed_out: bool,
     deadline: Option<Instant>,
+    next_frame_at: Option<Instant>,
 }
 
 impl SynchronizedPublication {
@@ -660,6 +664,7 @@ impl SynchronizedPublication {
             active: false,
             timed_out: false,
             deadline: None,
+            next_frame_at: None,
         }
     }
 
@@ -674,13 +679,17 @@ impl SynchronizedPublication {
         self.active = active;
     }
 
-    const fn suppresses_publication(self) -> bool {
-        self.active && !self.timed_out
-    }
-
     fn expire(&mut self) {
         self.timed_out = true;
         self.deadline = None;
+    }
+
+    fn should_publish_frame(&mut self, now: Instant) -> bool {
+        if self.next_frame_at.is_some_and(|deadline| now < deadline) {
+            return false;
+        }
+        self.next_frame_at = Some(now + SYNCHRONIZED_FRAME_INTERVAL);
+        true
     }
 }
 
@@ -853,7 +862,9 @@ async fn run_actor_body(
                             let started = Instant::now();
                             let output = process_output(
                                 &read_buffer[..count],
+                                splint_id,
                                 incarnation,
+                                child_exit,
                                 &mut terminal,
                                 &mut reply_writes,
                                 &mut subscribers,
@@ -917,7 +928,14 @@ async fn run_actor_body(
                 terminal.expire_synchronized_updates();
                 publication.observe(false, Instant::now());
                 publication.expire();
-                publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+                publish_updates(
+                    splint_id,
+                    &terminal,
+                    &mut publication,
+                    incarnation,
+                    child_exit,
+                    &mut subscribers,
+                );
             }
             _ = interval.tick() => {
                 if child_exit.is_none() {
@@ -935,7 +953,14 @@ async fn run_actor_body(
     terminal.expire_synchronized_updates();
     publication.observe(false, Instant::now());
     publication.expire();
-    publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+    publish_updates(
+        splint_id,
+        &terminal,
+        &mut publication,
+        incarnation,
+        Some(status),
+        &mut subscribers,
+    );
     publish(
         &mut subscribers,
         LiveEvent::Exited {
@@ -1007,9 +1032,14 @@ fn handle_command(
                 );
                 terminal.resize(usize::from(size.columns), usize::from(size.rows));
                 publication.observe(terminal.synchronized_updates(), Instant::now());
-                if !publication.suppresses_publication() {
-                    publish_updates(terminal, publication, incarnation, subscribers);
-                }
+                publish_updates(
+                    splint_id,
+                    terminal,
+                    publication,
+                    incarnation,
+                    child_exit,
+                    subscribers,
+                );
             }
             let _ = reply.send(result);
         }
@@ -1083,7 +1113,7 @@ fn handle_command(
                 page,
             }));
         }
-        Command::Subscribe(capacity, reply) => {
+        Command::Subscribe(capacity, max_rows, reply) => {
             subscribers.retain(|subscriber| !subscriber.events.is_closed());
             let Ok(event_capacity) =
                 subscriber_channel_capacity(capacity, config.subscriber_capacity)
@@ -1101,6 +1131,7 @@ fn handle_command(
                 events: event_sender,
                 resnapshot,
                 published_revision: terminal.revision(),
+                snapshot_rows: max_rows.min(config.max_scrollback_snapshot_rows),
             });
             let _ = reply.send(Ok(Subscription {
                 events,
@@ -1138,6 +1169,7 @@ fn handle_command(
                 events: event_sender,
                 resnapshot,
                 published_revision: terminal.revision(),
+                snapshot_rows: max_rows.min(config.max_scrollback_snapshot_rows),
             });
             let subscription = Subscription {
                 events,
@@ -1156,9 +1188,11 @@ fn handle_command(
 }
 
 fn publish_updates(
+    splint_id: SplintId,
     terminal: &Terminal,
     publication: &mut SynchronizedPublication,
     incarnation: ProcessIncarnation,
+    child_exit: Option<ProcessExit>,
     subscribers: &mut Vec<Subscriber>,
 ) -> (usize, usize) {
     let update_count = terminal
@@ -1186,9 +1220,17 @@ fn publish_updates(
             overflows = overflows.saturating_add(1);
             return false;
         }
+        let snapshot = owned_snapshot(
+            splint_id,
+            incarnation,
+            terminal,
+            subscriber.snapshot_rows,
+            child_exit,
+        );
         match subscriber.events.try_send(LiveEvent::Update {
             incarnation,
             updates,
+            snapshot: Box::new(snapshot),
         }) {
             Ok(()) => {
                 subscriber.published_revision = terminal.revision();
@@ -1233,9 +1275,15 @@ fn set_terminal_pixel_geometry(
     terminal.set_cell_pixel_size(cell_width, cell_height);
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "PTY parsing, immutable frame capture, replies, and subscriber publication form one actor transaction"
+)]
 fn process_output(
     bytes: &[u8],
+    splint_id: SplintId,
     incarnation: ProcessIncarnation,
+    child_exit: Option<ProcessExit>,
     terminal: &mut Terminal,
     reply_writes: &mut WriteQueue,
     subscribers: &mut Vec<Subscriber>,
@@ -1247,7 +1295,39 @@ fn process_output(
         metrics.parse_batches = metrics.parse_batches.saturating_add(1);
         let image_metrics_before = terminal.image_metrics();
         let parse_started = Instant::now();
-        terminal.advance(batch);
+        let mut remaining = batch;
+        while !remaining.is_empty() {
+            let revision_before = terminal.revision();
+            let (consumed, completed_frame) = terminal.advance_to_synchronized_boundary(remaining);
+            debug_assert!(consumed > 0 && consumed <= remaining.len());
+            remaining = &remaining[consumed..];
+            let now = Instant::now();
+            publication.observe(terminal.synchronized_updates(), now);
+            let publish_now = if completed_frame {
+                publication.should_publish_frame(now)
+            } else {
+                !terminal.synchronized_updates() && terminal.revision() != revision_before
+            };
+            let (updates, overflows) = if publish_now {
+                publish_updates(
+                    splint_id,
+                    terminal,
+                    publication,
+                    incarnation,
+                    child_exit,
+                    subscribers,
+                )
+            } else {
+                (0, 0)
+            };
+            metrics.terminal_updates = metrics
+                .terminal_updates
+                .saturating_add(u64::try_from(updates).unwrap_or(u64::MAX));
+            metrics.live_events = metrics.live_events.saturating_add(u64::from(updates > 0));
+            metrics.subscriber_overflows = metrics
+                .subscriber_overflows
+                .saturating_add(u64::try_from(overflows).unwrap_or(u64::MAX));
+        }
         if std::env::var_os("SPLINTERM_IMAGE_TRACE").is_some()
             && terminal.image_metrics() != image_metrics_before
         {
@@ -1259,18 +1339,6 @@ fn process_output(
                 image_metrics.content_count,
                 image_metrics.placement_count,
             );
-        }
-        publication.observe(terminal.synchronized_updates(), Instant::now());
-        if !publication.suppresses_publication() {
-            let (updates, overflows) =
-                publish_updates(terminal, publication, incarnation, subscribers);
-            metrics.terminal_updates = metrics
-                .terminal_updates
-                .saturating_add(u64::try_from(updates).unwrap_or(u64::MAX));
-            metrics.live_events = metrics.live_events.saturating_add(u64::from(updates > 0));
-            metrics.subscriber_overflows = metrics
-                .subscriber_overflows
-                .saturating_add(u64::try_from(overflows).unwrap_or(u64::MAX));
         }
         for event in terminal.drain_events() {
             if let TerminalEvent::PtyWrite(bytes) = event {
@@ -1437,6 +1505,7 @@ mod tests {
                 events,
                 resnapshot,
                 published_revision: terminal.revision(),
+                snapshot_rows: 0,
             },
             receiver,
             resnapshot_receiver,
@@ -1453,8 +1522,10 @@ mod tests {
         let mut replies = WriteQueue::default();
 
         let metrics = process_output(
-            b"\x1b[2026hA\x1b[5n",
+            b"\x1b[2026lA\x1b[5n",
+            SplintId::new(),
             incarnation,
+            None,
             &mut terminal,
             &mut replies,
             &mut subscribers,
@@ -1462,7 +1533,7 @@ mod tests {
             1024,
         )
         .unwrap();
-        assert!(publication.suppresses_publication());
+        assert!(publication.active && !publication.timed_out);
         assert_eq!(metrics.terminal_updates, 0);
         assert!(matches!(
             receiver.try_recv(),
@@ -1474,8 +1545,10 @@ mod tests {
         );
 
         process_output(
-            b"B\x1b[2026l\x1b\\C",
+            b"B\x1b[2026h\x1b\\C",
+            SplintId::new(),
             incarnation,
+            None,
             &mut terminal,
             &mut replies,
             &mut subscribers,
@@ -1483,15 +1556,132 @@ mod tests {
             1024,
         )
         .unwrap();
-        assert!(!publication.suppresses_publication());
-        let LiveEvent::Update { updates, .. } = receiver.try_recv().unwrap() else {
-            panic!("expected one deferred update batch");
+        assert!(!publication.active);
+        let LiveEvent::Update {
+            updates, snapshot, ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("expected the completed synchronized frame");
         };
-        assert_eq!(updates.len(), 2);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(snapshot.visible_rows[0].cells[0].content, "A");
+        assert_eq!(snapshot.visible_rows[0].cells[1].content, "B");
+        assert_eq!(snapshot.visible_rows[0].cells[2].content, "");
+
+        let LiveEvent::Update {
+            updates, snapshot, ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("expected trailing normal output");
+        };
+        assert_eq!(updates.len(), 1);
+        assert_eq!(snapshot.visible_rows[0].cells[2].content, "C");
+    }
+
+    #[test]
+    fn completed_cava_frame_publishes_when_batch_begins_next_frame() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let (subscriber, mut receiver, _) = synchronized_test_subscriber(&terminal);
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+        let mut replies = WriteQueue::default();
+
+        let metrics = process_output(
+            b"\x1b[2026lA\x1b[2026h\x1b\\\x1b[2026lB",
+            SplintId::new(),
+            incarnation,
+            None,
+            &mut terminal,
+            &mut replies,
+            &mut subscribers,
+            &mut publication,
+            1024,
+        )
+        .unwrap();
+
+        assert!(terminal.synchronized_updates());
+        assert!(publication.active && !publication.timed_out);
+        assert_eq!(metrics.terminal_updates, 1);
+        let LiveEvent::Update {
+            updates, snapshot, ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("completed Cava frame was not published");
+        };
+        assert_eq!(updates.len(), 1);
+        assert_eq!(snapshot.visible_rows[0].cells[0].content, "A");
+        assert_eq!(
+            snapshot.visible_rows[0].cells[1].content, "",
+            "the immutable completed frame must exclude partial next-frame state"
+        );
         assert!(matches!(
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn ordinary_output_bypasses_synchronized_frame_throttle() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let (subscriber, mut receiver, _) = synchronized_test_subscriber(&terminal);
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+        publication.next_frame_at = Some(Instant::now() + Duration::from_secs(1));
+        let mut replies = WriteQueue::default();
+
+        process_output(
+            b"\x1b[2026lA\x1b[2026h",
+            SplintId::new(),
+            incarnation,
+            None,
+            &mut terminal,
+            &mut replies,
+            &mut subscribers,
+            &mut publication,
+            1024,
+        )
+        .unwrap();
+        process_output(
+            b"\x1b\\",
+            SplintId::new(),
+            incarnation,
+            None,
+            &mut terminal,
+            &mut replies,
+            &mut subscribers,
+            &mut publication,
+            1024,
+        )
+        .unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let metrics = process_output(
+            b"Z",
+            SplintId::new(),
+            incarnation,
+            None,
+            &mut terminal,
+            &mut replies,
+            &mut subscribers,
+            &mut publication,
+            1024,
+        )
+        .unwrap();
+
+        assert_eq!(metrics.terminal_updates, 2);
+        let LiveEvent::Update {
+            updates, snapshot, ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("ordinary output must publish immediately");
+        };
+        assert_eq!(updates.len(), 2);
+        assert_eq!(snapshot.visible_rows[0].cells[0].content, "A");
+        assert_eq!(snapshot.visible_rows[0].cells[1].content, "Z");
     }
 
     #[tokio::test]
@@ -1504,6 +1694,7 @@ mod tests {
             events,
             resnapshot,
             published_revision: terminal.revision(),
+            snapshot_rows: 0,
         }];
         let mut subscription = Subscription {
             events: receiver,
@@ -1511,7 +1702,14 @@ mod tests {
         };
         let mut publication = SynchronizedPublication::new(terminal.revision());
         terminal.advance(b"\x1b[?2026hfinal\x1b[?2026l");
-        publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+        publish_updates(
+            SplintId::new(),
+            &terminal,
+            &mut publication,
+            incarnation,
+            None,
+            &mut subscribers,
+        );
         let status = ProcessExit {
             code: Some(0),
             signal: None,
@@ -1567,7 +1765,9 @@ mod tests {
 
         process_output(
             b"\x1b[?2026hABCDEFGHIJK",
+            SplintId::new(),
             incarnation,
+            None,
             &mut terminal,
             &mut replies,
             &mut subscribers,
@@ -1582,8 +1782,14 @@ mod tests {
         terminal.expire_synchronized_updates();
         publication.observe(false, Instant::now());
         publication.expire();
-        let (updates, overflows) =
-            publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+        let (updates, overflows) = publish_updates(
+            SplintId::new(),
+            &terminal,
+            &mut publication,
+            incarnation,
+            None,
+            &mut subscribers,
+        );
         assert_eq!((updates, overflows), (1, 0));
         assert_eq!(subscribers.len(), 1);
         assert!(!*resnapshot.borrow());
@@ -1604,8 +1810,14 @@ mod tests {
         let mut publication = SynchronizedPublication::new(terminal.revision());
         terminal.advance(b"ABCDEFGHIJK");
 
-        let (_, overflows) =
-            publish_updates(&terminal, &mut publication, incarnation, &mut subscribers);
+        let (_, overflows) = publish_updates(
+            SplintId::new(),
+            &terminal,
+            &mut publication,
+            incarnation,
+            None,
+            &mut subscribers,
+        );
         assert_eq!(overflows, 1);
         assert!(subscribers.is_empty());
         assert!(*resnapshot.borrow());

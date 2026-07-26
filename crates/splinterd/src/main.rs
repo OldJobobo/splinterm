@@ -1488,13 +1488,14 @@ enum PendingSubscription {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct SubscriptionAccess {
     grant_id: Option<u64>,
     maximum_returned_bytes: Option<usize>,
     scrollback_rows: usize,
     include_images: bool,
     history: HistoryState,
+    visible_rows: Vec<splinterd::LiveRow>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4237,6 +4238,7 @@ async fn handle_authorized_request(
                 .map_err(|_| internal())?;
             let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
             let history = history_state(&snapshot);
+            let visible_rows = snapshot.visible_rows.clone();
             let provenance = terminal_provenance(
                 state,
                 splint_id,
@@ -4262,6 +4264,7 @@ async fn handle_authorized_request(
                         scrollback_rows,
                         include_images,
                         history,
+                        visible_rows,
                     },
                 }),
             });
@@ -5104,6 +5107,7 @@ enum DrainedSubscription {
 fn drain_pending_subscription(
     subscription: &mut Subscription,
     updates: &mut Vec<TerminalUpdate>,
+    snapshot: &mut Box<LiveSnapshot>,
 ) -> DrainedSubscription {
     loop {
         if subscription.resnapshot_required() {
@@ -5111,8 +5115,13 @@ fn drain_pending_subscription(
         }
         match subscription.events.try_recv() {
             Ok(LiveEvent::Update {
-                updates: pending, ..
-            }) => updates.extend(pending),
+                updates: pending,
+                snapshot: pending_snapshot,
+                ..
+            }) => {
+                updates.extend(pending);
+                *snapshot = pending_snapshot;
+            }
             Ok(LiveEvent::Exited { status, .. }) => {
                 return DrainedSubscription::Exited(status);
             }
@@ -5142,6 +5151,7 @@ fn spawn_subscription(
     tokio::spawn(async move {
         let mut sequence = 1_u64;
         let mut previous_history = access.history;
+        let mut previous_visible_rows = access.visible_rows.clone();
         let expiry = time::sleep(consent::GRANT_LIFETIME);
         tokio::pin!(expiry);
         loop {
@@ -5197,8 +5207,13 @@ fn spawn_subscription(
                     });
                     break;
                 }
-                SubscriptionReceive::Event(LiveEvent::Update { mut updates, .. }) => {
-                    let drained = drain_pending_subscription(&mut subscription, &mut updates);
+                SubscriptionReceive::Event(LiveEvent::Update {
+                    mut updates,
+                    mut snapshot,
+                    ..
+                }) => {
+                    let drained =
+                        drain_pending_subscription(&mut subscription, &mut updates, &mut snapshot);
                     if matches!(drained, DrainedSubscription::ResnapshotRequired) {
                         let revision = current_revision(&handle, access.scrollback_rows).await;
                         let _ = outputs
@@ -5213,21 +5228,18 @@ fn spawn_subscription(
                             .await;
                         break;
                     }
-                    let Ok(snapshot) = handle
-                        .snapshot_with_scrollback(access.scrollback_rows)
-                        .await
-                    else {
-                        break;
-                    };
                     let current_history = history_state(&snapshot);
                     if revision_advances(previous_history.revision, current_history.revision) {
+                        let next_visible_rows = snapshot.visible_rows.clone();
                         let event = subscription_update_event(
                             &updates,
-                            snapshot,
+                            *snapshot,
                             previous_history,
+                            &previous_visible_rows,
                             access.include_images,
                         );
                         previous_history = current_history;
+                        previous_visible_rows = next_visible_rows;
                         let frame = ServerFrame::Event {
                             subscription_id: id,
                             sequence,
@@ -5302,6 +5314,7 @@ fn subscription_update_event(
     updates: &[TerminalUpdate],
     snapshot: LiveSnapshot,
     previous_history: HistoryState,
+    previous_visible_rows: &[splinterd::LiveRow],
     include_images: bool,
 ) -> SubscriptionEvent {
     if !revisions_match(updates, snapshot.revision.value()) {
@@ -5314,6 +5327,7 @@ fn subscription_update_event(
         &snapshot,
         previous_history.revision,
         previous_history,
+        previous_visible_rows,
         include_images,
     ) {
         Ok(update) => SubscriptionEvent::Update { update },
@@ -5442,11 +5456,20 @@ fn image_content_error(error: &LiveError) -> ProtocolError {
     clippy::too_many_lines,
     reason = "wire conversion keeps one revision's bounded semantic damage atomic"
 )]
+fn visible_row_changed(
+    previous: &[splinterd::LiveRow],
+    current: &[splinterd::LiveRow],
+    index: usize,
+) -> bool {
+    previous.get(index) != current.get(index)
+}
+
 fn wire_update(
     updates: &[TerminalUpdate],
     snapshot: &LiveSnapshot,
     previous_revision: u64,
     previous_history: HistoryState,
+    previous_visible_rows: &[splinterd::LiveRow],
     include_images: bool,
 ) -> Result<WireTerminalUpdate, ProtocolError> {
     let mut damaged = vec![false; snapshot.visible_rows.len()];
@@ -5525,7 +5548,9 @@ fn wire_update(
     let rows = damaged
         .into_iter()
         .enumerate()
-        .filter(|(_, changed)| *changed)
+        .filter(|(index, changed)| {
+            *changed && visible_row_changed(previous_visible_rows, &snapshot.visible_rows, *index)
+        })
         .map(|(index, _)| TerminalRowPatch {
             index,
             row: wire_row(snapshot.visible_rows[index].clone()),
@@ -6750,6 +6775,25 @@ mod tests {
             *subscription.resync.borrow(),
             Some(splinterm_core::TopologyRevision::default())
         );
+    }
+
+    #[test]
+    fn semantic_row_diff_suppresses_identical_redraws() {
+        let row = splinterd::LiveRow {
+            row_id: Some(7),
+            linebreak: false,
+            cells: Vec::new(),
+        };
+        let mut changed = row.clone();
+        changed.linebreak = true;
+        assert!(!visible_row_changed(
+            std::slice::from_ref(&row),
+            std::slice::from_ref(&row),
+            0,
+        ));
+        assert!(visible_row_changed(&[row], &[changed.clone()], 0));
+        assert!(visible_row_changed(&[], &[changed], 0));
+        assert!(!visible_row_changed(&[], &[], 0));
     }
 
     #[test]
