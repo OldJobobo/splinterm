@@ -2966,6 +2966,8 @@ pub struct Connection {
     stream: Option<UnixStream>,
     next_request: u64,
     read_buffer: Vec<u8>,
+    read_offset: usize,
+    read_scratch: Box<[u8; READ_CHUNK_BYTES]>,
     queued_events: VecDeque<(ServerFrame, usize)>,
     queued_event_bytes: usize,
     limits: ServerLimits,
@@ -3061,7 +3063,9 @@ impl Connection {
         Ok(Self {
             stream: Some(stream),
             next_request: 1,
-            read_buffer: Vec::new(),
+            read_buffer: Vec::with_capacity(READ_CHUNK_BYTES),
+            read_offset: 0,
+            read_scratch: Box::new([0; READ_CHUNK_BYTES]),
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             limits,
@@ -3344,34 +3348,43 @@ impl Connection {
     async fn read_server_frame(&mut self) -> Result<ServerFrame> {
         self.ensure_usable()?;
         loop {
-            if self.read_buffer.len() >= 4 {
-                let length = u32::from_be_bytes(
-                    self.read_buffer[..4]
-                        .try_into()
-                        .expect("four-byte frame prefix"),
-                ) as usize;
+            let buffered = &self.read_buffer[self.read_offset..];
+            if buffered.len() >= 4 {
+                let length =
+                    u32::from_be_bytes(buffered[..4].try_into().expect("four-byte frame prefix"))
+                        as usize;
                 if length == 0 || length > MAX_FRAME_BYTES {
                     bail!("splinterd sent an invalid frame length: {length} bytes");
                 }
                 let frame_length = length + 4;
-                if self.read_buffer.len() >= frame_length {
-                    let frame = serde_json::from_slice(&self.read_buffer[4..frame_length])
+                if buffered.len() >= frame_length {
+                    let frame = serde_json::from_slice(&buffered[4..frame_length])
                         .context("splinterd sent invalid JSON")?;
-                    self.read_buffer.drain(..frame_length);
+                    self.read_offset += frame_length;
+                    if self.read_offset == self.read_buffer.len() {
+                        self.read_buffer.clear();
+                        self.read_offset = 0;
+                    }
                     return Ok(frame);
                 }
             }
-            let mut chunk = Box::new([0_u8; READ_CHUNK_BYTES]);
+            if self.read_offset > 0 {
+                let remaining = self.read_buffer.len() - self.read_offset;
+                self.read_buffer.copy_within(self.read_offset.., 0);
+                self.read_buffer.truncate(remaining);
+                self.read_offset = 0;
+            }
             let read = self
                 .stream
                 .as_mut()
                 .context("splinterd connection is closed")?
-                .read(chunk.as_mut_slice())
+                .read(self.read_scratch.as_mut_slice())
                 .await?;
             if read == 0 {
                 bail!("splinterd closed a partial frame");
             }
-            self.read_buffer.extend_from_slice(&chunk[..read]);
+            self.read_buffer
+                .extend_from_slice(&self.read_scratch[..read]);
             if self.read_buffer.len() > MAX_BUFFERED_BYTES {
                 bail!("splinterd sent an invalid frame length: buffered data exceeds limit");
             }
@@ -3394,6 +3407,7 @@ impl Connection {
         self.queued_events.clear();
         self.queued_event_bytes = 0;
         self.read_buffer.clear();
+        self.read_offset = 0;
         if let Some(stream) = self.stream.take()
             && let Ok(frame) = encode_frame(&ClientFrame::Cancel { request_id })
         {
@@ -3414,6 +3428,7 @@ impl Connection {
         self.queued_events.clear();
         self.queued_event_bytes = 0;
         self.read_buffer.clear();
+        self.read_offset = 0;
     }
 
     /// Reads the current daemon topology revision.
@@ -3830,7 +3845,9 @@ mod tests {
         Connection {
             stream: Some(stream),
             next_request: 1,
-            read_buffer: Vec::new(),
+            read_buffer: Vec::with_capacity(READ_CHUNK_BYTES),
+            read_offset: 0,
+            read_scratch: Box::new([0; READ_CHUNK_BYTES]),
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             limits: ServerLimits::default(),
@@ -4943,6 +4960,70 @@ mod tests {
                 .contains("cannot be reused")
         );
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn buffered_reader_consumes_coalesced_frames_without_front_draining() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let mut connection = established(client);
+        let first = ServerFrame::Hello {
+            version: PROTOCOL_VERSION,
+            limits: ServerLimits::default(),
+            development_terminal_access: true,
+        };
+        let second = ServerFrame::Response {
+            request_id: 7,
+            result: Response::Pong,
+        };
+        let first_bytes = encode_frame(&first).unwrap();
+        let second_bytes = encode_frame(&second).unwrap();
+        connection.read_buffer.extend_from_slice(&first_bytes);
+        connection.read_buffer.extend_from_slice(&second_bytes);
+
+        assert_eq!(connection.next_server_frame().await.unwrap(), first);
+        assert_eq!(connection.read_offset, first_bytes.len());
+        assert_eq!(
+            connection.read_buffer.len(),
+            first_bytes.len() + second_bytes.len()
+        );
+        assert_eq!(connection.next_server_frame().await.unwrap(), second);
+        assert!(connection.read_buffer.is_empty());
+        assert_eq!(connection.read_offset, 0);
+    }
+
+    #[tokio::test]
+    async fn buffered_reader_compacts_partial_trailing_frame_before_resuming() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut connection = established(client);
+        let first = ServerFrame::Response {
+            request_id: 1,
+            result: Response::Pong,
+        };
+        let second = ServerFrame::Response {
+            request_id: 2,
+            result: Response::Pong,
+        };
+        let first_bytes = encode_frame(&first).unwrap();
+        let second_bytes = encode_frame(&second).unwrap();
+        let partial = 5;
+        connection.read_buffer.extend_from_slice(&first_bytes);
+        connection
+            .read_buffer
+            .extend_from_slice(&second_bytes[..partial]);
+
+        assert_eq!(connection.next_server_frame().await.unwrap(), first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), connection.next_server_frame())
+                .await
+                .is_err()
+        );
+        assert_eq!(connection.read_offset, 0);
+        assert_eq!(connection.read_buffer, second_bytes[..partial]);
+
+        server.write_all(&second_bytes[partial..]).await.unwrap();
+        assert_eq!(connection.next_server_frame().await.unwrap(), second);
+        assert!(connection.read_buffer.is_empty());
+        assert_eq!(connection.read_offset, 0);
     }
 
     #[tokio::test]
