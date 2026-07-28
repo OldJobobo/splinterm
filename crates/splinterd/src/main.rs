@@ -24,9 +24,9 @@ use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 use splinterd::{
-    LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,
-    LiveSplintHandle, LiveSplintRuntime, ProcessExit, ProcessIncarnation, Subscription,
-    SubscriptionReceive, authorization, executable_identity,
+    CompactSubscription, LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot,
+    LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, ProcessIncarnation, SubscriptionReceive,
+    authorization, executable_identity,
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     policy,
 };
@@ -40,15 +40,15 @@ use splinterm_protocol::{
     ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_FRAME_BYTES,
     MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS,
     MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
-    MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MouseTracking as WireMouseTracking,
-    PROTOCOL_VERSION, ProcessExitStatus, ProtocolError, Request, Response, RestoreLeafResult,
-    ScrollDirection as WireScrollDirection, ScrollbackPage as WireScrollbackPage,
-    SearchMatch as WireSearchMatch, SearchPage as WireSearchPage, ServerFrame, ServerLimits,
-    SplintLifecycle, SplintRuntimeSummary, SubscriptionEvent, TerminalCell, TerminalCursor,
-    TerminalInputModes, TerminalProvenance, TerminalRow, TerminalRowPatch, TerminalScroll,
-    TerminalScrollbackUpdate, TerminalSnapshot, TerminalUpdate as WireTerminalUpdate,
-    TopologyChange, TopologyChangeKind, TopologySnapshot, UnderlineStyle as WireUnderlineStyle,
-    encode_frame, image_content_socket_path,
+    MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MAX_UPDATE_SCROLLS,
+    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, ProcessExitStatus, ProtocolError,
+    Request, Response, RestoreLeafResult, ScrollDirection as WireScrollDirection,
+    ScrollbackPage as WireScrollbackPage, SearchMatch as WireSearchMatch,
+    SearchPage as WireSearchPage, ServerFrame, ServerLimits, SplintLifecycle, SplintRuntimeSummary,
+    SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalProvenance,
+    TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
+    TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind, TopologySnapshot,
+    UnderlineStyle as WireUnderlineStyle, encode_frame, image_content_socket_path,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
@@ -1470,7 +1470,7 @@ struct Handled {
 enum PendingSubscription {
     Terminal {
         id: u64,
-        stream: Subscription,
+        stream: CompactSubscription,
         handle: LiveSplintHandle,
         access: SubscriptionAccess,
     },
@@ -4234,7 +4234,7 @@ async fn handle_authorized_request(
             let handle = current_handle(state, splint_id, incarnation).await?;
             let scrollback_rows = scrollback_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS);
             let (snapshot, subscription) = handle
-                .attach_with_scrollback(scrollback_rows)
+                .attach_compact_with_scrollback(scrollback_rows)
                 .await
                 .map_err(|_| internal())?;
             let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
@@ -5098,51 +5098,9 @@ fn frame_within_policy_limit(frame: &ServerFrame, maximum: Option<usize>) -> boo
     })
 }
 
-enum DrainedSubscription {
-    Open,
-    Exited(ProcessExit),
-    Closed,
-    ResnapshotRequired,
-}
-
-fn drain_pending_subscription(
-    subscription: &mut Subscription,
-    updates: &mut Vec<TerminalUpdate>,
-    snapshot: &mut Box<LiveSnapshot>,
-) -> DrainedSubscription {
-    loop {
-        if subscription.resnapshot_required() {
-            return DrainedSubscription::ResnapshotRequired;
-        }
-        match subscription.events.try_recv() {
-            Ok(LiveEvent::Update {
-                updates: pending,
-                snapshot: pending_snapshot,
-                ..
-            }) => {
-                updates.extend(pending);
-                *snapshot = pending_snapshot;
-            }
-            Ok(LiveEvent::Exited { status, .. }) => {
-                return DrainedSubscription::Exited(status);
-            }
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                return DrainedSubscription::Closed;
-            }
-            Err(mpsc::error::TryRecvError::Empty) => {
-                return if subscription.resnapshot_required() {
-                    DrainedSubscription::ResnapshotRequired
-                } else {
-                    DrainedSubscription::Open
-                };
-            }
-        }
-    }
-}
-
 fn spawn_subscription(
     id: u64,
-    mut subscription: Subscription,
+    mut subscription: CompactSubscription,
     handle: LiveSplintHandle,
     outputs: SubscriptionOutputs,
     mut revocations: broadcast::Receiver<Revocation>,
@@ -5156,8 +5114,8 @@ fn spawn_subscription(
         let expiry = time::sleep(consent::GRANT_LIFETIME);
         tokio::pin!(expiry);
         loop {
-            let received = tokio::select! {
-                value = subscription.recv() => value,
+            let (received, trailing_exit) = tokio::select! {
+                value = subscription.recv_coalesced() => value,
                 revoked = revocations.recv(), if access.grant_id.is_some() => {
                     match revoked {
                         Ok(revocation) if Some(revocation.grant_id) == access.grant_id => {
@@ -5209,26 +5167,8 @@ fn spawn_subscription(
                     break;
                 }
                 SubscriptionReceive::Event(LiveEvent::Update {
-                    mut updates,
-                    mut snapshot,
-                    ..
+                    updates, snapshot, ..
                 }) => {
-                    let drained =
-                        drain_pending_subscription(&mut subscription, &mut updates, &mut snapshot);
-                    if matches!(drained, DrainedSubscription::ResnapshotRequired) {
-                        let revision = current_revision(&handle, access.scrollback_rows).await;
-                        let _ = outputs
-                            .control
-                            .send(ServerFrame::Event {
-                                subscription_id: id,
-                                sequence,
-                                event: SubscriptionEvent::ResyncRequired {
-                                    current_revision: revision,
-                                },
-                            })
-                            .await;
-                        break;
-                    }
                     let current_history = history_state(&snapshot);
                     if revision_advances(previous_history.revision, current_history.revision) {
                         let materialize_started = perf_trace_enabled().then(Instant::now);
@@ -5296,20 +5236,16 @@ fn spawn_subscription(
                         }
                         sequence += 1;
                     }
-                    match drained {
-                        DrainedSubscription::Exited(status) => {
-                            let _ = outputs.outbound.try_send(ServerFrame::Event {
-                                subscription_id: id,
-                                sequence,
-                                event: SubscriptionEvent::Exited {
-                                    code: status.code,
-                                    signal: status.signal,
-                                },
-                            });
-                            break;
-                        }
-                        DrainedSubscription::Closed => break,
-                        DrainedSubscription::Open | DrainedSubscription::ResnapshotRequired => {}
+                    if let Some(status) = trailing_exit {
+                        let _ = outputs.outbound.try_send(ServerFrame::Event {
+                            subscription_id: id,
+                            sequence,
+                            event: SubscriptionEvent::Exited {
+                                code: status.code,
+                                signal: status.signal,
+                            },
+                        });
+                        break;
                     }
                 }
                 SubscriptionReceive::Closed => break,
@@ -5351,12 +5287,12 @@ fn subscription_update_event(
     include_images: bool,
 ) -> (SubscriptionEvent, Vec<splinterd::LiveRow>) {
     if !revisions_match(updates, snapshot.revision.value()) {
-        let next_visible_rows = snapshot.visible_rows.clone();
+        let revision = snapshot.revision.value();
         return (
-            SubscriptionEvent::Snapshot {
-                snapshot: wire_snapshot(snapshot, include_images),
+            SubscriptionEvent::ResyncRequired {
+                current_revision: revision,
             },
-            next_visible_rows,
+            std::mem::take(&mut snapshot.visible_rows),
         );
     }
     let event = match wire_update(
@@ -5577,6 +5513,64 @@ fn visible_row_changed(
     previous.get(index) != current.get(index)
 }
 
+fn wire_scrollback_update(
+    rows: &[splinterd::LiveRow],
+    scrollback: splinterm_terminal::ScrollbackSnapshot,
+    previous_history: HistoryState,
+    reflow: bool,
+    appended_rows: usize,
+) -> TerminalScrollbackUpdate {
+    let transition = if scrollback.history_generation != previous_history.generation {
+        if reflow {
+            HistoryTransition::Reflow
+        } else if scrollback.available_rows == 0 {
+            HistoryTransition::Clear
+        } else {
+            HistoryTransition::Replace
+        }
+    } else if appended_rows > 0 && appended_rows <= usize::from(MAX_ROWS) {
+        HistoryTransition::Append {
+            appended_rows,
+            trimmed_rows: previous_history
+                .available_rows
+                .saturating_add(appended_rows)
+                .saturating_sub(scrollback.available_rows),
+        }
+    } else {
+        HistoryTransition::Replace
+    };
+    let maximum_rows = match transition {
+        HistoryTransition::Append { appended_rows, .. } => {
+            appended_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS)
+        }
+        HistoryTransition::Clear | HistoryTransition::Reflow | HistoryTransition::Replace => {
+            MAX_SNAPSHOT_SCROLLBACK_ROWS
+        }
+    };
+    let first = rows.len().saturating_sub(maximum_rows);
+    let rows: Vec<_> = rows[first..].iter().cloned().map(wire_row).collect();
+    TerminalScrollbackUpdate {
+        transition,
+        history_generation: scrollback.history_generation,
+        oldest_available_row_id: scrollback.oldest_available_row_id,
+        newest_available_row_id: scrollback.newest_available_row_id,
+        omitted_oldest_rows: scrollback.available_rows.saturating_sub(rows.len()),
+        available_rows: scrollback.available_rows,
+        rows,
+    }
+}
+
+fn bound_wire_scrolls(scrolls: &mut Vec<TerminalScroll>, damaged: &mut [bool]) {
+    if scrolls.len() > MAX_UPDATE_SCROLLS {
+        // Scroll operations are an optimization over the authoritative final rows. A
+        // coalesced burst can contain more scroll damage records than one wire update
+        // permits, so fall back to bounded final-state viewport patches rather than
+        // widening the protocol limit or emitting a semantically incomplete prefix.
+        scrolls.clear();
+        damaged.fill(true);
+    }
+}
+
 fn wire_update(
     updates: &[TerminalUpdate],
     snapshot: &LiveSnapshot,
@@ -5657,6 +5651,18 @@ fn wire_update(
             }
         }
     }
+    bound_wire_scrolls(&mut scrolls, &mut damaged);
+    let wire_scrollback = if scrollback {
+        Some(wire_scrollback_update(
+            &snapshot.scrollback_rows,
+            snapshot.scrollback,
+            previous_history,
+            reflow,
+            appended_rows,
+        ))
+    } else {
+        None
+    };
     let position = snapshot.cursor.cursor.position();
     let rows = damaged
         .into_iter()
@@ -5686,49 +5692,7 @@ fn wire_update(
         default_colors: palette.then_some(snapshot.default_colors),
         columns: dimensions.then_some(snapshot.dimensions.columns),
         row_count: dimensions.then_some(snapshot.dimensions.rows),
-        scrollback: scrollback.then(|| {
-            let first = snapshot
-                .scrollback_rows
-                .len()
-                .saturating_sub(MAX_SNAPSHOT_SCROLLBACK_ROWS);
-            let rows: Vec<_> = snapshot.scrollback_rows[first..]
-                .iter()
-                .cloned()
-                .map(wire_row)
-                .collect();
-            let transition =
-                if snapshot.scrollback.history_generation != previous_history.generation {
-                    if reflow {
-                        HistoryTransition::Reflow
-                    } else if snapshot.scrollback.available_rows == 0 {
-                        HistoryTransition::Clear
-                    } else {
-                        HistoryTransition::Replace
-                    }
-                } else if appended_rows > 0 {
-                    HistoryTransition::Append {
-                        appended_rows,
-                        trimmed_rows: previous_history
-                            .available_rows
-                            .saturating_add(appended_rows)
-                            .saturating_sub(snapshot.scrollback.available_rows),
-                    }
-                } else {
-                    HistoryTransition::Replace
-                };
-            TerminalScrollbackUpdate {
-                transition,
-                history_generation: snapshot.scrollback.history_generation,
-                oldest_available_row_id: snapshot.scrollback.oldest_available_row_id,
-                newest_available_row_id: snapshot.scrollback.newest_available_row_id,
-                omitted_oldest_rows: snapshot
-                    .scrollback
-                    .available_rows
-                    .saturating_sub(rows.len()),
-                available_rows: snapshot.scrollback.available_rows,
-                rows,
-            }
-        }),
+        scrollback: wire_scrollback,
         images: (include_images && images).then(|| Box::new(wire_image_plane(snapshot))),
     })
 }
@@ -5985,6 +5949,157 @@ fn socket_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn public_live_row_materializes_unchanged_wire_content() {
+        let attributes = splinterm_terminal::Attributes::default().into();
+        let row = splinterd::LiveRow {
+            row_id: Some(7),
+            linebreak: true,
+            cells: vec![splinterd::LiveCell {
+                content: "A".to_owned(),
+                spacer_remaining: None,
+                attributes,
+            }],
+        };
+        let expected = TerminalRow {
+            row_id: Some(7),
+            linebreak: true,
+            cells: vec![TerminalCell {
+                content: "A".to_owned(),
+                spacer_remaining: None,
+                attributes: CellAttributes::default(),
+            }],
+        };
+
+        let actual = wire_row(row);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn oversized_append_batch_falls_back_to_bounded_history_replace() {
+        let attributes = splinterm_terminal::Attributes::default().into();
+        let rows = (1..=20)
+            .map(|row_id| splinterd::LiveRow {
+                row_id: Some(row_id),
+                linebreak: true,
+                cells: vec![splinterd::LiveCell {
+                    content: format!("row-{row_id}"),
+                    spacer_remaining: None,
+                    attributes,
+                }],
+            })
+            .collect::<Vec<_>>();
+        let scrollback = splinterm_terminal::ScrollbackSnapshot {
+            history_generation: 7,
+            oldest_available_row_id: Some(1),
+            newest_available_row_id: Some(20),
+            available_rows: 20,
+            returned_rows: 20,
+            omitted_oldest_rows: 0,
+        };
+        let previous = HistoryState {
+            revision: 10,
+            generation: 7,
+            available_rows: 0,
+        };
+
+        let update = wire_scrollback_update(
+            &rows,
+            scrollback,
+            previous,
+            false,
+            usize::from(MAX_ROWS) + 1,
+        );
+
+        assert_eq!(update.transition, HistoryTransition::Replace);
+        assert_eq!(update.rows.len(), MAX_SNAPSHOT_SCROLLBACK_ROWS);
+        assert_eq!(update.omitted_oldest_rows, 4);
+        let wire = WireTerminalUpdate {
+            base_revision: 10,
+            revision: 20,
+            rows: Vec::new(),
+            scrolls: Vec::new(),
+            cursor: None,
+            title: None,
+            input_modes: None,
+            active_screen: None,
+            palette: None,
+            default_colors: None,
+            columns: None,
+            row_count: None,
+            scrollback: Some(update),
+            images: None,
+        };
+        wire.validate_against(10, 7, 80, 24).unwrap();
+    }
+
+    #[test]
+    fn oversized_scroll_batch_falls_back_to_bounded_viewport_patches() {
+        let scroll = TerminalScroll {
+            direction: WireScrollDirection::Forward,
+            start_row: 0,
+            end_row: 2,
+            rows: 1,
+        };
+        let mut scrolls = vec![scroll; MAX_UPDATE_SCROLLS + 1];
+        let mut damaged = vec![false; MAX_ROWS as usize];
+
+        bound_wire_scrolls(&mut scrolls, &mut damaged);
+
+        assert!(scrolls.is_empty());
+        assert!(damaged.iter().all(|damaged| *damaged));
+        assert!(damaged.len() <= splinterm_protocol::MAX_UPDATE_ROW_PATCHES);
+    }
+
+    #[test]
+    fn append_delta_history_is_wire_identical_to_full_materialization() {
+        let attributes = splinterm_terminal::Attributes::default().into();
+        let make_row = |row_id| splinterd::LiveRow {
+            row_id: Some(row_id),
+            linebreak: true,
+            cells: vec![splinterd::LiveCell {
+                content: format!("row-{row_id}"),
+                spacer_remaining: None,
+                attributes,
+            }],
+        };
+        let full_rows = (1..=5).map(make_row).collect::<Vec<_>>();
+        let delta_rows = full_rows[3..].to_vec();
+        let scrollback = splinterm_terminal::ScrollbackSnapshot {
+            history_generation: 7,
+            oldest_available_row_id: Some(1),
+            newest_available_row_id: Some(5),
+            available_rows: 5,
+            returned_rows: 5,
+            omitted_oldest_rows: 0,
+        };
+        let previous = HistoryState {
+            revision: 10,
+            generation: 7,
+            available_rows: 3,
+        };
+        let full = wire_scrollback_update(&full_rows, scrollback, previous, false, 2);
+        let delta = wire_scrollback_update(&delta_rows, scrollback, previous, false, 2);
+        assert_eq!(full, delta);
+        assert_eq!(
+            serde_json::to_vec(&full).unwrap(),
+            serde_json::to_vec(&delta).unwrap()
+        );
+        assert_eq!(full.rows.len(), 2);
+        assert_eq!(full.omitted_oldest_rows, 3);
+        assert_eq!(
+            full.transition,
+            HistoryTransition::Append {
+                appended_rows: 2,
+                trimmed_rows: 0,
+            }
+        );
+    }
 
     #[tokio::test]
     async fn binary_image_content_channel_is_raw_windowed_and_acknowledged() {

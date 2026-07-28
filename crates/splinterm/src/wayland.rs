@@ -7673,6 +7673,63 @@ mod tests {
     }
 
     #[test]
+    fn bounded_history_replace_applies_visible_marker_without_resync() {
+        let mut current = snapshot(SplintId::new(), 7, 10);
+        current.columns = 1;
+        current.rows = 1;
+        current.visible_rows = vec![blank_row(1)];
+        current.scrollback_rows = (1..=4).map(|id| history_row(id, 0)).collect();
+        current.available_scrollback_rows = 4;
+        current.oldest_available_scrollback_row_id = Some(1);
+        current.newest_available_scrollback_row_id = Some(4);
+        let marker = TerminalRow {
+            row_id: Some(21),
+            linebreak: true,
+            cells: vec![TerminalCell {
+                content: "SPLINTERBENCH_DONE".into(),
+                spacer_remaining: None,
+                attributes: current.visible_rows[0].cells[0].attributes,
+            }],
+        };
+
+        apply_terminal_update(
+            &mut current,
+            TerminalUpdate {
+                base_revision: 10,
+                revision: 11,
+                rows: vec![splinterm_protocol::TerminalRowPatch {
+                    index: 0,
+                    row: marker.clone(),
+                }],
+                scrolls: Vec::new(),
+                cursor: None,
+                title: None,
+                input_modes: None,
+                active_screen: None,
+                palette: None,
+                default_colors: None,
+                columns: None,
+                row_count: None,
+                scrollback: Some(splinterm_protocol::TerminalScrollbackUpdate {
+                    transition: HistoryTransition::Replace,
+                    history_generation: 1,
+                    oldest_available_row_id: Some(1),
+                    newest_available_row_id: Some(20),
+                    rows: vec![history_row(19, 0), history_row(20, 0)],
+                    available_rows: 20,
+                    omitted_oldest_rows: 18,
+                }),
+                images: None,
+            },
+        )
+        .expect("bounded replace update");
+
+        assert_eq!(current.revision, 11);
+        assert_eq!(current.visible_rows[0], marker);
+        assert_eq!(current.newest_available_scrollback_row_id, Some(20));
+    }
+
+    #[test]
     fn semantic_update_applies_exact_row_cursor_and_title_revision() {
         let mut current = snapshot(SplintId::new(), 7, 10);
         current.columns = 2;
