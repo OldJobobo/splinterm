@@ -25,12 +25,28 @@ Ask the user before launching a subagent if the launch would:
 
 ### 1.3 Failed or Incomplete Subagents
 
-If a subagent fails, times out, or returns incomplete work:
+Distinguish execution failure from review outcome:
+
+* An execution failure means the subagent timed out, crashed, could not access its
+  required inputs, exhausted its tools before producing the requested result, or
+  returned incomplete work.
+* A reviewer finding defects or rejecting a milestone is a successful review, not
+  a failed subagent.
+
+If a subagent has an execution failure:
 
 * Do not automatically retry it.
 * Do not automatically resume it.
 * Do not automatically replace it.
 * Stop and report the result to the user.
+
+If a reviewer successfully returns actionable findings:
+
+* Apply in-scope fixes directly in the single-writer parent without asking for
+  another approval.
+* Run the already-authorized non-graphical validation.
+* Request user input only when a finding triggers Section 1.2 or Section 2.4.
+* Do not describe the review itself as an agent failure.
 
 ### 1.4 Worktree Writers
 
@@ -74,6 +90,45 @@ After launch, report:
 * The subagent’s outcome.
 
 Do not introduce an additional confirmation gate after launch.
+
+### 1.7 Subagent Launch-Readiness Gate
+
+Do not use a subagent as a substitute for the parent’s first-pass debugging,
+implementation, or validation. Before every reviewer or verifier launch, the
+parent must confirm all of the following:
+
+* The coherent milestone is implemented rather than partially sketched.
+* Relevant focused tests, formatters, linters, and `git diff --check` pass, or the
+  prompt explicitly identifies and bounds a known failure under review.
+* The parent has inspected the actual diff and handled obvious missing cases,
+  error paths, cleanup paths, and requirement mismatches.
+* Every referenced file and artifact exists and is readable.
+* The task prompt names exact files, exact evidence, constraints, expected
+  decision, and commands the agent may run.
+* The agent has enough turn and tool budget to inspect the stated scope and
+  produce a complete result. Do not impose a soft budget below the realistic
+  read/validation workload.
+* Read-only agents receive the evidence directly or an explicit bounded read
+  list; do not make them rediscover broad historical context.
+
+If this gate is not satisfied, keep working in the parent. Do not launch the
+reviewer yet.
+
+### 1.8 Review and Watchdog Reliability
+
+* Launch fresh review only at a coherent acceptance boundary, not after the first
+  draft of a fix.
+* Ask reviewers for blockers and fixes worth doing now; do not ask them to
+  speculate beyond the bounded milestone.
+* A review rejection authorizes the parent to make bounded fixes and validate
+  them under the original request. It does not create a new user confirmation
+  gate.
+* Before treating a watchdog warning as a missed authorization, reconstruct the
+  approval chain from the full conversation, including user messages immediately
+  before and after the narrow event delta. Do not blindly accept a warning that
+  omits a relevant approval.
+* Report a false-positive watchdog warning as such and continue only within the
+  authorization actually granted.
 
 ## 2. Implementation Stop-Loss
 
@@ -122,11 +177,18 @@ Do not repeat a failed, expensive command until both of the following have occur
 
 ### 2.6 Graphical Test Matrices
 
-For a graphical test matrix:
+Request approval once for the complete bounded graphical sequence, naming the
+smoke and the matrix it gates. After that approval:
 
 1. Run one guarded test case.
 2. Confirm that the guarded smoke test succeeds.
-3. Run the full matrix only after that success.
+3. Run the approved full matrix after that success without inserting another
+   confirmation gate.
+
+A smoke failure, placement/focus violation, or cleanup failure aborts the
+sequence and blocks the matrix. Diagnose it non-graphically before proposing a
+new bounded graphical attempt. Do not repeatedly ask for approval between stages
+of a sequence the user already authorized.
 
 ## 3. Graphical Test Isolation
 
