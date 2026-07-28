@@ -49,8 +49,10 @@ Human-readable output remains the default. Machine modes reserve stdout:
 
 One-shot NDJSON and JSON subscriptions are rejected rather than silently changing
 record shape. Machine output, schema, and timeout flags are also rejected for the
-graphical `window` and `launch` commands and for local policy or relay
-administration. Those commands remain human-only; automation uses the
+graphical `window` and `launch` commands and for local policy, relay, or service
+administration. This includes the destructive `reset` command, which is guarded
+by interactive confirmation or an explicit `--yes` and intentionally has no
+machine-output contract. Those commands remain human-only; automation uses the
 non-Wayland lifecycle commands instead.
 
 A daemon `window` is a logical topology resource. `new-window`,
@@ -88,7 +90,9 @@ resource-revision hints because the operation exposes no resource data.
 
 ### One-shot command and operation inventory
 
-The implemented v1 one-shot names are frozen as follows.
+The implemented v1 one-shot names are frozen as follows. Human-only local
+administration commands such as `policy`, `relay`, and `reset` are deliberately
+outside this inventory.
 
 | Command | `operation` |
 | --- | --- |

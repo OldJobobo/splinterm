@@ -85,7 +85,10 @@ cargo run -p splinterd
 # Terminal 2
 cargo run -p splinterm -- ping
 cargo run -p splinterm -- new main
-cargo run -p splinterm -- list       # shows stable Dojo, window, and Splint UUIDs
+# Active sessions only, with stable Dojo, window, and Splint UUIDs.
+cargo run -p splinterm -- list
+# Include exited-only sessions and complete topology details.
+cargo run -p splinterm -- list --all
 DOJO_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 WINDOW_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 SPLINT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -115,11 +118,22 @@ cargo run -p splinterm -- close-window "$WINDOW_ID"
 cargo run -p splinterm -- window --dojo-id "$DOJO_ID" --window-id "$WINDOW_ID"
 ```
 
+For the packaged systemd user service, reset every session through one guarded
+command instead of manually moving state files:
+
+```bash
+splinterm reset       # prompts before resetting
+splinterm reset --yes # explicit unattended confirmation
+```
+
 Durable metadata is stored under `$XDG_STATE_HOME/splinterm/`, falling back to
 `$HOME/.local/state/splinterm/`. Writes use an owner-only atomic primary plus a
 previous-generation backup. Startup quarantines malformed metadata and never
-runs a saved command automatically. Restored layouts retain their stable IDs,
-but every explicitly restored process receives a new incarnation. Terminal and
+runs a saved command automatically. `splinterm reset` atomically moves the
+complete session database to a timestamped backup, restarts the canonical user
+service, waits for its configured socket, and leaves policy and configuration
+untouched. Restored layouts retain their stable IDs, but every explicitly
+restored process receives a new incarnation. Terminal and
 scrollback bodies, clipboard data, PTY handles, grants, and controller tokens
 are never persisted.
 
