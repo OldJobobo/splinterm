@@ -136,15 +136,22 @@ async fn main() -> Result<()> {
         },
         ..LiveSplintConfig::default()
     };
-    let runtime = LiveSplintRuntime::spawn(
-        SplintId::new(),
-        LinuxPtyBackend::new(helper),
-        PtyCommand::new("/bin/sh", "/tmp").args(["-c", &script]),
-        config.clone(),
-    )
-    .await?;
+    let instrumented = std::env::var_os("SPLINTERM_PUBLICATION_MEMORY_METRICS").is_some();
+    let backend = LinuxPtyBackend::new(helper);
+    let command = PtyCommand::new("/bin/sh", "/tmp").args(["-c", &script]);
+    let runtime = if instrumented {
+        LiveSplintRuntime::spawn_with_publication_memory_metrics(
+            SplintId::new(),
+            backend,
+            command,
+            config.clone(),
+        )
+        .await?
+    } else {
+        LiveSplintRuntime::spawn(SplintId::new(), backend, command, config.clone()).await?
+    };
     let handle = runtime.handle();
-    let (_, mut stalled_subscription) = handle.attach_with_scrollback(16).await?;
+    let (_, mut stalled_subscription) = handle.attach_compact_with_scrollback(16).await?;
     let rss_before = rss_bytes();
 
     let output_started = Instant::now();
@@ -153,7 +160,7 @@ async fn main() -> Result<()> {
     let output_ns = elapsed_ns(output_started)?;
     let subscriber_resnapshot_required = timeout(Duration::from_secs(1), async {
         loop {
-            match stalled_subscription.recv().await {
+            match stalled_subscription.recv_coalesced().await.0 {
                 SubscriptionReceive::ResnapshotRequired => return true,
                 SubscriptionReceive::Closed => return false,
                 SubscriptionReceive::Event(_) => {}
@@ -223,6 +230,7 @@ async fn main() -> Result<()> {
         serde_json::to_string_pretty(&serde_json::json!({
             "schema": "splinterm.performance.daemon.v1",
             "profile": "release",
+            "publication_memory_metrics_enabled": instrumented,
             "workload": { "plain_lines": 10000, "colored_lines": 2000 },
             "output_ns": output_ns,
             "subscriber_resnapshot_required": subscriber_resnapshot_required,

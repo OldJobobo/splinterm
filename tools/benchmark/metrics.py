@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+from typing import Any
 
 
 @dataclasses.dataclass(frozen=True)
@@ -15,6 +16,97 @@ class ProcessMetrics:
 
     def as_dict(self) -> dict[str, int]:
         return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class ProcessMemory:
+    """Body-free per-process residency attribution from procfs."""
+
+    pid: int
+    name: str
+    rss_bytes: int = 0
+    pss_bytes: int = 0
+    private_anon_bytes: int = 0
+    private_file_bytes: int = 0
+    shared_bytes: int = 0
+    shmem_bytes: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+def _kib_fields(path: pathlib.Path) -> dict[str, int]:
+    values: dict[str, int] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        if ":" not in line:
+            continue
+        key, raw = line.split(":", 1)
+        fields = raw.split()
+        if not fields:
+            continue
+        try:
+            values[key] = int(fields[0]) * 1024
+        except ValueError:
+            continue
+    return values
+
+
+def process_memory(
+    pid: int, proc_root: pathlib.Path = pathlib.Path("/proc")
+) -> ProcessMemory | None:
+    """Read one process without retaining command arguments or memory bodies.
+
+    ``smaps_rollup`` exposes total anonymous and total private residency but not
+    their exact intersection. ``private_anon_bytes`` is therefore the bounded
+    intersection of those totals; the remainder is classified as private file.
+    Shared residency and shmem mappings are retained separately.
+    """
+
+    root = proc_root / str(pid)
+    fields = _kib_fields(root / "smaps_rollup")
+    if not fields:
+        return None
+    try:
+        name = (root / "comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        name = "unknown"
+    private_total = fields.get("Private_Clean", 0) + fields.get("Private_Dirty", 0)
+    private_anon = min(private_total, fields.get("Anonymous", 0))
+    return ProcessMemory(
+        pid=pid,
+        name=name,
+        rss_bytes=fields.get("Rss", 0),
+        pss_bytes=fields.get("Pss", 0),
+        private_anon_bytes=private_anon,
+        private_file_bytes=max(0, private_total - private_anon),
+        shared_bytes=fields.get("Shared_Clean", 0) + fields.get("Shared_Dirty", 0),
+        shmem_bytes=fields.get("ShmemPmdMapped", 0),
+    )
+
+
+def snapshot_process_memory_forest(
+    root_pids: list[int], proc_root: pathlib.Path = pathlib.Path("/proc")
+) -> dict[str, Any]:
+    """Return aggregate and per-process smaps attribution for unique descendants."""
+
+    pids = sorted({pid for root in root_pids for pid in process_tree(proc_root, root)})
+    processes = [item for pid in pids if (item := process_memory(pid, proc_root))]
+    keys = (
+        "rss_bytes",
+        "pss_bytes",
+        "private_anon_bytes",
+        "private_file_bytes",
+        "shared_bytes",
+        "shmem_bytes",
+    )
+    return {
+        "aggregate": {key: sum(getattr(item, key) for item in processes) for key in keys},
+        "processes": [item.as_dict() for item in processes],
+    }
 
 
 def _children(proc_root: pathlib.Path, pid: int) -> list[int]:

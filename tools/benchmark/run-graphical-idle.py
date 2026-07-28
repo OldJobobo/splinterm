@@ -110,6 +110,7 @@ def launch_command(
     columns: int = 80,
     scrollback_lines: int | None = None,
     hold_window: bool = True,
+    hold_seconds: float = 10.0,
 ) -> tuple[list[str], dict[str, str]]:
     ready = state / "ready.json"
     child = [
@@ -133,7 +134,7 @@ def launch_command(
                 "--done-file",
                 str(state / "done.json"),
                 "--hold-seconds",
-                "10",
+                str(hold_seconds),
             )
         )
         if case == "input":
@@ -283,17 +284,55 @@ def wait_launch(
     raise RuntimeError("benchmark child or window did not become ready")
 
 
+class WindowIsolationError(RuntimeError):
+    def __init__(self, reason: str, details: dict[str, Any]) -> None:
+        self.reason = reason
+        self.details = details
+        super().__init__(f"{reason}: {json.dumps(details, sort_keys=True)}")
+
+
+def describe_workspace_clients(clients: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fields = ("address", "class", "title", "pid", "monitor", "mapped", "hidden")
+    described = []
+    for client in clients:
+        item = {field: client.get(field) for field in fields}
+        item["workspace"] = client.get("workspace", {}).get("id")
+        described.append(item)
+    return sorted(described, key=lambda item: str(item["address"]))
+
+
 def assert_owned_window(app_id: str, address: str) -> None:
-    clients = V1.workspace_clients(V1.TEST_WORKSPACE)
+    all_clients = V1.all_clients()
+    clients = [
+        client
+        for client in all_clients
+        if client.get("workspace", {}).get("id") == V1.TEST_WORKSPACE
+    ]
+    details = {
+        "expected": {
+            "address": address,
+            "class": app_id,
+            "monitor": V1.test_monitor_id(),
+            "workspace": V1.TEST_WORKSPACE,
+        },
+        "expected_address_observed_globally": describe_workspace_clients(
+            [client for client in all_clients if client.get("address") == address]
+        ),
+        "observed": describe_workspace_clients(clients),
+        "observed_count": len(clients),
+    }
     if len(clients) != 1:
-        raise RuntimeError(
-            "reserved workspace does not contain exactly one benchmark window"
+        raise WindowIsolationError(
+            "reserved workspace does not contain exactly one benchmark window",
+            details,
         )
     window = clients[0]
     if window.get("address") != address or window.get("class") != app_id:
-        raise RuntimeError("reserved workspace contains an unexpected window")
+        raise WindowIsolationError(
+            "reserved workspace contains an unexpected window", details
+        )
     if window.get("monitor") != V1.test_monitor_id():
-        raise RuntimeError("benchmark window left DP-2")
+        raise WindowIsolationError("benchmark window left DP-2", details)
     V1.assert_user_workspace_untouched()
 
 

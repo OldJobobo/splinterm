@@ -17,9 +17,11 @@ sys.path.insert(0, str(BENCHMARK))
 from adapters.base import TerminalAdapter, file_sha256  # noqa: E402
 from correctness import build_report, write_report  # noqa: E402
 from metrics import (  # noqa: E402
+    process_memory,
     process_tree,
     read_cgroup_v2,
     snapshot_process_forest,
+    snapshot_process_memory_forest,
     snapshot_process_tree,
 )
 from summary import summarize_samples, summarize_values  # noqa: E402
@@ -45,6 +47,17 @@ class ExampleAdapter(TerminalAdapter):
     def candidates(self, root: pathlib.Path):
         del root
         return (self.executable,)
+
+
+def test_publication_metrics_overhead_bootstrap_is_deterministic() -> None:
+    module = load_module(
+        ROOT / "tools/performance/run-publication-metrics-overhead.py",
+        "publication_metrics_overhead",
+    )
+    first = module.bootstrap([10.0, 11.0, 12.0], [10.0, 11.0, 12.0], 7, 100)
+    second = module.bootstrap([10.0, 11.0, 12.0], [10.0, 11.0, 12.0], 7, 100)
+    assert first == second
+    assert first["point_percent"] == 0.0
 
 
 def test_phase9_binary_identity_records_exact_release_artifact(
@@ -124,6 +137,42 @@ def test_process_tree_snapshot_aggregates_descendants(tmp_path: pathlib.Path) ->
     assert forest == metrics
 
 
+def test_smaps_rollup_attributes_processes_without_body_content(
+    tmp_path: pathlib.Path,
+) -> None:
+    _write_process(tmp_path, 10, "11\n", 4, (1, 2))
+    _write_process(tmp_path, 11, "\n", 5, (3, 4))
+    for pid, name, values in (
+        (10, "splinterd", (100, 90, 4, 66, 70, 8, 2)),
+        (11, "splinterm", (50, 40, 5, 15, 12, 6, 1)),
+    ):
+        root = tmp_path / str(pid)
+        (root / "comm").write_text(name + "\n", encoding="utf-8")
+        rss, pss, private_clean, private_dirty, anonymous, shared, shmem = values
+        (root / "smaps_rollup").write_text(
+            f"Rss: {rss} kB\nPss: {pss} kB\n"
+            f"Private_Clean: {private_clean} kB\nPrivate_Dirty: {private_dirty} kB\n"
+            f"Anonymous: {anonymous} kB\nShared_Clean: {shared} kB\n"
+            f"Shared_Dirty: 0 kB\nShmemPmdMapped: {shmem} kB\n",
+            encoding="utf-8",
+        )
+    first = process_memory(10, tmp_path)
+    assert first is not None
+    assert first.name == "splinterd"
+    assert first.private_anon_bytes == 70 * 1024
+    assert first.private_file_bytes == 0
+    forest = snapshot_process_memory_forest([10], tmp_path)
+    assert [item["pid"] for item in forest["processes"]] == [10, 11]
+    assert forest["aggregate"] == {
+        "rss_bytes": 150 * 1024,
+        "pss_bytes": 130 * 1024,
+        "private_anon_bytes": 82 * 1024,
+        "private_file_bytes": 8 * 1024,
+        "shared_bytes": 14 * 1024,
+        "shmem_bytes": 3 * 1024,
+    }
+
+
 def test_cgroup_reader_handles_max_and_cpu_stat(tmp_path: pathlib.Path) -> None:
     (tmp_path / "memory.current").write_text("1024\n", encoding="utf-8")
     (tmp_path / "memory.peak").write_text("2048\n", encoding="utf-8")
@@ -170,6 +219,304 @@ def test_workload_child_writes_side_channel_records(tmp_path: pathlib.Path) -> N
     assert completion["total_bytes"] == len(result.stdout)
     assert completion["duration_ns"] >= 0
     assert completion["pid"] > 0
+
+
+def test_retention_v2_settle_points_are_sorted_bounded_and_unique() -> None:
+    module = load_module(
+        BENCHMARK / "run-graphical-retention-v2.py", "graphical_retention_v2"
+    )
+    assert module.parse_settle_points("120,2,10,30,2") == [2.0, 10.0, 30.0, 120.0]
+    with pytest.raises(ValueError, match="between zero and 120"):
+        module.parse_settle_points("121")
+
+
+def test_graphical_launcher_preserves_exec_and_records_output(
+    tmp_path: pathlib.Path,
+) -> None:
+    idle = load_module(BENCHMARK / "run-graphical-idle.py", "graphical_launcher")
+    launcher = tmp_path / "launch.sh"
+    idle.write_launcher(
+        launcher,
+        ["bash", "-c", "printf stdout; printf stderr >&2; exit 7"],
+        {"EXAMPLE": "value"},
+    )
+    completed = subprocess.run([str(launcher)], check=False)
+    assert completed.returncode == 7
+    assert launcher.with_suffix(".stdout").read_text() == "stdout"
+    assert launcher.with_suffix(".stderr").read_text() == "stderr"
+    source = launcher.read_text()
+    assert "exec env " in source
+    assert not launcher.with_suffix(".status.json").exists()
+
+
+def test_graphical_cardinality_failure_records_expected_and_observed_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    idle = load_module(BENCHMARK / "run-graphical-idle.py", "graphical_idle_guard")
+    clients = [
+        {
+            "address": "0x2",
+            "class": "unexpected",
+            "title": "second",
+            "pid": 12,
+            "monitor": 1,
+            "workspace": {"id": 8},
+            "mapped": True,
+            "hidden": False,
+        },
+        {
+            "address": "0x1",
+            "class": "expected",
+            "title": "first",
+            "pid": 11,
+            "monitor": 1,
+            "workspace": {"id": 8},
+            "mapped": True,
+            "hidden": False,
+        },
+    ]
+
+    class FakeGuard:
+        TEST_WORKSPACE = 8
+
+        @staticmethod
+        def all_clients():
+            return clients
+
+        @staticmethod
+        def test_monitor_id() -> int:
+            return 1
+
+        @staticmethod
+        def assert_user_workspace_untouched() -> None:
+            raise AssertionError("cardinality failure must occur first")
+
+    monkeypatch.setattr(idle, "V1", FakeGuard)
+    with pytest.raises(idle.WindowIsolationError) as caught:
+        idle.assert_owned_window("expected", "0x1")
+    assert caught.value.reason == (
+        "reserved workspace does not contain exactly one benchmark window"
+    )
+    assert caught.value.details == {
+        "expected": {
+            "address": "0x1",
+            "class": "expected",
+            "monitor": 1,
+            "workspace": 8,
+        },
+        "expected_address_observed_globally": [
+            {
+                "address": "0x1",
+                "class": "expected",
+                "hidden": False,
+                "mapped": True,
+                "monitor": 1,
+                "pid": 11,
+                "title": "first",
+                "workspace": 8,
+            }
+        ],
+        "observed": [
+            {
+                "address": "0x1",
+                "class": "expected",
+                "hidden": False,
+                "mapped": True,
+                "monitor": 1,
+                "pid": 11,
+                "title": "first",
+                "workspace": 8,
+            },
+            {
+                "address": "0x2",
+                "class": "unexpected",
+                "hidden": False,
+                "mapped": True,
+                "monitor": 1,
+                "pid": 12,
+                "title": "second",
+                "workspace": 8,
+            },
+        ],
+        "observed_count": 2,
+    }
+
+
+def test_graphical_guard_distinguishes_escaped_from_closed_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    idle = load_module(BENCHMARK / "run-graphical-idle.py", "graphical_idle_escape")
+    escaped = {
+        "address": "0x1",
+        "class": "expected",
+        "title": "escaped",
+        "pid": 11,
+        "monitor": 0,
+        "workspace": {"id": 3},
+        "mapped": True,
+        "hidden": False,
+    }
+
+    class FakeGuard:
+        TEST_WORKSPACE = 8
+
+        @staticmethod
+        def all_clients():
+            return [escaped]
+
+        @staticmethod
+        def test_monitor_id() -> int:
+            return 1
+
+        @staticmethod
+        def assert_user_workspace_untouched() -> None:
+            raise AssertionError("cardinality failure must occur first")
+
+    monkeypatch.setattr(idle, "V1", FakeGuard)
+    with pytest.raises(idle.WindowIsolationError) as caught:
+        idle.assert_owned_window("expected", "0x1")
+    assert caught.value.details["observed"] == []
+    assert caught.value.details["observed_count"] == 0
+    assert caught.value.details["expected_address_observed_globally"][0] == {
+        "address": "0x1",
+        "class": "expected",
+        "hidden": False,
+        "mapped": True,
+        "monitor": 0,
+        "pid": 11,
+        "title": "escaped",
+        "workspace": 3,
+    }
+
+
+def test_retention_v2_failure_record_preserves_phase_and_isolation_details() -> None:
+    retention = load_module(
+        BENCHMARK / "run-graphical-retention-v2.py",
+        "graphical_retention_failure_record",
+    )
+
+    class ExampleIsolationError(RuntimeError):
+        details = {"observed_count": 0}
+
+    error = ExampleIsolationError("window disappeared")
+    assert retention.failure_record("settle_sampling", error) == {
+        "phase": "settle_sampling",
+        "type": "ExampleIsolationError",
+        "message": "window disappeared",
+        "isolation": {"observed_count": 0},
+    }
+
+
+def test_retention_v2_main_serializes_pretrigger_and_cleanup_failures(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retention = load_module(
+        BENCHMARK / "run-graphical-retention-v2.py",
+        "graphical_retention_main_failure",
+    )
+    output = tmp_path / "report"
+    calls = {"ownership": 0, "cleanup": 0, "killed": []}
+    isolation_details = {
+        "expected": {"address": "0x1", "workspace": 8},
+        "observed": [],
+        "observed_count": 0,
+    }
+
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "test-instance")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run-graphical-retention-v2.py",
+            str(output),
+            "--terminal",
+            "foot",
+            "--settle-seconds",
+            "0",
+            "--settle-points",
+            "2",
+        ],
+    )
+    monkeypatch.setattr(retention.V1, "assert_test_workspace_isolated", lambda: None)
+    monkeypatch.setattr(retention.V1, "assert_user_workspace_untouched", lambda: None)
+    monkeypatch.setattr(retention.V1, "all_clients", lambda: [])
+    monkeypatch.setattr(
+        retention.V1,
+        "kill_oracle_window",
+        lambda address: calls["killed"].append(address),
+    )
+    monkeypatch.setattr(
+        retention.COMMON,
+        "launch_command",
+        lambda *args, **kwargs: (["terminal"], {}),
+    )
+    monkeypatch.setattr(retention.COMMON, "write_launcher", lambda *args: None)
+    monkeypatch.setattr(retention.COMMON, "dispatch_launcher", lambda *args: None)
+    monkeypatch.setattr(
+        retention.COMMON,
+        "wait_launch",
+        lambda *args: (
+            {"address": "0x1", "pid": 40},
+            {"pid": 41},
+            0,
+            0,
+        ),
+    )
+
+    def assert_owned_window(app_id: str, address: str) -> None:
+        assert app_id == retention.COMMON.APP_IDS["foot"]
+        assert address == "0x1"
+        calls["ownership"] += 1
+        if calls["ownership"] == 3:
+            raise retention.COMMON.WindowIsolationError(
+                "benchmark window disappeared", isolation_details
+            )
+
+    def fail_cleanup() -> None:
+        calls["cleanup"] += 1
+        raise RuntimeError("workspace did not empty")
+
+    monkeypatch.setattr(retention.COMMON, "assert_owned_window", assert_owned_window)
+    monkeypatch.setattr(retention.COMMON, "wait_cleanup", fail_cleanup)
+    monkeypatch.setattr(retention, "snapshot_process_forest", lambda roots: object())
+    monkeypatch.setattr(
+        retention,
+        "snapshot_process_memory_forest",
+        lambda roots: {"aggregate": {}, "processes": []},
+    )
+
+    assert retention.main() == 1
+    report = json.loads((output / "foot-retention.json").read_text())
+    assert report["valid"] is False
+    assert report["failure"] == {
+        "phase": "pre_trigger_ownership",
+        "type": "WindowIsolationError",
+        "message": (
+            "benchmark window disappeared: "
+            + json.dumps(isolation_details, sort_keys=True)
+        ),
+        "isolation": isolation_details,
+    }
+    assert report["cleanup_failure"] == {
+        "phase": "cleanup",
+        "type": "RuntimeError",
+        "message": "workspace did not empty",
+    }
+    assert calls == {"ownership": 3, "cleanup": 1, "killed": ["0x1"]}
+
+
+def test_marker_capture_refreshes_stale_launch_geometry_by_owned_address() -> None:
+    output = load_module(
+        BENCHMARK / "run-graphical-output.py", "graphical_output_geometry"
+    )
+    expected = {"address": "0x1", "at": [1, 2], "size": [3, 4]}
+    clients = [
+        {"address": "0x2", "at": [20, 30], "size": [40, 50]},
+        {"address": "0x1", "at": [100, -900], "size": [960, 600]},
+    ]
+    assert output.current_window_geometry(expected, clients) == (100, -900, 960, 600)
+    with pytest.raises(RuntimeError, match="disappeared before screenshot"):
+        output.current_window_geometry(expected, clients[:1])
 
 
 def test_visible_marker_detection_survives_inactive_window_composition() -> None:

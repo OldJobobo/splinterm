@@ -53,9 +53,20 @@ def is_visible_marker_pixel(red: int, green: int, blue: int) -> bool:
     )
 
 
+def current_window_geometry(
+    expected: dict[str, Any], clients: list[dict[str, Any]]
+) -> tuple[int, int, int, int]:
+    address = expected.get("address")
+    current = next((client for client in clients if client.get("address") == address), None)
+    if current is None:
+        raise RuntimeError("benchmark window disappeared before screenshot")
+    x, y = current["at"]
+    width, height = current["size"]
+    return int(x), int(y), int(width), int(height)
+
+
 def screenshot_marker(window: dict[str, Any], path: pathlib.Path) -> int:
-    x, y = window["at"]
-    width, height = window["size"]
+    x, y, width, height = current_window_geometry(window, V1.all_clients())
     result = subprocess.run(
         ["grim", "-g", f"{x},{y} {width}x{height}", str(path)],
         text=True,

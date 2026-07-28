@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Splinterbench attributed graphical retention result",
+  "type": "object",
+  "required": ["schema", "terminal", "variant", "retention", "memory_timeline", "processes", "isolation", "valid", "notes"],
+  "properties": {
+    "schema": {"const": "splinterm.benchmark.graphical-retention.v2"},
+    "terminal": {"enum": ["splinterm", "foot", "kitty", "ghostty"]},
+    "variant": {"type": "string", "minLength": 1},
+    "retention": {
+      "type": "object",
+      "required": ["lines", "rss_baseline_bytes", "rss_peak_observed_bytes", "rss_post_settle_bytes", "retained_growth_bytes", "trigger_to_visible_marker_ns"]
+    },
+    "memory_timeline": {
+      "type": "object",
+      "required": ["classification", "baseline", "peak_observed_rss_bytes", "marker_visible", "settles"]
+    },
+    "processes": {"type": "object", "required": ["root_pids", "child_pid", "child_included", "count"]},
+    "isolation": {
+      "type": "object",
+      "required": ["workspace", "monitor", "no_initial_focus", "cleanup_verified"],
+      "properties": {
+        "workspace": {"const": 8},
+        "monitor": {"const": "DP-2"},
+        "no_initial_focus": {"const": true},
+        "cleanup_verified": {"const": true}
+      }
+    },
+    "valid": {"const": true},
+    "notes": {"type": "array", "items": {"type": "string"}}
+  }
+}
