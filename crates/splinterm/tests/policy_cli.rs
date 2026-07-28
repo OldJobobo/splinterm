@@ -127,3 +127,179 @@ fn policy_commands_reject_machine_mode_without_touching_stdout() {
     assert!(result.stdout.is_empty());
     assert!(!result.stderr.is_empty());
 }
+
+#[test]
+fn reset_requires_confirmation_and_rejects_machine_mode_before_service_access() {
+    let guarded = output(binary().arg("reset"));
+    assert!(!guarded.status.success());
+    assert!(guarded.stdout.is_empty());
+    assert!(
+        String::from_utf8(guarded.stderr)
+            .unwrap()
+            .contains("pass --yes to confirm")
+    );
+
+    for arguments in [
+        vec!["--output", "json", "reset", "--yes"],
+        vec!["--output", "ndjson", "reset", "--yes"],
+        vec!["--schema-major", "1", "reset", "--yes"],
+        vec!["--timeout-ms", "1000", "reset", "--yes"],
+    ] {
+        let machine = output(binary().args(arguments));
+        assert_eq!(machine.status.code(), Some(2));
+        assert!(machine.stdout.is_empty());
+        assert!(!machine.stderr.is_empty());
+    }
+}
+
+#[test]
+fn reset_backup_failure_restarts_service_and_preserves_state() {
+    let directory = test_directory("reset-backup-failure");
+    let state_home = directory.join("state");
+    let state = state_home.join("splinterm");
+    let runtime = directory.join("runtime");
+    let fake_bin = directory.join("bin");
+    let record = directory.join("record");
+    fs::create_dir_all(&state_home).unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::write(&state, b"not-a-directory").unwrap();
+
+    let systemctl = fake_bin.join("systemctl");
+    fs::write(
+        &systemctl,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$SPLINTERM_TEST_RECORD"
+if [ "$2" = start ]; then
+  mkdir -p "$XDG_RUNTIME_DIR/splinterm"
+  /usr/bin/python -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' "$XDG_RUNTIME_DIR/splinterm/splinterd.sock"
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let reset = output(
+        binary()
+            .args(["reset", "--yes"])
+            .env("PATH", format!("{}:/usr/bin", fake_bin.display()))
+            .env("XDG_STATE_HOME", &state_home)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("SPLINTERM_TEST_RECORD", &record),
+    );
+    assert!(!reset.status.success());
+    assert!(reset.stdout.is_empty());
+    assert!(
+        String::from_utf8(reset.stderr)
+            .unwrap()
+            .contains("restarted unchanged")
+    );
+    assert_eq!(fs::read(&state).unwrap(), b"not-a-directory");
+    assert_eq!(
+        fs::read_to_string(&record).unwrap(),
+        "--user stop splinterd.service\n--user start splinterd.service\n"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn reset_start_failure_reports_the_completed_backup() {
+    let directory = test_directory("reset-start-failure");
+    let state_home = directory.join("state");
+    let state = state_home.join("splinterm");
+    let runtime = directory.join("runtime");
+    let fake_bin = directory.join("bin");
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::write(state.join("lair.json"), b"sessions").unwrap();
+
+    let systemctl = fake_bin.join("systemctl");
+    fs::write(&systemctl, "#!/bin/sh\n[ \"$2\" != start ]\n").unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let reset = output(
+        binary()
+            .args(["reset", "--yes"])
+            .env("PATH", format!("{}:/usr/bin", fake_bin.display()))
+            .env("XDG_STATE_HOME", &state_home)
+            .env("XDG_RUNTIME_DIR", &runtime),
+    );
+    assert!(!reset.status.success());
+    let backups: Vec<_> = fs::read_dir(&state_home)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(backups.len(), 1);
+    let stderr = String::from_utf8(reset.stderr).unwrap();
+    assert!(stderr.contains("backed up to"));
+    assert!(stderr.contains(backups[0].to_string_lossy().as_ref()));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn reset_is_one_guarded_stop_backup_start_sequence() {
+    let directory = test_directory("reset");
+    let state_home = directory.join("state");
+    let state = state_home.join("splinterm");
+    let runtime = directory.join("runtime");
+    let socket = directory.join("custom-splinterd.sock");
+    let fake_bin = directory.join("bin");
+    let record = directory.join("record");
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::write(state.join("lair.json"), b"sessions").unwrap();
+
+    let systemctl = fake_bin.join("systemctl");
+    fs::write(
+        &systemctl,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$SPLINTERM_TEST_RECORD"
+if [ "$2" = stop ]; then
+  rm -f "$SPLINTERM_SOCKET"
+elif [ "$2" = start ]; then
+  /usr/bin/python -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' "$SPLINTERM_SOCKET"
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let reset = output(
+        binary()
+            .args(["reset", "--yes"])
+            .env("PATH", format!("{}:/usr/bin", fake_bin.display()))
+            .env("XDG_STATE_HOME", &state_home)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("SPLINTERM_SOCKET", &socket)
+            .env("SPLINTERM_TEST_RECORD", &record),
+    );
+    assert!(reset.status.success(), "{:?}", reset.stderr);
+    assert_eq!(
+        fs::read_to_string(&record).unwrap(),
+        "--user stop splinterd.service\n--user start splinterd.service\n"
+    );
+    assert!(!state.exists());
+    let backups: Vec<_> = fs::read_dir(&state_home)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("splinterm.reset-")
+        })
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(fs::read(backups[0].join("lair.json")).unwrap(), b"sessions");
+    let stdout = String::from_utf8(reset.stdout).unwrap();
+    assert!(stdout.contains("restarted with no sessions"));
+    assert!(stdout.contains(backups[0].to_string_lossy().as_ref()));
+
+    fs::remove_dir_all(directory).unwrap();
+}

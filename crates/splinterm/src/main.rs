@@ -1,12 +1,17 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
+    fmt::Write as _,
     io::{self, IsTerminal, Read, Write},
-    os::unix::{fs::MetadataExt, process::CommandExt},
-    path::PathBuf,
+    os::unix::{
+        fs::{FileTypeExt, MetadataExt},
+        process::CommandExt,
+    },
+    path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::mpsc as std_mpsc,
-    time::Instant,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -23,7 +28,8 @@ use splinterm::{
         inspect_topology_envelope, kill_envelope, list_dojos_envelope, process_started_envelope,
         protocol_error, public_error_code, read_resync_envelope, response_protocol_error,
         restore_many_envelope, revoke_envelope, scrollback_page_envelope, search_page_envelope,
-        terminal_action_envelope, terminal_snapshot_envelope, write_json_document,
+        socket_path as configured_socket_path, terminal_action_envelope,
+        terminal_snapshot_envelope, write_json_document,
     },
     config::{AppConfig, ConfigLoad, ResolvedTheme, load_default, load_theme},
     renderer::{self, RendererOptions},
@@ -111,7 +117,18 @@ enum Command {
         window_id: Option<WindowId>,
     },
     Ping,
-    List,
+    /// Stop the daemon, back up and clear every session, then restart cleanly.
+    Reset {
+        /// Confirm termination of every daemon-owned shell without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List active sessions without flooding the terminal with exited history.
+    List {
+        /// Include exited-only sessions and their complete topology.
+        #[arg(long)]
+        all: bool,
+    },
     /// Inspect effective authority or revoke ephemeral grants.
     Authorization {
         #[command(subcommand)]
@@ -367,6 +384,26 @@ fn confirm_kill(splint_id: SplintId) -> Result<bool> {
     ))
 }
 
+fn confirm_reset() -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        bail!(
+            "refusing to reset every session without an interactive terminal; pass --yes to confirm"
+        );
+    }
+    eprint!("Stop every Splint, clear all sessions, and restart splinterd? [y/N] ");
+    io::stderr()
+        .flush()
+        .context("failed to display confirmation")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("failed to read confirmation")?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 // The client needs concurrent local IPC and theme watching, not one allocator
 // arena per CPU. Wayland rendering already runs on a bounded blocking worker.
 fn usage_error(message: &str) -> ! {
@@ -415,6 +452,147 @@ fn run_policy_command(command: PolicyCommand) -> Result<()> {
     Ok(())
 }
 
+fn splinterm_state_directory() -> Result<PathBuf> {
+    let base = match env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(env::var_os("HOME").context("XDG_STATE_HOME and HOME are unset")?)
+            .join(".local/state"),
+    };
+    if !base.is_absolute() {
+        bail!("state directory base must be absolute");
+    }
+    Ok(base.join("splinterm"))
+}
+
+fn move_session_state_no_replace(state: &Path, backup: &Path) -> Result<bool> {
+    match rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        state,
+        rustix::fs::CWD,
+        backup,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::EXIST) => Ok(false),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to move session state {} to {}",
+                state.display(),
+                backup.display()
+            )
+        }),
+    }
+}
+
+fn backup_session_state(state: &Path) -> Result<Option<PathBuf>> {
+    let metadata = match std::fs::symlink_metadata(state) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_dir() {
+        bail!("session state path is not a directory: {}", state.display());
+    }
+    let parent = state.parent().context("session state path has no parent")?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_millis();
+    for suffix in 0_u8..100 {
+        let name = if suffix == 0 {
+            format!("splinterm.reset-{stamp}")
+        } else {
+            format!("splinterm.reset-{stamp}-{suffix}")
+        };
+        let backup = parent.join(name);
+        if move_session_state_no_replace(state, &backup)? {
+            return Ok(Some(backup));
+        }
+    }
+    bail!("could not allocate a unique session backup path");
+}
+
+fn run_user_systemctl(action: &str) -> Result<()> {
+    let status = ProcessCommand::new("systemctl")
+        .args(["--user", action, "splinterd.service"])
+        .status()
+        .with_context(|| format!("failed to invoke systemctl --user {action} splinterd.service"))?;
+    if !status.success() {
+        bail!("systemctl --user {action} splinterd.service failed with {status}");
+    }
+    Ok(())
+}
+
+fn wait_for_splinterd_socket(socket: &Path) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if std::fs::symlink_metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket())
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    bail!(
+        "splinterd restarted but did not create {} within 5 seconds; inspect `systemctl --user status splinterd.service`",
+        socket.display()
+    );
+}
+
+fn reset_readiness_context(backup: Option<&Path>) -> String {
+    match backup {
+        Some(path) => format!(
+            "sessions were reset and backed up to {}, but splinterd did not become ready",
+            path.display()
+        ),
+        None => "session state was empty, but splinterd did not become ready".to_owned(),
+    }
+}
+
+fn run_reset_command(yes: bool) -> Result<()> {
+    if !yes && !confirm_reset()? {
+        println!("Reset cancelled.");
+        return Ok(());
+    }
+
+    let state = splinterm_state_directory()?;
+    let socket = configured_socket_path()?;
+    run_user_systemctl("stop")?;
+
+    let backup = match backup_session_state(&state) {
+        Ok(backup) => backup,
+        Err(error) => {
+            if let Err(restart) = run_user_systemctl("start") {
+                return Err(error).context(format!(
+                    "session reset failed, then splinterd restart also failed: {restart:#}"
+                ));
+            }
+            if let Err(readiness) = wait_for_splinterd_socket(&socket) {
+                return Err(error).context(format!(
+                    "session reset failed; splinterd restart also did not become ready: {readiness:#}"
+                ));
+            }
+            return Err(error).context("session reset failed; splinterd was restarted unchanged");
+        }
+    };
+
+    run_user_systemctl("start").with_context(|| match &backup {
+        Some(path) => format!(
+            "sessions were backed up to {}, but splinterd failed to restart",
+            path.display()
+        ),
+        None => "no session state existed, but splinterd failed to restart".to_owned(),
+    })?;
+    wait_for_splinterd_socket(&socket)
+        .with_context(|| reset_readiness_context(backup.as_deref()))?;
+
+    println!("Splinterd restarted with no sessions.");
+    match backup {
+        Some(path) => println!("Previous sessions: {}", path.display()),
+        None => println!("No previous session database was present."),
+    }
+    Ok(())
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let Cli {
@@ -430,10 +608,11 @@ async fn main() -> Result<()> {
             | Command::Consent
             | Command::Policy { .. }
             | Command::Relay { .. }
+            | Command::Reset { .. }
     ) && (output.is_some() || schema_major.is_some() || timeout_ms.is_some())
     {
         usage_error(
-            "automation output, schema, and timeout options are unavailable for graphical, policy, and relay commands",
+            "automation output, schema, and timeout options are unavailable for graphical, policy, relay, and local service commands",
         );
     }
     if matches!(command, Command::Subscribe { .. }) && output != Some(OutputMode::Ndjson) {
@@ -480,6 +659,9 @@ async fn main() -> Result<()> {
     }
     if let Command::Relay { stdio } = command {
         return run_relay_command(stdio);
+    }
+    if let Command::Reset { yes } = command {
+        return run_reset_command(yes);
     }
 
     let ConfigLoad {
@@ -561,7 +743,7 @@ async fn run_machine_command(command: Command, schema_major: u16, timeout_ms: u6
     };
     match command {
         Command::Ping => run_machine_ping(schema_major, timeout_ms).await,
-        Command::List => run_machine_read(MachineRead::List, schema_major, timeout_ms).await,
+        Command::List { .. } => run_machine_read(MachineRead::List, schema_major, timeout_ms).await,
         Command::Topology => {
             run_machine_read(MachineRead::Topology, schema_major, timeout_ms).await
         }
@@ -2911,11 +3093,19 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
         | Command::Launch { .. }
         | Command::Consent
         | Command::Policy { .. }
-        | Command::Relay { .. } => {
+        | Command::Relay { .. }
+        | Command::Reset { .. } => {
             unreachable!("graphical, policy, or relay command returned before daemon connection")
         }
         Command::Ping => print_response(connection.request(Request::Ping).await?),
-        Command::List => print_response(connection.request(Request::ListDojos).await?),
+        Command::List { all } => {
+            let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await?
+            else {
+                anyhow::bail!("splinterd returned an unexpected response to list")
+            };
+            print_dojos(dojos, all);
+            Ok(())
+        }
         Command::Topology => print_response(connection.request(Request::InspectTopology).await?),
         Command::Inspect { splint_id } => print_response(
             connection
@@ -5384,27 +5574,142 @@ fn print_restore_results(
     }
 }
 
-fn print_dojos(dojos: Vec<splinterm_core::Dojo>) {
-    for dojo in dojos {
-        let splints: usize = dojo
-            .windows
-            .iter()
-            .map(|window| window.root.splint_count())
-            .sum();
-        println!(
-            "{}  {}  {} window(s)  {splints} Splint(s)",
-            dojo.id,
-            dojo.name,
-            dojo.windows.len()
-        );
-        for window in &dojo.windows {
-            println!(
-                "  window {}  {}  default-focus {}",
-                window.id, window.title, window.default_focus
-            );
-            print_splint_ids(&window.root);
+fn node_has_active_splint(node: &splinterm_core::LayoutNode) -> bool {
+    match node {
+        splinterm_core::LayoutNode::Leaf(splint) => !matches!(splint.state, SplintState::Exited(_)),
+        splinterm_core::LayoutNode::Branch { first, second, .. } => {
+            node_has_active_splint(first) || node_has_active_splint(second)
         }
     }
+}
+
+fn dojo_has_active_splint(dojo: &splinterm_core::Dojo) -> bool {
+    dojo.windows
+        .iter()
+        .any(|window| node_has_active_splint(&window.root))
+}
+
+fn render_active_splint_ids(node: &splinterm_core::LayoutNode, output: &mut String) {
+    match node {
+        splinterm_core::LayoutNode::Leaf(splint)
+            if !matches!(splint.state, SplintState::Exited(_)) =>
+        {
+            let state = match splint.state {
+                SplintState::Starting => "starting",
+                SplintState::Running => "running",
+                SplintState::Exited(_) => unreachable!("exited Splints are filtered"),
+            };
+            writeln!(output, "    {state:<8} {}  {}", splint.title, splint.id)
+                .expect("writing to String cannot fail");
+        }
+        splinterm_core::LayoutNode::Leaf(_) => {}
+        splinterm_core::LayoutNode::Branch { first, second, .. } => {
+            render_active_splint_ids(first, output);
+            render_active_splint_ids(second, output);
+        }
+    }
+}
+
+fn render_all_splint_ids(node: &splinterm_core::LayoutNode, output: &mut String) {
+    match node {
+        splinterm_core::LayoutNode::Leaf(splint) => {
+            writeln!(
+                output,
+                "  {}  {}  {:?}",
+                splint.id, splint.title, splint.state
+            )
+            .expect("writing to String cannot fail");
+        }
+        splinterm_core::LayoutNode::Branch { first, second, .. } => {
+            render_all_splint_ids(first, output);
+            render_all_splint_ids(second, output);
+        }
+    }
+}
+
+fn render_dojos(dojos: &[splinterm_core::Dojo], all: bool) -> String {
+    let mut output = String::new();
+    if all {
+        if dojos.is_empty() {
+            return "No sessions.\n".to_owned();
+        }
+        for dojo in dojos {
+            let splints: usize = dojo
+                .windows
+                .iter()
+                .map(|window| window.root.splint_count())
+                .sum();
+            writeln!(
+                output,
+                "{}  {}  {} window(s)  {splints} Splint(s)",
+                dojo.id,
+                dojo.name,
+                dojo.windows.len()
+            )
+            .expect("writing to String cannot fail");
+            for window in &dojo.windows {
+                writeln!(
+                    output,
+                    "  window {}  {}  default-focus {}",
+                    window.id, window.title, window.default_focus
+                )
+                .expect("writing to String cannot fail");
+                render_all_splint_ids(&window.root, &mut output);
+            }
+        }
+        return output;
+    }
+
+    let active: Vec<_> = dojos
+        .iter()
+        .filter(|dojo| dojo_has_active_splint(dojo))
+        .collect();
+    let hidden = dojos.len().saturating_sub(active.len());
+
+    if active.is_empty() {
+        writeln!(output, "No active sessions.").expect("writing to String cannot fail");
+    } else {
+        writeln!(
+            output,
+            "Active session{} ({})",
+            if active.len() == 1 { "" } else { "s" },
+            active.len()
+        )
+        .expect("writing to String cannot fail");
+        for dojo in active {
+            writeln!(output, "\n{}", dojo.name).expect("writing to String cannot fail");
+            writeln!(output, "  dojo    {}", dojo.id).expect("writing to String cannot fail");
+            for window in &dojo.windows {
+                if !node_has_active_splint(&window.root) {
+                    continue;
+                }
+                writeln!(output, "  window  {}  {}", window.title, window.id)
+                    .expect("writing to String cannot fail");
+                render_active_splint_ids(&window.root, &mut output);
+            }
+        }
+        writeln!(
+            output,
+            "\nStop one running Splint with: splinterm kill <SPLINT_ID>"
+        )
+        .expect("writing to String cannot fail");
+    }
+
+    if hidden > 0 {
+        writeln!(
+            output,
+            "{hidden} inactive session{} hidden.",
+            if hidden == 1 { "" } else { "s" },
+        )
+        .expect("writing to String cannot fail");
+    }
+    writeln!(output, "Show complete history with: splinterm list --all")
+        .expect("writing to String cannot fail");
+    output
+}
+
+fn print_dojos(dojos: Vec<splinterm_core::Dojo>, all: bool) {
+    print!("{}", render_dojos(&dojos, all));
 }
 
 #[allow(
@@ -5417,8 +5722,7 @@ fn print_response(response: Response) -> Result<()> {
         Response::MutationPrepared { .. } => {
             println!("Mutation preflight prepared.");
         }
-        Response::Dojos { dojos, .. } if dojos.is_empty() => println!("No dojos in the lair."),
-        Response::Dojos { dojos, .. } => print_dojos(dojos),
+        Response::Dojos { dojos, .. } => print_dojos(dojos, true),
         Response::DojoCreated { dojo, .. } => println!("Created dojo '{}'.", dojo.name),
         Response::Topology { snapshot } => println!(
             "Topology revision {}: {} dojo(s), {} Splint(s)",
@@ -5554,18 +5858,6 @@ fn print_response(response: Response) -> Result<()> {
         .context("failed to flush command output")
 }
 
-fn print_splint_ids(node: &splinterm_core::LayoutNode) {
-    match node {
-        splinterm_core::LayoutNode::Leaf(splint) => {
-            println!("  {}  {}  {:?}", splint.id, splint.title, splint.state);
-        }
-        splinterm_core::LayoutNode::Branch { first, second, .. } => {
-            print_splint_ids(first);
-            print_splint_ids(second);
-        }
-    }
-}
-
 fn print_snapshot(snapshot: &TerminalSnapshot) {
     println!(
         "Splint {:?} · incarnation {} · revision {} · {}x{}",
@@ -5595,6 +5887,143 @@ fn print_snapshot(snapshot: &TerminalSnapshot) {
 mod tests {
     use super::*;
     use splinterm_protocol::{ActiveScreen, TerminalInputModes};
+
+    #[test]
+    fn reset_requires_explicit_confirmation_for_unattended_use() {
+        let guarded = Cli::try_parse_from(["splinterm", "reset"]).unwrap();
+        assert!(matches!(guarded.command, Command::Reset { yes: false }));
+
+        let confirmed = Cli::try_parse_from(["splinterm", "reset", "--yes"]).unwrap();
+        assert!(matches!(confirmed.command, Command::Reset { yes: true }));
+    }
+
+    #[test]
+    fn session_reset_moves_state_to_a_reversible_backup() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "splinterm-reset-test-{}-{nonce}",
+            std::process::id()
+        ));
+        let state = root.join("splinterm");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("lair.json"), b"current").unwrap();
+        std::fs::write(state.join("lair.json.previous"), b"previous").unwrap();
+
+        let backup = backup_session_state(&state).unwrap().unwrap();
+        assert!(!state.exists());
+        assert_eq!(std::fs::read(backup.join("lair.json")).unwrap(), b"current");
+        assert_eq!(
+            std::fs::read(backup.join("lair.json.previous")).unwrap(),
+            b"previous"
+        );
+        assert!(backup_session_state(&state).unwrap().is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_backup_never_replaces_existing_or_dangling_destinations() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "splinterm-reset-collision-test-{}-{nonce}",
+            std::process::id()
+        ));
+        let state = root.join("splinterm");
+        let backup = root.join("splinterm.reset-collision");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("lair.json"), b"sessions").unwrap();
+        std::fs::write(&backup, b"existing").unwrap();
+
+        assert!(!move_session_state_no_replace(&state, &backup).unwrap());
+        assert!(state.exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"existing");
+
+        std::fs::remove_file(&backup).unwrap();
+        std::os::unix::fs::symlink(root.join("missing-target"), &backup).unwrap();
+        assert!(!move_session_state_no_replace(&state, &backup).unwrap());
+        assert!(state.exists());
+        assert!(std::fs::symlink_metadata(&backup).unwrap().is_symlink());
+
+        std::fs::remove_file(&backup).unwrap();
+        assert!(move_session_state_no_replace(&state, &backup).unwrap());
+        assert!(!state.exists());
+        assert_eq!(
+            std::fs::read(backup.join("lair.json")).unwrap(),
+            b"sessions"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn readiness_failure_context_preserves_partial_reset_backup() {
+        let backup = Path::new("/tmp/splinterm.reset-example");
+        let message = reset_readiness_context(Some(backup));
+        assert!(message.contains("sessions were reset"));
+        assert!(message.contains(backup.to_string_lossy().as_ref()));
+        assert!(message.contains("did not become ready"));
+    }
+
+    #[test]
+    fn list_defaults_to_active_sessions_and_all_is_explicit() {
+        let active = Cli::try_parse_from(["splinterm", "list"]).unwrap();
+        assert!(matches!(active.command, Command::List { all: false }));
+
+        let all = Cli::try_parse_from(["splinterm", "list", "--all"]).unwrap();
+        assert!(matches!(all.command, Command::List { all: true }));
+    }
+
+    #[test]
+    fn human_list_hides_inactive_sessions_and_all_retains_complete_detail() {
+        let active = splinterm_core::Dojo::new("active", PathBuf::from("/tmp"));
+        let active_dojo_id = active.id.to_string();
+        let active_window_id = active.windows[0].id.to_string();
+        let active_splint_id = active.windows[0].root.first_splint_id().to_string();
+        assert!(dojo_has_active_splint(&active));
+
+        let mut inactive = splinterm_core::Dojo::new("inactive", PathBuf::from("/tmp"));
+        let inactive_id = inactive.id.to_string();
+        let splinterm_core::LayoutNode::Leaf(splint) = &mut inactive.windows[0].root else {
+            panic!("new Dojo should contain one Splint")
+        };
+        splint.state = SplintState::Exited(0);
+        assert!(!dojo_has_active_splint(&inactive));
+
+        let dojos = vec![active, inactive];
+        let concise = render_dojos(&dojos, false);
+        assert!(concise.contains("Active session (1)"));
+        assert!(concise.contains("\nactive\n"));
+        assert!(concise.contains(&active_dojo_id));
+        assert!(concise.contains(&active_window_id));
+        assert!(concise.contains(&active_splint_id));
+        assert!(!concise.contains("\ninactive\n"));
+        assert!(concise.contains("1 inactive session hidden."));
+        assert!(concise.contains("Stop one running Splint with:"));
+        assert!(concise.contains("Show complete history with: splinterm list --all"));
+
+        let all = render_dojos(&dojos, true);
+        assert!(all.contains(" active "));
+        assert!(all.contains(" inactive "));
+        assert!(all.contains(&inactive_id));
+        assert!(all.contains("default-focus"));
+        assert!(all.contains("Exited(0)"));
+    }
+
+    #[test]
+    fn empty_human_list_still_guides_complete_history() {
+        let output = render_dojos(&[], false);
+        assert_eq!(
+            output,
+            "No active sessions.\nShow complete history with: splinterm list --all\n"
+        );
+        assert_eq!(render_dojos(&[], true), "No sessions.\n");
+    }
 
     #[test]
     fn theme_fingerprint_changes_without_parsing_unchanged_content() {

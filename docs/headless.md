@@ -126,8 +126,19 @@ removal before systemd may force cleanup.
 Persisted topology and launch metadata may remain, but saved commands are never
 automatically executed; restoration requires an explicit authorized `restore`,
 `restore-window`, or `restore-dojo` command. Audit retention is
-daemon-lifetime-only and resets after
-restart.
+daemon-lifetime-only and resets after restart.
+
+To terminate every daemon-owned shell, move the complete session database to a
+timestamped backup, restart the service, and wait for its socket in one guarded
+command:
+
+```bash
+splinterm reset
+```
+
+The interactive command asks for confirmation. Use `splinterm reset --yes` only
+for an already-approved unattended reset. It reports the reversible backup path;
+policy and user configuration remain untouched.
 
 For a consistent backup, stop the service, copy the state and policy files while
 preserving owner/mode, then start it again:
