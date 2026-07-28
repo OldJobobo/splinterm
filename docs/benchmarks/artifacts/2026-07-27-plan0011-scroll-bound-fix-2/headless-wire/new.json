@@ -1,0 +1,1 @@
+{"schema":"splinterm.cli.v1","request_id":"1","operation":"create_dojo","ok":true,"truncated":false,"resource":{"dojo_id":"15c64dfe-27d7-4901-b834-dae42a67e99e","incarnation":1,"splint_id":"68b0d96f-c268-4f15-b741-377a53303829","topology_revision":1,"window_id":"392301d4-9865-4bc5-a594-54182ace7414"},"data":{"created":true}}

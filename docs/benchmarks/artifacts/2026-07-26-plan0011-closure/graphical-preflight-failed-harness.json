@@ -1,0 +1,9 @@
+{
+  "schema": "splinterm.plan0011.graphical-isolation-preflight.v1",
+  "checked_at_ns": 1785126460105527571,
+  "workspace": 8,
+  "monitor": "DP-2",
+  "launch_attempted": false,
+  "valid": false,
+  "error": "module 'v1' has no attribute 'active_workspace_id'"
+}

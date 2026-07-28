@@ -1,0 +1,51 @@
+{
+  "binaries": {
+    "candidate_plan11-daemon-retention": {
+      "path": "/tmp/splinterm-plan0011-final-candidate-bin/plan11-daemon-retention",
+      "sha256": "d5a83551e5d75b62432691b552a1200a931c7347a00e846ce42efce800ec6769",
+      "size_bytes": 1939904
+    },
+    "candidate_splinterd": {
+      "path": "/tmp/splinterm-plan0011-final-candidate-bin/splinterd",
+      "sha256": "fb1be6752de2b43d72f58a40df01d8c13b78f2b2bb20eedaf952f5d0c5086699",
+      "size_bytes": 5153800
+    },
+    "candidate_splinterm": {
+      "path": "/tmp/splinterm-plan0011-final-candidate-bin/splinterm",
+      "sha256": "30c6b7cd6978dac40988159c73e4f04b201d10493177e589b63ffe36b3925eb8",
+      "size_bytes": 7662352
+    },
+    "candidate_splinterm-pty-child": {
+      "path": "/tmp/splinterm-plan0011-final-candidate-bin/splinterm-pty-child",
+      "sha256": "dd9d96c97814d4b1f918f192b3354fd81981304bbc5050658e8a4eb28f82413f",
+      "size_bytes": 490184
+    },
+    "control_splinterd": {
+      "path": "/tmp/splinterm-plan0011-final-control-target/release/splinterd",
+      "sha256": "7ff18e4adcb6e80316b1482e683c72322c2b2d630ade27d95c40c4bddcd37ca0",
+      "size_bytes": 5095696
+    },
+    "control_splinterm": {
+      "path": "/tmp/splinterm-plan0011-final-control-target/release/splinterm",
+      "sha256": "55879f8085797fc22ec3b4ef9911ec0b8fef5a94d92da8a701410dae422bb1a7",
+      "size_bytes": 7662296
+    },
+    "control_splinterm-pty-child": {
+      "path": "/tmp/splinterm-plan0011-final-control-target/release/splinterm-pty-child",
+      "sha256": "9d3225b2dc0af4d8ca2132a2caa1fdfe9d5fce8ef61351ef40c5abde6c96f6c7",
+      "size_bytes": 490184
+    }
+  },
+  "head": "0ce4fc62ed7ade2138fd35f492075942b415a571",
+  "schema": "splinterm.plan0011.final-provenance.v1",
+  "tracked_patch": {
+    "path": "docs/benchmarks/artifacts/2026-07-27-plan0011-final/provenance/candidate-tracked.patch",
+    "sha256": "7710c297742b789d1afff96ac66949b2d3fb27b9051ffbc5c386a3c77ed037c3",
+    "size_bytes": 156862
+  },
+  "untracked_source_bundle": {
+    "path": "docs/benchmarks/artifacts/2026-07-27-plan0011-final/provenance/untracked-source.tar",
+    "sha256": "7adef2695f0d454ed027d4e9fcf4050a1c14b10f4517230a903434b93f69d89e",
+    "size_bytes": 61440
+  }
+}

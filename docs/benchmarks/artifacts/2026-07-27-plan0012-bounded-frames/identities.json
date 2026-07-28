@@ -1,0 +1,9 @@
+{
+  "schema": "splinterm.plan0012.first-experiment-identities.v1",
+  "recorded_at": "2026-07-27T18:29:10-07:00",
+  "head": "0ce4fc62ed7ade2138fd35f492075942b415a571",
+  "worktree": "dirty-uncommitted-candidate",
+  "foot_oracle": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+  "release_probe_sha256": "12a5f607efa0cc7373b9d892b576c87494d44fdc7257e77675e963c1e059122c",
+  "pty_helper_sha256": "4061b8d95cc0a3ff9ea83c2ef1737c681d53fa098e80d0210f8b80474447ebee"
+}

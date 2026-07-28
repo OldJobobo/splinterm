@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/end_to_end.rs (target/debug/deps/end_to_end-9674df48266f3f1d)
+
+running 1 test
+test phase8_detach_reattach_overflow_resync_and_cleanup ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 16.46s
+

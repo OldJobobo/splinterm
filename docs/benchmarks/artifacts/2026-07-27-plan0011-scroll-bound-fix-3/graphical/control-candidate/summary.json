@@ -1,0 +1,56 @@
+{
+  "candidate_reduction_percent": -10.78458552813973,
+  "improvement_established": false,
+  "improvement_gate_percent": 40.0,
+  "samples_per_variant": 10,
+  "schema": "splinterm.plan0011.graphical-control-candidate.v3",
+  "seed": 1106,
+  "summary": {
+    "candidate": {
+      "cpu_ticks": {
+        "maximum": 100,
+        "median": 76.5,
+        "minimum": 51
+      },
+      "retained_growth_bytes": {
+        "maximum": 84709376,
+        "median": 81838080.0,
+        "minimum": 76361728
+      },
+      "rss_post_settle_bytes": {
+        "maximum": 132468736,
+        "median": 129685504.0,
+        "minimum": 124203008
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 859438368,
+        "median": 615855954.5,
+        "minimum": 595342569
+      }
+    },
+    "control": {
+      "cpu_ticks": {
+        "maximum": 22,
+        "median": 19.0,
+        "minimum": 18
+      },
+      "retained_growth_bytes": {
+        "maximum": 73953280,
+        "median": 73871360.0,
+        "minimum": 73641984
+      },
+      "rss_post_settle_bytes": {
+        "maximum": 121655296,
+        "median": 121552896.0,
+        "minimum": 121331712
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 431458167,
+        "median": 396125124.0,
+        "minimum": 372977064
+      }
+    }
+  },
+  "valid": true,
+  "warmups_per_variant": 2
+}

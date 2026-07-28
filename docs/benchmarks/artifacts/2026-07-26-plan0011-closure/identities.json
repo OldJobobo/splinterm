@@ -1,0 +1,57 @@
+{
+  "schema": "splinterm.plan0011.identities.v1",
+  "head": "0ce4fc62ed7ade2138fd35f492075942b415a571",
+  "candidate_dirty_status": [
+    " M crates/splinterd/examples/phase9-daemon-benchmark.rs",
+    " M crates/splinterd/src/lib.rs",
+    " M crates/splinterd/src/live.rs",
+    " M crates/splinterd/src/main.rs",
+    " M tools/benchmark/metrics.py",
+    " M tools/benchmark/run-graphical-idle.py",
+    " M tools/benchmark/test_benchmark.py",
+    "?? docs/plans/0011-burst-output-memory-retention.md",
+    "?? tools/benchmark/retention-v2-schema.json",
+    "?? tools/benchmark/run-graphical-retention-v2.py",
+    "?? tools/performance/run-publication-metrics-overhead.py"
+  ],
+  "control_source": "git archive HEAD",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6",
+  "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+  "binaries": {
+    "candidate_client": {
+      "path": "/tmp/splinterm-plan0011-candidate-bin/splinterm",
+      "sha256": "bcc64d7819836d32b4a83bdfe1166beccafe6302897cb019f510ace57429d47c",
+      "size_bytes": 7662296
+    },
+    "candidate_daemon": {
+      "path": "/tmp/splinterm-plan0011-candidate-bin/splinterd",
+      "sha256": "f3b65dcd8f0e95567c98858d74a4d43cd87f52b8f70dbab50eb903b813fabae9",
+      "size_bytes": 5101600
+    },
+    "candidate_helper": {
+      "path": "/tmp/splinterm-plan0011-candidate-bin/splinterm-pty-child",
+      "sha256": "90df4a966566f6c084328090aa6d1d795f78aa7d3cc483e0d6ef6dd00eec9f77",
+      "size_bytes": 490200
+    },
+    "candidate_benchmark": {
+      "path": "/tmp/splinterm-plan0011-candidate-bin/phase9-daemon-benchmark",
+      "sha256": "d0bfefd96e3bd212d3eda695bd6a9f3e46e93f9de38b831abb5d5b53fc7b459a",
+      "size_bytes": 1895568
+    },
+    "control_client": {
+      "path": "/tmp/splinterm-plan0011-control-target/release/splinterm",
+      "sha256": "55879f8085797fc22ec3b4ef9911ec0b8fef5a94d92da8a701410dae422bb1a7",
+      "size_bytes": 7662296
+    },
+    "control_daemon": {
+      "path": "/tmp/splinterm-plan0011-control-target/release/splinterd",
+      "sha256": "7ff18e4adcb6e80316b1482e683c72322c2b2d630ade27d95c40c4bddcd37ca0",
+      "size_bytes": 5095696
+    },
+    "control_helper": {
+      "path": "/tmp/splinterm-plan0011-control-target/release/splinterm-pty-child",
+      "sha256": "9d3225b2dc0af4d8ca2132a2caa1fdfe9d5fce8ef61351ef40c5abde6c96f6c7",
+      "size_bytes": 490184
+    }
+  }
+}

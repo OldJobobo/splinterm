@@ -1,0 +1,61 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/splinterd-3389e78ff18f10d4)
+
+running 54 tests
+test authorization::tests::sensitive_matrix_keeps_policy_ownership_and_trusted_ui_distinct ... ok
+test authorization::tests::scope_vocabulary_is_closed_unique_and_schema_sized ... ok
+test executable_identity::tests::rejects_in_place_mutation_after_descriptor_open ... ok
+test executable_identity::tests::rejects_relative_non_regular_and_oversized_targets ... ok
+test executable_identity::tests::rejects_path_replacement_after_descriptor_open ... ok
+test executable_identity::tests::snapshots_exact_opened_regular_file ... ok
+test image_transport::tests::active_transfers_are_bounded_per_splint_and_released_exactly_once ... ok
+test image_transport::tests::tokens_are_exact_single_use_expiring_and_capacity_bounded ... ok
+test image_transport::tests::sealed_memfd_is_preferred_and_exactly_immutable ... ok
+test live::tests::compact_live_cells_allocate_owned_strings_only_for_composed_content ... ok
+test live::tests::capacity_one_preserves_final_synchronized_update_before_exit ... ok
+test live::tests::coalesced_receive_returns_retained_final_update_before_disconnect ... ok
+test live::tests::coalesced_receive_preserves_trailing_exit_and_resnapshot_precedence ... ok
+test live::tests::coalesced_receive_materializes_only_the_latest_snapshot_and_preserves_order ... ok
+test live::tests::completed_cava_frame_publishes_when_batch_begins_next_frame ... ok
+test live::tests::disabled_publication_attribution_stays_zero ... ok
+test live::tests::failed_admission_does_not_raise_successful_queue_high_water ... ok
+test live::tests::compact_snapshot_build_does_not_block_receiver_or_overflow_fast_tail ... ok
+test live::tests::ordinary_output_bypasses_synchronized_frame_throttle ... ok
+test live::tests::public_live_cell_api_remains_source_compatible ... ok
+test live::tests::owned_snapshot_retains_image_metadata_without_pixel_bodies ... ok
+test live::tests::public_subscription_events_remains_the_full_tokio_receiver ... ok
+test live::tests::concurrent_drain_and_receiver_drop_restore_queue_current_metrics ... ok
+test live::tests::receiver_drop_between_admission_and_send_releases_ownership ... ok
+test live::tests::publication_history_gap_requests_resnapshot_without_panicking ... ok
+test live::tests::resnapshot_state_wins_over_an_already_queued_event ... ok
+test live::tests::saturated_and_multiple_subscriber_metrics_are_exact ... ok
+test live::tests::publication_attribution_distinguishes_build_enqueue_and_dequeue ... ok
+test live::tests::delayed_compact_subscriber_retains_one_latest_snapshot ... ok
+test live::tests::resize_publishes_the_committed_terminal_update ... ok
+test live::tests::snapshot_slot_replacement_and_receiver_drop_release_exact_ownership ... ok
+test live::tests::subscriber_capacity_reserves_exit_slot_and_rejects_extremes ... ok
+test live::tests::synchronized_publication_defers_updates_but_not_pty_replies ... ok
+test live::tests::synchronized_publication_timeout_is_fixed_and_commits_one_frame ... ok
+test live::tests::write_queue_is_byte_bounded_and_preserves_partial_chunks ... ok
+test policy::tests::exact_and_current_incarnations_remain_distinct_after_publication ... ok
+test policy::tests::exact_identity_scope_resource_and_limit_match_is_narrow ... ok
+test policy::tests::loads_owner_only_policy_through_no_symlink_path_walk ... ok
+test policy::tests::publication_snapshot_excludes_later_descendants_and_reloads_explicitly ... ok
+test policy::tests::rejects_unsafe_mode_symlink_duplicate_and_expired_rules ... ok
+test policy::tests::reload_failure_atomically_installs_deny_all_generation ... ok
+test policy::tests::resolved_expansion_is_deduplicated_and_bounded ... ok
+test policy::tests::spawn_limit_is_consumed_atomically_within_generation ... ok
+test live::tests::cooperative_read_boundary_prevents_false_fast_subscriber_overflow ... ok
+test live::tests::dropping_runtime_still_closes_channel_and_reaps_child ... ok
+test live::tests::shutdown_escalates_after_group_leader_exits ... ok
+test live::tests::shutdown_escalates_and_reaps_the_process ... ok
+test live::tests::actor_resolves_only_exact_immutable_image_content ... ok
+test live::tests::detached_actor_keeps_consuming_and_snapshots_current_state ... ok
+test live::tests::atomic_attach_starts_updates_after_snapshot_revision ... ok
+test live::tests::input_resize_and_subscriber_overflow_do_not_block_the_actor ... ok
+test live::tests::shared_image_budget_rejects_across_actors_and_releases_on_exit ... ok
+test live::tests::compact_slot_pairs_thousand_row_history_clear_and_reflow_revision ... ok
+test executable_identity::tests::snapshots_current_process_through_proc ... ok
+
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
+

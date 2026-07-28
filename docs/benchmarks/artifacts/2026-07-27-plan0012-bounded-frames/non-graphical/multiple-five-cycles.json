@@ -1,0 +1,404 @@
+{
+  "baseline": {
+    "aggregate": {
+      "private_anon_bytes": 856064,
+      "private_file_bytes": 1204224,
+      "pss_bytes": 2084864,
+      "rss_bytes": 4706304,
+      "shared_bytes": 2646016,
+      "shmem_bytes": 0
+    },
+    "processes": [
+      {
+        "memory": {
+          "private_anon_bytes": 856064,
+          "private_file_bytes": 1204224,
+          "pss_bytes": 2084864,
+          "rss_bytes": 4706304,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "name": "plan11-daemon-r",
+        "pid": 3117036
+      }
+    ]
+  },
+  "case": "multiple",
+  "clear_interval_lines": 500,
+  "cycles": 5,
+  "drain_events": 754,
+  "drain_resnapshots": 0,
+  "endpoints": [
+    {
+      "cycle": 0,
+      "marker": {
+        "aggregate": {
+          "private_anon_bytes": 6836224,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 8196096,
+          "rss_bytes": 10817536,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 6836224,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 8196096,
+              "rss_bytes": 10817536,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      },
+      "settle_2s": {
+        "aggregate": {
+          "private_anon_bytes": 6844416,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 8204288,
+          "rss_bytes": 10825728,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 6844416,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 8204288,
+              "rss_bytes": 10825728,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      }
+    },
+    {
+      "cycle": 1,
+      "marker": {
+        "aggregate": {
+          "private_anon_bytes": 8445952,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 9805824,
+          "rss_bytes": 12427264,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 8445952,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 9805824,
+              "rss_bytes": 12427264,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      },
+      "settle_2s": {
+        "aggregate": {
+          "private_anon_bytes": 8445952,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 9805824,
+          "rss_bytes": 12427264,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 8445952,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 9805824,
+              "rss_bytes": 12427264,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      }
+    },
+    {
+      "cycle": 2,
+      "marker": {
+        "aggregate": {
+          "private_anon_bytes": 18915328,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 20275200,
+          "rss_bytes": 22896640,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 18915328,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 20275200,
+              "rss_bytes": 22896640,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      },
+      "settle_2s": {
+        "aggregate": {
+          "private_anon_bytes": 18915328,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 20275200,
+          "rss_bytes": 22896640,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 18915328,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 20275200,
+              "rss_bytes": 22896640,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      }
+    },
+    {
+      "cycle": 3,
+      "marker": {
+        "aggregate": {
+          "private_anon_bytes": 22798336,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 24157184,
+          "rss_bytes": 26779648,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 22798336,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 24157184,
+              "rss_bytes": 26779648,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      },
+      "settle_2s": {
+        "aggregate": {
+          "private_anon_bytes": 22798336,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 24158208,
+          "rss_bytes": 26779648,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 22798336,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 24158208,
+              "rss_bytes": 26779648,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      }
+    },
+    {
+      "cycle": 4,
+      "marker": {
+        "aggregate": {
+          "private_anon_bytes": 22806528,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 24166400,
+          "rss_bytes": 26787840,
+          "shared_bytes": 2646016,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 22806528,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 24166400,
+              "rss_bytes": 26787840,
+              "shared_bytes": 2646016,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          }
+        ]
+      },
+      "settle_2s": {
+        "aggregate": {
+          "private_anon_bytes": 22925312,
+          "private_file_bytes": 1376256,
+          "pss_bytes": 24367104,
+          "rss_bytes": 31244288,
+          "shared_bytes": 6942720,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 22806528,
+              "private_file_bytes": 1335296,
+              "pss_bytes": 24167424,
+              "rss_bytes": 26918912,
+              "shared_bytes": 2777088,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3117036
+          },
+          {
+            "memory": {
+              "private_anon_bytes": 118784,
+              "private_file_bytes": 40960,
+              "pss_bytes": 199680,
+              "rss_bytes": 4325376,
+              "shared_bytes": 4165632,
+              "shmem_bytes": 0
+            },
+            "name": "sleep",
+            "pid": 3117040
+          }
+        ]
+      }
+    }
+  ],
+  "final": {
+    "aggregate": {
+      "private_anon_bytes": 22937600,
+      "private_file_bytes": 1376256,
+      "pss_bytes": 24379392,
+      "rss_bytes": 31256576,
+      "shared_bytes": 6942720,
+      "shmem_bytes": 0
+    },
+    "processes": [
+      {
+        "memory": {
+          "private_anon_bytes": 22818816,
+          "private_file_bytes": 1335296,
+          "pss_bytes": 24179712,
+          "rss_bytes": 26931200,
+          "shared_bytes": 2777088,
+          "shmem_bytes": 0
+        },
+        "name": "plan11-daemon-r",
+        "pid": 3117036
+      },
+      {
+        "memory": {
+          "private_anon_bytes": 118784,
+          "private_file_bytes": 40960,
+          "pss_bytes": 199680,
+          "rss_bytes": 4325376,
+          "shared_bytes": 4165632,
+          "shmem_bytes": 0
+        },
+        "name": "sleep",
+        "pid": 3117040
+      }
+    ]
+  },
+  "final_settle_seconds": 2,
+  "lines_per_cycle": 5000,
+  "runtime_metrics": {
+    "command_queue_high_water": 1,
+    "output_live_events": 5809,
+    "output_parse_batches": 5809,
+    "output_processing_ns": 930082159,
+    "output_subscriber_overflows": 0,
+    "output_terminal_updates": 1408580,
+    "pty_read_bytes": 1483820,
+    "pty_read_calls": 372,
+    "publication_compact_batch_merges": 10894,
+    "publication_compact_batches": 11618,
+    "publication_compact_frame_appended_rows_high_water": 80,
+    "publication_compact_frame_merges": 10864,
+    "publication_compact_frame_scrolls_high_water": 80,
+    "publication_compact_frames_created": 754,
+    "publication_compact_frames_materialized": 754,
+    "publication_compact_materializations": 724,
+    "publication_compact_materialized_appended_rows": 47904,
+    "publication_compact_materialized_appended_rows_high_water": 276,
+    "publication_compact_materialized_batches": 11618,
+    "publication_compact_materialized_batches_high_water": 64,
+    "publication_compact_materialized_scrolls": 47904,
+    "publication_compact_materialized_scrolls_high_water": 276,
+    "publication_compact_materialized_terminal_updates": 2817160,
+    "publication_compact_materialized_terminal_updates_high_water": 15556,
+    "publication_snapshot_builds": 11618,
+    "publication_snapshot_cells": 57474320,
+    "publication_snapshot_composed_cells": 0,
+    "publication_snapshot_empty_cells": 19076492,
+    "publication_snapshot_enqueued_cells": 57474320,
+    "publication_snapshot_enqueued_owned_string_bytes": 0,
+    "publication_snapshot_enqueued_rows": 718429,
+    "publication_snapshot_enqueues": 11618,
+    "publication_snapshot_owned_string_bytes": 0,
+    "publication_snapshot_rows": 718429,
+    "publication_snapshot_scalar_cells": 38397828,
+    "publication_snapshot_spacer_cells": 0,
+    "queued_compact_appended_rows_current": 0,
+    "queued_compact_appended_rows_high_water": 552,
+    "queued_compact_batches_current": 0,
+    "queued_compact_batches_high_water": 128,
+    "queued_compact_frames_current": 0,
+    "queued_compact_frames_high_water": 8,
+    "queued_compact_scrolls_current": 0,
+    "queued_compact_scrolls_high_water": 552,
+    "queued_compact_terminal_updates_current": 0,
+    "queued_compact_terminal_updates_high_water": 31112,
+    "queued_snapshot_cells_current": 0,
+    "queued_snapshot_cells_high_water": 48000,
+    "queued_snapshot_events_current": 0,
+    "queued_snapshot_events_high_water": 2,
+    "queued_snapshot_owned_string_bytes_current": 0,
+    "queued_snapshot_owned_string_bytes_high_water": 0,
+    "queued_snapshot_rows_current": 0,
+    "queued_snapshot_rows_high_water": 600,
+    "reply_write_queue_high_water_bytes": 0,
+    "snapshot_build_ns": 7596163,
+    "snapshot_builds": 94,
+    "subscriber_count_high_water": 2,
+    "subscriber_queue_events_current": 0,
+    "subscriber_queue_events_high_water": 128,
+    "subscriber_queue_per_subscriber_high_water": 64,
+    "user_write_queue_high_water_bytes": 6
+  },
+  "schema": "splinterm.plan0011.daemon-retention.v1",
+  "scrollback_lines": 1000
+}

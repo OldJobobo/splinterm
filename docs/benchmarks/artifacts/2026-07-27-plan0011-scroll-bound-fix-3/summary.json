@@ -1,0 +1,65 @@
+{
+  "blocker": "candidate aggregate retained growth, client retained growth, CPU, and marker latency regress against clean-HEAD control",
+  "candidate_reduction_percent": -10.78458552813973,
+  "closure_complete": false,
+  "comparative_terminals_run": false,
+  "decision": "no-go",
+  "final_review": {
+    "accepted": true,
+    "beta1_forbidden": true,
+    "blockers": 0,
+    "decision": "no-go",
+    "path": "review/final-review.md"
+  },
+  "graphical_matrix_valid": true,
+  "graphical_smoke_valid": true,
+  "improvement_established": false,
+  "next_architecture": "bounded intermediate compact checkpoints/publication batches that preserve protocol-sized client updates without restoring delayed-subscriber snapshot retention",
+  "process_attribution": {
+    "candidate": {
+      "python": {
+        "max_mib": 0.0,
+        "median_mib": 0.0,
+        "min_mib": 0.0,
+        "samples": 10
+      },
+      "splinterd": {
+        "max_mib": 21.45703125,
+        "median_mib": 21.171875,
+        "min_mib": 20.40625,
+        "samples": 10
+      },
+      "splinterm": {
+        "max_mib": 59.5859375,
+        "median_mib": 56.8359375,
+        "min_mib": 52.41796875,
+        "samples": 10
+      }
+    },
+    "control": {
+      "python": {
+        "max_mib": 0.0,
+        "median_mib": 0.0,
+        "min_mib": 0.0,
+        "samples": 10
+      },
+      "splinterd": {
+        "max_mib": 34.30078125,
+        "median_mib": 34.109375,
+        "min_mib": 33.9140625,
+        "samples": 10
+      },
+      "splinterm": {
+        "max_mib": 36.4296875,
+        "median_mib": 36.310546875,
+        "min_mib": 36.11328125,
+        "samples": 10
+      }
+    }
+  },
+  "samples_per_variant": 10,
+  "schema": "splinterm.plan0011.final-no-go.v1",
+  "slice4_product_change_justified": false,
+  "slices_1_to_3_implementation_valid": true,
+  "tag_allowed": false
+}

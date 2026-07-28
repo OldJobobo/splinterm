@@ -1,0 +1,22 @@
+{
+  "schema": "splinterm.plan0011.graphical-isolation-preflight.v1",
+  "checked_at_ns": 1785126474606263680,
+  "workspace": 8,
+  "monitor": "DP-2",
+  "launch_attempted": false,
+  "active_workspace": {
+    "id": 1,
+    "name": "1",
+    "monitor": "DP-1",
+    "monitorID": 0,
+    "windows": 1,
+    "hasfullscreen": false,
+    "lastwindow": "0x555bc46d0520",
+    "lastwindowtitle": "Work | \u03c0 - splinterm",
+    "ispersistent": false,
+    "tiledLayout": "scrolling"
+  },
+  "valid": true,
+  "test_monitor_id": 1,
+  "workspace_clients": []
+}

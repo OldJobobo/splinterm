@@ -1,0 +1,157 @@
+heaptrack output will be written to "/home/oldjobobo/Projects/splinterm/docs/benchmarks/artifacts/2026-07-27-plan0011-final/non-graphical/heaptrack-slice4.gz.zst"
+starting application, this might take some time...
+{
+  "baseline": {
+    "aggregate": {
+      "private_anon_bytes": 1994752,
+      "private_file_bytes": 1343488,
+      "pss_bytes": 3476480,
+      "rss_bytes": 7987200,
+      "shared_bytes": 4648960,
+      "shmem_bytes": 0
+    },
+    "processes": [
+      {
+        "memory": {
+          "private_anon_bytes": 1994752,
+          "private_file_bytes": 1343488,
+          "pss_bytes": 3476480,
+          "rss_bytes": 7987200,
+          "shared_bytes": 4648960,
+          "shmem_bytes": 0
+        },
+        "name": "plan11-daemon-r",
+        "pid": 114317
+      }
+    ]
+  },
+  "case": "fast",
+  "clear_interval_lines": 500,
+  "cycles": 1,
+  "drain_events": 75,
+  "drain_resnapshots": 0,
+  "endpoints": [
+    {
+      "cycle": 0,
+      "marker": {
+        "aggregate": {
+          "private_anon_bytes": 20652032,
+          "private_file_bytes": 1409024,
+          "pss_bytes": 22225920,
+          "rss_bytes": 26775552,
+          "shared_bytes": 4714496,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 20652032,
+              "private_file_bytes": 1409024,
+              "pss_bytes": 22225920,
+              "rss_bytes": 26775552,
+              "shared_bytes": 4714496,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 114317
+          }
+        ]
+      },
+      "settle_2s": {
+        "aggregate": {
+          "private_anon_bytes": 20664320,
+          "private_file_bytes": 1409024,
+          "pss_bytes": 22238208,
+          "rss_bytes": 26787840,
+          "shared_bytes": 4714496,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "private_anon_bytes": 20664320,
+              "private_file_bytes": 1409024,
+              "pss_bytes": 22238208,
+              "rss_bytes": 26787840,
+              "shared_bytes": 4714496,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 114317
+          }
+        ]
+      }
+    }
+  ],
+  "final": {
+    "aggregate": {
+      "private_anon_bytes": 20676608,
+      "private_file_bytes": 1409024,
+      "pss_bytes": 22250496,
+      "rss_bytes": 26800128,
+      "shared_bytes": 4714496,
+      "shmem_bytes": 0
+    },
+    "processes": [
+      {
+        "memory": {
+          "private_anon_bytes": 20676608,
+          "private_file_bytes": 1409024,
+          "pss_bytes": 22250496,
+          "rss_bytes": 26800128,
+          "shared_bytes": 4714496,
+          "shmem_bytes": 0
+        },
+        "name": "plan11-daemon-r",
+        "pid": 114317
+      }
+    ]
+  },
+  "final_settle_seconds": 2,
+  "lines_per_cycle": 5000,
+  "runtime_metrics": {
+    "command_queue_high_water": 1,
+    "output_live_events": 1162,
+    "output_parse_batches": 1162,
+    "output_processing_ns": 502178309,
+    "output_subscriber_overflows": 0,
+    "output_terminal_updates": 281716,
+    "pty_read_bytes": 296764,
+    "pty_read_calls": 75,
+    "publication_snapshot_builds": 1162,
+    "publication_snapshot_cells": 5425360,
+    "publication_snapshot_composed_cells": 0,
+    "publication_snapshot_empty_cells": 1808981,
+    "publication_snapshot_enqueued_cells": 5425360,
+    "publication_snapshot_enqueued_owned_string_bytes": 0,
+    "publication_snapshot_enqueued_rows": 67817,
+    "publication_snapshot_enqueues": 1162,
+    "publication_snapshot_owned_string_bytes": 0,
+    "publication_snapshot_rows": 67817,
+    "publication_snapshot_scalar_cells": 3616379,
+    "publication_snapshot_spacer_cells": 0,
+    "queued_snapshot_cells_current": 0,
+    "queued_snapshot_cells_high_water": 7440,
+    "queued_snapshot_events_current": 0,
+    "queued_snapshot_events_high_water": 1,
+    "queued_snapshot_owned_string_bytes_current": 0,
+    "queued_snapshot_owned_string_bytes_high_water": 0,
+    "queued_snapshot_rows_current": 0,
+    "queued_snapshot_rows_high_water": 93,
+    "reply_write_queue_high_water_bytes": 0,
+    "snapshot_build_ns": 199822088,
+    "snapshot_builds": 19,
+    "subscriber_count_high_water": 1,
+    "subscriber_queue_events_current": 0,
+    "subscriber_queue_events_high_water": 16,
+    "subscriber_queue_per_subscriber_high_water": 16,
+    "user_write_queue_high_water_bytes": 6
+  },
+  "schema": "splinterm.plan0011.daemon-retention.v1",
+  "scrollback_lines": 1000
+}
+Heaptrack finished! Now run the following to investigate the data:
+
+  heaptrack --analyze "/home/oldjobobo/Projects/splinterm/docs/benchmarks/artifacts/2026-07-27-plan0011-final/non-graphical/heaptrack-slice4.gz.zst"
+
+heaptrack_gui detected, automatically opening the file...

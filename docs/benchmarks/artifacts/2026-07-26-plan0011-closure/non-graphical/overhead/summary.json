@@ -1,0 +1,2981 @@
+{
+  "schema": "splinterm.performance.publication-metrics-overhead.v1",
+  "valid": false,
+  "warmups": 3,
+  "samples": 15,
+  "seed": 11001,
+  "binary": {
+    "path": "/tmp/splinterm-plan0011-candidate-bin/phase9-daemon-benchmark",
+    "sha256": "d0bfefd96e3bd212d3eda695bd6a9f3e46e93f9de38b831abb5d5b53fc7b459a"
+  },
+  "helper": {
+    "path": "/tmp/splinterm-plan0011-candidate-bin/splinterm-pty-child",
+    "sha256": "90df4a966566f6c084328090aa6d1d795f78aa7d3cc483e0d6ef6dd00eec9f77"
+  },
+  "orders": [
+    {
+      "phase": "warmup",
+      "iteration": 0,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "warmup",
+      "iteration": 1,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "warmup",
+      "iteration": 2,
+      "order": [
+        "default_off",
+        "enabled"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 0,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 1,
+      "order": [
+        "default_off",
+        "enabled"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 2,
+      "order": [
+        "default_off",
+        "enabled"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 3,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 4,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 5,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 6,
+      "order": [
+        "default_off",
+        "enabled"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 7,
+      "order": [
+        "default_off",
+        "enabled"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 8,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 9,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 10,
+      "order": [
+        "default_off",
+        "enabled"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 11,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 12,
+      "order": [
+        "default_off",
+        "enabled"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 13,
+      "order": [
+        "enabled",
+        "default_off"
+      ]
+    },
+    {
+      "phase": "measured",
+      "iteration": 14,
+      "order": [
+        "default_off",
+        "enabled"
+      ]
+    }
+  ],
+  "raw": {
+    "default_off": [
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42912635,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 61647,
+            "median": 51128,
+            "min": 49764,
+            "p95": 53572
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 10651530,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 21796179,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45826048,
+          "before": 4911104
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1525,
+          "output_parse_batches": 1525,
+          "output_processing_ns": 34286604,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1156,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1834609,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 170023,
+          "median": 64152,
+          "min": 54984,
+          "p95": 102415
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 93461000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42369122,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 56567,
+            "median": 50396,
+            "min": 49795,
+            "p95": 53662
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11598661,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 30236868,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45731840,
+          "before": 4886528
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1392,
+          "output_parse_batches": 1392,
+          "output_processing_ns": 33651849,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1009,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1717766,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 158852,
+          "median": 62729,
+          "min": 54093,
+          "p95": 89561
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 103308000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42859064,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 63911,
+            "median": 55766,
+            "min": 53732,
+            "p95": 59452
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11973843,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 28237428,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45907968,
+          "before": 4849664
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1337,
+          "output_parse_batches": 1337,
+          "output_processing_ns": 33370957,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 952,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1951164,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 164132,
+          "median": 66767,
+          "min": 60014,
+          "p95": 108877
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 101142000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42996414,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 70324,
+            "median": 54704,
+            "min": 50476,
+            "p95": 63901
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 10693901,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 21902961,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45899776,
+          "before": 4980736
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1652,
+          "output_parse_batches": 1652,
+          "output_processing_ns": 33449889,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1297,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1871056,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 175844,
+          "median": 66487,
+          "min": 57449,
+          "p95": 123755
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 94285000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 41254264,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 63881,
+            "median": 59754,
+            "min": 59132,
+            "p95": 60656
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11715904,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 25940153,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45789184,
+          "before": 4874240
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1519,
+          "output_parse_batches": 1519,
+          "output_processing_ns": 33805356,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1149,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1763368,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 153923,
+          "median": 67378,
+          "min": 63762,
+          "p95": 93788
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 98733000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 41413526,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 49053,
+            "median": 47410,
+            "min": 46729,
+            "p95": 48091
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 10725982,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 21822238,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45817856,
+          "before": 4898816
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1553,
+          "output_parse_batches": 1553,
+          "output_processing_ns": 34412907,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1192,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1654964,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 134906,
+          "median": 62168,
+          "min": 47470,
+          "p95": 80883
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 95882000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42966978,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 63991,
+            "median": 58972,
+            "min": 58731,
+            "p95": 61457
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 10713017,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 21809614,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45883392,
+          "before": 5029888
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1327,
+          "output_parse_batches": 1327,
+          "output_processing_ns": 33193871,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 938,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1805600,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 145046,
+          "median": 65595,
+          "min": 56908,
+          "p95": 102174
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 92479000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 48542434,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 88589,
+            "median": 66215,
+            "min": 54373,
+            "p95": 77026
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 10743035,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22199194,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45748224,
+          "before": 4833280
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1058,
+          "output_parse_batches": 1058,
+          "output_processing_ns": 37108109,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 650,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1728844,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 136319,
+          "median": 65314,
+          "min": 59604,
+          "p95": 81695
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 95107000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42017915,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 59092,
+            "median": 50306,
+            "min": 49724,
+            "p95": 51738
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11694352,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22097722,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45727744,
+          "before": 4820992
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1352,
+          "output_parse_batches": 1352,
+          "output_processing_ns": 33350493,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 963,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1722404,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 145277,
+          "median": 65865,
+          "min": 55065,
+          "p95": 86314
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 92528000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42450207,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 106021,
+            "median": 64943,
+            "min": 53421,
+            "p95": 70364
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11818127,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22938610,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 46391296,
+          "before": 4907008
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1266,
+          "output_parse_batches": 1266,
+          "output_processing_ns": 33779095,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 880,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1974690,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 132232,
+          "median": 62589,
+          "min": 58581,
+          "p95": 96413
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 94669000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 45403278,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 59393,
+            "median": 50947,
+            "min": 49685,
+            "p95": 53472
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 10867040,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22345884,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 46243840,
+          "before": 4878336
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1701,
+          "output_parse_batches": 1701,
+          "output_processing_ns": 36971468,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1351,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 2016739,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 127622,
+          "median": 66536,
+          "min": 58321,
+          "p95": 85733
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 100906000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42186094,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 54674,
+            "median": 49895,
+            "min": 49304,
+            "p95": 51507
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 10775447,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 21936244,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45707264,
+          "before": 4800512
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1527,
+          "output_parse_batches": 1527,
+          "output_processing_ns": 33342119,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1157,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1669831,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 175724,
+          "median": 54934,
+          "min": 54023,
+          "p95": 69563
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 92666000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 41252410,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 54323,
+            "median": 50185,
+            "min": 49655,
+            "p95": 52760
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11728698,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22109815,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45756416,
+          "before": 4898816
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1575,
+          "output_parse_batches": 1575,
+          "output_processing_ns": 34089528,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1214,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1750551,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 126240,
+          "median": 63921,
+          "min": 59714,
+          "p95": 85523
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 94970000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 43888340,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 64392,
+            "median": 54734,
+            "min": 51408,
+            "p95": 62889
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11832455,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 21991851,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45748224,
+          "before": 4837376
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1501,
+          "output_parse_batches": 1501,
+          "output_processing_ns": 35531905,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1127,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1773142,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 144625,
+          "median": 66106,
+          "min": 63601,
+          "p95": 86575
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 97164000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 44827965,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 72177,
+            "median": 59934,
+            "min": 57419,
+            "p95": 71977
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11693581,
+        "profile": "release",
+        "publication_memory_metrics_enabled": false,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 26398173,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45883392,
+          "before": 5029888
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1336,
+          "output_parse_batches": 1336,
+          "output_processing_ns": 35938643,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 952,
+          "publication_snapshot_builds": 0,
+          "publication_snapshot_cells": 0,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 0,
+          "publication_snapshot_enqueued_cells": 0,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 0,
+          "publication_snapshot_enqueues": 0,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 0,
+          "publication_snapshot_scalar_cells": 0,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 0,
+          "queued_snapshot_cells_high_water": 0,
+          "queued_snapshot_events_current": 0,
+          "queued_snapshot_events_high_water": 0,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 0,
+          "queued_snapshot_rows_high_water": 0,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1730008,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 0,
+          "subscriber_queue_events_current": 0,
+          "subscriber_queue_events_high_water": 0,
+          "subscriber_queue_per_subscriber_high_water": 0,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 145928,
+          "median": 63792,
+          "min": 56567,
+          "p95": 91804
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 100355000
+      }
+    ],
+    "enabled": [
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 43070555,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 66306,
+            "median": 53922,
+            "min": 52049,
+            "p95": 61317
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11621274,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 23766202,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 46465024,
+          "before": 4980736
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1408,
+          "output_parse_batches": 1408,
+          "output_processing_ns": 33726726,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1026,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 2304698,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 226481,
+          "median": 91013,
+          "min": 54394,
+          "p95": 204299
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 95954000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 43677259,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 69292,
+            "median": 55706,
+            "min": 54303,
+            "p95": 65454
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11702769,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 21557254,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45748224,
+          "before": 4837376
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1315,
+          "output_parse_batches": 1315,
+          "output_processing_ns": 34963299,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 922,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1827559,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 150265,
+          "median": 67628,
+          "min": 57670,
+          "p95": 93788
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 95075000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 78317002,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 99549,
+            "median": 97536,
+            "min": 84851,
+            "p95": 98467
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 12010483,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 40507766,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45912064,
+          "before": 4997120
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1476,
+          "output_parse_batches": 1476,
+          "output_processing_ns": 50852276,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1122,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 2541399,
+          "snapshot_builds": 29,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 1592937,
+          "median": 94579,
+          "min": 81224,
+          "p95": 210540
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 134440000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 43863934,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 618295,
+            "median": 62879,
+            "min": 52690,
+            "p95": 85563
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11842434,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22157746,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 46448640,
+          "before": 5033984
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1717,
+          "output_parse_batches": 1717,
+          "output_processing_ns": 36071745,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1369,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1909430,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 128825,
+          "median": 60916,
+          "min": 53732,
+          "p95": 82196
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 97434000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 43293178,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 53441,
+            "median": 49645,
+            "min": 49604,
+            "p95": 51618
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 10746772,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 21771091,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45895680,
+          "before": 4980736
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1309,
+          "output_parse_batches": 1309,
+          "output_processing_ns": 34174189,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 923,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1796181,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 143433,
+          "median": 62529,
+          "min": 55075,
+          "p95": 99289
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 92509000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42725881,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 85602,
+            "median": 60205,
+            "min": 52470,
+            "p95": 69212
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11576628,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 26500789,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45916160,
+          "before": 4997120
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1370,
+          "output_parse_batches": 1370,
+          "output_processing_ns": 34847798,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 989,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1777789,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 155396,
+          "median": 59433,
+          "min": 57610,
+          "p95": 88668
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 101492000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 43112846,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 72878,
+            "median": 61056,
+            "min": 50436,
+            "p95": 64843
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11639999,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22693494,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 46211072,
+          "before": 4837376
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1343,
+          "output_parse_batches": 1343,
+          "output_processing_ns": 33583651,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 956,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 2100172,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 154113,
+          "median": 68219,
+          "min": 63350,
+          "p95": 96473
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 94939000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 69059472,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 66627,
+            "median": 54424,
+            "min": 52390,
+            "p95": 64363
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11816124,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22369117,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 46215168,
+          "before": 4841472
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1155,
+          "output_parse_batches": 1155,
+          "output_processing_ns": 44442483,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 764,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 2121072,
+          "snapshot_builds": 29,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 150886,
+          "median": 66066,
+          "min": 59012,
+          "p95": 100411
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 120108000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42371968,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 66547,
+            "median": 51047,
+            "min": 49133,
+            "p95": 59533
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11568303,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22104254,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 46198784,
+          "before": 4894720
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1301,
+          "output_parse_batches": 1301,
+          "output_processing_ns": 33326929,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 913,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 2519284,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 183108,
+          "median": 84361,
+          "min": 67899,
+          "p95": 124136
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 92948000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 41362670,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 79962,
+            "median": 62249,
+            "min": 50636,
+            "p95": 73189
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11757352,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22131776,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45879296,
+          "before": 4968448
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1500,
+          "output_parse_batches": 1500,
+          "output_processing_ns": 33496325,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1131,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1774756,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 140146,
+          "median": 66817,
+          "min": 64522,
+          "p95": 89040
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 92693000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42001264,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 53041,
+            "median": 50636,
+            "min": 49634,
+            "p95": 51197
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11769215,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22313281,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45842432,
+          "before": 4931584
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1393,
+          "output_parse_batches": 1393,
+          "output_processing_ns": 32941245,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1008,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1842698,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 142381,
+          "median": 63521,
+          "min": 53942,
+          "p95": 102956
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 94523000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 41289260,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 64573,
+            "median": 59874,
+            "min": 50767,
+            "p95": 60926
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11751631,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22141634,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45916160,
+          "before": 4997120
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1368,
+          "output_parse_batches": 1368,
+          "output_processing_ns": 32900568,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 986,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1776095,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 179260,
+          "median": 63410,
+          "min": 59263,
+          "p95": 89650
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 92536000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42524758,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 59483,
+            "median": 48462,
+            "min": 47401,
+            "p95": 56998
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11731072,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22208221,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45899776,
+          "before": 5050368
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1401,
+          "output_parse_batches": 1401,
+          "output_processing_ns": 33139473,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1022,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 1579793,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 144995,
+          "median": 55245,
+          "min": 46839,
+          "p95": 79151
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 93266000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 42401043,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 104078,
+            "median": 90622,
+            "min": 86905,
+            "p95": 94039
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 12152714,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 42515601,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 45883392,
+          "before": 4833280
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1282,
+          "output_parse_batches": 1282,
+          "output_processing_ns": 33999127,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 893,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 2530020,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 420088,
+          "median": 94670,
+          "min": 85562,
+          "p95": 201553
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 115641000
+      },
+      {
+        "bounds": {
+          "command_capacity": 64,
+          "input_byte_limit": 1048576,
+          "reply_byte_limit": 65536,
+          "subscriber_capacity": 1
+        },
+        "history": {
+          "available_rows": 8168,
+          "effective_row_bound": 8168,
+          "requested_rows": 4096,
+          "returned_rows": 16,
+          "snapshot_bound": 16
+        },
+        "output_ns": 41654094,
+        "paging": {
+          "approximate_retained_bytes": 663872,
+          "fetch_ns": {
+            "max": 56378,
+            "median": 50466,
+            "min": 49414,
+            "p95": 54724
+          },
+          "pages": 8,
+          "rows": 128
+        },
+        "post_output_input_response_ns": 11575046,
+        "profile": "release",
+        "publication_memory_metrics_enabled": true,
+        "resize": {
+          "columns": 120,
+          "generation_advanced": true,
+          "ns": 22456624,
+          "rows": 40
+        },
+        "rss_bytes": {
+          "after": 46297088,
+          "before": 4812800
+        },
+        "runtime_metrics": {
+          "command_queue_high_water": 1,
+          "output_live_events": 1431,
+          "output_parse_batches": 1431,
+          "output_processing_ns": 33358932,
+          "output_subscriber_overflows": 1,
+          "output_terminal_updates": 108056,
+          "pty_read_bytes": 126056,
+          "pty_read_calls": 1055,
+          "publication_snapshot_builds": 1,
+          "publication_snapshot_cells": 1920,
+          "publication_snapshot_composed_cells": 0,
+          "publication_snapshot_empty_cells": 1915,
+          "publication_snapshot_enqueued_cells": 1920,
+          "publication_snapshot_enqueued_owned_string_bytes": 0,
+          "publication_snapshot_enqueued_rows": 24,
+          "publication_snapshot_enqueues": 1,
+          "publication_snapshot_owned_string_bytes": 0,
+          "publication_snapshot_rows": 24,
+          "publication_snapshot_scalar_cells": 5,
+          "publication_snapshot_spacer_cells": 0,
+          "queued_snapshot_cells_current": 1920,
+          "queued_snapshot_cells_high_water": 1920,
+          "queued_snapshot_events_current": 1,
+          "queued_snapshot_events_high_water": 1,
+          "queued_snapshot_owned_string_bytes_current": 0,
+          "queued_snapshot_owned_string_bytes_high_water": 0,
+          "queued_snapshot_rows_current": 24,
+          "queued_snapshot_rows_high_water": 24,
+          "reply_write_queue_high_water_bytes": 0,
+          "snapshot_build_ns": 2258013,
+          "snapshot_builds": 27,
+          "subscriber_count_high_water": 1,
+          "subscriber_queue_events_current": 1,
+          "subscriber_queue_events_high_water": 1,
+          "subscriber_queue_per_subscriber_high_water": 1,
+          "user_write_queue_high_water_bytes": 9
+        },
+        "schema": "splinterm.performance.daemon.v1",
+        "snapshot_ns": {
+          "max": 181214,
+          "median": 85102,
+          "min": 58541,
+          "p95": 177858
+        },
+        "subscriber_resnapshot_required": true,
+        "workload": {
+          "colored_lines": 2000,
+          "plain_lines": 10000
+        },
+        "process_cpu_ns": 93527000
+      }
+    ]
+  },
+  "summaries": {
+    "default_off": {
+      "output_ns": {
+        "count": 15,
+        "min": 41252410.0,
+        "median": 42859064.0,
+        "p95": 48542434.0,
+        "max": 48542434.0,
+        "mad": 841149.0
+      },
+      "process_cpu_ns": {
+        "count": 15,
+        "min": 92479000.0,
+        "median": 95107000.0,
+        "p95": 103308000.0,
+        "max": 103308000.0,
+        "mad": 2441000.0
+      },
+      "small_write_ns": {
+        "count": 15,
+        "min": 10651530.0,
+        "median": 11598661.0,
+        "p95": 11973843.0,
+        "max": 11973843.0,
+        "mad": 375182.0
+      }
+    },
+    "enabled": {
+      "output_ns": {
+        "count": 15,
+        "min": 41289260.0,
+        "median": 42725881.0,
+        "p95": 78317002.0,
+        "max": 78317002.0,
+        "mad": 724617.0
+      },
+      "process_cpu_ns": {
+        "count": 15,
+        "min": 92509000.0,
+        "median": 94939000.0,
+        "p95": 134440000.0,
+        "max": 134440000.0,
+        "mad": 2246000.0
+      },
+      "small_write_ns": {
+        "count": 15,
+        "min": 10746772.0,
+        "median": 11731072.0,
+        "p95": 12152714.0,
+        "max": 12152714.0,
+        "mad": 109798.0
+      }
+    }
+  },
+  "regressions": {
+    "output_ns": {
+      "point_percent": -0.31074640360787553,
+      "one_sided_95_upper_percent": 2.0965700213914085,
+      "seed": 11001,
+      "resamples": 10000
+    },
+    "process_cpu_ns": {
+      "point_percent": -0.17664314929500824,
+      "one_sided_95_upper_percent": 2.5945035274297146,
+      "seed": 11002,
+      "resamples": 10000
+    },
+    "small_write_ns": {
+      "point_percent": 1.1416059146827306,
+      "one_sided_95_upper_percent": 9.197000661358734,
+      "seed": 11003,
+      "resamples": 10000
+    }
+  },
+  "limits_percent": {
+    "output_ns": 2.0,
+    "process_cpu_ns": 2.0,
+    "small_write_ns": 5.0
+  },
+  "failures": [
+    "output_ns 95% upper 2.097% > 2.0%",
+    "process_cpu_ns 95% upper 2.595% > 2.0%",
+    "small_write_ns 95% upper 9.197% > 5.0%"
+  ]
+}

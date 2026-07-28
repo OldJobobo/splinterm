@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "case": "fast",
+      "pss_growth_bytes": 19976192,
+      "queue_events_high_water": 64,
+      "rss_growth_bytes": 19976192,
+      "snapshot_cells_high_water": 24000,
+      "snapshot_events_high_water": 1,
+      "snapshot_rows_high_water": 300,
+      "subscriber_overflows": 0
+    },
+    {
+      "case": "delayed",
+      "pss_growth_bytes": 5722112,
+      "queue_events_high_water": 64,
+      "rss_growth_bytes": 5722112,
+      "snapshot_cells_high_water": 21280,
+      "snapshot_events_high_water": 1,
+      "snapshot_rows_high_water": 266,
+      "subscriber_overflows": 1
+    },
+    {
+      "case": "overflow",
+      "pss_growth_bytes": 2582528,
+      "queue_events_high_water": 1,
+      "rss_growth_bytes": 2584576,
+      "snapshot_cells_high_water": 1920,
+      "snapshot_events_high_water": 1,
+      "snapshot_rows_high_water": 24,
+      "subscriber_overflows": 1
+    },
+    {
+      "case": "multiple",
+      "pss_growth_bytes": 21402624,
+      "queue_events_high_water": 48,
+      "rss_growth_bytes": 21401600,
+      "snapshot_cells_high_water": 20400,
+      "snapshot_events_high_water": 2,
+      "snapshot_rows_high_water": 255,
+      "subscriber_overflows": 0
+    }
+  ],
+  "comparison": {
+    "fast_reduction_percent": 44.5,
+    "slice2_fast_rss_growth_bytes": 35995648,
+    "slice3_fast_rss_growth_bytes": 19976192
+  },
+  "schema": "splinterm.plan0011.slice3-evidence.v1",
+  "slice3_gate": {
+    "fast_below_24_mib": true,
+    "fast_no_overflow": true,
+    "fast_preferred_at_most_20_mib": true,
+    "one_snapshot_per_subscriber": true
+  },
+  "source_head": "0ce4fc62ed7ade2138fd35f492075942b415a571",
+  "validation": {
+    "direct_packages": "passed",
+    "first_workspace_serial": "unrelated MCP flake; exact isolated and retry passed",
+    "ordinary_splinterd": "concurrent timing failures; both exact isolated cases passed",
+    "workspace_serial_retry": "passed"
+  },
+  "worktree_dirty": true
+}

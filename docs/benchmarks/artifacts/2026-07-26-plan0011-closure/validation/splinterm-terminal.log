@@ -1,0 +1,226 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/splinterm_terminal-f9e74f4aec75dcf4)
+
+running 102 tests
+test cell::tests::attributes_default_to_foot_zero_state ... ok
+test cell::tests::attributes_transition_independently ... ok
+test cell::tests::cell_content_preserves_scalar_composed_and_spacer_states ... ok
+test cell::tests::color_fields_preserve_each_other_at_boundaries ... ok
+test cell::tests::compact_types_match_the_phase_ten_underline_baseline ... ok
+test cell::tests::every_boolean_attribute_uses_an_independent_bit ... ok
+test cell::tests::scalar_nul_is_rejected_instead_of_becoming_empty - should panic ... ok
+test composed::tests::interns_and_reuses_sequences_with_a_hard_limit ... ok
+test coord::tests::reversed_scroll_region_is_rejected - should panic ... ok
+test coord::tests::scroll_region_is_half_open_like_foot ... ok
+test cursor::tests::cursor_starts_without_deferred_wrap ... ok
+test grid::reflow::tests::composed_width_resolver_can_create_or_discard_continuations ... ok
+test grid::reflow::tests::cursor_and_deferred_wrap_follow_reflowed_content ... ok
+test grid::reflow::tests::hard_linebreaks_are_not_joined_when_width_grows ... ok
+test grid::reflow::tests::internal_empty_hard_rows_are_preserved_before_later_content ... ok
+test grid::reflow::tests::narrowing_and_widening_preserves_a_soft_wrapped_logical_line ... ok
+test grid::reflow::tests::soft_row_extension_stops_at_bare_spacer_padding ... ok
+test grid::reflow::tests::trailing_empty_hard_row_does_not_harden_preceding_soft_wrap ... ok
+test grid::reflow::tests::trailing_empty_hard_rows_do_not_push_content_out_of_view ... ok
+test grid::reflow::tests::wide_cells_move_as_an_indivisible_unit ... ok
+test grid::tests::absolute_and_scrollback_coordinates_round_trip_across_wraparound ... ok
+test grid::tests::absolute_conversion_rejects_out_of_range_row - should panic ... ok
+test grid::tests::absolute_indices_wrap_in_both_directions ... ok
+test grid::tests::changing_offset_changes_logical_lookup_without_moving_rows ... ok
+test grid::tests::coordinate_conversion_rejects_oversized_screen - should panic ... ok
+test grid::tests::coordinate_conversion_rejects_zero_screen_rows - should panic ... ok
+test grid::tests::forward_scroll_skips_unallocated_lazy_history_slots ... ok
+test grid::tests::full_forward_scroll_by_screen_height_moves_every_row_to_history ... ok
+test grid::tests::full_forward_scroll_preserves_history_and_exposes_dirty_row ... ok
+test grid::tests::full_reverse_scroll_drops_bottom_and_exposes_top_row ... ok
+test grid::tests::oldest_initialized_row_skips_empty_scrollback_slots ... ok
+test grid::tests::overwritten_detached_viewport_advances_like_foot ... ok
+test grid::tests::partial_forward_scroll_preserves_non_scrolling_top_rows ... ok
+test grid::tests::partial_reverse_scroll_preserves_non_scrolling_bottom_rows ... ok
+test grid::tests::partial_then_full_scroll_keeps_history_ids_chronological ... ok
+test grid::tests::rejects_non_power_of_two_row_capacity - should panic ... ok
+test grid::tests::rejects_zero_columns - should panic ... ok
+test grid::tests::rejects_zero_row_capacity - should panic ... ok
+test grid::tests::resize_without_reflow_copies_visible_rows_and_drops_history ... ok
+test grid::tests::resize_without_reflow_drops_wide_character_cut_by_new_width ... ok
+test grid::tests::resize_without_reflow_growth_adds_dirty_empty_cells ... ok
+test grid::tests::row_swapping_uses_offset_relative_coordinates ... ok
+test grid::tests::rows_are_allocated_lazily_and_initialized_safely ... ok
+test grid::tests::scrollback_conversion_rejects_out_of_range_row - should panic ... ok
+test grid::tests::viewport_lookup_is_independent_until_reset_to_live_screen ... ok
+test grid::tests::wrapped_rows_keep_distinct_physical_storage ... ok
+test image::sixel::tests::dimensions_and_work_are_bounded_before_growth ... ok
+test image::sixel::tests::matches_pinned_foot_semantic_fixtures ... ok
+test image::tests::admission_reclaims_only_while_placed_content_and_tracks_high_water ... ok
+test image::tests::content_and_placements_are_bounded_shared_and_screen_local ... ok
+test image::tests::anchor_pruning_reclaims_sixel_but_preserves_explicit_content ... ok
+test image::tests::ordering_uses_z_then_application_image_then_creation ... ok
+test image::tests::partial_edge_cell_crop_uses_original_sixel_cell_geometry ... ok
+test image::tests::partial_overlap_bounds_before_allocation_and_uses_actual_old_edge ... ok
+test image::tests::reflow_created_overlap_preserves_newer_sixel_and_crops_older ... ok
+test image::tests::shared_authoritative_budget_is_exact_across_planes_clones_and_release ... ok
+test image::tests::text_overlap_removes_sixel_policy_but_preserves_explicit_policy ... ok
+test image::tests::text_overlap_splits_cell_aligned_sixel_fragments_without_copying_content ... ok
+test row::tests::bulk_mutable_access_marks_every_cell_dirty ... ok
+test image::tests::transparent_and_partial_sixel_overlap_preserve_old_pixels ... ok
+test row::tests::cloned_row_is_an_independent_equal_snapshot ... ok
+test row::tests::erase_preserves_only_background_and_marks_row_dirty ... ok
+test grid::reflow::tests::randomized_grid_operations_preserve_core_invariants ... ok
+test row::tests::initialized_row_matches_foot_metadata ... ok
+test row::tests::mutable_access_marks_row_dirty ... ok
+test row::tests::reset_restores_cells_and_linebreak_metadata ... ok
+test row::tests::shrinking_drops_a_severed_wide_character ... ok
+test row::tests::wide_cell_validation_accepts_complete_sequences ... ok
+test terminal::tests::alternate_screen_restores_normal_content_and_cursor ... ok
+test terminal::tests::c0_controls_and_bell_update_state_in_order ... ok
+test terminal::tests::bounded_search_covers_history_visible_unicode_case_and_cursor_pages ... ok
+test terminal::tests::combining_mark_walks_back_to_a_wide_leader ... ok
+test terminal::tests::default_color_osc_set_query_and_reset_are_bounded ... ok
+test terminal::tests::csi_cursor_erase_and_basic_sgr_match_initial_fixtures ... ok
+test terminal::tests::editing_commands_clear_deferred_wrap ... ok
+test terminal::tests::existing_oracle_print_and_wrap_semantics_match ... ok
+test terminal::tests::extended_sgr_colors_support_indexed_rgb_and_colon_forms ... ok
+test terminal::tests::malformed_colors_and_excess_parameters_are_ignored ... ok
+test terminal::tests::mouse_tracking_reset_only_clears_the_matching_active_mode ... ok
+test terminal::tests::osc_controls_are_ignored_and_escape_dispatches_before_next_sequence ... ok
+test terminal::tests::osc_title_palette_query_and_limits_are_observable ... ok
+test terminal::tests::queries_emit_ordered_pty_replies ... ok
+test terminal::tests::overwriting_either_half_of_wide_cell_clears_the_other_half ... ok
+test terminal::tests::row_damage_detects_underline_style_and_color_only_changes ... ok
+test terminal::tests::event_queue_and_composed_sequences_are_bounded ... ok
+test terminal::tests::private_cursor_query_and_ris_event_order_are_preserved ... ok
+test terminal::tests::sgr_21_preserves_bold_and_palette_queries_use_16_bit_components ... ok
+test terminal::tests::scroll_region_and_line_feed_preserve_outside_rows ... ok
+test terminal::tests::sgr_colon_underline_styles_and_reset_match_foot ... ok
+test terminal::tests::sgr_underline_color_set_and_reset_are_independent ... ok
+test terminal::tests::synchronized_boundary_advance_stops_before_the_next_cava_frame ... ok
+test terminal::tests::synchronized_update_modes_accept_dec_and_cava_boundaries ... ok
+test terminal::tests::utf8_wide_and_combining_input_remains_valid ... ok
+test terminal::tests::wide_character_at_margin_without_autowrap_is_clipped_safely ... ok
+test vt::tests::invalid_utf8_replacement_reprocesses_ascii ... ok
+test vt::tests::kitty_apc_streams_only_recognized_payloads_and_recovers ... ok
+test vt::tests::osc_overflow_stays_synchronized ... ok
+test vt::tests::kitty_control_only_and_cancel_are_bounded_and_synchronized ... ok
+test vt::tests::sixel_cancel_aborts_and_recovers_to_ground ... ok
+test vt::tests::sixel_is_streamed_without_using_the_collected_dcs_limit ... ok
+test terminal::tests::every_single_split_matches_whole_buffer ... ok
+test terminal::tests::unsupported_dcs_and_malformed_bytes_recover_without_panicking ... ok
+
+test result: ok. 102 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/images.rs (target/debug/deps/images-c1de6d5551d5b596)
+
+running 23 tests
+test cancelled_sixel_discards_partial_pixels_and_resynchronizes ... ok
+test bounded_image_update_history_requires_resnapshot_after_a_gap ... ok
+test history_trim_and_clear_prune_stale_anchors_and_reclaim_sixel_content ... ok
+test character_edits_overwrite_sixel_policy_placements ... ok
+test invalid_anchor_is_rejected_without_revision_or_accounting_change ... ok
+test line_insertion_and_deletion_follow_stable_row_anchors ... ok
+test normal_and_fresh_alternate_image_catalogs_are_isolated ... ok
+test normal_resize_preserves_sixel_on_trailing_blank_non_cursor_row ... ok
+test opaque_sixel_overlap_splits_the_older_placement_around_the_new_image ... ok
+test same_count_sixel_crop_emits_image_damage ... ok
+test alternate_resize_remaps_visible_sixel_and_drops_out_of_bounds_start_column ... ok
+test phase5_scaled_sixel_payload_decodes_with_live_cell_geometry ... ok
+test resize_and_reset_apply_explicit_image_lifecycle_rules ... ok
+test sixel_configuration_uses_foot_palette_and_can_disable_graphics ... ok
+test sixel_modes_control_anchor_and_post_image_cursor ... ok
+test sixel_anchor_survives_narrow_and_wide_normal_screen_reflow ... ok
+test sixel_shared_palette_survives_cancel_and_decoder_failure ... ok
+test terminal_snapshots_reference_images_without_pixel_bodies ... ok
+test transmit_and_display_is_atomic_and_commits_one_revision ... ok
+test xtsmgraphics_queries_are_bounded_and_ordered_before_later_replies ... ok
+test sixel_shared_palette_persists_definitions_and_private_mode_resets_them ... ok
+test text_overwrite_and_erase_remove_only_sixel_policy_placements ... ok
+test streamed_sixel_matches_every_pinned_foot_fixture_at_every_chunk_boundary ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/iterm.rs (target/debug/deps/iterm-9b62317f94248d03)
+
+running 11 tests
+test interleaving_aborts_the_prior_kitty_upload_and_keeps_one_pty_admission ... ok
+test malformed_cancelled_and_budget_exhausted_transfers_fail_closed ... ok
+test inline_png_streams_into_the_generic_image_plane ... ok
+test all_terminators_release_admission_and_malformed_escape_can_start_kitty ... ok
+test resize_scrollback_alternate_screen_replay_and_reset_preserve_lifecycle ... ok
+test text_overwrite_reclaims_anonymous_inline_content ... ok
+test aspect_extents_and_cursor_policy_are_deterministic ... ok
+test recorded_spec_fixture_executes_every_advertised_case ... ok
+test aggregate_admission_and_every_abort_path_release_and_resynchronize ... ok
+test osc_1337_is_chunk_independent_and_accepts_st_and_c1_st ... ok
+test metadata_and_payload_exact_limits_preserve_accounting ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests/kitty.rs (target/debug/deps/kitty-2fb11f6f7e73c586)
+
+running 24 tests
+test direct_rgba_transmit_premultiplies_to_canonical_bgra ... ok
+test chunked_rgb_upload_places_with_exact_geometry_ids_and_cursor_policy ... ok
+test abort_and_invalid_continuation_discard_partial_upload_without_state ... ok
+test continuation_failures_keep_initial_correlation_and_quiet_policy ... ok
+test crop_intersection_aspect_extent_and_offset_bounds_match_kitty ... ok
+test clear_reset_and_fresh_alternate_apply_kitty_lifecycle ... ok
+test missing_delete_unsupported_and_quiet_errors_are_bounded_and_compatible ... ok
+test exact_and_visible_delete_follow_lowercase_uppercase_retention ... ok
+test representative_anonymous_transmit_and_display_streams_are_supported ... ok
+test external_media_never_open_unlink_or_consume_application_named_objects ... ok
+test same_charge_retransmit_reuses_full_shared_budget_and_removes_old_placements ... ok
+test spec_query_reply_precedes_following_da1_and_never_commits_content ... ok
+test shared_inbound_upload_budget_exhausts_across_terminals_and_releases_on_abort ... ok
+test unequal_charge_retransmit_adjusts_shared_budget_atomically ... ok
+test transmit_and_display_moves_cursor_and_same_pair_replaces_placement ... ok
+test png_and_zlib_rgb_decode_through_the_narrow_supported_codecs ... ok
+test z_tiers_and_equal_z_application_ids_have_deterministic_order ... ok
+test representative_unwrapped_stream_payload_can_exceed_chunk_limit ... ok
+test resize_scrollback_screen_switch_and_revision_replay_preserve_kitty_identity ... ok
+test png_and_raw_axis_limits_are_rejected_before_canonical_output_allocation ... ok
+test visible_delete_and_ed2_preserve_scrollback_placements_and_content ... ok
+test recorded_spec_fixture_manifest_executes_every_case ... ok
+test unrelated_apc_is_ignored_and_kitty_is_chunk_independent ... ok
+test recorded_kitten_and_chafa_static_streams_replay_without_protocol_errors ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/memory_layout.rs (target/debug/deps/memory_layout-dbfc6e94803edeeb)
+
+running 1 test
+test phase_eight_underline_style_memory_layout_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/oracle_fixtures.rs (target/debug/deps/oracle_fixtures-b90b09c82c14eae0)
+
+running 1 test
+test every_pinned_foot_semantic_fixture_matches_whole_and_chunked_input ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/snapshot.rs (target/debug/deps/snapshot-fb4bf7adbdcb59e7)
+
+running 15 tests
+test bounded_history_forces_resnapshot_on_gaps_and_future_bases ... ok
+test alternate_snapshot_excludes_retained_normal_scrollback ... ok
+test deferred_wrap_changes_revision_even_when_cursor_coordinate_is_unchanged ... ok
+test bounded_scrollback_returns_newest_rows_in_chronological_order ... ok
+test idempotent_erase_and_empty_scrollback_clear_do_not_revise ... ok
+test snapshot_resolves_composed_content_and_semantic_attributes ... ok
+test event_overflow_is_explicit_and_snapshot_does_not_drain_effects ... ok
+test erase_scrollback_emits_scrollback_damage ... ok
+test scrollback_pages_walk_older_rows_without_overlap ... ok
+test revisions_are_action_based_and_ignore_incomplete_input ... ok
+test stable_history_ids_survive_ring_movement_and_generation_changes_reset_them ... ok
+test updates_report_rows_cursor_scroll_and_full_snapshot_damage ... ok
+test sparse_wrapped_reflow_assigns_ids_in_chronological_order ... ok
+test reset_preserves_monotonic_revision_and_chunking_updates_match ... ok
+test ris_advances_history_namespace_without_reusing_generation_or_row_ids ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests splinterm_terminal
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
