@@ -33,31 +33,55 @@ ROLE_ALIASES = {
 }
 
 
-def theme_alpha(theme_dir: Path) -> float:
+def parse_foot_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"yes", "true", "on", "1"}:
+        return True
+    if normalized in {"no", "false", "off", "0"}:
+        return False
+    raise ValueError("foot.ini blur must be a boolean")
+
+
+def theme_settings(theme_dir: Path) -> tuple[float, bool]:
     foot = theme_dir / "foot.ini"
     if not foot.is_file():
-        return 1.0
+        return 1.0, False
+
+    assignments: dict[str, dict[str, str]] = {
+        "colors": {},
+        "colors-dark": {},
+    }
+    sections_seen: set[str] = set()
     section = ""
     for raw_line in foot.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if line.startswith("[") and line.endswith("]"):
             section = line[1:-1].strip().lower()
+            if section in assignments:
+                sections_seen.add(section)
             continue
-        if section not in {"colors", "colors-dark", "colors-light"}:
+        if section not in assignments:
             continue
         key, separator, value = line.partition("=")
-        if separator and key.strip().lower() == "alpha":
-            try:
-                alpha = float(value.strip())
-            except ValueError as error:
-                raise ValueError("foot.ini alpha must be a number") from error
-            if not 0.0 <= alpha <= 1.0:
-                raise ValueError("foot.ini alpha must be between 0.0 and 1.0")
-            return alpha
-    return 1.0
+        normalized_key = key.strip().lower()
+        if separator and normalized_key in {"alpha", "blur"}:
+            assignments[section][normalized_key] = value.strip()
+
+    selected = "colors-dark" if "colors-dark" in sections_seen else "colors"
+    values = assignments[selected]
+    try:
+        alpha = float(values.get("alpha", "1.0"))
+    except ValueError as error:
+        raise ValueError("foot.ini alpha must be a number") from error
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("foot.ini alpha must be between 0.0 and 1.0")
+    blur = parse_foot_bool(values["blur"]) if "blur" in values else False
+    return alpha, blur
 
 
-def generate(colors: dict[str, object], alpha: float = 1.0) -> dict[str, object]:
+def generate(
+    colors: dict[str, object], alpha: float = 1.0, blur: bool = False
+) -> dict[str, object]:
     roles = {
         role: next((colors[key] for key in aliases if key in colors), None)
         for role, aliases in ROLE_ALIASES.items()
@@ -71,9 +95,12 @@ def generate(colors: dict[str, object], alpha: float = 1.0) -> dict[str, object]
         int(value[1:], 16)
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha must be between 0.0 and 1.0")
+    if not isinstance(blur, bool):
+        raise ValueError("blur must be a boolean")
     return {
         "background": roles["bg"],
         "alpha": float(alpha),
+        "blur": blur,
         "foreground": roles["fg"],
         "cursor": roles["accent"],
         "selection": roles["selection"],
@@ -100,7 +127,8 @@ def main() -> int:
     )
     args = parser.parse_args()
     with args.source.open("rb") as source:
-        generated = generate(tomllib.load(source), theme_alpha(args.source.parent))
+        alpha, blur = theme_settings(args.source.parent)
+        generated = generate(tomllib.load(source), alpha, blur)
     args.output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".theme.", dir=args.output.parent, text=True)
     try:

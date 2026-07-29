@@ -4437,13 +4437,95 @@ fn theme_file_fingerprint(path: &std::path::Path) -> Option<(u64, u64, u64, i64,
     ))
 }
 
+fn resolve_configured_theme(
+    path: &Path,
+    alpha_override: Option<u16>,
+    blur_override: Option<bool>,
+) -> Result<ResolvedTheme> {
+    load_theme(path).map(|theme| theme.with_color_overrides(alpha_override, blur_override))
+}
+
+struct StartupThemeLoad {
+    theme: ResolvedTheme,
+    diagnostic: Option<String>,
+}
+
+fn prepare_startup_theme(
+    path: &Path,
+    alpha_override: Option<u16>,
+    blur_override: Option<bool>,
+) -> StartupThemeLoad {
+    match resolve_configured_theme(path, alpha_override, blur_override) {
+        Ok(theme) => StartupThemeLoad {
+            theme,
+            diagnostic: None,
+        },
+        Err(error) => StartupThemeLoad {
+            theme: ResolvedTheme::default().with_color_overrides(alpha_override, blur_override),
+            diagnostic: Some(format!(
+                "splinterm theme: {error:#}; using safe fallback palette"
+            )),
+        },
+    }
+}
+
+fn load_startup_theme_with_reporter(
+    config: &AppConfig,
+    mut report: impl FnMut(&str),
+) -> ResolvedTheme {
+    let loaded = prepare_startup_theme(
+        &config.theme_path,
+        config.background_alpha,
+        config.background_blur,
+    );
+    if let Some(diagnostic) = loaded.diagnostic {
+        report(&diagnostic);
+    }
+    loaded.theme
+}
+
+fn load_startup_theme(config: &AppConfig) -> ResolvedTheme {
+    load_startup_theme_with_reporter(config, |diagnostic| eprintln!("{diagnostic}"))
+}
+
+fn resolve_live_theme_update(
+    path: &Path,
+    alpha_override: Option<u16>,
+    blur_override: Option<bool>,
+    current: ResolvedTheme,
+) -> Result<Option<ResolvedTheme>> {
+    let next = resolve_configured_theme(path, alpha_override, blur_override)?;
+    Ok((next != current).then_some(next))
+}
+
+#[derive(Default)]
+struct ThemeReloadDiagnostics {
+    rejection_reported: bool,
+}
+
+impl ThemeReloadDiagnostics {
+    fn accepted(&mut self) {
+        self.rejection_reported = false;
+    }
+
+    fn rejected(&mut self, error: &anyhow::Error) -> Option<String> {
+        if self.rejection_reported {
+            return None;
+        }
+        self.rejection_reported = true;
+        Some(format!("splinterm theme reload rejected: {error:#}"))
+    }
+}
+
 async fn watch_theme(
     path: PathBuf,
     alpha_override: Option<u16>,
+    blur_override: Option<bool>,
     mut current: ResolvedTheme,
-    updates: mpsc::Sender<WindowUpdate>,
+    updates: Vec<mpsc::Sender<WindowUpdate>>,
 ) {
     let mut observed = theme_file_fingerprint(&path);
+    let mut diagnostics = ThemeReloadDiagnostics::default();
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -4453,15 +4535,24 @@ async fn watch_theme(
             continue;
         }
         observed = next_fingerprint;
-        match load_theme(&path).map(|theme| theme.with_background_alpha_override(alpha_override)) {
-            Ok(next) if next != current => {
+        match resolve_live_theme_update(&path, alpha_override, blur_override, current) {
+            Ok(Some(next)) => {
                 current = next;
-                if updates.send(WindowUpdate::Theme(next)).await.is_err() {
+                diagnostics.accepted();
+                let mut delivered = false;
+                for updates in &updates {
+                    delivered |= updates.send(WindowUpdate::Theme(next)).await.is_ok();
+                }
+                if !delivered {
                     break;
                 }
             }
-            Ok(_) => {}
-            Err(error) => eprintln!("splinterm theme reload rejected: {error:#}"),
+            Ok(None) => diagnostics.accepted(),
+            Err(error) => {
+                if let Some(diagnostic) = diagnostics.rejected(&error) {
+                    eprintln!("{diagnostic}");
+                }
+            }
         }
     }
 }
@@ -5164,9 +5255,7 @@ async fn run_live_multipane_window(
     config: AppConfig,
     window_model: splinterm_core::Window,
 ) -> Result<()> {
-    let theme = load_theme(&config.theme_path)
-        .unwrap_or_default()
-        .with_background_alpha_override(config.background_alpha);
+    let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_size: config.font_size,
@@ -5195,32 +5284,13 @@ async fn run_live_multipane_window(
         .iter()
         .map(|pane| pane.updates.clone())
         .collect::<Vec<_>>();
-    let theme_path = config.theme_path.clone();
-    let alpha_override = config.background_alpha;
-    let theme_task = tokio::spawn(async move {
-        let mut current = theme;
-        let mut observed = theme_file_fingerprint(&theme_path);
-        let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
-        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            poll.tick().await;
-            let next_fingerprint = theme_file_fingerprint(&theme_path);
-            if next_fingerprint == observed {
-                continue;
-            }
-            observed = next_fingerprint;
-            if let Ok(next) = load_theme(&theme_path)
-                .map(|theme| theme.with_background_alpha_override(alpha_override))
-            {
-                if next != current {
-                    current = next;
-                    for sender in &theme_senders {
-                        let _ = sender.send(WindowUpdate::Theme(next)).await;
-                    }
-                }
-            }
-        }
-    });
+    let theme_task = tokio::spawn(watch_theme(
+        config.theme_path.clone(),
+        config.background_alpha,
+        config.background_blur,
+        theme,
+        theme_senders,
+    ));
     let mut panes = Vec::with_capacity(prepared.len());
     let mut tasks = Vec::with_capacity(prepared.len());
     for pane in prepared {
@@ -5281,12 +5351,7 @@ async fn run_live_multipane_window(
     reason = "subscription resync, controller ownership, and window task shutdown are one lifecycle"
 )]
 async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
-    let theme = load_theme(&config.theme_path)
-        .unwrap_or_else(|error| {
-            eprintln!("splinterm theme: {error:#}; using safe fallback palette");
-            ResolvedTheme::default()
-        })
-        .with_background_alpha_override(config.background_alpha);
+    let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_size: config.font_size,
@@ -5338,8 +5403,9 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     let _theme_watcher = tokio::spawn(watch_theme(
         config.theme_path.clone(),
         config.background_alpha,
+        config.background_blur,
         theme,
-        updates.clone(),
+        vec![updates.clone()],
     ));
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
     let (resync_sender, mut resyncs) = mpsc::channel(1);
@@ -6036,6 +6102,62 @@ mod tests {
         assert_eq!(theme_file_fingerprint(&path), Some(first));
         std::fs::write(&path, b"different-length").unwrap();
         assert_ne!(theme_file_fingerprint(&path), Some(first));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn valid_theme_json(alpha: f32, blur: bool) -> String {
+        format!(
+            r##"{{"background":"#000001","foreground":"#000003","cursor":"#000003","selection":"#000004","url":"#000005","ui_accent":"#000006","alpha":{alpha},"blur":{blur},"ansi":["#000000","#000001","#000002","#000003","#000004","#000005","#000006","#000007","#000008","#000009","#00000a","#00000b","#00000c","#00000d","#00000e","#00000f"]}}"##
+        )
+    }
+
+    #[test]
+    fn malformed_startup_and_live_themes_preserve_bounded_safe_state() {
+        let path =
+            std::env::temp_dir().join(format!("splinterm-theme-resolution-{}", std::process::id()));
+        std::fs::write(&path, b"{}").unwrap();
+
+        let mut config = AppConfig {
+            theme_path: path.clone(),
+            background_alpha: Some(1234),
+            background_blur: Some(true),
+            ..AppConfig::default()
+        };
+        for _launch_path in ["single-pane", "multi-pane"] {
+            let mut startup_diagnostics = Vec::new();
+            let startup = load_startup_theme_with_reporter(&config, |diagnostic| {
+                startup_diagnostics.push(diagnostic.to_owned());
+            });
+            assert_eq!(startup_diagnostics.len(), 1);
+            assert_eq!(startup.background_alpha, 1234);
+            assert!(startup.background_blur);
+        }
+
+        std::fs::write(&path, valid_theme_json(0.25, true)).unwrap();
+        config.background_alpha = None;
+        config.background_blur = None;
+        let current = load_startup_theme_with_reporter(&config, |_| {});
+        assert_eq!(current.background, 1);
+        assert_eq!(current.foreground, 3);
+        assert!(current.background_blur);
+        let preserved = current;
+
+        std::fs::write(&path, b"{}").unwrap();
+        let error = resolve_live_theme_update(&path, None, None, current).unwrap_err();
+        assert_eq!(current, preserved);
+
+        let mut diagnostics = ThemeReloadDiagnostics::default();
+        assert!(diagnostics.rejected(&error).is_some());
+        assert!(diagnostics.rejected(&error).is_none());
+        diagnostics.accepted();
+        assert!(diagnostics.rejected(&error).is_some());
+
+        std::fs::write(&path, valid_theme_json(0.5, true)).unwrap();
+        let next = resolve_live_theme_update(&path, Some(2468), Some(false), current)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.background_alpha, 2468);
+        assert!(!next.background_blur);
         std::fs::remove_file(path).unwrap();
     }
 

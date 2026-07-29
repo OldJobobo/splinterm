@@ -1,6 +1,6 @@
 # Plan 0013: native Wayland background blur
 
-- **Status:** In progress — Slice 0 protocol spike complete
+- **Status:** In progress — Slices 0–1 complete
 - **Release decision:** Do not advertise native blur until protocol, fallback, graphical, and review gates pass
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Protocol authority:** `ext-background-effect-v1`, version 1, from `wayland-protocols` staging
@@ -240,6 +240,8 @@ Before production edits:
 semantics. No production config key is accepted yet.
 
 ### Slice 1 — configuration and theme schema
+
+Completed in [Spike 0028](../spikes/0028-native-background-blur-configuration.md).
 
 Implement strict parsing, precedence, generator import, backward-compatible JSON
 defaulting, and live theme model propagation. Do not bind the Wayland protocol

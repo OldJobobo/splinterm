@@ -40,6 +40,9 @@ pub struct AppConfig {
     /// Optional Foot-compatible background-alpha override (`[colors] alpha`).
     /// When absent, the active theme owns background translucency.
     pub background_alpha: Option<u16>,
+    /// Optional native background-blur override (`[colors] blur`).
+    /// When absent, the active theme owns the requested blur state.
+    pub background_blur: Option<bool>,
     pub theme_path: PathBuf,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
@@ -85,6 +88,7 @@ impl Default for AppConfig {
             cursor_blink: true,
             resize_delay_ms: 0,
             background_alpha: None,
+            background_blur: None,
             theme_path: default_config_dir().join("theme.json"),
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
@@ -294,6 +298,10 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
                 config.background_alpha = Some(foot_alpha(alpha));
                 false
             }
+            "colors.blur" => {
+                config.background_blur = Some(parse_bool(value, index)?);
+                false
+            }
             "scrollback.lines" => {
                 config.scrollback_lines = parse_range(value, 0, 1_000_000, index)?;
                 false
@@ -413,6 +421,8 @@ pub struct ThemePalette {
     #[serde(default = "opaque_alpha")]
     pub alpha: f32,
     #[serde(default)]
+    pub blur: bool,
+    #[serde(default)]
     pub pane_border: Option<String>,
     #[serde(default)]
     pub pane_border_active: Option<String>,
@@ -430,6 +440,7 @@ pub struct ResolvedTheme {
     pub pane_border: u32,
     pub pane_border_active: u32,
     pub background_alpha: u16,
+    pub background_blur: bool,
     pub ansi: [u32; 16],
 }
 
@@ -445,6 +456,7 @@ impl Default for ResolvedTheme {
             pane_border: 0x7c7e80,
             pane_border_active: 0x78d2ff,
             background_alpha: u16::MAX,
+            background_blur: false,
             ansi: [
                 0x1d2021, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
                 0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
@@ -459,9 +471,12 @@ const fn opaque_alpha() -> f32 {
 
 impl ResolvedTheme {
     #[must_use]
-    pub fn with_background_alpha_override(mut self, alpha: Option<u16>) -> Self {
+    pub fn with_color_overrides(mut self, alpha: Option<u16>, blur: Option<bool>) -> Self {
         if let Some(alpha) = alpha {
             self.background_alpha = alpha;
+        }
+        if let Some(blur) = blur {
+            self.background_blur = blur;
         }
         self
     }
@@ -503,6 +518,7 @@ impl ThemePalette {
                 .transpose()?
                 .unwrap_or(ui_accent),
             background_alpha: foot_alpha(self.alpha),
+            background_blur: self.blur,
             ansi,
         })
     }
@@ -629,17 +645,29 @@ mod tests {
     }
 
     #[test]
-    fn foot_background_alpha_is_bounded_and_exact() {
+    fn foot_background_alpha_and_blur_are_strict_last_assignment_overrides() {
+        let loaded = parse("[colors]\nalpha=0.5\nblur=no\nalpha=0.888\nblur=yes\n").unwrap();
+        assert_eq!(loaded.config.background_alpha, Some(foot_alpha(0.888)));
+        assert_eq!(loaded.config.background_blur, Some(true));
+
+        let defaults = parse("").unwrap().config;
+        assert_eq!(defaults.background_alpha, None);
+        assert_eq!(defaults.background_blur, None);
         assert_eq!(
-            parse("[colors]\nalpha=0.888\n")
+            parse("[colors]\nblur=yes\nblur=no\n")
                 .unwrap()
                 .config
-                .background_alpha,
-            Some(foot_alpha(0.888))
+                .background_blur,
+            Some(false)
         );
-        assert_eq!(parse("").unwrap().config.background_alpha, None);
         assert!(parse("[colors]\nalpha=-0.1\n").is_err());
         assert!(parse("[colors]\nalpha=1.1\n").is_err());
+        assert!(
+            parse("[colors]\nblur=perhaps\n")
+                .unwrap_err()
+                .to_string()
+                .contains("line 2: expected boolean")
+        );
     }
 
     #[test]
@@ -682,6 +710,7 @@ mod tests {
         assert_eq!(resolved.pane_border, 2);
         assert_eq!(resolved.pane_border_active, 6);
         assert_eq!(resolved.background_alpha, u16::MAX);
+        assert!(!resolved.background_blur);
         assert_eq!(resolved.ansi[15], 15);
 
         let explicit = json.replace(
@@ -695,24 +724,31 @@ mod tests {
         assert_eq!(resolved.pane_border, 7);
         assert_eq!(resolved.pane_border_active, 8);
 
-        let themed = json.replace("\"ui_accent\"", "\"alpha\":0.85,\"ui_accent\"");
+        let themed = json.replace(
+            "\"ui_accent\"",
+            "\"alpha\":0.85,\"blur\":true,\"ui_accent\"",
+        );
         let resolved = serde_json::from_str::<ThemePalette>(&themed)
             .unwrap()
             .resolve()
             .unwrap();
         assert_eq!(resolved.background_alpha, foot_alpha(0.85));
-        assert_eq!(
-            resolved
-                .with_background_alpha_override(Some(foot_alpha(0.7)))
-                .background_alpha,
-            foot_alpha(0.7)
-        );
+        assert!(resolved.background_blur);
+        let overridden = resolved.with_color_overrides(Some(foot_alpha(0.7)), Some(false));
+        assert_eq!(overridden.background_alpha, foot_alpha(0.7));
+        assert!(!overridden.background_blur);
         assert!(
             serde_json::from_str::<ThemePalette>(
                 &json.replace("\"ui_accent\"", "\"alpha\":1.1,\"ui_accent\"")
             )
             .unwrap()
             .resolve()
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ThemePalette>(
+                &json.replace("\"ui_accent\"", "\"blur\":\"yes\",\"ui_accent\"")
+            )
             .is_err()
         );
     }

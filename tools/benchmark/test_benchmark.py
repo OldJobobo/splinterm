@@ -878,7 +878,7 @@ def test_statistics_retain_invalid_counts_and_use_nearest_rank() -> None:
     assert invalid_only[0]["invalid_samples"] == 1
 
 
-def test_omarchy_theme_generator_uses_foot_alpha_and_legacy_roles(
+def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
     tmp_path: pathlib.Path,
 ) -> None:
     module = load_module(
@@ -891,22 +891,45 @@ def test_omarchy_theme_generator_uses_foot_alpha_and_legacy_roles(
         "selection_background": "#202122",
         **{f"color{index}": f"#{index:06x}" for index in range(16)},
     }
-    generated = module.generate(legacy, 0.85)
+    generated = module.generate(legacy, 0.85, True)
     assert generated["alpha"] == 0.85
+    assert generated["blur"] is True
     assert generated["background"] == legacy["background"]
     assert generated["ansi"][0] == legacy["color0"]
     assert generated["ansi"][15] == legacy["color15"]
 
-    assert module.theme_alpha(tmp_path) == 1.0
+    assert module.theme_settings(tmp_path) == (1.0, False)
     (tmp_path / "foot.ini").write_text(
-        "[colors-dark]\nalpha=0.72\n", encoding="utf-8"
+        "[colors]\nalpha=0.61\nblur=no\n"
+        "[colors-light]\nalpha=0.99\nblur=yes\n",
+        encoding="utf-8",
     )
-    assert module.theme_alpha(tmp_path) == 0.72
+    assert module.theme_settings(tmp_path) == (0.61, False)
+
+    (tmp_path / "foot.ini").write_text(
+        "[colors]\nalpha=0.61\nblur=no\n"
+        "[colors-dark]\nalpha=0.72\nblur=no\nalpha=0.73\nblur=yes\n"
+        "[colors-light]\nalpha=0.99\nblur=no\n",
+        encoding="utf-8",
+    )
+    assert module.theme_settings(tmp_path) == (0.73, True)
+
+    (tmp_path / "foot.ini").write_text(
+        "[colors]\nalpha=0.61\nblur=yes\n[colors-dark]\n",
+        encoding="utf-8",
+    )
+    assert module.theme_settings(tmp_path) == (1.0, False)
+
     (tmp_path / "foot.ini").write_text(
         "[colors-dark]\nalpha=1.1\n", encoding="utf-8"
     )
     with pytest.raises(ValueError, match="between"):
-        module.theme_alpha(tmp_path)
+        module.theme_settings(tmp_path)
+    (tmp_path / "foot.ini").write_text(
+        "[colors-dark]\nblur=perhaps\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="boolean"):
+        module.theme_settings(tmp_path)
 
 
 def test_stage_overhead_bootstrap_is_deterministic_and_one_sided() -> None:
