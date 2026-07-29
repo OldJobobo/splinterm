@@ -111,7 +111,9 @@ use smithay_client_toolkit::reexports::protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::background_effect::{BackgroundEffectState, EffectAction, EffectDiagnostic};
+use crate::background_effect::{
+    BackgroundEffectState, CommitReason as BackgroundCommitReason, EffectAction, EffectDiagnostic,
+};
 use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -829,6 +831,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         background_effect_manager,
         background_effect: None,
         background_effect_state,
+        background_effect_deferred_commit: None,
+        background_effect_reconcile_schedule: BackgroundEffectReconcileSchedule::default(),
         background_effect_capabilities_received: false,
         background_effect_trace,
         text_input_seat: None,
@@ -1826,6 +1830,8 @@ struct App {
     background_effect_manager: Option<ExtBackgroundEffectManagerV1>,
     background_effect: Option<ExtBackgroundEffectSurfaceV1>,
     background_effect_state: BackgroundEffectState,
+    background_effect_deferred_commit: Option<BackgroundCommitReason>,
+    background_effect_reconcile_schedule: BackgroundEffectReconcileSchedule,
     background_effect_capabilities_received: bool,
     background_effect_trace: bool,
     text_input_seat: Option<wl_seat::WlSeat>,
@@ -3276,6 +3282,71 @@ fn viewport_cursor_row(cursor_row: i32, offset: usize, rows: usize) -> Option<i3
         .filter(|row| *row >= 0 && usize::try_from(*row).is_ok_and(|row| row < rows))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackgroundEffectCommitMode {
+    Immediate,
+    DeferToDraw,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ThemeUpdateImpact {
+    rebuild_pixels: bool,
+    reconcile_effect: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BackgroundEffectReconcileSchedule {
+    on_draw: bool,
+}
+
+impl BackgroundEffectReconcileSchedule {
+    fn queue_update(
+        &mut self,
+        effect_changed: bool,
+        visual_commit_queued: bool,
+        configured: bool,
+    ) -> bool {
+        if !effect_changed {
+            return false;
+        }
+        if self.on_draw || visual_commit_queued && configured {
+            self.on_draw = true;
+            false
+        } else {
+            true
+        }
+    }
+
+    fn queue_geometry(&mut self) {
+        self.on_draw = true;
+    }
+
+    fn capability_reconciles_immediately(self) -> bool {
+        !self.on_draw
+    }
+
+    fn take_for_draw(&mut self) -> bool {
+        std::mem::take(&mut self.on_draw)
+    }
+
+    fn clear(&mut self) {
+        self.on_draw = false;
+    }
+}
+
+fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUpdateImpact {
+    let reconcile_effect = current.background_alpha != next.background_alpha
+        || current.background_blur != next.background_blur;
+    let mut current_pixels = current;
+    let mut next_pixels = next;
+    current_pixels.background_blur = false;
+    next_pixels.background_blur = false;
+    ThemeUpdateImpact {
+        rebuild_pixels: current_pixels != next_pixels,
+        reconcile_effect,
+    }
+}
+
 fn background_effect_capability_bits(flags: WEnum<BackgroundCapability>) -> u32 {
     match flags {
         WEnum::Value(flags) => flags.bits(),
@@ -3322,6 +3393,7 @@ impl App {
     fn execute_background_effect_actions(
         &mut self,
         queue_handle: &QueueHandle<Self>,
+        commit_mode: BackgroundEffectCommitMode,
     ) -> Result<()> {
         for action in self.background_effect_state.reconcile() {
             self.trace_background_effect_action(action);
@@ -3362,30 +3434,57 @@ impl App {
                         .context("background effect destroy requested without an object")?;
                     effect.destroy();
                 }
-                EffectAction::CommitSurface(reason) => {
-                    self.window.commit();
-                    anyhow::ensure!(
-                        self.background_effect_state.surface_committed() == Some(reason),
-                        "background effect commit did not match reducer state"
-                    );
-                }
+                EffectAction::CommitSurface(reason) => match commit_mode {
+                    BackgroundEffectCommitMode::Immediate => {
+                        self.window.commit();
+                        anyhow::ensure!(
+                            self.background_effect_state.surface_committed() == Some(reason),
+                            "background effect commit did not match reducer state"
+                        );
+                    }
+                    BackgroundEffectCommitMode::DeferToDraw => {
+                        anyhow::ensure!(
+                            self.background_effect_deferred_commit
+                                .replace(reason)
+                                .is_none(),
+                            "background effect already has a deferred surface commit"
+                        );
+                    }
+                },
             }
         }
         Ok(())
     }
 
-    fn reconcile_background_effect_geometry(
+    fn complete_background_effect_draw_commit(&mut self) -> Result<()> {
+        let Some(expected) = self.background_effect_deferred_commit.take() else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            self.background_effect_state.surface_committed() == Some(expected),
+            "draw commit did not match deferred background effect state"
+        );
+        Ok(())
+    }
+
+    fn reconcile_background_effect(
         &mut self,
         queue_handle: &QueueHandle<Self>,
+        commit_mode: BackgroundEffectCommitMode,
     ) -> Result<()> {
+        if self.background_effect_manager.is_none() || self.background_effect_capabilities_received
+        {
+            self.execute_background_effect_actions(queue_handle, commit_mode)?;
+        }
+        Ok(())
+    }
+
+    fn queue_background_effect_geometry_for_draw(&mut self) -> Result<()> {
         self.background_effect_state.set_logical_size(
             i64::from(self.logical_width),
             i64::from(self.logical_height),
         )?;
-        if self.background_effect_manager.is_none() || self.background_effect_capabilities_received
-        {
-            self.execute_background_effect_actions(queue_handle)?;
-        }
+        self.background_effect_reconcile_schedule.queue_geometry();
         Ok(())
     }
 
@@ -3398,6 +3497,8 @@ impl App {
                 effect.destroy();
             }
         }
+        self.background_effect_deferred_commit = None;
+        self.background_effect_reconcile_schedule.clear();
         if let Some(manager) = self.background_effect_manager.take() {
             manager.destroy();
         }
@@ -4874,7 +4975,35 @@ impl App {
         Ok(changed)
     }
 
-    fn apply_inactive_updates(&mut self) -> Result<bool> {
+    fn apply_resolved_theme(&mut self, theme: ResolvedTheme) -> Result<ThemeUpdateImpact> {
+        self.background_effect_state
+            .set_requested_blur(theme.background_blur);
+        self.background_effect_state
+            .set_background_alpha(theme.background_alpha);
+        let impact = classify_theme_update(self.theme, theme);
+        set_background_alpha(theme.background_alpha);
+        self.theme = theme;
+        if !impact.rebuild_pixels {
+            return Ok(impact);
+        }
+        if let Some(snapshot) = self.pane.snapshot.as_mut() {
+            apply_theme(snapshot, theme);
+        }
+        for pane in &mut self.inactive_panes {
+            if let Some(snapshot) = pane.snapshot.as_mut() {
+                apply_theme(snapshot, theme);
+                pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+                    snapshot,
+                    self.scale_120,
+                    Some(&pane.image_sources),
+                )?);
+            }
+        }
+        self.full_redraw = true;
+        Ok(impact)
+    }
+
+    fn apply_inactive_updates(&mut self) -> Result<(bool, Option<ResolvedTheme>)> {
         let mut changed = false;
         let mut next_theme = None;
         for pane in &mut self.inactive_panes {
@@ -4899,33 +5028,10 @@ impl App {
                 }
             }
         }
-        if let Some(theme) = next_theme {
-            set_background_alpha(theme.background_alpha);
-            self.theme = theme;
-            if let Some(snapshot) = self.pane.snapshot.as_mut() {
-                apply_theme(snapshot, theme);
-                self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
-                    snapshot,
-                    self.scale_120,
-                    Some(&self.pane.image_sources),
-                )?);
-            }
-            for pane in &mut self.inactive_panes {
-                if let Some(snapshot) = pane.snapshot.as_mut() {
-                    apply_theme(snapshot, theme);
-                    pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
-                        snapshot,
-                        self.scale_120,
-                        Some(&pane.image_sources),
-                    )?);
-                }
-            }
-            changed = true;
-        }
         if changed {
             self.full_redraw = true;
         }
-        Ok(changed)
+        Ok((changed, next_theme))
     }
 
     #[allow(
@@ -4954,9 +5060,17 @@ impl App {
             self.exit = true;
             return Ok(());
         }
-        let mut visual_changed = topology_changed | self.apply_inactive_updates()?;
+        let (inactive_changed, inactive_theme) = self.apply_inactive_updates()?;
+        let mut visual_changed = topology_changed | inactive_changed;
         let mut title_changed = false;
         let mut full_frame_reload = false;
+        let mut effect_desired_changed = false;
+        if let Some(theme) = inactive_theme {
+            let impact = self.apply_resolved_theme(theme)?;
+            visual_changed |= impact.rebuild_pixels;
+            full_frame_reload |= impact.rebuild_pixels;
+            effect_desired_changed |= impact.reconcile_effect;
+        }
         for update in pending {
             match update {
                 WindowUpdate::Snapshot {
@@ -5254,14 +5368,10 @@ impl App {
                     self.full_redraw = true;
                 }
                 WindowUpdate::Theme(theme) => {
-                    set_background_alpha(theme.background_alpha);
-                    self.theme = theme;
-                    if let Some(snapshot) = self.pane.snapshot.as_mut() {
-                        apply_theme(snapshot, theme);
-                    }
-                    visual_changed = true;
-                    full_frame_reload = true;
-                    self.full_redraw = true;
+                    let impact = self.apply_resolved_theme(theme)?;
+                    visual_changed |= impact.rebuild_pixels;
+                    full_frame_reload |= impact.rebuild_pixels;
+                    effect_desired_changed |= impact.reconcile_effect;
                 }
                 WindowUpdate::Shutdown => {
                     if self.layout.is_some() {
@@ -5281,6 +5391,13 @@ impl App {
         if self.pane.search.pending_reveal.is_some() {
             self.reveal_pending_search_match();
             visual_changed = true;
+        }
+        if self.background_effect_reconcile_schedule.queue_update(
+            effect_desired_changed,
+            visual_changed,
+            self.configured,
+        ) {
+            self.reconcile_background_effect(queue_handle, BackgroundEffectCommitMode::Immediate)?;
         }
         if visual_changed {
             self.cursor_blink_visible = true;
@@ -5942,6 +6059,12 @@ impl App {
         self.pane.raster_dirty_rows.fill(false);
         self.pane.surface_dirty_rows.fill(false);
         self.pane.pending_scrolls.clear();
+        if self.background_effect_reconcile_schedule.take_for_draw() {
+            self.reconcile_background_effect(
+                queue_handle,
+                BackgroundEffectCommitMode::DeferToDraw,
+            )?;
+        }
         if !self.frame_pending {
             self.window
                 .wl_surface()
@@ -5953,6 +6076,7 @@ impl App {
             .attach_to(self.window.wl_surface())
             .context("attach SHM buffer")?;
         self.window.commit();
+        self.complete_background_effect_draw_commit()?;
         let committed_identity = self
             .pane
             .snapshot
@@ -6166,7 +6290,7 @@ impl WindowHandler for App {
                 self.pane.last_resize.is_some(),
             ));
             if let Err(error) = self
-                .reconcile_background_effect_geometry(queue_handle)
+                .queue_background_effect_geometry_for_draw()
                 .and_then(|()| self.emit_resize())
                 .and_then(|()| self.schedule_draw(queue_handle))
             {
@@ -6944,7 +7068,14 @@ impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
                     flags & BackgroundCapability::Blur.bits() != 0
                 );
             }
-            if let Err(error) = state.execute_background_effect_actions(queue_handle) {
+            if state
+                .background_effect_reconcile_schedule
+                .capability_reconciles_immediately()
+                && let Err(error) = state.execute_background_effect_actions(
+                    queue_handle,
+                    BackgroundEffectCommitMode::Immediate,
+                )
+            {
                 state.fail(error);
             }
         }
@@ -7099,6 +7230,69 @@ mod tests {
             .insert_source(source, |(), _, wake_count| *wake_count += 1)
             .unwrap();
         (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
+    }
+
+    #[test]
+    fn blur_only_theme_updates_reconcile_immediately_without_queuing_pixel_work() {
+        let current = ResolvedTheme::default();
+        let mut blur_only = current;
+        blur_only.background_blur = true;
+        let impact = classify_theme_update(current, blur_only);
+        assert_eq!(
+            impact,
+            ThemeUpdateImpact {
+                rebuild_pixels: false,
+                reconcile_effect: true,
+            }
+        );
+        let mut schedule = BackgroundEffectReconcileSchedule::default();
+        assert!(schedule.queue_update(impact.reconcile_effect, impact.rebuild_pixels, true));
+        assert!(!schedule.on_draw);
+
+        let mut alpha = blur_only;
+        alpha.background_alpha = u16::MAX - 1;
+        assert_eq!(
+            classify_theme_update(blur_only, alpha),
+            ThemeUpdateImpact {
+                rebuild_pixels: true,
+                reconcile_effect: true,
+            }
+        );
+
+        let mut palette = blur_only;
+        palette.foreground ^= 0x00ff_ffff;
+        assert_eq!(
+            classify_theme_update(blur_only, palette),
+            ThemeUpdateImpact {
+                rebuild_pixels: true,
+                reconcile_effect: false,
+            }
+        );
+        assert_eq!(
+            classify_theme_update(current, current),
+            ThemeUpdateImpact::default()
+        );
+    }
+
+    #[test]
+    fn draw_bound_effect_reconciliation_survives_later_updates_and_capabilities() {
+        let mut schedule = BackgroundEffectReconcileSchedule::default();
+        assert!(!schedule.queue_update(true, true, true));
+        assert!(schedule.on_draw);
+
+        assert!(!schedule.queue_update(true, false, true));
+        assert!(schedule.on_draw);
+        assert!(!schedule.capability_reconciles_immediately());
+
+        assert!(schedule.take_for_draw());
+        assert!(!schedule.on_draw);
+        assert!(schedule.capability_reconciles_immediately());
+        assert!(!schedule.take_for_draw());
+
+        schedule.queue_geometry();
+        assert!(schedule.on_draw);
+        schedule.clear();
+        assert!(!schedule.on_draw);
     }
 
     #[test]

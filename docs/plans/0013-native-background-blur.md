@@ -1,6 +1,6 @@
 # Plan 0013: native Wayland background blur
 
-- **Status:** In progress — Slices 0–3 complete
+- **Status:** In progress — Slices 0–4 complete
 - **Release decision:** Do not advertise native blur until protocol, fallback, graphical, and review gates pass
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Protocol authority:** `ext-background-effect-v1`, version 1, from `wayland-protocols` staging
@@ -303,6 +303,8 @@ A protocol-disabled or capability-disabled launch remains behaviorally identical
 to current clean HEAD.
 
 ### Slice 4 — live theme reconciliation and resize correctness
+
+Completed in [Spike 0031](../spikes/0031-native-background-effect-live-reconciliation.md).
 
 Connect accepted theme updates and logical resize events to the controller.
 Ensure protocol-only commits neither repaint the terminal nor create a frame
