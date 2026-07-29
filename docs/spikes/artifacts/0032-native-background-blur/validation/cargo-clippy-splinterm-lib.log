@@ -1,0 +1,591 @@
+    Checking splinterm-core v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm-core)
+    Checking splinterm-terminal v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm-terminal)
+    Checking splinterm-pixman v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm-pixman)
+    Checking splinterm-filemap v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm-filemap)
+    Checking splinterm-pty v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm-pty)
+    Checking splinterm-freetype v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm-freetype)
+    Checking splinterm-protocol v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm-protocol)
+    Checking splinterm-automation-client v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm-automation-client)
+    Checking splinterd v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterd)
+    Checking splinterm v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterm)
+error: usage of `contains_key` followed by `insert` on a `HashMap`
+    --> crates/splinterm/src/renderer.rs:2898:29
+     |
+2898 |               let generated = if cache.contains_key(&key) {
+     |  _____________________________^
+2899 | |                 true
+2900 | |             } else {
+2901 | |                 let thickness = box_drawing::default_thickness(cell_width, cell_height, scale);
+...    |
+2918 | |             };
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#map_entry
+     = note: `-D clippy::map-entry` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::map_entry)]`
+help: try
+     |
+2898 ~             let generated = if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(key) {
+2899 +                 let thickness = box_drawing::default_thickness(cell_width, cell_height, scale);
+2900 +                 box_drawing::generate(character, cell_width, cell_height, thickness).is_some_and(
+2901 +                     |mask| {
+2902 +                         e.insert(Arc::new(CachedGlyph {
+2903 +                                 content: Content::Mask,
+2904 +                                 left: 0,
+2905 +                                 top: baseline,
+2906 +                                 width: mask.width,
+2907 +                                 height: mask.height,
+2908 +                                 data: mask.data,
+2909 +                             }));
+2910 +                         true
+2911 +                     },
+2912 +                 )
+2913 +             } else {
+2914 +                 true
+2915 ~             };
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/renderer.rs:3356:5
+     |
+3356 | /     if let Some((start, end)) = hovered_url {
+3357 | |         if start.0 == end.0 && row_is_dirty(start.0) {
+3358 | |             for column in start.1..=end.1.min(frame.columns.saturating_sub(1) as usize) {
+3359 | |                 let (Ok(column), Ok(row)) = (u32::try_from(column), u32::try_from(start.0)) else {
+...    |
+3380 | |     }
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+     = note: `-D clippy::collapsible-if` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+     |
+3356 ~     if let Some((start, end)) = hovered_url
+3357 ~         && start.0 == end.0 && row_is_dirty(start.0) {
+3358 |             for column in start.1..=end.1.min(frame.columns.saturating_sub(1) as usize) {
+ ...
+3378 |             }
+3379 ~         }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:1681:17
+     |
+1681 | /                 if let Some(current) = self.snapshot.as_ref() {
+1682 | |                     if !snapshot_is_newer(current, &snapshot)? {
+1683 | |                         return Ok(false);
+1684 | |                     }
+1685 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1681 ~                 if let Some(current) = self.snapshot.as_ref()
+1682 ~                     && !snapshot_is_newer(current, &snapshot)? {
+1683 |                         return Ok(false);
+1684 ~                     }
+     |
+
+error: more than 3 bools in a struct
+    --> crates/splinterm/src/wayland.rs:1819:1
+     |
+1819 | / struct App {
+1820 | |     registry_state: RegistryState,
+1821 | |     compositor: CompositorState,
+1822 | |     seat_state: SeatState,
+...    |
+1902 | |     seat_count: usize,
+1903 | | }
+     | |_^
+     |
+     = help: consider using a state machine or refactoring bools into two-variant enums
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#struct_excessive_bools
+     = note: `-D clippy::struct-excessive-bools` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::struct_excessive_bools)]`
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:2831:17
+     |
+2831 | /                 if let Some(leader) = leader {
+2832 | |                     if let Some(cell) = snapshot.visible_rows[row].cells.get_mut(leader) {
+2833 | |                         cell.content.push(character);
+2834 | |                     }
+2835 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+2831 ~                 if let Some(leader) = leader
+2832 ~                     && let Some(cell) = snapshot.visible_rows[row].cells.get_mut(leader) {
+2833 |                         cell.content.push(character);
+2834 ~                     }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:2846:13
+     |
+2846 | /             if width == 2 {
+2847 | |                 if let Some(spacer) = snapshot.visible_rows[row].cells.get_mut(column + 1) {
+2848 | |                     spacer.content.clear();
+2849 | |                     spacer.spacer_remaining = Some(1);
+2850 | |                 }
+2851 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+2846 ~             if width == 2
+2847 ~                 && let Some(spacer) = snapshot.visible_rows[row].cells.get_mut(column + 1) {
+2848 |                     spacer.content.clear();
+2849 |                     spacer.spacer_remaining = Some(1);
+2850 ~                 }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:5228:29
+     |
+5228 | / ...                   if let Ok(row) = usize::try_from(snapshot.cursor_row) {
+5229 | | ...                       if row < rows {
+5230 | | ...                           self.pane.raster_dirty_rows[row] = true;
+5231 | | ...                           self.pane.surface_dirty_rows[row] = true;
+5232 | | ...                       }
+5233 | | ...                   }
+     | |_______________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+5228 ~                             if let Ok(row) = usize::try_from(snapshot.cursor_row)
+5229 ~                                 && row < rows {
+5230 |                                     self.pane.raster_dirty_rows[row] = true;
+5231 |                                     self.pane.surface_dirty_rows[row] = true;
+5232 ~                                 }
+     |
+
+error: manual implementation of `.is_multiple_of()`
+    --> crates/splinterm/src/wayland.rs:5533:39
+     |
+5533 |         if self.viewport.is_none() && scale_120 % SCALE_DENOMINATOR != 0 {
+     |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `!scale_120.is_multiple_of(SCALE_DENOMINATOR)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_is_multiple_of
+     = note: `-D clippy::manual-is-multiple-of` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::manual_is_multiple_of)]`
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:5589:13
+     |
+5589 | /             if let Some(snapshot) = &self.pane.snapshot {
+5590 | |                 if let Ok(row) = usize::try_from(snapshot.cursor_row) {
+5591 | |                     if row < snapshot.rows {
+5592 | |                         self.pane.raster_dirty_rows.resize(snapshot.rows, false);
+...    |
+5598 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+5589 ~             if let Some(snapshot) = &self.pane.snapshot
+5590 ~                 && let Ok(row) = usize::try_from(snapshot.cursor_row) {
+5591 |                     if row < snapshot.rows {
+ ...
+5596 |                     }
+5597 ~                 }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:5590:17
+     |
+5590 | /                 if let Ok(row) = usize::try_from(snapshot.cursor_row) {
+5591 | |                     if row < snapshot.rows {
+5592 | |                         self.pane.raster_dirty_rows.resize(snapshot.rows, false);
+5593 | |                         self.pane.surface_dirty_rows.resize(snapshot.rows, false);
+...    |
+5597 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+5590 ~                 if let Ok(row) = usize::try_from(snapshot.cursor_row)
+5591 ~                     && row < snapshot.rows {
+5592 |                         self.pane.raster_dirty_rows.resize(snapshot.rows, false);
+ ...
+5595 |                         self.pane.surface_dirty_rows[row] = true;
+5596 ~                     }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:5604:13
+     |
+5604 | /             if let Some(snapshot) = &self.pane.snapshot {
+5605 | |                 if let Ok(row) = usize::try_from(snapshot.cursor_row) {
+5606 | |                     if row < snapshot.rows {
+5607 | |                         self.pane.raster_dirty_rows.resize(snapshot.rows, false);
+...    |
+5613 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+5604 ~             if let Some(snapshot) = &self.pane.snapshot
+5605 ~                 && let Ok(row) = usize::try_from(snapshot.cursor_row) {
+5606 |                     if row < snapshot.rows {
+ ...
+5611 |                     }
+5612 ~                 }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:5605:17
+     |
+5605 | /                 if let Ok(row) = usize::try_from(snapshot.cursor_row) {
+5606 | |                     if row < snapshot.rows {
+5607 | |                         self.pane.raster_dirty_rows.resize(snapshot.rows, false);
+5608 | |                         self.pane.surface_dirty_rows.resize(snapshot.rows, false);
+...    |
+5612 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+5605 ~                 if let Ok(row) = usize::try_from(snapshot.cursor_row)
+5606 ~                     && row < snapshot.rows {
+5607 |                         self.pane.raster_dirty_rows.resize(snapshot.rows, false);
+ ...
+5610 |                         self.pane.surface_dirty_rows[row] = true;
+5611 ~                     }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6047:9
+     |
+6047 | /         if history_status != self.pane.painted_history_status {
+6048 | |             if let Some(layout) = history_overlay_layout(width, height, self.scale_120) {
+6049 | |                 let (x, y, overlay_width, overlay_height) = layout.panel;
+6050 | |                 self.window.wl_surface().damage_buffer(
+...    |
+6057 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6047 ~         if history_status != self.pane.painted_history_status
+6048 ~             && let Some(layout) = history_overlay_layout(width, height, self.scale_120) {
+6049 |                 let (x, y, overlay_width, overlay_height) = layout.panel;
+ ...
+6055 |                 );
+6056 ~             }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6126:9
+     |
+6126 | /         if self.scroll_trace {
+6127 | |             if let Some(scroll_started) = scroll_started {
+6128 | |                 eprintln!(
+6129 | |                     "scroll-trace input_to_commit_us={} draw_us={} viewport_offset={} cached_rows={} page_pending={}",
+...    |
+6140 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6126 ~         if self.scroll_trace
+6127 ~             && let Some(scroll_started) = scroll_started {
+6128 |                 eprintln!(
+ ...
+6138 |                 );
+6139 ~             }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6189:13
+     |
+6189 | /             if self.redraw_pending {
+6190 | |                 if let Err(error) = self.draw(queue_handle) {
+6191 | |                     self.fail(error);
+6192 | |                 }
+6193 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6189 ~             if self.redraw_pending
+6190 ~                 && let Err(error) = self.draw(queue_handle) {
+6191 |                     self.fail(error);
+6192 ~                 }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6229:13
+     |
+6229 | /             if let Some(current) = self.entered_outputs.last().cloned() {
+6230 | |                 if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
+6231 | |                     self.fail(error);
+6232 | |                 }
+6233 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6229 ~             if let Some(current) = self.entered_outputs.last().cloned()
+6230 ~                 && let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
+6231 |                     self.fail(error);
+6232 ~                 }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6345:21
+     |
+6345 | /                     if self.text_input.is_none() {
+6346 | |                         if let Some(manager) = &self.text_input_manager {
+6347 | |                             self.text_input = Some(manager.get_text_input(&seat, queue_handle, ()));
+6348 | |                             self.text_input_seat = Some(seat.clone());
+6349 | |                         }
+6350 | |                     }
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6345 ~                     if self.text_input.is_none()
+6346 ~                         && let Some(manager) = &self.text_input_manager {
+6347 |                             self.text_input = Some(manager.get_text_input(&seat, queue_handle, ()));
+6348 |                             self.text_input_seat = Some(seat.clone());
+6349 ~                         }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6532:21
+     |
+6532 | /                     if self.full_redraw {
+6533 | |                         if let Err(error) = self.schedule_draw(queue_handle) {
+6534 | |                             self.fail(error);
+6535 | |                         }
+6536 | |                     }
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6532 ~                     if self.full_redraw
+6533 ~                         && let Err(error) = self.schedule_draw(queue_handle) {
+6534 |                             self.fail(error);
+6535 ~                         }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6652:21
+     |
+6652 | /                     if let Some(splint_id) = self.splint_at_point(event.position) {
+6653 | |                         if self.focus_splint(splint_id) {
+6654 | |                             cell = self.pointer_cell_at(event.position);
+6655 | |                             self.pane.pointer_cell = cell;
+...    |
+6662 | |                     }
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6652 ~                     if let Some(splint_id) = self.splint_at_point(event.position)
+6653 ~                         && self.focus_splint(splint_id) {
+6654 |                             cell = self.pointer_cell_at(event.position);
+ ...
+6660 |                             }
+6661 ~                         }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6708:29
+     |
+6708 | / ...                   if let Some(position) = cell {
+6709 | | ...                       if let Some(report) =
+6710 | | ...                           mouse_report(MouseAction::Press(code), position, modifiers, sgr)
+...    |
+6714 | | ...                   }
+     | |_______________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6708 ~                             if let Some(position) = cell
+6709 ~                                 && let Some(report) =
+6710 |                                     mouse_report(MouseAction::Press(code), position, modifiers, sgr)
+6711 |                                 {
+6712 |                                     self.send_command(WindowCommand::Input(report));
+6713 ~                                 }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6737:29
+     |
+6737 | / ...                   if let Some(position) = cell.or(self.pane.pointer_cell) {
+6738 | | ...                       if let Some(report) = mouse_report(
+6739 | | ...                           MouseAction::Release(code),
+6740 | | ...                           position,
+...    |
+6746 | | ...                   }
+     | |_______________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6737 ~                             if let Some(position) = cell.or(self.pane.pointer_cell)
+6738 ~                                 && let Some(report) = mouse_report(
+6739 |                                     MouseAction::Release(code),
+ ...
+6744 |                                     self.send_command(WindowCommand::Input(report));
+6745 ~                                 }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:6784:9
+     |
+6784 | /         if self.configured
+6785 | |             && (self.pane.viewport_dirty
+6786 | |                 || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
+6787 | |                 || self.pane.surface_dirty_rows.iter().any(|dirty| *dirty))
+...    |
+6792 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6787 ~                 || self.pane.surface_dirty_rows.iter().any(|dirty| *dirty))
+6788 ~             && let Err(error) = self.schedule_draw(queue_handle) {
+6789 |                 self.fail(error);
+6790 ~             }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:7022:9
+     |
+7022 | /         if self.entered_outputs.last() == Some(&output) {
+7023 | |             if let Err(error) = self.refresh_output_dpi(&output, queue_handle) {
+7024 | |                 self.fail(error);
+7025 | |             }
+7026 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+7022 ~         if self.entered_outputs.last() == Some(&output)
+7023 ~             && let Err(error) = self.refresh_output_dpi(&output, queue_handle) {
+7024 |                 self.fail(error);
+7025 ~             }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:7036:9
+     |
+7036 | /         if was_most_recent {
+7037 | |             if let Some(current) = self.entered_outputs.last().cloned() {
+7038 | |                 if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
+7039 | |                     self.fail(error);
+...    |
+7042 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+7036 ~         if was_most_recent
+7037 ~             && let Some(current) = self.entered_outputs.last().cloned() {
+7038 |                 if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
+7039 |                     self.fail(error);
+7040 |                 }
+7041 ~             }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:7037:13
+     |
+7037 | /             if let Some(current) = self.entered_outputs.last().cloned() {
+7038 | |                 if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
+7039 | |                     self.fail(error);
+7040 | |                 }
+7041 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+7037 ~             if let Some(current) = self.entered_outputs.last().cloned()
+7038 ~                 && let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
+7039 |                     self.fail(error);
+7040 ~                 }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:7154:9
+     |
+7154 | /         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+7155 | |             if let Err(error) = state.apply_scale(scale, queue_handle) {
+7156 | |                 state.fail(error);
+7157 | |             }
+7158 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+7154 ~         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
+7155 ~             && let Err(error) = state.apply_scale(scale, queue_handle) {
+7156 |                 state.fail(error);
+7157 ~             }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:7184:21
+     |
+7184 | /                     if state.configured {
+7185 | |                         if let Err(error) = state.schedule_draw(queue_handle) {
+7186 | |                             state.fail(error);
+7187 | |                         }
+7188 | |                     }
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+7184 ~                     if state.configured
+7185 ~                         && let Err(error) = state.schedule_draw(queue_handle) {
+7186 |                             state.fail(error);
+7187 ~                         }
+     |
+
+error: this `if` statement can be collapsed
+    --> crates/splinterm/src/wayland.rs:7206:17
+     |
+7206 | /                 if state.configured {
+7207 | |                     if let Err(error) = state.schedule_draw(queue_handle) {
+7208 | |                         state.fail(error);
+7209 | |                     }
+7210 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+7206 ~                 if state.configured
+7207 ~                     && let Err(error) = state.schedule_draw(queue_handle) {
+7208 |                         state.fail(error);
+7209 ~                     }
+     |
+
+error: could not compile `splinterm` (lib) due to 28 previous errors

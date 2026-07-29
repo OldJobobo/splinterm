@@ -1,0 +1,65 @@
+{
+  "schema": "splinterm.native-blur.validation.v1",
+  "date": "2026-07-29",
+  "commands": [
+    {
+      "command": "python -m pytest -q tools/benchmark/test_benchmark.py -k omarchy_theme_generator",
+      "status": "passed",
+      "result": "1 passed, 34 deselected"
+    },
+    {
+      "command": "cargo test -p splinterm --lib config::tests::foot_background_alpha_and_blur_are_strict_last_assignment_overrides -- --exact --test-threads=1",
+      "status": "passed",
+      "result": "1 passed, including NaN, positive/negative infinity, and finite out-of-range rejection"
+    },
+    {
+      "command": "cargo test -p splinterm --lib -- --test-threads=1",
+      "status": "passed",
+      "result": "185 passed"
+    },
+    {
+      "command": "cargo fmt --all --check",
+      "status": "passed"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "status": "failed_accepted_preexisting_baseline",
+      "result": "Rust 1.97 reported pre-existing replace_box and collapsible_match diagnostics in splinterm-core and splinterm-terminal before reaching the full workspace; no lint policy was weakened and no out-of-scope fix was made; user approved the retained-baseline closure exception, lint policy remains unchanged, and independent review found no Plan 0013 diagnostic"
+    },
+    {
+      "command": "cargo clippy -p splinterm --lib --no-deps -- -D warnings",
+      "status": "failed_known_baseline",
+      "result": "Rust 1.97 reported 28 existing style diagnostics across renderer and Wayland code, including map_entry, collapsible_if, manual_is_multiple_of, and struct_excessive_bools; this is retained as a release blocker"
+    },
+    {
+      "command": "cargo test --workspace -- --test-threads=1",
+      "status": "passed_with_isolated_flake_closure",
+      "result": "full serial workspace passed before the isolated config-parser fix; final rerun hit the established unrelated phase8 slow-subscriber timing flake; that exact test then passed isolated in 15.16s; Plan 0013 changes no splinterd source"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    },
+    {
+      "command": "sha256sum --check docs/spikes/artifacts/0032-native-background-blur/SHA256SUMS",
+      "status": "passed_before_validation_logs_were_added",
+      "result": "manifest regenerated after adding validation evidence"
+    },
+    {
+      "command": "local Markdown link check for Plan 0013 Slice 7 files",
+      "status": "passed"
+    },
+    {
+      "command": "guarded pre-feature smoke plus five matched pre-feature/RC opaque blur-disabled RSS and two-second idle measurements",
+      "status": "passed",
+      "result": "RC median RSS delta 61,440 bytes within 1,048,576-byte noise floor; both medians 0 idle CPU ticks, both maxima 1; placement/focus/cleanup passed"
+    },
+    {
+      "command": "cargo test -p splinterd --test end_to_end phase8_detach_reattach_overflow_resync_and_cleanup -- --exact --test-threads=1",
+      "status": "passed",
+      "result": "1 passed, 15 filtered out, 15.16s after the post-fix serial suite exposed the established timing flake"
+    }
+  ],
+  "release_blocked": true,
+  "blocker": "Only the final independent closure review of the newly retained resource/policy evidence remains pending."
+}

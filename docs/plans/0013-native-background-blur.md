@@ -1,6 +1,6 @@
 # Plan 0013: native Wayland background blur
 
-- **Status:** In progress — Slices 0–4 complete
+- **Status:** In progress — Slices 0–6 complete; Slice 7 review in progress
 - **Release decision:** Do not advertise native blur until protocol, fallback, graphical, and review gates pass
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Protocol authority:** `ext-background-effect-v1`, version 1, from `wayland-protocols` staging
@@ -325,6 +325,8 @@ no change to opaque final-buffer hashes.
 
 ### Slice 5 — guarded graphical smoke
 
+Completed in [Spike 0032](../spikes/0032-native-background-blur-graphical-validation.md).
+
 This slice requires explicit user approval under the repository graphical-test
 guardrails.
 
@@ -362,6 +364,8 @@ claimed compositor-visible result has a guardrail-compliant evidence path.
 
 ### Slice 6 — approved graphical differential matrix
 
+Completed in [Spike 0032](../spikes/0032-native-background-blur-graphical-validation.md).
+
 Run only after Slice 5 succeeds, under the same single graphical approval:
 
 - Splinterm translucent + blur disabled: no effect object;
@@ -391,6 +395,8 @@ consistent within their documented alpha-mode difference.
 
 ### Slice 7 — review, documentation, and release decision
 
+In progress.
+
 After all implementation and evidence gates:
 
 - update `docs/configuration.md` and the sample config;
@@ -413,6 +419,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace -- --test-threads=1
 git diff --check
 ```
+
+The exact strict-Clippy command remains mandatory and its lint configuration may
+not be weakened. If a newer toolchain exposes a demonstrably pre-existing
+repository-wide warning baseline outside this plan, closure may instead retain
+the complete failed output plus review proving that Plan 0013 introduced no new
+diagnostic. That exception requires an explicit release-policy decision; it is
+not an implicit pass.
 
 Add additional focused generator cases to the existing benchmark test module or
 move that focused coverage to a clearly named dedicated module in one deliberate
@@ -488,6 +501,7 @@ This plan is complete only when all of the following are true:
 - Foot differential protocol evidence is retained;
 - resource/idle gates pass;
 - documentation and ADR accurately describe support and limitations;
-- `git diff --check`, formatting, strict Clippy, and the serial workspace suite
-  pass; and
+- `git diff --check`, formatting, and the serial workspace suite pass; strict
+  Clippy either passes or satisfies the explicitly approved, fully retained
+  pre-existing-baseline exception above with no Plan 0013 diagnostic; and
 - fresh review records no unresolved blocker.

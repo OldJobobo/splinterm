@@ -1,0 +1,258 @@
+{
+  "schema": "splinterm.native-blur.matrix.v1",
+  "exact": true,
+  "git_head": "d2affafcacd4df820e41df20971c673e99f6e46b",
+  "splinterm_binary_sha256": "4e64dfea4bc1712356ad722198cc4bfdeeb581c22df4f3d8dcab4ab1520d16c7",
+  "hyprland": "Hyprland 0.56.1 built from branch v0.56.1 at commit 5c9377c15f85c50648f35ca5a213754f95b93ca0 clean (version: bump to 0.56.1).",
+  "monitor": "DP-2",
+  "workspace": 8,
+  "rotated_lane_run": false,
+  "cases": [
+    {
+      "case": "translucent-blur-off",
+      "alpha": 0.75,
+      "blur": false,
+      "expected": "no effect object",
+      "trace": [
+        "splinterm background-effect manager version=1 bound",
+        "splinterm background-effect capabilities=0x1 blur=true"
+      ],
+      "effect_create_count": 0,
+      "effect_destroy_count": 0,
+      "guarded_placement": "workspace 8 on DP-2",
+      "focus_guard": "passed through case cleanup",
+      "captures": [
+        {
+          "source_file": "dp2.png",
+          "sha256": "48f518fe09704d66bfcd21ff0e145119590b33a54f6b194bc61a551f7fbaa76b",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        }
+      ]
+    },
+    {
+      "case": "translucent-blur-on",
+      "alpha": 0.75,
+      "blur": true,
+      "expected": "one active effect and finite region",
+      "trace": [
+        "splinterm background-effect manager version=1 bound",
+        "splinterm background-effect capabilities=0x1 blur=true",
+        "splinterm background-effect create",
+        "splinterm background-effect region=664x504",
+        "splinterm background-effect commit=Enable",
+        "splinterm background-effect region=960x600",
+        "splinterm background-effect commit=Resize"
+      ],
+      "effect_create_count": 1,
+      "effect_destroy_count": 0,
+      "guarded_placement": "workspace 8 on DP-2",
+      "focus_guard": "passed through case cleanup",
+      "captures": [
+        {
+          "source_file": "dp2.png",
+          "sha256": "912734272516208a174b8ee7ac84ebc886170c9559588c53a8cefd3871f17fc1",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        }
+      ]
+    },
+    {
+      "case": "opaque-blur-on",
+      "alpha": 1.0,
+      "blur": true,
+      "expected": "no effect object",
+      "trace": [
+        "splinterm background-effect manager version=1 bound",
+        "splinterm background-effect capabilities=0x1 blur=true"
+      ],
+      "effect_create_count": 0,
+      "effect_destroy_count": 0,
+      "guarded_placement": "workspace 8 on DP-2",
+      "focus_guard": "passed through case cleanup",
+      "captures": [
+        {
+          "source_file": "dp2.png",
+          "sha256": "c0537b4816b6e4f3d171583c6acdd197b9630bc5548a55633d83be6c0b6bbd5f",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        }
+      ]
+    },
+    {
+      "case": "live-blur-toggle",
+      "alpha": 0.75,
+      "blur": "no -> yes -> no",
+      "expected": "one create/enable then one destroy/disable",
+      "trace": [
+        "splinterm background-effect manager version=1 bound",
+        "splinterm background-effect capabilities=0x1 blur=true",
+        "splinterm background-effect create",
+        "splinterm background-effect region=960x600",
+        "splinterm background-effect commit=Enable",
+        "splinterm background-effect destroy",
+        "splinterm background-effect commit=Disable"
+      ],
+      "effect_create_count": 1,
+      "effect_destroy_count": 1,
+      "guarded_placement": "workspace 8 on DP-2",
+      "focus_guard": "passed through case cleanup",
+      "captures": [
+        {
+          "source_file": "dp2.png",
+          "sha256": "651b292bae52a57374383df19dddbb2dabb527d276ddb944c8568f1e1c873184",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        },
+        {
+          "source_file": "enabled.png",
+          "sha256": "ff1680a0fc4c3be502934aef453a7b5b033e7c628c61aaeecf9d5804b3da78e4",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        }
+      ]
+    },
+    {
+      "case": "live-alpha-toggle",
+      "alpha": "1.0 -> 0.75 -> 1.0",
+      "blur": true,
+      "expected": "one create/enable then one destroy/disable",
+      "trace": [
+        "splinterm background-effect manager version=1 bound",
+        "splinterm background-effect capabilities=0x1 blur=true",
+        "splinterm background-effect create",
+        "splinterm background-effect region=960x600",
+        "splinterm background-effect commit=Enable",
+        "splinterm background-effect destroy",
+        "splinterm background-effect commit=Disable"
+      ],
+      "effect_create_count": 1,
+      "effect_destroy_count": 1,
+      "guarded_placement": "workspace 8 on DP-2",
+      "focus_guard": "passed through case cleanup",
+      "captures": [
+        {
+          "source_file": "dp2.png",
+          "sha256": "2897b0d9b6a10c371e7e72a0224453fd065d5556454a5e92d5a81d2754c55eb5",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        },
+        {
+          "source_file": "translucent.png",
+          "sha256": "437dfb3dbbe86d31810de56e732421b7994469d48c223a715f41a02ef7cb08b6",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        }
+      ]
+    },
+    {
+      "case": "active-resize",
+      "alpha": 0.75,
+      "blur": true,
+      "expected": "one object; finite region updated to 1100x700",
+      "trace": [
+        "splinterm background-effect manager version=1 bound",
+        "splinterm background-effect capabilities=0x1 blur=true",
+        "splinterm background-effect create",
+        "splinterm background-effect region=664x504",
+        "splinterm background-effect commit=Enable",
+        "splinterm background-effect region=960x600",
+        "splinterm background-effect commit=Resize",
+        "splinterm background-effect region=1100x700",
+        "splinterm background-effect commit=Resize"
+      ],
+      "effect_create_count": 1,
+      "effect_destroy_count": 0,
+      "guarded_placement": "workspace 8 on DP-2",
+      "focus_guard": "passed through case cleanup",
+      "captures": [
+        {
+          "source_file": "dp2.png",
+          "sha256": "de232797444cef971a9e41a33132df25958f53f3b9f99c814f17e45fb603d4c1",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        }
+      ]
+    },
+    {
+      "case": "fractional-scale-150",
+      "alpha": 0.75,
+      "blur": true,
+      "expected": "one object at scale 1.25; DP-2 restored to 1.0",
+      "trace": [
+        "splinterm background-effect manager version=1 bound",
+        "splinterm background-effect capabilities=0x1 blur=true",
+        "splinterm background-effect create",
+        "splinterm background-effect region=664x504",
+        "splinterm background-effect commit=Enable",
+        "splinterm background-effect region=960x600",
+        "splinterm background-effect commit=Resize"
+      ],
+      "effect_create_count": 1,
+      "effect_destroy_count": 0,
+      "guarded_placement": "workspace 8 on DP-2",
+      "focus_guard": "passed through case cleanup",
+      "captures": [
+        {
+          "source_file": "dp2.png",
+          "sha256": "ce57a78f6003d7ef9c1111e8e009bf8ca46e7fe8e8f393deb0dc8c4cfdfdf134",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        }
+      ]
+    },
+    {
+      "case": "multi-pane",
+      "alpha": 0.75,
+      "blur": true,
+      "expected": "two panes; one window effect object",
+      "trace": [
+        "splinterm background-effect manager version=1 bound",
+        "splinterm background-effect capabilities=0x1 blur=true",
+        "splinterm background-effect create",
+        "splinterm background-effect region=664x504",
+        "splinterm background-effect commit=Enable",
+        "splinterm background-effect region=960x600",
+        "splinterm background-effect commit=Resize"
+      ],
+      "effect_create_count": 1,
+      "effect_destroy_count": 0,
+      "guarded_placement": "workspace 8 on DP-2",
+      "focus_guard": "passed through case cleanup",
+      "captures": [
+        {
+          "source_file": "dp2.png",
+          "sha256": "e2dac3f49ad531ab5008ec08296f5fd13bb866e2160925dc56c8fe0f806492b8",
+          "retained": false,
+          "acceptance_use": false,
+          "reason": "matrix capture timing was not synchronized to the current terminal frame; some captures visibly retained the preceding case"
+        }
+      ]
+    }
+  ],
+  "harness_outcome": {
+    "splinterm_cases_completed": 8,
+    "foot_launched_by_matrix_harness": false,
+    "abort_reason": "one-shot harness path collision: foot-reference config directory already existed when the generic launcher attempted to create it",
+    "product_failure": false,
+    "cleanup": "passed"
+  },
+  "foot_completion": {
+    "separate_bounded_attempt": "passed",
+    "summary": "foot-reference-summary.json"
+  },
+  "visual_evidence": {
+    "smoke": "smoke-dp2.png",
+    "foot_reference": "foot-reference-dp2.png",
+    "comparison": "Both valid compositor captures show blur behind translucent default-background pixels. Foot uses its documented INT32_MAX region; Splinterm uses the planned finite logical region. Matrix screenshots are excluded from visual acceptance because frame timing was stale."
+  }
+}

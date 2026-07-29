@@ -1,0 +1,18 @@
+{
+  "workspace_8_clients": [],
+  "private_daemon_alive": false,
+  "dp2": {
+    "name": "DP-2",
+    "width": 1920,
+    "height": 1080,
+    "scale": 1.0,
+    "transform": 0,
+    "focused": false,
+    "activeWorkspace": {
+      "id": 8,
+      "name": "8"
+    }
+  },
+  "guard_result": "passed before harness path collision was reported",
+  "note": "The active user workspace/focus address matched the harness baseline at cleanup; private user window metadata is intentionally omitted."
+}

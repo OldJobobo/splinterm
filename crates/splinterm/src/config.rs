@@ -294,8 +294,7 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
                 false
             }
             "colors.alpha" => {
-                let alpha = parse_range(value, 0.0_f32, 1.0_f32, index)?;
-                config.background_alpha = Some(foot_alpha(alpha));
+                config.background_alpha = Some(foot_alpha(parse_alpha(value, index)?));
                 false
             }
             "colors.blur" => {
@@ -398,6 +397,17 @@ where
     }
     Ok(parsed)
 }
+
+fn parse_alpha(value: &str, line: usize) -> Result<f32> {
+    let alpha = value
+        .parse::<f32>()
+        .map_err(|_| anyhow::anyhow!("line {}: invalid number", line + 1))?;
+    if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+        bail!("line {}: number outside supported range", line + 1);
+    }
+    Ok(alpha)
+}
+
 fn expand_path(value: &str) -> PathBuf {
     if let Some(rest) = value.strip_prefix("~/") {
         env::var_os("HOME")
@@ -660,8 +670,12 @@ mod tests {
                 .background_blur,
             Some(false)
         );
-        assert!(parse("[colors]\nalpha=-0.1\n").is_err());
-        assert!(parse("[colors]\nalpha=1.1\n").is_err());
+        for alpha in ["-0.1", "1.1", "NaN", "inf", "-inf"] {
+            let error = parse(&format!("[colors]\nalpha={alpha}\n"))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, "line 2: number outside supported range");
+        }
         assert!(
             parse("[colors]\nblur=perhaps\n")
                 .unwrap_err()

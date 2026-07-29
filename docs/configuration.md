@@ -24,6 +24,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `main.dpi-aware` | deprecated **legacy Splinterm** key: `yes` maps only to `output-scale`; `no` fails with migration guidance | unset |
 | `main.theme` | generated JSON role map | `~/.config/splinterm/theme.json` |
 | `colors.alpha` | optional Foot-compatible override for theme background translucency | 0.0–1.0; unset (theme-owned) |
+| `colors.blur` | optional native background-blur request | strict boolean; unset (theme-owned, otherwise `no`) |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | block |
 | `cursor.blink` | permit cursor blink | yes |
@@ -31,12 +32,20 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 
 Malformed supported values fail startup. Unknown sections and keys print
-line-numbered diagnostics. Background alpha normally comes from the active
-Omarchy theme's `foot.ini`; `[colors] alpha` is an explicit user override.
-Whichever source wins follows Foot's default alpha mode: only cells whose
-background source is default are translucent; explicit and reverse-video
-backgrounds remain opaque. `alpha-mode` and blur are not yet supported. Other
-`[colors]` options direct users to generated `theme.json`, and
+line-numbered diagnostics. Background alpha and blur normally come atomically
+from the active Omarchy theme's `foot.ini`; `[colors] alpha` and `[colors] blur`
+are explicit user overrides. Whichever alpha source wins follows Foot's default
+alpha mode: only cells whose background source is default are translucent;
+explicit and reverse-video backgrounds remain opaque. When blur resolves to
+`yes`, alpha is translucent, and the compositor advertises
+`ext-background-effect-v1` blur capability, Splinterm requests native
+compositor blur for the finite logical window region. Missing protocol support
+or capability falls back to ordinary transparency with one bounded diagnostic;
+opaque alpha and `blur=no` own no effect object. The protocol is still staging;
+the validated initial target is Hyprland 0.56.1 or newer, while other
+compositors require compatible version-1 blur capability. `alpha-mode=matching/all`
+remains unsupported. Other `[colors]` options direct users to generated
+`theme.json`, and
 `[key-bindings]` options explain that MVP bindings are not remappable. This
 avoids claiming arbitrary `foot.ini` compatibility.
 
@@ -71,6 +80,10 @@ Copy values rather than copying a whole `foot.ini`:
   `main.initial-rows`.
 - Foot `shell` → `main.shell`; Splinterm never evaluates it as a shell command.
 - Foot `scrollback.lines` and cursor style/blink map directly.
+- Foot `alpha` and `blur` are imported together from `[colors-dark]`, or from
+  legacy `[colors]` when no dark section exists. `[colors-light]` is ignored
+  because Splinterm has no light-theme selection state. Use `[colors] alpha`
+  and `[colors] blur` only for explicit Splinterm overrides.
 - Convert colors through the Omarchy generator below instead of pasting Foot's
   complete `[colors]` section.
 
@@ -93,10 +106,12 @@ this MVP and produce diagnostics when represented as unknown keys.
 
 `tools/generate-omarchy-theme.py THEME/colors.toml` maps semantic or legacy
 Omarchy palette roles into a strict project-owned JSON file. It reads background
-alpha from the sibling theme `foot.ini`; absent alpha defaults opaque. Writes
-are atomic. Splinterm polls that file every 500 ms, validates all roles, colors,
-and alpha, and repaints the terminal palette, translucency, cursor, selection,
-URL, and focus chrome without restarting
+alpha and blur from one selected section in the sibling theme `foot.ini`:
+`[colors-dark]` takes precedence over legacy `[colors]`, and `[colors-light]` is
+ignored. Absent alpha defaults opaque and absent blur defaults off. Writes are
+atomic. Splinterm polls that file every 500 ms, validates all roles, colors,
+alpha, and blur, and updates the terminal palette, translucency, native effect,
+cursor, selection, URL, and focus chrome without restarting
 the daemon or shell. The optional `pane_border` role defaults to a midpoint of
 background and foreground, while `pane_border_active` defaults to `ui_accent`,
 so older generated themes remain valid. Invalid changes are rejected and the

@@ -1,0 +1,63 @@
+## translucent-blur-off
+splinterm background-effect manager version=1 bound
+splinterm background-effect capabilities=0x1 blur=true
+
+## translucent-blur-on
+splinterm background-effect manager version=1 bound
+splinterm background-effect capabilities=0x1 blur=true
+splinterm background-effect create
+splinterm background-effect region=664x504
+splinterm background-effect commit=Enable
+splinterm background-effect region=960x600
+splinterm background-effect commit=Resize
+
+## opaque-blur-on
+splinterm background-effect manager version=1 bound
+splinterm background-effect capabilities=0x1 blur=true
+
+## live-blur-toggle
+splinterm background-effect manager version=1 bound
+splinterm background-effect capabilities=0x1 blur=true
+splinterm background-effect create
+splinterm background-effect region=960x600
+splinterm background-effect commit=Enable
+splinterm background-effect destroy
+splinterm background-effect commit=Disable
+
+## live-alpha-toggle
+splinterm background-effect manager version=1 bound
+splinterm background-effect capabilities=0x1 blur=true
+splinterm background-effect create
+splinterm background-effect region=960x600
+splinterm background-effect commit=Enable
+splinterm background-effect destroy
+splinterm background-effect commit=Disable
+
+## active-resize
+splinterm background-effect manager version=1 bound
+splinterm background-effect capabilities=0x1 blur=true
+splinterm background-effect create
+splinterm background-effect region=664x504
+splinterm background-effect commit=Enable
+splinterm background-effect region=960x600
+splinterm background-effect commit=Resize
+splinterm background-effect region=1100x700
+splinterm background-effect commit=Resize
+
+## fractional-scale-150
+splinterm background-effect manager version=1 bound
+splinterm background-effect capabilities=0x1 blur=true
+splinterm background-effect create
+splinterm background-effect region=664x504
+splinterm background-effect commit=Enable
+splinterm background-effect region=960x600
+splinterm background-effect commit=Resize
+
+## multi-pane
+splinterm background-effect manager version=1 bound
+splinterm background-effect capabilities=0x1 blur=true
+splinterm background-effect create
+splinterm background-effect region=664x504
+splinterm background-effect commit=Enable
+splinterm background-effect region=960x600
+splinterm background-effect commit=Resize

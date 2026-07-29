@@ -1,0 +1,46 @@
+{
+  "schema": "splinterm.native-blur.smoke.v1",
+  "exact": true,
+  "git_head": "d2affafcacd4df820e41df20971c673e99f6e46b",
+  "binary_sha256": "4e64dfea4bc1712356ad722198cc4bfdeeb581c22df4f3d8dcab4ab1520d16c7",
+  "hyprland": "Hyprland 0.56.1 built from branch v0.56.1 at commit 5c9377c15f85c50648f35ca5a213754f95b93ca0 clean (version: bump to 0.56.1).",
+  "theme": {
+    "alpha": 0.75,
+    "blur": true
+  },
+  "window": {
+    "address": "0x5631025fc100",
+    "class": "com.oldjobobo.splinterm",
+    "title": "Splinterm \u2014 local controller \u2014 DEVELOPMENT BYPASS",
+    "workspace": {
+      "id": 8,
+      "name": "8"
+    },
+    "monitor": 1,
+    "at": [
+      1120,
+      -836
+    ],
+    "size": [
+      960,
+      600
+    ],
+    "pid": 2782171,
+    "focusHistoryID": 4
+  },
+  "focus_unchanged": true,
+  "active_workspace_unchanged": true,
+  "capture": {
+    "file": "dp2-smoke.png",
+    "sha256": "6fa6d37270e960feaca059692c92ce23f0f18ba1b42747bd7c9b0cdc5be53da2"
+  },
+  "trace_lines": [
+    "splinterm background-effect manager version=1 bound",
+    "splinterm background-effect capabilities=0x1 blur=true",
+    "splinterm background-effect create",
+    "splinterm background-effect region=664x504",
+    "splinterm background-effect commit=Enable",
+    "splinterm background-effect region=960x600",
+    "splinterm background-effect commit=Resize"
+  ]
+}

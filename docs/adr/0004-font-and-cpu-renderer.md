@@ -131,7 +131,11 @@ Intentional or deferred Foot divergences are:
   lanes do not.
 - Splinterm translates the supported Foot box-drawing geometry into safe Rust.
 - Configuration is a documented subset. Background `alpha` supports Foot's
-  default mode; `alpha-mode=matching/all` and blur remain unsupported.
+  default mode, and opt-in native blur uses compositor-owned
+  `ext-background-effect-v1` presentation state when translucent and supported.
+  This remains a staging protocol, initially validated against Hyprland 0.56.1
+  or newer. Missing protocol capability falls back to ordinary transparency;
+  `alpha-mode=matching/all` remains unsupported.
 - `TERM=xterm-256color` is advertised until a tested project terminfo and full
   Foot keyboard contract exist; claiming `TERM=foot` broke Neovim input.
 - The extra exploratory `underline-double-indexed` 1.25× case is recorded as
@@ -148,6 +152,9 @@ input.
 ## Consequences
 
 - The renderer remains disposable derived state in the graphical client.
+- Native blur is also disposable graphical-client presentation state. It does
+  not change CPU-rendered SHM pixels, terminal snapshots, or renderer oracle
+  semantics; blur algorithm and cost remain compositor policy.
 - The daemon, protocol, and terminal-semantic crates gain no font or graphics
   dependencies.
 - CPU SHM rendering remains the baseline; a future GPU renderer must preserve

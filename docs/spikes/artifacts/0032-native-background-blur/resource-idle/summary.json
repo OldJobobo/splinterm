@@ -1,0 +1,673 @@
+{
+  "schema": "splinterm.native-blur.resource-idle.v1",
+  "exact": true,
+  "date": "2026-07-29",
+  "hyprland": "Hyprland 0.56.1 built from branch v0.56.1 at commit 5c9377c15f85c50648f35ca5a213754f95b93ca0 clean (version: bump to 0.56.1).",
+  "guard": {
+    "workspace": 8,
+    "monitor": "DP-2",
+    "monitor_geometry": {
+      "width": 1920,
+      "height": 1080,
+      "scale": 1.0,
+      "transform": 0,
+      "focused": false,
+      "activeWorkspace": {
+        "id": 8,
+        "name": "8"
+      }
+    },
+    "active_workspace_unchanged": false,
+    "focus_address_unchanged": true,
+    "workspace_8_clients_after": [],
+    "screenshots_taken": false,
+    "dp3_used": false,
+    "transform_changed": false
+  },
+  "policy": {
+    "alpha": 1.0,
+    "blur": false,
+    "pair_count": 5,
+    "settle_seconds": 1.0,
+    "idle_seconds": 2.0,
+    "idle_tick_limit": 5,
+    "rss_noise_floor_bytes": 1048576
+  },
+  "binaries": {
+    "prefeature": {
+      "commit": "1e233a1c37039d147f99505a92e83169bb81f19f",
+      "client_sha256": "0df426031ce76aea3db9fc15fa82c3481455203bb726274437d1791931c4de17",
+      "client_size_bytes": 7698120,
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "0de46e55fa2a8c0cfa538a2f9a9a2fc8b46dc883cd7a1e6bb6cc2e7dd3bc8804"
+    },
+    "rc": {
+      "commit": "d2affafcacd4df820e41df20971c673e99f6e46b+reviewed-worktree-config-fix",
+      "client_sha256": "df8cdb8b5178f79d1e69f3b7c320582f08bd0270a51703c0cc00cd80874e048c",
+      "client_size_bytes": 7739472,
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "90df4a966566f6c084328090aa6d1d795f78aa7d3cc483e0d6ef6dd00eec9f77"
+    }
+  },
+  "smoke": {
+    "label": "prefeature-guarded-smoke",
+    "version": "prefeature",
+    "commit": "1e233a1c37039d147f99505a92e83169bb81f19f",
+    "client_sha256": "0df426031ce76aea3db9fc15fa82c3481455203bb726274437d1791931c4de17",
+    "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+    "helper_sha256": "0de46e55fa2a8c0cfa538a2f9a9a2fc8b46dc883cd7a1e6bb6cc2e7dd3bc8804",
+    "client_size_bytes": 7698120,
+    "window": {
+      "workspace": {
+        "id": 8,
+        "name": "8"
+      },
+      "monitor": 1,
+      "at": [
+        1120,
+        -836
+      ],
+      "size": [
+        960,
+        600
+      ]
+    },
+    "settle_seconds": 1.0,
+    "idle_seconds": 2.0,
+    "rss_bytes": 25198592,
+    "rss_samples_bytes": [
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592,
+      25198592
+    ],
+    "idle_cpu_ticks": 0,
+    "focus_unchanged": true,
+    "effect_created": false
+  },
+  "runs": [
+    {
+      "label": "pair-01-prefeature",
+      "version": "prefeature",
+      "commit": "1e233a1c37039d147f99505a92e83169bb81f19f",
+      "client_sha256": "0df426031ce76aea3db9fc15fa82c3481455203bb726274437d1791931c4de17",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "0de46e55fa2a8c0cfa538a2f9a9a2fc8b46dc883cd7a1e6bb6cc2e7dd3bc8804",
+      "client_size_bytes": 7698120,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25112576,
+      "rss_samples_bytes": [
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25108480,
+        25112576,
+        25112576,
+        25112576,
+        25112576,
+        25112576,
+        25112576,
+        25112576
+      ],
+      "idle_cpu_ticks": 1,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-01-rc",
+      "version": "rc",
+      "commit": "d2affafcacd4df820e41df20971c673e99f6e46b+reviewed-worktree-config-fix",
+      "client_sha256": "df8cdb8b5178f79d1e69f3b7c320582f08bd0270a51703c0cc00cd80874e048c",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "90df4a966566f6c084328090aa6d1d795f78aa7d3cc483e0d6ef6dd00eec9f77",
+      "client_size_bytes": 7739472,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25100288,
+      "rss_samples_bytes": [
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288,
+        25100288
+      ],
+      "idle_cpu_ticks": 0,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-02-prefeature",
+      "version": "prefeature",
+      "commit": "1e233a1c37039d147f99505a92e83169bb81f19f",
+      "client_sha256": "0df426031ce76aea3db9fc15fa82c3481455203bb726274437d1791931c4de17",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "0de46e55fa2a8c0cfa538a2f9a9a2fc8b46dc883cd7a1e6bb6cc2e7dd3bc8804",
+      "client_size_bytes": 7698120,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25075712,
+      "rss_samples_bytes": [
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712,
+        25075712
+      ],
+      "idle_cpu_ticks": 0,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-02-rc",
+      "version": "rc",
+      "commit": "d2affafcacd4df820e41df20971c673e99f6e46b+reviewed-worktree-config-fix",
+      "client_sha256": "df8cdb8b5178f79d1e69f3b7c320582f08bd0270a51703c0cc00cd80874e048c",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "90df4a966566f6c084328090aa6d1d795f78aa7d3cc483e0d6ef6dd00eec9f77",
+      "client_size_bytes": 7739472,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25300992,
+      "rss_samples_bytes": [
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992,
+        25300992
+      ],
+      "idle_cpu_ticks": 0,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-03-prefeature",
+      "version": "prefeature",
+      "commit": "1e233a1c37039d147f99505a92e83169bb81f19f",
+      "client_sha256": "0df426031ce76aea3db9fc15fa82c3481455203bb726274437d1791931c4de17",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "0de46e55fa2a8c0cfa538a2f9a9a2fc8b46dc883cd7a1e6bb6cc2e7dd3bc8804",
+      "client_size_bytes": 7698120,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25231360,
+      "rss_samples_bytes": [
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360,
+        25231360
+      ],
+      "idle_cpu_ticks": 0,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-03-rc",
+      "version": "rc",
+      "commit": "d2affafcacd4df820e41df20971c673e99f6e46b+reviewed-worktree-config-fix",
+      "client_sha256": "df8cdb8b5178f79d1e69f3b7c320582f08bd0270a51703c0cc00cd80874e048c",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "90df4a966566f6c084328090aa6d1d795f78aa7d3cc483e0d6ef6dd00eec9f77",
+      "client_size_bytes": 7739472,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25268224,
+      "rss_samples_bytes": [
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224,
+        25268224
+      ],
+      "idle_cpu_ticks": 0,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-04-prefeature",
+      "version": "prefeature",
+      "commit": "1e233a1c37039d147f99505a92e83169bb81f19f",
+      "client_sha256": "0df426031ce76aea3db9fc15fa82c3481455203bb726274437d1791931c4de17",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "0de46e55fa2a8c0cfa538a2f9a9a2fc8b46dc883cd7a1e6bb6cc2e7dd3bc8804",
+      "client_size_bytes": 7698120,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25206784,
+      "rss_samples_bytes": [
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784,
+        25206784
+      ],
+      "idle_cpu_ticks": 0,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-04-rc",
+      "version": "rc",
+      "commit": "d2affafcacd4df820e41df20971c673e99f6e46b+reviewed-worktree-config-fix",
+      "client_sha256": "df8cdb8b5178f79d1e69f3b7c320582f08bd0270a51703c0cc00cd80874e048c",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "90df4a966566f6c084328090aa6d1d795f78aa7d3cc483e0d6ef6dd00eec9f77",
+      "client_size_bytes": 7739472,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25071616,
+      "rss_samples_bytes": [
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616,
+        25071616
+      ],
+      "idle_cpu_ticks": 0,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-05-prefeature",
+      "version": "prefeature",
+      "commit": "1e233a1c37039d147f99505a92e83169bb81f19f",
+      "client_sha256": "0df426031ce76aea3db9fc15fa82c3481455203bb726274437d1791931c4de17",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "0de46e55fa2a8c0cfa538a2f9a9a2fc8b46dc883cd7a1e6bb6cc2e7dd3bc8804",
+      "client_size_bytes": 7698120,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25272320,
+      "rss_samples_bytes": [
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320,
+        25272320
+      ],
+      "idle_cpu_ticks": 0,
+      "focus_unchanged": true,
+      "effect_created": false
+    },
+    {
+      "label": "pair-05-rc",
+      "version": "rc",
+      "commit": "d2affafcacd4df820e41df20971c673e99f6e46b+reviewed-worktree-config-fix",
+      "client_sha256": "df8cdb8b5178f79d1e69f3b7c320582f08bd0270a51703c0cc00cd80874e048c",
+      "daemon_sha256": "a89113c44cd48beff4ef671dc6713003f31ef04fe454352c6aca8342d6f48b58",
+      "helper_sha256": "90df4a966566f6c084328090aa6d1d795f78aa7d3cc483e0d6ef6dd00eec9f77",
+      "client_size_bytes": 7739472,
+      "window": {
+        "workspace": {
+          "id": 8,
+          "name": "8"
+        },
+        "monitor": 1,
+        "at": [
+          1120,
+          -836
+        ],
+        "size": [
+          960,
+          600
+        ]
+      },
+      "settle_seconds": 1.0,
+      "idle_seconds": 2.0,
+      "rss_bytes": 25346048,
+      "rss_samples_bytes": [
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048,
+        25346048
+      ],
+      "idle_cpu_ticks": 1,
+      "focus_unchanged": true,
+      "effect_created": false
+    }
+  ],
+  "comparison": {
+    "prefeature": {
+      "count": 5,
+      "rss_bytes": {
+        "min": 25075712,
+        "median": 25206784,
+        "max": 25272320,
+        "range": 196608
+      },
+      "idle_cpu_ticks": {
+        "min": 0,
+        "median": 0,
+        "max": 1
+      }
+    },
+    "rc": {
+      "count": 5,
+      "rss_bytes": {
+        "min": 25071616,
+        "median": 25268224,
+        "max": 25346048,
+        "range": 274432
+      },
+      "idle_cpu_ticks": {
+        "min": 0,
+        "median": 0,
+        "max": 1
+      }
+    },
+    "rc_minus_prefeature_median_rss_bytes": 61440,
+    "measurement_noise_bytes": 1048576,
+    "rss_within_measurement_noise": true,
+    "all_idle_runs_within_tick_limit": true
+  },
+  "passed": true,
+  "failure": null
+}
