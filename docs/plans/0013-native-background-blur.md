@@ -1,6 +1,6 @@
 # Plan 0013: native Wayland background blur
 
-- **Status:** In progress — Slices 0–2 complete
+- **Status:** In progress — Slices 0–3 complete
 - **Release decision:** Do not advertise native blur until protocol, fallback, graphical, and review gates pass
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Protocol authority:** `ext-background-effect-v1`, version 1, from `wayland-protocols` staging
@@ -287,6 +287,8 @@ Tests must cover:
 **Gate:** no Wayland proxy is needed to prove lifecycle and ordering decisions.
 
 ### Slice 3 — Wayland binding and object lifecycle
+
+Completed in [Spike 0030](../spikes/0030-native-background-effect-wayland-lifecycle.md).
 
 Wire the manager, capability dispatch, temporary `wl_region`, effect proxy, and
 surface commits into the production client. Preserve all existing fractional

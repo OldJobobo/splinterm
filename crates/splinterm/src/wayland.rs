@@ -26,7 +26,7 @@ use unicode_width::UnicodeWidthChar;
 
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, Region},
     data_device_manager::{
         DataDeviceManagerState, WritePipe,
         data_device::{DataDevice, DataDeviceHandler},
@@ -70,12 +70,20 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum,
     globals::registry_queue_init,
     protocol::{
         wl_data_device, wl_data_device_manager::DndAction, wl_data_source, wl_keyboard, wl_output,
         wl_pointer, wl_seat, wl_shm, wl_surface,
     },
+};
+
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1::{
+        Capability as BackgroundCapability, Event as BackgroundManagerEvent,
+        ExtBackgroundEffectManagerV1,
+    },
+    ext_background_effect_surface_v1::{self, ExtBackgroundEffectSurfaceV1},
 };
 
 use splinterm_automation_client::ImageContentLeaseSet;
@@ -103,6 +111,7 @@ use smithay_client_toolkit::reexports::protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
+use crate::background_effect::{BackgroundEffectState, EffectAction, EffectDiagnostic};
 use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -784,8 +793,31 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let signoff = SignoffProbe::from_environment(options.authority.development_bypass)?;
     let graphical_input_probe =
         GraphicalInputProbe::from_environment(options.authority.development_bypass)?;
+    let inactive_panes = inactive_options
+        .into_iter()
+        .map(|pane| PaneView::from_options(pane, SCALE_DENOMINATOR))
+        .collect::<Result<Vec<_>>>()?;
+    let background_effect_manager = globals
+        .bind::<ExtBackgroundEffectManagerV1, _, _>(&queue_handle, 1..=1, ())
+        .ok();
+    let mut background_effect_state = BackgroundEffectState::default();
+    background_effect_state.set_manager_available(background_effect_manager.is_some());
+    background_effect_state.set_requested_blur(options.theme.background_blur);
+    background_effect_state.set_background_alpha(options.theme.background_alpha);
+    let background_effect_trace = std::env::var_os("SPLINTERM_BACKGROUND_EFFECT_TRACE").is_some();
+    if background_effect_trace {
+        if let Some(manager) = &background_effect_manager {
+            eprintln!(
+                "splinterm background-effect manager version={} bound",
+                manager.version()
+            );
+        } else {
+            eprintln!("splinterm background-effect manager unavailable");
+        }
+    }
     let mut app = App {
         registry_state: RegistryState::new(&globals),
+        compositor,
         seat_state: SeatState::new(&globals, &queue_handle),
         output_state: OutputState::new(&globals, &queue_handle),
         data_device_manager,
@@ -794,6 +826,11 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         viewport,
         text_input_manager,
         text_input: None,
+        background_effect_manager,
+        background_effect: None,
+        background_effect_state,
+        background_effect_capabilities_received: false,
+        background_effect_trace,
         text_input_seat: None,
         ime: ImeState::default(),
         reduced_motion: reduced_motion_requested(),
@@ -830,10 +867,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pointer_cell: None,
             hovered_url: None,
         },
-        inactive_panes: inactive_options
-            .into_iter()
-            .map(|pane| PaneView::from_options(pane, SCALE_DENOMINATOR))
-            .collect::<Result<Vec<_>>>()?,
+        inactive_panes,
         layout: options.layout,
         topology_updates: options.topology_updates,
         topology_commands: options.topology_commands,
@@ -891,28 +925,33 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         seat_count: 0,
     };
 
-    while !app.exit {
-        app.apply_updates(&queue_handle)?;
-        if app.redraw_pending
-            && !pending_draw_waits_for_frame(app.frame_pending, app.terminal_redraw_pending)
-        {
-            if app.terminal_redraw_pending {
-                app.schedule_terminal_draw(&queue_handle)?;
-            } else {
-                app.schedule_draw(&queue_handle)?;
+    let event_loop_result: Result<()> = (|| {
+        while !app.exit {
+            app.apply_updates(&queue_handle)?;
+            if app.redraw_pending
+                && !pending_draw_waits_for_frame(app.frame_pending, app.terminal_redraw_pending)
+            {
+                if app.terminal_redraw_pending {
+                    app.schedule_terminal_draw(&queue_handle)?;
+                } else {
+                    app.schedule_draw(&queue_handle)?;
+                }
             }
+            app.tick_signoff(&queue_handle)?;
+            app.apply_clipboard_reads()?;
+            app.tick_cursor_blink(&queue_handle)?;
+            let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
+                break;
+            };
+            event_loop
+                .dispatch(dispatch_timeout, &mut app)
+                .context("dispatch Wayland events")?;
         }
-        app.tick_signoff(&queue_handle)?;
-        app.apply_clipboard_reads()?;
-        app.tick_cursor_blink(&queue_handle)?;
-        let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
-            break;
-        };
-        event_loop
-            .dispatch(dispatch_timeout, &mut app)
-            .context("dispatch Wayland events")?;
-    }
-    if let Some(error) = app.failure {
+        Ok(())
+    })();
+    app.release_background_effect();
+    event_loop_result?;
+    if let Some(error) = app.failure.take() {
         return Err(error);
     }
     Ok(())
@@ -1775,6 +1814,7 @@ struct ShmFrameBuffer {
 
 struct App {
     registry_state: RegistryState,
+    compositor: CompositorState,
     seat_state: SeatState,
     output_state: OutputState,
     data_device_manager: DataDeviceManagerState,
@@ -1783,6 +1823,11 @@ struct App {
     viewport: Option<WpViewport>,
     text_input_manager: Option<ZwpTextInputManagerV3>,
     text_input: Option<ZwpTextInputV3>,
+    background_effect_manager: Option<ExtBackgroundEffectManagerV1>,
+    background_effect: Option<ExtBackgroundEffectSurfaceV1>,
+    background_effect_state: BackgroundEffectState,
+    background_effect_capabilities_received: bool,
+    background_effect_trace: bool,
     text_input_seat: Option<wl_seat::WlSeat>,
     ime: ImeState,
     reduced_motion: bool,
@@ -3231,7 +3276,133 @@ fn viewport_cursor_row(cursor_row: i32, offset: usize, rows: usize) -> Option<i3
         .filter(|row| *row >= 0 && usize::try_from(*row).is_ok_and(|row| row < rows))
 }
 
+fn background_effect_capability_bits(flags: WEnum<BackgroundCapability>) -> u32 {
+    match flags {
+        WEnum::Value(flags) => flags.bits(),
+        WEnum::Unknown(flags) => flags,
+    }
+}
+
+fn background_effect_diagnostic_message(diagnostic: EffectDiagnostic) -> &'static str {
+    match diagnostic {
+        EffectDiagnostic::MissingManager => {
+            "splinterm background blur requested, but ext-background-effect-v1 is unavailable"
+        }
+        EffectDiagnostic::MissingBlurCapability => {
+            "splinterm background blur requested, but the compositor advertises no blur capability"
+        }
+    }
+}
+
+fn background_effect_trace_line(action: EffectAction) -> Option<String> {
+    match action {
+        EffectAction::Diagnostic(_) => None,
+        EffectAction::CreateEffect => Some("splinterm background-effect create".to_owned()),
+        EffectAction::SetBlurRegion(size) => Some(format!(
+            "splinterm background-effect region={}x{}",
+            size.width(),
+            size.height()
+        )),
+        EffectAction::DestroyEffect => Some("splinterm background-effect destroy".to_owned()),
+        EffectAction::CommitSurface(reason) => {
+            Some(format!("splinterm background-effect commit={reason:?}"))
+        }
+    }
+}
+
 impl App {
+    fn trace_background_effect_action(&self, action: EffectAction) {
+        if self.background_effect_trace
+            && let Some(line) = background_effect_trace_line(action)
+        {
+            eprintln!("{line}");
+        }
+    }
+
+    fn execute_background_effect_actions(
+        &mut self,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<()> {
+        for action in self.background_effect_state.reconcile() {
+            self.trace_background_effect_action(action);
+            match action {
+                EffectAction::Diagnostic(diagnostic) => {
+                    eprintln!("{}", background_effect_diagnostic_message(diagnostic));
+                }
+                EffectAction::CreateEffect => {
+                    anyhow::ensure!(
+                        self.background_effect.is_none(),
+                        "background effect reducer attempted duplicate object creation"
+                    );
+                    let manager = self
+                        .background_effect_manager
+                        .as_ref()
+                        .context("background effect manager disappeared before creation")?;
+                    self.background_effect = Some(manager.get_background_effect(
+                        self.window.wl_surface(),
+                        queue_handle,
+                        (),
+                    ));
+                }
+                EffectAction::SetBlurRegion(size) => {
+                    let effect = self
+                        .background_effect
+                        .as_ref()
+                        .context("background effect region requested without an object")?;
+                    let region = Region::new(&self.compositor)
+                        .context("create finite background effect region")?;
+                    region.add(0, 0, size.width(), size.height());
+                    effect.set_blur_region(Some(region.wl_region()));
+                    drop(region);
+                }
+                EffectAction::DestroyEffect => {
+                    let effect = self
+                        .background_effect
+                        .take()
+                        .context("background effect destroy requested without an object")?;
+                    effect.destroy();
+                }
+                EffectAction::CommitSurface(reason) => {
+                    self.window.commit();
+                    anyhow::ensure!(
+                        self.background_effect_state.surface_committed() == Some(reason),
+                        "background effect commit did not match reducer state"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_background_effect_geometry(
+        &mut self,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<()> {
+        self.background_effect_state.set_logical_size(
+            i64::from(self.logical_width),
+            i64::from(self.logical_height),
+        )?;
+        if self.background_effect_manager.is_none() || self.background_effect_capabilities_received
+        {
+            self.execute_background_effect_actions(queue_handle)?;
+        }
+        Ok(())
+    }
+
+    fn release_background_effect(&mut self) {
+        for action in self.background_effect_state.destroy_surface() {
+            self.trace_background_effect_action(action);
+            if action == EffectAction::DestroyEffect
+                && let Some(effect) = self.background_effect.take()
+            {
+                effect.destroy();
+            }
+        }
+        if let Some(manager) = self.background_effect_manager.take() {
+            manager.destroy();
+        }
+    }
+
     fn focused_splint(&self) -> Option<SplintId> {
         self.pane
             .snapshot
@@ -5995,7 +6166,8 @@ impl WindowHandler for App {
                 self.pane.last_resize.is_some(),
             ));
             if let Err(error) = self
-                .emit_resize()
+                .reconcile_background_effect_geometry(queue_handle)
+                .and_then(|()| self.emit_resize())
                 .and_then(|()| self.schedule_draw(queue_handle))
             {
                 self.fail(error);
@@ -6753,6 +6925,44 @@ impl ShmHandler for App {
     }
 }
 
+impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &ExtBackgroundEffectManagerV1,
+        event: BackgroundManagerEvent,
+        _data: &(),
+        _connection: &Connection,
+        queue_handle: &QueueHandle<Self>,
+    ) {
+        if let BackgroundManagerEvent::Capabilities { flags } = event {
+            let flags = background_effect_capability_bits(flags);
+            state.background_effect_capabilities_received = true;
+            state.background_effect_state.set_capability_flags(flags);
+            if state.background_effect_trace {
+                eprintln!(
+                    "splinterm background-effect capabilities={flags:#x} blur={}",
+                    flags & BackgroundCapability::Blur.bits() != 0
+                );
+            }
+            if let Err(error) = state.execute_background_effect_actions(queue_handle) {
+                state.fail(error);
+            }
+        }
+    }
+}
+
+impl Dispatch<ExtBackgroundEffectSurfaceV1, ()> for App {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtBackgroundEffectSurfaceV1,
+        _event: ext_background_effect_surface_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue_handle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 impl Dispatch<WpFractionalScaleManagerV1, ()> for App {
     fn event(
         _state: &mut Self,
@@ -6889,6 +7099,48 @@ mod tests {
             .insert_source(source, |(), _, wake_count| *wake_count += 1)
             .unwrap();
         (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
+    }
+
+    #[test]
+    fn background_effect_dispatch_preserves_known_and_unknown_capability_bits() {
+        assert_eq!(
+            background_effect_capability_bits(WEnum::Value(BackgroundCapability::Blur)),
+            crate::background_effect::BLUR_CAPABILITY
+        );
+        assert_eq!(
+            background_effect_capability_bits(WEnum::Unknown(0x8000_0000)),
+            0x8000_0000
+        );
+    }
+
+    #[test]
+    fn background_effect_diagnostics_and_trace_are_bounded_metadata_only() {
+        let size = crate::background_effect::LogicalSize::new(960, 600).unwrap();
+        assert_eq!(
+            background_effect_trace_line(EffectAction::SetBlurRegion(size)).as_deref(),
+            Some("splinterm background-effect region=960x600")
+        );
+        assert_eq!(
+            background_effect_trace_line(EffectAction::CommitSurface(
+                crate::background_effect::CommitReason::Enable
+            ))
+            .as_deref(),
+            Some("splinterm background-effect commit=Enable")
+        );
+        assert!(
+            background_effect_trace_line(EffectAction::Diagnostic(
+                EffectDiagnostic::MissingManager
+            ))
+            .is_none()
+        );
+        for diagnostic in [
+            EffectDiagnostic::MissingManager,
+            EffectDiagnostic::MissingBlurCapability,
+        ] {
+            let message = background_effect_diagnostic_message(diagnostic);
+            assert!(message.len() < 128);
+            assert!(message.starts_with("splinterm background blur requested"));
+        }
     }
 
     #[test]
