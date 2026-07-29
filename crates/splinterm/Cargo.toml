@@ -26,6 +26,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 unicode-width.workspace = true
 wayland-client.workspace = true
+wayland-protocols.workspace = true
 
 [dev-dependencies]
 sha2.workspace = true

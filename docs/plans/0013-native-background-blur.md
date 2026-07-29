@@ -1,6 +1,6 @@
 # Plan 0013: native Wayland background blur
 
-- **Status:** Draft — implementation not started
+- **Status:** In progress — Slice 0 protocol spike complete
 - **Release decision:** Do not advertise native blur until protocol, fallback, graphical, and review gates pass
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Protocol authority:** `ext-background-effect-v1`, version 1, from `wayland-protocols` staging
@@ -224,6 +224,8 @@ Expected files:
 ## Dependency-ordered implementation slices
 
 ### Slice 0 — freeze authorities and add a protocol spike
+
+Completed in [Spike 0027](../spikes/0027-native-background-effect-protocol.md).
 
 Before production edits:
 
