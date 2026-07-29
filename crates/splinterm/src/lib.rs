@@ -8,6 +8,7 @@
 
 #[doc(hidden)]
 pub mod automation;
+pub mod background_effect;
 mod box_drawing;
 pub mod config;
 pub mod geometry;

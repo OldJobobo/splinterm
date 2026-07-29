@@ -1,6 +1,6 @@
 # Plan 0013: native Wayland background blur
 
-- **Status:** In progress — Slices 0–1 complete
+- **Status:** In progress — Slices 0–2 complete
 - **Release decision:** Do not advertise native blur until protocol, fallback, graphical, and review gates pass
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Protocol authority:** `ext-background-effect-v1`, version 1, from `wayland-protocols` staging
@@ -266,6 +266,8 @@ Tests must cover:
 value without claiming the compositor effect works yet.
 
 ### Slice 2 — pure effect-state reducer
+
+Completed in [Spike 0029](../spikes/0029-native-background-effect-reducer.md).
 
 Implement and exhaustively test a side-effect-free reducer that turns requested
 blur, alpha, capability, object state, and logical size into bounded actions such
