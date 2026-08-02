@@ -18,6 +18,10 @@ use splinterm_core::SplintId;
 use splinterm_pty::{LinuxPtyBackend, PtyCommand};
 use tokio::time::{sleep, timeout};
 
+#[allow(
+    clippy::struct_field_names,
+    reason = "serialized probe fields retain explicit byte units"
+)]
 #[derive(Clone, Debug, Default, Serialize)]
 struct Memory {
     rss_bytes: u64,
@@ -122,6 +126,10 @@ fn contains(snapshot: &LiveSnapshot, marker: &str) -> bool {
         })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the standalone retention probe records one linear measurement procedure"
+)]
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     if cfg!(debug_assertions) {
@@ -154,7 +162,7 @@ async fn main() -> Result<()> {
         PathBuf::from,
     );
     let script = format!(
-        r#"IFS= read -r _; c=0; while [ $c -lt {cycles} ]; do i=0; while [ $i -lt 5000 ]; do if [ $i -gt 0 ] && [ $((i % 500)) -eq 0 ]; then printf '\033[2J\033[H'; fi; case $((i % 3)) in 0) printf 'retain-%08d plain xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n' $i;; 1) printf '\033[3%dmretain-%08d ansi xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\033[0m\n' $((i % 8)) $i;; 2) printf 'retain-%08d unicode-naive-cafe-lambda-emoji\n' $i;; esac; i=$((i+1)); done; printf 'PLAN11_CYCLE_%02d\n' $c; c=$((c+1)); if [ $c -lt {cycles} ]; then IFS= read -r _; fi; done; sleep 180"#
+        r"IFS= read -r _; c=0; while [ $c -lt {cycles} ]; do i=0; while [ $i -lt 5000 ]; do if [ $i -gt 0 ] && [ $((i % 500)) -eq 0 ]; then printf '\033[2J\033[H'; fi; case $((i % 3)) in 0) printf 'retain-%08d plain xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n' $i;; 1) printf '\033[3%dmretain-%08d ansi xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\033[0m\n' $((i % 8)) $i;; 2) printf 'retain-%08d unicode-naive-cafe-lambda-emoji\n' $i;; esac; i=$((i+1)); done; printf 'PLAN11_CYCLE_%02d\n' $c; c=$((c+1)); if [ $c -lt {cycles} ]; then IFS= read -r _; fi; done; sleep 180"
     );
     let config = LiveSplintConfig {
         columns: 80,

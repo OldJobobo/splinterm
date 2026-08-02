@@ -225,39 +225,43 @@ impl Eq for ImageBudgetReservation {}
 impl ImageBudgetReservation {
     fn resize(&self, bytes: usize) -> Result<(), ImageError> {
         let old = self.0.bytes.load(Ordering::Acquire);
-        if bytes > old {
-            let delta = bytes - old;
-            let mut current = self.0.budget.content_bytes.load(Ordering::Acquire);
-            loop {
-                let next = current
-                    .checked_add(delta)
-                    .filter(|next| *next <= self.0.budget.limit)
-                    .ok_or(ImageError::DaemonBytes)?;
-                match self.0.budget.content_bytes.compare_exchange_weak(
-                    current,
-                    next,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        self.0
-                            .budget
-                            .high_water_content_bytes
-                            .fetch_max(next, Ordering::AcqRel);
-                        self.0.bytes.store(bytes, Ordering::Release);
-                        return Ok(());
+        match bytes.cmp(&old) {
+            std::cmp::Ordering::Greater => {
+                let delta = bytes - old;
+                let mut current = self.0.budget.content_bytes.load(Ordering::Acquire);
+                loop {
+                    let next = current
+                        .checked_add(delta)
+                        .filter(|next| *next <= self.0.budget.limit)
+                        .ok_or(ImageError::DaemonBytes)?;
+                    match self.0.budget.content_bytes.compare_exchange_weak(
+                        current,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            self.0
+                                .budget
+                                .high_water_content_bytes
+                                .fetch_max(next, Ordering::AcqRel);
+                            self.0.bytes.store(bytes, Ordering::Release);
+                            return Ok(());
+                        }
+                        Err(actual) => current = actual,
                     }
-                    Err(actual) => current = actual,
                 }
             }
-        } else if bytes < old {
-            self.0.bytes.store(bytes, Ordering::Release);
-            let previous = self
-                .0
-                .budget
-                .content_bytes
-                .fetch_sub(old - bytes, Ordering::AcqRel);
-            debug_assert!(previous >= old - bytes, "image budget resize underflow");
+            std::cmp::Ordering::Less => {
+                self.0.bytes.store(bytes, Ordering::Release);
+                let previous = self
+                    .0
+                    .budget
+                    .content_bytes
+                    .fetch_sub(old - bytes, Ordering::AcqRel);
+                debug_assert!(previous >= old - bytes, "image budget resize underflow");
+            }
+            std::cmp::Ordering::Equal => {}
         }
         Ok(())
     }

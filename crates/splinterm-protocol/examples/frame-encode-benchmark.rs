@@ -37,7 +37,7 @@ fn payload() -> serde_json::Value {
                             "italic": false,
                             "underline": "none",
                             "foreground_source": "default",
-                            "foreground": 0xffffff,
+                            "foreground": 0x00ff_ffff,
                             "background_source": "default",
                             "background": 0
                         }

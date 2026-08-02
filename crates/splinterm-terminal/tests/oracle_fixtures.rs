@@ -37,6 +37,10 @@ struct ExpectedAttributeRun {
     attributes: ExpectedAttributes,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "fixture fields mirror independent terminal attribute semantics"
+)]
 #[derive(Clone, Copy, Default)]
 struct ExpectedAttributes {
     bold: bool,
@@ -154,7 +158,8 @@ fn assert_semantic_state(terminal: &mut Terminal, fixture: Fixture) {
     }
 
     for (row_index, expected_row) in fixture.expected_rows.iter().enumerate() {
-        let actual_row = terminal.grid().row(row_index as i32).unwrap();
+        let fixture_row = i32::try_from(row_index).expect("fixture row fits in i32");
+        let actual_row = terminal.grid().row(fixture_row).unwrap();
         let text = actual_row
             .cells()
             .iter()
@@ -232,7 +237,8 @@ fn every_pinned_foot_semantic_fixture_matches_whole_and_chunked_input() {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1);
-            let size = 1 + (state as usize % 7).min(remaining - 1);
+            let chunk_offset = usize::try_from(state % 7).unwrap();
+            let size = 1 + chunk_offset.min(remaining - 1);
             random_chunks.push(size);
             remaining -= size;
         }

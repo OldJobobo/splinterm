@@ -2895,27 +2895,24 @@ fn prepare_snapshot_row(
                 face: BOX_DRAWING_FACE,
                 glyph,
             };
-            let generated = if cache.contains_key(&key) {
-                true
-            } else {
-                let thickness = box_drawing::default_thickness(cell_width, cell_height, scale);
-                box_drawing::generate(character, cell_width, cell_height, thickness).is_some_and(
-                    |mask| {
-                        cache.insert(
-                            key,
-                            Arc::new(CachedGlyph {
+            let generated =
+                if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
+                    let thickness = box_drawing::default_thickness(cell_width, cell_height, scale);
+                    box_drawing::generate(character, cell_width, cell_height, thickness)
+                        .is_some_and(|mask| {
+                            entry.insert(Arc::new(CachedGlyph {
                                 content: Content::Mask,
                                 left: 0,
                                 top: baseline,
                                 width: mask.width,
                                 height: mask.height,
                                 data: mask.data,
-                            }),
-                        );
-                        true
-                    },
-                )
-            };
+                            }));
+                            true
+                        })
+                } else {
+                    true
+                };
             if generated {
                 glyphs.push(SnapshotGlyph {
                     key,
@@ -6914,6 +6911,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "test helper exposes independent image geometry and ordering inputs"
+    )]
     fn test_snapshot_image(
         pixels: &[u8],
         width: u32,
@@ -7448,6 +7449,10 @@ mod tests {
         assert_eq!(images[1].placement.application_image_id, Some(20));
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one lifecycle regression covers leases, scales, eviction, and row anchoring"
+    )]
     #[test]
     fn prepared_image_sources_survive_cache_eviction_and_follow_row_ids() {
         use sha2::{Digest as _, Sha256};

@@ -1816,6 +1816,10 @@ struct ShmFrameBuffer {
     stale: BackingDamage,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent Wayland lifecycle and rendering flags are not one state machine"
+)]
 struct App {
     registry_state: RegistryState,
     compositor: CompositorState,
@@ -7227,7 +7231,7 @@ mod tests {
         let (ping, source) = make_ping().unwrap();
         event_loop
             .handle()
-            .insert_source(source, |(), _, wake_count| *wake_count += 1)
+            .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
     }
@@ -7373,7 +7377,7 @@ mod tests {
         let (ping, source) = make_ping().unwrap();
         event_loop
             .handle()
-            .insert_source(source, |(), _, wake_count| *wake_count += 1)
+            .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         let waker = Waker::from(Arc::new(UpdateWake(ping)));
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
@@ -7410,7 +7414,7 @@ mod tests {
         let (ping, source) = make_ping().unwrap();
         event_loop
             .handle()
-            .insert_source(source, |(), _, wake_count| *wake_count += 1)
+            .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         let waker = Waker::from(Arc::new(UpdateWake(ping)));
         let item_count = RECEIVER_DRAIN_BUDGET * 2;
@@ -7459,7 +7463,7 @@ mod tests {
         let (ping, source) = make_ping().unwrap();
         event_loop
             .handle()
-            .insert_source(source, |(), _, wake_count| *wake_count += 1)
+            .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         let waker = Waker::from(Arc::new(UpdateWake(ping)));
         let item_count = RECEIVER_DRAIN_BUDGET * 8;
@@ -7473,7 +7477,10 @@ mod tests {
         let mut disconnected = false;
         while !disconnected {
             let drained = drain_receiver(&mut receiver, &waker);
-            assert!(drained.items.len() <= RECEIVER_DRAIN_BUDGET);
+            assert!(
+                drained.disconnected || drained.items.len() <= RECEIVER_DRAIN_BUDGET,
+                "an active producer drain exceeded its cooperative budget"
+            );
             items_seen.extend(drained.items);
             disconnected = drained.disconnected;
             std::thread::yield_now();

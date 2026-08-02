@@ -403,7 +403,7 @@ struct PendingCompactUpdates {
     batches: Vec<Vec<TerminalUpdate>>,
     end_revision: TerminalRevision,
     history_policy: CompactHistoryPolicy,
-    _admitted: Vec<Option<QueueLease>>,
+    admitted: Vec<Option<QueueLease>>,
     pending_attribution: Option<PendingFrameLease>,
 }
 
@@ -775,6 +775,7 @@ enum CompactPublishOutcome {
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "compact publication validates and commits one mailbox transaction"
 )]
 fn publish_compact_update(
@@ -822,8 +823,8 @@ fn publish_compact_update(
     } else {
         match sender.try_reserve() {
             Ok(permit) => Some(permit),
-            Err(mpsc::error::TrySendError::Full(_)) => return CompactPublishOutcome::Full,
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(mpsc::error::TrySendError::Full(())) => return CompactPublishOutcome::Full,
+            Err(mpsc::error::TrySendError::Closed(())) => {
                 return CompactPublishOutcome::Closed;
             }
         }
@@ -853,7 +854,7 @@ fn publish_compact_update(
             let batch_attribution = PendingFrameAttribution::one_batch(&updates, history_policy);
             let snapshot = Box::new(snapshot);
             pending.batches.push(updates);
-            pending._admitted.push(QueueLease::new(accounting));
+            pending.admitted.push(QueueLease::new(accounting));
             if let Some(lease) = pending.pending_attribution.as_mut() {
                 lease.merge(batch_attribution);
             }
@@ -913,8 +914,8 @@ fn publish_compact_update(
         Some(permit) if current.generation == observed_generation => permit,
         Some(_) | None => match sender.try_reserve() {
             Ok(permit) => permit,
-            Err(mpsc::error::TrySendError::Full(_)) => return CompactPublishOutcome::Full,
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(mpsc::error::TrySendError::Full(())) => return CompactPublishOutcome::Full,
+            Err(mpsc::error::TrySendError::Closed(())) => {
                 return CompactPublishOutcome::Closed;
             }
         },
@@ -928,7 +929,7 @@ fn publish_compact_update(
         batches: vec![updates],
         end_revision,
         history_policy: snapshot.history_policy,
-        _admitted: vec![QueueLease::new(accounting)],
+        admitted: vec![QueueLease::new(accounting)],
         pending_attribution: PendingFrameLease::new(accounting, batch_attribution),
     });
     current.snapshot = Some(SnapshotEnvelope {
@@ -1101,12 +1102,12 @@ impl CompactSubscription {
             self.snapshot_slot.clear();
             return (SubscriptionReceive::ResnapshotRequired, None);
         }
-        self.coalesce_queued(first)
+        self.coalesce_queued(&first)
     }
 
     fn coalesce_queued(
         &mut self,
-        retained: CompactQueuedEvent,
+        retained: &CompactQueuedEvent,
     ) -> (SubscriptionReceive, Option<ProcessExit>) {
         if let CompactQueuedEvent::Exited {
             incarnation,
@@ -1116,8 +1117,8 @@ impl CompactSubscription {
         {
             return (
                 SubscriptionReceive::Event(LiveEvent::Exited {
-                    incarnation,
-                    status,
+                    incarnation: *incarnation,
+                    status: *status,
                 }),
                 None,
             );
@@ -1162,8 +1163,9 @@ impl CompactSubscription {
                     trailing_exit = Some(status);
                     break;
                 }
-                Err(mpsc::error::TryRecvError::Empty)
-                | Err(mpsc::error::TryRecvError::Disconnected) => break,
+                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                    break;
+                }
             }
         }
 
@@ -1554,6 +1556,10 @@ impl RuntimeMetrics {
         );
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "runtime metrics snapshot explicitly loads every independent counter"
+    )]
     fn snapshot(&self) -> LiveRuntimeMetrics {
         LiveRuntimeMetrics {
             command_queue_high_water: self.command_queue_high_water.load(Ordering::Relaxed),
@@ -2787,6 +2793,10 @@ fn handle_command(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "subscriber publication keeps ordering, admission, and resync decisions in one transaction"
+)]
 fn publish_updates(
     splint_id: SplintId,
     terminal: &Terminal,
@@ -2837,12 +2847,12 @@ fn publish_updates(
             SubscriberEvents::Legacy(sender) => {
                 let permit = match sender.try_reserve() {
                     Ok(permit) => permit,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
+                    Err(mpsc::error::TrySendError::Full(())) => {
                         subscriber.resnapshot.send_replace(true);
                         overflows = overflows.saturating_add(1);
                         return false;
                     }
-                    Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                    Err(mpsc::error::TrySendError::Closed(())) => return false,
                 };
                 let snapshot =
                     owned_snapshot(splint_id, incarnation, terminal, snapshot_rows, child_exit);
@@ -2946,6 +2956,7 @@ fn set_terminal_pixel_geometry(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "PTY parsing, immutable frame capture, replies, and subscriber publication form one actor transaction"
 )]
 fn process_output(
@@ -3083,12 +3094,12 @@ fn publish_exit(
         SubscriberEvents::Legacy(sender) => {
             let permit = match sender.try_reserve() {
                 Ok(permit) => permit,
-                Err(mpsc::error::TrySendError::Full(_)) => {
+                Err(mpsc::error::TrySendError::Full(())) => {
                     overflows = overflows.saturating_add(1);
                     subscriber.resnapshot.send_replace(true);
                     return false;
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                Err(mpsc::error::TrySendError::Closed(())) => return false,
             };
             permit.send(LiveEvent::Exited {
                 incarnation,
@@ -3104,13 +3115,13 @@ fn publish_exit(
         } => {
             let permit = match sender.try_reserve() {
                 Ok(permit) => permit,
-                Err(mpsc::error::TrySendError::Full(_)) => {
+                Err(mpsc::error::TrySendError::Full(())) => {
                     overflows = overflows.saturating_add(1);
                     snapshot_slot.clear();
                     subscriber.resnapshot.send_replace(true);
                     return false;
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(mpsc::error::TrySendError::Closed(())) => {
                     snapshot_slot.clear();
                     return false;
                 }
@@ -3770,6 +3781,10 @@ mod tests {
         ));
     }
 
+    #[allow(
+        clippy::similar_names,
+        reason = "receiver names distinguish the channel from its delivered event"
+    )]
     #[tokio::test]
     async fn coalesced_receive_materializes_only_the_latest_snapshot_and_preserves_order() {
         let incarnation = ProcessIncarnation::allocate();
@@ -3829,6 +3844,10 @@ mod tests {
         assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 1);
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one concurrency regression covers paused construction, receiver progress, and resumed delivery"
+    )]
     #[tokio::test]
     async fn compact_snapshot_build_does_not_block_receiver_or_overflow_fast_tail() {
         let incarnation = ProcessIncarnation::allocate();
@@ -4225,6 +4244,10 @@ mod tests {
         assert_eq!(metrics.snapshot().subscriber_queue_events_current, 0);
     }
 
+    #[allow(
+        clippy::similar_names,
+        reason = "receiver names distinguish the channel from its delivered event"
+    )]
     #[tokio::test]
     async fn coalesced_receive_preserves_trailing_exit_and_resnapshot_precedence() {
         let incarnation = ProcessIncarnation::allocate();
@@ -4363,8 +4386,10 @@ mod tests {
     #[test]
     fn synchronized_publication_timeout_is_fixed_and_commits_one_frame() {
         let incarnation = ProcessIncarnation::allocate();
-        let mut config = TerminalConfig::default();
-        config.update_history_limit = 4;
+        let config = TerminalConfig {
+            update_history_limit: 4,
+            ..TerminalConfig::default()
+        };
         let mut terminal = Terminal::new(8, 2, config);
         let initial_revision = terminal.revision();
         let (subscriber, mut receiver, resnapshot) = synchronized_test_subscriber(&terminal);
@@ -4415,8 +4440,10 @@ mod tests {
     #[test]
     fn publication_history_gap_requests_resnapshot_without_panicking() {
         let incarnation = ProcessIncarnation::allocate();
-        let mut config = TerminalConfig::default();
-        config.update_history_limit = 4;
+        let config = TerminalConfig {
+            update_history_limit: 4,
+            ..TerminalConfig::default()
+        };
         let mut terminal = Terminal::new(8, 2, config);
         let (subscriber, _receiver, resnapshot) = synchronized_test_subscriber(&terminal);
         let mut subscribers = vec![subscriber];
@@ -4607,7 +4634,7 @@ mod tests {
                 batches: vec![Vec::new()],
                 end_revision: terminal.revision(),
                 history_policy: CompactHistoryPolicy::AppendTail(1),
-                _admitted: Vec::new(),
+                admitted: Vec::new(),
                 pending_attribution: None,
             });
             current.snapshot = Some(SnapshotEnvelope {

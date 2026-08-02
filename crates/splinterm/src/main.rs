@@ -3103,7 +3103,7 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
             else {
                 anyhow::bail!("splinterd returned an unexpected response to list")
             };
-            print_dojos(dojos, all);
+            print_dojos(&dojos, all);
             Ok(())
         }
         Command::Topology => print_response(connection.request(Request::InspectTopology).await?),
@@ -4749,6 +4749,7 @@ async fn resolve_update_images(
 }
 
 #[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "subscription ordering and controller resynchronization form one pane lifecycle"
 )]
@@ -5774,8 +5775,8 @@ fn render_dojos(dojos: &[splinterm_core::Dojo], all: bool) -> String {
     output
 }
 
-fn print_dojos(dojos: Vec<splinterm_core::Dojo>, all: bool) {
-    print!("{}", render_dojos(&dojos, all));
+fn print_dojos(dojos: &[splinterm_core::Dojo], all: bool) {
+    print!("{}", render_dojos(dojos, all));
 }
 
 #[allow(
@@ -5788,7 +5789,7 @@ fn print_response(response: Response) -> Result<()> {
         Response::MutationPrepared { .. } => {
             println!("Mutation preflight prepared.");
         }
-        Response::Dojos { dojos, .. } => print_dojos(dojos, true),
+        Response::Dojos { dojos, .. } => print_dojos(&dojos, true),
         Response::DojoCreated { dojo, .. } => println!("Created dojo '{}'.", dojo.name),
         Response::Topology { snapshot } => println!(
             "Topology revision {}: {} dojo(s), {} Splint(s)",

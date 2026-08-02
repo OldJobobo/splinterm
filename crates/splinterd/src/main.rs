@@ -757,7 +757,7 @@ async fn main() -> Result<()> {
                 result.context("failed to listen for shutdown signal")?;
                 break;
             }
-            _ = &mut image_transfer_expiry => {
+            () = &mut image_transfer_expiry => {
                 image_transfer_expiry
                     .as_mut()
                     .reset(image_transfer_expiry_deadline(&state, true).await);
@@ -922,8 +922,9 @@ async fn serve_image_content_client(mut stream: UnixStream, state: Arc<DaemonSta
         result?;
         finish.map_err(|error| anyhow::anyhow!(error))
     };
-    let _peer_monitor = peer_monitor;
-    transfer.await
+    let result = transfer.await;
+    drop(peer_monitor);
+    result
 }
 
 async fn send_image_content_memfd(
@@ -952,7 +953,7 @@ async fn send_image_content_memfd(
         ) {
             Ok(1) => break,
             Ok(_) => bail!("image descriptor marker write was incomplete"),
-            Err(error) if error == rustix::io::Errno::WOULDBLOCK => continue,
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => {}
             Err(error) => return Err(error).context("image descriptor send failed"),
         }
     }
@@ -5098,6 +5099,10 @@ fn frame_within_policy_limit(frame: &ServerFrame, maximum: Option<usize>) -> boo
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "subscription delivery keeps grant expiry, resync, and event ordering in one task"
+)]
 fn spawn_subscription(
     id: u64,
     mut subscription: CompactSubscription,
@@ -5571,6 +5576,10 @@ fn bound_wire_scrolls(scrolls: &mut Vec<TerminalScroll>, damaged: &mut [bool]) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "wire update materialization handles every independent terminal damage class"
+)]
 fn wire_update(
     updates: &[TerminalUpdate],
     snapshot: &LiveSnapshot,
@@ -6261,6 +6270,10 @@ mod tests {
         sender.await.unwrap().unwrap();
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one lifecycle test covers drop and cancelled-finish cleanup paths"
+    )]
     #[tokio::test]
     async fn dropped_content_sender_releases_active_transfer_capacity() {
         use splinterm_terminal::{

@@ -281,11 +281,9 @@ impl SixelDecoder {
     }
 
     fn finish_raster(&mut self) -> Result<(), SixelError> {
-        let pan = self.params[0].clamp(1, 5);
-        let pad = self.params[1].clamp(1, 5);
         if self.width == 0 && self.height == 0 {
-            self.pan = pan;
-            self.pad = pad;
+            self.pan = self.params[0].clamp(1, 5);
+            self.pad = self.params[1].clamp(1, 5);
         }
         let width = self.params[2]
             .checked_mul(self.pad)
