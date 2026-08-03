@@ -210,8 +210,9 @@ Phase 8 uses the stable identity `com.oldjobobo.splinterm`. The files under
 `dist/` provide the desktop entry, icon, AppStream metadata, systemd user unit,
 `xdg-terminals.list` entry, and `splinterm-xdg-terminal-exec` launcher. The
 launcher preserves command arguments and working directory without shell
-interpolation. Project-owned configuration and Omarchy theme templates live in
-`config/`; open clients safely reload generated theme roles. See
+interpolation. Open clients read and safely reload the active Omarchy Quattro
+`colors.toml` and effective `foot.ini` directly, with no hook or generated
+runtime palette. Project-owned configuration lives in `config/`; see
 [`docs/configuration.md`](docs/configuration.md) for the supported Foot subset
 and migration guide.
 
@@ -264,7 +265,7 @@ cargo run -p splinterm -- window
 # Workspace-8-safe human review launcher
 tools/run-wayland-window-demo.py
 
-# Generate a project-owned theme from an Omarchy colors.toml
+# Optionally export an Omarchy palette as an explicit portable JSON override
 python tools/generate-omarchy-theme.py /path/to/colors.toml --output /tmp/theme.json
 
 # Exercise the xdg-terminal-exec-compatible contract without installing it

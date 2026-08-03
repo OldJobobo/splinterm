@@ -78,8 +78,6 @@ package_splinterm() {
 
   install -Dm644 config/splinterm/config.ini "$pkgdir/usr/share/doc/splinterm/config.ini"
   install -Dm644 config/splinterm/theme.json "$pkgdir/usr/share/doc/splinterm/theme.json"
-  install -Dm644 config/omarchy/hooks/theme-set.d/10-splinterm.sh \
-    "$pkgdir/usr/share/doc/splinterm/omarchy/10-splinterm.sh"
   install -Dm644 dist/xdg-terminals.list "$pkgdir/usr/share/doc/splinterm/xdg-terminals.list"
   install -Dm644 docs/packaging.md "$pkgdir/usr/share/doc/splinterm/packaging.md"
   install -Dm644 docs/headless.md "$pkgdir/usr/share/doc/splinterm/headless.md"

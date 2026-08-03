@@ -48,8 +48,8 @@ versioned immutable source URL and checksum.
   policy-authorized `/usr/bin/splinterm-mcp`, its setup guide, and notices;
 - `/usr/bin/splinterm-xdg-terminal-exec`, its `splinterm-sessions` and
   `splinterm-reopen` session UX aliases, the public-CLI-only
-  `/usr/bin/splinterm-session-picker` reference client, and
-  `/usr/bin/generate-omarchy-theme.py`;
+  `/usr/bin/splinterm-session-picker` reference client, and the optional
+  `/usr/bin/generate-omarchy-theme.py` JSON exporter;
 - desktop entry, AppStream metadata, scalable icon, and user service;
 - headless lifecycle/policy guidance, the exact terminal-image compatibility
   matrix, and integration snippets under `/usr/share/doc/splinterm/`; and
@@ -70,16 +70,9 @@ and [mcp.md](mcp.md) for the optional adapter's host and digest-policy setup.
 
 ## Optional user integration
 
-To apply Omarchy themes, copy the packaged hook once:
-
-```bash
-mkdir -p ~/.config/omarchy/hooks/theme-set.d
-install -m755 /usr/share/doc/splinterm/omarchy/10-splinterm.sh \
-  ~/.config/omarchy/hooks/theme-set.d/10-splinterm.sh
-~/.config/omarchy/hooks/theme-set.d/10-splinterm.sh
-```
-
-To prefer Splinterm through `xdg-terminal-exec`, prepend its desktop ID to the
+Splinterm follows the active Omarchy Quattro theme natively; no theme hook or
+user-generated palette is required. To prefer Splinterm through
+`xdg-terminal-exec`, prepend its desktop ID to the
 user-owned preference file; do not overwrite existing entries:
 
 ```text
@@ -135,5 +128,5 @@ sudo pacman -U packaging/splinterm-mcp-0.1.0.pre-1-x86_64.pkg.tar.zst
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional
 package is already installed; it never opts a user in. Remove it independently
 with `sudo pacman -Rns splinterm-mcp`. Remove the main package with
-`sudo pacman -Rns splinterm`. User-owned config, theme hooks, policy, and durable
-state are deliberately not deleted by package scripts.
+`sudo pacman -Rns splinterm`. User-owned config, explicit theme overrides,
+policy, and durable state are deliberately not deleted by package scripts.

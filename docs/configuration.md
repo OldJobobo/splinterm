@@ -22,7 +22,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `main.app-id` | diagnostic only | fixed to `com.oldjobobo.splinterm` |
 | `main.resize-delay-ms` | bounded delay before resize command | 0–1000; 0 |
 | `main.dpi-aware` | deprecated **legacy Splinterm** key: `yes` maps only to `output-scale`; `no` fails with migration guidance | unset |
-| `main.theme` | generated JSON role map | `~/.config/splinterm/theme.json` |
+| `main.theme` | explicit Splinterm JSON palette override; disables native Omarchy discovery | unset |
 | `colors.alpha` | optional Foot-compatible override for theme background translucency | 0.0–1.0; unset (theme-owned) |
 | `colors.blur` | optional native background-blur request | strict boolean; unset (theme-owned, otherwise `no`) |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
@@ -32,9 +32,9 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 
 Malformed supported values fail startup. Unknown sections and keys print
-line-numbered diagnostics. Background alpha and blur normally come atomically
-from the active Omarchy theme's `foot.ini`; `[colors] alpha` and `[colors] blur`
-are explicit user overrides. Whichever alpha source wins follows Foot's default
+line-numbered diagnostics. By default, palette roles come directly from the
+active Omarchy theme's `colors.toml` and effective `foot.ini`; `[colors] alpha`
+and `[colors] blur` are explicit user overrides. Whichever alpha source wins follows Foot's default
 alpha mode: only cells whose background source is default are translucent;
 explicit and reverse-video backgrounds remain opaque. When blur resolves to
 `yes`, alpha is translucent, and the compositor advertises
@@ -44,9 +44,9 @@ or capability falls back to ordinary transparency with one bounded diagnostic;
 opaque alpha and `blur=no` own no effect object. The protocol is still staging;
 the validated initial target is Hyprland 0.56.1 or newer, while other
 compositors require compatible version-1 blur capability. `alpha-mode=matching/all`
-remains unsupported. Other `[colors]` options direct users to generated
-`theme.json`, and
-`[key-bindings]` options explain that MVP bindings are not remappable. This
+remains unsupported. Other `[colors]` options direct users to the active
+Omarchy palette or an explicit `main.theme` JSON override, and `[key-bindings]`
+options explain that MVP bindings are not remappable. This
 avoids claiming arbitrary `foot.ini` compatibility.
 
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste and Ctrl+Shift+S
@@ -125,24 +125,26 @@ Foot options outside the table—server mode, pad geometry, URL modes, arbitrary
 bindings, notifications, and advanced rendering controls—are unsupported in
 this MVP and produce diagnostics when represented as unknown keys.
 
-## Theme role bridge
+## Native Omarchy theme integration
 
-`tools/generate-omarchy-theme.py THEME/colors.toml` maps semantic or legacy
-Omarchy palette roles into a strict project-owned JSON file. It reads background
-alpha and blur from one selected section in the sibling theme `foot.ini`:
-`[colors-dark]` takes precedence over legacy `[colors]`, and `[colors-light]` is
-ignored. Absent alpha defaults opaque and absent blur defaults off. Writes are
-atomic. Splinterm polls that file every 500 ms, validates all roles, colors,
-alpha, and blur, and updates the terminal palette, translucency, native effect,
-cursor, selection, URL, and focus chrome without restarting
-the daemon or shell. The optional `pane_border` role defaults to a midpoint of
-background and foreground, while `pane_border_active` defaults to `ui_accent`,
-so older generated themes remain valid. Invalid changes are rejected and the
-last valid palette remains active; a missing startup file uses the documented
-safe fallback in `config/splinterm/theme.json`.
+With `main.theme` unset, Splinterm reads the active Quattro theme directly from
+`${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective
+`foot.ini` supplies the terminal foreground/background, ANSI 16, cursor,
+selection, alpha, and blur; `colors.toml` supplies the Omarchy UI accent used by
+trusted surfaces and active pane chrome. `[colors-dark]` takes precedence over
+legacy `[colors]`, while absent alpha defaults opaque and absent blur defaults
+off.
 
-After installing the generator, Omarchy 4 users should copy
-`config/omarchy/hooks/theme-set.d/10-splinterm.sh` into
-`~/.config/omarchy/hooks/theme-set.d/`. The legacy single-hook template remains
-at `config/omarchy/hooks/theme-set`. Both read the active Omarchy state/theme
-directory and never modify `/usr/share/omarchy/` or a stock theme.
+Splinterm fingerprints the active directory plus both source files every 500 ms.
+This detects Omarchy's atomic current-theme directory replacement and applies a
+valid palette through the existing live theme channel without restarting the
+daemon, shell, or Wayland window. A transiently incomplete replacement or
+malformed live theme retains the last valid palette and reports one bounded
+diagnostic. If Omarchy state is absent at startup, Splinterm uses its bundled
+safe fallback.
+
+No theme hook, generated file, or manual integration step is required. Setting
+`main.theme=/path/to/theme.json` explicitly opts out of Omarchy discovery for
+portable or isolated use. The strict JSON schema retains `pane_border` and
+`pane_border_active` overrides; `tools/generate-omarchy-theme.py` remains only
+an optional exporter for that override format.

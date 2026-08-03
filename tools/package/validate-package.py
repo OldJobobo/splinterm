@@ -38,7 +38,6 @@ REQUIRED = {
     "usr/share/doc/splinterm/headless.md",
     "usr/share/doc/splinterm/integrations.md",
     "usr/share/doc/splinterm/images.md",
-    "usr/share/doc/splinterm/omarchy/10-splinterm.sh",
     "usr/share/doc/splinterm/packaging.md",
     "usr/share/doc/splinterm/remote.md",
     "usr/share/doc/splinterm/theme.json",

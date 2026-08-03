@@ -1,4 +1,4 @@
-//! Project-owned MVP configuration and Omarchy palette bridge.
+//! Project-owned MVP configuration and native Omarchy palette integration.
 //!
 //! This parser deliberately accepts only the documented Foot-compatible subset.
 //! Unknown sections and keys are diagnostics, never silently accepted compatibility.
@@ -10,7 +10,9 @@
 )]
 
 use std::{
+    collections::HashMap,
     env, fs,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -43,7 +45,9 @@ pub struct AppConfig {
     /// Optional native background-blur override (`[colors] blur`).
     /// When absent, the active theme owns the requested blur state.
     pub background_blur: Option<bool>,
-    pub theme_path: PathBuf,
+    /// Explicit project JSON override. When absent, Splinterm follows the
+    /// active Omarchy theme directly.
+    pub theme_path: Option<PathBuf>,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
 }
@@ -89,7 +93,7 @@ impl Default for AppConfig {
             resize_delay_ms: 0,
             background_alpha: None,
             background_blur: None,
-            theme_path: default_config_dir().join("theme.json"),
+            theme_path: None,
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
         }
@@ -100,6 +104,22 @@ impl Default for AppConfig {
 pub struct ConfigLoad {
     pub config: AppConfig,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThemeSource {
+    Omarchy(PathBuf),
+    Json(PathBuf),
+}
+
+impl AppConfig {
+    #[must_use]
+    pub fn theme_source(&self) -> ThemeSource {
+        self.theme_path.clone().map_or_else(
+            || ThemeSource::Omarchy(default_omarchy_theme_dir()),
+            ThemeSource::Json,
+        )
+    }
 }
 
 pub fn default_config_dir() -> PathBuf {
@@ -113,6 +133,19 @@ pub fn default_config_dir() -> PathBuf {
             PathBuf::from,
         )
         .join("splinterm")
+}
+
+pub fn default_omarchy_theme_dir() -> PathBuf {
+    env::var_os("XDG_STATE_HOME")
+        .map_or_else(
+            || {
+                env::var_os("HOME")
+                    .map_or_else(|| PathBuf::from("."), PathBuf::from)
+                    .join(".local/state")
+            },
+            PathBuf::from,
+        )
+        .join("omarchy/current/theme")
 }
 
 /// Loads the supported configuration from the standard or overridden path.
@@ -290,7 +323,7 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
                 false
             }
             "main.theme" => {
-                config.theme_path = expand_path(value);
+                config.theme_path = Some(expand_path(value));
                 false
             }
             "colors.alpha" => {
@@ -343,7 +376,7 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
             }
             key if key.starts_with("colors.") => {
                 diagnostics.push(format!(
-                    "line {}: put colors in the generated theme JSON; {key} ignored",
+                    "line {}: colors come from the active Omarchy theme or explicit main.theme JSON; {key} ignored",
                     index + 1
                 ));
                 false
@@ -534,7 +567,216 @@ impl ThemePalette {
     }
 }
 
-/// Loads a generated Omarchy role map, or the safe fallback when absent.
+fn omarchy_color_values(raw: &str) -> HashMap<String, String> {
+    let mut colors = HashMap::new();
+    for line in raw.lines() {
+        let Some((key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key: String = key
+            .chars()
+            .filter(|character| !matches!(character, '"' | '\'' | ' ' | '\t'))
+            .collect();
+        if key.is_empty() || key.starts_with('#') {
+            continue;
+        }
+        let value = if let Some(start) = raw_value.find(['"', '\'']) {
+            let quoted = &raw_value[start + 1..];
+            let end = quoted.find(['"', '\'']).unwrap_or(quoted.len());
+            quoted[..end].to_owned()
+        } else {
+            raw_value.trim().to_owned()
+        };
+        colors.insert(key, value);
+    }
+    colors
+}
+
+fn foot_color_values(raw: &str) -> HashMap<String, String> {
+    let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut section = String::new();
+    let mut colors_dark_seen = false;
+    for raw_line in raw.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            colors_dark_seen |= section == "colors-dark";
+            continue;
+        }
+        if !matches!(section.as_str(), "colors" | "colors-dark") {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        sections
+            .entry(section.clone())
+            .or_default()
+            .insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
+    }
+    if colors_dark_seen {
+        sections.remove("colors-dark").unwrap_or_default()
+    } else {
+        sections.remove("colors").unwrap_or_default()
+    }
+}
+
+fn foot_theme_color(values: &HashMap<String, String>, key: &str) -> Result<u32> {
+    parse_color(
+        values
+            .get(key)
+            .with_context(|| format!("active Omarchy foot.ini is missing {key}"))?,
+    )
+    .with_context(|| format!("active Omarchy foot.ini has invalid {key}"))
+}
+
+fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedTheme> {
+    let colors = omarchy_color_values(colors_raw);
+    let foot = foot_color_values(foot_raw);
+    if foot.is_empty() {
+        bail!("active Omarchy foot.ini has no [colors-dark] or [colors] palette");
+    }
+
+    let mut ansi = [0_u32; 16];
+    for (index, output) in ansi.iter_mut().enumerate().take(8) {
+        *output = foot_theme_color(&foot, &format!("regular{index}"))?;
+    }
+    for (index, output) in ansi.iter_mut().enumerate().skip(8) {
+        *output = foot_theme_color(&foot, &format!("bright{}", index - 8))?;
+    }
+
+    let background = foot_theme_color(&foot, "background")?;
+    let foreground = foot_theme_color(&foot, "foreground")?;
+    let selection = foot
+        .get("selection-background")
+        .map(|value| parse_color(value))
+        .transpose()
+        .context("active Omarchy foot.ini has invalid selection-background")?
+        .unwrap_or(ansi[8]);
+    let cursor = foot
+        .get("cursor")
+        .and_then(|value| value.split_whitespace().last())
+        .map(parse_color)
+        .transpose()
+        .context("active Omarchy foot.ini has invalid cursor")?
+        .unwrap_or(foreground);
+    let ui_accent = ["accent", "cursor", "color4", "blue"]
+        .iter()
+        .find_map(|key| colors.get(*key))
+        .map(|value| parse_color(value))
+        .transpose()
+        .context("active Omarchy colors.toml has invalid accent")?
+        .unwrap_or(cursor);
+    let alpha = foot.get("alpha").map_or(Ok(1.0), |value| {
+        value
+            .parse::<f32>()
+            .context("active Omarchy foot.ini alpha must be a number")
+    })?;
+    if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+        bail!("active Omarchy foot.ini alpha must be between 0.0 and 1.0");
+    }
+    let blur = foot.get("blur").map_or(Ok(false), |value| {
+        match value.to_ascii_lowercase().as_str() {
+            "yes" | "true" | "on" | "1" => Ok(true),
+            "no" | "false" | "off" | "0" => Ok(false),
+            _ => bail!("active Omarchy foot.ini blur must be a boolean"),
+        }
+    })?;
+
+    Ok(ResolvedTheme {
+        background,
+        foreground,
+        cursor,
+        selection,
+        url: ansi[4],
+        ui_accent,
+        pane_border: ansi[8],
+        pane_border_active: ui_accent,
+        background_alpha: foot_alpha(alpha),
+        background_blur: blur,
+        ansi,
+    })
+}
+
+type OmarchySourceIdentity = Option<(u64, u64, u64, i64, i64)>;
+
+fn omarchy_path_identity(path: &Path) -> OmarchySourceIdentity {
+    let metadata = fs::metadata(path).ok()?;
+    Some((
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+    ))
+}
+
+fn omarchy_theme_identity(
+    theme_dir: &Path,
+) -> (
+    OmarchySourceIdentity,
+    OmarchySourceIdentity,
+    OmarchySourceIdentity,
+) {
+    (
+        omarchy_path_identity(theme_dir),
+        omarchy_path_identity(&theme_dir.join("colors.toml")),
+        omarchy_path_identity(&theme_dir.join("foot.ini")),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MissingOmarchyTheme {
+    UseFallback,
+    Reject,
+}
+
+fn load_omarchy_theme_with(
+    theme_dir: &Path,
+    missing: MissingOmarchyTheme,
+    after_identity: impl FnOnce(),
+    between_reads: impl FnOnce(),
+) -> Result<ResolvedTheme> {
+    let colors_path = theme_dir.join("colors.toml");
+    let foot_path = theme_dir.join("foot.ini");
+    let before = omarchy_theme_identity(theme_dir);
+    if missing == MissingOmarchyTheme::UseFallback
+        && before.0.is_none()
+        && before.1.is_none()
+        && before.2.is_none()
+    {
+        return Ok(ResolvedTheme::default());
+    }
+    after_identity();
+    let colors = fs::read_to_string(&colors_path)
+        .with_context(|| format!("read {}", colors_path.display()))?;
+    between_reads();
+    let foot =
+        fs::read_to_string(&foot_path).with_context(|| format!("read {}", foot_path.display()))?;
+    anyhow::ensure!(
+        omarchy_theme_identity(theme_dir) == before,
+        "active Omarchy theme changed while its palette was loading"
+    );
+    resolve_omarchy_theme(&colors, &foot)
+}
+
+/// Loads the effective active Omarchy terminal palette directly.
+///
+/// # Errors
+/// Returns an error when an active theme exists but its `colors.toml` or
+/// generated `foot.ini` cannot be read as one coherent theme generation.
+pub fn load_omarchy_theme(theme_dir: &Path) -> Result<ResolvedTheme> {
+    load_omarchy_theme_with(theme_dir, MissingOmarchyTheme::UseFallback, || {}, || {})
+}
+
+fn load_live_omarchy_theme(theme_dir: &Path) -> Result<ResolvedTheme> {
+    load_omarchy_theme_with(theme_dir, MissingOmarchyTheme::Reject, || {}, || {})
+}
+
+/// Loads an explicit project JSON role map, or the safe fallback when absent.
 ///
 /// # Errors
 /// Returns an error when an existing theme file is unreadable or invalid.
@@ -544,8 +786,32 @@ pub fn load_theme(path: &Path) -> Result<ResolvedTheme> {
     }
     let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str::<ThemePalette>(&raw)
-        .context("parse generated Omarchy theme JSON")?
+        .context("parse explicit Splinterm theme JSON")?
         .resolve()
+}
+
+/// Resolves either native Omarchy state or an explicit JSON override.
+///
+/// # Errors
+/// Returns an error when the selected source exists but is malformed.
+pub fn load_theme_source(source: &ThemeSource) -> Result<ResolvedTheme> {
+    match source {
+        ThemeSource::Omarchy(theme_dir) => load_omarchy_theme(theme_dir),
+        ThemeSource::Json(path) => load_theme(path),
+    }
+}
+
+/// Resolves a live source without converting transient native-theme absence
+/// into the startup fallback palette.
+///
+/// # Errors
+/// Returns an error when a native theme is absent, incomplete, changing, or
+/// malformed, or when an explicit JSON override is invalid.
+pub fn load_live_theme_source(source: &ThemeSource) -> Result<ResolvedTheme> {
+    match source {
+        ThemeSource::Omarchy(theme_dir) => load_live_omarchy_theme(theme_dir),
+        ThemeSource::Json(path) => load_theme(path),
+    }
 }
 
 #[allow(
@@ -558,9 +824,18 @@ fn foot_alpha(alpha: f32) -> u16 {
 }
 
 fn parse_color(value: &str) -> Result<u32> {
-    let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    let value = value.trim();
+    let hex = value
+        .strip_prefix('#')
+        .or_else(|| value.strip_prefix("0x"))
+        .unwrap_or(value);
+    let hex = if value.starts_with("0x") && hex.len() == 8 {
+        &hex[2..]
+    } else {
+        hex
+    };
     if hex.len() != 6 {
-        bail!("color {value:?} must be #RRGGBB");
+        bail!("color {value:?} must be #RRGGBB or 0xRRGGBB");
     }
     u32::from_str_radix(hex, 16).with_context(|| format!("invalid color {value:?}"))
 }
@@ -712,6 +987,142 @@ mod tests {
         }
         assert!(parse("[multiplexer]\ndivider-style=tmux\n").is_err());
         assert!(parse("[multiplexer]\nframe-title=osc\n").is_err());
+    }
+
+    #[test]
+    fn theme_source_defaults_to_native_omarchy_and_allows_explicit_json() {
+        let defaults = AppConfig::default();
+        assert!(defaults.theme_path.is_none());
+        assert!(matches!(defaults.theme_source(), ThemeSource::Omarchy(_)));
+
+        let loaded = parse("[main]\ntheme=/tmp/splinterm-theme.json\n")
+            .unwrap()
+            .config;
+        assert_eq!(
+            loaded.theme_source(),
+            ThemeSource::Json(PathBuf::from("/tmp/splinterm-theme.json"))
+        );
+    }
+
+    #[test]
+    fn native_omarchy_theme_uses_effective_foot_palette_and_semantic_accent() {
+        let colors = "accent = \"0x010203\" # inline comment\n";
+        let foot = "[colors]\nforeground=000003\nbackground=000001\nselection-background=000004\ncursor=000001 000006\nalpha=0.75\nblur=yes\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n";
+        let theme = resolve_omarchy_theme(colors, foot).unwrap();
+        assert_eq!(theme.background, 1);
+        assert_eq!(theme.foreground, 3);
+        assert_eq!(theme.cursor, 6);
+        assert_eq!(theme.selection, 4);
+        assert_eq!(theme.url, 4);
+        assert_eq!(theme.ui_accent, 0x01_02_03);
+        assert_eq!(theme.pane_border, 8);
+        assert_eq!(theme.pane_border_active, 0x01_02_03);
+        assert_eq!(
+            theme.ansi,
+            std::array::from_fn(|index| u32::try_from(index).unwrap())
+        );
+        assert_eq!(theme.background_alpha, foot_alpha(0.75));
+        assert!(theme.background_blur);
+    }
+
+    #[test]
+    fn native_omarchy_theme_prefers_colors_dark_and_rejects_incomplete_input() {
+        let complete = |background: &str| {
+            format!(
+                "foreground=000003\nbackground={background}\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n"
+            )
+        };
+        let foot = format!(
+            "[colors]\n{}[colors-dark]\n{}",
+            complete("000001"),
+            complete("000002")
+        );
+        assert_eq!(
+            resolve_omarchy_theme("cursor=\"#000006\"", &foot)
+                .unwrap()
+                .background,
+            2
+        );
+        assert!(
+            resolve_omarchy_theme("accent=\"#000006\"", "[colors-dark]\nbackground=000001")
+                .unwrap_err()
+                .to_string()
+                .contains("missing regular0")
+        );
+        let empty_dark = format!("[colors]\n{}[colors-dark]\n", complete("000001"));
+        assert!(
+            resolve_omarchy_theme("accent=\"#000006\"", &empty_dark)
+                .unwrap_err()
+                .to_string()
+                .contains("no [colors-dark] or [colors] palette")
+        );
+    }
+
+    #[test]
+    fn native_omarchy_theme_rejects_cross_generation_reads() {
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-native-theme-snapshot-{}",
+            std::process::id()
+        ));
+        let theme = root.join("theme");
+        let old = root.join("old");
+        let next = root.join("next");
+        let foot = |background: &str| {
+            format!(
+                "[colors-dark]\nforeground=000003\nbackground={background}\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n"
+            )
+        };
+        for (directory, accent, background) in
+            [(&theme, "#000006", "000001"), (&next, "#000007", "000002")]
+        {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::write(
+                directory.join("colors.toml"),
+                format!("accent=\"{accent}\"\n"),
+            )
+            .unwrap();
+            std::fs::write(directory.join("foot.ini"), foot(background)).unwrap();
+        }
+        let error = load_omarchy_theme_with(
+            &theme,
+            MissingOmarchyTheme::Reject,
+            || {},
+            || {
+                std::fs::rename(&theme, &old).unwrap();
+                std::fs::rename(&next, &theme).unwrap();
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("changed while its palette was loading"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_live_theme_never_publishes_fallback_during_replacement_gap() {
+        let root =
+            std::env::temp_dir().join(format!("splinterm-native-theme-gap-{}", std::process::id()));
+        let theme = root.join("theme");
+        let displaced = root.join("displaced");
+        std::fs::create_dir_all(&theme).unwrap();
+        std::fs::write(theme.join("colors.toml"), "accent=\"#000006\"\n").unwrap();
+        std::fs::write(theme.join("foot.ini"), "[colors-dark]\n").unwrap();
+
+        let error = load_omarchy_theme_with(
+            &theme,
+            MissingOmarchyTheme::Reject,
+            || std::fs::rename(&theme, &displaced).unwrap(),
+            || {},
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("colors.toml"));
+        assert!(load_live_omarchy_theme(&theme).is_err());
+        assert_eq!(
+            load_omarchy_theme(&theme).unwrap(),
+            ResolvedTheme::default()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

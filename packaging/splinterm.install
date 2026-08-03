@@ -1,6 +1,6 @@
 post_install() {
   echo 'Splinterm installed as a private prerelease.'
-  echo 'Copy /usr/share/doc/splinterm/omarchy/10-splinterm.sh into ~/.config/omarchy/hooks/theme-set.d/ for theme switching.'
+  echo 'Active Omarchy Quattro themes are discovered and reloaded automatically; no theme hook is required.'
   echo 'Add com.oldjobobo.splinterm.desktop to ~/.config/xdg-terminals.list when ready to make it preferred.'
 }
 

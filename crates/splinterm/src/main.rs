@@ -32,7 +32,10 @@ use splinterm::{
         socket_path as configured_socket_path, terminal_action_envelope,
         terminal_snapshot_envelope, write_json_document,
     },
-    config::{AppConfig, ConfigLoad, ResolvedTheme, load_default, load_theme},
+    config::{
+        AppConfig, ConfigLoad, ResolvedTheme, ThemeSource, load_default, load_live_theme_source,
+        load_theme_source,
+    },
     renderer::{self, RendererOptions},
     run_window,
     session_picker::{RecentWindows, SessionEntry, collect_sessions},
@@ -4609,7 +4612,9 @@ async fn run_controller(
     result
 }
 
-fn theme_file_fingerprint(path: &std::path::Path) -> Option<(u64, u64, u64, i64, i64)> {
+type ThemeFileFingerprint = (u64, u64, u64, i64, i64);
+
+fn theme_file_fingerprint(path: &std::path::Path) -> Option<ThemeFileFingerprint> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((
         metadata.dev(),
@@ -4620,12 +4625,33 @@ fn theme_file_fingerprint(path: &std::path::Path) -> Option<(u64, u64, u64, i64,
     ))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ThemeSourceFingerprint {
+    Omarchy {
+        directory: Option<ThemeFileFingerprint>,
+        colors: Option<ThemeFileFingerprint>,
+        foot: Option<ThemeFileFingerprint>,
+    },
+    Json(Option<ThemeFileFingerprint>),
+}
+
+fn theme_source_fingerprint(source: &ThemeSource) -> ThemeSourceFingerprint {
+    match source {
+        ThemeSource::Omarchy(theme_dir) => ThemeSourceFingerprint::Omarchy {
+            directory: theme_file_fingerprint(theme_dir),
+            colors: theme_file_fingerprint(&theme_dir.join("colors.toml")),
+            foot: theme_file_fingerprint(&theme_dir.join("foot.ini")),
+        },
+        ThemeSource::Json(path) => ThemeSourceFingerprint::Json(theme_file_fingerprint(path)),
+    }
+}
+
 fn resolve_configured_theme(
-    path: &Path,
+    source: &ThemeSource,
     alpha_override: Option<u16>,
     blur_override: Option<bool>,
 ) -> Result<ResolvedTheme> {
-    load_theme(path).map(|theme| theme.with_color_overrides(alpha_override, blur_override))
+    load_theme_source(source).map(|theme| theme.with_color_overrides(alpha_override, blur_override))
 }
 
 struct StartupThemeLoad {
@@ -4634,11 +4660,11 @@ struct StartupThemeLoad {
 }
 
 fn prepare_startup_theme(
-    path: &Path,
+    source: &ThemeSource,
     alpha_override: Option<u16>,
     blur_override: Option<bool>,
 ) -> StartupThemeLoad {
-    match resolve_configured_theme(path, alpha_override, blur_override) {
+    match resolve_configured_theme(source, alpha_override, blur_override) {
         Ok(theme) => StartupThemeLoad {
             theme,
             diagnostic: None,
@@ -4657,7 +4683,7 @@ fn load_startup_theme_with_reporter(
     mut report: impl FnMut(&str),
 ) -> ResolvedTheme {
     let loaded = prepare_startup_theme(
-        &config.theme_path,
+        &config.theme_source(),
         config.background_alpha,
         config.background_blur,
     );
@@ -4672,12 +4698,12 @@ fn load_startup_theme(config: &AppConfig) -> ResolvedTheme {
 }
 
 fn resolve_live_theme_update(
-    path: &Path,
+    source: &ThemeSource,
     alpha_override: Option<u16>,
     blur_override: Option<bool>,
     current: ResolvedTheme,
 ) -> Result<Option<ResolvedTheme>> {
-    let next = resolve_configured_theme(path, alpha_override, blur_override)?;
+    let next = load_live_theme_source(source)?.with_color_overrides(alpha_override, blur_override);
     Ok((next != current).then_some(next))
 }
 
@@ -4706,24 +4732,24 @@ enum ThemeUpdateSink {
 }
 
 async fn watch_theme(
-    path: PathBuf,
+    source: ThemeSource,
     alpha_override: Option<u16>,
     blur_override: Option<bool>,
     mut current: ResolvedTheme,
     sink: ThemeUpdateSink,
 ) {
-    let mut observed = theme_file_fingerprint(&path);
+    let mut observed = None;
     let mut diagnostics = ThemeReloadDiagnostics::default();
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         poll.tick().await;
-        let next_fingerprint = theme_file_fingerprint(&path);
-        if next_fingerprint == observed {
+        let next_fingerprint = theme_source_fingerprint(&source);
+        if observed.as_ref() == Some(&next_fingerprint) {
             continue;
         }
-        observed = next_fingerprint;
-        match resolve_live_theme_update(&path, alpha_override, blur_override, current) {
+        observed = Some(next_fingerprint);
+        match resolve_live_theme_update(&source, alpha_override, blur_override, current) {
             Ok(Some(next)) => {
                 current = next;
                 diagnostics.accepted();
@@ -5743,7 +5769,7 @@ async fn run_live_multipane_window(
     let (topology_commands, topology_command_receiver) = mpsc::channel(8);
     let (topology_update_sender, topology_updates) = mpsc::channel(4);
     let theme_task = tokio::spawn(watch_theme(
-        config.theme_path.clone(),
+        config.theme_source(),
         config.background_alpha,
         config.background_blur,
         theme,
@@ -5857,7 +5883,7 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     println!("Controller lease {controller_id} granted for live Splint");
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
     let _theme_watcher = tokio::spawn(watch_theme(
-        config.theme_path.clone(),
+        config.theme_source(),
         config.background_alpha,
         config.background_blur,
         theme,
@@ -6556,6 +6582,29 @@ mod tests {
     }
 
     #[test]
+    fn native_theme_fingerprint_tracks_omarchy_atomic_directory_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-omarchy-theme-fingerprint-{}",
+            std::process::id()
+        ));
+        let theme = root.join("theme");
+        let previous = root.join("previous");
+        std::fs::create_dir_all(&theme).unwrap();
+        std::fs::write(theme.join("colors.toml"), b"accent = \"#010203\"\n").unwrap();
+        std::fs::write(theme.join("foot.ini"), b"[colors-dark]\n").unwrap();
+        let source = ThemeSource::Omarchy(theme.clone());
+        let first = theme_source_fingerprint(&source);
+
+        std::fs::rename(&theme, &previous).unwrap();
+        assert!(resolve_live_theme_update(&source, None, None, ResolvedTheme::default()).is_err());
+        std::fs::create_dir(&theme).unwrap();
+        std::fs::write(theme.join("colors.toml"), b"accent = \"#010203\"\n").unwrap();
+        std::fs::write(theme.join("foot.ini"), b"[colors-dark]\n").unwrap();
+        assert_ne!(theme_source_fingerprint(&source), first);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn theme_fingerprint_changes_without_parsing_unchanged_content() {
         let path = std::env::temp_dir().join(format!(
             "splinterm-theme-fingerprint-{}",
@@ -6582,7 +6631,7 @@ mod tests {
         std::fs::write(&path, b"{}").unwrap();
 
         let mut config = AppConfig {
-            theme_path: path.clone(),
+            theme_path: Some(path.clone()),
             background_alpha: Some(1234),
             background_blur: Some(true),
             ..AppConfig::default()
@@ -6607,7 +6656,8 @@ mod tests {
         let preserved = current;
 
         std::fs::write(&path, b"{}").unwrap();
-        let error = resolve_live_theme_update(&path, None, None, current).unwrap_err();
+        let source = ThemeSource::Json(path.clone());
+        let error = resolve_live_theme_update(&source, None, None, current).unwrap_err();
         assert_eq!(current, preserved);
 
         let mut diagnostics = ThemeReloadDiagnostics::default();
@@ -6617,7 +6667,7 @@ mod tests {
         assert!(diagnostics.rejected(&error).is_some());
 
         std::fs::write(&path, valid_theme_json(0.5, true)).unwrap();
-        let next = resolve_live_theme_update(&path, Some(2468), Some(false), current)
+        let next = resolve_live_theme_update(&source, Some(2468), Some(false), current)
             .unwrap()
             .unwrap();
         assert_eq!(next.background_alpha, 2468);
