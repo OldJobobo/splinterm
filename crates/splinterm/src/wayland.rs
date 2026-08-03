@@ -519,6 +519,214 @@ pub struct TrustedConsentUi {
     pub decision: StdSender<bool>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionPickerItem {
+    pub primary: String,
+    pub secondary: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionPickerDecision {
+    New,
+    Open(usize),
+}
+
+pub struct SessionPickerUi {
+    items: Vec<SessionPickerItem>,
+    selected: usize,
+    page_start: usize,
+    revision: u64,
+    synthetic_id: SplintId,
+    decision: StdSender<SessionPickerDecision>,
+}
+
+const SESSION_PICKER_PAGE_ITEMS: usize = 7;
+const SESSION_PICKER_NEW_ROW: usize = 3;
+const SESSION_PICKER_FIRST_ITEM_ROW: usize = 5;
+
+impl SessionPickerUi {
+    #[must_use]
+    pub fn new(items: Vec<SessionPickerItem>, decision: StdSender<SessionPickerDecision>) -> Self {
+        Self {
+            items,
+            selected: 0,
+            page_start: 0,
+            revision: 0,
+            synthetic_id: SplintId::new(),
+            decision,
+        }
+    }
+
+    fn selected_decision(&self) -> SessionPickerDecision {
+        if self.selected == 0 {
+            SessionPickerDecision::New
+        } else {
+            SessionPickerDecision::Open(self.selected - 1)
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let count = self.items.len() + 1;
+        self.selected = if delta.is_negative() {
+            self.selected
+                .checked_sub(delta.unsigned_abs())
+                .unwrap_or(count - 1)
+        } else {
+            self.selected
+                .checked_add(delta.unsigned_abs())
+                .filter(|selected| *selected < count)
+                .unwrap_or(0)
+        };
+        if self.selected > 0 {
+            let item = self.selected - 1;
+            self.page_start = item / SESSION_PICKER_PAGE_ITEMS * SESSION_PICKER_PAGE_ITEMS;
+        }
+    }
+
+    fn select_row(&mut self, row: usize) -> Option<SessionPickerDecision> {
+        if row == SESSION_PICKER_NEW_ROW || row == SESSION_PICKER_NEW_ROW + 1 {
+            self.selected = 0;
+            return Some(SessionPickerDecision::New);
+        }
+        let relative = row.checked_sub(SESSION_PICKER_FIRST_ITEM_ROW)?;
+        let slot = relative / 2;
+        if slot >= SESSION_PICKER_PAGE_ITEMS {
+            return None;
+        }
+        let item = self.page_start.checked_add(slot)?;
+        if item >= self.items.len() {
+            return None;
+        }
+        self.selected = item + 1;
+        Some(SessionPickerDecision::Open(item))
+    }
+
+    #[must_use]
+    pub fn snapshot(&mut self) -> TerminalSnapshot {
+        self.revision = self.revision.saturating_add(1).max(1);
+        let marker = |selected| if selected { "› " } else { "  " };
+        let mut lines = vec![
+            "RECENT SESSIONS".to_owned(),
+            "Open a running window without restoring or relaunching.".to_owned(),
+            String::new(),
+            format!("{}New Terminal", marker(self.selected == 0)),
+            "    Start a fresh shell".to_owned(),
+        ];
+        for (index, item) in self
+            .items
+            .iter()
+            .enumerate()
+            .skip(self.page_start)
+            .take(SESSION_PICKER_PAGE_ITEMS)
+        {
+            lines.push(format!(
+                "{}{}",
+                marker(self.selected == index + 1),
+                item.primary
+            ));
+            lines.push(format!("    {}", item.secondary));
+        }
+        while lines.len() < SESSION_PICKER_FIRST_ITEM_ROW + SESSION_PICKER_PAGE_ITEMS * 2 {
+            lines.push(String::new());
+        }
+        lines.extend([
+            String::new(),
+            "↑/↓ or J/K select · Enter open · N new · Escape cancel".to_owned(),
+        ]);
+        picker_terminal_snapshot(self.synthetic_id, self.revision, lines)
+    }
+}
+
+fn picker_terminal_snapshot(
+    splint_id: SplintId,
+    revision: u64,
+    lines: Vec<String>,
+) -> TerminalSnapshot {
+    let columns = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(1)
+        .clamp(72, 120);
+    let rows = lines.len().max(24);
+    let attributes = CellAttributes {
+        bold: false,
+        dim: false,
+        italic: false,
+        underline: UnderlineStyle::None,
+        underline_color_source: ColorSource::Default,
+        underline_color: 0,
+        strikethrough: false,
+        blink: false,
+        conceal: false,
+        reverse: false,
+        foreground_source: ColorSource::Default,
+        foreground: 0,
+        background_source: ColorSource::Default,
+        background: 0,
+    };
+    let mut visible_rows: Vec<_> = lines
+        .into_iter()
+        .map(|line| TerminalRow {
+            row_id: None,
+            linebreak: false,
+            cells: line
+                .chars()
+                .take(columns)
+                .map(|character| TerminalCell {
+                    content: character.to_string(),
+                    spacer_remaining: None,
+                    attributes,
+                })
+                .collect(),
+        })
+        .collect();
+    visible_rows.resize_with(rows, || TerminalRow {
+        row_id: None,
+        linebreak: false,
+        cells: Vec::new(),
+    });
+    for (index, row) in visible_rows.iter_mut().enumerate() {
+        row.row_id = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1));
+    }
+    TerminalSnapshot {
+        splint_id,
+        incarnation: 1,
+        revision,
+        columns,
+        rows,
+        cursor_column: -1,
+        cursor_row: -1,
+        cursor_deferred_wrap: false,
+        active_screen: ActiveScreen::Normal,
+        input_modes: TerminalInputModes {
+            application_cursor: false,
+            application_keypad: false,
+            focus_reporting: false,
+            bracketed_paste: false,
+            cursor_visible: false,
+            cursor_blink: false,
+            mouse_tracking: MouseTracking::None,
+            sgr_mouse: false,
+        },
+        palette: vec![0; 256],
+        default_colors: [0x00f4_f0e8, 0x0014_1820, 0x00e0_a030],
+        title: "Recent Sessions".to_owned(),
+        visible_rows,
+        history_generation: 1,
+        oldest_available_scrollback_row_id: None,
+        newest_available_scrollback_row_id: None,
+        scrollback_rows: Vec::new(),
+        available_scrollback_rows: 0,
+        omitted_oldest_scrollback_rows: 0,
+        images: None,
+        exited_code: None,
+        exited_signal: None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowTopologyCommand {
     Split {
@@ -569,6 +777,8 @@ pub struct WindowOptions {
     pub capture_scale: Option<u32>,
     /// Trusted application-owned consent mode. Terminal content cannot enable it.
     pub trusted_consent: Option<TrustedConsentUi>,
+    /// Application-owned recent-session picker. Terminal content cannot enable it.
+    pub session_picker: Option<SessionPickerUi>,
     /// Trusted authority state rendered in persistent application chrome.
     pub authority: AuthorityStatus,
     /// Whether the legacy single-pane command channel already owns control.
@@ -655,6 +865,7 @@ impl Default for WindowOptions {
             evidence_close_shortcuts: false,
             capture_scale: None,
             trusted_consent: None,
+            session_picker: None,
             authority: AuthorityStatus::default(),
             controlled: true,
             initial_columns: 80,
@@ -761,8 +972,11 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     }
     let controller_active = options.controlled && options.commands.is_some();
     let trusted_consent = options.trusted_consent;
+    let session_picker = options.session_picker;
     let title = if trusted_consent.is_some() {
         "Splinterm — Trusted Access Request".to_owned()
+    } else if session_picker.is_some() {
+        "Splinterm — Recent Sessions".to_owned()
     } else {
         window_title(
             options.title.as_deref().or_else(|| {
@@ -861,6 +1075,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             search: SearchUiState::default(),
             authority: options.authority,
             last_resize: None,
+            initial_resize_requires_control: false,
             prepare_dirty_rows: Vec::new(),
             raster_dirty_rows: Vec::new(),
             surface_dirty_rows: Vec::new(),
@@ -879,6 +1094,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         graphical_input_probe,
         scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
         trusted_consent,
+        session_picker,
         cursor_style: options.cursor_style,
         cursor_blink: options.cursor_blink,
         title_override: options.title,
@@ -954,11 +1170,18 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         Ok(())
     })();
     app.release_background_effect();
+    let failure = app.failure.take();
+    drop(app);
+    drop(event_loop);
+    let teardown_result = connection
+        .roundtrip()
+        .context("complete Wayland surface teardown")
+        .map(|_| ());
     event_loop_result?;
-    if let Some(error) = app.failure.take() {
+    if let Some(error) = failure {
         return Err(error);
     }
-    Ok(())
+    teardown_result
 }
 
 fn paint_trusted_consent_chrome(canvas: &mut [u8], width: u32, height: u32) {
@@ -1495,6 +1718,7 @@ struct PaneView {
     search: SearchUiState,
     authority: AuthorityStatus,
     last_resize: Option<(u16, u16, u16, u16)>,
+    initial_resize_requires_control: bool,
     prepare_dirty_rows: Vec<bool>,
     raster_dirty_rows: Vec<bool>,
     surface_dirty_rows: Vec<bool>,
@@ -1545,6 +1769,7 @@ impl PaneView {
             search: SearchUiState::default(),
             authority: options.authority,
             last_resize: None,
+            initial_resize_requires_control: false,
             prepare_dirty_rows: Vec::new(),
             raster_dirty_rows: Vec::new(),
             surface_dirty_rows: Vec::new(),
@@ -1855,6 +2080,7 @@ struct App {
     graphical_input_probe: Option<GraphicalInputProbe>,
     scroll_trace: bool,
     trusted_consent: Option<TrustedConsentUi>,
+    session_picker: Option<SessionPickerUi>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
@@ -4586,6 +4812,36 @@ impl App {
         self.exit = true;
     }
 
+    fn refresh_session_picker(&mut self) -> Result<()> {
+        let Some(picker) = self.session_picker.as_mut() else {
+            return Ok(());
+        };
+        let mut snapshot = picker.snapshot();
+        apply_theme(&mut snapshot, self.theme);
+        self.pane.snapshot = Some(snapshot);
+        rebuild_pane_scaled_frame(&mut self.pane, self.scale_120)?;
+        self.buffers.clear();
+        self.backing.clear();
+        self.full_redraw = true;
+        Ok(())
+    }
+
+    fn move_session_picker(&mut self, delta: isize) {
+        if let Some(picker) = self.session_picker.as_mut() {
+            picker.move_selection(delta);
+        }
+        if let Err(error) = self.refresh_session_picker() {
+            self.fail(error);
+        }
+    }
+
+    fn decide_session_picker(&mut self, decision: SessionPickerDecision) {
+        if let Some(picker) = self.session_picker.take() {
+            let _ = picker.decision.send(decision);
+        }
+        self.exit = true;
+    }
+
     fn update_window_title(&self) {
         if let Some(snapshot) = &self.pane.snapshot {
             self.window.set_title(window_title(
@@ -4671,6 +4927,47 @@ impl App {
         reason = "trusted local shortcuts and search editing share one ordered keyboard boundary"
     )]
     fn handle_key(&mut self, event: &KeyEvent) {
+        if self.session_picker.is_some() {
+            match event.keysym {
+                Keysym::Up | Keysym::k | Keysym::K => self.move_session_picker(-1),
+                Keysym::Down | Keysym::j | Keysym::J => self.move_session_picker(1),
+                Keysym::Home => {
+                    if let Some(picker) = self.session_picker.as_mut() {
+                        picker.selected = 0;
+                        picker.page_start = 0;
+                    }
+                    if let Err(error) = self.refresh_session_picker() {
+                        self.fail(error);
+                    }
+                }
+                Keysym::End => {
+                    if let Some(picker) = self.session_picker.as_mut() {
+                        picker.selected = picker.items.len();
+                        picker.page_start = picker.items.len().saturating_sub(1)
+                            / SESSION_PICKER_PAGE_ITEMS
+                            * SESSION_PICKER_PAGE_ITEMS;
+                    }
+                    if let Err(error) = self.refresh_session_picker() {
+                        self.fail(error);
+                    }
+                }
+                Keysym::Return | Keysym::KP_Enter => {
+                    if let Some(decision) = self
+                        .session_picker
+                        .as_ref()
+                        .map(SessionPickerUi::selected_decision)
+                    {
+                        self.decide_session_picker(decision);
+                    }
+                }
+                Keysym::n | Keysym::N => {
+                    self.decide_session_picker(SessionPickerDecision::New);
+                }
+                Keysym::Escape => self.exit = true,
+                _ => {}
+            }
+            return;
+        }
         if self.trusted_consent.is_some() {
             match event.keysym {
                 Keysym::g | Keysym::G | Keysym::Return | Keysym::KP_Enter => {
@@ -4869,7 +5166,26 @@ impl App {
             let Some(rect) = layout.as_ref().and_then(|layout| layout.rect(splint_id)) else {
                 continue;
             };
-            Self::emit_pane_resize(pane, rect.width, rect.height, self.scale_120, false)?;
+            Self::emit_inactive_pane_resize(pane, rect.width, rect.height, self.scale_120)?;
+        }
+        Ok(())
+    }
+
+    fn emit_inactive_pane_resize(
+        pane: &mut PaneView,
+        logical_width: u32,
+        logical_height: u32,
+        scale_120: u32,
+    ) -> Result<()> {
+        Self::emit_pane_resize(
+            pane,
+            logical_width,
+            logical_height,
+            scale_120,
+            pane.initial_resize_requires_control,
+        )?;
+        if pane.last_resize.is_some() {
+            pane.initial_resize_requires_control = false;
         }
         Ok(())
     }
@@ -4939,8 +5255,9 @@ impl App {
             };
             let removed = removed.into_iter().collect::<HashSet<_>>();
             for pane in added {
-                self.inactive_panes
-                    .push(PaneView::from_options(pane, self.scale_120)?);
+                let mut pane = PaneView::from_options(pane, self.scale_120)?;
+                pane.initial_resize_requires_control = true;
+                self.inactive_panes.push(pane);
             }
             if self
                 .focused_splint()
@@ -6653,6 +6970,17 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Press { button, serial, .. } => {
                     self.last_pointer_serial = Some(serial);
+                    if button == BTN_LEFT && self.session_picker.is_some() {
+                        let decision = cell.and_then(|position| {
+                            self.session_picker
+                                .as_mut()
+                                .and_then(|picker| picker.select_row(position.row))
+                        });
+                        if let Some(decision) = decision {
+                            self.decide_session_picker(decision);
+                        }
+                        continue;
+                    }
                     if let Some(splint_id) = self.splint_at_point(event.position) {
                         if self.focus_splint(splint_id) {
                             cell = self.pointer_cell_at(event.position);
@@ -8043,6 +8371,39 @@ mod tests {
     }
 
     #[test]
+    fn newly_added_inactive_pane_applies_its_first_resize_immediately() {
+        let splint_id = SplintId::new();
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(2);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+        pane.initial_resize_requires_control = true;
+
+        App::emit_inactive_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR).unwrap();
+        assert!(matches!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Resize { .. }
+        ));
+        assert!(!pane.initial_resize_requires_control);
+
+        App::emit_inactive_pane_resize(&mut pane, 640, 480, SCALE_DENOMINATOR).unwrap();
+        assert!(matches!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::PrepareResize { .. }
+        ));
+    }
+
+    #[test]
     fn history_cache_enforces_row_budget_from_either_edge() {
         let mut newest = (1..=u64::try_from(MAX_CACHED_HISTORY_ROWS + 4).unwrap())
             .map(|id| history_row(id, 0))
@@ -9160,6 +9521,37 @@ mod tests {
         assert_eq!(
             display.visible_rows[0].cells[0].content, "a",
             "a hidden live cursor must not replace a visible history row"
+        );
+    }
+
+    #[test]
+    fn session_picker_wraps_pages_and_maps_visible_rows() {
+        let (decision, _receiver) = std_mpsc::channel();
+        let items = (0..10)
+            .map(|index| SessionPickerItem {
+                primary: format!("session {index}"),
+                secondary: format!("/tmp/{index} · 1 pane · 1 running"),
+            })
+            .collect();
+        let mut picker = SessionPickerUi::new(items, decision);
+        assert_eq!(picker.selected_decision(), SessionPickerDecision::New);
+        picker.move_selection(-1);
+        assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(9));
+        assert_eq!(picker.page_start, 7);
+        assert_eq!(
+            picker.select_row(SESSION_PICKER_FIRST_ITEM_ROW),
+            Some(SessionPickerDecision::Open(7))
+        );
+        assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(7));
+        let snapshot = picker.snapshot();
+        assert!(snapshot.validate().is_ok());
+        assert!(
+            snapshot.visible_rows[SESSION_PICKER_FIRST_ITEM_ROW]
+                .cells
+                .iter()
+                .map(|cell| cell.content.as_str())
+                .collect::<String>()
+                .starts_with('›')
         );
     }
 

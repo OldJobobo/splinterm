@@ -96,11 +96,32 @@ impl Default for RendererOptions {
     }
 }
 
+fn compatible_renderer_options(current: &RendererOptions, next: &RendererOptions) -> bool {
+    current.font == next.font
+        && current.font_size == next.font_size
+        && current.font_sizing_policy == next.font_sizing_policy
+        && current.physical_dpi == next.physical_dpi
+        && current.padding == next.padding
+}
+
+fn accept_compatible_reconfiguration(options: &RendererOptions) -> Result<()> {
+    let current = RENDERER_OPTIONS
+        .get()
+        .context("renderer configuration disappeared during initialization")?;
+    anyhow::ensure!(
+        compatible_renderer_options(current, options),
+        "renderer is already configured with different immutable options"
+    );
+    BACKGROUND_ALPHA.store(options.background_alpha, Ordering::Relaxed);
+    Ok(())
+}
+
 /// Installs immutable per-process renderer configuration before a window opens.
-/// A process owns one graphical window in the MVP, so caches cannot mix fonts.
+/// Repeated compatible setup supports application-owned chooser-to-window
+/// transitions without allowing font or geometry caches to mix configurations.
 ///
 /// # Errors
-/// Returns an error for an invalid size or a second configuration attempt.
+/// Returns an error for an invalid size or an incompatible configuration attempt.
 pub fn configure(options: RendererOptions) -> Result<()> {
     if !options.font_size.value().is_finite() || !(6.0..=96.0).contains(&options.font_size.value())
     {
@@ -113,11 +134,13 @@ pub fn configure(options: RendererOptions) -> Result<()> {
         options.physical_dpi,
     )?;
     let background_alpha = options.background_alpha;
-    RENDERER_OPTIONS
-        .set(options)
-        .map_err(|_| anyhow::anyhow!("renderer is already configured"))?;
-    BACKGROUND_ALPHA.store(background_alpha, Ordering::Relaxed);
-    Ok(())
+    match RENDERER_OPTIONS.set(options) {
+        Ok(()) => {
+            BACKGROUND_ALPHA.store(background_alpha, Ordering::Relaxed);
+            Ok(())
+        }
+        Err(options) => accept_compatible_reconfiguration(&options),
+    }
 }
 
 fn renderer_options() -> &'static RendererOptions {
@@ -5154,6 +5177,22 @@ mod tests {
             origin_x: BASE_ROW_X,
             origin_y: BASE_ROW_Y,
         }
+    }
+
+    #[test]
+    fn compatible_renderer_reconfiguration_allows_only_mutable_alpha_changes() {
+        let current = RendererOptions::default();
+        let mut alpha_only = current.clone();
+        alpha_only.background_alpha = 32_768;
+        assert!(compatible_renderer_options(&current, &alpha_only));
+
+        let mut different_font = current.clone();
+        different_font.font = "different font".to_owned();
+        assert!(!compatible_renderer_options(&current, &different_font));
+
+        let mut different_padding = current.clone();
+        different_padding.padding.left += 1;
+        assert!(!compatible_renderer_options(&current, &different_padding));
     }
 
     #[test]

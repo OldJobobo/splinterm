@@ -11,10 +11,18 @@ StartupNotify=true
 StartupWMClass=com.oldjobobo.splinterm
 Categories=System;TerminalEmulator;
 Keywords=shell;prompt;command;commandline;terminal;
-Actions=New;
+Actions=New;Sessions;Reopen;
 X-TerminalArgExec=--
 X-TerminalArgDir=--working-directory=
 
 [Desktop Action New]
 Name=New Terminal
 Exec=splinterm-xdg-terminal-exec
+
+[Desktop Action Sessions]
+Name=Recent Sessions
+Exec=splinterm-sessions
+
+[Desktop Action Reopen]
+Name=Reopen Last Session
+Exec=splinterm-reopen

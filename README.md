@@ -59,6 +59,30 @@ links exact renderer, graphical sign-off, and private package evidence.
 Headless multiplexing, crash-safe metadata restore, independently attachable
 Dojo windows, and clipped multi-pane composition in one Wayland toplevel are implemented.
 
+## Daily use
+
+The normal desktop entry and `xdg-terminal-exec` path always open a fresh Dojo
+with one pane, running the requested command or the configured shell when none
+is supplied. Reopening is a separate, non-destructive action:
+
+```bash
+splinterm sessions  # choose New Terminal or a recent running logical window
+splinterm reopen    # reopen the last locally remembered running window
+```
+
+The native Recent Sessions picker shows human Dojo/window names, starting
+directory, pane count, and running state without exposing UUIDs. Use arrow keys
+or J/K to select, Enter to open, N for a fresh terminal, Escape to cancel, or
+click an entry. Reopening maps a daemon-owned window whose complete pane layout
+is still running; it does not create, relaunch, or restore a process. Windows
+with exited panes remain available through the explicit `restore`,
+`restore-window`, and `restore-dojo` commands.
+
+Packaged desktop actions expose **New Terminal**, **Recent Sessions**, and
+**Reopen Last Session**. Omarchy users can bind `splinterm-sessions` to a global
+shortcut such as Super+Shift+Enter while leaving the normal terminal shortcut
+on `splinterm-xdg-terminal-exec`.
+
 ## Try the scaffold
 
 For the current isolated development build, run:

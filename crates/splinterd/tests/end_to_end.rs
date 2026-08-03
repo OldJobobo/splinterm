@@ -3056,6 +3056,8 @@ async fn two_splints_spawn_and_preserve_independent_output() {
         };
         let first_id = first.id;
         let first_incarnation = admin.live_incarnation(first_id).await;
+        admin.resize(first_id, first_incarnation, 91, 43).await;
+        admin.release_control().await;
 
         let Response::SplintStarted {
             splint_id: second_id,
@@ -3076,6 +3078,18 @@ async fn two_splints_spawn_and_preserve_independent_output() {
         };
         assert_eq!(topology_revision.get(), 2);
         assert_ne!(first_id, second_id);
+        let mut initial_size_probe = daemon.connect().await;
+        let (_, second_initial) = initial_size_probe
+            .attach(second_id, second_incarnation)
+            .await;
+        assert_eq!((second_initial.columns, second_initial.rows), (91, 43));
+        assert!(
+            second_initial.cursor_row <= 1,
+            "new shell prompt started at row {} of {}",
+            second_initial.cursor_row,
+            second_initial.rows
+        );
+        drop(initial_size_probe);
 
         let Response::Topology { snapshot: before } = admin.request(Request::InspectTopology).await
         else {

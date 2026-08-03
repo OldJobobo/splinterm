@@ -1804,6 +1804,15 @@ async fn spawn_runtime(
     context: SplintLaunchContext,
     launch: &splinterm_protocol::LaunchParameters,
 ) -> Result<LiveSplintRuntime, ProtocolError> {
+    spawn_runtime_with_size(state, context, launch, None).await
+}
+
+async fn spawn_runtime_with_size(
+    state: &DaemonState,
+    context: SplintLaunchContext,
+    launch: &splinterm_protocol::LaunchParameters,
+    initial_size: Option<(u16, u16)>,
+) -> Result<LiveSplintRuntime, ProtocolError> {
     launch.validate()?;
     let pty_command = if let Some((program, arguments)) = launch.command.split_first() {
         PtyCommand::new(program, launch.cwd.clone())
@@ -1823,6 +1832,10 @@ async fn spawn_runtime(
     .env("SPLINTERM_WINDOW_ID", context.window.to_string())
     .env("SPLINTERM_SPLINT_ID", context.splint.to_string());
     let mut config = LiveSplintConfig::default();
+    if let Some((columns, rows)) = initial_size {
+        config.columns = columns;
+        config.rows = rows;
+    }
     config.terminal.scrollback_lines = launch.scrollback_lines;
     config.terminal.shared_image_budget = Some(state.shared_image_budget.clone());
     config.terminal.shared_kitty_upload_budget = Some(state.shared_kitty_upload_budget.clone());
@@ -3824,7 +3837,17 @@ async fn handle_authorized_request(
                 splint: splint_id,
                 ..parent_context
             };
-            let runtime = spawn_runtime(state, context, &launch).await?;
+            let target_handle = state.runtimes.lock().await.handle(target_splint_id);
+            let initial_size = if let Some(handle) = target_handle {
+                let snapshot = handle.snapshot().await.map_err(|_| internal())?;
+                Some((
+                    u16::try_from(snapshot.dimensions.columns).map_err(|_| internal())?,
+                    u16::try_from(snapshot.dimensions.rows).map_err(|_| internal())?,
+                ))
+            } else {
+                None
+            };
+            let runtime = spawn_runtime_with_size(state, context, &launch, initial_size).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
 

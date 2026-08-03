@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -22,7 +23,9 @@ REQUIRED = {
     "usr/bin/splinterd",
     "usr/bin/splinterm",
     "usr/bin/splinterm-relay",
+    "usr/bin/splinterm-reopen",
     "usr/bin/splinterm-session-picker",
+    "usr/bin/splinterm-sessions",
     "usr/bin/splinterm-pty-child",
     "usr/bin/splinterm-xdg-terminal-exec",
     "usr/lib/systemd/user/splinterd.service",
@@ -31,6 +34,7 @@ REQUIRED = {
     "usr/share/metainfo/com.oldjobobo.splinterm.metainfo.xml",
     "usr/share/doc/splinterm/automation.md",
     "usr/share/doc/splinterm/config.ini",
+    "usr/share/doc/splinterm/configuration.md",
     "usr/share/doc/splinterm/headless.md",
     "usr/share/doc/splinterm/integrations.md",
     "usr/share/doc/splinterm/images.md",
@@ -54,7 +58,9 @@ EXECUTABLES = {
     "usr/bin/splinterm",
     "usr/bin/splinterm-mcp",
     "usr/bin/splinterm-relay",
+    "usr/bin/splinterm-reopen",
     "usr/bin/splinterm-session-picker",
+    "usr/bin/splinterm-sessions",
     "usr/bin/splinterm-pty-child",
     "usr/bin/splinterm-xdg-terminal-exec",
 }
@@ -136,6 +142,11 @@ def validate_launcher(root: Path) -> None:
             and all(part.isdigit() for part in name_parts[1:])
         )
         assert launch[4:] == ["--working-directory", "/tmp/a b"]
+
+        run([str(root / "usr/bin/splinterm-sessions")], env=environment, timeout=10)
+        assert record.read_text(encoding="utf-8").splitlines() == ["sessions"]
+        run([str(root / "usr/bin/splinterm-reopen")], env=environment, timeout=10)
+        assert record.read_text(encoding="utf-8").splitlines() == ["reopen"]
 
 
 def validate_systemd_unit(root: Path) -> None:
@@ -877,8 +888,16 @@ def main() -> int:
         metadata = root / "usr/share/metainfo/com.oldjobobo.splinterm.metainfo.xml"
         run(["desktop-file-validate", str(desktop)])
         run(["appstreamcli", "validate", "--no-net", str(metadata)])
-        assert "Exec=splinterm-xdg-terminal-exec" in desktop.read_text(encoding="utf-8")
-        assert "Icon=com.oldjobobo.splinterm" in desktop.read_text(encoding="utf-8")
+        desktop_config = configparser.ConfigParser(interpolation=None, strict=True)
+        desktop_config.optionxform = str
+        with desktop.open(encoding="utf-8") as desktop_file:
+            desktop_config.read_file(desktop_file)
+        assert desktop_config["Desktop Entry"]["Exec"] == "splinterm-xdg-terminal-exec"
+        assert desktop_config["Desktop Entry"]["Actions"] == "New;Sessions;Reopen;"
+        assert desktop_config["Desktop Entry"]["Icon"] == "com.oldjobobo.splinterm"
+        assert desktop_config["Desktop Action New"]["Exec"] == "splinterm-xdg-terminal-exec"
+        assert desktop_config["Desktop Action Sessions"]["Exec"] == "splinterm-sessions"
+        assert desktop_config["Desktop Action Reopen"]["Exec"] == "splinterm-reopen"
 
         pkginfo = package_metadata(package)
         dependencies = {

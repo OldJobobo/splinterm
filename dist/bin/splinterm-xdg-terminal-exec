@@ -36,7 +36,16 @@ if ! ping; then
   fi
 fi
 
-# Desktop/XDG launchers have no interactive stdin; always create a fresh,
-# uniquely named Dojo so repeated terminal launches never prompt or collide.
+case ${0##*/} in
+  splinterm-sessions)
+    exec splinterm sessions
+    ;;
+  splinterm-reopen)
+    exec splinterm reopen
+    ;;
+esac
+
+# Desktop/XDG launches remain fresh and non-interactive. The explicit aliases
+# above own session selection and reopening without changing terminal-exec.
 name="terminal-$(date +%s)-$$"
 exec splinterm launch --new --name "$name" "$@"

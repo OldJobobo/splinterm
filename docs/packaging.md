@@ -46,7 +46,8 @@ versioned immutable source URL and checksum.
   `/usr/bin/splinterm-pty-child` helper;
 - optional split package `splinterm-mcp`, containing only the independently
   policy-authorized `/usr/bin/splinterm-mcp`, its setup guide, and notices;
-- `/usr/bin/splinterm-xdg-terminal-exec`, the public-CLI-only
+- `/usr/bin/splinterm-xdg-terminal-exec`, its `splinterm-sessions` and
+  `splinterm-reopen` session UX aliases, the public-CLI-only
   `/usr/bin/splinterm-session-picker` reference client, and
   `/usr/bin/generate-omarchy-theme.py`;
 - desktop entry, AppStream metadata, scalable icon, and user service;
@@ -86,6 +87,13 @@ com.oldjobobo.splinterm.desktop
 ```
 
 The reference snippet is `/usr/share/doc/splinterm/xdg-terminals.list`.
+
+The default launcher always creates a fresh terminal. Use the **Recent
+Sessions** desktop action or `splinterm-sessions` to choose an existing running
+window, and **Reopen Last Session** or `splinterm-reopen` for the last locally
+remembered window whose complete pane layout is still running. These aliases
+also start the user daemon on demand. They never restore exited processes. See
+`configuration.md` for the suggested Omarchy shortcut split.
 
 ## Live installation and rollback
 

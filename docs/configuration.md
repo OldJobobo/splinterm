@@ -62,6 +62,22 @@ currently remappable. Foot-compatible runtime zoom uses Ctrl+plus/equal/KP_Add a
 Ctrl+minus/KP_Subtract in 0.5-point steps; Ctrl+0/KP_0 resets the configured
 size. Terminal key mappings otherwise follow the implemented Foot/xterm behavior.
 
+## Daily launch and session reopening
+
+The normal desktop/XDG command remains `splinterm-xdg-terminal-exec` and always
+creates a fresh Dojo. Session reopening is deliberately separate:
+
+```text
+splinterm-sessions  → native Recent Sessions picker
+splinterm-reopen    → last locally remembered running window
+```
+
+A suitable Omarchy convention is Super+Enter for the normal terminal command
+and Super+Shift+Enter for `splinterm-sessions`. Splinterm does not modify the
+user's Hyprland configuration automatically. The picker opens only logical
+windows whose complete pane layout is still running; restoring exited processes
+remains an explicit lifecycle command.
+
 ## Migrating from Foot
 
 Copy values rather than copying a whole `foot.ini`:

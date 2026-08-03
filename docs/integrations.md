@@ -35,6 +35,10 @@ A supported client must:
 
 ## Reference session picker
 
+This automation reference client is separate from the native daily-use
+`splinterm sessions` picker and `splinterm reopen` command. Normal users do not
+need to copy UUIDs through this interface.
+
 The packaged `splinterm-session-picker` is a narrow, dependency-free Python
 reference client. Its implementation lives at
 `tools/automation/splinterm-session-picker.py`. It invokes only the public CLI,

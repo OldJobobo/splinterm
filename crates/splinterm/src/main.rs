@@ -17,8 +17,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use splinterm::{
-    AuthorityStatus, TrustedConsentUi, WindowCommand, WindowOptions, WindowPaneOptions,
-    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    AuthorityStatus, SessionPickerDecision, SessionPickerItem, SessionPickerUi, TrustedConsentUi,
+    WindowCommand, WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate,
+    WindowUpdate,
     automation::{
         CliEnvelopeV1, CliErrorCodeV1, CliEventV1, Connection, ImageContentLeaseSet,
         MAX_RENDERER_IMAGE_RESIDENT_BYTES, MutationIdentityV1, PingEnvelopeV1, ReadResyncReasonV1,
@@ -34,6 +35,7 @@ use splinterm::{
     config::{AppConfig, ConfigLoad, ResolvedTheme, load_default, load_theme},
     renderer::{self, RendererOptions},
     run_window,
+    session_picker::{RecentWindows, SessionEntry, collect_sessions},
 };
 use splinterm_core::{
     Axis, DojoId, LayoutNode, SplintId, SplintState, SplitRatio, SplitSide, TopologyRevision,
@@ -107,6 +109,10 @@ impl From<NewSplintSide> for SplitSide {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Choose a recent running logical window or create a fresh terminal.
+    Sessions,
+    /// Reopen the most recently opened logical window that is still running.
+    Reopen,
     /// Render ordered snapshots of one explicitly selected terminal.
     Window {
         /// Select a Dojo by stable identity (required with --window-id).
@@ -603,7 +609,9 @@ async fn main() -> Result<()> {
     } = Cli::parse();
     if matches!(
         &command,
-        Command::Window { .. }
+        Command::Sessions
+            | Command::Reopen
+            | Command::Window { .. }
             | Command::Launch { .. }
             | Command::Consent
             | Command::Policy { .. }
@@ -671,31 +679,34 @@ async fn main() -> Result<()> {
     for diagnostic in diagnostics {
         eprintln!("splinterm config: {diagnostic}");
     }
-    if let Command::Window { dojo_id, window_id } = command {
-        let window = select_window(dojo_id.zip(window_id)).await?;
-        return run_live_multipane_window(config, window).await;
-    }
-    if let Command::Launch {
-        cwd,
-        name,
-        splint_id,
-        new,
-        command,
-    } = &command
-    {
-        let cwd = cwd
-            .clone()
-            .unwrap_or(env::current_dir().context("failed to read current directory")?);
-        launch(name.clone(), cwd, *splint_id, *new, command.clone(), config).await?;
-        return Ok(());
-    }
-    if matches!(command, Command::Consent) {
-        return tokio::task::spawn_blocking(run_consent_client)
-            .await
-            .context("trusted consent task failed")?;
-    }
+    run_configured_command(command, config).await
+}
 
-    run_headless(command, &config).await
+async fn run_configured_command(command: Command, config: AppConfig) -> Result<()> {
+    match command {
+        Command::Sessions => run_sessions(config).await,
+        Command::Reopen => reopen_recent(config).await,
+        Command::Window { dojo_id, window_id } => {
+            let window = select_window(dojo_id.zip(window_id)).await?;
+            remember_window(window.id);
+            run_live_multipane_window(config, window).await
+        }
+        Command::Launch {
+            cwd,
+            name,
+            splint_id,
+            new,
+            command,
+        } => {
+            let cwd =
+                cwd.unwrap_or(env::current_dir().context("failed to read current directory")?);
+            launch(name, cwd, splint_id, new, command, config).await
+        }
+        Command::Consent => tokio::task::spawn_blocking(run_consent_client)
+            .await
+            .context("trusted consent task failed")?,
+        command => run_headless(command, &config).await,
+    }
 }
 
 fn machine_exit_code(error: &anyhow::Error) -> i32 {
@@ -3089,7 +3100,9 @@ async fn run_machine_subscription(
 async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
     let mut connection = Connection::connect().await?;
     match command {
-        Command::Window { .. }
+        Command::Sessions
+        | Command::Reopen
+        | Command::Window { .. }
         | Command::Launch { .. }
         | Command::Consent
         | Command::Policy { .. }
@@ -3569,6 +3582,152 @@ async fn select_window(selection: Option<(DojoId, WindowId)>) -> Result<splinter
     }
 }
 
+fn recent_window_ids() -> Vec<WindowId> {
+    RecentWindows::discover().map_or_else(
+        |error| {
+            eprintln!("splinterm recent sessions unavailable: {error:#}");
+            Vec::new()
+        },
+        |store| store.load(),
+    )
+}
+
+fn remember_window(window_id: WindowId) {
+    match RecentWindows::discover().and_then(|store| store.record(window_id)) {
+        Ok(()) => {}
+        Err(error) => eprintln!("splinterm could not update recent sessions: {error:#}"),
+    }
+}
+
+fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result<()> {
+    renderer::configure(RendererOptions {
+        font: config.font.clone(),
+        font_size: config.font_size,
+        font_sizing_policy: config.font_sizing_policy,
+        physical_dpi: 96.0,
+        padding: config.padding,
+        background_alpha: theme.background_alpha,
+    })
+}
+
+fn choose_recent_session(
+    config: &AppConfig,
+    entries: &[SessionEntry],
+) -> Result<Option<SessionPickerDecision>> {
+    let theme = load_startup_theme(config);
+    configure_picker_renderer(config, theme)?;
+    let items = entries
+        .iter()
+        .map(|entry| SessionPickerItem {
+            primary: entry.primary_label(),
+            secondary: entry.secondary_label(),
+        })
+        .collect();
+    let (decision, receiver) = std_mpsc::channel();
+    let mut picker = SessionPickerUi::new(items, decision);
+    let snapshot = picker.snapshot();
+    run_window(WindowOptions {
+        snapshot: Some(snapshot),
+        session_picker: Some(picker),
+        initial_columns: config.initial_columns,
+        initial_rows: config.initial_rows,
+        cursor_style: config.cursor_style,
+        cursor_blink: false,
+        theme,
+        ..WindowOptions::default()
+    })?;
+    Ok(receiver.try_recv().ok())
+}
+
+async fn select_reopenable_window(
+    dojo_id: DojoId,
+    window_id: WindowId,
+) -> Result<splinterm_core::Window> {
+    let mut connection = Connection::connect().await?;
+    let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
+        bail!("splinterd did not return its session list");
+    };
+    let window = select_window_from(&dojos, (dojo_id, window_id))?;
+    let reopenable = collect_sessions(&dojos, &[])
+        .into_iter()
+        .find(|entry| entry.window_id == window_id)
+        .is_some_and(|entry| entry.reopenable());
+    anyhow::ensure!(
+        reopenable,
+        "selected session no longer has a fully running pane layout"
+    );
+    Ok(window)
+}
+
+async fn run_sessions(config: AppConfig) -> Result<()> {
+    let mut connection = Connection::connect()
+        .await
+        .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
+    let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
+        bail!("splinterd did not return its session list");
+    };
+    drop(connection);
+    let entries = collect_sessions(&dojos, &recent_window_ids())
+        .into_iter()
+        .filter(SessionEntry::reopenable)
+        .collect::<Vec<_>>();
+    let picker_entries = entries.clone();
+    let picker_config = config.clone();
+    let decision =
+        tokio::task::spawn_blocking(move || choose_recent_session(&picker_config, &picker_entries))
+            .await
+            .context("session picker task failed")??;
+    match decision {
+        None => Ok(()),
+        Some(SessionPickerDecision::New) => {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            launch(
+                format!("terminal-{stamp}-{}", std::process::id()),
+                env::current_dir().context("failed to read current directory")?,
+                None,
+                true,
+                Vec::new(),
+                config,
+            )
+            .await
+        }
+        Some(SessionPickerDecision::Open(index)) => {
+            let selected = entries
+                .get(index)
+                .context("session picker returned an invalid selection")?;
+            let window = select_reopenable_window(selected.dojo_id, selected.window_id).await?;
+            remember_window(window.id);
+            run_live_multipane_window(config, window).await
+        }
+    }
+}
+
+async fn reopen_recent(config: AppConfig) -> Result<()> {
+    let mut connection = Connection::connect()
+        .await
+        .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
+    let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
+        bail!("splinterd did not return its session list");
+    };
+    let recent = recent_window_ids();
+    let entries = collect_sessions(&dojos, &recent);
+    let selected = recent
+        .iter()
+        .find_map(|window_id| {
+            entries
+                .iter()
+                .find(|entry| entry.window_id == *window_id && entry.reopenable())
+        })
+        .context("no recent running session; open the session picker with `splinterm sessions`")?;
+    let window = select_window_from(&dojos, (selected.dojo_id, selected.window_id))?;
+    drop(connection);
+    remember_window(window.id);
+    run_live_multipane_window(config, window).await
+}
+
 async fn launch(
     name: String,
     cwd: PathBuf,
@@ -3587,6 +3746,9 @@ async fn launch(
         if !command.is_empty() {
             bail!("cannot execute a new command while attaching an existing Splint");
         }
+        let window = window_containing(&dojos, splint_id)
+            .context("selected Splint is not present in a daemon window")?;
+        remember_window(window.id);
         drop(connection);
         return run_live_window(config, splint_id).await;
     }
@@ -3615,6 +3777,7 @@ async fn launch(
         }
         window.clone()
     };
+    remember_window(window.id);
     drop(connection);
     run_live_multipane_window(config, window).await
 }
@@ -4116,6 +4279,29 @@ async fn handle_scrollback_fetch(
     }
 }
 
+fn resolved_active_resize_request(
+    controller_id: Option<u64>,
+    prepared_resize: &mut Option<PaneResize>,
+    identity: (SplintId, u64),
+    resize: PaneResize,
+) -> Option<Request> {
+    let Some(controller_id) = controller_id else {
+        *prepared_resize = Some(resize);
+        return None;
+    };
+    *prepared_resize = None;
+    let (splint_id, incarnation) = identity;
+    Some(Request::Resize {
+        controller_id,
+        splint_id,
+        incarnation,
+        columns: resize.0,
+        rows: resize.1,
+        pixel_width: resize.2,
+        pixel_height: resize.3,
+    })
+}
+
 async fn active_resize_request(
     control: &mut Connection,
     active_controller: &mut Option<u64>,
@@ -4139,15 +4325,12 @@ async fn active_resize_request(
         false,
     )
     .await?;
-    Ok(controller_id.map(|controller_id| Request::Resize {
+    Ok(resolved_active_resize_request(
         controller_id,
-        splint_id,
-        incarnation,
-        columns: resize.0,
-        rows: resize.1,
-        pixel_width: resize.2,
-        pixel_height: resize.3,
-    }))
+        prepared_resize,
+        (splint_id, incarnation),
+        resize,
+    ))
 }
 
 async fn handle_control_event(
@@ -6038,6 +6221,14 @@ mod tests {
     }
 
     #[test]
+    fn graphical_session_commands_are_explicit() {
+        let sessions = Cli::try_parse_from(["splinterm", "sessions"]).unwrap();
+        assert!(matches!(sessions.command, Command::Sessions));
+        let reopen = Cli::try_parse_from(["splinterm", "reopen"]).unwrap();
+        assert!(matches!(reopen.command, Command::Reopen));
+    }
+
+    #[test]
     fn list_defaults_to_active_sessions_and_all_is_explicit() {
         let active = Cli::try_parse_from(["splinterm", "list"]).unwrap();
         assert!(matches!(active.command, Command::List { all: false }));
@@ -6631,6 +6822,39 @@ mod tests {
             ),
             EventAction::Shutdown
         );
+    }
+
+    #[test]
+    fn active_resize_is_retained_until_control_is_available() {
+        let splint_id = SplintId::new();
+        let resize = (80, 40, 800, 800);
+        let mut prepared = None;
+
+        assert!(
+            resolved_active_resize_request(None, &mut prepared, (splint_id, 3), resize).is_none()
+        );
+        assert_eq!(prepared, Some(resize));
+
+        let request = resolved_active_resize_request(
+            Some(9),
+            &mut prepared,
+            (splint_id, 3),
+            (100, 50, 1_000, 1_000),
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::Resize {
+                controller_id: 9,
+                splint_id: requested_splint,
+                incarnation: 3,
+                columns: 100,
+                rows: 50,
+                pixel_width: 1_000,
+                pixel_height: 1_000,
+            } if requested_splint == splint_id
+        ));
+        assert_eq!(prepared, None);
     }
 
     #[test]

@@ -61,6 +61,8 @@ package_splinterm() {
   install -Dm755 target/release/splinterm-relay "$pkgdir/usr/bin/splinterm-relay"
   install -Dm755 target/release/splinterm-pty-child "$pkgdir/usr/bin/splinterm-pty-child"
   install -Dm755 dist/bin/splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-xdg-terminal-exec"
+  ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-sessions"
+  ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-reopen"
   install -Dm755 tools/generate-omarchy-theme.py "$pkgdir/usr/bin/generate-omarchy-theme.py"
   install -Dm755 tools/automation/splinterm-session-picker.py \
     "$pkgdir/usr/bin/splinterm-session-picker"
@@ -82,6 +84,7 @@ package_splinterm() {
   install -Dm644 docs/packaging.md "$pkgdir/usr/share/doc/splinterm/packaging.md"
   install -Dm644 docs/headless.md "$pkgdir/usr/share/doc/splinterm/headless.md"
   install -Dm644 docs/automation.md "$pkgdir/usr/share/doc/splinterm/automation.md"
+  install -Dm644 docs/configuration.md "$pkgdir/usr/share/doc/splinterm/configuration.md"
   install -Dm644 docs/integrations.md "$pkgdir/usr/share/doc/splinterm/integrations.md"
   install -Dm644 docs/images.md "$pkgdir/usr/share/doc/splinterm/images.md"
   install -Dm644 docs/remote.md "$pkgdir/usr/share/doc/splinterm/remote.md"
