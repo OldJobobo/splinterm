@@ -3092,6 +3092,34 @@ enum PaneTopologyAction {
     AdjustRatio(i16),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionPickerShortcutAction {
+    Launch,
+    ConsumeRepeat,
+}
+
+fn session_picker_shortcut_action(
+    keysym: Keysym,
+    modifiers: Modifiers,
+    repeat: bool,
+    protected_surface: bool,
+) -> Option<SessionPickerShortcutAction> {
+    if protected_surface
+        || !modifiers.ctrl
+        || !modifiers.shift
+        || modifiers.alt
+        || modifiers.logo
+        || !matches!(keysym, Keysym::s | Keysym::S)
+    {
+        return None;
+    }
+    Some(if repeat {
+        SessionPickerShortcutAction::ConsumeRepeat
+    } else {
+        SessionPickerShortcutAction::Launch
+    })
+}
+
 fn pane_topology_action(keysym: Keysym, modifiers: Modifiers) -> Option<PaneTopologyAction> {
     if !modifiers.ctrl || !modifiers.shift || modifiers.alt || modifiers.logo {
         return None;
@@ -4596,6 +4624,15 @@ impl App {
             return;
         };
         let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+
+    fn spawn_session_picker() -> Result<()> {
+        let executable = std::env::current_exe().context("locate the Splinterm executable")?;
+        Command::new(&executable)
+            .arg("sessions")
+            .spawn()
+            .with_context(|| format!("launch session picker through {}", executable.display()))?;
+        Ok(())
     }
 
     fn fail(&mut self, error: anyhow::Error) {
@@ -6799,6 +6836,19 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
+        if let Some(action) = session_picker_shortcut_action(
+            event.keysym,
+            self.modifiers,
+            false,
+            self.session_picker.is_some() || self.trusted_consent.is_some(),
+        ) {
+            if action == SessionPickerShortcutAction::Launch
+                && let Err(error) = Self::spawn_session_picker()
+            {
+                eprintln!("splinterm could not launch Recent Sessions: {error:#}");
+            }
+            return;
+        }
         if self.topology_commands.is_some()
             && let Some(action) = pane_topology_action(event.keysym, self.modifiers)
         {
@@ -6869,6 +6919,16 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
+        if session_picker_shortcut_action(
+            event.keysym,
+            self.modifiers,
+            true,
+            self.session_picker.is_some() || self.trusted_consent.is_some(),
+        )
+        .is_some()
+        {
+            return;
+        }
         if let Some(action) = font_zoom_action(event.keysym, self.modifiers) {
             if let Err(error) = self.apply_font_zoom(action, queue_handle) {
                 self.fail(error);
@@ -8190,6 +8250,55 @@ mod tests {
             ..WindowOptions::default()
         };
         assert!(invalid.activate_multi_pane_input().is_err());
+    }
+
+    #[test]
+    fn session_picker_shortcut_is_exact_and_application_owned() {
+        let modifiers = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            session_picker_shortcut_action(Keysym::s, modifiers, false, false),
+            Some(SessionPickerShortcutAction::Launch)
+        );
+        assert_eq!(
+            session_picker_shortcut_action(Keysym::S, modifiers, true, false),
+            Some(SessionPickerShortcutAction::ConsumeRepeat)
+        );
+        assert_eq!(
+            session_picker_shortcut_action(Keysym::s, modifiers, false, true),
+            None
+        );
+        assert_eq!(
+            session_picker_shortcut_action(Keysym::s, Modifiers::default(), false, false),
+            None
+        );
+        assert_eq!(
+            session_picker_shortcut_action(
+                Keysym::s,
+                Modifiers {
+                    alt: true,
+                    ..modifiers
+                },
+                false,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            session_picker_shortcut_action(
+                Keysym::s,
+                Modifiers {
+                    logo: true,
+                    ..modifiers
+                },
+                false,
+                false,
+            ),
+            None
+        );
     }
 
     #[test]

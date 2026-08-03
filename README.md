@@ -70,6 +70,10 @@ splinterm sessions  # choose New Terminal or a recent running logical window
 splinterm reopen    # reopen the last locally remembered running window
 ```
 
+From any focused Splinterm terminal, **Ctrl+Shift+S** launches the Recent
+Sessions picker. This application-owned shortcut is not forwarded to the
+terminal process.
+
 The native Recent Sessions picker shows human Dojo/window names, starting
 directory, pane count, and running state without exposing UUIDs. Use arrow keys
 or J/K to select, Enter to open, N for a fresh terminal, Escape to cancel, or
