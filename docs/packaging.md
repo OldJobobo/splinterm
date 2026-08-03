@@ -4,6 +4,24 @@ Splinterm's `packaging/PKGBUILD` is a local validation artifact for the private
 `0.1.0.pre` release. It is not an AUR publication recipe and does not upload
 source or packages.
 
+## One-command local installation
+
+On an x86_64 Arch/Omarchy machine, a clean clone or pull can build and install
+Splinterm with:
+
+```bash
+./install.sh
+```
+
+This installs missing build/runtime dependencies, builds the committed checkout,
+validates the package contents, and asks before installation. It deliberately
+does not change the default terminal or edit Omarchy configuration. It never
+opts a fresh installation into the optional MCP package; when MCP is already
+installed, the matching split package is upgraded to preserve its exact-version
+dependency. Package tests are omitted from this installation path; pass
+`--check` to run the complete `PKGBUILD` `check()` function. Pass `--yes` only
+for an already-approved unattended installation.
+
 ## Build without installing
 
 The package source must be an exact committed snapshot. The guarded build and
@@ -12,6 +30,10 @@ validation entry point is:
 ```bash
 tools/package/build-local-package.sh
 ```
+
+Pass `--no-check` to build and validate package contents without running the
+complete package test suite. This is the mode used by `./install.sh` unless its
+`--check` option is supplied.
 
 Its equivalent manual build from a clean checkout is:
 

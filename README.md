@@ -59,6 +59,21 @@ links exact renderer, graphical sign-off, and private package evidence.
 Headless multiplexing, crash-safe metadata restore, independently attachable
 Dojo windows, and clipped multi-pane composition in one Wayland toplevel are implemented.
 
+## Install on Arch/Omarchy
+
+From a clean clone or pull, build and install the current committed version with:
+
+```bash
+./install.sh
+```
+
+The script installs missing package dependencies, builds and validates the Arch
+package, and asks before installing it. It does **not** change the default
+terminal or edit Omarchy configuration. It never opts a fresh installation into
+the optional MCP package; when MCP is already installed, it is upgraded to keep
+the package versions matched. Use `./install.sh --check` to include the full
+package test suite, or `--yes` for an already-approved unattended installation.
+
 ## Daily use
 
 The normal desktop entry and `xdg-terminal-exec` path always open a fresh Dojo

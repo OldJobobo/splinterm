@@ -3,6 +3,28 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 package_dir="$root/packaging"
+run_checks=true
+
+usage() {
+  cat <<'EOF'
+Usage: tools/package/build-local-package.sh [--no-check]
+
+Build and validate local Splinterm Arch packages.
+
+  --no-check   Skip the PKGBUILD check() function
+  -h, --help   Show this help
+EOF
+}
+
+while (($#)); do
+  case $1 in
+    --no-check) run_checks=false ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
 pkgver=$(bash -c "source '$package_dir/PKGBUILD'; printf '%s' \"\$pkgver\"")
 archive="$package_dir/splinterm-$pkgver.tar.gz"
 
@@ -11,10 +33,9 @@ if [[ -n $(git -C "$root" status --porcelain --untracked-files=no -- . ':(exclud
   exit 1
 fi
 
-required=(cargo fontconfig freetype2 gcc-libs glibc hicolor-icon-theme libxkbcommon
-  noto-fonts-cjk noto-fonts-emoji pixman pkgconf python rust
-  ttf-jetbrains-mono-nerd-basic wayland
-  xdg-terminal-exec)
+required=(appstream cargo desktop-file-utils fontconfig freetype2 gcc-libs glibc
+  hicolor-icon-theme libxkbcommon noto-fonts-cjk noto-fonts-emoji pixman pkgconf
+  python rust ttf-jetbrains-mono-nerd-basic wayland xdg-terminal-exec)
 missing=$(pacman -T "${required[@]}" || true)
 if [[ -n "$missing" ]]; then
   printf 'missing package dependencies:\n%s\n' "$missing" >&2
@@ -24,9 +45,11 @@ fi
 rm -rf "$package_dir/src" "$package_dir/pkg" "$archive"
 rm -f "$package_dir"/splinterm-*.pkg.tar.*
 git -C "$root" archive --format=tar.gz --prefix="splinterm-$pkgver/" -o "$archive" HEAD
+makepkg_args=(--cleanbuild --clean --noconfirm --noprogressbar)
+[[ $run_checks == false ]] && makepkg_args+=(--nocheck)
 (
   cd "$package_dir"
-  makepkg --cleanbuild --clean --noconfirm --noprogressbar
+  makepkg "${makepkg_args[@]}"
 )
 package=$(find "$package_dir" -maxdepth 1 -name "splinterm-$pkgver-*.pkg.tar.*" -print -quit)
 mcp_package=$(find "$package_dir" -maxdepth 1 -name "splinterm-mcp-$pkgver-*.pkg.tar.*" -print -quit)
