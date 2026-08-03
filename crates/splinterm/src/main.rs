@@ -4700,12 +4700,17 @@ impl ThemeReloadDiagnostics {
     }
 }
 
+enum ThemeUpdateSink {
+    Panes(Vec<mpsc::Sender<WindowUpdate>>),
+    Topology(mpsc::Sender<WindowTopologyUpdate>),
+}
+
 async fn watch_theme(
     path: PathBuf,
     alpha_override: Option<u16>,
     blur_override: Option<bool>,
     mut current: ResolvedTheme,
-    updates: Vec<mpsc::Sender<WindowUpdate>>,
+    sink: ThemeUpdateSink,
 ) {
     let mut observed = theme_file_fingerprint(&path);
     let mut diagnostics = ThemeReloadDiagnostics::default();
@@ -4722,10 +4727,19 @@ async fn watch_theme(
             Ok(Some(next)) => {
                 current = next;
                 diagnostics.accepted();
-                let mut delivered = false;
-                for updates in &updates {
-                    delivered |= updates.send(WindowUpdate::Theme(next)).await.is_ok();
-                }
+                let delivered = match &sink {
+                    ThemeUpdateSink::Panes(updates) => {
+                        let mut delivered = false;
+                        for updates in updates {
+                            delivered |= updates.send(WindowUpdate::Theme(next)).await.is_ok();
+                        }
+                        delivered
+                    }
+                    ThemeUpdateSink::Topology(updates) => updates
+                        .send(WindowTopologyUpdate::Theme(next))
+                        .await
+                        .is_ok(),
+                };
                 if !delivered {
                     break;
                 }
@@ -4742,7 +4756,6 @@ async fn watch_theme(
 
 struct PreparedPane {
     options: WindowPaneOptions,
-    updates: mpsc::Sender<WindowUpdate>,
     task: tokio::task::JoinHandle<Result<()>>,
 }
 
@@ -4858,7 +4871,6 @@ async fn prepare_live_pane(
             controlled: controller_id.is_some(),
             image_sources,
         },
-        updates,
         task,
     })
 }
@@ -5256,6 +5268,11 @@ async fn apply_topology_command(
             }
         }
         WindowTopologyCommand::Close { .. } => unreachable!("close handled above"),
+        WindowTopologyCommand::RequestSessionPicker
+        | WindowTopologyCommand::SwitchWindow { .. }
+        | WindowTopologyCommand::NewWindow => {
+            unreachable!("session commands are handled by the topology manager")
+        }
     };
     match connection.request(request).await? {
         Response::TopologyCommitted { .. } | Response::SplintStarted { .. } => {
@@ -5308,6 +5325,8 @@ async fn reconcile_window_topology(
             layout: next.clone(),
             added,
             removed,
+            focused: None,
+            switched: false,
         })
         .await
         .is_err()
@@ -5318,40 +5337,297 @@ async fn reconcile_window_topology(
     Ok(true)
 }
 
+async fn session_picker_catalog(
+    connection: &mut Connection,
+) -> Result<(Vec<SessionPickerItem>, Vec<(DojoId, WindowId)>)> {
+    let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
+        bail!("splinterd did not return its session list");
+    };
+    let entries = collect_sessions(&dojos, &recent_window_ids())
+        .into_iter()
+        .filter(SessionEntry::reopenable)
+        .collect::<Vec<_>>();
+    let items = entries
+        .iter()
+        .map(|entry| SessionPickerItem {
+            primary: entry.primary_label(),
+            secondary: entry.secondary_label(),
+        })
+        .collect();
+    let targets = entries
+        .iter()
+        .map(|entry| (entry.dojo_id, entry.window_id))
+        .collect();
+    Ok((items, targets))
+}
+
+async fn reopenable_window(
+    connection: &mut Connection,
+    dojo_id: DojoId,
+    window_id: WindowId,
+) -> Result<splinterm_core::Window> {
+    let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
+        bail!("splinterd did not return its session list");
+    };
+    let window = select_window_from(&dojos, (dojo_id, window_id))?;
+    anyhow::ensure!(
+        collect_sessions(&dojos, &[])
+            .into_iter()
+            .any(|entry| entry.window_id == window_id && entry.reopenable()),
+        "selected session no longer has a fully running pane layout"
+    );
+    Ok(window)
+}
+
+async fn create_daily_window(
+    connection: &mut Connection,
+    config: &AppConfig,
+) -> Result<splinterm_core::Window> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expected = connection.topology_revision().await?;
+    let Response::DojoCreated { dojo, .. } = connection
+        .request(create_request(
+            expected,
+            format!("terminal-{stamp}-{}", std::process::id()),
+            env::current_dir().context("failed to read current directory")?,
+            Vec::new(),
+            config,
+        ))
+        .await?
+    else {
+        bail!("splinterd did not create the requested terminal");
+    };
+    dojo.windows
+        .first()
+        .cloned()
+        .context("new dojo did not contain a window")
+}
+
+async fn replace_managed_window(
+    config: &AppConfig,
+    image_cache: &SharedImageContentCache,
+    window_id: &mut WindowId,
+    root: &mut LayoutNode,
+    target: splinterm_core::Window,
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+    pane_tasks: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<bool> {
+    if target.id == *window_id {
+        remember_window(target.id);
+        return Ok(updates
+            .send(WindowTopologyUpdate::SessionSwitchComplete)
+            .await
+            .is_ok());
+    }
+    anyhow::ensure!(
+        target.root.find_splint(target.default_focus).is_some(),
+        "target window focus is absent from its layout"
+    );
+    let mut ids = Vec::new();
+    layout_splint_ids(&target.root, &mut ids);
+    let mut prepared = Vec::with_capacity(ids.len());
+    for splint_id in ids {
+        match prepare_live_pane(
+            config,
+            splint_id,
+            image_cache.clone(),
+            pane_claims_initial_control(splint_id, target.default_focus),
+        )
+        .await
+        {
+            Ok(pane) => prepared.push(pane),
+            Err(error) => {
+                for pane in prepared {
+                    pane.task.abort();
+                }
+                return Err(error);
+            }
+        }
+    }
+    let mut removed = Vec::new();
+    layout_splint_ids(root, &mut removed);
+    let mut added = Vec::with_capacity(prepared.len());
+    let mut tasks = Vec::with_capacity(prepared.len());
+    for pane in prepared {
+        added.push(pane.options);
+        tasks.push(pane.task);
+    }
+    if updates
+        .send(WindowTopologyUpdate::Apply {
+            layout: target.root.clone(),
+            added,
+            removed,
+            focused: Some(target.default_focus),
+            switched: true,
+        })
+        .await
+        .is_err()
+    {
+        for task in tasks {
+            task.abort();
+        }
+        return Ok(false);
+    }
+    pane_tasks.extend(tasks);
+    *window_id = target.id;
+    *root = target.root;
+    remember_window(target.id);
+    Ok(true)
+}
+
+enum TopologyManagerCommandOutcome {
+    Continue,
+    Stop,
+    Edit(WindowTopologyCommand),
+}
+
+struct TopologyManagerState {
+    window_id: WindowId,
+    root: LayoutNode,
+    pane_tasks: Vec<tokio::task::JoinHandle<Result<()>>>,
+}
+
+async fn finish_managed_window_switch(
+    target: Result<splinterm_core::Window>,
+    state: &mut TopologyManagerState,
+    config: &AppConfig,
+    image_cache: &SharedImageContentCache,
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+) -> TopologyManagerCommandOutcome {
+    let result = match target {
+        Ok(target) => {
+            replace_managed_window(
+                config,
+                image_cache,
+                &mut state.window_id,
+                &mut state.root,
+                target,
+                updates,
+                &mut state.pane_tasks,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(true) => TopologyManagerCommandOutcome::Continue,
+        Ok(false) => TopologyManagerCommandOutcome::Stop,
+        Err(error) => {
+            let _ = updates
+                .send(WindowTopologyUpdate::SessionPickerFailed(format!(
+                    "{error:#}"
+                )))
+                .await;
+            TopologyManagerCommandOutcome::Continue
+        }
+    }
+}
+
+async fn handle_session_manager_command(
+    command: WindowTopologyCommand,
+    connection: &mut Connection,
+    config: &AppConfig,
+    image_cache: &SharedImageContentCache,
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+    state: &mut TopologyManagerState,
+) -> TopologyManagerCommandOutcome {
+    match command {
+        WindowTopologyCommand::RequestSessionPicker => {
+            match session_picker_catalog(connection).await {
+                Ok((items, targets)) => {
+                    if updates
+                        .send(WindowTopologyUpdate::ShowSessionPicker { items, targets })
+                        .await
+                        .is_err()
+                    {
+                        return TopologyManagerCommandOutcome::Stop;
+                    }
+                }
+                Err(error) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::SessionPickerFailed(format!(
+                            "{error:#}"
+                        )))
+                        .await;
+                }
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::SwitchWindow {
+            dojo_id,
+            window_id: target_id,
+        } => {
+            let target = reopenable_window(connection, dojo_id, target_id).await;
+            finish_managed_window_switch(target, state, config, image_cache, updates).await
+        }
+        WindowTopologyCommand::NewWindow => {
+            let target = create_daily_window(connection, config).await;
+            finish_managed_window_switch(target, state, config, image_cache, updates).await
+        }
+        command => TopologyManagerCommandOutcome::Edit(command),
+    }
+}
+
 async fn run_topology_manager(
     config: AppConfig,
     image_cache: SharedImageContentCache,
     window_id: WindowId,
-    mut root: LayoutNode,
+    root: LayoutNode,
     mut commands: mpsc::Receiver<WindowTopologyCommand>,
     updates: mpsc::Sender<WindowTopologyUpdate>,
-    mut pane_tasks: Vec<tokio::task::JoinHandle<Result<()>>>,
+    pane_tasks: Vec<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<()> {
     let mut connection = Connection::connect().await?;
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut state = TopologyManagerState {
+        window_id,
+        root,
+        pane_tasks,
+    };
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
             _ = poll.tick() => None,
         };
-        let (revision, authoritative) = match inspect_window_state(&mut connection, window_id).await
-        {
-            Ok(state) => state,
-            Err(error) => {
-                let _ = updates
-                    .send(WindowTopologyUpdate::Shutdown(format!("{error:#}")))
-                    .await;
-                return Err(error);
+        let command = if let Some(command) = command {
+            match handle_session_manager_command(
+                command,
+                &mut connection,
+                &config,
+                &image_cache,
+                &updates,
+                &mut state,
+            )
+            .await
+            {
+                TopologyManagerCommandOutcome::Continue => continue,
+                TopologyManagerCommandOutcome::Stop => break,
+                TopologyManagerCommandOutcome::Edit(command) => Some(command),
             }
+        } else {
+            None
         };
+        let (revision, authoritative) =
+            match inspect_window_state(&mut connection, state.window_id).await {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::Shutdown(format!("{error:#}")))
+                        .await;
+                    return Err(error);
+                }
+            };
         let reconciled = match reconcile_window_topology(
             &config,
             &image_cache,
-            &mut root,
+            &mut state.root,
             authoritative,
             &updates,
-            &mut pane_tasks,
+            &mut state.pane_tasks,
         )
         .await
         {
@@ -5375,8 +5651,8 @@ async fn run_topology_manager(
         match apply_topology_command(
             &mut connection,
             &config,
-            window_id,
-            &root,
+            state.window_id,
+            &state.root,
             revision,
             command,
         )
@@ -5390,7 +5666,7 @@ async fn run_topology_manager(
             Err(error) => eprintln!("splinterm topology edit rejected: {error:#}"),
         }
     }
-    for task in pane_tasks {
+    for task in state.pane_tasks {
         task.await.context("pane subscription task failed")??;
     }
     Ok(())
@@ -5464,16 +5740,14 @@ async fn run_live_multipane_window(
             .await?,
         );
     }
-    let theme_senders = prepared
-        .iter()
-        .map(|pane| pane.updates.clone())
-        .collect::<Vec<_>>();
+    let (topology_commands, topology_command_receiver) = mpsc::channel(8);
+    let (topology_update_sender, topology_updates) = mpsc::channel(4);
     let theme_task = tokio::spawn(watch_theme(
         config.theme_path.clone(),
         config.background_alpha,
         config.background_blur,
         theme,
-        theme_senders,
+        ThemeUpdateSink::Topology(topology_update_sender.clone()),
     ));
     let mut panes = Vec::with_capacity(prepared.len());
     let mut tasks = Vec::with_capacity(prepared.len());
@@ -5481,8 +5755,6 @@ async fn run_live_multipane_window(
         panes.push(pane.options);
         tasks.push(pane.task);
     }
-    let (topology_commands, topology_command_receiver) = mpsc::channel(8);
-    let (topology_update_sender, topology_updates) = mpsc::channel(4);
     let topology_smoke =
         spawn_topology_smoke(topology_commands.clone(), window_model.default_focus)?;
     let window_config = config.clone();
@@ -5589,7 +5861,7 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
         config.background_alpha,
         config.background_blur,
         theme,
-        vec![updates.clone()],
+        ThemeUpdateSink::Panes(vec![updates.clone()]),
     ));
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
     let (resync_sender, mut resyncs) = mpsc::channel(1);

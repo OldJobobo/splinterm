@@ -87,7 +87,7 @@ use wayland_protocols::ext::background_effect::v1::client::{
 };
 
 use splinterm_automation_client::ImageContentLeaseSet;
-use splinterm_core::{LayoutNode, SplintId};
+use splinterm_core::{DojoId, LayoutNode, SplintId, WindowId};
 use splinterm_protocol::{
     ActiveScreen, CellAttributes, ColorSource, ControlTransferDecision, ControlTransferOutcome,
     HistoryTransition, MouseTracking, SearchMatch, SearchPage, TerminalCell, TerminalInputModes,
@@ -543,6 +543,7 @@ pub struct SessionPickerUi {
 const SESSION_PICKER_PAGE_ITEMS: usize = 7;
 const SESSION_PICKER_NEW_ROW: usize = 3;
 const SESSION_PICKER_FIRST_ITEM_ROW: usize = 5;
+const MAX_DEFERRED_TOPOLOGY_UPDATES: usize = 16;
 
 impl SessionPickerUi {
     #[must_use]
@@ -740,6 +741,12 @@ pub enum WindowTopologyCommand {
         target: SplintId,
         delta: i16,
     },
+    RequestSessionPicker,
+    SwitchWindow {
+        dojo_id: DojoId,
+        window_id: WindowId,
+    },
+    NewWindow,
 }
 
 pub enum WindowTopologyUpdate {
@@ -747,7 +754,16 @@ pub enum WindowTopologyUpdate {
         layout: LayoutNode,
         added: Vec<WindowPaneOptions>,
         removed: Vec<SplintId>,
+        focused: Option<SplintId>,
+        switched: bool,
     },
+    ShowSessionPicker {
+        items: Vec<SessionPickerItem>,
+        targets: Vec<(DojoId, WindowId)>,
+    },
+    SessionPickerFailed(String),
+    SessionSwitchComplete,
+    Theme(ResolvedTheme),
     Closed,
     Shutdown(String),
 }
@@ -1095,6 +1111,13 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
         trusted_consent,
         session_picker,
+        session_picker_restore: None,
+        session_picker_targets: Vec::new(),
+        session_picker_requested: false,
+        session_switch_pending: false,
+        restored_frontend_needs_resize: false,
+        deferred_picker_theme: None,
+        deferred_topology_updates: Vec::new(),
         cursor_style: options.cursor_style,
         cursor_blink: options.cursor_blink,
         title_override: options.title,
@@ -2041,6 +2064,36 @@ struct ShmFrameBuffer {
     stale: BackingDamage,
 }
 
+struct SavedFrontend {
+    pane: PaneView,
+    inactive_panes: Vec<PaneView>,
+    layout: Option<LayoutNode>,
+}
+
+fn install_picker_frontend(
+    pane: &mut PaneView,
+    inactive_panes: &mut Vec<PaneView>,
+    layout: &mut Option<LayoutNode>,
+    picker_pane: PaneView,
+) -> SavedFrontend {
+    SavedFrontend {
+        pane: std::mem::replace(pane, picker_pane),
+        inactive_panes: std::mem::take(inactive_panes),
+        layout: layout.take(),
+    }
+}
+
+fn restore_saved_frontend(
+    pane: &mut PaneView,
+    inactive_panes: &mut Vec<PaneView>,
+    layout: &mut Option<LayoutNode>,
+    saved: SavedFrontend,
+) {
+    *pane = saved.pane;
+    *inactive_panes = saved.inactive_panes;
+    *layout = saved.layout;
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent Wayland lifecycle and rendering flags are not one state machine"
@@ -2081,6 +2134,13 @@ struct App {
     scroll_trace: bool,
     trusted_consent: Option<TrustedConsentUi>,
     session_picker: Option<SessionPickerUi>,
+    session_picker_restore: Option<SavedFrontend>,
+    session_picker_targets: Vec<(DojoId, WindowId)>,
+    session_picker_requested: bool,
+    session_switch_pending: bool,
+    restored_frontend_needs_resize: bool,
+    deferred_picker_theme: Option<ResolvedTheme>,
+    deferred_topology_updates: Vec<WindowTopologyUpdate>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
@@ -3047,6 +3107,16 @@ fn try_window_command(commands: &Sender<WindowCommand>, command: WindowCommand) 
     })
 }
 
+fn try_topology_command(
+    commands: &Sender<WindowTopologyCommand>,
+    command: WindowTopologyCommand,
+) -> Result<()> {
+    commands.try_send(command).map_err(|error| match error {
+        TrySendError::Full(_) => anyhow::anyhow!("topology command queue is full"),
+        TrySendError::Closed(_) => anyhow::anyhow!("topology command queue is closed"),
+    })
+}
+
 fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Option<usize> {
     let row = usize::try_from(snapshot.cursor_row).ok()?;
     if row >= snapshot.rows {
@@ -3094,18 +3164,17 @@ enum PaneTopologyAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionPickerShortcutAction {
-    Launch,
-    ConsumeRepeat,
+    Request,
+    Consume,
 }
 
 fn session_picker_shortcut_action(
     keysym: Keysym,
     modifiers: Modifiers,
     repeat: bool,
-    protected_surface: bool,
+    request_pending: bool,
 ) -> Option<SessionPickerShortcutAction> {
-    if protected_surface
-        || !modifiers.ctrl
+    if !modifiers.ctrl
         || !modifiers.shift
         || modifiers.alt
         || modifiers.logo
@@ -3113,10 +3182,10 @@ fn session_picker_shortcut_action(
     {
         return None;
     }
-    Some(if repeat {
-        SessionPickerShortcutAction::ConsumeRepeat
+    Some(if repeat || request_pending {
+        SessionPickerShortcutAction::Consume
     } else {
-        SessionPickerShortcutAction::Launch
+        SessionPickerShortcutAction::Request
     })
 }
 
@@ -4626,13 +4695,74 @@ impl App {
         let _ = Command::new("xdg-open").arg(url).spawn();
     }
 
-    fn spawn_session_picker() -> Result<()> {
-        let executable = std::env::current_exe().context("locate the Splinterm executable")?;
-        Command::new(&executable)
-            .arg("sessions")
-            .spawn()
-            .with_context(|| format!("launch session picker through {}", executable.display()))?;
+    fn show_embedded_session_picker(
+        &mut self,
+        items: Vec<SessionPickerItem>,
+        targets: Vec<(DojoId, WindowId)>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.session_picker.is_none() && self.session_picker_restore.is_none(),
+            "session picker is already open"
+        );
+        anyhow::ensure!(
+            items.len() == targets.len(),
+            "session picker targets differ"
+        );
+        let (decision, _receiver) = std_mpsc::channel();
+        let mut picker = SessionPickerUi::new(items, decision);
+        let mut snapshot = picker.snapshot();
+        apply_theme(&mut snapshot, self.theme);
+        let (_update_sender, updates) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut picker_pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot,
+                updates,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            self.scale_120,
+        )?;
+        picker_pane.updates = None;
+        picker_pane.commands = None;
+        let saved = install_picker_frontend(
+            &mut self.pane,
+            &mut self.inactive_panes,
+            &mut self.layout,
+            picker_pane,
+        );
+        self.session_picker = Some(picker);
+        self.session_picker_restore = Some(saved);
+        self.session_picker_targets = targets;
+        self.session_picker_requested = false;
+        self.window.set_title("Splinterm — Recent Sessions");
+        self.buffers.clear();
+        self.backing.clear();
+        self.full_redraw = true;
         Ok(())
+    }
+
+    fn restore_embedded_session_picker(&mut self) -> bool {
+        let Some(saved) = self.session_picker_restore.take() else {
+            return false;
+        };
+        restore_saved_frontend(
+            &mut self.pane,
+            &mut self.inactive_panes,
+            &mut self.layout,
+            saved,
+        );
+        self.session_picker = None;
+        self.session_picker_targets.clear();
+        self.session_picker_requested = false;
+        self.restored_frontend_needs_resize = true;
+        self.buffers.clear();
+        self.backing.clear();
+        self.full_redraw = true;
+        self.update_window_title();
+        true
     }
 
     fn fail(&mut self, error: anyhow::Error) {
@@ -4641,13 +4771,12 @@ impl App {
         self.exit = true;
     }
 
-    fn send_topology_command(&mut self, command: WindowTopologyCommand) {
-        let Some(commands) = &self.topology_commands else {
-            return;
-        };
-        if let Err(error) = commands.try_send(command) {
-            self.fail(anyhow::anyhow!("topology command queue failed: {error}"));
-        }
+    fn send_topology_command(&self, command: WindowTopologyCommand) -> Result<()> {
+        let commands = self
+            .topology_commands
+            .as_ref()
+            .context("topology command queue is unavailable")?;
+        try_topology_command(commands, command)
     }
 
     fn send_command(&mut self, command: WindowCommand) {
@@ -4872,7 +5001,36 @@ impl App {
         }
     }
 
+    fn cancel_session_picker(&mut self) {
+        if self.session_picker_restore.is_some() {
+            self.restore_embedded_session_picker();
+        } else {
+            self.exit = true;
+        }
+    }
+
     fn decide_session_picker(&mut self, decision: SessionPickerDecision) {
+        if self.session_picker_restore.is_some() {
+            let command = match decision {
+                SessionPickerDecision::New => WindowTopologyCommand::NewWindow,
+                SessionPickerDecision::Open(index) => {
+                    let Some((dojo_id, window_id)) =
+                        self.session_picker_targets.get(index).copied()
+                    else {
+                        self.fail(anyhow::anyhow!("session picker selected an invalid target"));
+                        return;
+                    };
+                    WindowTopologyCommand::SwitchWindow { dojo_id, window_id }
+                }
+            };
+            self.restore_embedded_session_picker();
+            self.session_switch_pending = true;
+            if let Err(error) = self.send_topology_command(command) {
+                self.session_switch_pending = false;
+                eprintln!("splinterm session switch: {error:#}");
+            }
+            return;
+        }
         if let Some(picker) = self.session_picker.take() {
             let _ = picker.decision.send(decision);
         }
@@ -5000,7 +5158,7 @@ impl App {
                 Keysym::n | Keysym::N => {
                     self.decide_session_picker(SessionPickerDecision::New);
                 }
-                Keysym::Escape => self.exit = true,
+                Keysym::Escape => self.cancel_session_picker(),
                 _ => {}
             }
             return;
@@ -5265,7 +5423,71 @@ impl App {
         Ok(())
     }
 
-    fn apply_topology_updates(&mut self) -> Result<bool> {
+    fn apply_topology_replacement(
+        &mut self,
+        layout: LayoutNode,
+        added: Vec<WindowPaneOptions>,
+        removed: Vec<SplintId>,
+        focused: Option<SplintId>,
+        switched: bool,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.session_picker_restore.is_none(),
+            "topology replacement arrived while the session picker was open"
+        );
+        let removed = removed.into_iter().collect::<HashSet<_>>();
+        for mut pane in added {
+            apply_theme(&mut pane.snapshot, self.theme);
+            let mut pane = PaneView::from_options(pane, self.scale_120)?;
+            pane.initial_resize_requires_control = true;
+            self.inactive_panes.push(pane);
+        }
+        if let Some(focused) = focused {
+            anyhow::ensure!(
+                layout.find_splint(focused).is_some() && self.focus_splint(focused),
+                "topology update focus is absent"
+            );
+        } else if self
+            .focused_splint()
+            .is_some_and(|splint_id| removed.contains(&splint_id))
+        {
+            let fallback = layout.first_splint_id();
+            anyhow::ensure!(
+                self.focus_splint(fallback),
+                "topology focus fallback is absent"
+            );
+        }
+        self.inactive_panes.retain(|pane| {
+            pane.snapshot
+                .as_ref()
+                .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
+        });
+        let mut identities = self
+            .inactive_panes
+            .iter()
+            .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id))
+            .collect::<HashSet<_>>();
+        if let Some(focused) = self.focused_splint() {
+            identities.insert(focused);
+        }
+        anyhow::ensure!(
+            identities.len() == layout.splint_count()
+                && identities
+                    .iter()
+                    .all(|splint_id| layout.find_splint(*splint_id).is_some()),
+            "topology update pane identities do not match its layout"
+        );
+        self.layout = Some(layout);
+        if switched {
+            self.session_switch_pending = false;
+            self.frame_titles.clear();
+            self.update_window_title();
+        }
+        self.full_redraw = true;
+        Ok(())
+    }
+
+    fn apply_topology_updates(&mut self) -> Result<(bool, Option<ResolvedTheme>)> {
         let mut pending = Vec::new();
         if let Some(updates) = &mut self.topology_updates {
             let drained = drain_receiver(updates, &self.update_waker);
@@ -5274,63 +5496,72 @@ impl App {
                 self.topology_updates = None;
             }
         }
+        if self.session_picker_restore.is_none() && !self.deferred_topology_updates.is_empty() {
+            let mut deferred = std::mem::take(&mut self.deferred_topology_updates);
+            deferred.append(&mut pending);
+            pending = deferred;
+        }
         let mut changed = false;
+        let mut next_theme = None;
         for update in pending {
-            let (layout, added, removed) = match update {
+            match update {
                 WindowTopologyUpdate::Apply {
                     layout,
                     added,
                     removed,
-                } => (layout, added, removed),
-                WindowTopologyUpdate::Closed => {
-                    self.exit = true;
-                    continue;
+                    focused,
+                    switched,
+                } => {
+                    if self.session_picker_restore.is_some() {
+                        anyhow::ensure!(
+                            self.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES,
+                            "too many topology updates arrived while the session picker was open"
+                        );
+                        self.deferred_topology_updates
+                            .push(WindowTopologyUpdate::Apply {
+                                layout,
+                                added,
+                                removed,
+                                focused,
+                                switched,
+                            });
+                    } else {
+                        self.apply_topology_replacement(layout, added, removed, focused, switched)?;
+                        changed = true;
+                    }
                 }
+                WindowTopologyUpdate::ShowSessionPicker { items, targets } => {
+                    if self.session_picker_requested
+                        && self.session_picker.is_none()
+                        && !self.session_switch_pending
+                    {
+                        self.show_embedded_session_picker(items, targets)?;
+                        changed = true;
+                    }
+                }
+                WindowTopologyUpdate::SessionPickerFailed(message) => {
+                    self.restore_embedded_session_picker();
+                    self.session_picker_requested = false;
+                    self.session_switch_pending = false;
+                    eprintln!("splinterm session picker: {message}");
+                }
+                WindowTopologyUpdate::SessionSwitchComplete => {
+                    self.session_switch_pending = false;
+                }
+                WindowTopologyUpdate::Theme(theme) => {
+                    if self.session_picker_restore.is_some() {
+                        self.deferred_picker_theme = Some(theme);
+                    } else {
+                        next_theme = Some(theme);
+                    }
+                }
+                WindowTopologyUpdate::Closed => self.exit = true,
                 WindowTopologyUpdate::Shutdown(message) => {
                     anyhow::bail!("topology manager stopped: {message}");
                 }
-            };
-            let removed = removed.into_iter().collect::<HashSet<_>>();
-            for pane in added {
-                let mut pane = PaneView::from_options(pane, self.scale_120)?;
-                pane.initial_resize_requires_control = true;
-                self.inactive_panes.push(pane);
             }
-            if self
-                .focused_splint()
-                .is_some_and(|splint_id| removed.contains(&splint_id))
-            {
-                let fallback = layout.first_splint_id();
-                anyhow::ensure!(
-                    self.focus_splint(fallback),
-                    "topology focus fallback is absent"
-                );
-            }
-            self.inactive_panes.retain(|pane| {
-                pane.snapshot
-                    .as_ref()
-                    .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
-            });
-            let mut identities = self
-                .inactive_panes
-                .iter()
-                .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id))
-                .collect::<HashSet<_>>();
-            if let Some(focused) = self.focused_splint() {
-                identities.insert(focused);
-            }
-            anyhow::ensure!(
-                identities.len() == layout.splint_count()
-                    && identities
-                        .iter()
-                        .all(|splint_id| layout.find_splint(*splint_id).is_some()),
-                "topology update pane identities do not match its layout"
-            );
-            self.layout = Some(layout);
-            self.full_redraw = true;
-            changed = true;
         }
-        Ok(changed)
+        Ok((changed, next_theme))
     }
 
     fn apply_resolved_theme(&mut self, theme: ResolvedTheme) -> Result<ThemeUpdateImpact> {
@@ -5397,12 +5628,22 @@ impl App {
         reason = "bounded update draining and semantic damage coalescing stay adjacent"
     )]
     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        let topology_changed = self.apply_topology_updates()?;
+        let (topology_changed, topology_theme) = self.apply_topology_updates()?;
         if self.exit {
             return Ok(());
         }
-        if topology_changed {
+        let topology_theme = topology_theme.or_else(|| {
+            self.session_picker_restore
+                .is_none()
+                .then(|| self.deferred_picker_theme.take())
+                .flatten()
+        });
+        let restored_frontend = std::mem::take(&mut self.restored_frontend_needs_resize);
+        if topology_changed || restored_frontend {
             self.emit_resize()?;
+        }
+        if restored_frontend {
+            self.update_ime_cursor_rectangle();
         }
 
         // Topology may promote a newly added pane to focus. Drain and arm the
@@ -5423,7 +5664,7 @@ impl App {
         let mut title_changed = false;
         let mut full_frame_reload = false;
         let mut effect_desired_changed = false;
-        if let Some(theme) = inactive_theme {
+        if let Some(theme) = topology_theme.or(inactive_theme) {
             let impact = self.apply_resolved_theme(theme)?;
             visual_changed |= impact.rebuild_pixels;
             full_frame_reload |= impact.rebuild_pixels;
@@ -6840,12 +7081,32 @@ impl KeyboardHandler for App {
             event.keysym,
             self.modifiers,
             false,
-            self.session_picker.is_some() || self.trusted_consent.is_some(),
+            self.session_picker.is_some()
+                || self.trusted_consent.is_some()
+                || self.session_picker_requested
+                || self.session_switch_pending,
         ) {
-            if action == SessionPickerShortcutAction::Launch
-                && let Err(error) = Self::spawn_session_picker()
+            if action == SessionPickerShortcutAction::Request {
+                if self.topology_commands.is_some() {
+                    self.session_picker_requested = true;
+                    if let Err(error) =
+                        self.send_topology_command(WindowTopologyCommand::RequestSessionPicker)
+                    {
+                        self.session_picker_requested = false;
+                        eprintln!("splinterm session picker request: {error:#}");
+                    }
+                } else {
+                    eprintln!("splinterm session picker is unavailable for this attachment");
+                }
+            }
+            return;
+        }
+        if self.session_picker.is_some() || self.trusted_consent.is_some() {
+            self.handle_key(&event);
+            if self.full_redraw
+                && let Err(error) = self.schedule_draw(queue_handle)
             {
-                eprintln!("splinterm could not launch Recent Sessions: {error:#}");
+                self.fail(error);
             }
             return;
         }
@@ -6862,7 +7123,9 @@ impl KeyboardHandler for App {
                         WindowTopologyCommand::AdjustRatio { target, delta }
                     }
                 };
-                self.send_topology_command(command);
+                if let Err(error) = self.send_topology_command(command) {
+                    self.fail(error);
+                }
             }
             return;
         }
@@ -6923,10 +7186,17 @@ impl KeyboardHandler for App {
             event.keysym,
             self.modifiers,
             true,
-            self.session_picker.is_some() || self.trusted_consent.is_some(),
+            self.session_picker.is_some()
+                || self.trusted_consent.is_some()
+                || self.session_picker_requested
+                || self.session_switch_pending,
         )
         .is_some()
         {
+            return;
+        }
+        if self.session_picker.is_some() || self.trusted_consent.is_some() {
+            self.handle_key(&event);
             return;
         }
         if let Some(action) = font_zoom_action(event.keysym, self.modifiers) {
@@ -8253,6 +8523,53 @@ mod tests {
     }
 
     #[test]
+    fn embedded_picker_restores_the_exact_live_frontend_bundle() {
+        let first = Splint::shell(PathBuf::from("/tmp/first"));
+        let first_id = first.id;
+        let second = Splint::shell(PathBuf::from("/tmp/second"));
+        let second_id = second.id;
+        let original_layout = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Leaf(first)),
+            second: Box::new(LayoutNode::Leaf(second)),
+        };
+        let mut pane = PaneView::from_options(pane_options(first_id), SCALE_DENOMINATOR).unwrap();
+        pane.search.input = Some("retained search".to_owned());
+        let mut inactive_panes =
+            vec![PaneView::from_options(pane_options(second_id), SCALE_DENOMINATOR).unwrap()];
+        let mut layout = Some(original_layout.clone());
+        let picker_id = SplintId::new();
+        let picker = PaneView::from_options(pane_options(picker_id), SCALE_DENOMINATOR).unwrap();
+
+        let saved = install_picker_frontend(&mut pane, &mut inactive_panes, &mut layout, picker);
+        assert_eq!(
+            pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+            Some(picker_id)
+        );
+        assert!(inactive_panes.is_empty());
+        assert!(layout.is_none());
+
+        restore_saved_frontend(&mut pane, &mut inactive_panes, &mut layout, saved);
+        assert_eq!(
+            pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+            Some(first_id)
+        );
+        assert_eq!(pane.search.input.as_deref(), Some("retained search"));
+        assert!(pane.commands.is_some());
+        assert!(pane.updates.is_some());
+        assert_eq!(inactive_panes.len(), 1);
+        assert_eq!(
+            inactive_panes[0]
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.splint_id),
+            Some(second_id)
+        );
+        assert_eq!(layout, Some(original_layout));
+    }
+
+    #[test]
     fn session_picker_shortcut_is_exact_and_application_owned() {
         let modifiers = Modifiers {
             ctrl: true,
@@ -8261,15 +8578,15 @@ mod tests {
         };
         assert_eq!(
             session_picker_shortcut_action(Keysym::s, modifiers, false, false),
-            Some(SessionPickerShortcutAction::Launch)
+            Some(SessionPickerShortcutAction::Request)
         );
         assert_eq!(
             session_picker_shortcut_action(Keysym::S, modifiers, true, false),
-            Some(SessionPickerShortcutAction::ConsumeRepeat)
+            Some(SessionPickerShortcutAction::Consume)
         );
         assert_eq!(
             session_picker_shortcut_action(Keysym::s, modifiers, false, true),
-            None
+            Some(SessionPickerShortcutAction::Consume)
         );
         assert_eq!(
             session_picker_shortcut_action(Keysym::s, Modifiers::default(), false, false),
@@ -9460,6 +9777,24 @@ mod tests {
         let error = try_window_command(&sender, WindowCommand::Input(vec![3]))
             .expect_err("disconnected receiver");
         assert!(error.to_string().contains("disconnected"));
+
+        let (topology_sender, mut topology_receiver) = tokio::sync::mpsc::channel(1);
+        try_topology_command(
+            &topology_sender,
+            WindowTopologyCommand::RequestSessionPicker,
+        )
+        .expect("first topology command");
+        let error = try_topology_command(&topology_sender, WindowTopologyCommand::NewWindow)
+            .expect_err("bounded topology overflow");
+        assert!(error.to_string().contains("full"));
+        assert!(topology_receiver.try_recv().is_ok());
+        drop(topology_receiver);
+        let error = try_topology_command(
+            &topology_sender,
+            WindowTopologyCommand::RequestSessionPicker,
+        )
+        .expect_err("disconnected topology receiver");
+        assert!(error.to_string().contains("closed"));
     }
 
     #[test]

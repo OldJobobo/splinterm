@@ -50,9 +50,10 @@ remains unsupported. Other `[colors]` options direct users to generated
 avoids claiming arbitrary `foot.ini` compatibility.
 
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste and Ctrl+Shift+S
-to launch the native Recent Sessions picker from any focused terminal window.
-These application-owned chords are not forwarded to the terminal process. In
-managed multi-Splint windows, Ctrl+Shift+W terminates and closes the focused pane;
+to open the native Recent Sessions picker inside any focused managed terminal
+window. These application-owned chords are not forwarded to the terminal
+process. In managed multi-Splint windows, Ctrl+Shift+W terminates and closes the
+focused pane;
 legacy direct single-Splint attachments leave that chord to the terminal.
 Ctrl+Shift+R revokes active access, and Ctrl+Shift+L releases control.
 Ctrl+Shift+T requests transfer from the current controller; its trusted UI uses
@@ -74,8 +75,9 @@ splinterm-sessions  → native Recent Sessions picker
 splinterm-reopen    → last locally remembered running window
 ```
 
-The in-window Ctrl+Shift+S shortcut launches the same picker in a separate
-Splinterm process, leaving the current terminal window and its session running.
+The in-window Ctrl+Shift+S shortcut replaces the terminal view temporarily
+without creating another Wayland window. Escape restores the exact current
+frontend state; choosing a session or New Terminal reuses the same window.
 
 A suitable Omarchy convention is Super+Enter for the normal terminal command
 and Super+Shift+Enter for `splinterm-sessions`. Splinterm does not modify the
