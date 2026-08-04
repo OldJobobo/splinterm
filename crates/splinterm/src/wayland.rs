@@ -1263,6 +1263,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         buffers: Vec::new(),
         backing: Vec::new(),
         full_redraw: true,
+        dirty_inactive_panes: HashSet::new(),
         keyboard: None,
         keyboard_seat: None,
         pointer: None,
@@ -2344,6 +2345,7 @@ struct App {
     buffers: Vec<ShmFrameBuffer>,
     backing: Vec<u8>,
     full_redraw: bool,
+    dirty_inactive_panes: HashSet<SplintId>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     keyboard_seat: Option<wl_seat::WlSeat>,
     pointer: Option<wl_pointer::WlPointer>,
@@ -3501,6 +3503,19 @@ const fn presented_cursor_visible(inline_picker_open: bool, blink_phase_visible:
     inline_picker_open || blink_phase_visible
 }
 
+fn restart_cursor_blink(
+    focused_visual_changed: bool,
+    visible: &mut bool,
+    last_blink: &mut Instant,
+) -> bool {
+    if !focused_visual_changed {
+        return false;
+    }
+    *visible = true;
+    *last_blink = Instant::now();
+    true
+}
+
 fn cursor_blink_enabled(reduced_motion: bool, focused: bool, modes: TerminalInputModes) -> bool {
     !reduced_motion && focused && modes.cursor_visible && modes.cursor_blink
 }
@@ -3623,30 +3638,121 @@ fn take_full_surface_damage(full_redraw: &mut bool, snapshot_frame_present: bool
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum BackingDamage {
     Clean,
-    Rows(Vec<bool>),
+    Partial {
+        dirty_rows: Vec<bool>,
+        dirty_regions: Vec<Rect>,
+    },
     Full,
 }
 
 impl BackingDamage {
-    fn mark_rows(&mut self, dirty_rows: &[bool]) {
-        if matches!(self, Self::Full) || !dirty_rows.iter().any(|dirty| *dirty) {
+    fn partial(&mut self) -> Option<(&mut Vec<bool>, &mut Vec<Rect>)> {
+        if matches!(self, Self::Clean) {
+            *self = Self::Partial {
+                dirty_rows: Vec::new(),
+                dirty_regions: Vec::new(),
+            };
+        }
+        let Self::Partial {
+            dirty_rows,
+            dirty_regions,
+        } = self
+        else {
+            return None;
+        };
+        Some((dirty_rows, dirty_regions))
+    }
+
+    fn mark_rows(&mut self, rows: &[bool]) {
+        if !rows.iter().any(|dirty| *dirty) {
             return;
         }
-        if matches!(self, Self::Clean) {
-            *self = Self::Rows(vec![false; dirty_rows.len()]);
-        }
-        let Self::Rows(stale_rows) = self else {
+        let Some((dirty_rows, _)) = self.partial() else {
             return;
         };
-        stale_rows.resize(dirty_rows.len(), false);
-        for (stale, dirty) in stale_rows.iter_mut().zip(dirty_rows) {
+        dirty_rows.resize(rows.len(), false);
+        for (stale, dirty) in dirty_rows.iter_mut().zip(rows) {
             *stale |= *dirty;
+        }
+    }
+
+    fn mark_regions(&mut self, regions: &[Rect]) {
+        if regions.is_empty() {
+            return;
+        }
+        let Some((_, dirty_regions)) = self.partial() else {
+            return;
+        };
+        for region in regions {
+            if !dirty_regions.contains(region) {
+                dirty_regions.push(*region);
+            }
         }
     }
 
     fn mark_full(&mut self) {
         *self = Self::Full;
     }
+}
+
+fn backing_row_damage_ranges(
+    dirty_rows: &[bool],
+    geometry: Option<&WindowGeometry>,
+    height: u32,
+    stride: usize,
+    byte_limit: usize,
+) -> Option<Vec<std::ops::Range<usize>>> {
+    if !dirty_rows.iter().any(|dirty| *dirty) {
+        return Some(Vec::new());
+    }
+    let geometry = geometry?;
+    let mut ranges = Vec::new();
+    for (row, dirty) in dirty_rows.iter().copied().enumerate() {
+        if !dirty {
+            continue;
+        }
+        let (_, y, _, row_height) = snapshot_row_rect(geometry, row)?;
+        let top = u32::try_from(y).ok()?;
+        let bottom = top
+            .saturating_add(u32::try_from(row_height).ok()?)
+            .min(height);
+        let start = usize::try_from(top).ok()?.checked_mul(stride)?;
+        let end = usize::try_from(bottom).ok()?.checked_mul(stride)?;
+        if start > end || end > byte_limit {
+            return None;
+        }
+        ranges.push(start..end);
+    }
+    Some(ranges)
+}
+
+fn backing_region_damage_ranges(
+    regions: &[Rect],
+    width: u32,
+    height: u32,
+    stride: usize,
+    byte_limit: usize,
+) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut ranges = Vec::new();
+    for region in regions {
+        let right = region.x.saturating_add(region.width).min(width);
+        let bottom = region.y.saturating_add(region.height).min(height);
+        if region.x >= right || region.y >= bottom {
+            continue;
+        }
+        let left = usize::try_from(region.x).ok()?.checked_mul(4)?;
+        let right = usize::try_from(right).ok()?.checked_mul(4)?;
+        for y in region.y..bottom {
+            let scanline = usize::try_from(y).ok()?.checked_mul(stride)?;
+            let start = scanline.checked_add(left)?;
+            let end = scanline.checked_add(right)?;
+            if start > end || end > byte_limit {
+                return None;
+            }
+            ranges.push(start..end);
+        }
+    }
+    Some(ranges)
 }
 
 fn sync_backing_damage(
@@ -3661,15 +3767,16 @@ fn sync_backing_damage(
         canvas.copy_from_slice(backing);
         backing.len()
     };
-    let BackingDamage::Rows(dirty_rows) = damage else {
+    let BackingDamage::Partial {
+        dirty_rows,
+        dirty_regions,
+    } = damage
+    else {
         return if matches!(damage, BackingDamage::Full) {
             full_copy(canvas)
         } else {
             0
         };
-    };
-    let Some(geometry) = geometry else {
-        return full_copy(canvas);
     };
     let Some(stride) = usize::try_from(width)
         .ok()
@@ -3677,39 +3784,28 @@ fn sync_backing_damage(
     else {
         return full_copy(canvas);
     };
-    let mut ranges = Vec::new();
-    for (row, dirty) in dirty_rows.iter().copied().enumerate() {
-        if !dirty {
-            continue;
-        }
-        let Some((_, y, _, row_height)) = snapshot_row_rect(geometry, row) else {
-            return full_copy(canvas);
-        };
-        let (Ok(top), Ok(row_height)) = (u32::try_from(y), u32::try_from(row_height)) else {
-            return full_copy(canvas);
-        };
-        let bottom = top.saturating_add(row_height).min(height);
-        let Some(start) = usize::try_from(top)
-            .ok()
-            .and_then(|top| top.checked_mul(stride))
-        else {
-            return full_copy(canvas);
-        };
-        let Some(end) = usize::try_from(bottom)
-            .ok()
-            .and_then(|bottom| bottom.checked_mul(stride))
-        else {
-            return full_copy(canvas);
-        };
-        if start > end || end > backing.len() || end > canvas.len() {
-            return full_copy(canvas);
-        }
-        ranges.push(start..end);
-    }
+    let byte_limit = backing.len().min(canvas.len());
+    let Some(mut ranges) =
+        backing_row_damage_ranges(dirty_rows, geometry, height, stride, byte_limit)
+    else {
+        return full_copy(canvas);
+    };
+    let Some(region_ranges) =
+        backing_region_damage_ranges(dirty_regions, width, height, stride, byte_limit)
+    else {
+        return full_copy(canvas);
+    };
+    ranges.extend(region_ranges);
+    ranges.sort_unstable_by_key(|range| range.start);
     let mut copied = 0;
+    let mut previous_end = 0;
     for range in ranges {
-        canvas[range.clone()].copy_from_slice(&backing[range.clone()]);
-        copied += range.len();
+        let start = range.start.max(previous_end);
+        if start < range.end {
+            canvas[start..range.end].copy_from_slice(&backing[start..range.end]);
+            copied += range.end - start;
+            previous_end = range.end;
+        }
     }
     copied
 }
@@ -6076,9 +6172,6 @@ impl App {
                 dirty_frames.insert(snapshot.splint_id);
             }
         }
-        if changed {
-            self.full_redraw = true;
-        }
         Ok(InactiveUpdateDrain {
             changed,
             theme: next_theme,
@@ -6134,6 +6227,7 @@ impl App {
             retain_newest_theme(&mut next_theme, update);
         }
         let mut visual_changed = topology_changed | inactive.changed;
+        let mut focused_visual_changed = topology_changed;
         let mut title_changed = false;
         let mut full_frame_reload = false;
         let mut rebuild_all_inactive = false;
@@ -6144,6 +6238,7 @@ impl App {
             } else {
                 let impact = self.apply_resolved_theme(update)?;
                 visual_changed |= impact.rebuild_pixels;
+                focused_visual_changed |= impact.rebuild_pixels;
                 full_frame_reload |= impact.rebuild_pixels;
                 rebuild_all_inactive |= impact.rebuild_pixels;
                 effect_desired_changed |= impact.reconcile_effect;
@@ -6188,6 +6283,7 @@ impl App {
                         self.full_redraw = true;
                         full_frame_reload = true;
                         visual_changed = true;
+                        focused_visual_changed = true;
                         title_changed = true;
                     }
                 }
@@ -6312,9 +6408,11 @@ impl App {
                         }
                         self.pane.pending_scrolls.extend(scrolls);
                     }
-                    visual_changed |= full
+                    let update_visual_changed = full
                         || cursor_changed
                         || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty);
+                    visual_changed |= update_visual_changed;
+                    focused_visual_changed |= update_visual_changed;
                     if let Some(started) = apply_started {
                         emit_perf_trace(
                             "splinterm",
@@ -6407,17 +6505,20 @@ impl App {
                     self.pane.history_page_pending = false;
                     self.invalidate_local_content_state();
                     visual_changed = true;
+                    focused_visual_changed = true;
                 }
                 WindowUpdate::Authority(authority) => {
                     self.pane.authority = authority;
                     title_changed = true;
                     visual_changed = true;
+                    focused_visual_changed = true;
                     self.full_redraw = true;
                 }
                 WindowUpdate::Control(active) => {
                     self.pane.controller_active = active;
                     title_changed = true;
                     visual_changed = true;
+                    focused_visual_changed = true;
                     self.full_redraw = true;
                 }
                 WindowUpdate::ControlTransferRequested(transfer_id) => {
@@ -6435,6 +6536,7 @@ impl App {
                     self.pane.search.pending_reveal = self.pane.search.matches.first().cloned();
                     title_changed = true;
                     visual_changed = true;
+                    focused_visual_changed = true;
                     self.full_redraw = true;
                 }
                 WindowUpdate::SearchResyncRequired => {
@@ -6443,6 +6545,7 @@ impl App {
                     self.pane.search.pending_reveal = None;
                     title_changed = true;
                     visual_changed = true;
+                    focused_visual_changed = true;
                     self.full_redraw = true;
                 }
                 WindowUpdate::Theme(update) => {
@@ -6451,6 +6554,7 @@ impl App {
                     } else {
                         let impact = self.apply_resolved_theme(update)?;
                         visual_changed |= impact.rebuild_pixels;
+                        focused_visual_changed |= impact.rebuild_pixels;
                         full_frame_reload |= impact.rebuild_pixels;
                         rebuild_all_inactive |= impact.rebuild_pixels;
                         effect_desired_changed |= impact.reconcile_effect;
@@ -6468,6 +6572,7 @@ impl App {
                         self.pane.updates = None;
                         title_changed = true;
                         visual_changed = true;
+                        focused_visual_changed = true;
                         self.full_redraw = true;
                     } else {
                         self.exit = true;
@@ -6481,6 +6586,7 @@ impl App {
                         self.pane.updates = None;
                         title_changed = true;
                         visual_changed = true;
+                        focused_visual_changed = true;
                         self.full_redraw = true;
                     } else {
                         self.exit = true;
@@ -6497,15 +6603,27 @@ impl App {
                 self.topology_commands = None;
             }
         }
-        visual_changed |= rebuild_inactive_frames(
+        let rebuilt_inactive = rebuild_inactive_frames(
             &mut self.inactive_panes,
             &inactive.dirty_frames,
             rebuild_all_inactive,
             self.scale_120,
-        )? > 0;
+        )?;
+        visual_changed |= rebuilt_inactive > 0;
+        if rebuild_all_inactive {
+            self.full_redraw = true;
+        } else if rebuilt_inactive > 0 {
+            self.dirty_inactive_panes
+                .extend(inactive.dirty_frames.iter().copied());
+        } else if inactive.changed {
+            // Rare inactive metadata changes do not identify a terminal frame
+            // region, so retain the conservative whole-window fallback.
+            self.full_redraw = true;
+        }
         if self.pane.search.pending_reveal.is_some() {
             self.reveal_pending_search_match();
             visual_changed = true;
+            focused_visual_changed = true;
         }
         if self.background_effect_reconcile_schedule.queue_update(
             effect_desired_changed,
@@ -6514,9 +6632,11 @@ impl App {
         ) {
             self.reconcile_background_effect(queue_handle, BackgroundEffectCommitMode::Immediate)?;
         }
-        if visual_changed {
-            self.cursor_blink_visible = true;
-            self.last_cursor_blink = Instant::now();
+        if restart_cursor_blink(
+            focused_visual_changed,
+            &mut self.cursor_blink_visible,
+            &mut self.last_cursor_blink,
+        ) {
             let prepare_started = perf_trace_enabled().then(Instant::now);
             let trace_dirty_rows = self
                 .pane
@@ -6581,9 +6701,9 @@ impl App {
             {
                 self.emit_resize()?;
             }
-            if self.configured && !self.session_picker_reconcile_pending {
-                self.schedule_terminal_draw(queue_handle)?;
-            }
+        }
+        if visual_changed && self.configured && !self.session_picker_reconcile_pending {
+            self.schedule_terminal_draw(queue_handle)?;
         }
         if title_changed && !self.inline_picker_open() && !self.session_picker_reconcile_pending {
             let snapshot = self
@@ -6991,6 +7111,7 @@ impl App {
             }
         }
         let mut copied_backing_bytes = 0;
+        let mut inactive_damage_regions = Vec::new();
         let backing_scroll_changed = !self.pane.pending_scrolls.is_empty();
         let capture_minimum_images = capture_minimum_images()?;
         let capture_image_count = self
@@ -7090,6 +7211,40 @@ impl App {
                     self.cursor_style,
                     CursorPresentation::for_keyboard_focus(terminal_keyboard_focused),
                 );
+                if let Some(layout) = pane_layout.as_ref() {
+                    for pane in &self.inactive_panes {
+                        let Some(splint_id) = pane
+                            .snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.splint_id)
+                            .filter(|splint_id| self.dirty_inactive_panes.contains(splint_id))
+                        else {
+                            continue;
+                        };
+                        let Some(rect) = layout.rect(splint_id) else {
+                            continue;
+                        };
+                        let (Some(frame), Some(geometry)) = (
+                            &pane.snapshot_frame,
+                            Self::pane_geometry(pane, rect, self.scale_120)?,
+                        ) else {
+                            continue;
+                        };
+                        let region = Self::buffer_rect(rect, self.scale_120)?;
+                        paint_snapshot_region_presented(
+                            &mut self.backing,
+                            width,
+                            height,
+                            frame,
+                            &geometry,
+                            region,
+                            terminal_cursor_blink,
+                            self.cursor_style,
+                            CursorPresentation::for_keyboard_focus(false),
+                        );
+                        inactive_damage_regions.push(region);
+                    }
+                }
             }
             let selection = resolved_selection;
             let hovered_url = self
@@ -7113,6 +7268,7 @@ impl App {
                     buffer.stale.mark_full();
                 } else {
                     buffer.stale.mark_rows(&self.pane.raster_dirty_rows);
+                    buffer.stale.mark_regions(&inactive_damage_regions);
                 }
             }
             let stale =
@@ -7254,16 +7410,26 @@ impl App {
             self.window
                 .wl_surface()
                 .damage_buffer(0, 0, width_i32, height_i32);
-        } else if let Some(geometry) = &window_geometry {
-            for (row, dirty) in self.pane.surface_dirty_rows.iter().copied().enumerate() {
-                if !dirty {
-                    continue;
+        } else {
+            if let Some(geometry) = &window_geometry {
+                for (row, dirty) in self.pane.surface_dirty_rows.iter().copied().enumerate() {
+                    if !dirty {
+                        continue;
+                    }
+                    if let Some((x, y, row_width, row_height)) = snapshot_row_rect(geometry, row) {
+                        self.window
+                            .wl_surface()
+                            .damage_buffer(x, y, row_width, row_height);
+                    }
                 }
-                if let Some((x, y, row_width, row_height)) = snapshot_row_rect(geometry, row) {
-                    self.window
-                        .wl_surface()
-                        .damage_buffer(x, y, row_width, row_height);
-                }
+            }
+            for region in &inactive_damage_regions {
+                self.window.wl_surface().damage_buffer(
+                    i32::try_from(region.x).unwrap_or(i32::MAX),
+                    i32::try_from(region.y).unwrap_or(i32::MAX),
+                    i32::try_from(region.width).unwrap_or(i32::MAX),
+                    i32::try_from(region.height).unwrap_or(i32::MAX),
+                );
             }
         }
         if history_status != self.pane.painted_history_status {
@@ -7298,6 +7464,7 @@ impl App {
             .attach_to(self.window.wl_surface())
             .context("attach SHM buffer")?;
         self.window.commit();
+        self.dirty_inactive_panes.clear();
         self.session_picker_layout = picker_layout;
         self.complete_background_effect_draw_commit()?;
         let committed_identity = self
@@ -8896,19 +9063,65 @@ mod tests {
     }
 
     #[test]
+    fn inactive_only_visual_changes_preserve_focused_cursor_blink_phase() {
+        let original = Instant::now() - Duration::from_millis(250);
+        let mut last_blink = original;
+        let mut visible = false;
+        assert!(!restart_cursor_blink(false, &mut visible, &mut last_blink));
+        assert!(!visible);
+        assert_eq!(last_blink, original);
+
+        assert!(restart_cursor_blink(true, &mut visible, &mut last_blink));
+        assert!(visible);
+        assert!(last_blink > original);
+    }
+
+    #[test]
     fn backing_damage_accumulates_independently_across_reused_buffers() {
+        let first_region = Rect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        let second_region = Rect {
+            x: 5,
+            y: 6,
+            width: 7,
+            height: 8,
+        };
         let mut buffers = [BackingDamage::Clean, BackingDamage::Clean];
         for damage in &mut buffers {
             damage.mark_rows(&[true, false, false]);
+            damage.mark_regions(&[first_region, first_region]);
         }
         let first = std::mem::replace(&mut buffers[0], BackingDamage::Clean);
-        assert_eq!(first, BackingDamage::Rows(vec![true, false, false]));
+        assert_eq!(
+            first,
+            BackingDamage::Partial {
+                dirty_rows: vec![true, false, false],
+                dirty_regions: vec![first_region],
+            }
+        );
 
         for damage in &mut buffers {
             damage.mark_rows(&[false, false, true]);
+            damage.mark_regions(&[second_region]);
         }
-        assert_eq!(buffers[0], BackingDamage::Rows(vec![false, false, true]));
-        assert_eq!(buffers[1], BackingDamage::Rows(vec![true, false, true]));
+        assert_eq!(
+            buffers[0],
+            BackingDamage::Partial {
+                dirty_rows: vec![false, false, true],
+                dirty_regions: vec![second_region],
+            }
+        );
+        assert_eq!(
+            buffers[1],
+            BackingDamage::Partial {
+                dirty_rows: vec![true, false, true],
+                dirty_regions: vec![first_region, second_region],
+            }
+        );
         buffers[1].mark_full();
         buffers[1].mark_rows(&[false, true, false]);
         assert_eq!(buffers[1], BackingDamage::Full);
@@ -8937,7 +9150,10 @@ mod tests {
             width,
             height,
             Some(&geometry),
-            &BackingDamage::Rows(vec![false, true, false]),
+            &BackingDamage::Partial {
+                dirty_rows: vec![false, true, false],
+                dirty_regions: Vec::new(),
+            },
         );
         let stride = usize::try_from(width).unwrap() * 4;
         assert_eq!(copied, stride * 2);
@@ -8947,6 +9163,42 @@ mod tests {
             &backing[stride * 2..stride * 4]
         );
         assert!(canvas[stride * 4..].iter().all(|byte| *byte == 0xff));
+    }
+
+    #[test]
+    fn backing_damage_copies_only_stale_pane_regions() {
+        let width = 4;
+        let height = 3;
+        let len = usize::try_from(width * height * 4).unwrap();
+        let backing = (0..len)
+            .map(|index| u8::try_from(index).unwrap())
+            .collect::<Vec<_>>();
+        let mut canvas = vec![0xff; len];
+        let region = Rect {
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 1,
+        };
+        let copied = sync_backing_damage(
+            &mut canvas,
+            &backing,
+            width,
+            height,
+            None,
+            &BackingDamage::Partial {
+                dirty_rows: Vec::new(),
+                dirty_regions: vec![region],
+            },
+        );
+        let stride = usize::try_from(width).unwrap() * 4;
+        assert_eq!(copied, 8);
+        assert!(canvas[..stride + 4].iter().all(|byte| *byte == 0xff));
+        assert_eq!(
+            &canvas[stride + 4..stride + 12],
+            &backing[stride + 4..stride + 12]
+        );
+        assert!(canvas[stride + 12..].iter().all(|byte| *byte == 0xff));
     }
 
     #[test]
@@ -9007,6 +9259,51 @@ mod tests {
             Some(&geometry),
             &first,
         );
+        assert_eq!(canvases[0], backing);
+        assert_eq!(canvases[1], backing);
+    }
+
+    #[test]
+    fn alternating_backing_buffers_repair_every_missed_pane_region() {
+        let width = 4;
+        let height = 2;
+        let stride = usize::try_from(width).unwrap() * 4;
+        let mut backing = vec![0; stride * usize::try_from(height).unwrap()];
+        let mut canvases = [backing.clone(), backing.clone()];
+        let mut damage = [BackingDamage::Clean, BackingDamage::Clean];
+        let left = Rect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        let right = Rect {
+            x: 2,
+            y: 1,
+            width: 2,
+            height: 1,
+        };
+
+        backing[..8].fill(1);
+        for stale in &mut damage {
+            stale.mark_regions(&[left]);
+        }
+        let first = std::mem::replace(&mut damage[0], BackingDamage::Clean);
+        sync_backing_damage(&mut canvases[0], &backing, width, height, None, &first);
+        assert_eq!(canvases[0], backing);
+        assert_ne!(canvases[1], backing);
+
+        backing[stride + 8..stride + 16].fill(2);
+        for stale in &mut damage {
+            stale.mark_regions(&[right]);
+        }
+        let second = std::mem::replace(&mut damage[1], BackingDamage::Clean);
+        sync_backing_damage(&mut canvases[1], &backing, width, height, None, &second);
+        assert_eq!(canvases[1], backing);
+        assert_ne!(canvases[0], backing);
+
+        let first = std::mem::replace(&mut damage[0], BackingDamage::Clean);
+        sync_backing_damage(&mut canvases[0], &backing, width, height, None, &first);
         assert_eq!(canvases[0], backing);
         assert_eq!(canvases[1], backing);
     }
