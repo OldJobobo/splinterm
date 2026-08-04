@@ -180,16 +180,17 @@ enum Command {
         #[arg(last = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
-    /// xdg-terminal-exec-compatible create/attach and graphical launch.
+    /// Create a fresh graphical terminal, or explicitly attach by Splint ID.
     Launch {
         #[arg(long = "working-directory", alias = "dir")]
         cwd: Option<PathBuf>,
-        #[arg(long, default_value = "main")]
-        name: String,
+        /// Give the fresh Dojo an explicit unique name.
+        #[arg(long)]
+        name: Option<String>,
         /// Attach an existing Splint by stable identity.
         #[arg(long)]
         splint_id: Option<SplintId>,
-        /// Create a new Dojo even when saved sessions exist.
+        /// Compatibility flag; fresh creation is already the default.
         #[arg(long, conflicts_with = "splint_id")]
         new: bool,
         /// Executable and arguments passed directly, never through a shell.
@@ -3561,16 +3562,6 @@ fn window_containing(
         .cloned()
 }
 
-fn focused_window_containing(
-    dojos: &[splinterm_core::Dojo],
-    splint_id: SplintId,
-) -> Result<splinterm_core::Window> {
-    let mut window = window_containing(dojos, splint_id)
-        .context("selected Splint is not present in a daemon window")?;
-    window.default_focus = splint_id;
-    Ok(window)
-}
-
 async fn select_window(selection: Option<(DojoId, WindowId)>) -> Result<splinterm_core::Window> {
     let mut connection = Connection::connect().await?;
     let Response::Dojos { dojos, .. } = connection.request(Request::ListDojos).await? else {
@@ -3688,7 +3679,7 @@ async fn run_sessions(config: AppConfig) -> Result<()> {
                 .unwrap_or_default()
                 .as_secs();
             launch(
-                format!("terminal-{stamp}-{}", std::process::id()),
+                Some(format!("terminal-{stamp}-{}", std::process::id())),
                 env::current_dir().context("failed to read current directory")?,
                 None,
                 true,
@@ -3731,11 +3722,16 @@ async fn reopen_recent(config: AppConfig) -> Result<()> {
     run_live_multipane_window(config, window).await
 }
 
+fn fresh_dojo_name(now: SystemTime, process_id: u32) -> String {
+    let stamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    format!("terminal-{stamp}-{process_id}")
+}
+
 async fn launch(
-    name: String,
+    name: Option<String>,
     cwd: PathBuf,
     splint_id: Option<SplintId>,
-    create_new: bool,
+    _create_new: bool,
     command: Vec<String>,
     config: AppConfig,
 ) -> Result<()> {
@@ -3756,30 +3752,22 @@ async fn launch(
         return run_live_window(config, splint_id).await;
     }
 
-    let attach = if create_new || dojos.is_empty() || !command.is_empty() {
-        None
-    } else {
-        choose_session(&dojos, true)?
+    let name = name.unwrap_or_else(|| fresh_dojo_name(SystemTime::now(), std::process::id()));
+    let expected = connection.topology_revision().await?;
+    let Response::DojoCreated { dojo, .. } = connection
+        .request(create_request(expected, name, cwd, command, &config))
+        .await?
+    else {
+        bail!("splinterd did not create the requested terminal");
     };
-    let window = if let Some(selected) = attach {
-        focused_window_containing(&dojos, selected)?
-    } else {
-        let expected = connection.topology_revision().await?;
-        let Response::DojoCreated { dojo, .. } = connection
-            .request(create_request(expected, name, cwd, command, &config))
-            .await?
-        else {
-            bail!("splinterd did not create the requested terminal");
-        };
-        let window = dojo
-            .windows
-            .first()
-            .context("new dojo did not contain a window")?;
-        if !matches!(&window.root, splinterm_core::LayoutNode::Leaf(_)) {
-            bail!("new dojo did not contain exactly one Splint");
-        }
-        window.clone()
-    };
+    let window = dojo
+        .windows
+        .first()
+        .context("new dojo did not contain a window")?;
+    if !matches!(&window.root, splinterm_core::LayoutNode::Leaf(_)) {
+        bail!("new dojo did not contain exactly one Splint");
+    }
+    let window = window.clone();
     remember_window(window.id);
     drop(connection);
     run_live_multipane_window(config, window).await
@@ -6870,7 +6858,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_launch_new_choice_requests_creation() {
+    fn explicit_window_choice_requires_an_exact_saved_splint_id() {
         let saved = SplintId::new();
         let choices = vec![(saved, "saved".to_owned())];
         assert_eq!(parse_session_choice(&choices, true, "new\n").unwrap(), None);
@@ -6882,25 +6870,26 @@ mod tests {
     }
 
     #[test]
-    fn launch_window_selection_preserves_the_requested_focused_splint() {
-        let mut dojo = splinterm_core::Dojo::new("multipane", PathBuf::from("/tmp"));
-        let original = dojo.windows[0].default_focus;
-        let selected = SplintId::new();
-        dojo.windows[0].root = splinterm_core::LayoutNode::Branch {
-            axis: splinterm_core::Axis::Horizontal,
-            ratio: splinterm_core::SplitRatio::new(500).unwrap(),
-            first: Box::new(splinterm_core::LayoutNode::Leaf(
-                splinterm_core::Splint::shell(PathBuf::from("/tmp")),
-            )),
-            second: Box::new(splinterm_core::LayoutNode::Leaf(splinterm_core::Splint {
-                id: selected,
-                ..splinterm_core::Splint::shell(PathBuf::from("/tmp"))
-            })),
+    fn launch_defaults_to_fresh_creation_with_a_collision_resistant_name() {
+        let cli = Cli::try_parse_from(["splinterm", "launch"]).unwrap();
+        let Command::Launch {
+            name,
+            splint_id,
+            new,
+            command,
+            ..
+        } = cli.command
+        else {
+            panic!("expected launch command");
         };
-
-        let window = focused_window_containing(&[dojo], selected).unwrap();
-        assert_eq!(window.default_focus, selected);
-        assert_ne!(window.default_focus, original);
+        assert!(name.is_none());
+        assert!(splint_id.is_none());
+        assert!(!new);
+        assert!(command.is_empty());
+        assert_eq!(
+            fresh_dojo_name(UNIX_EPOCH + Duration::from_secs(1_234), 56),
+            "terminal-1234-56"
+        );
     }
 
     #[test]
