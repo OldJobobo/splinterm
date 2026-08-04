@@ -1,20 +1,20 @@
 {
   "$schema_file": "cli-envelope.schema.json",
   "document": {
-    "schema": "splinterm.cli.v1",
+    "schema": "splinterm.cli.v2",
     "request_id": "10",
-    "operation": "list_dojos",
+    "operation": "list_lairs",
     "ok": true,
     "truncated": false,
     "resource": {
       "topology_revision": 7
     },
     "data": {
-      "dojos": [
+      "lairs": [
         {
-          "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+          "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
           "name": "main",
-          "window_count": 1,
+          "dojo_count": 1,
           "argv": [
             "secret"
           ]

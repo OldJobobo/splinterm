@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v2/tools/new_dojo.input.schema.json",
+  "title": "splinterm.new_dojo input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "name",
+        "argv"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/uuid"
+        },
+        "cwd": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/cwd"
+        },
+        "argv": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/argv"
+        },
+        "name": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/name"
+        }
+      }
+    }
+  ]
+}

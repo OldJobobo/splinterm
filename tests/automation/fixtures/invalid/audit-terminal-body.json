@@ -1,7 +1,7 @@
 {
   "$schema_file": "audit-record.schema.json",
   "document": {
-    "schema": "splinterm.audit.v1",
+    "schema": "splinterm.audit.v2",
     "retention": "daemon_lifetime",
     "audit_id": 72,
     "unix_seconds": 1784764801,
@@ -11,7 +11,9 @@
       "executable_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     },
     "operation": "input",
-    "requested_scopes": ["input"],
+    "requested_scopes": [
+      "input"
+    ],
     "decision": "allowed",
     "reason": "policy_match",
     "terminal_bytes": "rm -rf /"

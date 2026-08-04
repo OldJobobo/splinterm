@@ -1,7 +1,7 @@
 {
   "$schema_file": "tools/inspect_audit.output.schema.json",
   "document": {
-    "schema": "splinterm.mcp.v1",
+    "schema": "splinterm.mcp.v2",
     "tool": "splinterm.inspect_audit",
     "ok": true,
     "resource": {

@@ -81,7 +81,7 @@ directory, shell configuration, SSH material, or inherited Splinterm context.
 ## Least-privileged policy
 
 Create `~/.config/splinterm/policy.json` mode `0600`, substituting the digest and
-real IDs. Dojo/window selectors snapshot only descendants present when the
+real IDs. Lair/Dojo selectors snapshot only descendants present when the
 policy generation is published. New descendants remain denied until a reviewed
 policy reload.
 
@@ -89,7 +89,7 @@ Observation-only rule:
 
 ```json
 {
-  "schema": "splinterm.policy.v1",
+  "schema": "splinterm.policy.v2",
   "rules": [{
     "id": "mcp-observe",
     "executable": {"path": "/usr/bin/splinterm-mcp", "sha256": "REPLACE_WITH_SHA256"},
@@ -105,7 +105,7 @@ creation or termination):
 
 ```json
 {
-  "schema": "splinterm.policy.v1",
+  "schema": "splinterm.policy.v2",
   "rules": [{
     "id": "mcp-control",
     "executable": {"path": "/usr/bin/splinterm-mcp", "sha256": "REPLACE_WITH_SHA256"},
@@ -120,12 +120,12 @@ Lifecycle-management rule (no terminal observation or control):
 
 ```json
 {
-  "schema": "splinterm.policy.v1",
+  "schema": "splinterm.policy.v2",
   "rules": [{
     "id": "mcp-lifecycle",
     "executable": {"path": "/usr/bin/splinterm-mcp", "sha256": "REPLACE_WITH_SHA256"},
     "scopes": ["process_spawn", "process_restore", "process_terminate", "topology_layout_mutate", "topology_name_mutate"],
-    "resources": [{"kind": "lair"}],
+    "resources": [{"kind": "daemon"}, {"kind": "lair", "lair_id": "REPLACE_WITH_UUID"}],
     "limits": {"max_spawn_count": 4, "max_returned_bytes": 1048576, "deadline_ms": 10000}
   }]
 }
@@ -136,12 +136,12 @@ recommended default:
 
 ```json
 {
-  "schema": "splinterm.policy.v1",
+  "schema": "splinterm.policy.v2",
   "rules": [{
     "id": "mcp-full-reviewed",
     "executable": {"path": "/usr/bin/splinterm-mcp", "sha256": "REPLACE_WITH_SHA256"},
     "scopes": ["topology_metadata_read", "topology_subscribe", "terminal_visible_read", "terminal_subscribe", "scrollback_read", "scrollback_search", "controller_acquire", "controller_transfer", "input", "resize", "process_spawn", "process_restore", "process_terminate", "topology_layout_mutate", "topology_name_mutate", "authorization_inspect", "authorization_revoke", "audit_inspect"],
-    "resources": [{"kind": "lair"}],
+    "resources": [{"kind": "daemon"}, {"kind": "lair", "lair_id": "REPLACE_WITH_UUID"}],
     "limits": {"max_returned_rows": 64, "max_results": 64, "max_returned_bytes": 1048576, "max_live_subscriptions": 4, "max_spawn_count": 4, "deadline_ms": 10000}
   }]
 }
@@ -180,11 +180,11 @@ controllers, and daemon connections. Cancellation does not roll back a mutation
 already committed by the daemon. Resource sequence gaps and history replacement
 publish `resync_required`; read fresh state and explicitly subscribe again.
 
-`SPLINTERM_DOJO_ID`, `SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
+`SPLINTERM_LAIR_ID`, `SPLINTERM_DOJO_ID`, `SPLINTERM_SPLINT_ID`, and
 `SPLINTERM_SPLINT_INCARNATION` are non-authoritative discovery hints. A host must
 validate them through an authorized topology read before selecting a resource.
-Logical MCP window operations edit daemon topology; they do not map, focus,
-move, resize, or assign a native Wayland window, and Splinterm does not provide
+MCP Dojo operations edit daemon topology; they do not map, focus, move, resize,
+or assign a native Wayland Window, and Splinterm does not provide
 semantic agent supervision, readiness, messaging, or completion.
 
 ## Upgrade, revocation, and troubleshooting

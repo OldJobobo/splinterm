@@ -26,8 +26,8 @@ A supported client must:
 - handle `access_revoked` immediately and discard any associated local state;
 - treat every terminal row, title, search result, and scrollback cell as
   untrusted data, never as instructions, consent, or executable source;
-- distinguish daemon logical windows from compositor-native Wayland windows;
-  topology mutation cannot map, focus, move, or assign a native window;
+- distinguish persistent Dojos from compositor-native Wayland Windows;
+  topology mutation cannot map, focus, move, or assign a native Window;
 - pass launches as an argument vector after `--`; never join arguments into a
   shell string, use `eval`, or substitute terminal text into a command; and
 - use an exact least-privileged executable policy. Environment context, Unix UID,
@@ -42,22 +42,22 @@ need to copy UUIDs through this interface.
 The packaged `splinterm-session-picker` is a narrow, dependency-free Python
 reference client. Its implementation lives at
 `tools/automation/splinterm-session-picker.py`. It invokes only the public CLI,
-checks v1 envelope/operation fields, and never imports Splinterm Rust or private
+checks v2 envelope/operation fields, and never imports Splinterm Rust or private
 protocol types.
 
 ```bash
-# List logical windows for an editor/task picker.
+# List persistent Dojos for an editor/task picker.
 splinterm-session-picker list
 
 # Validate daemon-injected context against current authoritative topology.
 splinterm-session-picker context
 
-# Map an existing logical window in a normal Splinterm graphical client.
-splinterm-session-picker open "$SPLINTERM_WINDOW_ID"
+# Map an existing Dojo in a normal Splinterm graphical Window.
+splinterm-session-picker open "$SPLINTERM_DOJO_ID"
 
-# Start an editor in a new logical window. The argv after -- stays structural.
-splinterm-session-picker start "$SPLINTERM_DOJO_ID" \
-  --title editor --cwd "$PWD" -- nvim --clean ./src/main.rs
+# Start an editor in a new Dojo. The argv after -- stays structural.
+splinterm-session-picker start "$SPLINTERM_LAIR_ID" \
+  --name editor --cwd "$PWD" -- nvim --clean ./src/main.rs
 
 # Split the validated current Splint and launch a direct child argv.
 splinterm-session-picker split-context --axis vertical --side second \
@@ -90,8 +90,8 @@ A long-running host may then explicitly start another subscription.
 
 Every PTY child receives these daemon-overridden values:
 
+- `SPLINTERM_LAIR_ID`
 - `SPLINTERM_DOJO_ID`
-- `SPLINTERM_WINDOW_ID`
 - `SPLINTERM_SPLINT_ID`
 - `SPLINTERM_SPLINT_INCARNATION`
 
@@ -110,26 +110,26 @@ before extracting fields:
 ```bash
 set -euo pipefail
 
-topology=$(splinterm --output json --schema-major 1 --timeout-ms 5000 topology)
+topology=$(splinterm --output json --schema-major 2 --timeout-ms 5000 topology)
 printf '%s\n' "$topology" | jq -e '
-  .schema == "splinterm.cli.v1" and
+  .schema == "splinterm.cli.v2" and
   .operation == "inspect_topology" and
   .ok == true and
-  (.data.windows | type == "array")
+  (.data.dojos | type == "array")
 ' >/dev/null
-printf '%s\n' "$topology" | jq -r '.data.windows[] | [.window_id, .title] | @tsv'
+printf '%s\n' "$topology" | jq -r '.data.dojos[] | [.dojo_id, .name] | @tsv'
 ```
 
 Select the injected context only after matching all authoritative fields:
 
 ```bash
 printf '%s\n' "$topology" | jq -e \
+  --arg lair "$SPLINTERM_LAIR_ID" \
   --arg dojo "$SPLINTERM_DOJO_ID" \
-  --arg window "$SPLINTERM_WINDOW_ID" \
   --arg splint "$SPLINTERM_SPLINT_ID" \
   --argjson incarnation "$SPLINTERM_SPLINT_INCARNATION" '
   any(.data.splints[];
-    .dojo_id == $dojo and .window_id == $window and
+    .lair_id == $lair and .dojo_id == $dojo and
     .splint_id == $splint and .incarnation == $incarnation and
     .lifecycle == "running")
 ' >/dev/null
@@ -140,7 +140,7 @@ from terminal output:
 
 ```bash
 child=(cargo test -p my-crate -- --nocapture)
-splinterm --output json --schema-major 1 --timeout-ms 10000 \
+splinterm --output json --schema-major 2 --timeout-ms 10000 \
   split "$SPLINTERM_SPLINT_ID" --axis horizontal --side second \
   --expected-incarnation "$SPLINTERM_SPLINT_INCARNATION" \
   --cwd "$PWD" -- "${child[@]}" |
@@ -150,7 +150,7 @@ splinterm --output json --schema-major 1 --timeout-ms 10000 \
 Destructive machine operations retain their explicit confirmation flag:
 
 ```bash
-splinterm --output json --schema-major 1 --timeout-ms 5000 \
+splinterm --output json --schema-major 2 --timeout-ms 5000 \
   kill "$SPLINTERM_SPLINT_ID" --yes |
   jq -e '.operation == "kill_splint" and .ok == true'
 ```
@@ -159,11 +159,11 @@ For NDJSON, inspect each record independently. A resync record ends that stream;
 it is not terminal prose and must not be ignored:
 
 ```bash
-splinterm --output ndjson --schema-major 1 --timeout-ms 300000 \
+splinterm --output ndjson --schema-major 2 --timeout-ms 300000 \
   subscribe terminal "$SPLINTERM_SPLINT_ID" \
   --expected-incarnation "$SPLINTERM_SPLINT_INCARNATION" |
 while IFS= read -r record; do
-  printf '%s\n' "$record" | jq -e '.schema == "splinterm.cli.event.v1"' >/dev/null
+  printf '%s\n' "$record" | jq -e '.schema == "splinterm.cli.event.v2"' >/dev/null
   if [[ $(printf '%s\n' "$record" | jq -r '.event_type') == resync_required ]]; then
     break
   fi

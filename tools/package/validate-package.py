@@ -186,7 +186,7 @@ def validate_headless_runtime(daemon: Path, client: Path, picker: Path) -> None:
         executable = client.resolve()
         policy.write_text(
             json.dumps({
-                "schema": "splinterm.policy.v1",
+                "schema": "splinterm.policy.v2",
                 "rules": [{
                     "id": "package-headless-read",
                     "executable": {
@@ -194,7 +194,7 @@ def validate_headless_runtime(daemon: Path, client: Path, picker: Path) -> None:
                         "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                     },
                     "scopes": ["topology_metadata_read"],
-                    "resources": [{"kind": "lair"}],
+                    "resources": [{"kind": "daemon"}],
                     "limits": {"max_results": 16},
                 }],
             }),
@@ -261,8 +261,8 @@ def validate_headless_runtime(daemon: Path, client: Path, picker: Path) -> None:
 
             spoofed = environment.copy()
             spoofed.update(
-                SPLINTERM_DOJO_ID="018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
-                SPLINTERM_WINDOW_ID="018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+                SPLINTERM_LAIR_ID="018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+                SPLINTERM_DOJO_ID="018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
                 SPLINTERM_SPLINT_ID="018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
                 SPLINTERM_SPLINT_INCARNATION="1",
             )
@@ -272,7 +272,7 @@ def validate_headless_runtime(daemon: Path, client: Path, picker: Path) -> None:
                     "--output",
                     "json",
                     "--schema-major",
-                    "1",
+                    "2",
                     "--timeout-ms",
                     "5000",
                     "new",
@@ -327,7 +327,7 @@ def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
                 limits["max_spawn_count"] = max_spawn_count
             policy.write_text(
                 json.dumps({
-                    "schema": "splinterm.policy.v1",
+                    "schema": "splinterm.policy.v2",
                     "rules": [{
                         "id": rule_id,
                         "executable": identity,
@@ -343,7 +343,7 @@ def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
         install_rule(
             "picker-bootstrap",
             ["topology_metadata_read", "process_spawn", "topology_layout_mutate"],
-            [{"kind": "lair"}],
+            [{"kind": "daemon"}],
             1,
         )
         environment = os.environ.copy()
@@ -373,7 +373,7 @@ def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
                     "--output",
                     "json",
                     "--schema-major",
-                    "1",
+                    "2",
                     "--timeout-ms",
                     "10000",
                     *arguments,
@@ -416,8 +416,8 @@ def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
             parent = json.loads(created.stdout)["resource"]
             context = environment.copy()
             context.update(
+                SPLINTERM_LAIR_ID=parent["lair_id"],
                 SPLINTERM_DOJO_ID=parent["dojo_id"],
-                SPLINTERM_WINDOW_ID=parent["window_id"],
                 SPLINTERM_SPLINT_ID=parent["splint_id"],
                 SPLINTERM_SPLINT_INCARNATION=str(parent["incarnation"]),
             )
@@ -425,7 +425,7 @@ def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
                 "picker-split",
                 ["topology_metadata_read", "process_spawn", "topology_layout_mutate"],
                 [
-                    {"kind": "lair"},
+                    {"kind": "daemon"},
                     {
                         "kind": "splint",
                         "splint_id": parent["splint_id"],
@@ -472,8 +472,8 @@ def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
             child = json.loads(split.stdout)["resource"]
             child_context = context.copy()
             child_context.update(
+                SPLINTERM_LAIR_ID=child["lair_id"],
                 SPLINTERM_DOJO_ID=child["dojo_id"],
-                SPLINTERM_WINDOW_ID=child["window_id"],
                 SPLINTERM_SPLINT_ID=child["splint_id"],
                 SPLINTERM_SPLINT_INCARNATION=str(child["incarnation"]),
             )
@@ -481,7 +481,7 @@ def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
                 "picker-read-child",
                 ["topology_metadata_read", "terminal_visible_read", "terminal_subscribe"],
                 [
-                    {"kind": "lair"},
+                    {"kind": "daemon"},
                     {
                         "kind": "splint",
                         "splint_id": child["splint_id"],
@@ -577,7 +577,7 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
         executable = relay.resolve()
         policy.write_text(
             json.dumps({
-                "schema": "splinterm.policy.v1",
+                "schema": "splinterm.policy.v2",
                 "rules": [{
                     "id": "package-relay-read",
                     "executable": {
@@ -585,7 +585,7 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
                         "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                     },
                     "scopes": ["topology_metadata_read", "topology_subscribe"],
-                    "resources": [{"kind": "lair"}],
+                    "resources": [{"kind": "daemon"}],
                     "limits": {"max_results": 16, "max_live_subscriptions": 1},
                 }],
             }),
@@ -635,13 +635,13 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 24,
-                "maximum_version": 24,
+                "minimum_version": 25,
+                "maximum_version": 25,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
             hello = read_private_frame(relay_process.stdout)
-            assert hello["type"] == "hello" and hello["version"] == 24
+            assert hello["type"] == "hello" and hello["version"] == 25
             inherited_path = Path(f"/proc/{relay_process.pid}/fd/{inherited_fd}")
             assert not inherited_path.exists() or os.readlink(inherited_path) != inherited_target
 
@@ -658,7 +658,7 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
                 "type": "request",
                 "request_id": 2,
                 "request": {
-                    "type": "create_dojo",
+                    "type": "create_lair",
                     "expected_topology_revision": 0,
                     "name": "must-be-denied",
                     "launch": {
@@ -700,8 +700,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 24,
-                "maximum_version": 24,
+                "minimum_version": 25,
+                "maximum_version": 25,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
@@ -758,8 +758,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert restarted_relay.stdout is not None
             restarted_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 24,
-                "maximum_version": 24,
+                "minimum_version": 25,
+                "maximum_version": 25,
                 "role": "automation",
             }))
             restarted_relay.stdin.flush()
@@ -795,8 +795,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert broken_output_relay.stdout is not None
             broken_output_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 24,
-                "maximum_version": 24,
+                "minimum_version": 25,
+                "maximum_version": 25,
                 "role": "automation",
             }))
             broken_output_relay.stdin.flush()

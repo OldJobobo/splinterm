@@ -1,7 +1,7 @@
 {
   "$schema_file": "resources/terminal.schema.json",
   "document": {
-    "schema": "splinterm.mcp.resource.v1",
+    "schema": "splinterm.mcp.resource.v2",
     "uri": "splinterm://splints/018f4d8c-2a18-4b31-8c2f-9e7c5de77103/terminal",
     "sequence": 1,
     "resync_required": false,
@@ -23,8 +23,8 @@
     },
     "resource": {
       "kind": "terminal",
-      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
-      "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+      "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
       "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
       "incarnation": 2,
       "topology_revision": 7,

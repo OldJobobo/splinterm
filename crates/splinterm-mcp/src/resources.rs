@@ -7,7 +7,7 @@ use rmcp::{
 };
 use serde_json::{Value, json};
 use splinterm_automation_client::{Connection, apply_terminal_update, project_terminal_rows};
-use splinterm_core::{DojoId, SplintId, TopologyRevision, WindowId};
+use splinterm_core::{DojoId, LairId, SplintId, TopologyRevision};
 use splinterm_protocol::{
     ControlStatus, Request, Response, ServerFrame, SubscriptionEvent, TerminalProvenance,
     TerminalSnapshot, TopologySnapshot,
@@ -22,7 +22,7 @@ use crate::{dispatch, limits::MAXIMUM_TOOL_RESPONSE_BYTES, tools};
 
 const TOPOLOGY_URI: &str = "splinterm://topology";
 pub(crate) const MAXIMUM_RESOURCE_SUBSCRIPTIONS: usize = 16;
-const RESOURCE_SCHEMA: &str = "splinterm.mcp.resource.v1";
+const RESOURCE_SCHEMA: &str = "splinterm.mcp.resource.v2";
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 
 type ControlModes = Arc<Mutex<HashMap<(SplintId, u64), Vec<String>>>>;
@@ -148,7 +148,7 @@ fn topology_document(
 ) -> Result<Value, ErrorData> {
     let revision = resync_revision.unwrap_or(snapshot.revision);
     let data = if resync {
-        json!({"dojos": []})
+        json!({"lairs": []})
     } else {
         dispatch::topology_data(snapshot)
             .map_err(|_| resource_error("invalid topology resource"))?
@@ -201,8 +201,8 @@ fn terminal_document(
         "content_trust": "untrusted_terminal_data",
         "resource": {
             "kind": "terminal",
+            "lair_id": provenance.lair_id.to_string(),
             "dojo_id": provenance.dojo_id.to_string(),
-            "window_id": provenance.window_id.to_string(),
             "splint_id": splint_id.to_string(),
             "incarnation": snapshot.incarnation,
             "topology_revision": provenance.topology_revision.get(),
@@ -224,8 +224,8 @@ fn terminal_document(
 )]
 fn control_document(
     uri: ResourceUri,
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     incarnation: u64,
     status: ControlStatus,
     modes: &[String],
@@ -255,8 +255,8 @@ fn control_document(
         "content_trust": "trusted_metadata",
         "resource": {
             "kind": "control",
+            "lair_id": lair_id.to_string(),
             "dojo_id": dojo_id.to_string(),
-            "window_id": window_id.to_string(),
             "splint_id": splint_id.to_string(),
             "incarnation": incarnation,
             "control_revision": sequence,
@@ -306,8 +306,8 @@ enum Retained {
         snapshot: Box<TerminalSnapshot>,
     },
     Control {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
         incarnation: u64,
         status: ControlStatus,
     },
@@ -331,14 +331,14 @@ impl Retained {
                 snapshot,
             } => terminal_document(uri, provenance, snapshot, sequence, resync),
             Self::Control {
+                lair_id,
                 dojo_id,
-                window_id,
                 incarnation,
                 status,
             } => control_document(
                 uri,
+                *lair_id,
                 *dojo_id,
-                *window_id,
                 *incarnation,
                 *status,
                 modes,
@@ -414,7 +414,7 @@ async fn start(uri: ResourceUri, cancellation: &CancellationToken) -> Result<Sta
             _ => return Err(resource_error("invalid terminal subscription response")),
         },
         ResourceUri::Control(splint_id) => {
-            let (dojo_id, window_id, incarnation) = match request(
+            let (lair_id, dojo_id, incarnation) = match request(
                 &mut connection,
                 Request::InspectSplint { splint_id },
                 cancellation,
@@ -422,12 +422,12 @@ async fn start(uri: ResourceUri, cancellation: &CancellationToken) -> Result<Sta
             .await?
             {
                 Response::Splint {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     runtime,
                     ..
                 } if runtime.splint_id == splint_id && runtime.live_incarnation.is_some() => {
-                    (dojo_id, window_id, runtime.live_incarnation.unwrap())
+                    (lair_id, dojo_id, runtime.live_incarnation.unwrap())
                 }
                 _ => return Err(resource_error("invalid control resource identity")),
             };
@@ -447,8 +447,8 @@ async fn start(uri: ResourceUri, cancellation: &CancellationToken) -> Result<Sta
                 } if subscription_id > 0 => (
                     subscription_id,
                     Retained::Control {
+                        lair_id,
                         dojo_id,
-                        window_id,
                         incarnation,
                         status,
                     },
@@ -750,10 +750,10 @@ impl ResourceRegistry {
         let _setup = self.setup_gate.lock().await;
         let old = {
             let mut entries = self.entries.lock().await;
-            if let Some(entry) = entries.get(&uri) {
-                if entry.state.lock().await.active {
-                    return Ok(());
-                }
+            if let Some(entry) = entries.get(&uri)
+                && entry.state.lock().await.active
+            {
+                return Ok(());
             }
             entries.remove(&uri)
         };
@@ -762,13 +762,12 @@ impl ResourceRegistry {
         }
         {
             let mut entries = self.entries.lock().await;
-            if entries.len() >= MAXIMUM_RESOURCE_SUBSCRIPTIONS {
-                if let Some(closed) = entries
+            if entries.len() >= MAXIMUM_RESOURCE_SUBSCRIPTIONS
+                && let Some(closed) = entries
                     .iter()
                     .find_map(|(key, entry)| entry.task.is_finished().then_some(*key))
-                {
-                    entries.remove(&closed);
-                }
+            {
+                entries.remove(&closed);
             }
             if entries.len() >= MAXIMUM_RESOURCE_SUBSCRIPTIONS {
                 return Err(resource_error("resource subscription limit reached"));
@@ -897,14 +896,14 @@ mod tests {
     #[test]
     fn control_projection_never_claims_local_modes_without_daemon_control() {
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
-        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-        let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
         let uri = ResourceUri::Control(splint_id);
         let modes = vec!["input".to_owned()];
         let uncontrolled = control_document(
             uri,
+            lair_id,
             dojo_id,
-            window_id,
             2,
             ControlStatus {
                 splint_id,
@@ -922,8 +921,8 @@ mod tests {
 
         let controlled = control_document(
             uri,
+            lair_id,
             dojo_id,
-            window_id,
             2,
             ControlStatus {
                 splint_id,

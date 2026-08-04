@@ -1,7 +1,7 @@
 {
   "$schema_file": "tools/rename_dojo.input.schema.json",
   "document": {
-    "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+    "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
     "name": "renamed"
   }
 }

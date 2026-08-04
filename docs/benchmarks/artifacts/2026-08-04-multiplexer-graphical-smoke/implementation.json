@@ -1,0 +1,64 @@
+{
+  "files": [
+    {
+      "path": "tools/benchmark/run-graphical-multiplexer-smoke.py",
+      "sha256": "c38f720eb1f05af48e34ad501fc6d287ccd7f674d7ed0fc85c99b24f33dc8ed2",
+      "size_bytes": 24490
+    },
+    {
+      "path": "tools/benchmark/run-graphical-multiplexer-smoke-matrix.py",
+      "sha256": "0c3755ccc908815ff06a26bd38b08657160aab6aa7c797eff8368ae7bfb82d5b",
+      "size_bytes": 7271
+    },
+    {
+      "path": "tools/benchmark/graphical-multiplexer-smoke-schema.json",
+      "sha256": "4ab265a5abe05e51ef6e22ef58236ad721febc9ae3b954ef8a55099a3f8c2c61",
+      "size_bytes": 13006
+    },
+    {
+      "path": "tools/benchmark/headless_multiplexer.py",
+      "sha256": "c3bc1482f6a7e5edf4a010feb745b74cdfa9ecf078a2999c9257ff3d1f22afc9",
+      "size_bytes": 28680
+    },
+    {
+      "path": "tools/benchmark/multiplexing.py",
+      "sha256": "6b517cba4266842219a8b40c3230969df1a2cca9a62c6f955157752c7d0cc251",
+      "size_bytes": 8125
+    },
+    {
+      "path": "tools/benchmark/metrics.py",
+      "sha256": "4d3ce02c2639830af78179485ee1b17f18c260553e6d2d5dd4656ddedeba3d34",
+      "size_bytes": 7335
+    },
+    {
+      "path": "tools/benchmark/multiplexers/base.py",
+      "sha256": "cee36d8f5f431ffe1da7a7952b5444b302931f2c035d661dc1c7145a80b31c52",
+      "size_bytes": 5366
+    },
+    {
+      "path": "tools/benchmark/multiplexers/tmux.py",
+      "sha256": "0ecb5796dfd93490a202568ddabadb88e777eda58ab6e6a5e1781065c93fa42c",
+      "size_bytes": 2016
+    },
+    {
+      "path": "tools/benchmark/multiplexers/zellij.py",
+      "sha256": "947406b868c104dcb1d57bbf922a1031877d3d74c93d967d44b9a0e1f3e88a9c",
+      "size_bytes": 2394
+    },
+    {
+      "path": "tools/benchmark/profiles/foot.ini",
+      "sha256": "d64cc0d6f410366c64c9ef498c56bfd96fe92822646cccaf4de30339be699763",
+      "size_bytes": 304
+    },
+    {
+      "path": "tools/benchmark/profiles/tmux.conf",
+      "sha256": "dd1ee946628a4350d426b64e68f3d2d663f424d1c5936c7763e3c42ba92dbff3",
+      "size_bytes": 334
+    },
+    {
+      "path": "tools/benchmark/profiles/zellij.kdl",
+      "sha256": "d625aefa3e1fe82f2a59e299547fffa7662c2ff5bfe679e38d4abdd8291a6ea2",
+      "size_bytes": 347
+    }
+  ]
+}

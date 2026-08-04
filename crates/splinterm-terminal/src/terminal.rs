@@ -2060,11 +2060,7 @@ impl Terminal {
                     private: Some(b'?'),
                     final_byte: b'h' | b'l',
                     ..
-                } => {
-                    if self.active != before.active {
-                        change.full();
-                    }
-                }
+                } if self.active != before.active => change.full(),
                 _ => {}
             }
         }

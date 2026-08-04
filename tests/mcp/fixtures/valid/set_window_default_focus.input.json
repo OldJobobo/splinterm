@@ -1,7 +1,0 @@
-{
-  "$schema_file": "tools/set_window_default_focus.input.schema.json",
-  "document": {
-    "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
-    "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103"
-  }
-}

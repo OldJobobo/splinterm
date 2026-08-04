@@ -2,7 +2,7 @@
   "$schema_file": "error.schema.json",
   "$expected_keyword": "enum",
   "document": {
-    "schema": "splinterm.mcp.v1",
+    "schema": "splinterm.mcp.v2",
     "tool": "splinterm.ping",
     "ok": false,
     "error": {

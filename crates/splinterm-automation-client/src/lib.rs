@@ -24,7 +24,7 @@ use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFl
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use splinterm_core::{DojoId, LayoutNode, SplintId, TopologyRevision, WindowId};
+use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, TopologyRevision};
 use splinterm_filemap::ReadOnlyFileMap;
 use splinterm_protocol::{
     AccessGrant, AccessScope, AuditDecision, AuditOperation, AuditOutcome, AuditPage,
@@ -45,8 +45,8 @@ const READ_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_BUFFERED_BYTES: usize = MAX_FRAME_BYTES + 4 + READ_CHUNK_BYTES;
 const MAX_QUEUED_EVENTS: usize = 64;
 const MAX_QUEUED_EVENT_BYTES: usize = MAX_FRAME_BYTES + 4;
-const CLI_SCHEMA_V1: &str = "splinterm.cli.v1";
-const CLI_EVENT_SCHEMA_V1: &str = "splinterm.cli.event.v1";
+const CLI_SCHEMA_V2: &str = "splinterm.cli.v2";
+const CLI_EVENT_SCHEMA_V2: &str = "splinterm.cli.event.v2";
 
 fn decimal_id(value: u64, label: &str) -> Result<String> {
     if value == 0 {
@@ -55,10 +55,10 @@ fn decimal_id(value: u64, label: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-/// Stable public v1 symbolic error codes.
+/// Stable public v2 symbolic error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CliErrorCodeV1 {
+pub enum CliErrorCodeV2 {
     AuthenticationFailed,
     HandshakeRequired,
     IncompatibleVersion,
@@ -81,8 +81,8 @@ pub enum CliErrorCodeV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct CliErrorV1 {
-    code: CliErrorCodeV1,
+struct CliErrorV2 {
+    code: CliErrorCodeV2,
     message: String,
     retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,7 +92,7 @@ struct CliErrorV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct GenericEnvelopeDataV1 {
+struct GenericEnvelopeDataV2 {
     schema: &'static str,
     request_id: String,
     operation: &'static str,
@@ -103,14 +103,14 @@ struct GenericEnvelopeDataV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<CliErrorV1>,
+    error: Option<CliErrorV2>,
 }
 
 /// Opaque explicit v1 envelope for reviewed operation projections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CliEnvelopeV1(GenericEnvelopeDataV1);
+pub struct CliEnvelopeV2(GenericEnvelopeDataV2);
 
-impl CliEnvelopeV1 {
+impl CliEnvelopeV2 {
     /// Creates a successful operation envelope from an explicit public projection.
     fn success(
         operation: &'static str,
@@ -118,8 +118,8 @@ impl CliEnvelopeV1 {
         data: Value,
         truncated: bool,
     ) -> Result<Self> {
-        Ok(Self(GenericEnvelopeDataV1 {
-            schema: CLI_SCHEMA_V1,
+        Ok(Self(GenericEnvelopeDataV2 {
+            schema: CLI_SCHEMA_V2,
             request_id: decimal_id(1, "request ID")?,
             operation,
             ok: true,
@@ -133,7 +133,7 @@ impl CliEnvelopeV1 {
     /// Creates a failed operation envelope with no terminal or query body.
     pub fn failure(
         operation: &'static str,
-        code: CliErrorCodeV1,
+        code: CliErrorCodeV2,
         message: impl Into<String>,
         retryable: bool,
     ) -> Result<Self> {
@@ -141,15 +141,15 @@ impl CliEnvelopeV1 {
         if message.is_empty() || message.chars().count() > 1024 {
             bail!("public error message length is outside 1..=1024 characters");
         }
-        Ok(Self(GenericEnvelopeDataV1 {
-            schema: CLI_SCHEMA_V1,
+        Ok(Self(GenericEnvelopeDataV2 {
+            schema: CLI_SCHEMA_V2,
             request_id: decimal_id(1, "request ID")?,
             operation,
             ok: false,
             truncated: false,
             resource: None,
             data: None,
-            error: Some(CliErrorV1 {
+            error: Some(CliErrorV2 {
                 code,
                 message,
                 retryable,
@@ -170,15 +170,15 @@ impl CliEnvelopeV1 {
             bail!("public error message length is outside 1..=1024 characters");
         }
         let (code, retryable) = public_error_code(error.code);
-        Ok(Self(GenericEnvelopeDataV1 {
-            schema: CLI_SCHEMA_V1,
+        Ok(Self(GenericEnvelopeDataV2 {
+            schema: CLI_SCHEMA_V2,
             request_id: decimal_id(1, "request ID")?,
             operation,
             ok: false,
             truncated: false,
             resource: None,
             data: None,
-            error: Some(CliErrorV1 {
+            error: Some(CliErrorV2 {
                 code,
                 message,
                 retryable,
@@ -192,71 +192,71 @@ impl CliEnvelopeV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct DojoSummaryV1 {
-    dojo_id: String,
+struct LairSummaryV2 {
+    lair_id: String,
     name: String,
-    window_count: usize,
+    dojo_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct WindowSummaryV1 {
+struct DojoSummaryV2 {
+    lair_id: String,
     dojo_id: String,
-    window_id: String,
-    title: String,
+    name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum SplintLifecycleV1 {
+enum SplintLifecycleV2 {
     Running,
     Exited,
     Restorable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct SplintSummaryV1 {
+struct SplintSummaryV2 {
+    lair_id: String,
     dojo_id: String,
-    window_id: String,
     splint_id: String,
     title: String,
-    lifecycle: SplintLifecycleV1,
+    lifecycle: SplintLifecycleV2,
     current_incarnation: Option<u64>,
     last_incarnation: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ListDojosDataV1 {
-    dojos: Vec<DojoSummaryV1>,
+struct ListLairsDataV2 {
+    lairs: Vec<LairSummaryV2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct InspectTopologyDataV1 {
-    dojos: Vec<DojoSummaryV1>,
-    windows: Vec<WindowSummaryV1>,
-    splints: Vec<SplintSummaryV1>,
+struct InspectTopologyDataV2 {
+    lairs: Vec<LairSummaryV2>,
+    dojos: Vec<DojoSummaryV2>,
+    splints: Vec<SplintSummaryV2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct InspectSplintResourceV1 {
+struct InspectSplintResourceV2 {
+    lair_id: String,
     dojo_id: String,
-    window_id: String,
     splint_id: String,
     topology_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct InspectSplintDataV1 {
+struct InspectSplintDataV2 {
     title: String,
-    lifecycle: SplintLifecycleV1,
+    lifecycle: SplintLifecycleV2,
     current_incarnation: Option<u64>,
     last_incarnation: Option<u64>,
     exit_code: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalReadResourceV1 {
+struct TerminalReadResourceV2 {
+    lair_id: String,
     dojo_id: String,
-    window_id: String,
     splint_id: String,
     incarnation: u64,
     terminal_revision: u64,
@@ -264,9 +264,9 @@ struct TerminalReadResourceV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalReadProvenanceV1 {
+pub struct TerminalReadProvenanceV2 {
+    pub lair_id: LairId,
     pub dojo_id: DojoId,
-    pub window_id: WindowId,
     pub splint_id: SplintId,
     pub incarnation: u64,
     pub terminal_revision: u64,
@@ -274,7 +274,7 @@ pub struct TerminalReadProvenanceV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalActionDataV1 {
+struct TerminalActionDataV2 {
     acknowledged: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     columns: Option<u16>,
@@ -283,39 +283,39 @@ struct TerminalActionDataV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalReadRowV1 {
+struct TerminalReadRowV2 {
     row_id: Option<u64>,
     linebreak: bool,
     cells: Vec<ProjectedTerminalCell>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalCursorV1 {
+struct TerminalCursorV2 {
     column: usize,
     row: usize,
     visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalSnapshotDataV1 {
+struct TerminalSnapshotDataV2 {
     content_encoding: &'static str,
     columns: usize,
-    rows: Vec<TerminalReadRowV1>,
-    cursor: TerminalCursorV1,
+    rows: Vec<TerminalReadRowV2>,
+    cursor: TerminalCursorV2,
     continuation_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ScrollbackPageDataV1 {
+struct ScrollbackPageDataV2 {
     kind: &'static str,
     content_encoding: &'static str,
-    rows: Vec<TerminalReadRowV1>,
+    rows: Vec<TerminalReadRowV2>,
     has_older: bool,
     continuation_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct SearchMatchV1 {
+struct SearchMatchV2 {
     row_id: u64,
     start_column: usize,
     end_column: usize,
@@ -323,30 +323,30 @@ struct SearchMatchV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct SearchResultsDataV1 {
+struct SearchResultsDataV2 {
     kind: &'static str,
-    matches: Vec<SearchMatchV1>,
+    matches: Vec<SearchMatchV2>,
     timed_out: bool,
     continuation_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReadResyncReasonV1 {
+pub enum ReadResyncReasonV2 {
     StaleRevision,
     HistoryReplaced,
     RetentionGap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ReadResyncDataV1 {
+struct ReadResyncDataV2 {
     kind: &'static str,
-    reason: ReadResyncReasonV1,
+    reason: ReadResyncReasonV2,
     continuation_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TerminalContinuationV1 {
+pub enum TerminalContinuationV2 {
     Scrollback {
         splint_id: SplintId,
         incarnation: u64,
@@ -364,15 +364,15 @@ pub enum TerminalContinuationV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AuthorizationResourceV1 {
+struct AuthorizationResourceV2 {
+    lair_id: String,
     dojo_id: String,
-    window_id: String,
     splint_id: String,
     incarnation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AuthorizationGrantV1 {
+struct AuthorizationGrantV2 {
     #[serde(skip_serializing_if = "Option::is_none")]
     grant_id: Option<String>,
     source: &'static str,
@@ -383,13 +383,13 @@ struct AuthorizationGrantV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AuthorizationStatusDataV1 {
-    grants: Vec<AuthorizationGrantV1>,
+struct AuthorizationStatusDataV2 {
+    grants: Vec<AuthorizationGrantV2>,
     development_bypass: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AuditPeerV1 {
+struct AuditPeerV2 {
     uid: u32,
     executable_path: String,
     executable_sha256: String,
@@ -400,11 +400,11 @@ struct AuditPeerV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AuditResourceV1 {
+struct AuditResourceV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lair_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dojo_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    window_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     splint_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -412,7 +412,7 @@ struct AuditResourceV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AuditRecordV1 {
+struct AuditRecordV2 {
     schema: &'static str,
     retention: &'static str,
     audit_id: String,
@@ -421,10 +421,10 @@ struct AuditRecordV1 {
     policy_generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_rule_id: Option<String>,
-    peer: AuditPeerV1,
+    peer: AuditPeerV2,
     operation: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    resource: Option<AuditResourceV1>,
+    resource: Option<AuditResourceV2>,
     requested_scopes: Vec<&'static str>,
     decision: &'static str,
     reason: String,
@@ -437,9 +437,9 @@ struct AuditRecordV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AuditDataV1 {
+struct AuditDataV2 {
     retention: &'static str,
-    records: Vec<AuditRecordV1>,
+    records: Vec<AuditRecordV2>,
     retention_gap: bool,
     oldest_available_audit_id: Option<String>,
     newest_available_audit_id: Option<String>,
@@ -447,11 +447,11 @@ struct AuditDataV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct MutationResourceV1 {
+struct MutationResourceV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lair_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dojo_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    window_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     splint_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -461,52 +461,52 @@ struct MutationResourceV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-struct CreatedResultV1 {
+struct CreatedResultV2 {
     created: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-struct MutationResultV1 {
+struct MutationResultV2 {
     committed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     confirmed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-struct ProcessStartedV1 {
+struct ProcessStartedV2 {
     started: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct RestoreLeafV1 {
+struct RestoreLeafV2 {
     splint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     incarnation: Option<u64>,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error_code: Option<CliErrorCodeV1>,
+    error_code: Option<CliErrorCodeV2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct RestoreManyV1 {
-    results: Vec<RestoreLeafV1>,
+struct RestoreManyV2 {
+    results: Vec<RestoreLeafV2>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-struct KillResultV1 {
+struct KillResultV2 {
     terminated: bool,
     confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct RevokeResultV1 {
+struct RevokeResultV2 {
     revoked_grant_id: String,
     confirmed: bool,
 }
 
 fn checked_public_text(value: &str, label: &str) -> Result<String> {
     if value.chars().count() > 255 {
-        bail!("{label} exceeds public v1 bounds");
+        bail!("{label} exceeds public v2 bounds");
     }
     Ok(value.to_owned())
 }
@@ -531,7 +531,7 @@ fn project_terminal_cells(
             width += 1;
         }
         if width > 2 || cell.content.chars().count() > 64 {
-            bail!("terminal cell exceeds public v1 bounds");
+            bail!("terminal cell exceeds public v2 bounds");
         }
         cells.push(ProjectedTerminalCell {
             text: cell.content.clone(),
@@ -650,7 +650,7 @@ pub fn apply_terminal_update(
     Ok(())
 }
 
-fn public_rows(rows: &[splinterm_protocol::TerminalRow]) -> Result<Vec<TerminalReadRowV1>> {
+fn public_rows(rows: &[splinterm_protocol::TerminalRow]) -> Result<Vec<TerminalReadRowV2>> {
     rows.iter()
         .zip(project_terminal_rows(rows)?)
         .map(|(row, projected)| {
@@ -659,9 +659,9 @@ fn public_rows(rows: &[splinterm_protocol::TerminalRow]) -> Result<Vec<TerminalR
                 .iter()
                 .any(|cell| cell.text.chars().count() > 32)
             {
-                bail!("terminal cell exceeds public v1 bounds");
+                bail!("terminal cell exceeds public v2 bounds");
             }
-            Ok(TerminalReadRowV1 {
+            Ok(TerminalReadRowV2 {
                 row_id: row.row_id,
                 linebreak: projected.linebreak,
                 cells: projected.cells,
@@ -691,7 +691,7 @@ fn base64url_encode(input: &[u8]) -> String {
 
 fn base64url_decode(input: &str) -> Result<Vec<u8>> {
     if !(16..=256).contains(&input.len()) {
-        bail!("continuation cursor length is outside public v1 bounds");
+        bail!("continuation cursor length is outside public v2 bounds");
     }
     let value = |byte| match byte {
         b'A'..=b'Z' => Some(byte - b'A'),
@@ -748,10 +748,10 @@ fn read_u64(input: &[u8], offset: &mut usize, label: &str) -> Result<u64> {
     Ok(value)
 }
 
-/// Encodes private paging provenance into an opaque public v1 cursor.
-pub fn encode_terminal_cursor(cursor: &TerminalContinuationV1) -> Result<String> {
+/// Encodes private paging provenance into an opaque public v2 cursor.
+pub fn encode_terminal_cursor(cursor: &TerminalContinuationV2) -> Result<String> {
     let (kind, splint_id, incarnation, revision, generation) = match cursor {
-        TerminalContinuationV1::Scrollback {
+        TerminalContinuationV2::Scrollback {
             splint_id,
             incarnation,
             terminal_revision,
@@ -764,7 +764,7 @@ pub fn encode_terminal_cursor(cursor: &TerminalContinuationV1) -> Result<String>
             terminal_revision,
             history_generation,
         ),
-        TerminalContinuationV1::Search {
+        TerminalContinuationV2::Search {
             splint_id,
             incarnation,
             terminal_revision,
@@ -784,13 +784,13 @@ pub fn encode_terminal_cursor(cursor: &TerminalContinuationV1) -> Result<String>
     bytes.extend_from_slice(&revision.to_be_bytes());
     push_u64(&mut bytes, *generation, "history generation")?;
     match cursor {
-        TerminalContinuationV1::Scrollback { before_row_id, .. } => {
+        TerminalContinuationV2::Scrollback { before_row_id, .. } => {
             push_u64(&mut bytes, *before_row_id, "before row ID")?;
         }
-        TerminalContinuationV1::Search { daemon_cursor, .. } => {
+        TerminalContinuationV2::Search { daemon_cursor, .. } => {
             let length = u8::try_from(daemon_cursor.len())?;
             if length == 0 || length > 32 || !daemon_cursor.is_ascii() {
-                bail!("daemon search cursor exceeds public v1 bounds");
+                bail!("daemon search cursor exceeds public v2 bounds");
             }
             bytes.push(length);
             bytes.extend_from_slice(daemon_cursor.as_bytes());
@@ -798,13 +798,13 @@ pub fn encode_terminal_cursor(cursor: &TerminalContinuationV1) -> Result<String>
     }
     let encoded = base64url_encode(&bytes);
     if encoded.len() > 256 {
-        bail!("continuation cursor exceeds public v1 bounds");
+        bail!("continuation cursor exceeds public v2 bounds");
     }
     Ok(encoded)
 }
 
-/// Decodes and validates an opaque public v1 terminal cursor.
-pub fn decode_terminal_cursor(encoded: &str) -> Result<TerminalContinuationV1> {
+/// Decodes and validates an opaque public v2 terminal cursor.
+pub fn decode_terminal_cursor(encoded: &str) -> Result<TerminalContinuationV2> {
     let bytes = base64url_decode(encoded)?;
     let (&version, rest) = bytes
         .split_first()
@@ -826,7 +826,7 @@ pub fn decode_terminal_cursor(encoded: &str) -> Result<TerminalContinuationV1> {
             if offset != rest.len() {
                 bail!("scrollback cursor has trailing data");
             }
-            Ok(TerminalContinuationV1::Scrollback {
+            Ok(TerminalContinuationV2::Scrollback {
                 splint_id,
                 incarnation,
                 terminal_revision,
@@ -845,7 +845,7 @@ pub fn decode_terminal_cursor(encoded: &str) -> Result<TerminalContinuationV1> {
             if length == 0 || offset + length != rest.len() {
                 bail!("search cursor has invalid length");
             }
-            Ok(TerminalContinuationV1::Search {
+            Ok(TerminalContinuationV2::Search {
                 splint_id,
                 incarnation,
                 terminal_revision,
@@ -857,11 +857,11 @@ pub fn decode_terminal_cursor(encoded: &str) -> Result<TerminalContinuationV1> {
     }
 }
 
-fn public_lifecycle(runtime: &SplintRuntimeSummary) -> SplintLifecycleV1 {
+fn public_lifecycle(runtime: &SplintRuntimeSummary) -> SplintLifecycleV2 {
     match runtime.lifecycle {
-        SplintLifecycle::Starting | SplintLifecycle::Running => SplintLifecycleV1::Running,
-        SplintLifecycle::Exited if runtime.restorable => SplintLifecycleV1::Restorable,
-        SplintLifecycle::Exited => SplintLifecycleV1::Exited,
+        SplintLifecycle::Starting | SplintLifecycle::Running => SplintLifecycleV2::Running,
+        SplintLifecycle::Exited if runtime.restorable => SplintLifecycleV2::Restorable,
+        SplintLifecycle::Exited => SplintLifecycleV2::Exited,
     }
 }
 
@@ -876,16 +876,16 @@ fn runtime_for(snapshot: &TopologySnapshot, splint_id: SplintId) -> Result<&Spli
 fn append_splint_summaries(
     node: &LayoutNode,
     snapshot: &TopologySnapshot,
+    lair_id: splinterm_core::LairId,
     dojo_id: splinterm_core::DojoId,
-    window_id: splinterm_core::WindowId,
-    summaries: &mut Vec<SplintSummaryV1>,
+    summaries: &mut Vec<SplintSummaryV2>,
 ) -> Result<()> {
     match node {
         LayoutNode::Leaf(splint) => {
             let runtime = runtime_for(snapshot, splint.id)?;
-            summaries.push(SplintSummaryV1 {
+            summaries.push(SplintSummaryV2 {
+                lair_id: lair_id.to_string(),
                 dojo_id: dojo_id.to_string(),
-                window_id: window_id.to_string(),
                 splint_id: splint.id.to_string(),
                 title: checked_public_text(&splint.title, "Splint title")?,
                 lifecycle: public_lifecycle(runtime),
@@ -894,65 +894,65 @@ fn append_splint_summaries(
             });
         }
         LayoutNode::Branch { first, second, .. } => {
-            append_splint_summaries(first, snapshot, dojo_id, window_id, summaries)?;
-            append_splint_summaries(second, snapshot, dojo_id, window_id, summaries)?;
+            append_splint_summaries(first, snapshot, lair_id, dojo_id, summaries)?;
+            append_splint_summaries(second, snapshot, lair_id, dojo_id, summaries)?;
         }
     }
     Ok(())
 }
 
-fn topology_projection(snapshot: &TopologySnapshot) -> Result<InspectTopologyDataV1> {
+fn topology_projection(snapshot: &TopologySnapshot) -> Result<InspectTopologyDataV2> {
     snapshot
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
+    let mut lairs = Vec::new();
     let mut dojos = Vec::new();
-    let mut windows = Vec::new();
     let mut splints = Vec::new();
-    for dojo in snapshot.lair.dojos() {
-        dojos.push(DojoSummaryV1 {
-            dojo_id: dojo.id.to_string(),
-            name: checked_public_text(&dojo.name, "Dojo name")?,
-            window_count: dojo.windows.len(),
+    for lair in snapshot.topology.lairs() {
+        lairs.push(LairSummaryV2 {
+            lair_id: lair.id.to_string(),
+            name: checked_public_text(&lair.name, "Lair name")?,
+            dojo_count: lair.dojos.len(),
         });
-        for window in &dojo.windows {
-            windows.push(WindowSummaryV1 {
+        for dojo in &lair.dojos {
+            dojos.push(DojoSummaryV2 {
+                lair_id: lair.id.to_string(),
                 dojo_id: dojo.id.to_string(),
-                window_id: window.id.to_string(),
-                title: checked_public_text(&window.title, "window title")?,
+                name: checked_public_text(&dojo.name, "Dojo name")?,
             });
-            append_splint_summaries(&window.root, snapshot, dojo.id, window.id, &mut splints)?;
+            append_splint_summaries(&dojo.root, snapshot, lair.id, dojo.id, &mut splints)?;
         }
     }
-    if dojos.len() > 256 || windows.len() > 1_024 || splints.len() > 4_096 {
-        bail!("topology exceeds public v1 collection bounds");
+    if lairs.len() > 256 || dojos.len() > 1_024 || splints.len() > 4_096 {
+        bail!("topology exceeds public v2 collection bounds");
     }
-    Ok(InspectTopologyDataV1 {
+    Ok(InspectTopologyDataV2 {
+        lairs,
         dojos,
-        windows,
         splints,
     })
 }
 
-/// Converts a validated private topology snapshot to the reviewed `list_dojos` envelope.
-pub fn list_dojos_envelope(snapshot: &TopologySnapshot) -> Result<CliEnvelopeV1> {
+/// Converts a validated private topology snapshot to the reviewed `list_lairs` envelope.
+pub fn list_lairs_envelope(snapshot: &TopologySnapshot) -> Result<CliEnvelopeV2> {
     let projection = topology_projection(snapshot)?;
-    CliEnvelopeV1::success(
-        "list_dojos",
-        Some(serde_json::to_value(TopologyResourceV1 {
+    CliEnvelopeV2::success(
+        "list_lairs",
+        Some(serde_json::to_value(TopologyResourceV2 {
             topology_revision: snapshot.revision.get(),
         })?),
-        serde_json::to_value(ListDojosDataV1 {
-            dojos: projection.dojos,
+        serde_json::to_value(ListLairsDataV2 {
+            lairs: projection.lairs,
         })?,
         false,
     )
 }
 
 /// Converts a validated private topology snapshot to the reviewed topology envelope.
-pub fn inspect_topology_envelope(snapshot: &TopologySnapshot) -> Result<CliEnvelopeV1> {
-    CliEnvelopeV1::success(
+pub fn inspect_topology_envelope(snapshot: &TopologySnapshot) -> Result<CliEnvelopeV2> {
+    CliEnvelopeV2::success(
         "inspect_topology",
-        Some(serde_json::to_value(TopologyResourceV1 {
+        Some(serde_json::to_value(TopologyResourceV2 {
             topology_revision: snapshot.revision.get(),
         })?),
         serde_json::to_value(topology_projection(snapshot)?)?,
@@ -964,27 +964,27 @@ pub fn inspect_topology_envelope(snapshot: &TopologySnapshot) -> Result<CliEnvel
 pub fn inspect_splint_envelope(
     snapshot: &TopologySnapshot,
     splint_id: SplintId,
-) -> Result<CliEnvelopeV1> {
+) -> Result<CliEnvelopeV2> {
     snapshot
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    for dojo in snapshot.lair.dojos() {
-        for window in &dojo.windows {
-            if let Some(splint) = window.root.find_splint(splint_id) {
+    for lair in snapshot.topology.lairs() {
+        for dojo in &lair.dojos {
+            if let Some(splint) = dojo.root.find_splint(splint_id) {
                 let runtime = runtime_for(snapshot, splint_id)?;
                 let exit_code = runtime.exit_status.and_then(|status| status.code);
                 if exit_code.is_some_and(|code| !(0..=255).contains(&code)) {
-                    bail!("Splint exit code exceeds public v1 bounds");
+                    bail!("Splint exit code exceeds public v2 bounds");
                 }
-                return CliEnvelopeV1::success(
+                return CliEnvelopeV2::success(
                     "inspect_splint",
-                    Some(serde_json::to_value(InspectSplintResourceV1 {
+                    Some(serde_json::to_value(InspectSplintResourceV2 {
+                        lair_id: lair.id.to_string(),
                         dojo_id: dojo.id.to_string(),
-                        window_id: window.id.to_string(),
                         splint_id: splint_id.to_string(),
                         topology_revision: snapshot.revision.get(),
                     })?),
-                    serde_json::to_value(InspectSplintDataV1 {
+                    serde_json::to_value(InspectSplintDataV2 {
                         title: checked_public_text(&splint.title, "Splint title")?,
                         lifecycle: public_lifecycle(runtime),
                         current_incarnation: runtime.live_incarnation,
@@ -1001,10 +1001,10 @@ pub fn inspect_splint_envelope(
 
 /// Converts a validated private terminal snapshot to the reviewed one-shot projection.
 pub fn terminal_snapshot_envelope(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     snapshot: &TerminalSnapshot,
-) -> Result<CliEnvelopeV1> {
+) -> Result<CliEnvelopeV2> {
     snapshot
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -1012,23 +1012,23 @@ pub fn terminal_snapshot_envelope(
         usize::try_from(snapshot.cursor_column).context("terminal cursor column is negative")?;
     let row = usize::try_from(snapshot.cursor_row).context("terminal cursor row is negative")?;
     if column > snapshot.columns || row >= snapshot.rows {
-        bail!("terminal cursor exceeds public v1 bounds");
+        bail!("terminal cursor exceeds public v2 bounds");
     }
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         "terminal_snapshot",
-        Some(serde_json::to_value(TerminalReadResourceV1 {
+        Some(serde_json::to_value(TerminalReadResourceV2 {
+            lair_id: lair_id.to_string(),
             dojo_id: dojo_id.to_string(),
-            window_id: window_id.to_string(),
             splint_id: snapshot.splint_id.to_string(),
             incarnation: snapshot.incarnation,
             terminal_revision: snapshot.revision,
             history_generation: snapshot.history_generation,
         })?),
-        serde_json::to_value(TerminalSnapshotDataV1 {
+        serde_json::to_value(TerminalSnapshotDataV2 {
             content_encoding: "unicode_scalars",
             columns: snapshot.columns,
             rows: public_rows(&snapshot.visible_rows)?,
-            cursor: TerminalCursorV1 {
+            cursor: TerminalCursorV2 {
                 column,
                 row,
                 visible: snapshot.input_modes.cursor_visible,
@@ -1040,16 +1040,16 @@ pub fn terminal_snapshot_envelope(
 }
 
 fn terminal_read_resource(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     splint_id: SplintId,
     incarnation: u64,
     terminal_revision: u64,
     history_generation: u64,
-) -> TerminalReadResourceV1 {
-    TerminalReadResourceV1 {
+) -> TerminalReadResourceV2 {
+    TerminalReadResourceV2 {
+        lair_id: lair_id.to_string(),
         dojo_id: dojo_id.to_string(),
-        window_id: window_id.to_string(),
         splint_id: splint_id.to_string(),
         incarnation,
         terminal_revision,
@@ -1059,15 +1059,15 @@ fn terminal_read_resource(
 
 /// Converts a validated private scrollback page to the reviewed public projection.
 pub fn scrollback_page_envelope(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     page: &ScrollbackPage,
-) -> Result<CliEnvelopeV1> {
+) -> Result<CliEnvelopeV2> {
     page.validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
     let continuation_cursor = if page.has_older {
         Some(encode_terminal_cursor(
-            &TerminalContinuationV1::Scrollback {
+            &TerminalContinuationV2::Scrollback {
                 splint_id: page.splint_id,
                 incarnation: page.incarnation,
                 terminal_revision: page.terminal_revision,
@@ -1080,17 +1080,17 @@ pub fn scrollback_page_envelope(
     } else {
         None
     };
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         "scrollback_page",
         Some(serde_json::to_value(terminal_read_resource(
+            lair_id,
             dojo_id,
-            window_id,
             page.splint_id,
             page.incarnation,
             page.terminal_revision,
             page.history_generation,
         ))?),
-        serde_json::to_value(ScrollbackPageDataV1 {
+        serde_json::to_value(ScrollbackPageDataV2 {
             kind: "page",
             content_encoding: "unicode_scalars",
             rows: public_rows(&page.rows)?,
@@ -1103,17 +1103,17 @@ pub fn scrollback_page_envelope(
 
 /// Converts a validated private search page to the reviewed public projection.
 pub fn search_page_envelope(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     page: &SearchPage,
-) -> Result<CliEnvelopeV1> {
+) -> Result<CliEnvelopeV2> {
     page.validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
     let continuation_cursor = page
         .next_cursor
         .as_ref()
         .map(|daemon_cursor| {
-            encode_terminal_cursor(&TerminalContinuationV1::Search {
+            encode_terminal_cursor(&TerminalContinuationV2::Search {
                 splint_id: page.splint_id,
                 incarnation: page.incarnation,
                 terminal_revision: page.terminal_revision,
@@ -1125,24 +1125,24 @@ pub fn search_page_envelope(
     let matches = page
         .matches
         .iter()
-        .map(|item| SearchMatchV1 {
+        .map(|item| SearchMatchV2 {
             row_id: item.row_id,
             start_column: item.start_column,
             end_column: item.end_column,
             preview: item.preview.clone(),
         })
         .collect();
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         "search_scrollback",
         Some(serde_json::to_value(terminal_read_resource(
+            lair_id,
             dojo_id,
-            window_id,
             page.splint_id,
             page.incarnation,
             page.terminal_revision,
             page.history_generation,
         ))?),
-        serde_json::to_value(SearchResultsDataV1 {
+        serde_json::to_value(SearchResultsDataV2 {
             kind: "results",
             matches,
             timed_out: page.timed_out,
@@ -1155,23 +1155,23 @@ pub fn search_page_envelope(
 /// Creates a successful scrollback/search resynchronization envelope.
 pub fn read_resync_envelope(
     operation: &'static str,
-    provenance: TerminalReadProvenanceV1,
-    reason: ReadResyncReasonV1,
-) -> Result<CliEnvelopeV1> {
+    provenance: TerminalReadProvenanceV2,
+    reason: ReadResyncReasonV2,
+) -> Result<CliEnvelopeV2> {
     if !matches!(operation, "scrollback_page" | "search_scrollback") {
         bail!("unsupported read resynchronization operation");
     }
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         operation,
         Some(serde_json::to_value(terminal_read_resource(
+            provenance.lair_id,
             provenance.dojo_id,
-            provenance.window_id,
             provenance.splint_id,
             provenance.incarnation,
             provenance.terminal_revision,
             provenance.history_generation,
         ))?),
-        serde_json::to_value(ReadResyncDataV1 {
+        serde_json::to_value(ReadResyncDataV2 {
             kind: "resync_required",
             reason,
             continuation_cursor: None,
@@ -1226,12 +1226,12 @@ fn valid_rule_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-/// Converts a correlated private terminal action acknowledgement to public v1.
+/// Converts a correlated private terminal action acknowledgement to public v2.
 pub fn terminal_action_envelope(
     operation: &'static str,
-    provenance: TerminalReadProvenanceV1,
+    provenance: TerminalReadProvenanceV2,
     dimensions: Option<(u16, u16)>,
-) -> Result<CliEnvelopeV1> {
+) -> Result<CliEnvelopeV2> {
     if provenance.incarnation == 0
         || provenance.history_generation == 0
         || !matches!(operation, "input" | "resize")
@@ -1239,21 +1239,21 @@ pub fn terminal_action_envelope(
         || (operation == "resize"
             && !dimensions.is_some_and(|(columns, rows)| columns > 0 && rows > 0))
     {
-        bail!("terminal action acknowledgement exceeds public v1 bounds");
+        bail!("terminal action acknowledgement exceeds public v2 bounds");
     }
     let (columns, rows) =
         dimensions.map_or((None, None), |(columns, rows)| (Some(columns), Some(rows)));
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         operation,
         Some(serde_json::to_value(terminal_read_resource(
+            provenance.lair_id,
             provenance.dojo_id,
-            provenance.window_id,
             provenance.splint_id,
             provenance.incarnation,
             provenance.terminal_revision,
             provenance.history_generation,
         ))?),
-        serde_json::to_value(TerminalActionDataV1 {
+        serde_json::to_value(TerminalActionDataV2 {
             acknowledged: true,
             columns,
             rows,
@@ -1264,16 +1264,16 @@ pub fn terminal_action_envelope(
 
 /// Converts private ephemeral and persistent authority to the reviewed status projection.
 pub fn authorization_status_envelope(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     splint_id: SplintId,
     incarnation: u64,
     grants: &[AccessGrant],
     persistent: &[PersistentAuthorizationStatus],
     development_bypass: bool,
-) -> Result<CliEnvelopeV1> {
+) -> Result<CliEnvelopeV2> {
     if incarnation == 0 || grants.len() + persistent.len() > 64 {
-        bail!("authorization status exceeds public v1 bounds");
+        bail!("authorization status exceeds public v2 bounds");
     }
     let mut projected = Vec::with_capacity(grants.len() + persistent.len());
     for grant in grants {
@@ -1291,7 +1291,7 @@ pub fn authorization_status_envelope(
             .collect::<Vec<_>>();
         scopes.sort_unstable();
         scopes.dedup();
-        projected.push(AuthorizationGrantV1 {
+        projected.push(AuthorizationGrantV2 {
             grant_id: Some(decimal_id(grant.grant_id, "grant ID")?),
             source: "grant_once",
             policy_rule_id: None,
@@ -1304,7 +1304,7 @@ pub fn authorization_status_envelope(
             || grant.expires_at_unix_seconds == Some(0)
             || grant.scopes.len() > 18
         {
-            bail!("persistent authorization status exceeds public v1 bounds");
+            bail!("persistent authorization status exceeds public v2 bounds");
         }
         let mut scopes = grant
             .scopes
@@ -1316,7 +1316,7 @@ pub fn authorization_status_envelope(
         if scopes.windows(2).any(|pair| pair[0] == pair[1]) {
             bail!("persistent authorization status contains duplicate scopes");
         }
-        projected.push(AuthorizationGrantV1 {
+        projected.push(AuthorizationGrantV2 {
             grant_id: None,
             source: "persistent_policy",
             policy_rule_id: Some(grant.policy_rule_id.clone()),
@@ -1324,15 +1324,15 @@ pub fn authorization_status_envelope(
             expires_unix_seconds: grant.expires_at_unix_seconds,
         });
     }
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         "authorization_status",
-        Some(serde_json::to_value(AuthorizationResourceV1 {
+        Some(serde_json::to_value(AuthorizationResourceV2 {
+            lair_id: lair_id.to_string(),
             dojo_id: dojo_id.to_string(),
-            window_id: window_id.to_string(),
             splint_id: splint_id.to_string(),
             incarnation,
         })?),
-        serde_json::to_value(AuthorizationStatusDataV1 {
+        serde_json::to_value(AuthorizationStatusDataV2 {
             grants: projected,
             development_bypass,
         })?,
@@ -1346,23 +1346,23 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
         AuditOperation::RequestAccess => "request_access",
         AuditOperation::AuthorizationStatus => "authorization_status",
         AuditOperation::RevokeAccess => "revoke_access",
-        AuditOperation::ListDojos => "list_dojos",
+        AuditOperation::ListLairs => "list_lairs",
         AuditOperation::InspectTopology => "inspect_topology",
         AuditOperation::SubscribeTopology => "subscribe_topology",
         AuditOperation::InspectSplint => "inspect_splint",
-        AuditOperation::CreateDojo => "create_dojo",
+        AuditOperation::CreateLair => "create_lair",
         AuditOperation::SplitSplint => "split_splint",
         AuditOperation::RelaunchSplint => "relaunch_splint",
         AuditOperation::RestoreSplint => "restore_splint",
-        AuditOperation::RestoreWindow => "restore_window",
         AuditOperation::RestoreDojo => "restore_dojo",
+        AuditOperation::RestoreLair => "restore_lair",
         AuditOperation::CloseSplint => "close_splint",
         AuditOperation::SetSplitRatio => "set_split_ratio",
-        AuditOperation::NewWindow => "new_window",
-        AuditOperation::CloseWindow => "close_window",
+        AuditOperation::NewDojo => "new_dojo",
+        AuditOperation::CloseDojo => "close_dojo",
+        AuditOperation::RenameLair => "rename_lair",
         AuditOperation::RenameDojo => "rename_dojo",
-        AuditOperation::RenameWindow => "rename_window",
-        AuditOperation::SetWindowDefaultFocus => "set_window_default_focus",
+        AuditOperation::SetDojoDefaultFocus => "set_dojo_default_focus",
         AuditOperation::RenameSplint => "rename_splint",
         AuditOperation::Attach => "attach",
         AuditOperation::ScrollbackPage => "scrollback_page",
@@ -1402,8 +1402,8 @@ fn audit_outcome_name(outcome: AuditOutcome) -> &'static str {
     }
 }
 
-fn audit_record(record: &splinterm_protocol::AuditRecord) -> Result<AuditRecordV1> {
-    if record.schema != "splinterm.audit.v1"
+fn audit_record(record: &splinterm_protocol::AuditRecord) -> Result<AuditRecordV2> {
+    if record.schema != "splinterm.audit.v2"
         || record.retention != "daemon_lifetime"
         || record.unix_seconds == 0
         || record.policy_generation == Some(0)
@@ -1430,7 +1430,7 @@ fn audit_record(record: &splinterm_protocol::AuditRecord) -> Result<AuditRecordV
             value.is_empty() || value.chars().count() > 255 || value.contains('/')
         })
     {
-        bail!("audit record exceeds public v1 bounds");
+        bail!("audit record exceeds public v2 bounds");
     }
     let mut requested_scopes = record
         .requested_scopes
@@ -1442,28 +1442,28 @@ fn audit_record(record: &splinterm_protocol::AuditRecord) -> Result<AuditRecordV
     if requested_scopes.windows(2).any(|pair| pair[0] == pair[1]) {
         bail!("audit record contains duplicate requested scopes");
     }
-    let resource = record.resource.as_ref().map(|resource| AuditResourceV1 {
+    let resource = record.resource.as_ref().map(|resource| AuditResourceV2 {
+        lair_id: resource.lair_id.map(|id| id.to_string()),
         dojo_id: resource.dojo_id.map(|id| id.to_string()),
-        window_id: resource.window_id.map(|id| id.to_string()),
         splint_id: resource.splint_id.map(|id| id.to_string()),
         incarnation: resource.incarnation,
     });
     if resource.as_ref().is_some_and(|resource| {
-        resource.dojo_id.is_none()
-            && resource.window_id.is_none()
+        resource.lair_id.is_none()
+            && resource.dojo_id.is_none()
             && resource.splint_id.is_none()
             && resource.incarnation.is_none()
     }) {
         bail!("audit resource must identify at least one field");
     }
-    Ok(AuditRecordV1 {
-        schema: "splinterm.audit.v1",
+    Ok(AuditRecordV2 {
+        schema: "splinterm.audit.v2",
         retention: "daemon_lifetime",
         audit_id: decimal_id(record.audit_id, "audit ID")?,
         unix_seconds: record.unix_seconds,
         policy_generation: record.policy_generation,
         policy_rule_id: record.policy_rule_id.clone(),
-        peer: AuditPeerV1 {
+        peer: AuditPeerV2 {
             uid: record.peer.uid,
             executable_path: record.peer.executable_path.clone(),
             executable_sha256: record.peer.executable_sha256.clone(),
@@ -1482,7 +1482,7 @@ fn audit_record(record: &splinterm_protocol::AuditRecord) -> Result<AuditRecordV
 }
 
 /// Converts a private bounded audit page to the reviewed public projection.
-pub fn audit_page_envelope(page: &AuditPage) -> Result<CliEnvelopeV1> {
+pub fn audit_page_envelope(page: &AuditPage) -> Result<CliEnvelopeV2> {
     if page.records.len() > 128
         || page.oldest_available_audit_id == Some(0)
         || page.newest_available_audit_id == Some(0)
@@ -1492,17 +1492,17 @@ pub fn audit_page_envelope(page: &AuditPage) -> Result<CliEnvelopeV1> {
             .windows(2)
             .any(|pair| pair[0].audit_id >= pair[1].audit_id)
     {
-        bail!("audit page exceeds public v1 bounds");
+        bail!("audit page exceeds public v2 bounds");
     }
     let records = page
         .records
         .iter()
         .map(audit_record)
         .collect::<Result<_>>()?;
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         "audit_inspect",
         None,
-        serde_json::to_value(AuditDataV1 {
+        serde_json::to_value(AuditDataV2 {
             retention: "daemon_lifetime",
             records,
             retention_gap: page.retention_gap,
@@ -1524,45 +1524,45 @@ pub fn audit_page_envelope(page: &AuditPage) -> Result<CliEnvelopeV1> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MutationIdentityV1 {
+pub struct MutationIdentityV2 {
+    pub lair_id: Option<LairId>,
     pub dojo_id: Option<DojoId>,
-    pub window_id: Option<WindowId>,
     pub splint_id: Option<SplintId>,
     pub topology_revision: Option<u64>,
     pub incarnation: Option<u64>,
 }
 
-fn mutation_resource(identity: MutationIdentityV1) -> Result<MutationResourceV1> {
+fn mutation_resource(identity: MutationIdentityV2) -> Result<MutationResourceV2> {
     if identity.topology_revision == Some(0) || identity.incarnation == Some(0) {
         bail!("mutation provenance must be nonzero");
     }
-    Ok(MutationResourceV1 {
+    Ok(MutationResourceV2 {
+        lair_id: identity.lair_id.map(|id| id.to_string()),
         dojo_id: identity.dojo_id.map(|id| id.to_string()),
-        window_id: identity.window_id.map(|id| id.to_string()),
         splint_id: identity.splint_id.map(|id| id.to_string()),
         topology_revision: identity.topology_revision,
         incarnation: identity.incarnation,
     })
 }
 
-/// Creates a reviewed create/split/new-window success envelope.
+/// Creates a reviewed create/split/new-Dojo success envelope.
 pub fn created_mutation_envelope(
     operation: &'static str,
-    identity: MutationIdentityV1,
-) -> Result<CliEnvelopeV1> {
-    if !matches!(operation, "create_dojo" | "split_splint" | "new_window")
+    identity: MutationIdentityV2,
+) -> Result<CliEnvelopeV2> {
+    if !matches!(operation, "create_lair" | "split_splint" | "new_dojo")
+        || identity.lair_id.is_none()
         || identity.dojo_id.is_none()
-        || identity.window_id.is_none()
         || identity.splint_id.is_none()
         || identity.topology_revision.is_none()
         || identity.incarnation.is_none()
     {
         bail!("created mutation identity does not match its operation");
     }
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         operation,
         Some(serde_json::to_value(mutation_resource(identity)?)?),
-        serde_json::to_value(CreatedResultV1 { created: true })?,
+        serde_json::to_value(CreatedResultV2 { created: true })?,
         false,
     )
 }
@@ -1570,28 +1570,28 @@ pub fn created_mutation_envelope(
 /// Creates a reviewed topology-commit success envelope.
 pub fn committed_mutation_envelope(
     operation: &'static str,
-    identity: MutationIdentityV1,
+    identity: MutationIdentityV2,
     confirmed: bool,
-) -> Result<CliEnvelopeV1> {
-    let destructive = matches!(operation, "close_splint" | "close_window");
+) -> Result<CliEnvelopeV2> {
+    let destructive = matches!(operation, "close_splint" | "close_dojo");
     let valid = match operation {
-        "close_splint" | "set_split_ratio" | "rename_splint" | "set_window_default_focus" => {
-            identity.dojo_id.is_some()
-                && identity.window_id.is_some()
+        "close_splint" | "set_split_ratio" | "rename_splint" | "set_dojo_default_focus" => {
+            identity.lair_id.is_some()
+                && identity.dojo_id.is_some()
                 && identity.splint_id.is_some()
                 && identity.topology_revision.is_some()
                 && identity.incarnation.is_none()
         }
-        "close_window" | "rename_window" => {
-            identity.dojo_id.is_some()
-                && identity.window_id.is_some()
+        "close_dojo" | "rename_dojo" => {
+            identity.lair_id.is_some()
+                && identity.dojo_id.is_some()
                 && identity.splint_id.is_none()
                 && identity.topology_revision.is_some()
                 && identity.incarnation.is_none()
         }
-        "rename_dojo" => {
-            identity.dojo_id.is_some()
-                && identity.window_id.is_none()
+        "rename_lair" => {
+            identity.lair_id.is_some()
+                && identity.dojo_id.is_none()
                 && identity.splint_id.is_none()
                 && identity.topology_revision.is_some()
                 && identity.incarnation.is_none()
@@ -1601,10 +1601,10 @@ pub fn committed_mutation_envelope(
     if !valid || destructive != confirmed {
         bail!("committed mutation identity or confirmation is invalid");
     }
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         operation,
         Some(serde_json::to_value(mutation_resource(identity)?)?),
-        serde_json::to_value(MutationResultV1 {
+        serde_json::to_value(MutationResultV2 {
             committed: true,
             confirmed: destructive.then_some(true),
         })?,
@@ -1615,34 +1615,34 @@ pub fn committed_mutation_envelope(
 /// Creates a reviewed relaunch/restore-one success envelope.
 pub fn process_started_envelope(
     operation: &'static str,
-    identity: MutationIdentityV1,
-) -> Result<CliEnvelopeV1> {
+    identity: MutationIdentityV2,
+) -> Result<CliEnvelopeV2> {
     if !matches!(operation, "relaunch_splint" | "restore_splint")
+        || identity.lair_id.is_none()
         || identity.dojo_id.is_none()
-        || identity.window_id.is_none()
         || identity.splint_id.is_none()
         || identity.topology_revision.is_none()
         || identity.incarnation.is_none()
     {
         bail!("process start identity does not match its operation");
     }
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         operation,
         Some(serde_json::to_value(mutation_resource(identity)?)?),
-        serde_json::to_value(ProcessStartedV1 { started: true })?,
+        serde_json::to_value(ProcessStartedV2 { started: true })?,
         false,
     )
 }
 
-fn restore_leaf(result: &RestoreLeafResult) -> Result<RestoreLeafV1> {
+fn restore_leaf(result: &RestoreLeafResult) -> Result<RestoreLeafV2> {
     match (&result.error, result.incarnation) {
-        (None, Some(incarnation)) if incarnation > 0 => Ok(RestoreLeafV1 {
+        (None, Some(incarnation)) if incarnation > 0 => Ok(RestoreLeafV2 {
             splint_id: result.splint_id.to_string(),
             incarnation: Some(incarnation),
             status: "restored",
             error_code: None,
         }),
-        (Some(error), None) => Ok(RestoreLeafV1 {
+        (Some(error), None) => Ok(RestoreLeafV2 {
             splint_id: result.splint_id.to_string(),
             incarnation: None,
             status: "failed",
@@ -1652,15 +1652,15 @@ fn restore_leaf(result: &RestoreLeafResult) -> Result<RestoreLeafV1> {
     }
 }
 
-/// Creates a reviewed restore-window/restore-Dojo aggregate envelope.
+/// Creates a reviewed restore-Dojo/restore-Lair aggregate envelope.
 pub fn restore_many_envelope(
     operation: &'static str,
-    identity: MutationIdentityV1,
+    identity: MutationIdentityV2,
     results: &[RestoreLeafResult],
-) -> Result<CliEnvelopeV1> {
+) -> Result<CliEnvelopeV2> {
     let valid = match operation {
-        "restore_window" => identity.dojo_id.is_some() && identity.window_id.is_some(),
-        "restore_dojo" => identity.dojo_id.is_some() && identity.window_id.is_none(),
+        "restore_dojo" => identity.lair_id.is_some() && identity.dojo_id.is_some(),
+        "restore_lair" => identity.lair_id.is_some() && identity.dojo_id.is_none(),
         _ => false,
     } && identity.splint_id.is_none()
         && identity.topology_revision.is_some()
@@ -1670,30 +1670,30 @@ pub fn restore_many_envelope(
         bail!("aggregate restore identity does not match its operation");
     }
     let results = results.iter().map(restore_leaf).collect::<Result<_>>()?;
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         operation,
         Some(serde_json::to_value(mutation_resource(identity)?)?),
-        serde_json::to_value(RestoreManyV1 { results })?,
+        serde_json::to_value(RestoreManyV2 { results })?,
         false,
     )
 }
 
 /// Creates a reviewed confirmed process-termination envelope.
 pub fn kill_envelope(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     splint_id: SplintId,
     incarnation: u64,
-) -> Result<CliEnvelopeV1> {
-    CliEnvelopeV1::success(
+) -> Result<CliEnvelopeV2> {
+    CliEnvelopeV2::success(
         "kill_splint",
-        Some(serde_json::to_value(AuthorizationResourceV1 {
+        Some(serde_json::to_value(AuthorizationResourceV2 {
+            lair_id: lair_id.to_string(),
             dojo_id: dojo_id.to_string(),
-            window_id: window_id.to_string(),
             splint_id: splint_id.to_string(),
             incarnation,
         })?),
-        serde_json::to_value(KillResultV1 {
+        serde_json::to_value(KillResultV2 {
             terminated: true,
             confirmed: true,
         })?,
@@ -1703,22 +1703,22 @@ pub fn kill_envelope(
 
 /// Creates a reviewed confirmed ephemeral-grant revocation envelope.
 pub fn revoke_envelope(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     grant: &AccessGrant,
-) -> Result<CliEnvelopeV1> {
+) -> Result<CliEnvelopeV2> {
     if grant.incarnation == 0 || grant.expires_at_unix_seconds == 0 {
         bail!("revoked grant provenance is invalid");
     }
-    CliEnvelopeV1::success(
+    CliEnvelopeV2::success(
         "revoke_access",
-        Some(serde_json::to_value(AuthorizationResourceV1 {
+        Some(serde_json::to_value(AuthorizationResourceV2 {
+            lair_id: lair_id.to_string(),
             dojo_id: dojo_id.to_string(),
-            window_id: window_id.to_string(),
             splint_id: grant.splint_id.to_string(),
             incarnation: grant.incarnation,
         })?),
-        serde_json::to_value(RevokeResultV1 {
+        serde_json::to_value(RevokeResultV2 {
             revoked_grant_id: decimal_id(grant.grant_id, "grant ID")?,
             confirmed: true,
         })?,
@@ -1807,13 +1807,13 @@ pub fn response_protocol_error(error: splinterm_protocol::ProtocolError) -> anyh
     anyhow::Error::new(DaemonProtocolFailure(error))
 }
 
-/// Maps every private protocol error to a stable public v1 category.
+/// Maps every private protocol error to a stable public v2 category.
 #[must_use]
-pub const fn public_error_code(code: ErrorCode) -> (CliErrorCodeV1, bool) {
+pub const fn public_error_code(code: ErrorCode) -> (CliErrorCodeV2, bool) {
     match code {
-        ErrorCode::AuthenticationFailed => (CliErrorCodeV1::AuthenticationFailed, false),
-        ErrorCode::HandshakeRequired => (CliErrorCodeV1::HandshakeRequired, false),
-        ErrorCode::IncompatibleVersion => (CliErrorCodeV1::IncompatibleVersion, false),
+        ErrorCode::AuthenticationFailed => (CliErrorCodeV2::AuthenticationFailed, false),
+        ErrorCode::HandshakeRequired => (CliErrorCodeV2::HandshakeRequired, false),
+        ErrorCode::IncompatibleVersion => (CliErrorCodeV2::IncompatibleVersion, false),
         ErrorCode::InvalidFrame
         | ErrorCode::FrameTooLarge
         | ErrorCode::InvalidRequestId
@@ -1821,38 +1821,38 @@ pub const fn public_error_code(code: ErrorCode) -> (CliErrorCodeV1, bool) {
         | ErrorCode::TooManyOutstandingRequests
         | ErrorCode::UnsupportedOperation
         | ErrorCode::DevelopmentFeatureDisabled
-        | ErrorCode::RequestNotFound => (CliErrorCodeV1::InvalidRequest, false),
-        ErrorCode::ConsentUnavailable => (CliErrorCodeV1::ConsentUnavailable, true),
-        ErrorCode::ConsentDenied => (CliErrorCodeV1::ConsentDenied, false),
-        ErrorCode::Unauthorized => (CliErrorCodeV1::Unauthorized, false),
-        ErrorCode::ControllerUnavailable => (CliErrorCodeV1::ControllerUnavailable, true),
-        ErrorCode::ControlTransferUnavailable => (CliErrorCodeV1::ControlTransferUnavailable, true),
-        ErrorCode::StaleTopology => (CliErrorCodeV1::StaleTopology, true),
-        ErrorCode::NotFound | ErrorCode::ImageContentNotFound => (CliErrorCodeV1::NotFound, false),
+        | ErrorCode::RequestNotFound => (CliErrorCodeV2::InvalidRequest, false),
+        ErrorCode::ConsentUnavailable => (CliErrorCodeV2::ConsentUnavailable, true),
+        ErrorCode::ConsentDenied => (CliErrorCodeV2::ConsentDenied, false),
+        ErrorCode::Unauthorized => (CliErrorCodeV2::Unauthorized, false),
+        ErrorCode::ControllerUnavailable => (CliErrorCodeV2::ControllerUnavailable, true),
+        ErrorCode::ControlTransferUnavailable => (CliErrorCodeV2::ControlTransferUnavailable, true),
+        ErrorCode::StaleTopology => (CliErrorCodeV2::StaleTopology, true),
+        ErrorCode::NotFound | ErrorCode::ImageContentNotFound => (CliErrorCodeV2::NotFound, false),
         ErrorCode::StaleIncarnation | ErrorCode::StaleImageContent => {
-            (CliErrorCodeV1::StaleIncarnation, true)
+            (CliErrorCodeV2::StaleIncarnation, true)
         }
-        ErrorCode::InvalidArgument => (CliErrorCodeV1::InvalidArgument, false),
-        ErrorCode::ResourceLimit => (CliErrorCodeV1::ResourceLimit, true),
-        ErrorCode::Cancelled => (CliErrorCodeV1::Cancelled, true),
-        ErrorCode::Internal => (CliErrorCodeV1::Internal, true),
+        ErrorCode::InvalidArgument => (CliErrorCodeV2::InvalidArgument, false),
+        ErrorCode::ResourceLimit => (CliErrorCodeV2::ResourceLimit, true),
+        ErrorCode::Cancelled => (CliErrorCodeV2::Cancelled, true),
+        ErrorCode::Internal => (CliErrorCodeV2::Internal, true),
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct PingSuccessV1 {
+struct PingSuccessV2 {
     status: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
-enum PingEnvelopeDataV1 {
+enum PingEnvelopeDataV2 {
     Success {
         schema: &'static str,
         request_id: String,
         operation: &'static str,
         ok: bool,
-        data: PingSuccessV1,
+        data: PingSuccessV2,
         truncated: bool,
     },
     Failure {
@@ -1860,24 +1860,24 @@ enum PingEnvelopeDataV1 {
         request_id: String,
         operation: &'static str,
         ok: bool,
-        error: CliErrorV1,
+        error: CliErrorV2,
         truncated: bool,
     },
 }
 
-/// An opaque schema-conforming public v1 response for `ping`.
+/// An opaque schema-conforming public v2 response for `ping`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PingEnvelopeV1(PingEnvelopeDataV1);
+pub struct PingEnvelopeV2(PingEnvelopeDataV2);
 
-impl PingEnvelopeV1 {
+impl PingEnvelopeV2 {
     /// Creates a successful v1 ping envelope.
     pub fn success(request_id: u64) -> Result<Self> {
-        Ok(Self(PingEnvelopeDataV1::Success {
-            schema: CLI_SCHEMA_V1,
+        Ok(Self(PingEnvelopeDataV2::Success {
+            schema: CLI_SCHEMA_V2,
             request_id: decimal_id(request_id, "request ID")?,
             operation: "ping",
             ok: true,
-            data: PingSuccessV1 { status: "awake" },
+            data: PingSuccessV2 { status: "awake" },
             truncated: false,
         }))
     }
@@ -1885,7 +1885,7 @@ impl PingEnvelopeV1 {
     /// Creates a failed v1 ping envelope with a bounded public message.
     pub fn failure(
         request_id: u64,
-        code: CliErrorCodeV1,
+        code: CliErrorCodeV2,
         message: impl Into<String>,
         retryable: bool,
     ) -> Result<Self> {
@@ -1893,12 +1893,12 @@ impl PingEnvelopeV1 {
         if message.is_empty() || message.chars().count() > 1024 {
             bail!("public error message length is outside 1..=1024 characters");
         }
-        Ok(Self(PingEnvelopeDataV1::Failure {
-            schema: CLI_SCHEMA_V1,
+        Ok(Self(PingEnvelopeDataV2::Failure {
+            schema: CLI_SCHEMA_V2,
             request_id: decimal_id(request_id, "request ID")?,
             operation: "ping",
             ok: false,
-            error: CliErrorV1 {
+            error: CliErrorV2 {
                 code,
                 message,
                 retryable,
@@ -1922,7 +1922,7 @@ pub fn write_json_document(value: &impl Serialize) -> Result<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalResourceV1 {
+struct TerminalResourceV2 {
     splint_id: String,
     incarnation: u64,
     terminal_revision: u64,
@@ -1931,12 +1931,12 @@ struct TerminalResourceV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TopologyResourceV1 {
+struct TopologyResourceV2 {
     topology_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ControlResourceV1 {
+struct ControlResourceV2 {
     splint_id: String,
     incarnation: u64,
 }
@@ -1956,7 +1956,7 @@ pub struct ProjectedTerminalRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalSnapshotV1 {
+struct TerminalSnapshotV2 {
     content_encoding: &'static str,
     columns: usize,
     rows: usize,
@@ -1964,7 +1964,7 @@ struct TerminalSnapshotV1 {
     visible_rows: Vec<ProjectedTerminalRow>,
 }
 
-impl TerminalSnapshotV1 {
+impl TerminalSnapshotV2 {
     fn try_from_protocol(snapshot: &TerminalSnapshot) -> Result<Self> {
         snapshot
             .validate()
@@ -1985,83 +1985,83 @@ impl TerminalSnapshotV1 {
 
 #[allow(
     clippy::struct_field_names,
-    reason = "field names are fixed by the reviewed public v1 JSON schema"
+    reason = "field names are fixed by the reviewed public v2 JSON schema"
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TopologySnapshotV1 {
+struct TopologySnapshotV2 {
+    lair_count: usize,
     dojo_count: usize,
-    window_count: usize,
     splint_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ControlSnapshotV1 {
+struct ControlSnapshotV2 {
     controlled: bool,
     locally_owned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TerminalUpdateV1 {
+struct TerminalUpdateV2 {
     content_encoding: &'static str,
     changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TopologyChangeV1 {
+struct TopologyChangeV2 {
     kind: &'static str,
+    lair_count: usize,
     dojo_count: usize,
-    window_count: usize,
     splint_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TransferRequestedV1 {
+struct TransferRequestedV2 {
     transfer_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TransferResolvedV1 {
+struct TransferResolvedV2 {
     transfer_id: String,
     outcome: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct AccessRevokedV1 {
+struct AccessRevokedV2 {
     grant_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ExitedV1 {
+struct ExitedV2 {
     code: Option<i32>,
     signal: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ResyncReasonV1 {
+pub enum ResyncReasonV2 {
     SubscriberStalled,
     RevisionGap,
     HistoryReplaced,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ResyncV1 {
-    reason: ResyncReasonV1,
+struct ResyncV2 {
+    reason: ResyncReasonV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct EmptyDataV1 {}
+struct EmptyDataV2 {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
-enum CliEventDataV1 {
+enum CliEventDataV2 {
     TerminalSnapshot {
         schema: &'static str,
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: TerminalResourceV1,
-        data: TerminalSnapshotV1,
+        resource: TerminalResourceV2,
+        data: TerminalSnapshotV2,
         truncated: bool,
     },
     TopologySnapshot {
@@ -2069,8 +2069,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: TopologyResourceV1,
-        data: TopologySnapshotV1,
+        resource: TopologyResourceV2,
+        data: TopologySnapshotV2,
         truncated: bool,
     },
     ControlSnapshot {
@@ -2078,8 +2078,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: ControlResourceV1,
-        data: ControlSnapshotV1,
+        resource: ControlResourceV2,
+        data: ControlSnapshotV2,
         truncated: bool,
     },
     TerminalUpdate {
@@ -2087,8 +2087,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: TerminalResourceV1,
-        data: TerminalUpdateV1,
+        resource: TerminalResourceV2,
+        data: TerminalUpdateV2,
         truncated: bool,
     },
     TopologyChanged {
@@ -2096,8 +2096,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: TopologyResourceV1,
-        data: TopologyChangeV1,
+        resource: TopologyResourceV2,
+        data: TopologyChangeV2,
         truncated: bool,
     },
     ControlStatusChanged {
@@ -2105,8 +2105,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: ControlResourceV1,
-        data: ControlSnapshotV1,
+        resource: ControlResourceV2,
+        data: ControlSnapshotV2,
         truncated: bool,
     },
     ControlTransferRequested {
@@ -2114,8 +2114,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: ControlResourceV1,
-        data: TransferRequestedV1,
+        resource: ControlResourceV2,
+        data: TransferRequestedV2,
         truncated: bool,
     },
     ControlTransferResolved {
@@ -2123,8 +2123,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: ControlResourceV1,
-        data: TransferResolvedV1,
+        resource: ControlResourceV2,
+        data: TransferResolvedV2,
         truncated: bool,
     },
     AccessRevoked {
@@ -2132,8 +2132,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: ControlResourceV1,
-        data: AccessRevokedV1,
+        resource: ControlResourceV2,
+        data: AccessRevokedV2,
         truncated: bool,
     },
     Exited {
@@ -2141,8 +2141,8 @@ enum CliEventDataV1 {
         subscription_id: String,
         sequence: u64,
         event_type: &'static str,
-        resource: ControlResourceV1,
-        data: ExitedV1,
+        resource: ControlResourceV2,
+        data: ExitedV2,
         truncated: bool,
     },
     TerminalResync {
@@ -2151,10 +2151,10 @@ enum CliEventDataV1 {
         sequence: u64,
         event_type: &'static str,
         stream: &'static str,
-        resource: TerminalResourceV1,
-        data: EmptyDataV1,
+        resource: TerminalResourceV2,
+        data: EmptyDataV2,
         truncated: bool,
-        resync: ResyncV1,
+        resync: ResyncV2,
     },
     TopologyResync {
         schema: &'static str,
@@ -2162,10 +2162,10 @@ enum CliEventDataV1 {
         sequence: u64,
         event_type: &'static str,
         stream: &'static str,
-        resource: TopologyResourceV1,
-        data: EmptyDataV1,
+        resource: TopologyResourceV2,
+        data: EmptyDataV2,
         truncated: bool,
-        resync: ResyncV1,
+        resync: ResyncV2,
     },
     ControlResync {
         schema: &'static str,
@@ -2173,18 +2173,18 @@ enum CliEventDataV1 {
         sequence: u64,
         event_type: &'static str,
         stream: &'static str,
-        resource: ControlResourceV1,
-        data: EmptyDataV1,
+        resource: ControlResourceV2,
+        data: EmptyDataV2,
         truncated: bool,
-        resync: ResyncV1,
+        resync: ResyncV2,
     },
 }
 
-/// Opaque public v1 initial-state and resynchronization event record.
+/// Opaque public v2 initial-state and resynchronization event record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CliEventV1(CliEventDataV1);
+pub struct CliEventV2(CliEventDataV2);
 
-impl CliEventV1 {
+impl CliEventV2 {
     fn common(subscription_id: u64, sequence: u64) -> Result<(String, u64)> {
         if sequence == 0 {
             bail!("event sequence must be nonzero");
@@ -2200,18 +2200,18 @@ impl CliEventV1 {
         truncated: bool,
     ) -> Result<Self> {
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::TerminalSnapshot {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::TerminalSnapshot {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "snapshot",
-            resource: TerminalResourceV1 {
+            resource: TerminalResourceV2 {
                 splint_id: snapshot.splint_id.to_string(),
                 incarnation: snapshot.incarnation,
                 terminal_revision: snapshot.revision,
                 history_generation: None,
             },
-            data: TerminalSnapshotV1::try_from_protocol(snapshot)?,
+            data: TerminalSnapshotV2::try_from_protocol(snapshot)?,
             truncated,
         }))
     }
@@ -2226,25 +2226,25 @@ impl CliEventV1 {
             .validate()
             .map_err(|error| anyhow::anyhow!(error.message))?;
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        let dojo_count = snapshot.lair.dojos().len();
-        let window_count = snapshot.lair.dojos().map(|dojo| dojo.windows.len()).sum();
+        let lair_count = snapshot.topology.lairs().len();
+        let dojo_count = snapshot.topology.lairs().map(|lair| lair.dojos.len()).sum();
         let splint_count = snapshot
-            .lair
-            .dojos()
-            .flat_map(|dojo| &dojo.windows)
-            .map(|window| window.root.splint_count())
+            .topology
+            .lairs()
+            .flat_map(|dojo| &dojo.dojos)
+            .map(|dojo| dojo.root.splint_count())
             .sum();
-        Ok(Self(CliEventDataV1::TopologySnapshot {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::TopologySnapshot {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "topology_snapshot",
-            resource: TopologyResourceV1 {
+            resource: TopologyResourceV2 {
                 topology_revision: snapshot.revision.get(),
             },
-            data: TopologySnapshotV1 {
+            data: TopologySnapshotV2 {
+                lair_count,
                 dojo_count,
-                window_count,
                 splint_count,
             },
             truncated: false,
@@ -2261,16 +2261,16 @@ impl CliEventV1 {
             .validate()
             .map_err(|error| anyhow::anyhow!(error.message))?;
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::ControlSnapshot {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::ControlSnapshot {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "control_snapshot",
-            resource: ControlResourceV1 {
+            resource: ControlResourceV2 {
                 splint_id: status.splint_id.to_string(),
                 incarnation: status.incarnation,
             },
-            data: ControlSnapshotV1 {
+            data: ControlSnapshotV2 {
                 controlled: status.controlled,
                 locally_owned: status.locally_owned,
             },
@@ -2291,18 +2291,18 @@ impl CliEventV1 {
             bail!("terminal update incarnation and history generation must be nonzero");
         }
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::TerminalUpdate {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::TerminalUpdate {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "update",
-            resource: TerminalResourceV1 {
+            resource: TerminalResourceV2 {
                 splint_id: splint_id.to_string(),
                 incarnation,
                 terminal_revision,
                 history_generation: Some(history_generation),
             },
-            data: TerminalUpdateV1 {
+            data: TerminalUpdateV2 {
                 content_encoding: "unicode_scalars",
                 changed: true,
             },
@@ -2321,39 +2321,39 @@ impl CliEventV1 {
             .validate()
             .map_err(|error| anyhow::anyhow!(error.message))?;
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        let dojo_count = snapshot.lair.dojos().len();
-        let window_count = snapshot.lair.dojos().map(|dojo| dojo.windows.len()).sum();
+        let lair_count = snapshot.topology.lairs().len();
+        let dojo_count = snapshot.topology.lairs().map(|lair| lair.dojos.len()).sum();
         let splint_count = snapshot
-            .lair
-            .dojos()
-            .flat_map(|dojo| &dojo.windows)
-            .map(|window| window.root.splint_count())
+            .topology
+            .lairs()
+            .flat_map(|dojo| &dojo.dojos)
+            .map(|dojo| dojo.root.splint_count())
             .sum();
         let kind = match kind {
-            TopologyChangeKind::DojoCreated => "dojo_created",
+            TopologyChangeKind::LairCreated => "lair_created",
             TopologyChangeKind::SplintSplit => "splint_split",
             TopologyChangeKind::SplintClosed => "splint_closed",
             TopologyChangeKind::SplitRatioChanged => "split_ratio_changed",
-            TopologyChangeKind::WindowCreated => "window_created",
-            TopologyChangeKind::WindowClosed => "window_closed",
+            TopologyChangeKind::DojoCreated => "dojo_created",
+            TopologyChangeKind::DojoClosed => "dojo_closed",
+            TopologyChangeKind::LairRenamed => "lair_renamed",
             TopologyChangeKind::DojoRenamed => "dojo_renamed",
-            TopologyChangeKind::WindowRenamed => "window_renamed",
-            TopologyChangeKind::WindowDefaultFocusChanged => "window_default_focus_changed",
+            TopologyChangeKind::DojoDefaultFocusChanged => "dojo_default_focus_changed",
             TopologyChangeKind::SplintRenamed => "splint_renamed",
             TopologyChangeKind::RuntimeChanged => "runtime_changed",
         };
-        Ok(Self(CliEventDataV1::TopologyChanged {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::TopologyChanged {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "topology_changed",
-            resource: TopologyResourceV1 {
+            resource: TopologyResourceV2 {
                 topology_revision: snapshot.revision.get(),
             },
-            data: TopologyChangeV1 {
+            data: TopologyChangeV2 {
                 kind,
+                lair_count,
                 dojo_count,
-                window_count,
                 splint_count,
             },
             truncated: false,
@@ -2370,16 +2370,16 @@ impl CliEventV1 {
             .validate()
             .map_err(|error| anyhow::anyhow!(error.message))?;
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::ControlStatusChanged {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::ControlStatusChanged {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "control_status_changed",
-            resource: ControlResourceV1 {
+            resource: ControlResourceV2 {
                 splint_id: status.splint_id.to_string(),
                 incarnation: status.incarnation,
             },
-            data: ControlSnapshotV1 {
+            data: ControlSnapshotV2 {
                 controlled: status.controlled,
                 locally_owned: status.locally_owned,
             },
@@ -2396,16 +2396,16 @@ impl CliEventV1 {
         transfer_id: u64,
     ) -> Result<Self> {
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::ControlTransferRequested {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::ControlTransferRequested {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "control_transfer_requested",
-            resource: ControlResourceV1 {
+            resource: ControlResourceV2 {
                 splint_id: splint_id.to_string(),
                 incarnation,
             },
-            data: TransferRequestedV1 {
+            data: TransferRequestedV2 {
                 transfer_id: decimal_id(transfer_id, "transfer ID")?,
             },
             truncated: false,
@@ -2428,16 +2428,16 @@ impl CliEventV1 {
             ControlTransferOutcome::TimedOut => "timed_out",
             ControlTransferOutcome::Cancelled => "cancelled",
         };
-        Ok(Self(CliEventDataV1::ControlTransferResolved {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::ControlTransferResolved {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "control_transfer_resolved",
-            resource: ControlResourceV1 {
+            resource: ControlResourceV2 {
                 splint_id: splint_id.to_string(),
                 incarnation,
             },
-            data: TransferResolvedV1 {
+            data: TransferResolvedV2 {
                 transfer_id: decimal_id(transfer_id, "transfer ID")?,
                 outcome,
             },
@@ -2454,16 +2454,16 @@ impl CliEventV1 {
         grant_id: u64,
     ) -> Result<Self> {
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::AccessRevoked {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::AccessRevoked {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "access_revoked",
-            resource: ControlResourceV1 {
+            resource: ControlResourceV2 {
                 splint_id: splint_id.to_string(),
                 incarnation,
             },
-            data: AccessRevokedV1 {
+            data: AccessRevokedV2 {
                 grant_id: decimal_id(grant_id, "grant ID")?,
             },
             truncated: false,
@@ -2480,16 +2480,16 @@ impl CliEventV1 {
         signal: Option<i32>,
     ) -> Result<Self> {
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::Exited {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::Exited {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "exited",
-            resource: ControlResourceV1 {
+            resource: ControlResourceV2 {
                 splint_id: splint_id.to_string(),
                 incarnation,
             },
-            data: ExitedV1 { code, signal },
+            data: ExitedV2 { code, signal },
             truncated: false,
         }))
     }
@@ -2502,33 +2502,33 @@ impl CliEventV1 {
         incarnation: u64,
         terminal_revision: u64,
         history_generation: Option<u64>,
-        reason: ResyncReasonV1,
+        reason: ResyncReasonV2,
     ) -> Result<Self> {
         if incarnation == 0 {
             bail!("terminal resync incarnation must be nonzero");
         }
-        if reason == ResyncReasonV1::HistoryReplaced && history_generation.is_none() {
+        if reason == ResyncReasonV2::HistoryReplaced && history_generation.is_none() {
             bail!("history replacement requires a history generation");
         }
         if history_generation == Some(0) {
             bail!("history generation must be nonzero");
         }
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::TerminalResync {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::TerminalResync {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "resync_required",
             stream: "terminal",
-            resource: TerminalResourceV1 {
+            resource: TerminalResourceV2 {
                 splint_id: splint_id.to_string(),
                 incarnation,
                 terminal_revision,
                 history_generation,
             },
-            data: EmptyDataV1 {},
+            data: EmptyDataV2 {},
             truncated: false,
-            resync: ResyncV1 { reason },
+            resync: ResyncV2 { reason },
         }))
     }
 
@@ -2537,24 +2537,24 @@ impl CliEventV1 {
         subscription_id: u64,
         sequence: u64,
         revision: TopologyRevision,
-        reason: ResyncReasonV1,
+        reason: ResyncReasonV2,
     ) -> Result<Self> {
-        if reason == ResyncReasonV1::HistoryReplaced {
+        if reason == ResyncReasonV2::HistoryReplaced {
             bail!("topology resync cannot report replaced terminal history");
         }
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::TopologyResync {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::TopologyResync {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "resync_required",
             stream: "topology",
-            resource: TopologyResourceV1 {
+            resource: TopologyResourceV2 {
                 topology_revision: revision.get(),
             },
-            data: EmptyDataV1 {},
+            data: EmptyDataV2 {},
             truncated: false,
-            resync: ResyncV1 { reason },
+            resync: ResyncV2 { reason },
         }))
     }
 
@@ -2564,25 +2564,25 @@ impl CliEventV1 {
         sequence: u64,
         splint_id: SplintId,
         incarnation: u64,
-        reason: ResyncReasonV1,
+        reason: ResyncReasonV2,
     ) -> Result<Self> {
-        if incarnation == 0 || reason == ResyncReasonV1::HistoryReplaced {
+        if incarnation == 0 || reason == ResyncReasonV2::HistoryReplaced {
             bail!("invalid control resync provenance or reason");
         }
         let (subscription_id, sequence) = Self::common(subscription_id, sequence)?;
-        Ok(Self(CliEventDataV1::ControlResync {
-            schema: CLI_EVENT_SCHEMA_V1,
+        Ok(Self(CliEventDataV2::ControlResync {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id,
             sequence,
             event_type: "resync_required",
             stream: "control",
-            resource: ControlResourceV1 {
+            resource: ControlResourceV2 {
                 splint_id: splint_id.to_string(),
                 incarnation,
             },
-            data: EmptyDataV1 {},
+            data: EmptyDataV2 {},
             truncated: false,
-            resync: ResyncV1 { reason },
+            resync: ResyncV2 { reason },
         }))
     }
 }
@@ -2668,7 +2668,7 @@ async fn receive_image_memfd(
             Err(error) if error == rustix::io::Errno::WOULDBLOCK => continue,
             Err(error) => return Err(error.into()),
         };
-        if message.bytes != 1 || marker != [b'F'] || message.flags.contains(ReturnFlags::CTRUNC) {
+        if message.bytes != 1 || marker != *b"F" || message.flags.contains(ReturnFlags::CTRUNC) {
             bail!("image descriptor message is malformed or truncated");
         }
         let mut descriptor: Option<OwnedFd> = None;
@@ -3522,7 +3522,7 @@ async fn read_frame(stream: &mut UnixStream) -> Result<ServerFrame> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use splinterm_core::{Dojo, DojoId, Lair, Splint, SplintState, Window, WindowId};
+    use splinterm_core::{Dojo, DojoId, Lair, LairId, Splint, SplintState, Topology};
     use splinterm_protocol::{
         CellAttributes, ColorSource, ProtocolError, SearchMatch, SubscriptionEvent, TerminalCell,
         TerminalRow, UnderlineStyle,
@@ -3948,30 +3948,32 @@ mod tests {
     }
 
     fn reviewed_topology() -> TopologySnapshot {
-        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-        let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let mut splint = Splint::shell(PathBuf::from("/tmp"));
         splint.id = splint_id;
         splint.title = "build".to_owned();
         splint.last_incarnation = Some(2);
         splint.state = SplintState::Running;
-        let window = Window {
-            id: window_id,
-            title: "terminal".to_owned(),
+        let dojo = Dojo {
+            id: dojo_id,
+            name: "terminal".to_owned(),
             default_focus: splint_id,
             root: LayoutNode::Leaf(splint),
         };
-        let dojo = Dojo {
-            id: dojo_id,
+        let dojo = Lair {
+            id: lair_id,
             name: "main".to_owned(),
-            windows: vec![window],
+            dojos: vec![dojo],
         };
-        let mut lair = Lair::new();
-        lair.insert_dojo_at(TopologyRevision::new(0), dojo).unwrap();
+        let mut topology = Topology::new();
+        topology
+            .insert_lair_at(TopologyRevision::new(0), dojo)
+            .unwrap();
         TopologySnapshot {
-            revision: lair.revision(),
-            lair,
+            revision: topology.revision(),
+            topology,
             runtimes: vec![SplintRuntimeSummary {
                 splint_id,
                 live_incarnation: Some(2),
@@ -3984,21 +3986,21 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_read_dtos_match_golden_fixtures() {
+    fn public_v2_read_dtos_match_golden_fixtures() {
         let snapshot = reviewed_topology();
         let mut expected = fixture_document(include_str!(
-            "../../../tests/automation/fixtures/valid/cli-list-dojos.json"
+            "../../../tests/automation/fixtures/valid/cli-list-lairs.json"
         ));
         expected["request_id"] = serde_json::json!("1");
         expected["resource"]["topology_revision"] = serde_json::json!(1);
         assert_eq!(
-            serialized(&list_dojos_envelope(&snapshot).unwrap()),
+            serialized(&list_lairs_envelope(&snapshot).unwrap()),
             expected
         );
 
         let empty = TopologySnapshot {
             revision: TopologyRevision::new(0),
-            lair: Lair::new(),
+            topology: Topology::new(),
             runtimes: Vec::new(),
         };
         let mut expected = fixture_document(include_str!(
@@ -4024,9 +4026,9 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_history_dtos_match_golden_fixtures() {
-        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-        let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    fn public_v2_history_dtos_match_golden_fixtures() {
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let page = ScrollbackPage {
             splint_id,
@@ -4038,7 +4040,7 @@ mod tests {
             rows: vec![reviewed_row()],
             has_older: true,
         };
-        let actual = serialized(&scrollback_page_envelope(dojo_id, window_id, &page).unwrap());
+        let actual = serialized(&scrollback_page_envelope(lair_id, dojo_id, &page).unwrap());
         let mut expected = fixture_document(include_str!(
             "../../../tests/automation/fixtures/valid/cli-scrollback-page.json"
         ));
@@ -4066,19 +4068,19 @@ mod tests {
         ));
         expected["request_id"] = serde_json::json!("1");
         assert_eq!(
-            serialized(&search_page_envelope(dojo_id, window_id, &search).unwrap()),
+            serialized(&search_page_envelope(lair_id, dojo_id, &search).unwrap()),
             expected
         );
 
         for (operation, reason, fixture) in [
             (
                 "scrollback_page",
-                ReadResyncReasonV1::HistoryReplaced,
+                ReadResyncReasonV2::HistoryReplaced,
                 include_str!("../../../tests/automation/fixtures/valid/cli-scrollback-resync.json"),
             ),
             (
                 "search_scrollback",
-                ReadResyncReasonV1::StaleRevision,
+                ReadResyncReasonV2::StaleRevision,
                 include_str!("../../../tests/automation/fixtures/valid/cli-search-resync.json"),
             ),
         ] {
@@ -4088,9 +4090,9 @@ mod tests {
                 serialized(
                     &read_resync_envelope(
                         operation,
-                        TerminalReadProvenanceV1 {
+                        TerminalReadProvenanceV2 {
+                            lair_id,
                             dojo_id,
-                            window_id,
                             splint_id,
                             incarnation: 2,
                             terminal_revision: 9,
@@ -4106,17 +4108,17 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_terminal_cursors_round_trip_and_reject_tampering() {
+    fn public_v2_terminal_cursors_round_trip_and_reject_tampering() {
         let splint_id = SplintId::new();
         for cursor in [
-            TerminalContinuationV1::Scrollback {
+            TerminalContinuationV2::Scrollback {
                 splint_id,
                 incarnation: 2,
                 terminal_revision: 0,
                 history_generation: 3,
                 before_row_id: 8,
             },
-            TerminalContinuationV1::Search {
+            TerminalContinuationV2::Search {
                 splint_id,
                 incarnation: 2,
                 terminal_revision: 9,
@@ -4132,10 +4134,10 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_terminal_action_dtos_match_golden_fixtures() {
-        let provenance = TerminalReadProvenanceV1 {
-            dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-            window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+    fn public_v2_terminal_action_dtos_match_golden_fixtures() {
+        let provenance = TerminalReadProvenanceV2 {
+            lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+            dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
             splint_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap(),
             incarnation: 2,
             terminal_revision: 9,
@@ -4162,7 +4164,7 @@ mod tests {
         }
     }
 
-    fn mutation_ids() -> (DojoId, WindowId, SplintId) {
+    fn mutation_ids() -> (LairId, DojoId, SplintId) {
         (
             "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
             "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
@@ -4170,11 +4172,11 @@ mod tests {
         )
     }
 
-    fn mutation_identity() -> MutationIdentityV1 {
-        let (dojo_id, window_id, splint_id) = mutation_ids();
-        MutationIdentityV1 {
+    fn mutation_identity() -> MutationIdentityV2 {
+        let (lair_id, dojo_id, splint_id) = mutation_ids();
+        MutationIdentityV2 {
+            lair_id: Some(lair_id),
             dojo_id: Some(dojo_id),
-            window_id: Some(window_id),
             splint_id: Some(splint_id),
             topology_revision: Some(7),
             incarnation: Some(2),
@@ -4182,13 +4184,13 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_mutation_dtos_match_golden_fixtures() {
+    fn public_v2_mutation_dtos_match_golden_fixtures() {
         let mut expected = fixture_document(include_str!(
-            "../../../tests/automation/fixtures/valid/cli-create-dojo.json"
+            "../../../tests/automation/fixtures/valid/cli-create-lair.json"
         ));
         expected["request_id"] = serde_json::json!("1");
         assert_eq!(
-            serialized(&created_mutation_envelope("create_dojo", mutation_identity()).unwrap()),
+            serialized(&created_mutation_envelope("create_lair", mutation_identity()).unwrap()),
             expected
         );
 
@@ -4209,7 +4211,7 @@ mod tests {
         ));
         expected["request_id"] = serde_json::json!("1");
         assert_eq!(
-            serialized(&committed_mutation_envelope("close_window", identity, true).unwrap()),
+            serialized(&committed_mutation_envelope("close_dojo", identity, true).unwrap()),
             expected
         );
 
@@ -4224,19 +4226,19 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_restore_kill_and_revoke_dtos_match_golden_fixtures() {
-        let (dojo_id, window_id, splint_id) = mutation_ids();
+    fn public_v2_restore_kill_and_revoke_dtos_match_golden_fixtures() {
+        let (lair_id, dojo_id, splint_id) = mutation_ids();
         let mut expected = fixture_document(include_str!(
-            "../../../tests/automation/fixtures/valid/cli-restore-dojo.json"
+            "../../../tests/automation/fixtures/valid/cli-restore-lair.json"
         ));
         expected["request_id"] = serde_json::json!("1");
         assert_eq!(
             serialized(
                 &restore_many_envelope(
-                    "restore_dojo",
-                    MutationIdentityV1 {
-                        dojo_id: Some(dojo_id),
-                        window_id: None,
+                    "restore_lair",
+                    MutationIdentityV2 {
+                        lair_id: Some(lair_id),
+                        dojo_id: None,
                         splint_id: None,
                         topology_revision: Some(7),
                         incarnation: None,
@@ -4257,7 +4259,7 @@ mod tests {
         ));
         expected["request_id"] = serde_json::json!("1");
         assert_eq!(
-            serialized(&kill_envelope(dojo_id, window_id, splint_id, 2).unwrap()),
+            serialized(&kill_envelope(lair_id, dojo_id, splint_id, 2).unwrap()),
             expected
         );
 
@@ -4274,15 +4276,15 @@ mod tests {
         ));
         expected["request_id"] = serde_json::json!("1");
         assert_eq!(
-            serialized(&revoke_envelope(dojo_id, window_id, &grant).unwrap()),
+            serialized(&revoke_envelope(lair_id, dojo_id, &grant).unwrap()),
             expected
         );
     }
 
     #[test]
-    fn public_v1_authorization_and_audit_dtos_match_golden_fixtures() {
-        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-        let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    fn public_v2_authorization_and_audit_dtos_match_golden_fixtures() {
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let mut expected = fixture_document(include_str!(
             "../../../tests/automation/fixtures/valid/cli-authorization-status.json"
@@ -4291,8 +4293,8 @@ mod tests {
         assert_eq!(
             serialized(
                 &authorization_status_envelope(
+                    lair_id,
                     dojo_id,
-                    window_id,
                     splint_id,
                     2,
                     &[],
@@ -4310,7 +4312,7 @@ mod tests {
 
         let page = AuditPage {
             records: vec![splinterm_protocol::AuditRecord {
-                schema: "splinterm.audit.v1".to_owned(),
+                schema: "splinterm.audit.v2".to_owned(),
                 retention: "daemon_lifetime".to_owned(),
                 audit_id: 73,
                 unix_seconds: 1_721_760_000,
@@ -4325,8 +4327,8 @@ mod tests {
                 },
                 operation: AuditOperation::Input,
                 resource: Some(splinterm_protocol::AuditResource {
+                    lair_id: None,
                     dojo_id: None,
-                    window_id: None,
                     splint_id: Some(splint_id),
                     incarnation: Some(2),
                 }),
@@ -4350,14 +4352,14 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_protocol_failures_preserve_topology_revision() {
+    fn public_v2_protocol_failures_preserve_topology_revision() {
         let error = splinterm_protocol::ProtocolError {
             code: ErrorCode::StaleTopology,
             message: "topology revision is stale".to_owned(),
             current_topology_revision: Some(TopologyRevision::new(9)),
         };
         let document = serialized(
-            &CliEnvelopeV1::protocol_failure(
+            &CliEnvelopeV2::protocol_failure(
                 "set_split_ratio",
                 &error,
                 "splinterd [staletopology]: topology revision is stale",
@@ -4370,8 +4372,8 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_ping_dtos_match_golden_fixtures() {
-        let success = PingEnvelopeV1::success(1).unwrap();
+    fn public_v2_ping_dtos_match_golden_fixtures() {
+        let success = PingEnvelopeV2::success(1).unwrap();
         assert_eq!(
             serialized(&success),
             fixture_document(include_str!(
@@ -4379,7 +4381,7 @@ mod tests {
             ))
         );
         let failure =
-            PingEnvelopeV1::failure(1, CliErrorCodeV1::Timeout, "request deadline elapsed", true)
+            PingEnvelopeV2::failure(1, CliErrorCodeV2::Timeout, "request deadline elapsed", true)
                 .unwrap();
         assert_eq!(
             serialized(&failure),
@@ -4387,25 +4389,25 @@ mod tests {
                 "../../../tests/automation/fixtures/valid/cli-ping-timeout.json"
             ))
         );
-        assert!(PingEnvelopeV1::success(0).is_err());
-        assert!(PingEnvelopeV1::failure(1, CliErrorCodeV1::Internal, "", false).is_err());
+        assert!(PingEnvelopeV2::success(0).is_err());
+        assert!(PingEnvelopeV2::failure(1, CliErrorCodeV2::Internal, "", false).is_err());
     }
 
     #[test]
-    fn public_v1_initial_event_dtos_match_golden_fixtures() {
+    fn public_v2_initial_event_dtos_match_golden_fixtures() {
         let splint_id = "018f4d8c-2a18-4b31-8c2f-9e7c5de77110";
-        let terminal = CliEventV1(CliEventDataV1::TerminalSnapshot {
-            schema: CLI_EVENT_SCHEMA_V1,
+        let terminal = CliEventV2(CliEventDataV2::TerminalSnapshot {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id: "1".to_owned(),
             sequence: 1,
             event_type: "snapshot",
-            resource: TerminalResourceV1 {
+            resource: TerminalResourceV2 {
                 splint_id: splint_id.to_owned(),
                 incarnation: 3,
                 terminal_revision: 42,
                 history_generation: None,
             },
-            data: TerminalSnapshotV1 {
+            data: TerminalSnapshotV2 {
                 content_encoding: "unicode_scalars",
                 columns: 2,
                 rows: 1,
@@ -4433,17 +4435,17 @@ mod tests {
             ))
         );
 
-        let topology = CliEventV1(CliEventDataV1::TopologySnapshot {
-            schema: CLI_EVENT_SCHEMA_V1,
+        let topology = CliEventV2(CliEventDataV2::TopologySnapshot {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id: "1".to_owned(),
             sequence: 1,
             event_type: "topology_snapshot",
-            resource: TopologyResourceV1 {
+            resource: TopologyResourceV2 {
                 topology_revision: 7,
             },
-            data: TopologySnapshotV1 {
-                dojo_count: 1,
-                window_count: 2,
+            data: TopologySnapshotV2 {
+                lair_count: 1,
+                dojo_count: 2,
                 splint_count: 3,
             },
             truncated: false,
@@ -4455,16 +4457,16 @@ mod tests {
             ))
         );
 
-        let control = CliEventV1(CliEventDataV1::ControlSnapshot {
-            schema: CLI_EVENT_SCHEMA_V1,
+        let control = CliEventV2(CliEventDataV2::ControlSnapshot {
+            schema: CLI_EVENT_SCHEMA_V2,
             subscription_id: "1".to_owned(),
             sequence: 1,
             event_type: "control_snapshot",
-            resource: ControlResourceV1 {
+            resource: ControlResourceV2 {
                 splint_id: splint_id.to_owned(),
                 incarnation: 3,
             },
-            data: ControlSnapshotV1 {
+            data: ControlSnapshotV2 {
                 controlled: true,
                 locally_owned: false,
             },
@@ -4479,17 +4481,17 @@ mod tests {
     }
 
     #[test]
-    fn public_v1_update_event_dtos_match_closed_fixtures() {
+    fn public_v2_update_event_dtos_match_closed_fixtures() {
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77110".parse().unwrap();
         assert_eq!(
-            serialized(&CliEventV1::terminal_update(1, 2, splint_id, 3, 43, 2).unwrap()),
+            serialized(&CliEventV2::terminal_update(1, 2, splint_id, 3, 43, 2).unwrap()),
             fixture_document(include_str!(
                 "../../../tests/automation/fixtures/valid/subscription-terminal-update.json"
             ))
         );
         assert_eq!(
             serialized(
-                &CliEventV1::control_transfer_resolved(
+                &CliEventV2::control_transfer_resolved(
                     1,
                     2,
                     splint_id,
@@ -4505,29 +4507,29 @@ mod tests {
         );
         let snapshot = reviewed_topology();
         let actual = serialized(
-            &CliEventV1::topology_changed(1, 2, TopologyChangeKind::SplintSplit, &snapshot)
+            &CliEventV2::topology_changed(1, 2, TopologyChangeKind::SplintSplit, &snapshot)
                 .unwrap(),
         );
         let mut expected = fixture_document(include_str!(
             "../../../tests/automation/fixtures/valid/subscription-topology-changed.json"
         ));
         expected["resource"]["topology_revision"] = serde_json::json!(1);
-        expected["data"]["window_count"] = serde_json::json!(1);
+        expected["data"]["dojo_count"] = serde_json::json!(1);
         expected["data"]["splint_count"] = serde_json::json!(1);
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn public_v1_resync_dtos_match_golden_fixtures() {
+    fn public_v2_resync_dtos_match_golden_fixtures() {
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77110".parse().unwrap();
-        let terminal = CliEventV1::terminal_resync(
+        let terminal = CliEventV2::terminal_resync(
             1,
             4,
             splint_id,
             3,
             45,
             Some(2),
-            ResyncReasonV1::HistoryReplaced,
+            ResyncReasonV2::HistoryReplaced,
         )
         .unwrap();
         assert_eq!(
@@ -4536,11 +4538,11 @@ mod tests {
                 "../../../tests/automation/fixtures/valid/subscription-terminal-resync.json"
             ))
         );
-        let topology = CliEventV1::topology_resync(
+        let topology = CliEventV2::topology_resync(
             1,
             4,
             TopologyRevision::new(9),
-            ResyncReasonV1::RevisionGap,
+            ResyncReasonV2::RevisionGap,
         )
         .unwrap();
         assert_eq!(
@@ -4550,7 +4552,7 @@ mod tests {
             ))
         );
         let control =
-            CliEventV1::control_resync(1, 4, splint_id, 3, ResyncReasonV1::SubscriberStalled)
+            CliEventV2::control_resync(1, 4, splint_id, 3, ResyncReasonV2::SubscriberStalled)
                 .unwrap();
         assert_eq!(
             serialized(&control),
@@ -4559,7 +4561,7 @@ mod tests {
             ))
         );
         assert!(
-            CliEventV1::control_resync(1, 4, splint_id, 3, ResyncReasonV1::HistoryReplaced)
+            CliEventV2::control_resync(1, 4, splint_id, 3, ResyncReasonV2::HistoryReplaced)
                 .is_err()
         );
     }

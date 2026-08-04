@@ -1,0 +1,10 @@
+{
+  "$schema_file": "tools/create_lair.input.schema.json",
+  "document": {
+    "name": "dojo",
+    "cwd": "/tmp",
+    "argv": [
+      "sh"
+    ]
+  }
+}

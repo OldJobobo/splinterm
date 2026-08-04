@@ -14,7 +14,7 @@ const MAX_REASON_BYTES: usize = 64;
 pub const fn operation_for_request(request: &Request) -> AuditOperation {
     match request {
         Request::Ping => AuditOperation::Ping,
-        Request::ListDojos => AuditOperation::ListDojos,
+        Request::ListLairs => AuditOperation::ListLairs,
         Request::InspectTopology => AuditOperation::InspectTopology,
         Request::SubscribeTopology => AuditOperation::SubscribeTopology,
         Request::InspectSplint { .. } => AuditOperation::InspectSplint,
@@ -22,46 +22,42 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::AuthorizationStatus { .. } => AuditOperation::AuthorizationStatus,
         Request::RevokeAccess { .. } => AuditOperation::RevokeAccess,
         Request::PrepareMutation { mutation } => match mutation {
-            splinterm_protocol::MutationPreflight::CreateDojo => AuditOperation::CreateDojo,
+            splinterm_protocol::MutationPreflight::CreateLair => AuditOperation::CreateLair,
             splinterm_protocol::MutationPreflight::SplitSplint { .. } => {
                 AuditOperation::SplitSplint
             }
-            splinterm_protocol::MutationPreflight::NewWindow { .. } => AuditOperation::NewWindow,
+            splinterm_protocol::MutationPreflight::NewDojo { .. } => AuditOperation::NewDojo,
             splinterm_protocol::MutationPreflight::RelaunchSplint { .. } => {
                 AuditOperation::RelaunchSplint
             }
             splinterm_protocol::MutationPreflight::RestoreSplint { .. } => {
                 AuditOperation::RestoreSplint
             }
-            splinterm_protocol::MutationPreflight::RestoreWindow { .. } => {
-                AuditOperation::RestoreWindow
-            }
             splinterm_protocol::MutationPreflight::RestoreDojo { .. } => {
                 AuditOperation::RestoreDojo
+            }
+            splinterm_protocol::MutationPreflight::RestoreLair { .. } => {
+                AuditOperation::RestoreLair
             }
             splinterm_protocol::MutationPreflight::CloseSplint { .. } => {
                 AuditOperation::CloseSplint
             }
-            splinterm_protocol::MutationPreflight::CloseWindow { .. } => {
-                AuditOperation::CloseWindow
-            }
+            splinterm_protocol::MutationPreflight::CloseDojo { .. } => AuditOperation::CloseDojo,
             splinterm_protocol::MutationPreflight::KillSplint { .. } => AuditOperation::KillSplint,
             splinterm_protocol::MutationPreflight::SetSplitRatio { .. } => {
                 AuditOperation::SetSplitRatio
             }
+            splinterm_protocol::MutationPreflight::RenameLair { .. } => AuditOperation::RenameLair,
             splinterm_protocol::MutationPreflight::RenameDojo { .. } => AuditOperation::RenameDojo,
-            splinterm_protocol::MutationPreflight::RenameWindow { .. } => {
-                AuditOperation::RenameWindow
-            }
             splinterm_protocol::MutationPreflight::RenameSplint { .. } => {
                 AuditOperation::RenameSplint
             }
-            splinterm_protocol::MutationPreflight::SetWindowDefaultFocus { .. } => {
-                AuditOperation::SetWindowDefaultFocus
+            splinterm_protocol::MutationPreflight::SetDojoDefaultFocus { .. } => {
+                AuditOperation::SetDojoDefaultFocus
             }
         },
-        Request::CreateDojo { .. } | Request::CreateDojoAutomation { .. } => {
-            AuditOperation::CreateDojo
+        Request::CreateLair { .. } | Request::CreateLairAutomation { .. } => {
+            AuditOperation::CreateLair
         }
         Request::SplitSplint { .. } | Request::SplitSplintAutomation { .. } => {
             AuditOperation::SplitSplint
@@ -70,17 +66,15 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
             AuditOperation::RelaunchSplint
         }
         Request::RestoreSplint { .. } => AuditOperation::RestoreSplint,
-        Request::RestoreWindow { .. } => AuditOperation::RestoreWindow,
         Request::RestoreDojo { .. } => AuditOperation::RestoreDojo,
+        Request::RestoreLair { .. } => AuditOperation::RestoreLair,
         Request::CloseSplint { .. } => AuditOperation::CloseSplint,
         Request::SetSplitRatio { .. } => AuditOperation::SetSplitRatio,
-        Request::NewWindow { .. } | Request::NewWindowAutomation { .. } => {
-            AuditOperation::NewWindow
-        }
-        Request::CloseWindow { .. } => AuditOperation::CloseWindow,
+        Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => AuditOperation::NewDojo,
+        Request::CloseDojo { .. } => AuditOperation::CloseDojo,
+        Request::RenameLair { .. } => AuditOperation::RenameLair,
         Request::RenameDojo { .. } => AuditOperation::RenameDojo,
-        Request::RenameWindow { .. } => AuditOperation::RenameWindow,
-        Request::SetWindowDefaultFocus { .. } => AuditOperation::SetWindowDefaultFocus,
+        Request::SetDojoDefaultFocus { .. } => AuditOperation::SetDojoDefaultFocus,
         Request::RenameSplint { .. } => AuditOperation::RenameSplint,
         // Keep the frozen public audit vocabulary stable; content reads remain
         // an exact-incarnation terminal attachment operation in this phase.
@@ -132,7 +126,7 @@ impl AuditStore {
         self.next_id = self.next_id.saturating_add(1).max(1);
         let reason = sanitize_reason(draft.reason);
         let record = AuditRecord {
-            schema: "splinterm.audit.v1".into(),
+            schema: "splinterm.audit.v2".into(),
             retention: "daemon_lifetime".into(),
             audit_id: self.next_id,
             unix_seconds: draft.unix_seconds.max(1),

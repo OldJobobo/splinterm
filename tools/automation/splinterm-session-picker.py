@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, Sequence
 
-SCHEMA = "splinterm.cli.v1"
-EVENT_SCHEMA = "splinterm.cli.event.v1"
+SCHEMA = "splinterm.cli.v2"
+EVENT_SCHEMA = "splinterm.cli.event.v2"
 MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 READ_CHUNK_BYTES = 16 * 1024
@@ -31,8 +31,8 @@ ERROR_CODES = {
 TERMINAL_EVENT_TYPES = {"snapshot", "update", "access_revoked", "exited", "resync_required"}
 RESYNC_REASONS = {"subscriber_stalled", "revision_gap", "history_replaced"}
 CONTEXT_NAMES = (
+    "SPLINTERM_LAIR_ID",
     "SPLINTERM_DOJO_ID",
-    "SPLINTERM_WINDOW_ID",
     "SPLINTERM_SPLINT_ID",
     "SPLINTERM_SPLINT_INCARNATION",
 )
@@ -48,8 +48,8 @@ class ClientError(Exception):
 
 @dataclass(frozen=True)
 class Context:
+    lair_id: str
     dojo_id: str
-    window_id: str
     splint_id: str
     incarnation: int
 
@@ -182,25 +182,25 @@ def valid_uuid(value: object) -> bool:
 
 
 def validate_topology_data(data: dict[str, Any]) -> None:
-    if not all(isinstance(data.get(name), list) for name in ("dojos", "windows", "splints")):
+    if not all(isinstance(data.get(name), list) for name in ("lairs", "dojos", "splints")):
         fail("topology response has an invalid public shape", 4)
+    for lair in data["lairs"]:
+        if not (
+            isinstance(lair, dict)
+            and valid_uuid(lair.get("lair_id"))
+            and isinstance(lair.get("name"), str)
+            and isinstance(lair.get("dojo_count"), int)
+            and lair["dojo_count"] >= 0
+        ):
+            fail("topology response has an invalid Lair summary", 4)
     for dojo in data["dojos"]:
         if not (
             isinstance(dojo, dict)
+            and valid_uuid(dojo.get("lair_id"))
             and valid_uuid(dojo.get("dojo_id"))
             and isinstance(dojo.get("name"), str)
-            and isinstance(dojo.get("window_count"), int)
-            and dojo["window_count"] >= 0
         ):
             fail("topology response has an invalid Dojo summary", 4)
-    for window in data["windows"]:
-        if not (
-            isinstance(window, dict)
-            and valid_uuid(window.get("dojo_id"))
-            and valid_uuid(window.get("window_id"))
-            and isinstance(window.get("title"), str)
-        ):
-            fail("topology response has an invalid window summary", 4)
     for splint in data["splints"]:
         current = splint.get("current_incarnation") if isinstance(splint, dict) else None
         last = splint.get("last_incarnation") if isinstance(splint, dict) else None
@@ -208,8 +208,8 @@ def validate_topology_data(data: dict[str, Any]) -> None:
         valid_last = last is None or (isinstance(last, int) and last > 0)
         if not (
             isinstance(splint, dict)
+            and valid_uuid(splint.get("lair_id"))
             and valid_uuid(splint.get("dojo_id"))
-            and valid_uuid(splint.get("window_id"))
             and valid_uuid(splint.get("splint_id"))
             and isinstance(splint.get("title"), str)
             and lifecycle in {"running", "exited", "restorable"}
@@ -230,10 +230,10 @@ def validate_topology_data(data: dict[str, Any]) -> None:
 def validate_operation_success(operation: str, document: dict[str, Any]) -> None:
     resource = document.get("resource")
     data = document["data"]
-    if operation in {"split_splint", "new_window"}:
+    if operation in {"split_splint", "new_dojo"}:
         if not (
             isinstance(resource, dict)
-            and all(valid_uuid(resource.get(name)) for name in ("dojo_id", "window_id", "splint_id"))
+            and all(valid_uuid(resource.get(name)) for name in ("lair_id", "dojo_id", "splint_id"))
             and isinstance(resource.get("incarnation"), int)
             and resource["incarnation"] > 0
             and isinstance(resource.get("topology_revision"), int)
@@ -244,7 +244,7 @@ def validate_operation_success(operation: str, document: dict[str, Any]) -> None
     elif operation in {"terminal_snapshot", "input"}:
         if not (
             isinstance(resource, dict)
-            and all(valid_uuid(resource.get(name)) for name in ("dojo_id", "window_id", "splint_id"))
+            and all(valid_uuid(resource.get(name)) for name in ("lair_id", "dojo_id", "splint_id"))
             and isinstance(resource.get("incarnation"), int)
             and resource["incarnation"] > 0
             and isinstance(resource.get("terminal_revision"), int)
@@ -349,7 +349,7 @@ class SplintermClient:
             "--output",
             mode,
             "--schema-major",
-            "1",
+            "2",
             "--timeout-ms",
             str(self.timeout_ms),
             *command,
@@ -488,8 +488,8 @@ def validated_context(topology: dict[str, Any], environment: dict[str, str]) -> 
     if incarnation <= 0:
         fail("in-Splint incarnation hint is invalid")
     context = Context(
+        lair_id=environment["SPLINTERM_LAIR_ID"],
         dojo_id=environment["SPLINTERM_DOJO_ID"],
-        window_id=environment["SPLINTERM_WINDOW_ID"],
         splint_id=environment["SPLINTERM_SPLINT_ID"],
         incarnation=incarnation,
     )
@@ -498,8 +498,8 @@ def validated_context(topology: dict[str, Any], environment: dict[str, str]) -> 
         item
         for item in splints
         if isinstance(item, dict)
+        and item.get("lair_id") == context.lair_id
         and item.get("dojo_id") == context.dojo_id
-        and item.get("window_id") == context.window_id
         and item.get("splint_id") == context.splint_id
         and item.get("current_incarnation") == context.incarnation
         and item.get("last_incarnation") == context.incarnation
@@ -510,15 +510,15 @@ def validated_context(topology: dict[str, Any], environment: dict[str, str]) -> 
     return context
 
 
-def find_window(topology: dict[str, Any], window_id: str) -> tuple[str, str]:
+def find_dojo(topology: dict[str, Any], dojo_id: str) -> tuple[str, str]:
     matching = [
         item
-        for item in topology["data"]["windows"]
-        if isinstance(item, dict) and item.get("window_id") == window_id
+        for item in topology["data"]["dojos"]
+        if isinstance(item, dict) and item.get("dojo_id") == dojo_id
     ]
-    if len(matching) != 1 or not isinstance(matching[0].get("dojo_id"), str):
-        fail(f"logical window not found: {window_id}")
-    return matching[0]["dojo_id"], window_id
+    if len(matching) != 1 or not isinstance(matching[0].get("lair_id"), str):
+        fail(f"Dojo not found: {dojo_id}")
+    return matching[0]["lair_id"], dojo_id
 
 
 def child_argv(values: list[str]) -> list[str]:
@@ -534,8 +534,8 @@ def print_context(context: Context) -> None:
     print(
         json.dumps(
             {
+                "lair_id": context.lair_id,
                 "dojo_id": context.dojo_id,
-                "window_id": context.window_id,
                 "splint_id": context.splint_id,
                 "incarnation": context.incarnation,
             },
@@ -556,12 +556,12 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("list", help="list authoritative logical sessions")
     commands.add_parser("context", help="validate and print the current in-Splint hints")
 
-    open_command = commands.add_parser("open", help="open one existing logical window")
-    open_command.add_argument("window_id", nargs="?")
+    open_command = commands.add_parser("open", help="open one existing Dojo in a native window")
+    open_command.add_argument("dojo_id", nargs="?")
 
-    start = commands.add_parser("start", help="start a direct argv in a new logical window")
-    start.add_argument("dojo_id")
-    start.add_argument("--title", default="editor")
+    start = commands.add_parser("start", help="start a direct argv in a new Dojo")
+    start.add_argument("lair_id")
+    start.add_argument("--name", default="editor")
     start.add_argument("--cwd", type=Path, default=Path.cwd())
 
     split = commands.add_parser("split-context", help="split the validated current Splint")
@@ -592,8 +592,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
     if options.command == "list":
         topology = client.topology()
-        for window in topology["data"]["windows"]:
-            print(f"{window['window_id']}\t{window['dojo_id']}\t{window['title']}")
+        for dojo in topology["data"]["dojos"]:
+            print(f"{dojo['dojo_id']}\t{dojo['lair_id']}\t{dojo['name']}")
         return 0
 
     topology = client.topology()
@@ -601,21 +601,21 @@ def main(arguments: Sequence[str] | None = None) -> int:
         print_context(validated_context(topology, dict(os.environ)))
         return 0
     if options.command == "open":
-        if options.window_id:
-            dojo_id, window_id = find_window(topology, options.window_id)
+        if options.dojo_id:
+            lair_id, dojo_id = find_dojo(topology, options.dojo_id)
         else:
             context = validated_context(topology, dict(os.environ))
-            dojo_id, window_id = context.dojo_id, context.window_id
+            lair_id, dojo_id = context.lair_id, context.dojo_id
         try:
             os.execvp(
                 options.splinterm,
                 [
                     options.splinterm,
                     "window",
+                    "--lair-id",
+                    lair_id,
                     "--dojo-id",
                     dojo_id,
-                    "--window-id",
-                    window_id,
                 ],
             )
         except OSError as error:
@@ -623,12 +623,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
     if options.command == "start":
         argv = child_argv(child_arguments)
         document = client.request(
-            "new_window",
+            "new_dojo",
             [
-                "new-window",
-                options.dojo_id,
-                "--title",
-                options.title,
+                "new-dojo",
+                options.lair_id,
+                "--name",
+                options.name,
                 "--cwd",
                 str(options.cwd),
                 "--",

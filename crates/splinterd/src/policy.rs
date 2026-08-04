@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
-use splinterm_core::{DojoId, Lair, LayoutNode, SplintId, WindowId};
+use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, Topology};
 
 use crate::{authorization::OperationScope, executable_identity::ExecutableIdentity};
 
@@ -37,7 +37,7 @@ pub struct PolicyDocument {
 impl PolicyDocument {
     fn deny_all() -> Self {
         Self {
-            schema: "splinterm.policy.v1".into(),
+            schema: "splinterm.policy.v2".into(),
             rules: Vec::new(),
             resolved_resources: HashMap::new(),
         }
@@ -95,43 +95,40 @@ impl PolicyDocument {
             .collect()
     }
 
-    fn resolve_against(&mut self, lair: &Lair) -> Result<()> {
+    fn resolve_against(&mut self, topology: &Topology) -> Result<()> {
         let mut resolved = HashMap::with_capacity(self.rules.len());
         for rule in &self.rules {
             let mut resources = HashSet::new();
             for selector in &rule.resources {
                 match selector {
-                    ResourceSelector::Lair => {
-                        insert_resolved(&mut resources, ResolvedResourceSelector::Lair)?;
+                    ResourceSelector::Daemon => {
+                        insert_resolved(&mut resources, ResolvedResourceSelector::Daemon)?;
+                    }
+                    ResourceSelector::Lair { lair_id } => {
+                        let lair = topology.find_lair(*lair_id).context(
+                            "policy Lair selector is not present in the topology snapshot",
+                        )?;
+                        insert_resolved(&mut resources, ResolvedResourceSelector::Lair(lair.id))?;
+                        for dojo in &lair.dojos {
+                            insert_resolved(
+                                &mut resources,
+                                ResolvedResourceSelector::Dojo(dojo.id),
+                            )?;
+                            resolve_layout(&dojo.root, &mut resources)?;
+                        }
                     }
                     ResourceSelector::Dojo { dojo_id } => {
-                        let dojo = lair.dojos().find(|dojo| dojo.id == *dojo_id).context(
+                        let dojo = topology.find_dojo(*dojo_id).context(
                             "policy Dojo selector is not present in the topology snapshot",
                         )?;
                         insert_resolved(&mut resources, ResolvedResourceSelector::Dojo(dojo.id))?;
-                        for window in &dojo.windows {
-                            insert_resolved(
-                                &mut resources,
-                                ResolvedResourceSelector::Window(window.id),
-                            )?;
-                            resolve_layout(&window.root, &mut resources)?;
-                        }
-                    }
-                    ResourceSelector::Window { window_id } => {
-                        let window = lair.find_window(*window_id).context(
-                            "policy Window selector is not present in the topology snapshot",
-                        )?;
-                        insert_resolved(
-                            &mut resources,
-                            ResolvedResourceSelector::Window(window.id),
-                        )?;
-                        resolve_layout(&window.root, &mut resources)?;
+                        resolve_layout(&dojo.root, &mut resources)?;
                     }
                     ResourceSelector::Splint {
                         splint_id,
                         incarnation,
                     } => {
-                        lair.find_splint(*splint_id).context(
+                        topology.find_splint(*splint_id).context(
                             "policy Splint selector is not present in the topology snapshot",
                         )?;
                         insert_resolved(
@@ -203,12 +200,12 @@ pub struct ExecutableMatcher {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceSelector {
-    Lair,
+    Daemon,
+    Lair {
+        lair_id: LairId,
+    },
     Dojo {
         dojo_id: DojoId,
-    },
-    Window {
-        window_id: WindowId,
     },
     Splint {
         splint_id: SplintId,
@@ -225,9 +222,9 @@ pub enum IncarnationSelector {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ResolvedResourceSelector {
-    Lair,
+    Daemon,
+    Lair(LairId),
     Dojo(DojoId),
-    Window(WindowId),
     Splint {
         splint_id: SplintId,
         incarnation: IncarnationSelector,
@@ -263,17 +260,17 @@ pub struct RequestedLimits {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyResource {
-    Lair,
-    Dojo {
-        dojo_id: DojoId,
+    Daemon,
+    Lair {
+        lair_id: LairId,
     },
-    Window {
+    Dojo {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
     },
     Splint {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
         splint_id: SplintId,
         incarnation: Option<u64>,
     },
@@ -329,11 +326,9 @@ impl PolicyRule {
 impl ResolvedResourceSelector {
     fn matches(&self, resource: PolicyResource) -> bool {
         match (self, resource) {
-            (Self::Lair, PolicyResource::Lair) => true,
-            (Self::Dojo(expected), PolicyResource::Dojo { dojo_id }) => *expected == dojo_id,
-            (Self::Window(expected), PolicyResource::Window { window_id, .. }) => {
-                *expected == window_id
-            }
+            (Self::Daemon, PolicyResource::Daemon) => true,
+            (Self::Lair(expected), PolicyResource::Lair { lair_id }) => *expected == lair_id,
+            (Self::Dojo(expected), PolicyResource::Dojo { dojo_id, .. }) => *expected == dojo_id,
             (
                 Self::Splint {
                     splint_id,
@@ -485,16 +480,16 @@ impl PolicyStore {
             .status(executable, resource, now_unix_seconds)
     }
 
-    pub fn reload(&mut self, path: Option<&Path>, lair: &Lair) -> PolicyGeneration {
+    pub fn reload(&mut self, path: Option<&Path>, lair: &Topology) -> PolicyGeneration {
         self.publish(prepare(path.map(Path::to_path_buf)), lair)
     }
 
-    pub fn publish(&mut self, mut candidate: PolicyCandidate, lair: &Lair) -> PolicyGeneration {
-        if candidate.diagnostic.is_none() {
-            if let Err(error) = candidate.document.resolve_against(lair) {
-                candidate.document = PolicyDocument::deny_all();
-                candidate.diagnostic = Some(bounded_diagnostic(&error.to_string()));
-            }
+    pub fn publish(&mut self, mut candidate: PolicyCandidate, lair: &Topology) -> PolicyGeneration {
+        if candidate.diagnostic.is_none()
+            && let Err(error) = candidate.document.resolve_against(lair)
+        {
+            candidate.document = PolicyDocument::deny_all();
+            candidate.diagnostic = Some(bounded_diagnostic(&error.to_string()));
         }
         let next_id = self.generation.id.saturating_add(1).max(1);
         self.generation = PolicyGeneration {
@@ -641,7 +636,7 @@ fn read_bounded(mut file: File, expected_size: u64) -> Result<Vec<u8>> {
 }
 
 fn validate_document(document: &PolicyDocument) -> Result<()> {
-    if document.schema != "splinterm.policy.v1" {
+    if document.schema != "splinterm.policy.v2" {
         bail!("unsupported policy schema");
     }
     if document.rules.len() > MAX_RULES {
@@ -736,7 +731,7 @@ mod tests {
     fn valid_policy() -> String {
         format!(
             r#"{{
-              "schema":"splinterm.policy.v1",
+              "schema":"splinterm.policy.v2",
               "rules":[{{
                 "id":"reader",
                 "executable":{{"path":"/usr/bin/client","sha256":"{}"}},
@@ -755,18 +750,18 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    fn lair_with_splint(splint_id: SplintId) -> (Lair, DojoId, WindowId) {
-        let mut dojo = splinterm_core::Dojo::new("policy", PathBuf::from("/tmp"));
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(splint) = &mut dojo.windows[0].root else {
-            unreachable!("new Dojo starts with one leaf");
+    fn topology_with_splint(splint_id: SplintId) -> (Topology, LairId, DojoId) {
+        let mut dojo = splinterm_core::Lair::new("policy", PathBuf::from("/tmp"));
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(splint) = &mut dojo.dojos[0].root else {
+            unreachable!("new Lair starts with one leaf");
         };
         splint.id = splint_id;
-        dojo.windows[0].default_focus = splint_id;
-        let dojo_id = dojo.id;
-        let mut lair = Lair::new();
-        lair.insert_dojo_at(lair.revision(), dojo).unwrap();
-        (lair, dojo_id, window_id)
+        dojo.dojos[0].default_focus = splint_id;
+        let lair_id = dojo.id;
+        let mut lair = Topology::new();
+        lair.insert_lair_at(lair.revision(), dojo).unwrap();
+        (lair, lair_id, dojo_id)
     }
 
     #[test]
@@ -789,7 +784,7 @@ mod tests {
         let ResourceSelector::Splint { splint_id, .. } = document.rules[0].resources[0] else {
             panic!("expected Splint selector");
         };
-        let (lair, _, _) = lair_with_splint(splint_id);
+        let (lair, _, _) = topology_with_splint(splint_id);
         let mut store = PolicyStore::default();
         let loaded = store.reload(Some(&path), &lair);
         assert_eq!(loaded.document.rules.len(), 1);
@@ -813,7 +808,7 @@ mod tests {
         let ResourceSelector::Splint { splint_id, .. } = rule.resources[0] else {
             panic!("expected Splint selector");
         };
-        let (lair, dojo_id, window_id) = lair_with_splint(splint_id);
+        let (lair, lair_id, dojo_id) = topology_with_splint(splint_id);
         document.resolve_against(&lair).unwrap();
         let executable = ExecutableIdentity {
             path: PathBuf::from("/usr/bin/client"),
@@ -825,8 +820,8 @@ mod tests {
             sha256: "a".repeat(64),
         };
         let resource = PolicyResource::Splint {
+            lair_id,
             dojo_id,
-            window_id,
             splint_id,
             incarnation: Some(9),
         };
@@ -876,11 +871,11 @@ mod tests {
     fn spawn_limit_is_consumed_atomically_within_generation() {
         let path = test_path("spawn-limit");
         let policy = format!(
-            r#"{{"schema":"splinterm.policy.v1","rules":[{{
+            r#"{{"schema":"splinterm.policy.v2","rules":[{{
                 "id":"spawner",
                 "executable":{{"path":"/usr/bin/client","sha256":"{}"}},
                 "scopes":["process_spawn","topology_layout_mutate"],
-                "resources":[{{"kind":"lair"}}],
+                "resources":[{{"kind":"daemon"}}],
                 "limits":{{"max_spawn_count":1}}
             }}]}}"#,
             "a".repeat(64)
@@ -901,14 +896,14 @@ mod tests {
                 OperationScope::TopologyLayoutMutate,
             ],
             any_scope: &[],
-            resources: &[PolicyResource::Lair],
+            resources: &[PolicyResource::Daemon],
             limits: RequestedLimits {
                 spawn_count: Some(1),
                 ..RequestedLimits::default()
             },
         };
         let mut store = PolicyStore::default();
-        let lair = Lair::new();
+        let lair = Topology::new();
         store.reload(Some(&path), &lair);
 
         assert!(store.authorize(&executable, &request, 1).is_some());
@@ -921,13 +916,13 @@ mod tests {
     #[test]
     #[allow(
         clippy::too_many_lines,
-        reason = "one publication snapshot scenario covers later Splints, windows, reload, and deny-all"
+        reason = "one publication snapshot scenario covers later Splints, dojos, reload, and deny-all"
     )]
     fn publication_snapshot_excludes_later_descendants_and_reloads_explicitly() {
         let original_id = SplintId::new();
-        let (mut lair, dojo_id, window_id) = lair_with_splint(original_id);
+        let (mut lair, lair_id, dojo_id) = topology_with_splint(original_id);
         let mut document: PolicyDocument = serde_json::from_value(serde_json::json!({
-            "schema": "splinterm.policy.v1",
+            "schema": "splinterm.policy.v2",
             "rules": [{
                 "id": "dojo-reader",
                 "executable": {
@@ -935,7 +930,7 @@ mod tests {
                     "sha256": "a".repeat(64),
                 },
                 "scopes": ["topology_metadata_read", "terminal_visible_read"],
-                "resources": [{"kind": "dojo", "dojo_id": dojo_id}],
+                "resources": [{"kind": "lair", "lair_id": lair_id}],
                 "limits": {"max_returned_rows": 40},
             }],
         }))
@@ -953,8 +948,8 @@ mod tests {
             sha256: "a".repeat(64),
         };
         let original_resource = PolicyResource::Splint {
+            lair_id,
             dojo_id,
-            window_id,
             splint_id: original_id,
             incarnation: Some(1),
         };
@@ -985,8 +980,8 @@ mod tests {
         )
         .unwrap();
         let added_resource = PolicyResource::Splint {
+            lair_id,
             dojo_id,
-            window_id,
             splint_id: added_id,
             incarnation: Some(1),
         };
@@ -997,49 +992,49 @@ mod tests {
         assert!(document.authorize(&executable, &added_request, 1).is_none());
         assert!(document.status(&executable, added_resource, 1).is_empty());
 
-        let added_window = splinterm_core::Window::with_shell(PathBuf::from("/tmp"));
-        let added_window_id = added_window.id;
-        let added_window_splint_id = added_window.default_focus;
-        lair.new_window_at(lair.revision(), dojo_id, added_window)
+        let added_dojo = splinterm_core::Dojo::with_shell("terminal", PathBuf::from("/tmp"));
+        let added_dojo_id = added_dojo.id;
+        let added_dojo_splint_id = added_dojo.default_focus;
+        lair.new_dojo_at(lair.revision(), lair_id, added_dojo)
             .unwrap();
-        let added_window_resource = PolicyResource::Splint {
-            dojo_id,
-            window_id: added_window_id,
-            splint_id: added_window_splint_id,
+        let added_dojo_resource = PolicyResource::Splint {
+            lair_id,
+            dojo_id: added_dojo_id,
+            splint_id: added_dojo_splint_id,
             incarnation: Some(1),
         };
-        let added_window_request = PolicyRequest {
-            resources: &[added_window_resource],
+        let added_dojo_request = PolicyRequest {
+            resources: &[added_dojo_resource],
             ..original_request
         };
         assert!(
             document
-                .authorize(&executable, &added_window_request, 1)
+                .authorize(&executable, &added_dojo_request, 1)
                 .is_none()
         );
         assert!(
             document
-                .status(&executable, added_window_resource, 1)
+                .status(&executable, added_dojo_resource, 1)
                 .is_empty()
         );
-        let direct_window_resource = PolicyResource::Window {
-            dojo_id,
-            window_id: added_window_id,
+        let direct_dojo_resource = PolicyResource::Dojo {
+            lair_id,
+            dojo_id: added_dojo_id,
         };
-        let direct_window_request = PolicyRequest {
+        let direct_dojo_request = PolicyRequest {
             required_scopes: &[OperationScope::TopologyMetadataRead],
             any_scope: &[],
-            resources: &[direct_window_resource],
+            resources: &[direct_dojo_resource],
             limits: RequestedLimits::default(),
         };
         assert!(
             document
-                .authorize(&executable, &direct_window_request, 1)
+                .authorize(&executable, &direct_dojo_request, 1)
                 .is_none()
         );
         assert!(
             document
-                .status(&executable, direct_window_resource, 1)
+                .status(&executable, direct_dojo_resource, 1)
                 .is_empty()
         );
 
@@ -1048,35 +1043,33 @@ mod tests {
         assert_eq!(document.status(&executable, added_resource, 1).len(), 1);
         assert!(
             document
-                .authorize(&executable, &added_window_request, 1)
+                .authorize(&executable, &added_dojo_request, 1)
                 .is_some()
         );
         assert_eq!(
-            document.status(&executable, added_window_resource, 1).len(),
+            document.status(&executable, added_dojo_resource, 1).len(),
             1
         );
         assert!(
             document
-                .authorize(&executable, &direct_window_request, 1)
+                .authorize(&executable, &direct_dojo_request, 1)
                 .is_some()
         );
         assert_eq!(
-            document
-                .status(&executable, direct_window_resource, 1)
-                .len(),
+            document.status(&executable, direct_dojo_resource, 1).len(),
             1
         );
 
         let mut absent: PolicyDocument = serde_json::from_value(serde_json::json!({
-            "schema": "splinterm.policy.v1",
+            "schema": "splinterm.policy.v2",
             "rules": [{
-                "id": "missing-window",
+                "id": "missing-dojo",
                 "executable": {
                     "path": "/usr/bin/client",
                     "sha256": "a".repeat(64),
                 },
                 "scopes": ["topology_metadata_read"],
-                "resources": [{"kind": "window", "window_id": WindowId::new()}],
+                "resources": [{"kind": "dojo", "dojo_id": DojoId::new()}],
                 "limits": {"deadline_ms": 1},
             }],
         }))
@@ -1095,7 +1088,7 @@ mod tests {
     #[test]
     fn exact_and_current_incarnations_remain_distinct_after_publication() {
         let splint_id = SplintId::new();
-        let (lair, dojo_id, window_id) = lair_with_splint(splint_id);
+        let (lair, lair_id, dojo_id) = topology_with_splint(splint_id);
         let executable = ExecutableIdentity {
             path: PathBuf::from("/usr/bin/client"),
             device: 1,
@@ -1107,7 +1100,7 @@ mod tests {
         };
         let make_document = |incarnation: serde_json::Value| {
             serde_json::from_value::<PolicyDocument>(serde_json::json!({
-                "schema": "splinterm.policy.v1",
+                "schema": "splinterm.policy.v2",
                 "rules": [{
                     "id": "incarnation-reader",
                     "executable": {
@@ -1126,8 +1119,8 @@ mod tests {
             .unwrap()
         };
         let resource = PolicyResource::Splint {
+            lair_id,
             dojo_id,
-            window_id,
             splint_id,
             incarnation: Some(2),
         };
@@ -1153,9 +1146,9 @@ mod tests {
     #[test]
     fn resolved_expansion_is_deduplicated_and_bounded() {
         let splint_id = SplintId::new();
-        let (mut lair, dojo_id, window_id) = lair_with_splint(splint_id);
+        let (mut lair, lair_id, dojo_id) = topology_with_splint(splint_id);
         let mut deduplicated: PolicyDocument = serde_json::from_value(serde_json::json!({
-            "schema": "splinterm.policy.v1",
+            "schema": "splinterm.policy.v2",
             "rules": [{
                 "id": "overlap",
                 "executable": {
@@ -1164,8 +1157,8 @@ mod tests {
                 },
                 "scopes": ["terminal_visible_read"],
                 "resources": [
+                    {"kind": "lair", "lair_id": lair_id},
                     {"kind": "dojo", "dojo_id": dojo_id},
-                    {"kind": "window", "window_id": window_id},
                     {"kind": "splint", "splint_id": splint_id, "incarnation": "current"}
                 ],
                 "limits": {"max_returned_rows": 1},
@@ -1176,9 +1169,8 @@ mod tests {
         assert_eq!(deduplicated.resolved_resources["overlap"].len(), 3);
 
         for _ in 0..256 {
-            let window = splinterm_core::Window::with_shell(PathBuf::from("/tmp"));
-            lair.new_window_at(lair.revision(), dojo_id, window)
-                .unwrap();
+            let dojo = splinterm_core::Dojo::with_shell("terminal", PathBuf::from("/tmp"));
+            lair.new_dojo_at(lair.revision(), lair_id, dojo).unwrap();
         }
         assert!(deduplicated.resolve_against(&lair).is_err());
     }
@@ -1197,7 +1189,7 @@ mod tests {
 
         let duplicate = valid_policy().replace(
             "]\n            }",
-            ",\n              {\"id\":\"reader\",\"executable\":{\"path\":\"/usr/bin/client\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"scopes\":[\"input\"],\"resources\":[{\"kind\":\"lair\"}],\"limits\":{\"deadline_ms\":1}}]\n            }",
+            ",\n              {\"id\":\"reader\",\"executable\":{\"path\":\"/usr/bin/client\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"scopes\":[\"input\"],\"resources\":[{\"kind\":\"daemon\"}],\"limits\":{\"deadline_ms\":1}}]\n            }",
         );
         write_policy(&path, &duplicate, 0o600);
         assert!(inspect_file(&path).is_err());

@@ -1,13 +1,13 @@
 {
   "$schema_file": "cli-envelope.schema.json",
   "document": {
-    "schema": "splinterm.cli.v1",
+    "schema": "splinterm.cli.v2",
     "request_id": "10",
-    "operation": "restore_dojo",
+    "operation": "restore_lair",
     "ok": true,
     "truncated": false,
     "resource": {
-      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
       "topology_revision": 7
     },
     "data": {

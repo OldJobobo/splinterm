@@ -52,7 +52,7 @@ umask 077
 policy_tmp=$(mktemp "$HOME/.config/splinterm/policy.json.XXXXXX")
 cat >"$policy_tmp" <<'JSON'
 {
-  "schema": "splinterm.policy.v1",
+  "schema": "splinterm.policy.v2",
   "rules": []
 }
 JSON
@@ -75,11 +75,11 @@ same-account process able to invoke that exact binary; running inside a Splint
 does not narrow or grant that authority. This can support a supervised CLI-based
 coding agent, but the optional `splinterm-mcp` split package uses its own exact
 executable identity for a narrower production boundary; see [mcp.md](mcp.md).
-Dojo and window rules
-snapshot only resources present when the policy generation is published. To
+Lair and Dojo rules snapshot only resources present when the policy generation
+is published. To
 authorize a newly created child, review the concrete resource, update policy,
 reload the service, and reconnect; broad future-descendant authority is not part
-of policy v1.
+of policy v2.
 
 Validate and inspect the file offline through the daemon's exact secure loader:
 
@@ -125,7 +125,7 @@ process-group grace periods, exit reconciliation, final metadata save, and socke
 removal before systemd may force cleanup.
 Persisted topology and launch metadata may remain, but saved commands are never
 automatically executed; restoration requires an explicit authorized `restore`,
-`restore-window`, or `restore-dojo` command. Audit retention is
+`restore-dojo`, or `restore-lair` command. Audit retention is
 daemon-lifetime-only and resets after restart.
 
 To terminate every daemon-owned shell, move the complete session database to a

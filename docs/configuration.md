@@ -39,7 +39,7 @@ alpha mode: only cells whose background source is default are translucent;
 explicit and reverse-video backgrounds remain opaque. When blur resolves to
 `yes`, alpha is translucent, and the compositor advertises
 `ext-background-effect-v1` blur capability, Splinterm requests native
-compositor blur for the finite logical window region. Missing protocol support
+compositor blur for the finite native Window region. Missing protocol support
 or capability falls back to ordinary transparency with one bounded diagnostic;
 opaque alpha and `blur=no` own no effect object. The protocol is still staging;
 the validated initial target is Hyprland 0.56.1 or newer, while other
@@ -68,21 +68,24 @@ size. Terminal key mappings otherwise follow the implemented Foot/xterm behavior
 ## Daily launch and session reopening
 
 The normal desktop/XDG command remains `splinterm-xdg-terminal-exec` and always
-creates a fresh Dojo. Session reopening is deliberately separate:
+creates a fresh Lair with one Dojo. Session reopening is deliberately separate:
 
 ```text
 splinterm-sessions  → native Recent Sessions picker
-splinterm-reopen    → last locally remembered running window
+splinterm-reopen    → last locally remembered running Dojo
 ```
 
-The in-window Ctrl+Shift+S shortcut replaces the terminal view temporarily
-without creating another Wayland window. Escape restores the exact current
-frontend state; choosing a session or New Terminal reuses the same window.
+The in-window Ctrl+Shift+S shortcut paints a trusted modal overlay over dimmed
+live panes without creating another Wayland window or replacing the terminal
+frontend. Escape removes the overlay and presents the newest valid pane state;
+choosing a session or New Terminal reuses the same window. The overlay adapts to
+compact and minimal sizes, and vertical wheel or touchpad scrolling navigates
+hidden actions without reaching terminal history or mouse reporting.
 
 A suitable Omarchy convention is Super+Enter for the normal terminal command
 and Super+Shift+Enter for `splinterm-sessions`. Splinterm does not modify the
-user's Hyprland configuration automatically. The picker opens only logical
-windows whose complete pane layout is still running; restoring exited processes
+user's Hyprland configuration automatically. The picker opens only Dojos whose
+complete pane layout is still running; restoring exited processes
 remains an explicit lifecycle command.
 
 ## Migrating from Foot

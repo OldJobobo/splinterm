@@ -34,37 +34,6 @@ impl std::str::FromStr for SplintId {
     }
 }
 
-/// Stable identity for a window in a dojo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WindowId(Uuid);
-
-impl WindowId {
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for WindowId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for WindowId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for WindowId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Uuid::parse_str(value).map(Self)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     Horizontal,
@@ -180,7 +149,7 @@ impl Splint {
     }
 }
 
-/// Binary layout tree used to arrange splints inside a window.
+/// Binary layout tree used to arrange Splints inside a Dojo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayoutNode {
     Leaf(Splint),
@@ -327,28 +296,6 @@ impl LayoutNode {
                     }),
                 },
             },
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Window {
-    pub id: WindowId,
-    pub title: String,
-    /// Daemon-persisted convenience hint; connected clients keep actual focus locally.
-    pub default_focus: SplintId,
-    pub root: LayoutNode,
-}
-
-impl Window {
-    #[must_use]
-    pub fn with_shell(cwd: PathBuf) -> Self {
-        let splint = Splint::shell(cwd);
-        Self {
-            id: WindowId::new(),
-            title: "terminal".into(),
-            default_focus: splint.id,
-            root: LayoutNode::Leaf(splint),
         }
     }
 }

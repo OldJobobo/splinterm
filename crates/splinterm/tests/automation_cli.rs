@@ -10,8 +10,8 @@ use std::{
 
 use serde_json::Value;
 use splinterm_core::{
-    Dojo, DojoId, Lair, LayoutNode, Splint, SplintId, SplintState, TopologyRevision, Window,
-    WindowId,
+    Dojo, DojoId, Lair, LairId, LayoutNode, Splint, SplintId, SplintState, Topology,
+    TopologyRevision,
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen, AuditPage, AutomationScope, CellAttributes,
@@ -72,29 +72,31 @@ fn run_json_ping(arguments: &[&str], socket: &std::path::Path) -> Output {
 }
 
 fn reviewed_topology() -> TopologySnapshot {
-    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-    let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
     let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
     let mut splint = Splint::shell(PathBuf::from("/tmp"));
     splint.id = splint_id;
     "build".clone_into(&mut splint.title);
     splint.last_incarnation = Some(2);
     splint.state = SplintState::Running;
-    let dojo = Dojo {
-        id: dojo_id,
+    let dojo = Lair {
+        id: lair_id,
         name: "main".to_owned(),
-        windows: vec![Window {
-            id: window_id,
-            title: "terminal".to_owned(),
+        dojos: vec![Dojo {
+            id: dojo_id,
+            name: "terminal".to_owned(),
             default_focus: splint_id,
             root: LayoutNode::Leaf(splint),
         }],
     };
-    let mut lair = Lair::new();
-    lair.insert_dojo_at(TopologyRevision::new(0), dojo).unwrap();
+    let mut topology = Topology::new();
+    topology
+        .insert_lair_at(TopologyRevision::new(0), dojo)
+        .unwrap();
     TopologySnapshot {
-        revision: lair.revision(),
-        lair,
+        revision: topology.revision(),
+        topology,
         runtimes: vec![SplintRuntimeSummary {
             splint_id,
             live_incarnation: Some(2),
@@ -111,8 +113,8 @@ fn reviewed_terminal_provenance(
     history_generation: u64,
 ) -> TerminalProvenance {
     TerminalProvenance {
-        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-        window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+        lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
         splint_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap(),
         incarnation: 2,
         topology_revision: TopologyRevision::new(1),
@@ -291,8 +293,8 @@ fn serve_authorization_status() -> (PathBuf, thread::JoinHandle<()>) {
             &mut stream,
             1,
             Response::AuthorizationStatus {
-                dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-                window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                 incarnation: 2,
                 topology_revision: TopologyRevision::new(1),
                 policy_generation: 1,
@@ -370,8 +372,8 @@ fn serve_subscription(stream_kind: ExpectedSubscription) -> (PathBuf, thread::Jo
                     &mut stream,
                     1,
                     Response::Splint {
-                        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-                        window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                        lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                         title: "build".to_owned(),
                         topology_revision: TopologyRevision::new(1),
                         runtime: reviewed_topology().runtimes[0].clone(),
@@ -525,8 +527,8 @@ fn serve_terminal_action(
             2,
             Response::ControlGranted {
                 controller_id: 42,
-                dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-                window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
             },
         );
         let request = read_client_frame(&mut stream);
@@ -585,7 +587,7 @@ enum ExpectedMutation {
     Kill,
     Revoke,
     RestoreSplint,
-    RestoreWindow,
+    RestoreDojo,
 }
 
 fn serve_mutation(
@@ -645,11 +647,11 @@ fn serve_mutation(
                     request: splinterm_protocol::Request::RestoreSplint { .. }
                 }
             ),
-            ExpectedMutation::RestoreWindow => matches!(
+            ExpectedMutation::RestoreDojo => matches!(
                 request,
                 ClientFrame::Request {
                     request_id: 2,
-                    request: splinterm_protocol::Request::RestoreWindow { .. }
+                    request: splinterm_protocol::Request::RestoreDojo { .. }
                 }
             ),
         });
@@ -676,7 +678,7 @@ fn serve_create() -> (PathBuf, thread::JoinHandle<()>) {
             Response::Topology {
                 snapshot: TopologySnapshot {
                     revision: TopologyRevision::new(0),
-                    lair: Lair::new(),
+                    topology: Topology::new(),
                     runtimes: Vec::new(),
                 },
             },
@@ -686,16 +688,16 @@ fn serve_create() -> (PathBuf, thread::JoinHandle<()>) {
             request,
             ClientFrame::Request {
                 request_id: 2,
-                request: splinterm_protocol::Request::CreateDojo { .. }
+                request: splinterm_protocol::Request::CreateLair { .. }
             }
         ));
         let topology = reviewed_topology();
-        let dojo = topology.lair.dojos().next().unwrap().clone();
+        let dojo = topology.topology.lairs().next().unwrap().clone();
         send_response(
             &mut stream,
             2,
-            Response::DojoCreated {
-                dojo,
+            Response::LairCreated {
+                lair: dojo,
                 incarnation: 2,
                 topology_revision: topology.revision,
             },
@@ -753,7 +755,7 @@ fn serve_one(result: Result<Response, ProtocolError>) -> (PathBuf, thread::JoinH
 fn output_json_reads_use_reviewed_shapes_and_global_flag_placement() {
     let splint_id = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103";
     let cases: &[(&[&str], &str)] = &[
-        (&["--output", "json", "list"], "list_dojos"),
+        (&["--output", "json", "list"], "list_lairs"),
         (&["topology", "--output", "json"], "inspect_topology"),
         (
             &[
@@ -1124,8 +1126,8 @@ fn output_ndjson_subscriptions_emit_initial_state_and_terminate_on_resync() {
 fn output_json_terminal_actions_are_atomic_and_do_not_leak_input() {
     let splint_id = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103";
     let acknowledged = || Response::TerminalActionAcknowledged {
-        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-        window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+        lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
         splint_id: splint_id.parse().unwrap(),
         incarnation: 2,
         terminal_revision: 9,
@@ -1190,12 +1192,12 @@ fn output_json_mutations_enforce_confirmation_before_connecting() {
         ),
         (
             vec![
-                "close-window",
+                "close-dojo",
                 "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
                 "--output",
                 "json",
             ],
-            "close_window",
+            "close_dojo",
         ),
         (
             vec!["authorization", "revoke", "42", "--output", "json"],
@@ -1266,8 +1268,8 @@ fn output_json_mutations_correlate_topology_kill_and_revoke() {
     let (socket, server) = serve_mutation(
         ExpectedMutation::Revoke,
         Response::AccessRevoked {
-            dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-            window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+            lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+            dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
             authorization_revision: 4,
             grant,
         },
@@ -1317,15 +1319,15 @@ fn output_json_restore_consumes_leaf_results_and_rejects_missing_members() {
     assert_eq!(document["operation"], "restore_splint");
     assert_eq!(document["resource"]["incarnation"], 3);
 
-    let window_id = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102";
+    let dojo_id = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102";
     let (socket, server) = serve_mutation(
-        ExpectedMutation::RestoreWindow,
+        ExpectedMutation::RestoreDojo,
         Response::RestoreCompleted {
             topology_revision: TopologyRevision::new(1),
             results: Vec::new(),
         },
     );
-    let output = run_json_ping(&["restore-window", window_id, "--output", "json"], &socket);
+    let output = run_json_ping(&["restore-dojo", dojo_id, "--output", "json"], &socket);
     server.join().unwrap();
     fs::remove_file(socket).unwrap();
     assert!(!output.status.success());
@@ -1358,7 +1360,7 @@ fn output_json_create_uses_atomic_response_without_argv_leak() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(!stdout.contains("secret-argument"));
     let document: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(document["operation"], "create_dojo");
+    assert_eq!(document["operation"], "create_lair");
     assert_eq!(document["resource"]["topology_revision"], 1);
     assert_eq!(document["data"]["created"], true);
 }
@@ -1375,7 +1377,7 @@ fn output_json_read_maps_daemon_errors_without_stdout_noise() {
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(output.stdout.last(), Some(&b'\n'));
     let document: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(document["operation"], "list_dojos");
+    assert_eq!(document["operation"], "list_lairs");
     assert_eq!(document["error"]["code"], "unauthorized");
     assert_eq!(document["error"]["retryable"], false);
 }
@@ -1433,7 +1435,7 @@ fn output_json_ping_keeps_stdout_pristine() {
     assert!(output.stderr.is_empty());
     assert_eq!(output.stdout.last(), Some(&b'\n'));
     let document: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(document["schema"], "splinterm.cli.v1");
+    assert_eq!(document["schema"], "splinterm.cli.v2");
     assert_eq!(document["operation"], "ping");
     assert_eq!(document["data"]["status"], "awake");
 }
@@ -1442,7 +1444,7 @@ fn output_json_ping_keeps_stdout_pristine() {
 fn output_json_ping_serializes_pre_request_failures() {
     let socket = socket_path();
     let output = run_json_ping(
-        &["--output", "json", "--schema-major", "2", "ping"],
+        &["--output", "json", "--schema-major", "1", "ping"],
         &socket,
     );
     assert_eq!(output.status.code(), Some(4));

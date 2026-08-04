@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v2/tools/set_dojo_default_focus.input.schema.json",
+  "title": "splinterm.set_dojo_default_focus input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dojo_id",
+        "splint_id"
+      ],
+      "properties": {
+        "dojo_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/uuid"
+        }
+      }
+    }
+  ]
+}

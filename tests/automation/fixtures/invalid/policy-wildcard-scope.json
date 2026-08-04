@@ -1,7 +1,7 @@
 {
   "$schema_file": "policy.schema.json",
   "document": {
-    "schema": "splinterm.policy.v1",
+    "schema": "splinterm.policy.v2",
     "rules": [
       {
         "id": "unsafe-wildcard",
@@ -9,9 +9,17 @@
           "path": "/usr/local/bin/client",
           "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         },
-        "scopes": ["*"],
-        "resources": [{ "kind": "lair" }],
-        "limits": { "deadline_ms": 5000 }
+        "scopes": [
+          "*"
+        ],
+        "resources": [
+          {
+            "kind": "daemon"
+          }
+        ],
+        "limits": {
+          "deadline_ms": 5000
+        }
       }
     ]
   }

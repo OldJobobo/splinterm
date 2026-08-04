@@ -1,0 +1,10 @@
+{
+  "$schema_file": "tools/new_dojo.input.schema.json",
+  "document": {
+    "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+    "name": "dojo",
+    "argv": [
+      "sh"
+    ]
+  }
+}

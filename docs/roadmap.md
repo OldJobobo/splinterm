@@ -8,7 +8,7 @@
 ## Phase 0 — skeleton and research (complete)
 
 - Rust workspace and CI
-- Lair/Dojo/window/splint domain model
+- Topology/Lair/Dojo/Splint domain model
 - Versioned Unix-socket protocol
 - Runnable daemon and control client
 
@@ -50,7 +50,7 @@ public/AUR publication remain optional post-milestone decisions.
 Detailed plans: [`plans/0004-phase3-multiplexing.md`](plans/0004-phase3-multiplexing.md) and the [`line/frame pane divider follow-up`](plans/0005-pane-divider-styles.md)
 
 - Splint-tree editing and focus navigation
-- Multiple windows per dojo
+- Multiple Dojos per Lair
 - Detach, reattach, rename, kill, and restore workflows
 - Scrollback ownership and search
 - Multiple simultaneous clients with explicit control-transfer semantics
@@ -68,8 +68,8 @@ and one pinned shutdown signal.
 - Dedicated policy-scoped SSH stdio relay (complete)
 - Stable JSON/NDJSON CLI and published schemas
 - Supported third-party capability policy and audit inspection
-- Publication-snapshotted Dojo/window descendant policy semantics (complete)
-- Inject non-authoritative Dojo/window/Splint/incarnation context into PTY children (complete)
+- Publication-snapshotted Lair/Dojo descendant policy semantics (complete)
+- Inject non-authoritative Lair/Dojo/Splint/incarnation context into PTY children (complete)
 - Public-CLI reference session picker and client-author examples (complete)
 - Required full-capability `splinterm-mcp` adapter with supported-automation parity (complete)
 - Reference in-Splint flow: discover, split, launch, observe, denied control, reconcile (complete)

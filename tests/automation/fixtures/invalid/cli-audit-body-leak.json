@@ -1,7 +1,7 @@
 {
   "$schema_file": "cli-envelope.schema.json",
   "document": {
-    "schema": "splinterm.cli.v1",
+    "schema": "splinterm.cli.v2",
     "request_id": "10",
     "operation": "audit_inspect",
     "ok": true,
@@ -10,7 +10,7 @@
       "retention": "daemon_lifetime",
       "records": [
         {
-          "schema": "splinterm.audit.v1",
+          "schema": "splinterm.audit.v2",
           "retention": "daemon_lifetime",
           "audit_id": "73",
           "unix_seconds": 1721760000,

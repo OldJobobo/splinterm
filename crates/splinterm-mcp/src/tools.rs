@@ -20,12 +20,12 @@ macro_rules! tool_definition {
             name: concat!("splinterm.", $stem),
             description: $description,
             input_schema: include_str!(concat!(
-                "../../../dist/schemas/mcp/v1/tools/",
+                "../../../dist/schemas/mcp/v2/tools/",
                 $stem,
                 ".input.schema.json"
             )),
             output_schema: include_str!(concat!(
-                "../../../dist/schemas/mcp/v1/tools/",
+                "../../../dist/schemas/mcp/v2/tools/",
                 $stem,
                 ".output.schema.json"
             )),
@@ -45,8 +45,8 @@ const DEFINITIONS: &[ToolDefinition] = &[
         true
     ),
     tool_definition!(
-        "list_dojos",
-        "Lists authorized Splinterm Dojo metadata.",
+        "list_lairs",
+        "Lists authorized Splinterm Lair metadata.",
         true,
         false,
         true
@@ -115,8 +115,8 @@ const DEFINITIONS: &[ToolDefinition] = &[
         true
     ),
     tool_definition!(
-        "create_dojo",
-        "Creates a logical Dojo with a structured process argument vector.",
+        "create_lair",
+        "Creates a logical Lair with a structured process argument vector.",
         false,
         false,
         false
@@ -129,8 +129,8 @@ const DEFINITIONS: &[ToolDefinition] = &[
         false
     ),
     tool_definition!(
-        "new_window",
-        "Creates a logical window and starts a structured process.",
+        "new_dojo",
+        "Creates a persistent Dojo and starts a structured process.",
         false,
         false,
         false
@@ -150,15 +150,15 @@ const DEFINITIONS: &[ToolDefinition] = &[
         false
     ),
     tool_definition!(
-        "restore_window",
-        "Restores authorized processes in one logical window.",
+        "restore_dojo",
+        "Restores authorized processes in one Dojo.",
         false,
         false,
         false
     ),
     tool_definition!(
-        "restore_dojo",
-        "Restores authorized processes in one logical Dojo.",
+        "restore_lair",
+        "Restores authorized processes in one logical Lair.",
         false,
         false,
         false
@@ -171,8 +171,8 @@ const DEFINITIONS: &[ToolDefinition] = &[
         false
     ),
     tool_definition!(
-        "close_window",
-        "Closes one logical window after confirmation.",
+        "close_dojo",
+        "Closes one Dojo after confirmation.",
         false,
         true,
         false
@@ -192,19 +192,13 @@ const DEFINITIONS: &[ToolDefinition] = &[
         true
     ),
     tool_definition!(
-        "rename_dojo",
-        "Sets one logical Dojo name.",
+        "rename_lair",
+        "Sets one logical Lair name.",
         false,
         false,
         true
     ),
-    tool_definition!(
-        "rename_window",
-        "Sets one logical window title.",
-        false,
-        false,
-        true
-    ),
+    tool_definition!("rename_dojo", "Sets one Dojo name.", false, false, true),
     tool_definition!(
         "rename_splint",
         "Sets one logical Splint title.",
@@ -213,8 +207,8 @@ const DEFINITIONS: &[ToolDefinition] = &[
         true
     ),
     tool_definition!(
-        "set_window_default_focus",
-        "Sets one logical window default-focus hint.",
+        "set_dojo_default_focus",
+        "Sets one Dojo default-focus hint.",
         false,
         false,
         true
@@ -263,14 +257,14 @@ const DEFINITIONS: &[ToolDefinition] = &[
     ),
 ];
 
-const COMMON_SCHEMA: &str = include_str!("../../../dist/schemas/mcp/v1/common.schema.json");
-const ERROR_SCHEMA: &str = include_str!("../../../dist/schemas/mcp/v1/error.schema.json");
+const COMMON_SCHEMA: &str = include_str!("../../../dist/schemas/mcp/v2/common.schema.json");
+const ERROR_SCHEMA: &str = include_str!("../../../dist/schemas/mcp/v2/error.schema.json");
 const TOPOLOGY_RESOURCE_SCHEMA: &str =
-    include_str!("../../../dist/schemas/mcp/v1/resources/topology.schema.json");
+    include_str!("../../../dist/schemas/mcp/v2/resources/topology.schema.json");
 const TERMINAL_RESOURCE_SCHEMA: &str =
-    include_str!("../../../dist/schemas/mcp/v1/resources/terminal.schema.json");
+    include_str!("../../../dist/schemas/mcp/v2/resources/terminal.schema.json");
 const CONTROL_RESOURCE_SCHEMA: &str =
-    include_str!("../../../dist/schemas/mcp/v1/resources/control.schema.json");
+    include_str!("../../../dist/schemas/mcp/v2/resources/control.schema.json");
 const MAXIMUM_SCHEMA_DEPTH: usize = 32;
 const MAXIMUM_ARGV_ENCODED_BYTES: usize = 65_536;
 const MAXIMUM_INPUT_TEXT_BYTES: usize = 65_536;
@@ -314,7 +308,7 @@ fn parse_schema(schema: &str) -> Value {
 }
 
 const COMMON_REFERENCE_PREFIX: &str =
-    "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/";
+    "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/";
 
 fn localize_common_references(value: &mut Value) {
     match value {
@@ -513,15 +507,14 @@ fn validate_schema(
             validate_schema(child, instance, common_schema, depth + 1)?;
         }
     }
-    if let Some(one_of) = schema.get("oneOf").and_then(Value::as_array) {
-        if one_of
+    if let Some(one_of) = schema.get("oneOf").and_then(Value::as_array)
+        && one_of
             .iter()
             .filter(|child| validate_schema(child, instance, common_schema, depth + 1).is_ok())
             .count()
             != 1
-        {
-            return Err(ValidationError::InvalidArgument);
-        }
+    {
+        return Err(ValidationError::InvalidArgument);
     }
     if let Some(expected_type) = schema.get("type").and_then(Value::as_str) {
         let has_type = match expected_type {
@@ -553,14 +546,13 @@ fn validate_schema(
 
     if let Some(object) = instance.as_object() {
         let properties = schema.get("properties").and_then(Value::as_object);
-        if let Some(required) = schema.get("required").and_then(Value::as_array) {
-            if required
+        if let Some(required) = schema.get("required").and_then(Value::as_array)
+            && required
                 .iter()
                 .filter_map(Value::as_str)
                 .any(|name| !object.contains_key(name))
-            {
-                return Err(ValidationError::InvalidArgument);
-            }
+        {
+            return Err(ValidationError::InvalidArgument);
         }
         if schema.get("additionalProperties") == Some(&Value::Bool(false))
             && object
@@ -625,8 +617,8 @@ fn validate_schema(
         }
     }
 
-    if let Some(number) = instance.as_f64() {
-        if schema
+    if let Some(number) = instance.as_f64()
+        && (schema
             .get("minimum")
             .and_then(Value::as_f64)
             .is_some_and(|minimum| number < minimum)
@@ -641,10 +633,9 @@ fn validate_schema(
             || schema
                 .get("exclusiveMaximum")
                 .and_then(Value::as_f64)
-                .is_some_and(|maximum| number >= maximum)
-        {
-            return Err(ValidationError::InvalidArgument);
-        }
+                .is_some_and(|maximum| number >= maximum))
+    {
+        return Err(ValidationError::InvalidArgument);
     }
 
     Ok(())
@@ -742,7 +733,7 @@ mod tests {
             [
                 "splinterm.revoke_access",
                 "splinterm.close_splint",
-                "splinterm.close_window",
+                "splinterm.close_dojo",
                 "splinterm.kill_splint"
             ]
         );
@@ -866,13 +857,13 @@ mod tests {
 
     #[test]
     fn successful_topology_output_accepts_nullable_incarnation_metadata() {
-        let envelope = |dojos: Value| {
+        let envelope = |lairs: Value| {
             json!({
-                "schema": "splinterm.mcp.v1",
+                "schema": "splinterm.mcp.v2",
                 "tool": "splinterm.inspect_topology",
                 "ok": true,
                 "resource": {"kind": "topology", "topology_revision": 1},
-                "data": {"dojos": dojos},
+                "data": {"lairs": lairs},
                 "truncated": false,
                 "content_trust": "untrusted_terminal_data"
             })
@@ -899,11 +890,11 @@ mod tests {
             validate_output(
                 "splinterm.inspect_topology",
                 &envelope(json!([{
-                    "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
-                    "name": "dojo",
-                    "windows": [{
-                        "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
-                        "title": "window",
+                    "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+                    "name": "lair",
+                    "dojos": [{
+                        "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+                        "name": "dojo",
                         "default_focus_splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
                         "splints": [{
                             "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
@@ -922,7 +913,7 @@ mod tests {
     #[test]
     fn canonical_uuid_matches_frozen_versions_and_variants_only() {
         for version in b'1'..=b'5' {
-            for variant in [b'8', b'9', b'a', b'b'] {
+            for variant in *b"89ab" {
                 assert!(canonical_uuid(&format!(
                     "11111111-2222-{}333-{}444-555555555555",
                     char::from(version),

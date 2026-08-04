@@ -1,7 +1,7 @@
 {
   "$schema_file": "cli-envelope.schema.json",
   "document": {
-    "schema": "splinterm.cli.v1",
+    "schema": "splinterm.cli.v2",
     "request_id": "10",
     "operation": "inspect_topology",
     "ok": true,
@@ -10,8 +10,8 @@
       "topology_revision": 7
     },
     "data": {
+      "lairs": [],
       "dojos": [],
-      "windows": [],
       "splints": []
     }
   }

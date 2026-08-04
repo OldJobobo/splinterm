@@ -94,7 +94,7 @@ def main() -> int:
     )
     addresses: set[str] = set()
     splints: list[str] = []
-    windows: list[str] = []
+    dojos: list[str] = []
     exact = False
     error: str | None = None
 
@@ -113,16 +113,16 @@ def main() -> int:
         return result.stdout
 
     def topology_ids() -> tuple[str, list[str], list[str]]:
-        listing = checked_client("list")
-        dojo = re.search(r"^([0-9a-f-]{36})  slice4-windows ", listing, re.MULTILINE)
-        found_windows = re.findall(r"^  window ([0-9a-f-]{36})  ", listing, re.MULTILINE)
+        listing = checked_client("list", "--all")
+        lair = re.search(r"^([0-9a-f-]{36})  slice4-windows ", listing, re.MULTILINE)
+        found_dojos = re.findall(r"^  Dojo ([0-9a-f-]{36})  ", listing, re.MULTILINE)
         found_splints = re.findall(r"^  ([0-9a-f-]{36})  ", listing, re.MULTILINE)
-        if dojo is None or len(found_windows) != 2 or len(found_splints) != 2:
-            raise RuntimeError(f"unexpected two-window topology:\n{listing}")
-        return dojo.group(1), found_windows, found_splints
+        if lair is None or len(found_dojos) != 2 or len(found_splints) != 2:
+            raise RuntimeError(f"unexpected two-Dojo topology:\n{listing}")
+        return lair.group(1), found_dojos, found_splints
 
-    def launch(dojo_id: str, window_id: str) -> dict[str, Any]:
-        launcher = output / f"launch-{window_id}.sh"
+    def launch(lair_id: str, dojo_id: str) -> dict[str, Any]:
+        launcher = output / f"launch-{dojo_id}.sh"
         command = [
             "env",
             *[f"{key}={value}" for key, value in environment.items() if key in {
@@ -131,13 +131,13 @@ def main() -> int:
             }],
             str(ROOT / "target/release/splinterm"),
             "window",
+            "--lair-id",
+            lair_id,
             "--dojo-id",
             dojo_id,
-            "--window-id",
-            window_id,
         ]
-        stdout = output / f"window-{window_id}.stdout"
-        stderr = output / f"window-{window_id}.stderr"
+        stdout = output / f"window-{dojo_id}.stdout"
+        stderr = output / f"window-{dojo_id}.stderr"
         launcher.write_text(
             "#!/bin/sh\nexec "
             + shlex.join(command)
@@ -190,23 +190,23 @@ def main() -> int:
     try:
         wait_until(lambda: socket.exists() and client("ping").returncode == 0, 5, "daemon not ready")
         checked_client("new", "slice4-windows", "--", "/bin/sh")
-        first_listing = checked_client("list")
-        dojo_match = re.search(r"^([0-9a-f-]{36})  slice4-windows ", first_listing, re.MULTILINE)
-        if dojo_match is None:
-            raise RuntimeError("new Dojo was not listed")
+        first_listing = checked_client("list", "--all")
+        lair_match = re.search(r"^([0-9a-f-]{36})  slice4-windows ", first_listing, re.MULTILINE)
+        if lair_match is None:
+            raise RuntimeError("new Lair was not listed")
         checked_client(
-            "new-window", dojo_match.group(1), "--title", "second", "--", "/bin/sh",
+            "new-dojo", lair_match.group(1), "--name", "second", "--", "/bin/sh",
         )
-        dojo_id, windows, splints = topology_ids()
+        lair_id, dojos, splints = topology_ids()
         checked_client("send", splints[0], "printf '\\033]0;Slice4 One\\007ONE_INPUT\\n'\n")
         checked_client("send", splints[1], "printf '\\033]0;Slice4 Two\\007TWO_INPUT\\n'\n")
         wait_until(lambda: "ONE_INPUT" in checked_client("snapshot", splints[0]), 5, "first input missing")
         wait_until(lambda: "TWO_INPUT" in checked_client("snapshot", splints[1]), 5, "second input missing")
         if "TWO_INPUT" in checked_client("snapshot", splints[0]) or "ONE_INPUT" in checked_client("snapshot", splints[1]):
-            raise RuntimeError("input crossed daemon windows")
+            raise RuntimeError("input crossed persistent Dojos")
 
-        first = launch(dojo_id, windows[0])
-        second = launch(dojo_id, windows[1])
+        first = launch(lair_id, dojos[0])
+        second = launch(lair_id, dojos[1])
         if len(V1.workspace_clients(WORKSPACE)) != 2:
             raise RuntimeError("launch did not create exactly two selected toplevels")
         wait_until(
@@ -256,7 +256,7 @@ def main() -> int:
             5,
             "detached process did not continue",
         )
-        reopened = launch(dojo_id, windows[0])
+        reopened = launch(lair_id, dojos[0])
         if len(V1.workspace_clients(WORKSPACE)) != 2 or second["address"] not in {
             item["address"] for item in V1.workspace_clients(WORKSPACE)
         }:
@@ -278,8 +278,8 @@ def main() -> int:
             exact = False
         for splint in splints:
             client("kill", splint, "--yes")
-        for window in windows:
-            client("close-window", window)
+        for dojo_id in dojos:
+            client("close-dojo", dojo_id)
         daemon.send_signal(signal.SIGINT)
         try:
             daemon.wait(timeout=8)
@@ -306,8 +306,8 @@ def main() -> int:
         "error": error,
         "workspace": WORKSPACE,
         "monitor": "DP-2",
-        "dojo_id": dojo_id if "dojo_id" in locals() else None,
-        "window_ids": windows,
+        "lair_id": lair_id if "lair_id" in locals() else None,
+        "dojo_ids": dojos,
         "splint_ids": splints,
         "input_independent": exact,
         "resize_sizes": after if "after" in locals() else None,

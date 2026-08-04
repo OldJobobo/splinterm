@@ -1,7 +1,7 @@
 {
   "$schema_file": "cli-event.schema.json",
   "document": {
-    "schema": "splinterm.cli.event.v1",
+    "schema": "splinterm.cli.event.v2",
     "subscription_id": "1",
     "sequence": 1,
     "event_type": "snapshot",

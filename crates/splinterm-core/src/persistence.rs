@@ -5,13 +5,17 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
-use crate::{Dojo, DojoId, Lair, LayoutNode, SplintState, TopologyRevision};
+use crate::{
+    Dojo, DojoId, Lair, LairId, LayoutNode, SplintId, SplintState, Topology, TopologyRevision,
+};
 
-pub const LAIR_SCHEMA_VERSION: u32 = 2;
-pub const MAX_LAIR_DOCUMENT_BYTES: usize = 1024 * 1024;
-const MAX_DOJOS: usize = 64;
-const MAX_WINDOWS_PER_DOJO: usize = 64;
+const LEGACY_LAIR_SCHEMA_VERSION: u32 = 2;
+pub const TOPOLOGY_SCHEMA_VERSION: u32 = 3;
+pub const MAX_TOPOLOGY_DOCUMENT_BYTES: usize = 1024 * 1024;
+const MAX_LAIRS: usize = 64;
+const MAX_DOJOS_PER_LAIR: usize = 64;
 const MAX_SPLINTS: usize = 256;
 const MAX_LAYOUT_DEPTH: usize = 32;
 const MAX_NAME_BYTES: usize = 128;
@@ -22,50 +26,122 @@ const MAX_COMMAND_BYTES: usize = 32 * 1024;
 /// Versioned metadata only; this document never represents live PTYs or processes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LairDocument {
+pub struct TopologyDocument {
     schema_version: u32,
     revision: TopologyRevision,
-    dojos: Vec<Dojo>,
+    lairs: Vec<Lair>,
 }
 
-impl LairDocument {
+#[derive(Deserialize)]
+struct DocumentVersion {
+    schema_version: u32,
+}
+
+/// Exact schema-v2 representation used only for validated migration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyLairDocumentV2 {
+    schema_version: u32,
+    revision: TopologyRevision,
+    dojos: Vec<LegacyDojoV2>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDojoV2 {
+    id: Uuid,
+    name: String,
+    windows: Vec<LegacyWindowV2>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyWindowV2 {
+    id: Uuid,
+    title: String,
+    default_focus: SplintId,
+    root: LayoutNode,
+}
+
+impl LegacyLairDocumentV2 {
+    fn migrate(self) -> TopologyDocument {
+        let lairs = self
+            .dojos
+            .into_iter()
+            .map(|legacy_lair| Lair {
+                id: LairId::from_uuid(legacy_lair.id),
+                name: legacy_lair.name,
+                dojos: legacy_lair
+                    .windows
+                    .into_iter()
+                    .map(|legacy_dojo| Dojo {
+                        id: DojoId::from_uuid(legacy_dojo.id),
+                        name: legacy_dojo.title,
+                        default_focus: legacy_dojo.default_focus,
+                        root: legacy_dojo.root,
+                    })
+                    .collect(),
+            })
+            .collect();
+        TopologyDocument {
+            schema_version: TOPOLOGY_SCHEMA_VERSION,
+            revision: self.revision,
+            lairs,
+        }
+    }
+}
+
+impl TopologyDocument {
     /// Creates and validates a metadata snapshot.
     ///
     /// # Errors
     ///
     /// Returns an error when the model cannot be represented as safe durable metadata.
-    pub fn from_lair(lair: &Lair) -> Result<Self, PersistenceError> {
-        let mut dojos: Vec<_> = lair.dojos.values().cloned().collect();
-        for dojo in &mut dojos {
-            for window in &mut dojo.windows {
-                mark_tree_restorable(&mut window.root);
+    pub fn from_topology(topology: &Topology) -> Result<Self, PersistenceError> {
+        let mut lairs: Vec<_> = topology.lairs.values().cloned().collect();
+        for lair in &mut lairs {
+            for dojo in &mut lair.dojos {
+                mark_tree_restorable(&mut dojo.root);
             }
         }
         let document = Self {
-            schema_version: LAIR_SCHEMA_VERSION,
-            revision: lair.revision,
-            dojos,
+            schema_version: TOPOLOGY_SCHEMA_VERSION,
+            revision: topology.revision,
+            lairs,
         };
         document.validate()?;
         Ok(document)
     }
 
-    /// Decodes and validates a bounded metadata document.
+    /// Decodes and validates a bounded schema-v3 document or migrates schema v2.
     ///
     /// # Errors
     ///
     /// Returns an error for malformed, unsupported, unsafe, or oversized metadata.
     pub fn decode(bytes: &[u8]) -> Result<Self, PersistenceError> {
-        if bytes.len() > MAX_LAIR_DOCUMENT_BYTES {
+        if bytes.len() > MAX_TOPOLOGY_DOCUMENT_BYTES {
             return Err(PersistenceError::DocumentTooLarge);
         }
-        let document: Self = serde_json::from_slice(bytes)
+        let version: DocumentVersion = serde_json::from_slice(bytes)
             .map_err(|error| PersistenceError::Decode(error.to_string()))?;
+        let document = match version.schema_version {
+            TOPOLOGY_SCHEMA_VERSION => serde_json::from_slice(bytes)
+                .map_err(|error| PersistenceError::Decode(error.to_string()))?,
+            LEGACY_LAIR_SCHEMA_VERSION => {
+                let legacy: LegacyLairDocumentV2 = serde_json::from_slice(bytes)
+                    .map_err(|error| PersistenceError::Decode(error.to_string()))?;
+                if legacy.schema_version != LEGACY_LAIR_SCHEMA_VERSION {
+                    return Err(PersistenceError::UnsupportedVersion(legacy.schema_version));
+                }
+                legacy.migrate()
+            }
+            other => return Err(PersistenceError::UnsupportedVersion(other)),
+        };
         document.validate()?;
         Ok(document)
     }
 
-    /// Serializes validated metadata.
+    /// Serializes validated schema-v3 metadata.
     ///
     /// # Errors
     ///
@@ -75,56 +151,56 @@ impl LairDocument {
         serde_json::to_vec(self).map_err(|error| PersistenceError::Encode(error.to_string()))
     }
 
-    /// Converts validated metadata into an in-memory Lair.
+    /// Converts validated metadata into an in-memory Topology.
     ///
     /// # Errors
     ///
     /// Returns an error if this document has become invalid.
-    pub fn into_lair(self) -> Result<Lair, PersistenceError> {
+    pub fn into_topology(self) -> Result<Topology, PersistenceError> {
         self.validate()?;
-        Ok(Lair {
+        Ok(Topology {
             revision: self.revision,
-            dojos: self.dojo_map(),
+            lairs: self.lair_map(),
         })
     }
 
-    fn dojo_map(self) -> BTreeMap<DojoId, Dojo> {
-        self.dojos.into_iter().map(|dojo| (dojo.id, dojo)).collect()
+    fn lair_map(self) -> BTreeMap<LairId, Lair> {
+        self.lairs.into_iter().map(|lair| (lair.id, lair)).collect()
     }
 
     fn validate(&self) -> Result<(), PersistenceError> {
-        if self.schema_version != LAIR_SCHEMA_VERSION {
+        if self.schema_version != TOPOLOGY_SCHEMA_VERSION {
             return Err(PersistenceError::UnsupportedVersion(self.schema_version));
         }
-        if self.dojos.len() > MAX_DOJOS {
-            return Err(PersistenceError::CollectionTooLarge("dojos"));
+        if self.lairs.len() > MAX_LAIRS {
+            return Err(PersistenceError::CollectionTooLarge("Lairs"));
         }
 
+        let mut lair_ids = HashSet::new();
+        let mut lair_names = HashSet::new();
         let mut dojo_ids = HashSet::new();
-        let mut dojo_names = HashSet::new();
-        let mut window_ids = HashSet::new();
         let mut splint_ids = HashSet::new();
         let mut splint_count = 0;
-        for dojo in &self.dojos {
-            validate_name(&dojo.name, "dojo name")?;
-            if !dojo_ids.insert(dojo.id) {
-                return Err(PersistenceError::DuplicateId("dojo"));
+        for lair in &self.lairs {
+            validate_name(&lair.name, "Lair name")?;
+            if !lair_ids.insert(lair.id) {
+                return Err(PersistenceError::DuplicateId("Lair"));
             }
-            if !dojo_names.insert(dojo.name.as_str()) {
-                return Err(PersistenceError::DuplicateDojoName);
+            if !lair_names.insert(lair.name.as_str()) {
+                return Err(PersistenceError::DuplicateLairName);
             }
-            if dojo.windows.len() > MAX_WINDOWS_PER_DOJO {
-                return Err(PersistenceError::CollectionTooLarge("windows"));
+            if lair.dojos.len() > MAX_DOJOS_PER_LAIR {
+                return Err(PersistenceError::CollectionTooLarge("Dojos"));
             }
-            for window in &dojo.windows {
-                validate_name(&window.title, "window title")?;
-                if !window_ids.insert(window.id) {
-                    return Err(PersistenceError::DuplicateId("window"));
+            for dojo in &lair.dojos {
+                validate_name(&dojo.name, "Dojo name")?;
+                if !dojo_ids.insert(dojo.id) {
+                    return Err(PersistenceError::DuplicateId("Dojo"));
                 }
-                if window.root.find_splint(window.default_focus).is_none() {
-                    return Err(PersistenceError::InvalidWindowDefaultFocus);
+                if dojo.root.find_splint(dojo.default_focus).is_none() {
+                    return Err(PersistenceError::InvalidDojoDefaultFocus);
                 }
-                validate_tree(&window.root, 1, &mut splint_count, &mut splint_ids)?;
+                validate_tree(&dojo.root, 1, &mut splint_count, &mut splint_ids)?;
             }
         }
         Ok(())
@@ -149,7 +225,7 @@ fn validate_tree(
     node: &LayoutNode,
     depth: usize,
     count: &mut usize,
-    ids: &mut HashSet<crate::SplintId>,
+    ids: &mut HashSet<SplintId>,
 ) -> Result<(), PersistenceError> {
     if depth > MAX_LAYOUT_DEPTH {
         return Err(PersistenceError::LayoutTooDeep);
@@ -158,7 +234,7 @@ fn validate_tree(
         LayoutNode::Leaf(splint) => {
             *count += 1;
             if *count > MAX_SPLINTS {
-                return Err(PersistenceError::CollectionTooLarge("splints"));
+                return Err(PersistenceError::CollectionTooLarge("Splints"));
             }
             if !ids.insert(splint.id) {
                 return Err(PersistenceError::DuplicateId("Splint"));
@@ -234,8 +310,8 @@ pub enum PersistenceError {
     CollectionTooLarge(&'static str),
     #[error("metadata contains a duplicate {0} ID")]
     DuplicateId(&'static str),
-    #[error("metadata contains duplicate dojo names")]
-    DuplicateDojoName,
+    #[error("metadata contains duplicate Lair names")]
+    DuplicateLairName,
     #[error("metadata contains an invalid {0}")]
     InvalidName(&'static str),
     #[error("metadata layout exceeds its depth limit")]
@@ -246,8 +322,8 @@ pub enum PersistenceError {
     InvalidCommand,
     #[error("metadata contains invalid launch policy or geometry")]
     InvalidLaunchMetadata,
-    #[error("metadata window default focus does not reference its own layout")]
-    InvalidWindowDefaultFocus,
+    #[error("metadata Dojo default focus does not reference its own layout")]
+    InvalidDojoDefaultFocus,
     #[error("metadata claims a process is live")]
     LiveProcessState,
 }
@@ -259,51 +335,82 @@ mod tests {
 
     use super::*;
 
-    fn valid_document() -> Value {
-        let splint_id = Uuid::new_v4();
+    const LAIR_ID: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101";
+    const DOJO_ID: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102";
+    const SECOND_DOJO_ID: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103";
+    const SPLINT_ID: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77110";
+    const SECOND_SPLINT_ID: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77111";
+
+    fn leaf(id: &str, cwd: &str) -> Value {
+        json!({"Leaf": {
+            "id": id,
+            "title": "shell",
+            "cwd": cwd,
+            "command": [],
+            "state": {"Exited": 0}
+        }})
+    }
+
+    fn valid_v3_document() -> Value {
         json!({
-            "schema_version": LAIR_SCHEMA_VERSION,
+            "schema_version": TOPOLOGY_SCHEMA_VERSION,
             "revision": 7,
-            "dojos": [{
-                "id": Uuid::new_v4(),
+            "lairs": [{
+                "id": LAIR_ID,
                 "name": "main",
-                "windows": [{
-                    "id": Uuid::new_v4(),
-                    "title": "terminal",
-                    "default_focus": splint_id,
-                    "root": {"Leaf": {
-                        "id": splint_id,
-                        "title": "shell",
-                        "cwd": "/tmp",
-                        "command": [],
-                        "state": {"Exited": 0}
-                    }}
+                "dojos": [{
+                    "id": DOJO_ID,
+                    "name": "terminal",
+                    "default_focus": SPLINT_ID,
+                    "root": leaf(SPLINT_ID, "/tmp")
                 }]
             }]
         })
     }
 
-    fn decode(value: &Value) -> Result<LairDocument, PersistenceError> {
-        LairDocument::decode(&serde_json::to_vec(value).unwrap())
+    fn valid_v2_document() -> Value {
+        json!({
+            "schema_version": LEGACY_LAIR_SCHEMA_VERSION,
+            "revision": 7,
+            "dojos": [{
+                "id": LAIR_ID,
+                "name": "main",
+                "windows": [{
+                    "id": DOJO_ID,
+                    "title": "terminal",
+                    "default_focus": SPLINT_ID,
+                    "root": leaf(SPLINT_ID, "/tmp")
+                }, {
+                    "id": SECOND_DOJO_ID,
+                    "title": "logs",
+                    "default_focus": SECOND_SPLINT_ID,
+                    "root": leaf(SECOND_SPLINT_ID, "/var/tmp")
+                }]
+            }]
+        })
+    }
+
+    fn decode(value: &Value) -> Result<TopologyDocument, PersistenceError> {
+        TopologyDocument::decode(&serde_json::to_vec(value).unwrap())
     }
 
     #[test]
     fn live_model_is_serialized_only_as_restorable_metadata() {
-        let mut lair = Lair::new();
-        let dojo = lair
-            .create_dojo("main", std::path::PathBuf::from("/tmp"))
+        let mut topology = Topology::new();
+        let lair = topology
+            .create_lair("main", std::path::PathBuf::from("/tmp"))
             .unwrap()
             .clone();
-        let LayoutNode::Leaf(created) = &dojo.windows[0].root else {
+        let LayoutNode::Leaf(created) = &lair.dojos[0].root else {
             unreachable!()
         };
-        assert!(lair.set_splint_last_incarnation(created.id, 41));
-        let document = LairDocument::from_lair(&lair).unwrap();
-        let restored = LairDocument::decode(&document.encode().unwrap())
+        assert!(topology.set_splint_last_incarnation(created.id, 41));
+        let document = TopologyDocument::from_topology(&topology).unwrap();
+        let restored = TopologyDocument::decode(&document.encode().unwrap())
             .unwrap()
-            .into_lair()
+            .into_topology()
             .unwrap();
-        let LayoutNode::Leaf(splint) = &restored.dojos().next().unwrap().windows[0].root else {
+        let LayoutNode::Leaf(splint) = &restored.lairs().next().unwrap().dojos[0].root else {
             unreachable!()
         };
         assert_eq!(splint.state, SplintState::Exited(0));
@@ -311,89 +418,117 @@ mod tests {
     }
 
     #[test]
-    fn independent_window_trees_and_focus_hints_round_trip() {
-        let mut lair = Lair::new();
-        let dojo_id = lair
-            .create_dojo("main", std::path::PathBuf::from("/tmp"))
+    fn independent_dojo_trees_and_focus_hints_round_trip() {
+        let mut topology = Topology::new();
+        let lair_id = topology
+            .create_lair("main", std::path::PathBuf::from("/tmp"))
             .unwrap()
             .id;
-        let first_window = lair.dojos[&dojo_id].windows[0].id;
-        let first_hint = lair.dojos[&dojo_id].windows[0].default_focus;
-        let second = crate::Window::with_shell(std::path::PathBuf::from("/var/tmp"));
-        let second_window = second.id;
+        let first_dojo = topology.lairs[&lair_id].dojos[0].id;
+        let first_hint = topology.lairs[&lair_id].dojos[0].default_focus;
+        let second = Dojo::with_shell("logs", std::path::PathBuf::from("/var/tmp"));
+        let second_dojo = second.id;
         let second_hint = second.default_focus;
-        lair.new_window_at(lair.revision(), dojo_id, second)
+        topology
+            .new_dojo_at(topology.revision(), lair_id, second)
             .unwrap();
         let sibling = crate::Splint::shell(std::path::PathBuf::from("/tmp"));
         let sibling_id = sibling.id;
-        lair.split_splint_at(
-            lair.revision(),
-            first_hint,
-            sibling,
-            crate::Axis::Horizontal,
-            crate::SplitSide::Second,
-            crate::SplitRatio::new(600).unwrap(),
-        )
-        .unwrap();
-        lair.set_window_default_focus_at(lair.revision(), first_window, sibling_id)
+        topology
+            .split_splint_at(
+                topology.revision(),
+                first_hint,
+                sibling,
+                crate::Axis::Horizontal,
+                crate::SplitSide::Second,
+                crate::SplitRatio::new(600).unwrap(),
+            )
+            .unwrap();
+        topology
+            .set_dojo_default_focus_at(topology.revision(), first_dojo, sibling_id)
             .unwrap();
 
-        let restored =
-            LairDocument::decode(&LairDocument::from_lair(&lair).unwrap().encode().unwrap())
+        let restored = TopologyDocument::decode(
+            &TopologyDocument::from_topology(&topology)
                 .unwrap()
-                .into_lair()
-                .unwrap();
+                .encode()
+                .unwrap(),
+        )
+        .unwrap()
+        .into_topology()
+        .unwrap();
         assert_eq!(
-            restored
-                .find_window(first_window)
-                .unwrap()
-                .root
-                .splint_count(),
+            restored.find_dojo(first_dojo).unwrap().root.splint_count(),
             2
         );
         assert_eq!(
-            restored.find_window(first_window).unwrap().default_focus,
+            restored.find_dojo(first_dojo).unwrap().default_focus,
             sibling_id
         );
         assert_eq!(
-            restored
-                .find_window(second_window)
-                .unwrap()
-                .root
-                .splint_count(),
+            restored.find_dojo(second_dojo).unwrap().root.splint_count(),
             1
         );
         assert_eq!(
-            restored.find_window(second_window).unwrap().default_focus,
+            restored.find_dojo(second_dojo).unwrap().default_focus,
             second_hint
         );
     }
 
     #[test]
+    fn schema_v2_migration_preserves_identity_and_layout_boundaries() {
+        let document = decode(&valid_v2_document()).unwrap();
+        let topology = document.into_topology().unwrap();
+        assert_eq!(topology.revision().get(), 7);
+        let lair = topology.lairs().next().unwrap();
+        assert_eq!(lair.id.to_string(), LAIR_ID);
+        assert_eq!(lair.name, "main");
+        assert_eq!(lair.dojos.len(), 2);
+        assert_eq!(lair.dojos[0].id.to_string(), DOJO_ID);
+        assert_eq!(lair.dojos[0].name, "terminal");
+        assert_eq!(lair.dojos[0].default_focus.to_string(), SPLINT_ID);
+        assert_eq!(lair.dojos[1].id.to_string(), SECOND_DOJO_ID);
+        assert_eq!(lair.dojos[1].name, "logs");
+        assert_eq!(lair.dojos[1].default_focus.to_string(), SECOND_SPLINT_ID);
+    }
+
+    #[test]
+    fn migrated_schema_encodes_only_as_v3() {
+        let document = decode(&valid_v2_document()).unwrap();
+        let encoded: Value = serde_json::from_slice(&document.encode().unwrap()).unwrap();
+        assert_eq!(encoded["schema_version"], json!(TOPOLOGY_SCHEMA_VERSION));
+        assert!(encoded.get("lairs").is_some());
+        assert!(encoded.get("dojos").is_none());
+    }
+
+    #[test]
     fn accepts_current_version_exited_metadata() {
-        let document = decode(&valid_document()).unwrap();
+        let document = decode(&valid_v3_document()).unwrap();
         let encoded = document.encode().unwrap();
-        let lair = LairDocument::decode(&encoded).unwrap().into_lair().unwrap();
-        assert_eq!(lair.revision().get(), 7);
-        assert_eq!(lair.dojos().count(), 1);
+        let topology = TopologyDocument::decode(&encoded)
+            .unwrap()
+            .into_topology()
+            .unwrap();
+        assert_eq!(topology.revision().get(), 7);
+        assert_eq!(topology.lairs().count(), 1);
     }
 
     #[test]
     fn rejects_unknown_version_running_state_and_unsafe_path() {
-        let mut value = valid_document();
-        value["schema_version"] = json!(LAIR_SCHEMA_VERSION + 1);
+        let mut value = valid_v3_document();
+        value["schema_version"] = json!(TOPOLOGY_SCHEMA_VERSION + 1);
         assert_eq!(
             decode(&value),
             Err(PersistenceError::UnsupportedVersion(
-                LAIR_SCHEMA_VERSION + 1
+                TOPOLOGY_SCHEMA_VERSION + 1
             ))
         );
 
-        let mut value = valid_document();
-        value["dojos"][0]["windows"][0]["root"]["Leaf"]["state"] = json!("Running");
+        let mut value = valid_v3_document();
+        value["lairs"][0]["dojos"][0]["root"]["Leaf"]["state"] = json!("Running");
         assert_eq!(decode(&value), Err(PersistenceError::LiveProcessState));
 
-        let mut value = valid_document();
+        let mut value = valid_v2_document();
         value["dojos"][0]["windows"][0]["root"]["Leaf"]["cwd"] = json!("../tmp");
         assert_eq!(
             decode(&value),
@@ -402,42 +537,53 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_window_focus_hint() {
-        let mut value = valid_document();
-        value["dojos"][0]["windows"][0]["default_focus"] = json!(Uuid::new_v4());
+    fn rejects_invalid_dojo_focus_hint() {
+        let mut value = valid_v3_document();
+        value["lairs"][0]["dojos"][0]["default_focus"] = json!(Uuid::new_v4());
         assert_eq!(
             decode(&value),
-            Err(PersistenceError::InvalidWindowDefaultFocus)
+            Err(PersistenceError::InvalidDojoDefaultFocus)
         );
     }
 
     #[test]
     fn rejects_duplicate_ids_invalid_ratios_and_oversized_collections() {
-        let mut value = valid_document();
-        let duplicate = value["dojos"][0].clone();
-        value["dojos"].as_array_mut().unwrap().push(duplicate);
-        assert_eq!(decode(&value), Err(PersistenceError::DuplicateId("dojo")));
+        let mut value = valid_v3_document();
+        let duplicate = value["lairs"][0].clone();
+        value["lairs"].as_array_mut().unwrap().push(duplicate);
+        assert_eq!(decode(&value), Err(PersistenceError::DuplicateId("Lair")));
 
-        let mut value = valid_document();
-        let leaf = value["dojos"][0]["windows"][0]["root"].clone();
-        value["dojos"][0]["windows"][0]["root"] = json!({
+        let mut value = valid_v3_document();
+        let leaf = value["lairs"][0]["dojos"][0]["root"].clone();
+        value["lairs"][0]["dojos"][0]["root"] = json!({
             "Branch": {"axis": "Horizontal", "ratio": 0, "first": leaf.clone(), "second": leaf}
         });
         assert!(matches!(decode(&value), Err(PersistenceError::Decode(_))));
 
-        let mut value = valid_document();
-        let dojo = value["dojos"][0].clone();
-        value["dojos"] = Value::Array(vec![dojo; MAX_DOJOS + 1]);
+        let mut value = valid_v3_document();
+        let lair = value["lairs"][0].clone();
+        value["lairs"] = Value::Array(vec![lair; MAX_LAIRS + 1]);
         assert_eq!(
             decode(&value),
-            Err(PersistenceError::CollectionTooLarge("dojos"))
+            Err(PersistenceError::CollectionTooLarge("Lairs"))
         );
+    }
+
+    #[test]
+    fn rejects_unknown_document_fields_in_v2_and_v3() {
+        let mut current = valid_v3_document();
+        current["unexpected"] = json!(true);
+        assert!(matches!(decode(&current), Err(PersistenceError::Decode(_))));
+
+        let mut legacy = valid_v2_document();
+        legacy["dojos"][0]["unexpected"] = json!(true);
+        assert!(matches!(decode(&legacy), Err(PersistenceError::Decode(_))));
     }
 
     #[test]
     fn rejects_oversized_documents_before_parsing() {
         assert_eq!(
-            LairDocument::decode(&vec![b' '; MAX_LAIR_DOCUMENT_BYTES + 1]),
+            TopologyDocument::decode(&vec![b' '; MAX_TOPOLOGY_DOCUMENT_BYTES + 1]),
             Err(PersistenceError::DocumentTooLarge)
         );
     }

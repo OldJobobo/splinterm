@@ -17,19 +17,19 @@ no authority from running inside a Splint.
                     │ versioned Unix socket
 ┌───────────────────▼───────────────────────┐
 │                 splinterd                 │
-│ protocol · Lair state · PTYs · persistence│
+│ protocol · Topology · PTYs · persistence │
 └───────────────────┬───────────────────────┘
                     │
-        Lair → Dojos → Windows → Splints
+        Topology → Lairs → Dojos → Splints
 ```
 
 ## Crate boundaries
 
 ### `splinterm-core`
 
-Transport- and UI-independent state. A `Lair` owns named `Dojo` workspaces. A
-`Dojo` owns windows, and each window owns a binary layout tree whose leaves are
-`Splint` terminal surfaces.
+Transport- and UI-independent state. A `Topology` catalogs named persistent
+`Lair` sessions. Each `Lair` owns zero or more `Dojo` layouts, and each `Dojo`
+owns a binary layout tree whose leaves are `Splint` terminal surfaces.
 
 This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 
@@ -38,7 +38,7 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 Request/response types shared by both processes. The current development
 protocol uses bounded length-prefixed JSON frames, version-range negotiation,
 request IDs, peer-UID verification, stable errors, and explicit subscription
-resynchronization. Protocol v18 carries closed access scopes, grant status,
+resynchronization. Protocol v25 carries closed access scopes, grant status,
 revocation events, bounded direct command argv/working-directory/shell launch
 fields, semantic terminal updates, topology and history generations, stable row
 IDs, revision-bound scrollback/search pages, visible-row identity, and bounded
@@ -48,7 +48,7 @@ terminal and daemon runtime structs.
 
 ### `splinterd`
 
-Owns the authoritative Lair and, eventually, all PTY file descriptors, child
+Owns the authoritative Topology and all PTY file descriptors, child
 processes, scrollback, and durable snapshots. Clients should be disposable
 without ending sessions. The daemon must not depend on Wayland and should run
 on headless Linux hosts such as `neuromancer`.
@@ -94,12 +94,11 @@ Client-owned configuration controls renderer/window policy; a generated,
 project-owned theme maps Omarchy roles and reloads without mutating daemon
 terminal state or process lifetime.
 
-A daemon `Window` is logical topology, not a compositor-native surface.
-Automation may create or mutate logical windows and their Splint trees without
-mapping a Wayland window. Mapping, focusing, moving, resizing, or assigning a
-native window to a compositor workspace requires a separate trusted graphical
-broker and is not implied by topology mutation or the persisted default-focus
-hint.
+A daemon `Dojo` is persistent topology, not a compositor-native surface.
+Automation may create or mutate Dojos and their Splint trees without mapping a
+native `Window`. Mapping, focusing, moving, resizing, or assigning a Window to a
+compositor workspace requires a separate trusted graphical broker and is not
+implied by topology mutation or the persisted default-focus hint.
 
 ## Automation and coding-agent boundary
 
@@ -118,8 +117,8 @@ higher-level orchestrator may build those semantics over structured process
 launch and bounded observation, but terminal content remains untrusted data and
 must never become authority or an automatic instruction.
 
-PTY children receive daemon-overridden logical context hints for their Dojo,
-window, Splint, and current incarnation. These values improve discovery for an
+PTY children receive daemon-overridden logical context hints for their Lair,
+Dojo, Splint, and current incarnation. These values improve discovery for an
 in-Splint agent but are not credentials and are never accepted as proof of
 resource authority. Relaunch replaces the incarnation, and supported clients
 reconcile every hint against current public topology before selection.
@@ -175,7 +174,7 @@ Wayland client's lifetime.
    network listener and never attributes the remote caller as its local peer.
 7. Shutdown owns and drains connection tasks before runtime shutdown and final
    metadata persistence; one pinned signal future prevents lost SIGINT events.
-8. Logical window mutation never claims compositor-native mapping or focus.
+8. Dojo mutation never claims native Window mapping or focus.
 9. In-Splint context and terminal-derived data are discovery inputs, never
    authorization, consent, or executable instructions.
 10. Future-descendant authority must be explicit and bounded; containment alone

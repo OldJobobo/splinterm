@@ -1,7 +1,7 @@
 {
   "$schema_file": "tools/ping.output.schema.json",
   "document": {
-    "schema": "splinterm.mcp.v1",
+    "schema": "splinterm.mcp.v2",
     "tool": "splinterm.ping",
     "ok": true,
     "resource": {

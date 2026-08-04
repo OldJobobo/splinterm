@@ -23,7 +23,7 @@ The public compatibility boundary consists of:
 
 - JSON documents emitted by `--output json`;
 - NDJSON records emitted by `--output ndjson`;
-- the checked-in Draft 2020-12 schemas under `dist/schemas/v1/`; and
+- the checked-in Draft 2020-12 schemas under `dist/schemas/v2/`; and
 - documented command behavior, exit codes, limits, and cancellation semantics.
 
 Raw daemon frames, protocol versions, Rust enum layouts, and serialized runtime
@@ -41,10 +41,10 @@ version rather than guessing.
 
 Human-readable output remains the default. Machine modes reserve stdout:
 
-- `--output json` emits exactly one `splinterm.cli.v1` document and is the only
+- `--output json` emits exactly one `splinterm.cli.v2` document and is the only
   machine mode accepted for one-shot commands;
 - `--output ndjson` is reserved for subscriptions, where it emits one bounded
-  `splinterm.cli.event.v1` record per line; and
+  `splinterm.cli.event.v2` record per line; and
 - diagnostics and logs go to stderr and never include terminal or input bodies.
 
 One-shot NDJSON and JSON subscriptions are rejected rather than silently changing
@@ -55,12 +55,12 @@ by interactive confirmation or an explicit `--yes` and intentionally has no
 machine-output contract. Those commands remain human-only; automation uses the
 non-Wayland lifecycle commands instead.
 
-A daemon `window` is a logical topology resource. `new-window`,
-`close-window`, `rename-window`, and `window-focus-hint` do not map, focus,
-move, resize, or close a compositor-native Wayland window. Graphical
-`splinterm window` clients are separate disposable processes, and the default
-focus field is only a persisted presentation hint. Compositor orchestration is
-outside the v1 automation contract.
+A daemon `Dojo` is a persistent topology resource. `new-dojo`, `close-dojo`,
+`rename-dojo`, and `dojo-focus-hint` do not map, focus, move, resize, or close a
+native Wayland Window. Graphical `splinterm window` clients are separate
+disposable processes, and the default-focus field is only a persisted
+presentation hint. Compositor orchestration is outside the v2 automation
+contract.
 
 Request and subscription IDs are client-owned nonzero decimal strings, independent
 of private daemon protocol IDs. This avoids precision loss in JSON consumers and
@@ -82,7 +82,7 @@ Successful one-shot envelopes contain `data` and cannot contain `error`. Failed
 envelopes contain a stable symbolic error, bounded message, and retryability,
 cannot contain `data`, and always set `truncated: false` because errors have no
 continuation mechanism. The optional `operation` discriminator preserves the
-operation-less draft v1 fixtures byte-for-byte. Production output always includes
+operation-less draft v2 fixtures byte-for-byte. Production output always includes
 it; whenever it is present, the schema applies a closed operation-specific
 `data`, `resource`, and error payload. Both successful and failed `ping` records,
 and `audit_inspect` records, omit `resource`; failed `ping` records also omit
@@ -90,14 +90,14 @@ resource-revision hints because the operation exposes no resource data.
 
 ### One-shot command and operation inventory
 
-The implemented v1 one-shot names are frozen as follows. Human-only local
+The implemented v2 one-shot names are frozen as follows. Human-only local
 administration commands such as `policy`, `relay`, and `reset` are deliberately
 outside this inventory.
 
 | Command | `operation` |
 | --- | --- |
 | `ping` | `ping` |
-| `list` | `list_dojos` |
+| `list` | `list_lairs` |
 | `topology` | `inspect_topology` |
 | `inspect SPLINT_ID` | `inspect_splint` |
 | `snapshot SPLINT_ID` | `terminal_snapshot` |
@@ -106,20 +106,20 @@ outside this inventory.
 | `authorization status SPLINT_ID` | `authorization_status` |
 | `authorization revoke GRANT_ID --yes` | `revoke_access` |
 | `audit` | `audit_inspect` |
-| `new NAME [-- ARGV...]` | `create_dojo` |
+| `new NAME [-- ARGV...]` | `create_lair` |
 | `split TARGET_SPLINT_ID ... [-- ARGV...]` | `split_splint` |
 | `close SPLINT_ID --yes` | `close_splint` |
 | `ratio TARGET_SPLINT_ID RATIO` | `set_split_ratio` |
-| `new-window DOJO_ID ... [-- ARGV...]` | `new_window` |
-| `close-window WINDOW_ID --yes` | `close_window` |
+| `new-dojo LAIR_ID ... [-- ARGV...]` | `new_dojo` |
+| `close-dojo DOJO_ID --yes` | `close_dojo` |
+| `rename-lair LAIR_ID NAME` | `rename_lair` |
 | `rename-dojo DOJO_ID NAME` | `rename_dojo` |
-| `rename-window WINDOW_ID TITLE` | `rename_window` |
 | `rename-splint SPLINT_ID TITLE` | `rename_splint` |
-| `window-focus-hint WINDOW_ID SPLINT_ID` | `set_window_default_focus` |
+| `dojo-focus-hint DOJO_ID SPLINT_ID` | `set_dojo_default_focus` |
 | `relaunch SPLINT_ID [-- ARGV...]` | `relaunch_splint` |
 | `restore SPLINT_ID` | `restore_splint` |
-| `restore-window WINDOW_ID` | `restore_window` |
 | `restore-dojo DOJO_ID` | `restore_dojo` |
+| `restore-lair LAIR_ID` | `restore_lair` |
 | `send SPLINT_ID TEXT` | `input` |
 | `resize SPLINT_ID COLUMNS ROWS` | `resize` |
 | `kill SPLINT_ID --yes` | `kill_splint` |
@@ -132,7 +132,7 @@ The NDJSON subscription commands are:
 
 JSON is rejected for subscriptions, and NDJSON is rejected for one-shot commands.
 
-Terminal, scrollback, and search responses always carry the exact Dojo, window,
+Terminal, scrollback, and search responses always carry the exact Lair, Dojo,
 Splint, incarnation, terminal revision, and history generation. Bounded pages
 use an opaque base64url continuation cursor; `truncated: true` requires a cursor
 and `truncated: false` requires `null`. Resync results have an explicit symbolic
@@ -176,7 +176,7 @@ generation; topology records carry only topology revision; control records carry
 only exact Splint/incarnation. The `resync` object carries only the symbolic
 reason, so duplicated or conflicting revision state is impossible. Operation-less
 legacy draft fixtures and stream-less legacy resync fixtures remain accepted for
-v1 compatibility but are never emitted by production. The caller must explicitly
+v2 compatibility but are never emitted by production. The caller must explicitly
 resubscribe; the CLI does not hide a gap by silently reattaching.
 
 ## Controller and confirmation rules
@@ -188,7 +188,7 @@ The machine CLI does not expose reusable controller IDs, standalone acquire/rele
 commands, transfer requests or decisions, or forced takeover. Observation and control-status subscriptions never acquire control.
 
 Machine mode never prompts. It requires `--yes` for killing a process, closing a
-Splint, closing a window, and revoking authorization. Create, split, restore,
+Splint, closing a Dojo, and revoking authorization. Create, split, restore,
 relaunch of an exited Splint, rename, ratio, focus hint, input, and resize remain
 explicit authorized commands but do not require a second confirmation flag.
 
@@ -199,18 +199,18 @@ revision into the daemon request. A relaunch before or during the operation fail
 as `stale_incarnation` or `stale_topology`; the command never silently retargets
 the replacement process.
 
-## Persistent policy v1
+## Persistent policy v2
 
 No policy file means no persistent third-party grants. Graphical grant-once
 consent remains daemon-lifetime-only and absence of its trusted UI fails closed.
 
 CLI commands that need parent IDs or topology CAS compose their operation with
 `InspectTopology`; their policy rules also include `topology_metadata_read` with
-a Lair resource selector. Terminal/control subscriptions preflight with
+a matching resource selector. Terminal/control subscriptions preflight with
 `InspectSplint` and require `topology_metadata_read` for that Splint. The daemon
 request matrix in ADR 0007 remains authoritative for each individual request.
 
-A v1 rule has:
+A v2 rule has:
 
 - a unique bounded rule ID;
 - an absolute canonical executable path and the SHA-256 digest of the exact
@@ -223,15 +223,15 @@ A v1 rule has:
 There are no wildcard scopes, basename identities, path-only identities, or
 implicit future resources. A `splint` selector identifies an exact Splint and
 either an exact incarnation or the conspicuous value `current`. When a policy
-generation is published, a `dojo` selector snapshots that Dojo plus its existing
-windows and Splints; a `window` selector snapshots that window plus its existing
+generation is published, a `lair` selector snapshots that Lair plus its existing
+Dojos and Splints; a `dojo` selector snapshots that Dojo plus its existing
 Splints. Overlaps are deduplicated and each rule may resolve to at most 512
 resources. Missing selectors or larger expansions reject the generation and
 install deny-all. Later descendants remain unauthorized until the user updates
 or reloads policy, which publishes a fresh snapshot. Parent snapshots follow a
 stable Splint ID using `current`; directly configured numeric incarnations remain
-exact. The singleton `{ "kind": "lair" }` selector authorizes only Lair-level
-operations such as creating a Dojo and never selects its resulting descendants.
+exact. The singleton `{ "kind": "daemon" }` selector authorizes daemon-level
+operations such as creating a Lair and never selects the resulting descendants.
 
 Schema validation is necessary but not sufficient. The daemon must additionally
 reject duplicate rule IDs, expired rules, unsafe ownership or mode, symlinks,
@@ -249,8 +249,8 @@ verification, and lifecycle guidance.
 ## In-Splint automation context
 
 A process running inside a Splint receives no authority merely because of its
-location. `splinterd` overrides and injects `SPLINTERM_DOJO_ID`,
-`SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
+location. `splinterd` overrides and injects `SPLINTERM_LAIR_ID`,
+`SPLINTERM_DOJO_ID`, `SPLINTERM_SPLINT_ID`, and
 `SPLINTERM_SPLINT_INCARNATION` into each PTY child. These values are discovery
 hints so a CLI-using coding agent can identify its initial logical location
 without guessing from topology. They are not credentials, policy selectors,
@@ -263,9 +263,9 @@ topology access must not broaden policy or cause an adapter to select an
 arbitrary Splint. See [integrations.md](integrations.md) for the client-author
 checklist, reference picker, and safe shell/`jq` workflows.
 
-## Audit v1
+## Audit v2
 
-Audit records are bounded metadata with the schema `splinterm.audit.v1` and
+Audit records are bounded metadata with the schema `splinterm.audit.v2` and
 retention label `daemon_lifetime`. IDs are monotonic and nonzero during one
 daemon lifetime. The daemon retains the newest 1,024 records; paginated reads
 must report a retention gap rather than hide it.
@@ -292,5 +292,4 @@ uv run --with jsonschema python tools/automation/validate-contract-fixtures.py
 ```
 
 Later implementation slices must retain these fixtures, add command-specific
-examples, validate every emitted machine document, and preserve old v1 fixtures
-when adding compatible fields.
+examples, validate every emitted machine document, and preserve reviewed v2 fixtures when adding compatible fields.

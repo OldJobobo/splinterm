@@ -251,19 +251,19 @@ def test_launch_specs_target_only_owned_namespaces(
     native = RUN.SplintermController.__new__(RUN.SplintermController)
     native.client = pathlib.Path("/usr/bin/splinterm")
     native.runtime_ids = {"pane-0": "splint-a", "pane-1": "splint-b"}
-    native.window_id = "window-a"
+    native.dojo_id = "dojo-a"
     native.environment = {"SPLINTERM_SOCKET": "/tmp/owned.sock"}
     native._json_command = lambda arguments: {
         "data": {
             "splints": [
                 {
+                    "lair_id": "lair-a",
                     "dojo_id": "dojo-a",
-                    "window_id": "window-a",
                     "splint_id": "splint-a",
                 },
                 {
+                    "lair_id": "lair-a",
                     "dojo_id": "dojo-a",
-                    "window_id": "window-a",
                     "splint_id": "splint-b",
                 },
             ]
@@ -273,12 +273,12 @@ def test_launch_specs_target_only_owned_namespaces(
     assert command == [
         "/usr/bin/splinterm",
         "window",
+        "--lair-id",
+        "lair-a",
         "--dojo-id",
         "dojo-a",
-        "--window-id",
-        "window-a",
     ]
-    assert RUN.owned_window_token(native) == "window-a"
+    assert RUN.owned_window_token(native) == "dojo-a"
     assert environment == {"SPLINTERM_SOCKET": "/tmp/owned.sock"}
 
     tmux = RUN.TmuxController.__new__(RUN.TmuxController)

@@ -5,7 +5,7 @@
 //! The client owns these objects; the daemon remains headless.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     os::fd::{AsFd, OwnedFd},
     path::PathBuf,
@@ -87,7 +87,7 @@ use wayland_protocols::ext::background_effect::v1::client::{
 };
 
 use splinterm_automation_client::ImageContentLeaseSet;
-use splinterm_core::{DojoId, LayoutNode, SplintId, WindowId};
+use splinterm_core::{DojoId, LairId, LayoutNode, SplintId};
 use splinterm_protocol::{
     ActiveScreen, CellAttributes, ColorSource, ControlTransferDecision, ControlTransferOutcome,
     HistoryTransition, MouseTracking, SearchMatch, SearchPage, TerminalCell, TerminalInputModes,
@@ -121,11 +121,14 @@ use crate::geometry::{
 };
 use crate::pane::{FocusDirection, PaneChrome, PaneDivider, PaneLayout};
 use crate::renderer::{
-    ChromeText, CursorPresentation, HistoryOverlayStatus, SnapshotFrame, SnapshotOverlays, TextRow,
-    configured_background_bgra, history_overlay_layout, paint, paint_box_drawing_cell,
-    paint_history_overlay, paint_snapshot_overlays, paint_snapshot_presented,
-    paint_snapshot_region_presented, paint_snapshot_rows_presented, scroll_snapshot_pixels,
-    set_background_alpha, set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
+    ChromeText, CursorPresentation, HistoryOverlayStatus, PickerHitTarget,
+    SessionPickerOverlayLayout, SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame,
+    SnapshotOverlays, TextRow, configured_background_bgra, history_overlay_layout, paint,
+    paint_box_drawing_cell, paint_history_overlay, paint_session_picker_overlay,
+    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
+    paint_snapshot_rows_presented, scroll_snapshot_pixels, session_picker_hit_test,
+    session_picker_overlay_layout, session_picker_palette, set_background_alpha,
+    set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
 };
 use crate::viewport::ScrollbackViewport;
 
@@ -268,6 +271,7 @@ enum PressOwner {
 
 struct ClipboardRead {
     target: PasteTarget,
+    input_generation: u64,
     bytes: io::Result<Vec<u8>>,
 }
 
@@ -412,8 +416,7 @@ impl ImeState {
         self.visible_preedit.is_some() || matches!(self.pending.preedit, PendingPreedit::Set(_))
     }
 
-    fn clear(&mut self) {
-        self.entered = false;
+    fn clear_composition(&mut self) {
         self.visible_preedit = None;
         self.pending = ImeBatch::default();
     }
@@ -465,8 +468,40 @@ pub enum WindowUpdate {
     ControlTransferResolved(ControlTransferOutcome),
     SearchResults(SearchPage),
     SearchResyncRequired,
-    Theme(ResolvedTheme),
+    Theme(ThemeUpdate),
+    Exited {
+        splint_id: SplintId,
+    },
     Shutdown,
+}
+
+fn pane_stream_has_terminal_notice(updates: &[WindowUpdate]) -> bool {
+    updates
+        .iter()
+        .any(|update| matches!(update, WindowUpdate::Exited { .. } | WindowUpdate::Shutdown))
+}
+
+fn enqueue_pending_exited_splints(
+    pending: &mut HashSet<SplintId>,
+    commands: &Sender<WindowTopologyCommand>,
+) -> bool {
+    let targets = pending.iter().copied().collect::<Vec<_>>();
+    for target in targets {
+        match commands.try_send(WindowTopologyCommand::Close { target }) {
+            Ok(()) => {
+                pending.remove(&target);
+            }
+            Err(TrySendError::Full(_)) => return true,
+            Err(TrySendError::Closed(_)) => return false,
+        }
+    }
+    true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ThemeUpdate {
+    pub generation: u64,
+    pub theme: ResolvedTheme,
 }
 
 /// Bounded Wayland-to-protocol commands for the first interactive slice.
@@ -521,8 +556,10 @@ pub struct TrustedConsentUi {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionPickerItem {
-    pub primary: String,
-    pub secondary: String,
+    pub display_title: String,
+    pub working_directory: String,
+    pub pane_count: usize,
+    pub running_pane_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -531,13 +568,21 @@ pub enum SessionPickerDecision {
     Open(usize),
 }
 
+enum SessionPickerHost {
+    Standalone {
+        revision: u64,
+        synthetic_id: SplintId,
+        decision: StdSender<SessionPickerDecision>,
+    },
+    Inline,
+}
+
 pub struct SessionPickerUi {
     items: Vec<SessionPickerItem>,
     selected: usize,
-    page_start: usize,
-    revision: u64,
-    synthetic_id: SplintId,
-    decision: StdSender<SessionPickerDecision>,
+    visible_start: usize,
+    hovered: Option<PickerHitTarget>,
+    host: SessionPickerHost,
 }
 
 const SESSION_PICKER_PAGE_ITEMS: usize = 7;
@@ -551,10 +596,35 @@ impl SessionPickerUi {
         Self {
             items,
             selected: 0,
-            page_start: 0,
-            revision: 0,
-            synthetic_id: SplintId::new(),
-            decision,
+            visible_start: 0,
+            hovered: None,
+            host: SessionPickerHost::Standalone {
+                revision: 0,
+                synthetic_id: SplintId::new(),
+                decision,
+            },
+        }
+    }
+
+    fn inline(items: Vec<SessionPickerItem>) -> Self {
+        Self {
+            items,
+            selected: 0,
+            visible_start: 0,
+            hovered: None,
+            host: SessionPickerHost::Inline,
+        }
+    }
+
+    const fn is_inline(&self) -> bool {
+        matches!(self.host, SessionPickerHost::Inline)
+    }
+
+    fn selected_target(&self) -> PickerHitTarget {
+        if self.selected == 0 {
+            PickerHitTarget::New
+        } else {
+            PickerHitTarget::Open(self.selected - 1)
         }
     }
 
@@ -567,21 +637,45 @@ impl SessionPickerUi {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let count = self.items.len() + 1;
+        let count = self.items.len().saturating_add(1);
+        let magnitude = delta.unsigned_abs() % count;
         self.selected = if delta.is_negative() {
             self.selected
-                .checked_sub(delta.unsigned_abs())
-                .unwrap_or(count - 1)
+                .saturating_add(count)
+                .saturating_sub(magnitude)
+                % count
         } else {
-            self.selected
-                .checked_add(delta.unsigned_abs())
-                .filter(|selected| *selected < count)
-                .unwrap_or(0)
+            self.selected.saturating_add(magnitude) % count
         };
-        if self.selected > 0 {
-            let item = self.selected - 1;
-            self.page_start = item / SESSION_PICKER_PAGE_ITEMS * SESSION_PICKER_PAGE_ITEMS;
+        self.ensure_selected_visible(SESSION_PICKER_PAGE_ITEMS);
+    }
+
+    fn select_first(&mut self) {
+        self.selected = 0;
+        self.visible_start = 0;
+    }
+
+    fn select_last(&mut self) {
+        self.selected = self.items.len();
+        self.ensure_selected_visible(SESSION_PICKER_PAGE_ITEMS);
+    }
+
+    fn ensure_selected_visible(&mut self, visible_count: usize) {
+        if self.items.is_empty() || self.selected == 0 || visible_count == 0 {
+            self.visible_start = 0;
+            return;
         }
+        let selected_item = self.selected - 1;
+        if selected_item < self.visible_start {
+            self.visible_start = selected_item;
+        } else if selected_item >= self.visible_start.saturating_add(visible_count) {
+            self.visible_start = selected_item
+                .saturating_add(1)
+                .saturating_sub(visible_count);
+        }
+        self.visible_start = self
+            .visible_start
+            .min(self.items.len().saturating_sub(visible_count));
     }
 
     fn select_row(&mut self, row: usize) -> Option<SessionPickerDecision> {
@@ -594,7 +688,7 @@ impl SessionPickerUi {
         if slot >= SESSION_PICKER_PAGE_ITEMS {
             return None;
         }
-        let item = self.page_start.checked_add(slot)?;
+        let item = self.visible_start.checked_add(slot)?;
         if item >= self.items.len() {
             return None;
         }
@@ -602,9 +696,23 @@ impl SessionPickerUi {
         Some(SessionPickerDecision::Open(item))
     }
 
+    /// Builds the temporary terminal presentation used only by the standalone
+    /// `splinterm sessions` host.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called for the inline host, whose presentation is native chrome.
     #[must_use]
     pub fn snapshot(&mut self) -> TerminalSnapshot {
-        self.revision = self.revision.saturating_add(1).max(1);
+        let SessionPickerHost::Standalone {
+            revision,
+            synthetic_id,
+            ..
+        } = &mut self.host
+        else {
+            panic!("inline session picker does not own a terminal snapshot");
+        };
+        *revision = revision.saturating_add(1).max(1);
         let marker = |selected| if selected { "› " } else { "  " };
         let mut lines = vec![
             "RECENT SESSIONS".to_owned(),
@@ -617,15 +725,23 @@ impl SessionPickerUi {
             .items
             .iter()
             .enumerate()
-            .skip(self.page_start)
+            .skip(self.visible_start)
             .take(SESSION_PICKER_PAGE_ITEMS)
         {
             lines.push(format!(
                 "{}{}",
                 marker(self.selected == index + 1),
-                item.primary
+                item.display_title
             ));
-            lines.push(format!("    {}", item.secondary));
+            let pane_label = if item.pane_count == 1 {
+                "pane"
+            } else {
+                "panes"
+            };
+            lines.push(format!(
+                "    {} · {} {pane_label} · {} running",
+                item.working_directory, item.pane_count, item.running_pane_count
+            ));
         }
         while lines.len() < SESSION_PICKER_FIRST_ITEM_ROW + SESSION_PICKER_PAGE_ITEMS * 2 {
             lines.push(String::new());
@@ -634,7 +750,7 @@ impl SessionPickerUi {
             String::new(),
             "↑/↓ or J/K select · Enter open · N new · Escape cancel".to_owned(),
         ]);
-        picker_terminal_snapshot(self.synthetic_id, self.revision, lines)
+        picker_terminal_snapshot(*synthetic_id, *revision, lines)
     }
 }
 
@@ -742,11 +858,11 @@ pub enum WindowTopologyCommand {
         delta: i16,
     },
     RequestSessionPicker,
-    SwitchWindow {
+    SwitchDojo {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
     },
-    NewWindow,
+    NewDojo,
 }
 
 pub enum WindowTopologyUpdate {
@@ -759,11 +875,11 @@ pub enum WindowTopologyUpdate {
     },
     ShowSessionPicker {
         items: Vec<SessionPickerItem>,
-        targets: Vec<(DojoId, WindowId)>,
+        targets: Vec<(LairId, DojoId)>,
     },
     SessionPickerFailed(String),
     SessionSwitchComplete,
-    Theme(ResolvedTheme),
+    Theme(ThemeUpdate),
     Closed,
     Shutdown(String),
 }
@@ -1111,12 +1227,26 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
         trusted_consent,
         session_picker,
-        session_picker_restore: None,
         session_picker_targets: Vec::new(),
+        session_picker_layout: None,
+        session_picker_pressed: None,
+        session_picker_text_cache: SessionPickerTextCache::default(),
+        session_picker_wheel: WheelAccumulator::default(),
+        session_picker_consumed_keys: HashSet::new(),
+        session_picker_redraw: false,
+        session_picker_reconcile_pending: false,
+        session_picker_open_focus: None,
         session_picker_requested: false,
         session_switch_pending: false,
         restored_frontend_needs_resize: false,
+        pending_exited_splints: HashSet::new(),
         deferred_picker_theme: None,
+        renderer_generation: 0,
+        theme_generation: 0,
+        input_generation: 0,
+        terminal_focus_reported: false,
+        ime_generation: 0,
+        ime_modal_barrier: false,
         deferred_topology_updates: Vec::new(),
         cursor_style: options.cursor_style,
         cursor_blink: options.cursor_blink,
@@ -1779,6 +1909,27 @@ fn rebuild_dirty_pane_viewport_frame(pane: &mut PaneView, scale_120: u32) -> Res
     rebuild_pane_scaled_frame(pane, scale_120)
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BackgroundUpdateImpact {
+    visual_changed: bool,
+    frame_dirty: bool,
+}
+
+impl BackgroundUpdateImpact {
+    const NONE: Self = Self {
+        visual_changed: false,
+        frame_dirty: false,
+    };
+    const VISUAL: Self = Self {
+        visual_changed: true,
+        frame_dirty: false,
+    };
+    const FRAME: Self = Self {
+        visual_changed: true,
+        frame_dirty: true,
+    };
+}
+
 impl PaneView {
     fn from_inactive_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
         let mut pane = Self::from_options(options, scale_120)?;
@@ -1933,8 +2084,7 @@ impl PaneView {
         &mut self,
         update: WindowUpdate,
         theme: ResolvedTheme,
-        scale_120: u32,
-    ) -> Result<bool> {
+    ) -> Result<BackgroundUpdateImpact> {
         match update {
             WindowUpdate::Snapshot {
                 mut snapshot,
@@ -1944,10 +2094,10 @@ impl PaneView {
                     .validate()
                     .map_err(|error| anyhow::anyhow!(error.message))?;
                 apply_theme(&mut snapshot, theme);
-                if let Some(current) = self.snapshot.as_ref() {
-                    if !snapshot_is_newer(current, &snapshot)? {
-                        return Ok(false);
-                    }
+                if let Some(current) = self.snapshot.as_ref()
+                    && !snapshot_is_newer(current, &snapshot)?
+                {
+                    return Ok(BackgroundUpdateImpact::NONE);
                 }
                 let previous_generation = self
                     .snapshot
@@ -1967,21 +2117,17 @@ impl PaneView {
                 self.clear_local_content_state();
                 self.snapshot = Some(snapshot);
                 self.image_sources = image_sources;
-                let display = self
-                    .display_snapshot()
-                    .context("background display snapshot")?;
-                self.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
-                    &display,
-                    scale_120,
-                    Some(&self.image_sources),
-                )?);
-                Ok(true)
+                Ok(BackgroundUpdateImpact::FRAME)
             }
             WindowUpdate::Update {
                 update,
                 image_sources,
             } => {
-                let changed = terminal_update_changes_visible_content(&update);
+                let content_changed = terminal_update_changes_visible_content(&update);
+                let frame_dirty = content_changed
+                    || update.cursor.is_some()
+                    || update.input_modes.is_some()
+                    || image_sources.is_some();
                 let previous_generation = self
                     .snapshot
                     .as_ref()
@@ -2006,64 +2152,104 @@ impl PaneView {
                 if let Some(image_sources) = image_sources {
                     self.image_sources = image_sources;
                 }
-                let display = self
-                    .display_snapshot()
-                    .context("background display snapshot")?;
-                let frame = SnapshotFrame::load_scaled_with_sources(
-                    &display,
-                    scale_120,
-                    Some(&self.image_sources),
-                )?;
-                if changed {
+                if content_changed {
                     self.clear_local_content_state();
                 }
-                self.snapshot_frame = Some(frame);
-                Ok(true)
+                Ok(if frame_dirty {
+                    BackgroundUpdateImpact::FRAME
+                } else {
+                    BackgroundUpdateImpact::VISUAL
+                })
             }
             WindowUpdate::Authority(authority) => {
                 self.authority = authority;
-                Ok(true)
+                Ok(BackgroundUpdateImpact::VISUAL)
             }
             WindowUpdate::Control(active) => {
                 self.controller_active = active;
-                Ok(true)
+                Ok(BackgroundUpdateImpact::VISUAL)
             }
             WindowUpdate::ControlTransferRequested(transfer_id) => {
                 self.pending_control_transfer = Some(transfer_id);
-                Ok(true)
+                Ok(BackgroundUpdateImpact::VISUAL)
             }
             WindowUpdate::ControlTransferResolved(_) => {
                 self.pending_control_transfer = None;
-                Ok(true)
+                Ok(BackgroundUpdateImpact::VISUAL)
             }
             WindowUpdate::SearchResults(page) => {
                 self.search.matches = page.matches;
                 self.search.selected = 0;
                 self.search.next_cursor = page.next_cursor;
                 self.search.pending_reveal = self.search.matches.first().cloned();
-                Ok(true)
+                Ok(BackgroundUpdateImpact::VISUAL)
             }
             WindowUpdate::SearchResyncRequired => {
                 self.search.matches.clear();
                 self.search.next_cursor = None;
                 self.search.pending_reveal = None;
-                Ok(true)
+                Ok(BackgroundUpdateImpact::VISUAL)
             }
             WindowUpdate::ScrollbackResyncRequired => {
                 self.history_page_pending = false;
                 self.clear_local_content_state();
-                Ok(true)
+                Ok(BackgroundUpdateImpact::VISUAL)
             }
-            WindowUpdate::ScrollbackPages(pages) => self.apply_background_pages(pages),
-            WindowUpdate::Theme(_) => Ok(false),
-            WindowUpdate::Shutdown => {
+            WindowUpdate::ScrollbackPages(pages) => Ok(if self.apply_background_pages(pages)? {
+                BackgroundUpdateImpact::FRAME
+            } else {
+                BackgroundUpdateImpact::NONE
+            }),
+            WindowUpdate::Theme(_) => Ok(BackgroundUpdateImpact::NONE),
+            WindowUpdate::Exited { .. } | WindowUpdate::Shutdown => {
                 self.controller_active = false;
                 self.commands = None;
                 self.updates = None;
-                Ok(true)
+                Ok(BackgroundUpdateImpact::VISUAL)
             }
         }
     }
+}
+
+struct InactiveUpdateDrain {
+    changed: bool,
+    theme: Option<ThemeUpdate>,
+    dirty_frames: HashSet<SplintId>,
+    exited: Vec<SplintId>,
+}
+
+fn apply_inactive_update_batch(
+    pane: &mut PaneView,
+    updates: impl IntoIterator<Item = WindowUpdate>,
+    theme: ResolvedTheme,
+) -> Result<BackgroundUpdateImpact> {
+    let mut batch = BackgroundUpdateImpact::NONE;
+    for update in updates {
+        let impact = pane.apply_background_update(update, theme)?;
+        batch.visual_changed |= impact.visual_changed;
+        batch.frame_dirty |= impact.frame_dirty;
+    }
+    Ok(batch)
+}
+
+fn rebuild_inactive_frames(
+    panes: &mut [PaneView],
+    dirty: &HashSet<SplintId>,
+    rebuild_all: bool,
+    scale_120: u32,
+) -> Result<usize> {
+    let mut rebuilt = 0;
+    for pane in panes {
+        let selected = rebuild_all
+            || pane
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| dirty.contains(&snapshot.splint_id));
+        if selected && rebuild_pane_scaled_frame(pane, scale_120)? {
+            rebuilt += 1;
+        }
+    }
+    Ok(rebuilt)
 }
 
 struct CachedFrameTitle {
@@ -2080,36 +2266,6 @@ struct CachedFrameTitle {
 struct ShmFrameBuffer {
     buffer: Buffer,
     stale: BackingDamage,
-}
-
-struct SavedFrontend {
-    pane: PaneView,
-    inactive_panes: Vec<PaneView>,
-    layout: Option<LayoutNode>,
-}
-
-fn install_picker_frontend(
-    pane: &mut PaneView,
-    inactive_panes: &mut Vec<PaneView>,
-    layout: &mut Option<LayoutNode>,
-    picker_pane: PaneView,
-) -> SavedFrontend {
-    SavedFrontend {
-        pane: std::mem::replace(pane, picker_pane),
-        inactive_panes: std::mem::take(inactive_panes),
-        layout: layout.take(),
-    }
-}
-
-fn restore_saved_frontend(
-    pane: &mut PaneView,
-    inactive_panes: &mut Vec<PaneView>,
-    layout: &mut Option<LayoutNode>,
-    saved: SavedFrontend,
-) {
-    *pane = saved.pane;
-    *inactive_panes = saved.inactive_panes;
-    *layout = saved.layout;
 }
 
 #[allow(
@@ -2152,12 +2308,26 @@ struct App {
     scroll_trace: bool,
     trusted_consent: Option<TrustedConsentUi>,
     session_picker: Option<SessionPickerUi>,
-    session_picker_restore: Option<SavedFrontend>,
-    session_picker_targets: Vec<(DojoId, WindowId)>,
+    session_picker_targets: Vec<(LairId, DojoId)>,
+    session_picker_layout: Option<SessionPickerOverlayLayout>,
+    session_picker_pressed: Option<PickerHitTarget>,
+    session_picker_text_cache: SessionPickerTextCache,
+    session_picker_wheel: WheelAccumulator,
+    session_picker_consumed_keys: HashSet<u32>,
+    session_picker_redraw: bool,
+    session_picker_reconcile_pending: bool,
+    session_picker_open_focus: Option<bool>,
     session_picker_requested: bool,
     session_switch_pending: bool,
     restored_frontend_needs_resize: bool,
-    deferred_picker_theme: Option<ResolvedTheme>,
+    pending_exited_splints: HashSet<SplintId>,
+    deferred_picker_theme: Option<ThemeUpdate>,
+    renderer_generation: u64,
+    theme_generation: u64,
+    input_generation: u64,
+    terminal_focus_reported: bool,
+    ime_generation: u64,
+    ime_modal_barrier: bool,
     deferred_topology_updates: Vec<WindowTopologyUpdate>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
@@ -2984,6 +3154,56 @@ fn take_press_owner(pressed: &mut HashMap<u32, PressOwner>, button: u32) -> Pres
     pressed.remove(&button).unwrap_or(PressOwner::Ignored)
 }
 
+fn picker_release_activation(
+    pressed: Option<PickerHitTarget>,
+    released: Option<PickerHitTarget>,
+) -> Option<PickerHitTarget> {
+    pressed.filter(|target| Some(*target) == released)
+}
+
+const fn clipboard_read_is_current(
+    inline_picker_open: bool,
+    current_generation: u64,
+    read_generation: u64,
+) -> bool {
+    !inline_picker_open && current_generation == read_generation
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PickerImeReconcile {
+    None,
+    Renew,
+    Enable,
+}
+
+const fn picker_ime_reconcile(
+    modal_barrier: bool,
+    keyboard_focused: bool,
+    ime_entered: bool,
+) -> PickerImeReconcile {
+    if modal_barrier {
+        PickerImeReconcile::Renew
+    } else if keyboard_focused && ime_entered {
+        PickerImeReconcile::Enable
+    } else {
+        PickerImeReconcile::None
+    }
+}
+
+fn reconciled_focus_report(
+    focus_reporting: bool,
+    reported_focused: bool,
+    current_focused: bool,
+) -> Option<Vec<u8>> {
+    if !focus_reporting || reported_focused == current_focused {
+        None
+    } else if current_focused {
+        Some(b"\x1b[I".to_vec())
+    } else {
+        Some(b"\x1b[O".to_vec())
+    }
+}
+
 fn application_motion(owner: &PressOwner) -> Option<(u8, bool, Modifiers)> {
     if let PressOwner::Application {
         code,
@@ -3263,6 +3483,10 @@ fn font_zoom_action(keysym: Keysym, modifiers: Modifiers) -> Option<FontZoomActi
         Keysym::_0 | Keysym::KP_0 => Some(FontZoomAction::Reset),
         _ => None,
     }
+}
+
+const fn presented_cursor_visible(inline_picker_open: bool, blink_phase_visible: bool) -> bool {
+    inline_picker_open || blink_phase_visible
 }
 
 fn cursor_blink_enabled(reduced_motion: bool, focused: bool, modes: TerminalInputModes) -> bool {
@@ -3595,12 +3819,14 @@ fn write_clipboard_with_deadline(
 fn spawn_clipboard_read(
     fd: OwnedFd,
     target: PasteTarget,
+    input_generation: u64,
     tx: StdSender<ClipboardRead>,
     waker: Waker,
 ) {
     let Some(permit) = try_clipboard_worker(&ACTIVE_CLIPBOARD_WORKERS) else {
         let _ = tx.send(ClipboardRead {
             target,
+            input_generation,
             bytes: Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "clipboard worker limit reached",
@@ -3612,7 +3838,11 @@ fn spawn_clipboard_read(
     std::thread::spawn(move || {
         let _permit = permit;
         let bytes = read_clipboard_with_deadline(&fd, CLIPBOARD_IO_TIMEOUT);
-        let _ = tx.send(ClipboardRead { target, bytes });
+        let _ = tx.send(ClipboardRead {
+            target,
+            input_generation,
+            bytes,
+        });
         waker.wake();
     });
 }
@@ -3676,6 +3906,15 @@ impl BackgroundEffectReconcileSchedule {
 
     fn clear(&mut self) {
         self.on_draw = false;
+    }
+}
+
+fn retain_newest_theme(slot: &mut Option<ThemeUpdate>, update: ThemeUpdate) {
+    if slot
+        .as_ref()
+        .is_none_or(|current| update.generation > current.generation)
+    {
+        *slot = Some(update);
     }
 }
 
@@ -4421,6 +4660,9 @@ impl App {
     }
 
     fn send_input(&mut self, bytes: Vec<u8>) -> Result<()> {
+        if self.inline_picker_open() {
+            return Ok(());
+        }
         if let Some(commands) = &self.pane.commands {
             try_window_command(commands, WindowCommand::Input(bytes))?;
         }
@@ -4634,8 +4876,12 @@ impl App {
     }
 
     fn begin_clipboard_read(&mut self, target: PasteTarget) {
+        if self.inline_picker_open() {
+            return;
+        }
         let tx = self.clipboard_tx.clone();
         let waker = self.update_waker.clone();
+        let input_generation = self.input_generation;
         match target {
             PasteTarget::Clipboard => {
                 let Some(offer) = self.clipboard_offer.clone() else {
@@ -4644,7 +4890,7 @@ impl App {
                 let mime = offer.with_mime_types(accepted_text_mime);
                 let Some(mime) = mime else { return };
                 if let Ok(pipe) = offer.receive(mime) {
-                    spawn_clipboard_read(pipe.into(), target, tx, waker);
+                    spawn_clipboard_read(pipe.into(), target, input_generation, tx, waker);
                 }
             }
             PasteTarget::Primary => {
@@ -4654,7 +4900,7 @@ impl App {
                 let mime = offer.with_mime_types(accepted_text_mime);
                 let Some(mime) = mime else { return };
                 if let Ok(pipe) = offer.receive(mime) {
-                    spawn_clipboard_read(pipe.into(), target, tx, waker);
+                    spawn_clipboard_read(pipe.into(), target, input_generation, tx, waker);
                 }
             }
         }
@@ -4662,6 +4908,13 @@ impl App {
 
     fn apply_clipboard_reads(&mut self) -> Result<()> {
         while let Ok(read) = self.clipboard_rx.try_recv() {
+            if !clipboard_read_is_current(
+                self.inline_picker_open(),
+                self.input_generation,
+                read.input_generation,
+            ) {
+                continue;
+            }
             let Ok(bytes) = read.bytes else {
                 continue;
             };
@@ -4713,73 +4966,105 @@ impl App {
         let _ = Command::new("xdg-open").arg(url).spawn();
     }
 
+    fn inline_picker_open(&self) -> bool {
+        self.session_picker
+            .as_ref()
+            .is_some_and(SessionPickerUi::is_inline)
+    }
+
+    fn settle_terminal_presses_for_picker(&mut self) {
+        let pressed = std::mem::take(&mut self.pressed_buttons);
+        for owner in pressed.into_values() {
+            if let PressOwner::Application {
+                code,
+                sgr,
+                modifiers,
+                ..
+            } = owner
+                && let Some(position) = self.pane.pointer_cell
+                && let Some(report) =
+                    mouse_report(MouseAction::Release(code), position, modifiers, sgr)
+            {
+                self.send_command(WindowCommand::Input(report));
+            }
+        }
+        if self.pane.selecting {
+            let selection = self.pane.selection.take();
+            self.dirty_selection(selection);
+            self.pane.selecting = false;
+            self.pane.selected_text = None;
+            self.pane.history_selection_pin_blocked = false;
+        }
+        self.pane.pointer_cell = None;
+        self.pane.hovered_url = None;
+    }
+
+    fn reconcile_terminal_focus_report(&mut self, modal_focus_changed: bool) {
+        if !modal_focus_changed {
+            return;
+        }
+        let Some(report) = reconciled_focus_report(
+            self.input_modes().focus_reporting,
+            self.terminal_focus_reported,
+            self.keyboard_focused,
+        ) else {
+            return;
+        };
+        self.send_command(WindowCommand::Input(report));
+        self.terminal_focus_reported = self.keyboard_focused;
+    }
+
     fn show_embedded_session_picker(
         &mut self,
         items: Vec<SessionPickerItem>,
-        targets: Vec<(DojoId, WindowId)>,
+        targets: Vec<(LairId, DojoId)>,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.session_picker.is_none() && self.session_picker_restore.is_none(),
+            self.session_picker.is_none(),
             "session picker is already open"
         );
         anyhow::ensure!(
             items.len() == targets.len(),
             "session picker targets differ"
         );
-        let (decision, _receiver) = std_mpsc::channel();
-        let mut picker = SessionPickerUi::new(items, decision);
-        let mut snapshot = picker.snapshot();
-        apply_theme(&mut snapshot, self.theme);
-        let (_update_sender, updates) = tokio::sync::mpsc::channel(1);
-        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
-        let mut picker_pane = PaneView::from_options(
-            WindowPaneOptions {
-                snapshot,
-                updates,
-                commands,
-                authority: AuthorityStatus::default(),
-                controlled: false,
-                image_sources: ImageContentLeaseSet::default(),
-            },
-            self.scale_120,
-        )?;
-        picker_pane.updates = None;
-        picker_pane.commands = None;
-        let saved = install_picker_frontend(
-            &mut self.pane,
-            &mut self.inactive_panes,
-            &mut self.layout,
-            picker_pane,
-        );
-        self.session_picker = Some(picker);
-        self.session_picker_restore = Some(saved);
+        self.settle_terminal_presses_for_picker();
+        self.input_generation = self.input_generation.saturating_add(1);
+        self.session_picker_wheel = WheelAccumulator::default();
+        self.ime_modal_barrier = self.ime.entered && self.text_input.is_some();
+        if self.ime_modal_barrier {
+            if let Some(text_input) = &self.text_input {
+                text_input.disable();
+            }
+            self.commit_text_input();
+        }
+        self.clear_ime_preedit();
+        self.session_picker = Some(SessionPickerUi::inline(items));
         self.session_picker_targets = targets;
+        self.session_picker_layout = None;
+        self.session_picker_pressed = None;
+        self.session_picker_text_cache.clear();
+        self.session_picker_redraw = false;
+        self.session_picker_reconcile_pending = false;
+        self.session_picker_open_focus = Some(self.keyboard_focused);
         self.session_picker_requested = false;
         self.window.set_title("Splinterm — Recent Sessions");
-        self.buffers.clear();
-        self.backing.clear();
         self.full_redraw = true;
         Ok(())
     }
 
-    fn restore_embedded_session_picker(&mut self) -> bool {
-        let Some(saved) = self.session_picker_restore.take() else {
+    fn close_inline_session_picker(&mut self) -> bool {
+        if !self.inline_picker_open() {
             return false;
-        };
-        restore_saved_frontend(
-            &mut self.pane,
-            &mut self.inactive_panes,
-            &mut self.layout,
-            saved,
-        );
+        }
         self.session_picker = None;
         self.session_picker_targets.clear();
+        self.session_picker_layout = None;
+        self.session_picker_pressed = None;
+        self.session_picker_text_cache.clear();
+        self.session_picker_wheel = WheelAccumulator::default();
+        self.session_picker_redraw = false;
+        self.session_picker_reconcile_pending = true;
         self.session_picker_requested = false;
-        self.restored_frontend_needs_resize = true;
-        self.buffers.clear();
-        self.backing.clear();
-        self.full_redraw = true;
-        self.update_window_title();
         true
     }
 
@@ -4798,6 +5083,9 @@ impl App {
     }
 
     fn send_command(&mut self, command: WindowCommand) {
+        if self.inline_picker_open() && matches!(command, WindowCommand::Input(_)) {
+            return;
+        }
         let Some(commands) = &self.pane.commands else {
             return;
         };
@@ -4807,6 +5095,9 @@ impl App {
     }
 
     fn send_coalescible_input(&mut self, bytes: Vec<u8>) {
+        if self.inline_picker_open() {
+            return;
+        }
         let Some(commands) = &self.pane.commands else {
             return;
         };
@@ -4872,8 +5163,21 @@ impl App {
             }
             self.commit_text_input();
             self.clear_ime_preedit();
-        } else if focused && self.ime.entered {
+        } else if focused && self.ime.entered && !self.inline_picker_open() {
             self.enable_text_input();
+        }
+    }
+
+    fn renew_text_input(&mut self, queue_handle: &QueueHandle<Self>) {
+        if let Some(text_input) = self.text_input.take() {
+            text_input.destroy();
+        }
+        self.ime_generation = self.ime_generation.saturating_add(1);
+        self.ime.entered = false;
+        self.ime.clear_composition();
+        self.ime_modal_barrier = false;
+        if let (Some(manager), Some(seat)) = (&self.text_input_manager, &self.text_input_seat) {
+            self.text_input = Some(manager.get_text_input(seat, queue_handle, self.ime_generation));
         }
     }
 
@@ -4894,7 +5198,7 @@ impl App {
 
     fn clear_ime_preedit(&mut self) {
         let had_preedit = self.ime.visible_preedit.is_some();
-        self.ime.clear();
+        self.ime.clear_composition();
         if had_preedit {
             let _ = self.refresh_ime_preedit();
         }
@@ -4970,7 +5274,14 @@ impl App {
             return Ok(true);
         };
         self.font_zoom_steps = next;
+        self.renderer_generation = self.renderer_generation.saturating_add(1);
+        self.session_picker_text_cache.clear();
+        self.session_picker_layout = None;
         if !raster_changed {
+            if self.inline_picker_open() && self.configured {
+                self.session_picker_redraw = true;
+                self.schedule_draw(queue_handle)?;
+            }
             return Ok(true);
         }
         self.rebuild_scaled_pane_frames(self.scale_120)?;
@@ -4983,7 +5294,11 @@ impl App {
         self.refresh_ime_preedit()?;
         self.update_ime_cursor_rectangle();
         if self.configured {
-            self.emit_resize()?;
+            if self.inline_picker_open() {
+                self.restored_frontend_needs_resize = true;
+            } else {
+                self.emit_resize()?;
+            }
             self.schedule_draw(queue_handle)?;
         }
         Ok(true)
@@ -5000,6 +5315,13 @@ impl App {
         let Some(picker) = self.session_picker.as_mut() else {
             return Ok(());
         };
+        if picker.is_inline() {
+            picker.hovered = None;
+            self.session_picker_layout = None;
+            self.session_picker_pressed = None;
+            self.session_picker_redraw = true;
+            return Ok(());
+        }
         let mut snapshot = picker.snapshot();
         apply_theme(&mut snapshot, self.theme);
         self.pane.snapshot = Some(snapshot);
@@ -5019,29 +5341,101 @@ impl App {
         }
     }
 
+    fn handle_session_picker_pointer(&mut self, event: &PointerEvent) -> bool {
+        let target = self
+            .session_picker_layout
+            .as_ref()
+            .and_then(|layout| session_picker_hit_test(layout, event.position));
+        let mut changed = false;
+        let mut activate = None;
+        match event.kind {
+            PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                if let Some(picker) = self.session_picker.as_mut()
+                    && picker.hovered != target
+                {
+                    picker.hovered = target;
+                    changed = true;
+                }
+            }
+            PointerEventKind::Leave { .. } => {
+                if let Some(picker) = self.session_picker.as_mut()
+                    && picker.hovered.take().is_some()
+                {
+                    changed = true;
+                }
+            }
+            PointerEventKind::Press { button, .. } => {
+                let next = (button == BTN_LEFT).then_some(target).flatten();
+                if self.session_picker_pressed != next {
+                    self.session_picker_pressed = next;
+                    changed = true;
+                }
+            }
+            PointerEventKind::Release { button, .. } => {
+                if button == BTN_LEFT {
+                    let pressed = self.session_picker_pressed.take();
+                    changed |= pressed.is_some();
+                    activate = picker_release_activation(pressed, target);
+                }
+            }
+            PointerEventKind::Axis { vertical, .. } => {
+                if !vertical.is_none()
+                    && let Some((direction, count)) = self.session_picker_wheel.push(
+                        vertical.absolute,
+                        vertical.discrete,
+                        vertical.value120,
+                        44,
+                    )
+                {
+                    let count = isize::try_from(count).unwrap_or(isize::MAX);
+                    let delta = match direction {
+                        MouseAction::WheelUp => -count,
+                        MouseAction::WheelDown => count,
+                        _ => 0,
+                    };
+                    self.move_session_picker(delta);
+                    self.session_picker_layout = None;
+                    if let Some(picker) = self.session_picker.as_mut() {
+                        picker.hovered = None;
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if let Some(target) = activate {
+            let decision = match target {
+                PickerHitTarget::New => SessionPickerDecision::New,
+                PickerHitTarget::Open(index) => SessionPickerDecision::Open(index),
+            };
+            self.decide_session_picker(decision);
+            changed = true;
+        }
+        if changed && self.inline_picker_open() {
+            self.session_picker_redraw = true;
+        }
+        changed
+    }
+
     fn cancel_session_picker(&mut self) {
-        if self.session_picker_restore.is_some() {
-            self.restore_embedded_session_picker();
-        } else {
+        if !self.close_inline_session_picker() {
             self.exit = true;
         }
     }
 
     fn decide_session_picker(&mut self, decision: SessionPickerDecision) {
-        if self.session_picker_restore.is_some() {
+        if self.inline_picker_open() {
             let command = match decision {
-                SessionPickerDecision::New => WindowTopologyCommand::NewWindow,
+                SessionPickerDecision::New => WindowTopologyCommand::NewDojo,
                 SessionPickerDecision::Open(index) => {
-                    let Some((dojo_id, window_id)) =
-                        self.session_picker_targets.get(index).copied()
+                    let Some((lair_id, dojo_id)) = self.session_picker_targets.get(index).copied()
                     else {
                         self.fail(anyhow::anyhow!("session picker selected an invalid target"));
                         return;
                     };
-                    WindowTopologyCommand::SwitchWindow { dojo_id, window_id }
+                    WindowTopologyCommand::SwitchDojo { lair_id, dojo_id }
                 }
             };
-            self.restore_embedded_session_picker();
+            self.close_inline_session_picker();
             self.session_switch_pending = true;
             if let Err(error) = self.send_topology_command(command) {
                 self.session_switch_pending = false;
@@ -5049,8 +5443,12 @@ impl App {
             }
             return;
         }
-        if let Some(picker) = self.session_picker.take() {
-            let _ = picker.decision.send(decision);
+        if let Some(picker) = self.session_picker.take()
+            && let SessionPickerHost::Standalone {
+                decision: sender, ..
+            } = picker.host
+        {
+            let _ = sender.send(decision);
         }
         self.exit = true;
     }
@@ -5146,8 +5544,7 @@ impl App {
                 Keysym::Down | Keysym::j | Keysym::J => self.move_session_picker(1),
                 Keysym::Home => {
                     if let Some(picker) = self.session_picker.as_mut() {
-                        picker.selected = 0;
-                        picker.page_start = 0;
+                        picker.select_first();
                     }
                     if let Err(error) = self.refresh_session_picker() {
                         self.fail(error);
@@ -5155,10 +5552,7 @@ impl App {
                 }
                 Keysym::End => {
                     if let Some(picker) = self.session_picker.as_mut() {
-                        picker.selected = picker.items.len();
-                        picker.page_start = picker.items.len().saturating_sub(1)
-                            / SESSION_PICKER_PAGE_ITEMS
-                            * SESSION_PICKER_PAGE_ITEMS;
+                        picker.select_last();
                     }
                     if let Err(error) = self.refresh_session_picker() {
                         self.fail(error);
@@ -5450,10 +5844,12 @@ impl App {
         switched: bool,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.session_picker_restore.is_none(),
+            !self.inline_picker_open(),
             "topology replacement arrived while the session picker was open"
         );
         let removed = removed.into_iter().collect::<HashSet<_>>();
+        self.pending_exited_splints
+            .retain(|splint_id| !removed.contains(splint_id));
         for mut pane in added {
             apply_theme(&mut pane.snapshot, self.theme);
             self.inactive_panes
@@ -5504,23 +5900,23 @@ impl App {
         Ok(())
     }
 
-    fn apply_topology_updates(&mut self) -> Result<(bool, Option<ResolvedTheme>)> {
-        let mut pending = Vec::new();
+    fn apply_topology_updates(&mut self) -> Result<(bool, Option<ThemeUpdate>)> {
+        let mut pending = VecDeque::new();
         if let Some(updates) = &mut self.topology_updates {
             let drained = drain_receiver(updates, &self.update_waker);
-            pending = drained.items;
+            pending = drained.items.into();
             if drained.disconnected {
                 self.topology_updates = None;
             }
         }
-        if self.session_picker_restore.is_none() && !self.deferred_topology_updates.is_empty() {
-            let mut deferred = std::mem::take(&mut self.deferred_topology_updates);
+        if !self.inline_picker_open() && !self.deferred_topology_updates.is_empty() {
+            let mut deferred = VecDeque::from(std::mem::take(&mut self.deferred_topology_updates));
             deferred.append(&mut pending);
             pending = deferred;
         }
         let mut changed = false;
         let mut next_theme = None;
-        for update in pending {
+        while let Some(update) = pending.pop_front() {
             match update {
                 WindowTopologyUpdate::Apply {
                     layout,
@@ -5529,19 +5925,28 @@ impl App {
                     focused,
                     switched,
                 } => {
-                    if self.session_picker_restore.is_some() {
-                        anyhow::ensure!(
-                            self.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES,
-                            "too many topology updates arrived while the session picker was open"
-                        );
-                        self.deferred_topology_updates
-                            .push(WindowTopologyUpdate::Apply {
-                                layout,
-                                added,
-                                removed,
-                                focused,
-                                switched,
-                            });
+                    if self.inline_picker_open() {
+                        let update = WindowTopologyUpdate::Apply {
+                            layout,
+                            added,
+                            removed,
+                            focused,
+                            switched,
+                        };
+                        if self.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES {
+                            self.deferred_topology_updates.push(update);
+                        } else {
+                            self.close_inline_session_picker();
+                            eprintln!(
+                                "splinterm session picker: cancelled to apply queued topology updates"
+                            );
+                            let mut replay =
+                                VecDeque::from(std::mem::take(&mut self.deferred_topology_updates));
+                            replay.push_back(update);
+                            replay.append(&mut pending);
+                            pending = replay;
+                            changed = true;
+                        }
                     } else {
                         self.apply_topology_replacement(layout, added, removed, focused, switched)?;
                         changed = true;
@@ -5551,13 +5956,14 @@ impl App {
                     if self.session_picker_requested
                         && self.session_picker.is_none()
                         && !self.session_switch_pending
+                        && !self.session_picker_reconcile_pending
                     {
                         self.show_embedded_session_picker(items, targets)?;
                         changed = true;
                     }
                 }
                 WindowTopologyUpdate::SessionPickerFailed(message) => {
-                    self.restore_embedded_session_picker();
+                    self.close_inline_session_picker();
                     self.session_picker_requested = false;
                     self.session_switch_pending = false;
                     eprintln!("splinterm session picker: {message}");
@@ -5565,11 +5971,11 @@ impl App {
                 WindowTopologyUpdate::SessionSwitchComplete => {
                     self.session_switch_pending = false;
                 }
-                WindowTopologyUpdate::Theme(theme) => {
-                    if self.session_picker_restore.is_some() {
-                        self.deferred_picker_theme = Some(theme);
+                WindowTopologyUpdate::Theme(update) => {
+                    if self.inline_picker_open() {
+                        retain_newest_theme(&mut self.deferred_picker_theme, update);
                     } else {
-                        next_theme = Some(theme);
+                        retain_newest_theme(&mut next_theme, update);
                     }
                 }
                 WindowTopologyUpdate::Closed => self.exit = true,
@@ -5581,7 +5987,12 @@ impl App {
         Ok((changed, next_theme))
     }
 
-    fn apply_resolved_theme(&mut self, theme: ResolvedTheme) -> Result<ThemeUpdateImpact> {
+    fn apply_resolved_theme(&mut self, update: ThemeUpdate) -> Result<ThemeUpdateImpact> {
+        if update.generation <= self.theme_generation {
+            return Ok(ThemeUpdateImpact::default());
+        }
+        self.theme_generation = update.generation;
+        let theme = update.theme;
         self.background_effect_state
             .set_requested_blur(theme.background_blur);
         self.background_effect_state
@@ -5598,20 +6009,17 @@ impl App {
         for pane in &mut self.inactive_panes {
             if let Some(snapshot) = pane.snapshot.as_mut() {
                 apply_theme(snapshot, theme);
-                pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
-                    snapshot,
-                    self.scale_120,
-                    Some(&pane.image_sources),
-                )?);
             }
         }
         self.full_redraw = true;
         Ok(impact)
     }
 
-    fn apply_inactive_updates(&mut self) -> Result<(bool, Option<ResolvedTheme>)> {
+    fn apply_inactive_updates(&mut self) -> Result<InactiveUpdateDrain> {
         let mut changed = false;
         let mut next_theme = None;
+        let mut dirty_frames = HashSet::new();
+        let mut exited = Vec::new();
         for pane in &mut self.inactive_panes {
             let mut pending = Vec::new();
             let mut disconnected = false;
@@ -5626,18 +6034,45 @@ impl App {
                 pane.updates = None;
                 changed = true;
             }
+            let mut terminal_updates = Vec::with_capacity(pending.len());
             for update in pending {
-                if let WindowUpdate::Theme(theme) = update {
-                    next_theme = Some(theme);
-                } else {
-                    changed |= pane.apply_background_update(update, self.theme, self.scale_120)?;
+                match update {
+                    WindowUpdate::Theme(update) => {
+                        retain_newest_theme(&mut next_theme, update);
+                    }
+                    WindowUpdate::Exited { splint_id } => {
+                        anyhow::ensure!(
+                            pane.snapshot
+                                .as_ref()
+                                .is_some_and(|snapshot| snapshot.splint_id == splint_id),
+                            "inactive pane exit identity does not match its snapshot"
+                        );
+                        pane.controller_active = false;
+                        pane.commands = None;
+                        pane.updates = None;
+                        exited.push(splint_id);
+                        changed = true;
+                    }
+                    update => terminal_updates.push(update),
                 }
+            }
+            let impact = apply_inactive_update_batch(pane, terminal_updates, self.theme)?;
+            changed |= impact.visual_changed;
+            if impact.frame_dirty
+                && let Some(snapshot) = pane.snapshot.as_ref()
+            {
+                dirty_frames.insert(snapshot.splint_id);
             }
         }
         if changed {
             self.full_redraw = true;
         }
-        Ok((changed, next_theme))
+        Ok(InactiveUpdateDrain {
+            changed,
+            theme: next_theme,
+            dirty_frames,
+            exited,
+        })
     }
 
     #[allow(
@@ -5649,17 +6084,22 @@ impl App {
         if self.exit {
             return Ok(());
         }
-        let topology_theme = topology_theme.or_else(|| {
-            self.session_picker_restore
-                .is_none()
-                .then(|| self.deferred_picker_theme.take())
-                .flatten()
-        });
+        let inline_picker_open = self.inline_picker_open();
+        let picker_reconcile_pending = self.session_picker_reconcile_pending;
+        let mut next_theme = (!inline_picker_open)
+            .then(|| self.deferred_picker_theme.take())
+            .flatten();
+        if let Some(update) = topology_theme {
+            retain_newest_theme(&mut next_theme, update);
+        }
         let restored_frontend = std::mem::take(&mut self.restored_frontend_needs_resize);
-        if topology_changed || restored_frontend {
+        let final_resize_reconciliation = topology_changed || restored_frontend;
+        if inline_picker_open && restored_frontend {
+            self.restored_frontend_needs_resize = true;
+        } else if final_resize_reconciliation && !picker_reconcile_pending {
             self.emit_resize()?;
         }
-        if restored_frontend {
+        if restored_frontend && !inline_picker_open && !picker_reconcile_pending {
             self.update_ime_cursor_rectangle();
         }
 
@@ -5672,20 +6112,30 @@ impl App {
             pending = drained.items;
             disconnected = drained.disconnected;
         }
-        if disconnected {
+        if disconnected && !pane_stream_has_terminal_notice(&pending) {
             self.exit = true;
             return Ok(());
         }
-        let (inactive_changed, inactive_theme) = self.apply_inactive_updates()?;
-        let mut visual_changed = topology_changed | inactive_changed;
+        let inactive = self.apply_inactive_updates()?;
+        self.pending_exited_splints.extend(inactive.exited);
+        if let Some(update) = inactive.theme {
+            retain_newest_theme(&mut next_theme, update);
+        }
+        let mut visual_changed = topology_changed | inactive.changed;
         let mut title_changed = false;
         let mut full_frame_reload = false;
+        let mut rebuild_all_inactive = false;
         let mut effect_desired_changed = false;
-        if let Some(theme) = topology_theme.or(inactive_theme) {
-            let impact = self.apply_resolved_theme(theme)?;
-            visual_changed |= impact.rebuild_pixels;
-            full_frame_reload |= impact.rebuild_pixels;
-            effect_desired_changed |= impact.reconcile_effect;
+        if let Some(update) = next_theme {
+            if inline_picker_open {
+                retain_newest_theme(&mut self.deferred_picker_theme, update);
+            } else {
+                let impact = self.apply_resolved_theme(update)?;
+                visual_changed |= impact.rebuild_pixels;
+                full_frame_reload |= impact.rebuild_pixels;
+                rebuild_all_inactive |= impact.rebuild_pixels;
+                effect_desired_changed |= impact.reconcile_effect;
+            }
         }
         for update in pending {
             match update {
@@ -5983,11 +6433,34 @@ impl App {
                     visual_changed = true;
                     self.full_redraw = true;
                 }
-                WindowUpdate::Theme(theme) => {
-                    let impact = self.apply_resolved_theme(theme)?;
-                    visual_changed |= impact.rebuild_pixels;
-                    full_frame_reload |= impact.rebuild_pixels;
-                    effect_desired_changed |= impact.reconcile_effect;
+                WindowUpdate::Theme(update) => {
+                    if self.inline_picker_open() {
+                        retain_newest_theme(&mut self.deferred_picker_theme, update);
+                    } else {
+                        let impact = self.apply_resolved_theme(update)?;
+                        visual_changed |= impact.rebuild_pixels;
+                        full_frame_reload |= impact.rebuild_pixels;
+                        rebuild_all_inactive |= impact.rebuild_pixels;
+                        effect_desired_changed |= impact.reconcile_effect;
+                    }
+                }
+                WindowUpdate::Exited { splint_id } => {
+                    anyhow::ensure!(
+                        self.focused_splint() == Some(splint_id),
+                        "focused pane exit identity does not match its snapshot"
+                    );
+                    if self.layout.is_some() {
+                        self.pending_exited_splints.insert(splint_id);
+                        self.pane.controller_active = false;
+                        self.pane.commands = None;
+                        self.pane.updates = None;
+                        title_changed = true;
+                        visual_changed = true;
+                        self.full_redraw = true;
+                    } else {
+                        self.exit = true;
+                        return Ok(());
+                    }
                 }
                 WindowUpdate::Shutdown => {
                     if self.layout.is_some() {
@@ -6004,6 +6477,20 @@ impl App {
                 }
             }
         }
+        if !self.pending_exited_splints.is_empty() {
+            let topology_queue_open = self.topology_commands.as_ref().is_some_and(|commands| {
+                enqueue_pending_exited_splints(&mut self.pending_exited_splints, commands)
+            });
+            if !topology_queue_open {
+                self.topology_commands = None;
+            }
+        }
+        visual_changed |= rebuild_inactive_frames(
+            &mut self.inactive_panes,
+            &inactive.dirty_frames,
+            rebuild_all_inactive,
+            self.scale_120,
+        )? > 0;
         if self.pane.search.pending_reveal.is_some() {
             self.reveal_pending_search_match();
             visual_changed = true;
@@ -6073,17 +6560,20 @@ impl App {
             }
             self.refresh_ime_preedit()?;
             self.update_ime_cursor_rectangle();
-            if terminal_resize_allowed(
-                TerminalResizeCause::SnapshotAvailable,
-                self.pane.last_resize.is_some(),
-            ) {
+            if !self.inline_picker_open()
+                && !self.session_picker_reconcile_pending
+                && terminal_resize_allowed(
+                    TerminalResizeCause::SnapshotAvailable,
+                    self.pane.last_resize.is_some(),
+                )
+            {
                 self.emit_resize()?;
             }
-            if self.configured {
+            if self.configured && !self.session_picker_reconcile_pending {
                 self.schedule_terminal_draw(queue_handle)?;
             }
         }
-        if title_changed {
+        if title_changed && !self.inline_picker_open() && !self.session_picker_reconcile_pending {
             let snapshot = self
                 .pane
                 .snapshot
@@ -6096,6 +6586,32 @@ impl App {
                 self.pane.pending_control_transfer.is_some(),
                 Some(&self.pane.search),
             ));
+        }
+        if picker_reconcile_pending {
+            self.session_picker_reconcile_pending = false;
+            if final_resize_reconciliation {
+                self.emit_resize()?;
+                self.update_ime_cursor_rectangle();
+            }
+            self.update_window_title();
+            match picker_ime_reconcile(
+                self.ime_modal_barrier,
+                self.keyboard_focused,
+                self.ime.entered,
+            ) {
+                PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
+                PickerImeReconcile::Enable => self.enable_text_input(),
+                PickerImeReconcile::None => {}
+            }
+            let modal_focus_changed = self
+                .session_picker_open_focus
+                .take()
+                .is_some_and(|focused| focused != self.keyboard_focused);
+            self.reconcile_terminal_focus_report(modal_focus_changed);
+            self.full_redraw = true;
+            if self.configured {
+                self.schedule_draw(queue_handle)?;
+            }
         }
         Ok(())
     }
@@ -6118,8 +6634,19 @@ impl App {
         queue_handle: &QueueHandle<Self>,
     ) -> Result<()> {
         let observation = self.output_dpi_observation(output);
-        if !update_output_dpi(observation, self.scale_120)? {
+        let raster_changed = update_output_dpi(observation, self.scale_120)?;
+        self.renderer_generation = self.renderer_generation.saturating_add(1);
+        self.session_picker_text_cache.clear();
+        self.session_picker_layout = None;
+        if !raster_changed {
+            if self.inline_picker_open() && self.configured {
+                self.session_picker_redraw = true;
+                self.schedule_draw(queue_handle)?;
+            }
             return Ok(());
+        }
+        if self.inline_picker_open() {
+            self.restored_frontend_needs_resize = true;
         }
         self.rebuild_scaled_pane_frames(self.scale_120)?;
         self.buffers.clear();
@@ -6162,6 +6689,12 @@ impl App {
             self.text_row = Some(TextRow::load(scale_120.div_ceil(SCALE_DENOMINATOR))?);
         }
         self.scale_120 = scale_120;
+        self.renderer_generation = self.renderer_generation.saturating_add(1);
+        self.session_picker_text_cache.clear();
+        self.session_picker_layout = None;
+        if self.inline_picker_open() {
+            self.restored_frontend_needs_resize = true;
+        }
         self.buffers.clear();
         self.backing.clear();
         self.full_redraw = true;
@@ -6178,7 +6711,8 @@ impl App {
     }
 
     fn cursor_is_blinking(&self) -> bool {
-        self.cursor_blink
+        !self.inline_picker_open()
+            && self.cursor_blink
             && self.pane.snapshot.as_ref().is_some_and(|snapshot| {
                 cursor_blink_enabled(
                     self.reduced_motion,
@@ -6375,6 +6909,30 @@ impl App {
             selection_display_bounds(snapshot, &display, selection)
                 .map(|(start, end)| ((start.row, start.column), (end.row, end.column)))
         });
+        let inline_picker_open = self.inline_picker_open();
+        let picker_layout = if inline_picker_open {
+            let picker = self
+                .session_picker
+                .as_mut()
+                .context("inline picker exists")?;
+            let layout = session_picker_overlay_layout(
+                self.logical_width,
+                self.logical_height,
+                self.scale_120,
+                picker.items.len(),
+                picker.selected,
+                picker.visible_start,
+            );
+            if let Some(layout) = &layout {
+                picker.visible_start = layout.visible_range.start;
+            }
+            layout
+        } else {
+            None
+        };
+        let terminal_cursor_blink =
+            presented_cursor_visible(inline_picker_open, self.cursor_blink_visible);
+        let terminal_keyboard_focused = self.keyboard_focused && !inline_picker_open;
         let mut buffer_index = None;
         for (index, buffer) in self.buffers.iter().enumerate() {
             if self.pool.canvas(&buffer.buffer).is_some() {
@@ -6474,7 +7032,7 @@ impl App {
                             frame,
                             &geometry,
                             Self::buffer_rect(rect, self.scale_120)?,
-                            self.cursor_blink_visible,
+                            terminal_cursor_blink,
                             self.cursor_style,
                             CursorPresentation::for_keyboard_focus(false),
                         );
@@ -6489,9 +7047,9 @@ impl App {
                             active_rect.context("active pane rectangle")?,
                             self.scale_120,
                         )?,
-                        self.cursor_blink_visible,
+                        terminal_cursor_blink,
                         self.cursor_style,
-                        CursorPresentation::for_keyboard_focus(self.keyboard_focused),
+                        CursorPresentation::for_keyboard_focus(terminal_keyboard_focused),
                     );
                 } else {
                     paint_snapshot_presented(
@@ -6500,9 +7058,9 @@ impl App {
                         height,
                         frame,
                         geometry,
-                        self.cursor_blink_visible,
+                        terminal_cursor_blink,
                         self.cursor_style,
-                        CursorPresentation::for_keyboard_focus(self.keyboard_focused),
+                        CursorPresentation::for_keyboard_focus(terminal_keyboard_focused),
                     );
                 }
             } else {
@@ -6516,9 +7074,9 @@ impl App {
                     frame,
                     geometry,
                     &self.pane.raster_dirty_rows,
-                    self.cursor_blink_visible,
+                    terminal_cursor_blink,
                     self.cursor_style,
-                    CursorPresentation::for_keyboard_focus(self.keyboard_focused),
+                    CursorPresentation::for_keyboard_focus(terminal_keyboard_focused),
                 );
             }
             let selection = resolved_selection;
@@ -6534,7 +7092,8 @@ impl App {
             let transient_canvas_content = selection.is_some()
                 || hovered_url.is_some()
                 || history_status.is_some()
-                || self.trusted_consent.is_some();
+                || self.trusted_consent.is_some()
+                || inline_picker_open;
             let full_backing_sync =
                 self.full_redraw || capture_image_count > 0 || backing_scroll_changed;
             for buffer in &mut self.buffers {
@@ -6564,7 +7123,7 @@ impl App {
                     selection,
                     hovered_url,
                     dirty_rows: None,
-                    focused: self.keyboard_focused,
+                    focused: terminal_keyboard_focused,
                     selection_color: self.theme.selection,
                     url_color: self.theme.url,
                     accent_color: self.theme.ui_accent,
@@ -6622,6 +7181,35 @@ impl App {
         } else {
             anyhow::bail!("window has no prepared renderer content");
         }
+        if let (Some(layout), Some(picker)) = (picker_layout.as_ref(), self.session_picker.as_ref())
+        {
+            let items = picker
+                .items
+                .iter()
+                .map(|item| SessionPickerTextItem {
+                    display_title: &item.display_title,
+                    working_directory: &item.working_directory,
+                    pane_count: item.pane_count,
+                    running_pane_count: item.running_pane_count,
+                })
+                .collect::<Vec<_>>();
+            paint_session_picker_overlay(
+                &mut self.session_picker_text_cache,
+                canvas,
+                width,
+                height,
+                self.scale_120,
+                self.renderer_generation,
+                layout,
+                session_picker_palette(self.theme),
+                &items,
+                picker.selected_target(),
+                picker.hovered,
+                self.session_picker_pressed,
+                self.keyboard_focused,
+            )?;
+            self.buffers[buffer_index].stale.mark_full();
+        }
         if let Some(started) = image_composition_started {
             eprintln!(
                 "phase5-image-trace composition_ns={} image_count={capture_image_count}",
@@ -6647,8 +7235,9 @@ impl App {
         }
         let history_status =
             history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref());
-        let damage_full_surface =
-            take_full_surface_damage(&mut self.full_redraw, self.pane.snapshot_frame.is_some());
+        let picker_damage_full_surface = std::mem::take(&mut self.session_picker_redraw);
+        let damage_full_surface = picker_damage_full_surface
+            || take_full_surface_damage(&mut self.full_redraw, self.pane.snapshot_frame.is_some());
         if damage_full_surface {
             self.window
                 .wl_surface()
@@ -6697,6 +7286,7 @@ impl App {
             .attach_to(self.window.wl_surface())
             .context("attach SHM buffer")?;
         self.window.commit();
+        self.session_picker_layout = picker_layout;
         self.complete_background_effect_draw_commit()?;
         let committed_identity = self
             .pane
@@ -6890,6 +7480,7 @@ impl WindowHandler for App {
         if resized {
             self.logical_width = width;
             self.logical_height = height;
+            self.session_picker_layout = None;
             if let Some(viewport) = &self.viewport {
                 match viewport_destination(width, height) {
                     Ok((width, height)) => viewport.set_destination(width, height),
@@ -6910,9 +7501,15 @@ impl WindowHandler for App {
                 TerminalResizeCause::SurfaceConfigure,
                 self.pane.last_resize.is_some(),
             ));
+            let resize = if self.inline_picker_open() {
+                self.restored_frontend_needs_resize = true;
+                Ok(())
+            } else {
+                self.emit_resize()
+            };
             if let Err(error) = self
                 .queue_background_effect_geometry_for_draw()
-                .and_then(|()| self.emit_resize())
+                .and(resize)
                 .and_then(|()| self.schedule_draw(queue_handle))
             {
                 self.fail(error);
@@ -6965,7 +7562,11 @@ impl SeatHandler for App {
                     self.keyboard_seat = Some(seat.clone());
                     if self.text_input.is_none() {
                         if let Some(manager) = &self.text_input_manager {
-                            self.text_input = Some(manager.get_text_input(&seat, queue_handle, ()));
+                            self.text_input = Some(manager.get_text_input(
+                                &seat,
+                                queue_handle,
+                                self.ime_generation,
+                            ));
                             self.text_input_seat = Some(seat.clone());
                         }
                     }
@@ -6997,6 +7598,9 @@ impl SeatHandler for App {
             }
             self.keyboard_seat = None;
             if self.text_input_seat.as_ref() == Some(&seat) {
+                self.ime.entered = false;
+                self.ime_generation = self.ime_generation.saturating_add(1);
+                self.ime_modal_barrier = false;
                 self.clear_ime_preedit();
                 if let Some(text_input) = self.text_input.take() {
                     text_input.disable();
@@ -7027,6 +7631,9 @@ impl SeatHandler for App {
             }
             self.keyboard_seat = None;
             if self.text_input_seat.as_ref() == Some(&seat) {
+                self.ime.entered = false;
+                self.ime_generation = self.ime_generation.saturating_add(1);
+                self.ime_modal_barrier = false;
                 self.clear_ime_preedit();
                 if let Some(text_input) = self.text_input.take() {
                     text_input.disable();
@@ -7062,8 +7669,9 @@ impl KeyboardHandler for App {
         if surface == self.window.wl_surface() {
             self.set_ime_focus(true);
             self.full_redraw = true;
-            if self.input_modes().focus_reporting {
+            if self.input_modes().focus_reporting && !self.inline_picker_open() {
                 self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
+                self.terminal_focus_reported = true;
             }
             if let Err(error) = self.schedule_draw(queue_handle) {
                 self.fail(error);
@@ -7082,8 +7690,9 @@ impl KeyboardHandler for App {
         if surface == self.window.wl_surface() {
             self.set_ime_focus(false);
             self.full_redraw = true;
-            if self.input_modes().focus_reporting {
+            if self.input_modes().focus_reporting && !self.inline_picker_open() {
                 self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
+                self.terminal_focus_reported = false;
             }
             if let Err(error) = self.schedule_draw(queue_handle) {
                 self.fail(error);
@@ -7099,6 +7708,9 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
+        if self.session_picker.is_some() {
+            self.session_picker_consumed_keys.insert(event.raw_code);
+        }
         if let Some(action) = session_picker_shortcut_action(
             event.keysym,
             self.modifiers,
@@ -7106,7 +7718,8 @@ impl KeyboardHandler for App {
             self.session_picker.is_some()
                 || self.trusted_consent.is_some()
                 || self.session_picker_requested
-                || self.session_switch_pending,
+                || self.session_switch_pending
+                || self.session_picker_reconcile_pending,
         ) {
             if action == SessionPickerShortcutAction::Request {
                 if self.topology_commands.is_some() {
@@ -7125,7 +7738,7 @@ impl KeyboardHandler for App {
         }
         if self.session_picker.is_some() || self.trusted_consent.is_some() {
             self.handle_key(&event);
-            if self.full_redraw
+            if (self.full_redraw || self.session_picker_redraw)
                 && let Err(error) = self.schedule_draw(queue_handle)
             {
                 self.fail(error);
@@ -7204,6 +7817,18 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
+        if self.session_picker.is_some() {
+            self.handle_key(&event);
+            if (self.full_redraw || self.session_picker_redraw)
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.fail(error);
+            }
+            return;
+        }
+        if self.session_picker_consumed_keys.contains(&event.raw_code) {
+            return;
+        }
         if session_picker_shortcut_action(
             event.keysym,
             self.modifiers,
@@ -7211,13 +7836,14 @@ impl KeyboardHandler for App {
             self.session_picker.is_some()
                 || self.trusted_consent.is_some()
                 || self.session_picker_requested
-                || self.session_switch_pending,
+                || self.session_switch_pending
+                || self.session_picker_reconcile_pending,
         )
         .is_some()
         {
             return;
         }
-        if self.session_picker.is_some() || self.trusted_consent.is_some() {
+        if self.trusted_consent.is_some() {
             self.handle_key(&event);
             return;
         }
@@ -7240,8 +7866,9 @@ impl KeyboardHandler for App {
         _queue_handle: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
-        _event: KeyEvent,
+        event: KeyEvent,
     ) {
+        self.session_picker_consumed_keys.remove(&event.raw_code);
     }
 
     fn update_modifiers(
@@ -7270,8 +7897,14 @@ impl PointerHandler for App {
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
+        let modal_frame = self.inline_picker_open();
+        let mut picker_changed = false;
         for event in events {
             if &event.surface != self.window.wl_surface() {
+                continue;
+            }
+            if modal_frame {
+                picker_changed |= self.handle_session_picker_pointer(event);
                 continue;
             }
             let previous_hover = self.pane.hovered_url.clone();
@@ -7322,7 +7955,12 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Press { button, serial, .. } => {
                     self.last_pointer_serial = Some(serial);
-                    if button == BTN_LEFT && self.session_picker.is_some() {
+                    if button == BTN_LEFT
+                        && self
+                            .session_picker
+                            .as_ref()
+                            .is_some_and(|picker| !picker.is_inline())
+                    {
                         let decision = cell.and_then(|position| {
                             self.session_picker
                                 .as_mut()
@@ -7466,7 +8104,9 @@ impl PointerHandler for App {
             }
         }
         if self.configured
-            && (self.pane.viewport_dirty
+            && !self.session_picker_reconcile_pending
+            && (picker_changed && self.inline_picker_open()
+                || self.pane.viewport_dirty
                 || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
                 || self.pane.surface_dirty_rows.iter().any(|dirty| *dirty))
         {
@@ -7843,20 +8483,33 @@ impl Dispatch<WpFractionalScaleV1, ()> for App {
     }
 }
 
-impl Dispatch<ZwpTextInputV3, ()> for App {
+impl Dispatch<ZwpTextInputV3, u64> for App {
     fn event(
         state: &mut Self,
         _proxy: &ZwpTextInputV3,
         event: zwp_text_input_v3::Event,
-        _data: &(),
+        generation: &u64,
         _connection: &Connection,
         queue_handle: &QueueHandle<Self>,
     ) {
+        if *generation != state.ime_generation {
+            return;
+        }
+        let ime_batch_event = matches!(
+            &event,
+            zwp_text_input_v3::Event::PreeditString { .. }
+                | zwp_text_input_v3::Event::CommitString { .. }
+                | zwp_text_input_v3::Event::Done { .. }
+        );
+        if ime_batch_event && (state.inline_picker_open() || state.ime_modal_barrier) {
+            state.ime.clear_composition();
+            return;
+        }
         match event {
             zwp_text_input_v3::Event::Enter { surface } => {
                 if surface == *state.window.wl_surface() {
                     state.ime.entered = true;
-                    if state.keyboard_focused {
+                    if state.keyboard_focused && !state.inline_picker_open() {
                         state.enable_text_input();
                     }
                 }
@@ -8135,6 +8788,43 @@ mod tests {
         let drained = drain_receiver(&mut receiver, &waker);
         assert_eq!(drained.items, (0..item_count).collect::<Vec<_>>());
         assert!(drained.disconnected);
+    }
+
+    #[test]
+    fn terminal_stream_notices_distinguish_clean_exit_from_unexpected_disconnect() {
+        let splint_id = SplintId::new();
+        assert!(pane_stream_has_terminal_notice(&[WindowUpdate::Exited {
+            splint_id
+        }]));
+        assert!(pane_stream_has_terminal_notice(&[WindowUpdate::Shutdown]));
+        assert!(!pane_stream_has_terminal_notice(&[WindowUpdate::Control(
+            false
+        )]));
+    }
+
+    #[test]
+    fn pending_exited_splints_retry_full_and_closed_topology_queues() {
+        let first = SplintId::new();
+        let second = SplintId::new();
+        let mut pending = HashSet::from([first, second]);
+        let (commands, mut receiver) = tokio::sync::mpsc::channel(1);
+
+        assert!(enqueue_pending_exited_splints(&mut pending, &commands));
+        assert_eq!(pending.len(), 1);
+        let WindowTopologyCommand::Close { target: accepted } = receiver.try_recv().unwrap() else {
+            panic!("expected automatic close command");
+        };
+        assert!(!pending.contains(&accepted));
+
+        assert!(enqueue_pending_exited_splints(&mut pending, &commands));
+        assert!(pending.is_empty());
+        let WindowTopologyCommand::Close { target: retained } = receiver.try_recv().unwrap() else {
+            panic!("expected retried automatic close command");
+        };
+        drop(receiver);
+        pending.insert(retained);
+        assert!(!enqueue_pending_exited_splints(&mut pending, &commands));
+        assert_eq!(pending, HashSet::from([retained]));
     }
 
     #[test]
@@ -8545,50 +9235,16 @@ mod tests {
     }
 
     #[test]
-    fn embedded_picker_restores_the_exact_live_frontend_bundle() {
-        let first = Splint::shell(PathBuf::from("/tmp/first"));
-        let first_id = first.id;
-        let second = Splint::shell(PathBuf::from("/tmp/second"));
-        let second_id = second.id;
-        let original_layout = LayoutNode::Branch {
-            axis: Axis::Horizontal,
-            ratio: SplitRatio::new(500).unwrap(),
-            first: Box::new(LayoutNode::Leaf(first)),
-            second: Box::new(LayoutNode::Leaf(second)),
-        };
-        let mut pane = PaneView::from_options(pane_options(first_id), SCALE_DENOMINATOR).unwrap();
-        pane.search.input = Some("retained search".to_owned());
-        let mut inactive_panes =
-            vec![PaneView::from_options(pane_options(second_id), SCALE_DENOMINATOR).unwrap()];
-        let mut layout = Some(original_layout.clone());
-        let picker_id = SplintId::new();
-        let picker = PaneView::from_options(pane_options(picker_id), SCALE_DENOMINATOR).unwrap();
-
-        let saved = install_picker_frontend(&mut pane, &mut inactive_panes, &mut layout, picker);
-        assert_eq!(
-            pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
-            Some(picker_id)
-        );
-        assert!(inactive_panes.is_empty());
-        assert!(layout.is_none());
-
-        restore_saved_frontend(&mut pane, &mut inactive_panes, &mut layout, saved);
-        assert_eq!(
-            pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
-            Some(first_id)
-        );
-        assert_eq!(pane.search.input.as_deref(), Some("retained search"));
-        assert!(pane.commands.is_some());
-        assert!(pane.updates.is_some());
-        assert_eq!(inactive_panes.len(), 1);
-        assert_eq!(
-            inactive_panes[0]
-                .snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.splint_id),
-            Some(second_id)
-        );
-        assert_eq!(layout, Some(original_layout));
+    fn inline_picker_state_has_no_terminal_snapshot_identity() {
+        let picker = SessionPickerUi::inline(vec![SessionPickerItem {
+            display_title: "work / editor".to_owned(),
+            working_directory: "/work".to_owned(),
+            pane_count: 2,
+            running_pane_count: 2,
+        }]);
+        assert!(picker.is_inline());
+        assert_eq!(picker.selected_target(), PickerHitTarget::New);
+        assert!(matches!(picker.host, SessionPickerHost::Inline));
     }
 
     #[test]
@@ -8704,9 +9360,9 @@ mod tests {
                     image_sources: None,
                 },
                 ResolvedTheme::default(),
-                SCALE_DENOMINATOR,
             )
             .unwrap()
+            .visual_changed
         );
         assert_eq!(pane.snapshot.as_ref().unwrap().revision, 2);
         assert_eq!(pane.snapshot.as_ref().unwrap().title, "background pane");
@@ -8721,14 +9377,67 @@ mod tests {
                     image_sources: None,
                 },
                 ResolvedTheme::default(),
-                SCALE_DENOMINATOR,
             )
             .is_err()
         );
     }
 
     #[test]
-    fn inactive_detached_pane_stays_anchored_across_new_output() {
+    fn inactive_pane_batch_defers_one_rebuild_until_after_contiguous_burst() {
+        let splint_id = SplintId::new();
+        let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
+        let mut first = empty_update();
+        let mut first_row = pane.snapshot.as_ref().unwrap().visible_rows[0].clone();
+        first_row.cells[0].content = "first".into();
+        first.rows.push(splinterm_protocol::TerminalRowPatch {
+            index: 0,
+            row: first_row,
+        });
+        let mut second = empty_update();
+        second.base_revision = 2;
+        second.revision = 3;
+        let mut second_row = pane.snapshot.as_ref().unwrap().visible_rows[0].clone();
+        second_row.cells[0].content = "second".into();
+        second.rows.push(splinterm_protocol::TerminalRowPatch {
+            index: 0,
+            row: second_row,
+        });
+        pane.snapshot_frame = None;
+
+        let impact = apply_inactive_update_batch(
+            &mut pane,
+            [
+                WindowUpdate::Update {
+                    update: first,
+                    image_sources: None,
+                },
+                WindowUpdate::Update {
+                    update: second,
+                    image_sources: None,
+                },
+            ],
+            ResolvedTheme::default(),
+        )
+        .unwrap();
+        assert_eq!(impact, BackgroundUpdateImpact::FRAME);
+        assert!(pane.snapshot_frame.is_none());
+        assert_eq!(
+            rebuild_inactive_frames(
+                std::slice::from_mut(&mut pane),
+                &HashSet::from([splint_id]),
+                false,
+                SCALE_DENOMINATOR,
+            )
+            .unwrap(),
+            1
+        );
+        let snapshot = pane.snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.revision, 3);
+        assert_eq!(snapshot.visible_rows[0].cells[0].content, "second");
+    }
+
+    #[test]
+    fn inactive_detached_pane_batches_snapshot_and_theme_into_one_anchored_frame() {
         let splint_id = SplintId::new();
         let mut initial = valid_snapshot(splint_id);
         initial.visible_rows[0].row_id = Some(3);
@@ -8761,17 +9470,37 @@ mod tests {
         next.newest_available_scrollback_row_id = Some(3);
         next.visible_rows[0].row_id = Some(4);
         next.visible_rows[0].cells[0].content = "live-four".into();
-        pane.apply_background_update(
-            WindowUpdate::Snapshot {
+        pane.snapshot_frame = None;
+        let impact = apply_inactive_update_batch(
+            &mut pane,
+            [WindowUpdate::Snapshot {
                 snapshot: next,
                 image_sources: ImageContentLeaseSet::default(),
-            },
+            }],
             ResolvedTheme::default(),
-            SCALE_DENOMINATOR,
         )
         .unwrap();
+        assert_eq!(impact, BackgroundUpdateImpact::FRAME);
+        assert!(pane.snapshot_frame.is_none());
+        let theme = ResolvedTheme {
+            background: 0x12_34_56,
+            ..ResolvedTheme::default()
+        };
+        apply_theme(pane.snapshot.as_mut().unwrap(), theme);
+        let expected_offset = pane.scrollback_viewport.offset_from_bottom();
+        assert_eq!(
+            rebuild_inactive_frames(
+                std::slice::from_mut(&mut pane),
+                &HashSet::new(),
+                true,
+                SCALE_DENOMINATOR,
+            )
+            .unwrap(),
+            1
+        );
 
         assert!(!pane.scrollback_viewport.is_live());
+        assert_eq!(pane.rendered_viewport_offset, expected_offset);
         let display = pane.display_snapshot().unwrap();
         assert_eq!(display.visible_rows[0].row_id, Some(2));
         assert_ne!(display.visible_rows[0].cells[0].content, "live-four");
@@ -9786,6 +10515,82 @@ mod tests {
     }
 
     #[test]
+    fn picker_activation_requires_matching_press_and_release_targets() {
+        assert_eq!(
+            picker_release_activation(Some(PickerHitTarget::New), Some(PickerHitTarget::New)),
+            Some(PickerHitTarget::New)
+        );
+        assert_eq!(
+            picker_release_activation(Some(PickerHitTarget::Open(1)), None),
+            None
+        );
+        assert_eq!(
+            picker_release_activation(
+                Some(PickerHitTarget::Open(1)),
+                Some(PickerHitTarget::Open(2))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn modal_input_generations_reject_stale_clipboard_and_reconcile_focus_once() {
+        assert!(clipboard_read_is_current(false, 4, 4));
+        assert!(!clipboard_read_is_current(true, 4, 4));
+        assert!(!clipboard_read_is_current(false, 5, 4));
+        assert_eq!(
+            reconciled_focus_report(true, false, true),
+            Some(b"\x1b[I".to_vec())
+        );
+        assert_eq!(
+            reconciled_focus_report(true, true, false),
+            Some(b"\x1b[O".to_vec())
+        );
+        assert_eq!(reconciled_focus_report(true, true, true), None);
+        assert_eq!(reconciled_focus_report(false, false, true), None);
+        assert_eq!(
+            picker_ime_reconcile(true, true, true),
+            PickerImeReconcile::Renew
+        );
+        assert_eq!(
+            picker_ime_reconcile(false, true, true),
+            PickerImeReconcile::Enable
+        );
+        assert_eq!(
+            picker_ime_reconcile(false, false, true),
+            PickerImeReconcile::None
+        );
+    }
+
+    #[test]
+    fn theme_updates_coalesce_by_shared_generation() {
+        let mut pending = None;
+        let theme = ResolvedTheme::default();
+        retain_newest_theme(
+            &mut pending,
+            ThemeUpdate {
+                generation: 8,
+                theme,
+            },
+        );
+        retain_newest_theme(
+            &mut pending,
+            ThemeUpdate {
+                generation: 3,
+                theme,
+            },
+        );
+        retain_newest_theme(
+            &mut pending,
+            ThemeUpdate {
+                generation: 13,
+                theme,
+            },
+        );
+        assert_eq!(pending.map(|update| update.generation), Some(13));
+    }
+
+    #[test]
     fn axis_accumulates_partial_steps_with_foot_thresholds() {
         let mut wheel = WheelAccumulator::default();
         assert_eq!(wheel.push(0.0, 0, -60, 10), None);
@@ -9893,7 +10698,7 @@ mod tests {
             WindowTopologyCommand::RequestSessionPicker,
         )
         .expect("first topology command");
-        let error = try_topology_command(&topology_sender, WindowTopologyCommand::NewWindow)
+        let error = try_topology_command(&topology_sender, WindowTopologyCommand::NewDojo)
             .expect_err("bounded topology overflow");
         assert!(error.to_string().contains("full"));
         assert!(topology_receiver.try_recv().is_ok());
@@ -10036,6 +10841,11 @@ mod tests {
 
         ime.set_preedit(Some("x".repeat(MAX_PREEDIT_BYTES + 1)));
         assert!(!ime.composing());
+        ime.set_preedit(Some("modal".into()));
+        ime.clear_composition();
+        assert!(!ime.composing());
+        assert!(ime.entered);
+        assert!(ime.focused);
     }
 
     #[test]
@@ -10082,20 +10892,22 @@ mod tests {
         let (decision, _receiver) = std_mpsc::channel();
         let items = (0..10)
             .map(|index| SessionPickerItem {
-                primary: format!("session {index}"),
-                secondary: format!("/tmp/{index} · 1 pane · 1 running"),
+                display_title: format!("session {index}"),
+                working_directory: format!("/tmp/{index}"),
+                pane_count: 1,
+                running_pane_count: 1,
             })
             .collect();
         let mut picker = SessionPickerUi::new(items, decision);
         assert_eq!(picker.selected_decision(), SessionPickerDecision::New);
         picker.move_selection(-1);
         assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(9));
-        assert_eq!(picker.page_start, 7);
+        assert_eq!(picker.visible_start, 3);
         assert_eq!(
             picker.select_row(SESSION_PICKER_FIRST_ITEM_ROW),
-            Some(SessionPickerDecision::Open(7))
+            Some(SessionPickerDecision::Open(3))
         );
-        assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(7));
+        assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(3));
         let snapshot = picker.snapshot();
         assert!(snapshot.validate().is_ok());
         assert!(
@@ -10109,11 +10921,48 @@ mod tests {
     }
 
     #[test]
+    fn session_picker_adapts_visibility_for_empty_and_large_catalogs() {
+        for count in [0, 1, 7, 8, 64, 256] {
+            let (decision, _receiver) = std_mpsc::channel();
+            let items = (0..count)
+                .map(|index| SessionPickerItem {
+                    display_title: format!("session {index}"),
+                    working_directory: format!("/tmp/{index}"),
+                    pane_count: 1,
+                    running_pane_count: 1,
+                })
+                .collect();
+            let mut picker = SessionPickerUi::new(items, decision);
+            picker.move_selection(-1);
+            let expected = if count == 0 {
+                SessionPickerDecision::New
+            } else {
+                SessionPickerDecision::Open(count - 1)
+            };
+            assert_eq!(picker.selected_decision(), expected);
+            picker.ensure_selected_visible(3);
+            assert!(picker.visible_start <= count.saturating_sub(3));
+            if count > 0 {
+                let selected = picker.selected - 1;
+                assert!(selected >= picker.visible_start);
+                assert!(selected < picker.visible_start + 3.min(count));
+            }
+            picker.select_first();
+            assert_eq!(picker.selected_decision(), SessionPickerDecision::New);
+            assert_eq!(picker.visible_start, 0);
+            picker.select_last();
+            assert_eq!(picker.selected_decision(), expected);
+        }
+    }
+
+    #[test]
     fn reduced_motion_and_focus_suppress_cursor_blink() {
         let modes = normal_modes();
         assert!(cursor_blink_enabled(false, true, modes));
         assert!(!cursor_blink_enabled(true, true, modes));
         assert!(!cursor_blink_enabled(false, false, modes));
+        assert!(presented_cursor_visible(true, false));
+        assert!(!presented_cursor_visible(false, false));
     }
 
     #[test]

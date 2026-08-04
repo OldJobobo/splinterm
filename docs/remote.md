@@ -41,7 +41,7 @@ A minimal read-only rule is:
 
 ```json
 {
-  "schema": "splinterm.policy.v1",
+  "schema": "splinterm.policy.v2",
   "rules": [
     {
       "id": "ssh-topology-reader",
@@ -50,7 +50,7 @@ A minimal read-only rule is:
         "sha256": "REPLACE_WITH_REVIEWED_SHA256"
       },
       "scopes": ["topology_metadata_read"],
-      "resources": [{"kind": "lair"}],
+      "resources": [{"kind": "daemon"}],
       "limits": {"max_results": 64, "deadline_ms": 5000}
     }
   ]

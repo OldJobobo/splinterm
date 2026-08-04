@@ -212,7 +212,7 @@ def main() -> int:
     )
     addresses: set[str] = set()
     splint_id: str | None = None
-    window_id: str | None = None
+    dojo_id: str | None = None
     result = False
     error: str | None = None
     observed_cell = b""
@@ -249,13 +249,13 @@ def main() -> int:
         )
         name = f"sixel-{args.case}"
         checked_client("new", name, "--", sys.executable, "-c", child)
-        listing = checked_client("list")
-        dojo = re.search(rf"^([0-9a-f-]{{36}})  {re.escape(name)} ", listing, re.MULTILINE)
-        windows = re.findall(r"^  window ([0-9a-f-]{36})  ", listing, re.MULTILINE)
+        listing = checked_client("list", "--all")
+        lair = re.search(rf"^([0-9a-f-]{{36}})  {re.escape(name)} ", listing, re.MULTILINE)
+        dojos = re.findall(r"^  Dojo ([0-9a-f-]{36})  ", listing, re.MULTILINE)
         splints = re.findall(r"^  ([0-9a-f-]{36})  ", listing, re.MULTILINE)
-        if dojo is None or len(windows) != 1 or len(splints) != 1:
+        if lair is None or len(dojos) != 1 or len(splints) != 1:
             raise RuntimeError(f"unexpected Sixel topology:\n{listing}")
-        window_id = windows[0]
+        dojo_id = dojos[0]
         splint_id = splints[0]
 
         V1.assert_test_workspace_isolated()
@@ -271,7 +271,7 @@ def main() -> int:
         }
         command = [
             "env", *[f"{key}={value}" for key, value in selected_environment.items()],
-            str(client_binary), "window", "--dojo-id", dojo.group(1), "--window-id", window_id,
+            str(client_binary), "window", "--lair-id", lair.group(1), "--dojo-id", dojo_id,
         ]
         launcher.write_text(
             "#!/bin/sh\nexec " + shlex.join(command)
@@ -361,8 +361,8 @@ def main() -> int:
             result = False
         if splint_id is not None:
             client("kill", splint_id, "--yes")
-        if window_id is not None:
-            client("close-window", window_id)
+        if dojo_id is not None:
+            client("close-dojo", dojo_id)
         daemon.send_signal(signal.SIGINT)
         try:
             daemon.wait(timeout=8)

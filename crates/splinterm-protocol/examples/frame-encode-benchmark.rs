@@ -96,6 +96,7 @@ fn summary(mut values: Vec<u64>) -> serde_json::Value {
     })
 }
 
+#[allow(clippy::assertions_on_constants)]
 fn main() {
     assert!(!cfg!(debug_assertions), "benchmark requires --release");
     let value = payload();

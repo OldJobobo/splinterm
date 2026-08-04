@@ -19,7 +19,7 @@ pub mod viewport;
 pub mod wayland;
 
 pub use wayland::{
-    AuthorityStatus, SessionPickerDecision, SessionPickerItem, SessionPickerUi, TrustedConsentUi,
-    WindowCommand, WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate,
-    WindowUpdate, run as run_window,
+    AuthorityStatus, SessionPickerDecision, SessionPickerItem, SessionPickerUi, ThemeUpdate,
+    TrustedConsentUi, WindowCommand, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    WindowTopologyUpdate, WindowUpdate, run as run_window,
 };

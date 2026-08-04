@@ -86,7 +86,7 @@ class McpHost:
 
 def write_policy(path: Path, executable: Path, scopes: list[str], resources: list[dict[str, object]]) -> None:
     path.write_text(json.dumps({
-        "schema": "splinterm.policy.v1",
+        "schema": "splinterm.policy.v2",
         "rules": [{
             "id": "package-mcp",
             "executable": {
@@ -134,7 +134,7 @@ def main() -> int:
 
         # Start deny-all. Transport/discovery remains available, daemon-backed
         # operations fail closed until the exact packaged identity is published.
-        policy.write_text('{"schema":"splinterm.policy.v1","rules":[]}', encoding="utf-8")
+        policy.write_text('{"schema":"splinterm.policy.v2","rules":[]}', encoding="utf-8")
         policy.chmod(0o600)
         daemon_process = subprocess.Popen(
             [str(daemon)], env=environment, stdin=subprocess.DEVNULL,
@@ -163,12 +163,12 @@ def main() -> int:
             host.close()
 
             lifecycle_scopes = ["topology_metadata_read", "process_spawn", "topology_layout_mutate"]
-            write_policy(policy, client, lifecycle_scopes, [{"kind": "lair"}])
+            write_policy(policy, client, lifecycle_scopes, [{"kind": "daemon"}])
             daemon_process.send_signal(signal.SIGHUP)
             time.sleep(0.2)
             created = subprocess.run(
                 [
-                    str(client), "--output", "json", "--schema-major", "1",
+                    str(client), "--output", "json", "--schema-major", "2",
                     "--timeout-ms", "10000", "new", "package-mcp", "--",
                     "/bin/sh", "-c", "printf 'package-mcp-ready\\n'; exec sleep 30",
                 ],
@@ -180,8 +180,8 @@ def main() -> int:
             )
             assert created.returncode == 0, (created.stdout, created.stderr)
             body = json.loads(created.stdout)
+            lair_id = body["resource"]["lair_id"]
             dojo_id = body["resource"]["dojo_id"]
-            window_id = body["resource"]["window_id"]
             splint_id = body["resource"]["splint_id"]
             incarnation = body["resource"]["incarnation"]
 
@@ -193,9 +193,9 @@ def main() -> int:
                 "topology_layout_mutate", "topology_name_mutate",
             ]
             resources_exact = [
-                {"kind": "lair"},
+                {"kind": "daemon"},
+                {"kind": "lair", "lair_id": lair_id},
                 {"kind": "dojo", "dojo_id": dojo_id},
-                {"kind": "window", "window_id": window_id},
                 {"kind": "splint", "splint_id": splint_id, "incarnation": incarnation},
             ]
             write_policy(policy, mcp, full_scopes, resources_exact)

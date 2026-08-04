@@ -1,10 +1,13 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{Axis, Splint, SplintId, SplintState, SplitRatio, SplitSide, Window, WindowId};
+use crate::{Axis, LayoutNode, Splint, SplintId, SplintState, SplitRatio, SplitSide};
 
 const MAX_NAME_BYTES: usize = 128;
 
@@ -24,12 +27,52 @@ impl TopologyRevision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct LairId(Uuid);
+
+impl LairId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    #[must_use]
+    pub(crate) const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl Default for LairId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for LairId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for LairId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value).map(Self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DojoId(Uuid);
 
 impl DojoId {
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    #[must_use]
+    pub(crate) const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
     }
 }
 
@@ -53,104 +96,116 @@ impl std::str::FromStr for DojoId {
     }
 }
 
-/// A persistent workspace containing windows and splints.
+/// One persistent terminal layout within a Lair.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dojo {
     pub id: DojoId,
     pub name: String,
-    pub windows: Vec<Window>,
+    /// Daemon-persisted convenience hint; connected clients keep actual focus locally.
+    pub default_focus: SplintId,
+    pub root: LayoutNode,
 }
 
 impl Dojo {
     #[must_use]
-    pub fn new(name: impl Into<String>, cwd: PathBuf) -> Self {
+    pub fn with_shell(name: impl Into<String>, cwd: PathBuf) -> Self {
+        let splint = Splint::shell(cwd);
         Self {
             id: DojoId::new(),
             name: name.into(),
-            windows: vec![Window::with_shell(cwd)],
+            default_focus: splint.id,
+            root: LayoutNode::Leaf(splint),
         }
     }
 }
 
-/// The daemon-owned collection of persistent dojos.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A named persistent session containing Dojos.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lair {
+    pub id: LairId,
+    pub name: String,
+    pub dojos: Vec<Dojo>,
+}
+
+impl Lair {
+    #[must_use]
+    pub fn new(name: impl Into<String>, cwd: PathBuf) -> Self {
+        Self {
+            id: LairId::new(),
+            name: name.into(),
+            dojos: vec![Dojo::with_shell("terminal", cwd)],
+        }
+    }
+}
+
+/// The daemon-owned collection of persistent Lairs.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Topology {
     pub(crate) revision: TopologyRevision,
-    pub(crate) dojos: BTreeMap<DojoId, Dojo>,
+    pub(crate) lairs: BTreeMap<LairId, Lair>,
 }
 
 #[allow(
     clippy::missing_errors_doc,
-    reason = "transaction errors are exhaustively represented by LairError"
+    reason = "transaction errors are exhaustively represented by TopologyError"
 )]
-impl Lair {
+impl Topology {
     #[must_use]
     pub const fn new() -> Self {
         Self {
             revision: TopologyRevision(0),
-            dojos: BTreeMap::new(),
+            lairs: BTreeMap::new(),
         }
     }
 
-    /// Adds a named dojo with one initial shell window.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LairError::EmptyName`] for a blank name or
-    /// [`LairError::DuplicateName`] when that name is already in use.
-    pub fn create_dojo(
+    /// Adds a named Lair with one initial shell Dojo.
+    pub fn create_lair(
         &mut self,
         name: impl Into<String>,
         cwd: PathBuf,
-    ) -> Result<&Dojo, LairError> {
-        self.create_dojo_at(self.revision, name, cwd)
+    ) -> Result<&Lair, TopologyError> {
+        self.create_lair_at(self.revision, name, cwd)
     }
 
-    pub fn create_dojo_at(
+    pub fn create_lair_at(
         &mut self,
         expected: TopologyRevision,
         name: impl Into<String>,
         cwd: PathBuf,
-    ) -> Result<&Dojo, LairError> {
+    ) -> Result<&Lair, TopologyError> {
         self.check_revision(expected)?;
-        let name = name.into();
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(LairError::EmptyName);
-        }
-        if name.len() > MAX_NAME_BYTES {
-            return Err(LairError::NameTooLong);
-        }
-        if self.dojos.values().any(|dojo| dojo.name == name) {
-            return Err(LairError::DuplicateName(name.into()));
+        let name = normalized_name(&name.into())?;
+        if self.lairs.values().any(|lair| lair.name == name) {
+            return Err(TopologyError::DuplicateLairName(name));
         }
 
-        let dojo = Dojo::new(name, cwd);
-        let id = dojo.id;
-        self.insert_dojo_at(expected, dojo)?;
-        Ok(&self.dojos[&id])
+        let lair = Lair::new(name, cwd);
+        let id = lair.id;
+        self.insert_lair_at(expected, lair)?;
+        Ok(&self.lairs[&id])
     }
 
-    pub fn insert_dojo_at(
+    pub fn insert_lair_at(
         &mut self,
         expected: TopologyRevision,
-        dojo: Dojo,
-    ) -> Result<TopologyRevision, LairError> {
+        lair: Lair,
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
-        validate_name(&dojo.name)?;
-        if self.dojos.contains_key(&dojo.id) {
-            return Err(LairError::DuplicateDojoId(dojo.id));
+        validate_name(&lair.name)?;
+        if self.lairs.contains_key(&lair.id) {
+            return Err(TopologyError::DuplicateLairId(lair.id));
         }
-        if self.dojos.values().any(|current| current.name == dojo.name) {
-            return Err(LairError::DuplicateName(dojo.name));
+        if self.lairs.values().any(|current| current.name == lair.name) {
+            return Err(TopologyError::DuplicateLairName(lair.name));
         }
-        self.dojos.insert(dojo.id, dojo);
+        self.validate_new_dojos(&lair.dojos)?;
+        self.lairs.insert(lair.id, lair);
         self.advance_revision();
         Ok(self.revision)
     }
 
-    pub fn remove_dojo(&mut self, id: DojoId) -> Option<Dojo> {
-        let removed = self.dojos.remove(&id);
+    pub fn remove_lair(&mut self, id: LairId) -> Option<Lair> {
+        let removed = self.lairs.remove(&id);
         if removed.is_some() {
             self.advance_revision();
         }
@@ -158,10 +213,6 @@ impl Lair {
     }
 
     /// Inserts a new leaf beside `target` and commits one topology revision.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error without changing the Lair when either identity is invalid.
     pub fn split_splint(
         &mut self,
         target: SplintId,
@@ -169,7 +220,7 @@ impl Lair {
         axis: Axis,
         side: SplitSide,
         ratio: SplitRatio,
-    ) -> Result<TopologyRevision, LairError> {
+    ) -> Result<TopologyRevision, TopologyError> {
         self.split_splint_at(self.revision, target, new_splint, axis, side, ratio)
     }
 
@@ -181,32 +232,28 @@ impl Lair {
         axis: Axis,
         side: SplitSide,
         ratio: SplitRatio,
-    ) -> Result<TopologyRevision, LairError> {
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
         if self.find_splint(new_splint.id).is_some() {
-            return Err(LairError::DuplicateSplintId(new_splint.id));
+            return Err(TopologyError::DuplicateSplintId(new_splint.id));
         }
 
-        let window = self
-            .dojos
+        let dojo = self
+            .lairs
             .values_mut()
-            .flat_map(|dojo| &mut dojo.windows)
-            .find(|window| window.root.find_splint(target).is_some())
-            .ok_or(LairError::SplintNotFound(target))?;
-        if !window.root.split(target, new_splint, axis, side, ratio) {
-            return Err(LairError::SplintNotFound(target));
+            .flat_map(|lair| &mut lair.dojos)
+            .find(|dojo| dojo.root.find_splint(target).is_some())
+            .ok_or(TopologyError::SplintNotFound(target))?;
+        if !dojo.root.split(target, new_splint, axis, side, ratio) {
+            return Err(TopologyError::SplintNotFound(target));
         }
 
         self.advance_revision();
         Ok(self.revision)
     }
 
-    /// Removes an exited leaf, collapsing its parent or removing its final window.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error without changing the Lair when the Splint is missing or live.
-    pub fn close_splint(&mut self, id: SplintId) -> Result<TopologyRevision, LairError> {
+    /// Removes an exited leaf, collapsing its parent or removing its final Dojo.
+    pub fn close_splint(&mut self, id: SplintId) -> Result<TopologyRevision, TopologyError> {
         self.close_splint_at(self.revision, id)
     }
 
@@ -214,33 +261,35 @@ impl Lair {
         &mut self,
         expected: TopologyRevision,
         id: SplintId,
-    ) -> Result<TopologyRevision, LairError> {
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
-        let splint = self.find_splint(id).ok_or(LairError::SplintNotFound(id))?;
+        let splint = self
+            .find_splint(id)
+            .ok_or(TopologyError::SplintNotFound(id))?;
         if !matches!(splint.state, SplintState::Exited(_)) {
-            return Err(LairError::SplintStillLive(id));
+            return Err(TopologyError::SplintStillLive(id));
         }
 
-        'dojos: for dojo in self.dojos.values_mut() {
-            for window_index in 0..dojo.windows.len() {
-                if dojo.windows[window_index].root.find_splint(id).is_none() {
+        'lairs: for lair in self.lairs.values_mut() {
+            for dojo_index in 0..lair.dojos.len() {
+                if lair.dojos[dojo_index].root.find_splint(id).is_none() {
                     continue;
                 }
-                let root = dojo.windows[window_index].root.clone();
+                let root = lair.dojos[dojo_index].root.clone();
                 match root.remove(id) {
                     Ok(Some(root)) => {
-                        let window = &mut dojo.windows[window_index];
-                        window.root = root;
-                        if window.default_focus == id {
-                            window.default_focus = window.root.first_splint_id();
+                        let dojo = &mut lair.dojos[dojo_index];
+                        dojo.root = root;
+                        if dojo.default_focus == id {
+                            dojo.default_focus = dojo.root.first_splint_id();
                         }
                     }
                     Ok(None) => {
-                        dojo.windows.remove(window_index);
+                        lair.dojos.remove(dojo_index);
                     }
-                    Err(_) => return Err(LairError::SplintNotFound(id)),
+                    Err(_) => return Err(TopologyError::SplintNotFound(id)),
                 }
-                break 'dojos;
+                break 'lairs;
             }
         }
 
@@ -253,70 +302,81 @@ impl Lair {
         expected: TopologyRevision,
         target: SplintId,
         ratio: SplitRatio,
-    ) -> Result<TopologyRevision, LairError> {
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
-        let window = self
-            .dojos
+        let dojo = self
+            .lairs
             .values_mut()
-            .flat_map(|dojo| &mut dojo.windows)
-            .find(|window| window.root.find_splint(target).is_some())
-            .ok_or(LairError::SplintNotFound(target))?;
-        if !window.root.set_parent_ratio(target, ratio) {
-            return Err(LairError::SplintHasNoParent(target));
+            .flat_map(|lair| &mut lair.dojos)
+            .find(|dojo| dojo.root.find_splint(target).is_some())
+            .ok_or(TopologyError::SplintNotFound(target))?;
+        if !dojo.root.set_parent_ratio(target, ratio) {
+            return Err(TopologyError::SplintHasNoParent(target));
         }
         self.advance_revision();
         Ok(self.revision)
     }
 
-    pub fn new_window_at(
+    pub fn new_dojo_at(
+        &mut self,
+        expected: TopologyRevision,
+        lair_id: LairId,
+        dojo: Dojo,
+    ) -> Result<TopologyRevision, TopologyError> {
+        self.check_revision(expected)?;
+        self.validate_new_dojos(std::slice::from_ref(&dojo))?;
+        self.lairs
+            .get_mut(&lair_id)
+            .ok_or(TopologyError::LairNotFound(lair_id))?
+            .dojos
+            .push(dojo);
+        self.advance_revision();
+        Ok(self.revision)
+    }
+
+    pub fn close_dojo_at(
         &mut self,
         expected: TopologyRevision,
         dojo_id: DojoId,
-        window: Window,
-    ) -> Result<TopologyRevision, LairError> {
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
-        if self.find_window(window.id).is_some() {
-            return Err(LairError::DuplicateWindowId(window.id));
+        let lair = self
+            .lairs
+            .values_mut()
+            .find(|lair| lair.dojos.iter().any(|dojo| dojo.id == dojo_id))
+            .ok_or(TopologyError::DojoNotFound(dojo_id))?;
+        let index = lair
+            .dojos
+            .iter()
+            .position(|dojo| dojo.id == dojo_id)
+            .ok_or(TopologyError::DojoNotFound(dojo_id))?;
+        if !lair.dojos[index].root.all_exited() {
+            return Err(TopologyError::DojoStillLive(dojo_id));
         }
-        if let Some(id) = existing_splint_id(self, &window.root) {
-            return Err(LairError::DuplicateSplintId(id));
-        }
-        if window.root.find_splint(window.default_focus).is_none() {
-            return Err(LairError::InvalidWindowDefaultFocus {
-                window_id: window.id,
-                splint_id: window.default_focus,
-            });
-        }
-        validate_name(&window.title)?;
-        self.dojos
-            .get_mut(&dojo_id)
-            .ok_or(LairError::DojoNotFound(dojo_id))?
-            .windows
-            .push(window);
+        lair.dojos.remove(index);
         self.advance_revision();
         Ok(self.revision)
     }
 
-    pub fn close_window_at(
+    pub fn rename_lair_at(
         &mut self,
         expected: TopologyRevision,
-        window_id: WindowId,
-    ) -> Result<TopologyRevision, LairError> {
+        lair_id: LairId,
+        name: impl Into<String>,
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
-        let dojo = self
-            .dojos
-            .values_mut()
-            .find(|dojo| dojo.windows.iter().any(|window| window.id == window_id))
-            .ok_or(LairError::WindowNotFound(window_id))?;
-        let index = dojo
-            .windows
-            .iter()
-            .position(|window| window.id == window_id)
-            .ok_or(LairError::WindowNotFound(window_id))?;
-        if !dojo.windows[index].root.all_exited() {
-            return Err(LairError::WindowStillLive(window_id));
+        let name = normalized_name(&name.into())?;
+        if self
+            .lairs
+            .values()
+            .any(|lair| lair.id != lair_id && lair.name == name)
+        {
+            return Err(TopologyError::DuplicateLairName(name));
         }
-        dojo.windows.remove(index);
+        self.lairs
+            .get_mut(&lair_id)
+            .ok_or(TopologyError::LairNotFound(lair_id))?
+            .name = name;
         self.advance_revision();
         Ok(self.revision)
     }
@@ -326,56 +386,30 @@ impl Lair {
         expected: TopologyRevision,
         dojo_id: DojoId,
         name: impl Into<String>,
-    ) -> Result<TopologyRevision, LairError> {
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
         let name = normalized_name(&name.into())?;
-        if self
-            .dojos
-            .values()
-            .any(|dojo| dojo.id != dojo_id && dojo.name == name)
-        {
-            return Err(LairError::DuplicateName(name));
-        }
-        self.dojos
-            .get_mut(&dojo_id)
-            .ok_or(LairError::DojoNotFound(dojo_id))?
+        self.find_dojo_mut(dojo_id)
+            .ok_or(TopologyError::DojoNotFound(dojo_id))?
             .name = name;
         self.advance_revision();
         Ok(self.revision)
     }
 
-    pub fn rename_window_at(
+    pub fn set_dojo_default_focus_at(
         &mut self,
         expected: TopologyRevision,
-        window_id: WindowId,
-        title: impl Into<String>,
-    ) -> Result<TopologyRevision, LairError> {
-        self.check_revision(expected)?;
-        let title = normalized_name(&title.into())?;
-        self.find_window_mut(window_id)
-            .ok_or(LairError::WindowNotFound(window_id))?
-            .title = title;
-        self.advance_revision();
-        Ok(self.revision)
-    }
-
-    pub fn set_window_default_focus_at(
-        &mut self,
-        expected: TopologyRevision,
-        window_id: WindowId,
+        dojo_id: DojoId,
         splint_id: SplintId,
-    ) -> Result<TopologyRevision, LairError> {
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
-        let window = self
-            .find_window_mut(window_id)
-            .ok_or(LairError::WindowNotFound(window_id))?;
-        if window.root.find_splint(splint_id).is_none() {
-            return Err(LairError::InvalidWindowDefaultFocus {
-                window_id,
-                splint_id,
-            });
+        let dojo = self
+            .find_dojo_mut(dojo_id)
+            .ok_or(TopologyError::DojoNotFound(dojo_id))?;
+        if dojo.root.find_splint(splint_id).is_none() {
+            return Err(TopologyError::InvalidDojoDefaultFocus { dojo_id, splint_id });
         }
-        window.default_focus = splint_id;
+        dojo.default_focus = splint_id;
         self.advance_revision();
         Ok(self.revision)
     }
@@ -385,32 +419,28 @@ impl Lair {
         expected: TopologyRevision,
         splint_id: SplintId,
         title: impl Into<String>,
-    ) -> Result<TopologyRevision, LairError> {
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
         let title = normalized_name(&title.into())?;
         self.find_splint_mut(splint_id)
-            .ok_or(LairError::SplintNotFound(splint_id))?
+            .ok_or(TopologyError::SplintNotFound(splint_id))?
             .title = title;
         self.advance_revision();
         Ok(self.revision)
     }
 
     /// Replaces launch metadata and marks an exited Splint running without changing topology.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error without mutation when the Splint is missing or still live.
     pub fn commit_relaunch(
         &mut self,
         id: SplintId,
         cwd: PathBuf,
         command: Vec<String>,
-    ) -> Result<(), LairError> {
+    ) -> Result<(), TopologyError> {
         let splint = self
             .find_splint_mut(id)
-            .ok_or(LairError::SplintNotFound(id))?;
+            .ok_or(TopologyError::SplintNotFound(id))?;
         if !matches!(splint.state, SplintState::Exited(_)) {
-            return Err(LairError::SplintStillLive(id));
+            return Err(TopologyError::SplintStillLive(id));
         }
         splint.cwd = cwd;
         splint.command = command;
@@ -424,7 +454,7 @@ impl Lair {
         launch: crate::SplintLaunchMetadata,
     ) -> bool {
         self.find_splint_mut(id).is_some_and(|splint| {
-            splint.launch = Box::new(launch);
+            *splint.launch = launch;
             true
         })
     }
@@ -458,43 +488,67 @@ impl Lair {
     }
 
     #[must_use]
-    pub fn find_window(&self, id: WindowId) -> Option<&Window> {
-        self.dojos
+    pub fn find_lair(&self, id: LairId) -> Option<&Lair> {
+        self.lairs.get(&id)
+    }
+
+    #[must_use]
+    pub fn find_dojo(&self, id: DojoId) -> Option<&Dojo> {
+        self.lairs
             .values()
-            .flat_map(|dojo| &dojo.windows)
-            .find(|window| window.id == id)
+            .flat_map(|lair| &lair.dojos)
+            .find(|dojo| dojo.id == id)
     }
 
     #[must_use]
     pub fn find_splint(&self, id: SplintId) -> Option<&Splint> {
-        self.dojos
+        self.lairs
             .values()
-            .flat_map(|dojo| &dojo.windows)
-            .find_map(|window| window.root.find_splint(id))
+            .flat_map(|lair| &lair.dojos)
+            .find_map(|dojo| dojo.root.find_splint(id))
     }
 
-    fn find_window_mut(&mut self, id: WindowId) -> Option<&mut Window> {
-        self.dojos
+    fn find_dojo_mut(&mut self, id: DojoId) -> Option<&mut Dojo> {
+        self.lairs
             .values_mut()
-            .flat_map(|dojo| &mut dojo.windows)
-            .find(|window| window.id == id)
+            .flat_map(|lair| &mut lair.dojos)
+            .find(|dojo| dojo.id == id)
     }
 
     fn find_splint_mut(&mut self, id: SplintId) -> Option<&mut Splint> {
-        self.dojos
+        self.lairs
             .values_mut()
-            .flat_map(|dojo| &mut dojo.windows)
-            .find_map(|window| window.root.find_splint_mut(id))
+            .flat_map(|lair| &mut lair.dojos)
+            .find_map(|dojo| dojo.root.find_splint_mut(id))
     }
 
     #[must_use]
-    pub fn dojos(&self) -> impl ExactSizeIterator<Item = &Dojo> {
-        self.dojos.values()
+    pub fn lairs(&self) -> impl ExactSizeIterator<Item = &Lair> {
+        self.lairs.values()
     }
 
-    fn check_revision(&self, expected: TopologyRevision) -> Result<(), LairError> {
+    fn validate_new_dojos(&self, dojos: &[Dojo]) -> Result<(), TopologyError> {
+        let mut dojo_ids = HashSet::new();
+        let mut splint_ids = HashSet::new();
+        for dojo in dojos {
+            validate_name(&dojo.name)?;
+            if self.find_dojo(dojo.id).is_some() || !dojo_ids.insert(dojo.id) {
+                return Err(TopologyError::DuplicateDojoId(dojo.id));
+            }
+            if dojo.root.find_splint(dojo.default_focus).is_none() {
+                return Err(TopologyError::InvalidDojoDefaultFocus {
+                    dojo_id: dojo.id,
+                    splint_id: dojo.default_focus,
+                });
+            }
+            collect_new_splint_ids(self, &dojo.root, &mut splint_ids)?;
+        }
+        Ok(())
+    }
+
+    fn check_revision(&self, expected: TopologyRevision) -> Result<(), TopologyError> {
         if expected != self.revision {
-            return Err(LairError::StaleTopology {
+            return Err(TopologyError::StaleTopology {
                 expected,
                 current: self.revision,
             });
@@ -511,38 +565,63 @@ impl Lair {
     }
 }
 
-fn normalized_name(value: &str) -> Result<String, LairError> {
+fn normalized_name(value: &str) -> Result<String, TopologyError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(LairError::EmptyName);
+        return Err(TopologyError::EmptyName);
     }
     if trimmed.len() > MAX_NAME_BYTES {
-        return Err(LairError::NameTooLong);
+        return Err(TopologyError::NameTooLong);
     }
     Ok(trimmed.to_owned())
 }
 
-fn validate_name(value: &str) -> Result<(), LairError> {
+fn validate_name(value: &str) -> Result<(), TopologyError> {
     normalized_name(value).map(|_| ())
 }
 
-fn existing_splint_id(lair: &Lair, node: &crate::LayoutNode) -> Option<SplintId> {
+fn collect_new_splint_ids(
+    topology: &Topology,
+    node: &LayoutNode,
+    ids: &mut HashSet<SplintId>,
+) -> Result<(), TopologyError> {
     match node {
-        crate::LayoutNode::Leaf(splint) => lair.find_splint(splint.id).map(|_| splint.id),
-        crate::LayoutNode::Branch { first, second, .. } => {
-            existing_splint_id(lair, first).or_else(|| existing_splint_id(lair, second))
+        LayoutNode::Leaf(splint) => {
+            if topology.find_splint(splint.id).is_some() || !ids.insert(splint.id) {
+                return Err(TopologyError::DuplicateSplintId(splint.id));
+            }
+        }
+        LayoutNode::Branch { first, second, .. } => {
+            collect_new_splint_ids(topology, first, ids)?;
+            collect_new_splint_ids(topology, second, ids)?;
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum LairError {
-    #[error("dojo name cannot be empty")]
+pub enum TopologyError {
+    #[error("name cannot be empty")]
     EmptyName,
-    #[error("dojo name cannot exceed 128 UTF-8 bytes")]
+    #[error("name cannot exceed 128 UTF-8 bytes")]
     NameTooLong,
-    #[error("a dojo named '{0}' already exists")]
-    DuplicateName(String),
+    #[error("a Lair named '{0}' already exists")]
+    DuplicateLairName(String),
+    #[error("Lair {0:?} does not exist")]
+    LairNotFound(LairId),
+    #[error("Lair {0:?} already exists")]
+    DuplicateLairId(LairId),
+    #[error("Dojo {0:?} does not exist")]
+    DojoNotFound(DojoId),
+    #[error("Dojo {0:?} already exists")]
+    DuplicateDojoId(DojoId),
+    #[error("Dojo {0:?} still contains a live Splint")]
+    DojoStillLive(DojoId),
+    #[error("Dojo {dojo_id:?} default focus references missing Splint {splint_id:?}")]
+    InvalidDojoDefaultFocus {
+        dojo_id: DojoId,
+        splint_id: SplintId,
+    },
     #[error("Splint {0:?} does not exist")]
     SplintNotFound(SplintId),
     #[error("Splint {0:?} already exists")]
@@ -551,21 +630,6 @@ pub enum LairError {
     SplintStillLive(SplintId),
     #[error("Splint {0:?} has no parent split")]
     SplintHasNoParent(SplintId),
-    #[error("dojo {0:?} does not exist")]
-    DojoNotFound(DojoId),
-    #[error("dojo {0:?} already exists")]
-    DuplicateDojoId(DojoId),
-    #[error("window {0:?} does not exist")]
-    WindowNotFound(WindowId),
-    #[error("window {0:?} already exists")]
-    DuplicateWindowId(WindowId),
-    #[error("window {0:?} still contains a live Splint")]
-    WindowStillLive(WindowId),
-    #[error("window {window_id:?} default focus references missing Splint {splint_id:?}")]
-    InvalidWindowDefaultFocus {
-        window_id: WindowId,
-        splint_id: SplintId,
-    },
     #[error("topology revision is stale: expected {expected:?}, current {current:?}")]
     StaleTopology {
         expected: TopologyRevision,
@@ -576,59 +640,68 @@ pub enum LairError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LayoutNode;
 
     #[test]
     fn runtime_state_can_transition_and_failed_creation_can_roll_back() {
-        let mut lair = Lair::new();
-        let dojo = lair
-            .create_dojo("main", PathBuf::from("/tmp"))
+        let mut topology = Topology::new();
+        let lair = topology
+            .create_lair("main", PathBuf::from("/tmp"))
             .unwrap()
             .clone();
-        let splint_id = match &dojo.windows[0].root {
-            crate::LayoutNode::Leaf(splint) => splint.id,
-            crate::LayoutNode::Branch { .. } => unreachable!(),
-        };
-        assert!(lair.set_splint_state(splint_id, SplintState::Running));
-        assert_eq!(lair.remove_dojo(dojo.id).unwrap().id, dojo.id);
-        assert_eq!(lair.dojos().count(), 0);
+        let splint_id = lair.dojos[0].root.find_splint_id_for_test();
+        assert!(topology.set_splint_state(splint_id, SplintState::Running));
+        assert_eq!(topology.remove_lair(lair.id).unwrap().id, lair.id);
+        assert_eq!(topology.lairs().count(), 0);
     }
 
     #[test]
-    fn rejects_duplicate_dojo_names() {
-        let mut lair = Lair::new();
-        lair.create_dojo(" main ", PathBuf::from("/tmp")).unwrap();
+    fn rejects_duplicate_lair_names_but_allows_duplicate_dojo_names() {
+        let mut topology = Topology::new();
+        let first = topology
+            .create_lair(" main ", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        assert_eq!(
+            topology.create_lair("main", PathBuf::from("/tmp")),
+            Err(TopologyError::DuplicateLairName("main".into()))
+        );
+        assert_eq!(
+            topology.create_lair("x".repeat(129), PathBuf::from("/tmp")),
+            Err(TopologyError::NameTooLong)
+        );
 
-        assert_eq!(
-            lair.create_dojo("main", PathBuf::from("/tmp")),
-            Err(LairError::DuplicateName("main".into()))
-        );
-        assert_eq!(
-            lair.create_dojo("x".repeat(129), PathBuf::from("/tmp")),
-            Err(LairError::NameTooLong)
-        );
+        let duplicate_name = Dojo::with_shell("terminal", PathBuf::from("/var/tmp"));
+        topology
+            .new_dojo_at(topology.revision(), first, duplicate_name)
+            .unwrap();
+        assert_eq!(topology.find_lair(first).unwrap().dojos.len(), 2);
     }
 
     #[test]
     fn split_and_close_preserve_ids_and_commit_once() {
-        let mut lair = Lair::new();
-        let dojo_id = lair.create_dojo("main", PathBuf::from("/tmp")).unwrap().id;
-        let target_id = lair.dojos[&dojo_id].windows[0]
+        let mut topology = Topology::new();
+        let lair_id = topology
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let dojo_id = topology.lairs[&lair_id].dojos[0].id;
+        let target_id = topology.lairs[&lair_id].dojos[0]
             .root
             .find_splint_id_for_test();
         let inserted = Splint::shell(PathBuf::from("/var/tmp"));
         let inserted_id = inserted.id;
 
         assert_eq!(
-            lair.split_splint(
-                target_id,
-                inserted,
-                Axis::Vertical,
-                SplitSide::First,
-                SplitRatio::new(400).unwrap(),
-            )
-            .unwrap()
-            .get(),
+            topology
+                .split_splint(
+                    target_id,
+                    inserted,
+                    Axis::Vertical,
+                    SplitSide::First,
+                    SplitRatio::new(400).unwrap(),
+                )
+                .unwrap()
+                .get(),
             2
         );
         let LayoutNode::Branch {
@@ -636,7 +709,7 @@ mod tests {
             ratio,
             first,
             second,
-        } = &lair.dojos[&dojo_id].windows[0].root
+        } = &topology.lairs[&lair_id].dojos[0].root
         else {
             panic!("split did not create a branch");
         };
@@ -644,139 +717,142 @@ mod tests {
         assert_eq!(first.find_splint(inserted_id).unwrap().id, inserted_id);
         assert_eq!(second.find_splint(target_id).unwrap().id, target_id);
 
-        let unchanged = lair.clone();
+        let unchanged = topology.clone();
         assert_eq!(
-            lair.close_splint(target_id),
-            Err(LairError::SplintStillLive(target_id))
+            topology.close_splint(target_id),
+            Err(TopologyError::SplintStillLive(target_id))
         );
-        assert_eq!(lair, unchanged);
+        assert_eq!(topology, unchanged);
 
-        assert!(lair.set_splint_state(target_id, SplintState::Exited(0)));
-        assert_eq!(lair.close_splint(target_id).unwrap().get(), 3);
-        assert_eq!(
-            lair.dojos[&dojo_id].windows[0]
-                .root
-                .find_splint(inserted_id)
-                .unwrap()
-                .id,
-            inserted_id
-        );
+        assert!(topology.set_splint_state(target_id, SplintState::Exited(0)));
+        assert_eq!(topology.close_splint(target_id).unwrap().get(), 3);
+        let dojo = topology.find_dojo(dojo_id).unwrap();
+        assert_eq!(dojo.root.find_splint(inserted_id).unwrap().id, inserted_id);
+        assert_eq!(dojo.default_focus, inserted_id);
 
-        assert_eq!(lair.dojos[&dojo_id].windows[0].default_focus, inserted_id);
-        assert!(lair.set_splint_state(inserted_id, SplintState::Exited(0)));
-        assert_eq!(lair.close_splint(inserted_id).unwrap().get(), 4);
-        assert!(lair.dojos[&dojo_id].windows.is_empty());
-        assert_eq!(lair.dojos().count(), 1);
+        assert!(topology.set_splint_state(inserted_id, SplintState::Exited(0)));
+        assert_eq!(topology.close_splint(inserted_id).unwrap().get(), 4);
+        assert!(topology.find_lair(lair_id).unwrap().dojos.is_empty());
+        assert_eq!(topology.lairs().count(), 1);
     }
 
     #[test]
     fn relaunch_updates_exited_leaf_without_advancing_topology() {
-        let mut lair = Lair::new();
-        let dojo = lair
-            .create_dojo("main", PathBuf::from("/tmp"))
+        let mut topology = Topology::new();
+        let lair = topology
+            .create_lair("main", PathBuf::from("/tmp"))
             .unwrap()
             .clone();
-        let id = dojo.windows[0].root.find_splint_id_for_test();
-        let unchanged = lair.clone();
+        let id = lair.dojos[0].root.find_splint_id_for_test();
+        let unchanged = topology.clone();
         assert_eq!(
-            lair.commit_relaunch(id, PathBuf::from("/var/tmp"), vec!["echo".into()]),
-            Err(LairError::SplintStillLive(id))
+            topology.commit_relaunch(id, PathBuf::from("/var/tmp"), vec!["echo".into()]),
+            Err(TopologyError::SplintStillLive(id))
         );
-        assert_eq!(lair, unchanged);
+        assert_eq!(topology, unchanged);
 
-        assert!(lair.set_splint_state(id, SplintState::Exited(0)));
-        let revision = lair.revision();
-        lair.commit_relaunch(
-            id,
-            PathBuf::from("/var/tmp"),
-            vec!["printf".into(), "ready".into()],
-        )
-        .unwrap();
-        let splint = lair.find_splint(id).unwrap();
-        assert_eq!(splint.id, id);
+        assert!(topology.set_splint_state(id, SplintState::Exited(0)));
+        let revision = topology.revision();
+        topology
+            .commit_relaunch(
+                id,
+                PathBuf::from("/var/tmp"),
+                vec!["printf".into(), "ready".into()],
+            )
+            .unwrap();
+        let splint = topology.find_splint(id).unwrap();
         assert_eq!(splint.cwd, PathBuf::from("/var/tmp"));
         assert_eq!(splint.command, vec!["printf", "ready"]);
         assert_eq!(splint.state, SplintState::Running);
-        assert_eq!(lair.revision(), revision);
+        assert_eq!(topology.revision(), revision);
     }
 
     #[test]
     fn stale_revision_and_complete_tree_edits_are_transactional() {
-        let mut lair = Lair::new();
-        let dojo = lair
-            .create_dojo("main", PathBuf::from("/tmp"))
+        let mut topology = Topology::new();
+        let lair = topology
+            .create_lair("main", PathBuf::from("/tmp"))
             .unwrap()
             .clone();
-        let dojo_id = dojo.id;
-        let window_id = dojo.windows[0].id;
-        let first_id = dojo.windows[0].root.find_splint_id_for_test();
-        let base = lair.revision();
+        let lair_id = lair.id;
+        let dojo_id = lair.dojos[0].id;
+        let first_id = lair.dojos[0].root.find_splint_id_for_test();
+        let base = topology.revision();
         let second = Splint::shell(PathBuf::from("/tmp"));
         let second_id = second.id;
-        lair.split_splint_at(
-            base,
-            first_id,
-            second,
-            Axis::Horizontal,
-            SplitSide::Second,
-            SplitRatio::new(500).unwrap(),
-        )
-        .unwrap();
-        let before = lair.clone();
+        topology
+            .split_splint_at(
+                base,
+                first_id,
+                second,
+                Axis::Horizontal,
+                SplitSide::Second,
+                SplitRatio::new(500).unwrap(),
+            )
+            .unwrap();
+        let before = topology.clone();
         assert_eq!(
-            lair.rename_splint_at(base, first_id, "stale"),
-            Err(LairError::StaleTopology {
+            topology.rename_splint_at(base, first_id, "stale"),
+            Err(TopologyError::StaleTopology {
                 expected: base,
                 current: before.revision(),
             })
         );
-        assert_eq!(lair, before);
+        assert_eq!(topology, before);
 
-        let revision = lair
-            .set_split_ratio_at(lair.revision(), second_id, SplitRatio::new(650).unwrap())
+        let revision = topology
+            .set_split_ratio_at(
+                topology.revision(),
+                second_id,
+                SplitRatio::new(650).unwrap(),
+            )
             .unwrap();
-        lair.rename_dojo_at(revision, dojo_id, "renamed").unwrap();
-        lair.rename_window_at(lair.revision(), window_id, "work")
+        topology
+            .rename_lair_at(revision, lair_id, "renamed")
             .unwrap();
-        lair.set_window_default_focus_at(lair.revision(), window_id, second_id)
+        topology
+            .rename_dojo_at(topology.revision(), dojo_id, "work")
+            .unwrap();
+        topology
+            .set_dojo_default_focus_at(topology.revision(), dojo_id, second_id)
             .unwrap();
         assert_eq!(
-            lair.find_window(window_id).unwrap().default_focus,
+            topology.find_dojo(dojo_id).unwrap().default_focus,
             second_id
         );
-        let before = lair.clone();
+        let before = topology.clone();
         assert!(matches!(
-            lair.set_window_default_focus_at(lair.revision(), window_id, SplintId::new()),
-            Err(LairError::InvalidWindowDefaultFocus { .. })
+            topology.set_dojo_default_focus_at(topology.revision(), dojo_id, SplintId::new()),
+            Err(TopologyError::InvalidDojoDefaultFocus { .. })
         ));
-        assert_eq!(lair, before);
-        lair.rename_splint_at(lair.revision(), first_id, "editor")
-            .unwrap();
+        assert_eq!(topology, before);
 
-        let mut extra = Window::with_shell(PathBuf::from("/var/tmp"));
-        extra.title = "extra".into();
+        let extra = Dojo::with_shell("extra", PathBuf::from("/var/tmp"));
         let extra_id = extra.id;
         let extra_splint = extra.root.find_splint_id_for_test();
-        assert_eq!(extra.default_focus, extra_splint);
-        lair.new_window_at(lair.revision(), dojo_id, extra).unwrap();
+        topology
+            .new_dojo_at(topology.revision(), lair_id, extra)
+            .unwrap();
         assert_eq!(
-            lair.close_window_at(lair.revision(), extra_id),
-            Err(LairError::WindowStillLive(extra_id))
+            topology.close_dojo_at(topology.revision(), extra_id),
+            Err(TopologyError::DojoStillLive(extra_id))
         );
-        assert!(lair.set_splint_state(extra_splint, SplintState::Exited(0)));
-        lair.close_window_at(lair.revision(), extra_id).unwrap();
-        assert!(lair.find_window(extra_id).is_none());
-        assert_unique_valid_tree(&lair);
+        assert!(topology.set_splint_state(extra_splint, SplintState::Exited(0)));
+        topology
+            .close_dojo_at(topology.revision(), extra_id)
+            .unwrap();
+        assert!(topology.find_dojo(extra_id).is_none());
+        assert_unique_valid_tree(&topology);
     }
 
     #[test]
     fn deterministic_edit_sequence_preserves_tree_invariants() {
-        let mut lair = Lair::new();
-        let dojo = lair
-            .create_dojo("random", PathBuf::from("/tmp"))
+        let mut topology = Topology::new();
+        let lair = topology
+            .create_lair("random", PathBuf::from("/tmp"))
             .unwrap()
             .clone();
-        let mut ids = vec![dojo.windows[0].root.find_splint_id_for_test()];
+        let mut ids = vec![lair.dojos[0].root.find_splint_id_for_test()];
         let mut seed = 0x5eed_u64;
         for index in 0..64 {
             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
@@ -784,51 +860,53 @@ mod tests {
             let splint = Splint::shell(PathBuf::from("/tmp"));
             ids.push(splint.id);
             let ratio = SplitRatio::new(u16::try_from(seed % 999 + 1).unwrap()).unwrap();
-            lair.split_splint_at(
-                lair.revision(),
-                target,
-                splint,
-                if seed & 1 == 0 {
-                    Axis::Horizontal
-                } else {
-                    Axis::Vertical
-                },
-                if seed & 2 == 0 {
-                    SplitSide::First
-                } else {
-                    SplitSide::Second
-                },
-                ratio,
-            )
-            .unwrap();
-            lair.rename_splint_at(lair.revision(), target, format!("pane-{index}"))
+            topology
+                .split_splint_at(
+                    topology.revision(),
+                    target,
+                    splint,
+                    if seed & 1 == 0 {
+                        Axis::Horizontal
+                    } else {
+                        Axis::Vertical
+                    },
+                    if seed & 2 == 0 {
+                        SplitSide::First
+                    } else {
+                        SplitSide::Second
+                    },
+                    ratio,
+                )
                 .unwrap();
-            assert_unique_valid_tree(&lair);
+            topology
+                .rename_splint_at(topology.revision(), target, format!("pane-{index}"))
+                .unwrap();
+            assert_unique_valid_tree(&topology);
         }
     }
 
     #[test]
     fn failed_split_rolls_back_completely() {
-        let mut lair = Lair::new();
-        lair.create_dojo("main", PathBuf::from("/tmp")).unwrap();
-        let before = lair.clone();
+        let mut topology = Topology::new();
+        topology.create_lair("main", PathBuf::from("/tmp")).unwrap();
+        let before = topology.clone();
         let missing = SplintId::new();
 
         assert_eq!(
-            lair.split_splint(
+            topology.split_splint(
                 missing,
                 Splint::shell(PathBuf::from("/tmp")),
                 Axis::Horizontal,
                 SplitSide::Second,
                 SplitRatio::new(500).unwrap(),
             ),
-            Err(LairError::SplintNotFound(missing))
+            Err(TopologyError::SplintNotFound(missing))
         );
-        assert_eq!(lair, before);
+        assert_eq!(topology, before);
     }
 
-    fn assert_unique_valid_tree(lair: &Lair) {
-        fn visit(node: &LayoutNode, ids: &mut std::collections::HashSet<SplintId>) {
+    fn assert_unique_valid_tree(topology: &Topology) {
+        fn visit(node: &LayoutNode, ids: &mut HashSet<SplintId>) {
             match node {
                 LayoutNode::Leaf(splint) => assert!(ids.insert(splint.id)),
                 LayoutNode::Branch {
@@ -843,14 +921,15 @@ mod tests {
                 }
             }
         }
-        let mut dojo_ids = std::collections::HashSet::new();
-        let mut window_ids = std::collections::HashSet::new();
-        let mut splint_ids = std::collections::HashSet::new();
-        for dojo in lair.dojos() {
-            assert!(dojo_ids.insert(dojo.id));
-            for window in &dojo.windows {
-                assert!(window_ids.insert(window.id));
-                visit(&window.root, &mut splint_ids);
+        let mut lair_ids = HashSet::new();
+        let mut dojo_ids = HashSet::new();
+        let mut splint_ids = HashSet::new();
+        for lair in topology.lairs() {
+            assert!(lair_ids.insert(lair.id));
+            for dojo in &lair.dojos {
+                assert!(dojo_ids.insert(dojo.id));
+                assert!(dojo.root.find_splint(dojo.default_focus).is_some());
+                visit(&dojo.root, &mut splint_ids);
             }
         }
     }
@@ -859,7 +938,7 @@ mod tests {
         fn find_splint_id_for_test(&self) -> SplintId;
     }
 
-    impl TestLayoutExt for crate::LayoutNode {
+    impl TestLayoutExt for LayoutNode {
         fn find_splint_id_for_test(&self) -> SplintId {
             match self {
                 Self::Leaf(splint) => splint.id,

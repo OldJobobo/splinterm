@@ -1,0 +1,100 @@
+{
+  "error": "splinterm-native guarded smoke failed: RuntimeError: Splinterm snapshot geometry is malformed",
+  "records": [
+    {
+      "execution_index": 0,
+      "report": {
+        "capture": null,
+        "cleanup": {
+          "ambient_counts_unchanged": true,
+          "clients_absent": true,
+          "failure": null,
+          "namespace_absent": true,
+          "process_forest_absent": true,
+          "server_absent": true,
+          "verified": true,
+          "window_absent": true,
+          "workloads_absent": true
+        },
+        "failure": "RuntimeError: Splinterm snapshot geometry is malformed",
+        "geometry": {
+          "after_graphical_attach": null,
+          "before_graphical_attach": null,
+          "stable_seconds": 0.3
+        },
+        "implementation": "splinterm",
+        "isolation": {
+          "ambient_after": {
+            "default_session_count": null,
+            "process_count": null
+          },
+          "ambient_before": {
+            "default_session_count": null,
+            "process_count": null
+          },
+          "ambient_names_recorded": false,
+          "host_state_before": {
+            "cursor": {
+              "x": 1326,
+              "y": 660
+            },
+            "focus_address": "0x55d06be48250",
+            "workspace": {
+              "id": 1,
+              "monitor": "DP-1"
+            }
+          },
+          "host_state_preserved": true,
+          "monitor": "DP-2",
+          "no_initial_focus": true,
+          "run_id": "gsmoke-0-splinterm-native",
+          "workspace": 8
+        },
+        "notes": [
+          "Guarded development smoke only; readiness values are not a performance ranking.",
+          "The terminal was mapped silently on inactive workspace 8 / DP-2."
+        ],
+        "process_roles": null,
+        "readiness": {
+          "pane-0": {
+            "event": "ready",
+            "monotonic_ns": 1792510299821,
+            "pid": 241055,
+            "schema": "splinterm.benchmark.child.v1"
+          },
+          "pane-1": {
+            "event": "ready",
+            "monotonic_ns": 1792519160201,
+            "pid": 241059,
+            "schema": "splinterm.benchmark.child.v1"
+          }
+        },
+        "runtime_ids": {
+          "pane-0": "edb983f4-ff6b-40ce-92dc-e172dd615637",
+          "pane-1": "636f2523-1ccb-412c-999b-b71b0014170d"
+        },
+        "schema": "splinterm.benchmark.multiplexer-graphical-smoke.v1",
+        "stack": "splinterm-native",
+        "topology": {
+          "name": "two-columns",
+          "pane_count": 2,
+          "panes": [
+            "pane-0",
+            "pane-1"
+          ]
+        },
+        "valid": false
+      },
+      "report_path": "raw/splinterm-native/report.json",
+      "returncode": 1,
+      "stack": "splinterm-native"
+    }
+  ],
+  "schema": "splinterm.benchmark.multiplexer-graphical-smoke-matrix.v1",
+  "sequence": [
+    "splinterm-native",
+    "foot-tmux",
+    "foot-zellij"
+  ],
+  "valid": false
+}

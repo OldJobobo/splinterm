@@ -144,7 +144,7 @@ def main() -> int:
     )
     addresses: set[str] = set()
     splints: list[str] = []
-    window_id: str | None = None
+    dojo_id: str | None = None
     result = False
     error: str | None = None
     captures: dict[str, dict[str, int]] = {}
@@ -173,15 +173,15 @@ def main() -> int:
         return completed.stdout
 
     def topology() -> tuple[str, str, list[str]]:
-        listing = checked_client("list")
+        listing = checked_client("list", "--all")
         dojo = re.search(r"^([0-9a-f-]{36})  divider-smoke ", listing, re.MULTILINE)
-        windows = re.findall(r"^  window ([0-9a-f-]{36})  ", listing, re.MULTILINE)
+        dojos = re.findall(r"^  Dojo ([0-9a-f-]{36})  ", listing, re.MULTILINE)
         ids = re.findall(r"^  ([0-9a-f-]{36})  ", listing, re.MULTILINE)
-        if dojo is None or len(windows) != 1:
+        if dojo is None or len(dojos) != 1:
             raise RuntimeError(f"unexpected divider topology:\n{listing}")
-        return dojo.group(1), windows[0], ids
+        return dojo.group(1), dojos[0], ids
 
-    def launch(style: str, dojo_id: str, selected_window: str) -> tuple[dict[str, Any], Path]:
+    def launch(style: str, lair_id: str, selected_dojo: str) -> tuple[dict[str, Any], Path]:
         # Required before every graphical launch, not only once per script.
         V1.assert_test_workspace_isolated()
         V1.assert_user_workspace_untouched()
@@ -199,7 +199,7 @@ def main() -> int:
         command = [
             "env", *[f"{key}={value}" for key, value in selected_environment.items()],
             str(ROOT / "target/release/splinterm"), "window",
-            "--dojo-id", dojo_id, "--window-id", selected_window,
+            "--lair-id", lair_id, "--dojo-id", selected_dojo,
         ]
         stdout = output / f"{style}.stdout"
         stderr = output / f"{style}.stderr"
@@ -235,7 +235,7 @@ def main() -> int:
     try:
         wait_until(lambda: socket.exists() and client("ping").returncode == 0, 5, "daemon not ready")
         checked_client("new", "divider-smoke", "--", "/bin/sh")
-        dojo_id, window_id, splints = topology()
+        lair_id, dojo_id, splints = topology()
         checked_client("split", splints[0], "--axis", "horizontal", "--side", "second", "--", "/bin/sh")
         _, _, two = topology()
         new_second = next(item for item in two if item not in splints)
@@ -245,7 +245,7 @@ def main() -> int:
             checked_client("rename-splint", splint, title)
             checked_client("send", splint, f"printf '{title} ready\\n'\n")
 
-        line_window, line_path = launch("line", dojo_id, window_id)
+        line_window, line_path = launch("line", lair_id, dojo_id)
         line_width, line_height, line_pixels = read_ppm(line_path)
         captures["line"] = {
             "width": line_width,
@@ -258,7 +258,7 @@ def main() -> int:
         addresses.remove(line_window["address"])
         wait_until(lambda: not V1.workspace_clients(WORKSPACE), 5, "line window did not close")
 
-        frame_window, frame_path = launch("frame", dojo_id, window_id)
+        frame_window, frame_path = launch("frame", lair_id, dojo_id)
         frame_width, frame_height, frame_pixels = read_ppm(frame_path)
         captures["frame"] = {
             "width": frame_width,
@@ -292,8 +292,8 @@ def main() -> int:
             result = False
         for splint in splints:
             client("kill", splint, "--yes")
-        if window_id is not None:
-            client("close-window", window_id)
+        if dojo_id is not None:
+            client("close-dojo", dojo_id)
         daemon.send_signal(signal.SIGINT)
         try:
             daemon.wait(timeout=8)

@@ -70,7 +70,7 @@ that design.
 | Primary product | Agent-aware terminal workspace manager | Native Wayland terminal, persistent multiplexer, and secure automation substrate |
 | Persistent owner | Herdr server | `splinterd` |
 | Process/terminal unit | Herdr pane and terminal | Splint and process incarnation |
-| Workspace hierarchy | Session → workspace → tab → pane | Lair → Dojo → logical window → Splint |
+| Workspace hierarchy | Session → workspace → tab → pane | Topology → Lair → Dojo → Splint |
 | Agent identity | First-class named live agent | No semantic agent registry |
 | Agent lifecycle | `idle`, `working`, `blocked`, `done`, `unknown` | Process lifecycle only |
 | Orchestration | Start, prompt, wait, read, focus, worktree workflows | Structured process/topology/control primitives |
@@ -183,7 +183,7 @@ Splinterm already provides the required presentation substrate:
 - daemon-owned persistent Splints;
 - native Wayland rendering and pane composition;
 - structured argv process creation;
-- stable Dojo/window/Splint IDs and process incarnations;
+- stable Lair/Dojo/Splint IDs and process incarnations;
 - bounded visible terminal, scrollback, search, and subscriptions;
 - one exclusive controller per live Splint;
 - explicit controller transfer;
@@ -265,7 +265,7 @@ would weaken the clear lifetime boundaries in both projects.
 ### Splinterm owns
 
 - native Wayland presentation;
-- Dojo/window/Splint placement;
+- Lair/Dojo/Splint placement;
 - rendering and local input;
 - Splinterm process incarnation and controller state;
 - policy, consent, revocation, and audit for Splinterm operations;

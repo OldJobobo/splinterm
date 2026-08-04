@@ -57,17 +57,17 @@ const fn preflight_authorization(
     use OperationScope as Scope;
 
     match mutation {
-        splinterm_protocol::MutationPreflight::CreateDojo
+        splinterm_protocol::MutationPreflight::CreateLair
         | splinterm_protocol::MutationPreflight::SplitSplint { .. }
-        | splinterm_protocol::MutationPreflight::NewWindow { .. } => {
+        | splinterm_protocol::MutationPreflight::NewDojo { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessSpawn, Scope::TopologyLayoutMutate])
         }
         splinterm_protocol::MutationPreflight::RelaunchSplint { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessSpawn])
         }
         splinterm_protocol::MutationPreflight::RestoreSplint { .. }
-        | splinterm_protocol::MutationPreflight::RestoreWindow { .. }
-        | splinterm_protocol::MutationPreflight::RestoreDojo { .. } => {
+        | splinterm_protocol::MutationPreflight::RestoreDojo { .. }
+        | splinterm_protocol::MutationPreflight::RestoreLair { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessRestore])
         }
         splinterm_protocol::MutationPreflight::CloseSplint { .. } => {
@@ -76,7 +76,7 @@ const fn preflight_authorization(
                 requirement: ConditionalRequirement::LiveProcessTermination,
             }
         }
-        splinterm_protocol::MutationPreflight::CloseWindow { .. } => {
+        splinterm_protocol::MutationPreflight::CloseDojo { .. } => {
             RequestAuthorization::Conditional {
                 base: &[Scope::TopologyLayoutMutate],
                 requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
@@ -86,11 +86,11 @@ const fn preflight_authorization(
             RequestAuthorization::policy(&[Scope::ProcessTerminate])
         }
         splinterm_protocol::MutationPreflight::SetSplitRatio { .. }
-        | splinterm_protocol::MutationPreflight::SetWindowDefaultFocus { .. } => {
+        | splinterm_protocol::MutationPreflight::SetDojoDefaultFocus { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyLayoutMutate])
         }
-        splinterm_protocol::MutationPreflight::RenameDojo { .. }
-        | splinterm_protocol::MutationPreflight::RenameWindow { .. }
+        splinterm_protocol::MutationPreflight::RenameLair { .. }
+        | splinterm_protocol::MutationPreflight::RenameDojo { .. }
         | splinterm_protocol::MutationPreflight::RenameSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyNameMutate])
         }
@@ -103,7 +103,7 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
 
     match request {
         Request::Ping => RequestAuthorization::Authenticated,
-        Request::ListDojos | Request::InspectTopology | Request::InspectSplint { .. } => {
+        Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }
         Request::SubscribeTopology => {
@@ -118,34 +118,32 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         }
         Request::RevokeAccess { .. } => RequestAuthorization::policy(&[Scope::AuthorizationRevoke]),
         Request::PrepareMutation { mutation } => preflight_authorization(mutation),
-        Request::CreateDojo { .. }
-        | Request::CreateDojoAutomation { .. }
+        Request::CreateLair { .. }
+        | Request::CreateLairAutomation { .. }
         | Request::SplitSplint { .. }
         | Request::SplitSplintAutomation { .. }
-        | Request::NewWindow { .. }
-        | Request::NewWindowAutomation { .. } => {
+        | Request::NewDojo { .. }
+        | Request::NewDojoAutomation { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessSpawn, Scope::TopologyLayoutMutate])
         }
         Request::RelaunchSplint { .. } | Request::RelaunchSplintAutomation { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessSpawn])
         }
         Request::RestoreSplint { .. }
-        | Request::RestoreWindow { .. }
-        | Request::RestoreDojo { .. } => RequestAuthorization::policy(&[Scope::ProcessRestore]),
+        | Request::RestoreDojo { .. }
+        | Request::RestoreLair { .. } => RequestAuthorization::policy(&[Scope::ProcessRestore]),
         Request::CloseSplint { .. } => RequestAuthorization::Conditional {
             base: &[Scope::TopologyLayoutMutate],
             requirement: ConditionalRequirement::LiveProcessTermination,
         },
-        Request::CloseWindow { .. } => RequestAuthorization::Conditional {
+        Request::CloseDojo { .. } => RequestAuthorization::Conditional {
             base: &[Scope::TopologyLayoutMutate],
             requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
         },
-        Request::SetSplitRatio { .. } | Request::SetWindowDefaultFocus { .. } => {
+        Request::SetSplitRatio { .. } | Request::SetDojoDefaultFocus { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyLayoutMutate])
         }
-        Request::RenameDojo { .. }
-        | Request::RenameWindow { .. }
-        | Request::RenameSplint { .. } => {
+        Request::RenameLair { .. } | Request::RenameDojo { .. } | Request::RenameSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyNameMutate])
         }
         Request::Attach { .. } => RequestAuthorization::Conditional {

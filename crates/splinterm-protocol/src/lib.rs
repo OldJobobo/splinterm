@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use splinterm_core::{
-    Axis, Dojo, DojoId, Lair, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
+    Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 24;
+pub const PROTOCOL_VERSION: u16 = 25;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -179,12 +179,12 @@ pub struct AutomationLaunch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum MutationPreflight {
-    CreateDojo,
+    CreateLair,
     SplitSplint {
         splint_id: SplintId,
     },
-    NewWindow {
-        dojo_id: DojoId,
+    NewDojo {
+        lair_id: LairId,
     },
     RelaunchSplint {
         splint_id: SplintId,
@@ -192,17 +192,17 @@ pub enum MutationPreflight {
     RestoreSplint {
         splint_id: SplintId,
     },
-    RestoreWindow {
-        window_id: WindowId,
-    },
     RestoreDojo {
         dojo_id: DojoId,
+    },
+    RestoreLair {
+        lair_id: LairId,
     },
     CloseSplint {
         splint_id: SplintId,
     },
-    CloseWindow {
-        window_id: WindowId,
+    CloseDojo {
+        dojo_id: DojoId,
     },
     KillSplint {
         splint_id: SplintId,
@@ -211,25 +211,25 @@ pub enum MutationPreflight {
     SetSplitRatio {
         splint_id: SplintId,
     },
+    RenameLair {
+        lair_id: LairId,
+    },
     RenameDojo {
         dojo_id: DojoId,
-    },
-    RenameWindow {
-        window_id: WindowId,
     },
     RenameSplint {
         splint_id: SplintId,
     },
-    SetWindowDefaultFocus {
-        window_id: WindowId,
+    SetDojoDefaultFocus {
+        dojo_id: DojoId,
         splint_id: SplintId,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationTarget {
+    pub lair_id: LairId,
     pub dojo_id: DojoId,
-    pub window_id: WindowId,
     pub splint_id: SplintId,
     /// Current incarnation when live, otherwise the last durable incarnation.
     pub incarnation: u64,
@@ -238,8 +238,8 @@ pub struct MutationTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationPreparation {
     pub topology_revision: TopologyRevision,
+    pub lair_id: Option<LairId>,
     pub dojo_id: Option<DojoId>,
-    pub window_id: Option<WindowId>,
     pub splint_id: Option<SplintId>,
     pub incarnation: Option<u64>,
     /// Exact bounded expansion for aggregate restore validation.
@@ -250,7 +250,7 @@ pub struct MutationPreparation {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Ping,
-    ListDojos,
+    ListLairs,
     InspectTopology,
     SubscribeTopology,
     InspectSplint {
@@ -271,7 +271,7 @@ pub enum Request {
     PrepareMutation {
         mutation: MutationPreflight,
     },
-    CreateDojoAutomation {
+    CreateLairAutomation {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: AutomationLaunch,
@@ -289,13 +289,13 @@ pub enum Request {
         splint_id: SplintId,
         launch: AutomationLaunch,
     },
-    NewWindowAutomation {
+    NewDojoAutomation {
         expected_topology_revision: TopologyRevision,
-        dojo_id: DojoId,
-        title: String,
+        lair_id: LairId,
+        name: String,
         launch: AutomationLaunch,
     },
-    CreateDojo {
+    CreateLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
@@ -317,13 +317,13 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         splint_id: SplintId,
     },
-    RestoreWindow {
-        expected_topology_revision: TopologyRevision,
-        window_id: WindowId,
-    },
     RestoreDojo {
         expected_topology_revision: TopologyRevision,
         dojo_id: DojoId,
+    },
+    RestoreLair {
+        expected_topology_revision: TopologyRevision,
+        lair_id: LairId,
     },
     CloseSplint {
         expected_topology_revision: TopologyRevision,
@@ -334,29 +334,29 @@ pub enum Request {
         target_splint_id: SplintId,
         ratio: SplitRatio,
     },
-    NewWindow {
+    NewDojo {
         expected_topology_revision: TopologyRevision,
-        dojo_id: DojoId,
-        title: String,
+        lair_id: LairId,
+        name: String,
         launch: LaunchParameters,
     },
-    CloseWindow {
+    CloseDojo {
         expected_topology_revision: TopologyRevision,
-        window_id: WindowId,
+        dojo_id: DojoId,
+    },
+    RenameLair {
+        expected_topology_revision: TopologyRevision,
+        lair_id: LairId,
+        name: String,
     },
     RenameDojo {
         expected_topology_revision: TopologyRevision,
         dojo_id: DojoId,
         name: String,
     },
-    RenameWindow {
+    SetDojoDefaultFocus {
         expected_topology_revision: TopologyRevision,
-        window_id: WindowId,
-        title: String,
-    },
-    SetWindowDefaultFocus {
-        expected_topology_revision: TopologyRevision,
-        window_id: WindowId,
+        dojo_id: DojoId,
         splint_id: SplintId,
     },
     RenameSplint {
@@ -465,12 +465,12 @@ pub enum Response {
     MutationPrepared {
         preparation: MutationPreparation,
     },
-    Dojos {
-        dojos: Vec<Dojo>,
+    Lairs {
+        lairs: Vec<Lair>,
         topology_revision: TopologyRevision,
     },
-    DojoCreated {
-        dojo: Dojo,
+    LairCreated {
+        lair: Lair,
         incarnation: u64,
         topology_revision: TopologyRevision,
     },
@@ -479,8 +479,8 @@ pub enum Response {
         incarnation: u64,
         topology_revision: TopologyRevision,
     },
-    WindowStarted {
-        window_id: WindowId,
+    DojoStarted {
+        dojo_id: DojoId,
         splint_id: SplintId,
         incarnation: u64,
         topology_revision: TopologyRevision,
@@ -500,27 +500,27 @@ pub enum Response {
         snapshot: TopologySnapshot,
     },
     Splint {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
         title: String,
         topology_revision: TopologyRevision,
         runtime: SplintRuntimeSummary,
     },
     AccessGranted {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
         authorization_revision: u64,
         grant: AccessGrant,
     },
     AccessRevoked {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
         authorization_revision: u64,
         grant: AccessGrant,
     },
     AuthorizationStatus {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
         incarnation: u64,
         topology_revision: TopologyRevision,
         policy_generation: u64,
@@ -556,8 +556,8 @@ pub enum Response {
     },
     ControlGranted {
         controller_id: u64,
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
     },
     ControlSubscribed {
         subscription_id: u64,
@@ -565,8 +565,8 @@ pub enum Response {
     },
     ControlTransferPending {
         transfer_id: u64,
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
     },
     ControlTransferDecided {
         outcome: ControlTransferOutcome,
@@ -576,8 +576,8 @@ pub enum Response {
         page: AuditPage,
     },
     TerminalActionAcknowledged {
+        lair_id: LairId,
         dojo_id: DojoId,
-        window_id: WindowId,
         splint_id: SplintId,
         incarnation: u64,
         terminal_revision: u64,
@@ -719,15 +719,15 @@ impl ControlStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TopologyChangeKind {
-    DojoCreated,
+    LairCreated,
     SplintSplit,
     SplintClosed,
     SplitRatioChanged,
-    WindowCreated,
-    WindowClosed,
+    DojoCreated,
+    DojoClosed,
+    LairRenamed,
     DojoRenamed,
-    WindowRenamed,
-    WindowDefaultFocusChanged,
+    DojoDefaultFocusChanged,
     SplintRenamed,
     RuntimeChanged,
 }
@@ -817,7 +817,7 @@ impl LaunchParameters {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologySnapshot {
     pub revision: TopologyRevision,
-    pub lair: Lair,
+    pub topology: Topology,
     pub runtimes: Vec<SplintRuntimeSummary>,
 }
 
@@ -830,17 +830,17 @@ impl TopologySnapshot {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         let mut identities = std::collections::HashSet::new();
         let runtime_count = self
-            .lair
-            .dojos()
-            .flat_map(|dojo| &dojo.windows)
-            .map(|window| window.root.splint_count())
+            .topology
+            .lairs()
+            .flat_map(|lair| &lair.dojos)
+            .map(|dojo| dojo.root.splint_count())
             .sum::<usize>();
-        let valid = self.revision == self.lair.revision()
+        let valid = self.revision == self.topology.revision()
             && runtime_count == self.runtimes.len()
             && self.runtimes.iter().all(|runtime| {
                 identities.insert(runtime.splint_id)
                     && self
-                        .lair
+                        .topology
                         .find_splint(runtime.splint_id)
                         .is_some_and(|splint| splint.last_incarnation == runtime.last_incarnation)
                     && runtime.validate()
@@ -959,23 +959,23 @@ pub enum AuditOperation {
     RequestAccess,
     AuthorizationStatus,
     RevokeAccess,
-    ListDojos,
+    ListLairs,
     InspectTopology,
     SubscribeTopology,
     InspectSplint,
-    CreateDojo,
+    CreateLair,
     SplitSplint,
     RelaunchSplint,
     RestoreSplint,
-    RestoreWindow,
     RestoreDojo,
+    RestoreLair,
     CloseSplint,
     SetSplitRatio,
-    NewWindow,
-    CloseWindow,
+    NewDojo,
+    CloseDojo,
+    RenameLair,
     RenameDojo,
-    RenameWindow,
-    SetWindowDefaultFocus,
+    SetDojoDefaultFocus,
     RenameSplint,
     Attach,
     ScrollbackPage,
@@ -1028,9 +1028,9 @@ pub struct AuditPeer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditResource {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dojo_id: Option<DojoId>,
+    pub lair_id: Option<LairId>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub window_id: Option<WindowId>,
+    pub dojo_id: Option<DojoId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub splint_id: Option<SplintId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1839,8 +1839,8 @@ pub enum ScrollDirection {
 /// generation must match the adjacent snapshot, page, or resync state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalProvenance {
+    pub lair_id: LairId,
     pub dojo_id: DojoId,
-    pub window_id: WindowId,
     pub splint_id: SplintId,
     pub incarnation: u64,
     pub topology_revision: TopologyRevision,
@@ -2204,7 +2204,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 24);
+        assert_eq!(PROTOCOL_VERSION, 25);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -2389,17 +2389,17 @@ mod tests {
         assert!(encoded.contains("inspect_splint"));
         assert!(encoded.contains("splint_id"));
 
-        let mut lair = Lair::new();
-        let dojo = lair
-            .create_dojo("main", PathBuf::from("/tmp"))
+        let mut topology = Topology::new();
+        let lair = topology
+            .create_lair("main", PathBuf::from("/tmp"))
             .unwrap()
             .clone();
-        let splint_id = match &dojo.windows[0].root {
+        let splint_id = match &lair.dojos[0].root {
             splinterm_core::LayoutNode::Leaf(splint) => splint.id,
             splinterm_core::LayoutNode::Branch { .. } => unreachable!(),
         };
-        assert!(lair.set_splint_state(splint_id, splinterm_core::SplintState::Exited(0)));
-        assert!(lair.set_splint_last_incarnation(splint_id, 1));
+        assert!(topology.set_splint_state(splint_id, splinterm_core::SplintState::Exited(0)));
+        assert!(topology.set_splint_last_incarnation(splint_id, 1));
         let runtime = SplintRuntimeSummary {
             splint_id,
             live_incarnation: None,
@@ -2412,8 +2412,8 @@ mod tests {
             }),
         };
         let snapshot = TopologySnapshot {
-            revision: lair.revision(),
-            lair,
+            revision: topology.revision(),
+            topology,
             runtimes: vec![runtime],
         };
         assert!(snapshot.validate().is_ok());

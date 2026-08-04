@@ -256,7 +256,7 @@ def main() -> int:
     daemon = subprocess.Popen([str(daemon_binary)], env=environment, stdin=subprocess.DEVNULL, stdout=daemon_log, stderr=subprocess.STDOUT, start_new_session=True, text=True)
     addresses: set[str] = set()
     splint_ids: list[str] = []
-    window_id: str | None = None
+    dojo_id: str | None = None
     report: dict[str, Any] = {"schema": "splinterm.phase5.graphical-closure.v1", "case": args.case, "valid": False, "error": None}
     workspace_never_active = True
     window_never_active = True
@@ -275,23 +275,23 @@ def main() -> int:
         wait_until(lambda: socket.exists() and client("ping").returncode == 0, 5, "daemon not ready")
         triggers = [private / f"trigger-{index}" for index in range(len(case["payloads"]))]
         checked_client("new", f"phase5-{args.case}", "--", *child_command(triggers[0], case["payloads"][0]))
-        listing = checked_client("list")
-        dojo_match = re.search(rf"^([0-9a-f-]{{36}})  phase5-{re.escape(args.case)} ", listing, re.MULTILINE)
+        listing = checked_client("list", "--all")
+        lair_match = re.search(rf"^([0-9a-f-]{{36}})  phase5-{re.escape(args.case)} ", listing, re.MULTILINE)
         initial_splints = re.findall(r"^  ([0-9a-f-]{36})  ", listing, re.MULTILINE)
-        windows = re.findall(r"^  window ([0-9a-f-]{36})  ", listing, re.MULTILINE)
-        if dojo_match is None or len(initial_splints) != 1 or len(windows) != 1:
+        dojos = re.findall(r"^  Dojo ([0-9a-f-]{36})  ", listing, re.MULTILINE)
+        if lair_match is None or len(initial_splints) != 1 or len(dojos) != 1:
             raise RuntimeError(f"unexpected initial topology:\n{listing}")
-        window_id = windows[0]
+        dojo_id = dojos[0]
         if case["axis"] is not None:
             checked_client("split", initial_splints[0], "--axis", case["axis"], "--side", "second", "--", *child_command(triggers[1], case["payloads"][1]))
-        listing = checked_client("list")
+        listing = checked_client("list", "--all")
         splint_ids = re.findall(r"^  ([0-9a-f-]{36})  ", listing, re.MULTILINE)
         if len(splint_ids) != len(case["payloads"]):
             raise RuntimeError(f"unexpected final topology:\n{listing}")
 
         launcher = case_dir / "launch.sh"
         selected = {key: environment[key] for key in ("SPLINTERM_SOCKET", "SPLINTERM_ENABLE_DEV_ATTACH", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "SPLINTERM_PANE_CHROME_CAPTURE", "SPLINTERM_CAPTURE_MIN_IMAGES", "SPLINTERM_IMAGE_TRACE")}
-        command = ["env", *[f"{key}={value}" for key, value in selected.items()], str(client_binary), "window", "--dojo-id", dojo_match.group(1), "--window-id", window_id]
+        command = ["env", *[f"{key}={value}" for key, value in selected.items()], str(client_binary), "window", "--lair-id", lair_match.group(1), "--dojo-id", dojo_id]
         launcher.write_text("#!/bin/sh\nexec " + shlex.join(command) + f" >{shlex.quote(str(case_dir / 'client.stdout'))} 2>{shlex.quote(str(case_dir / 'client.stderr'))}\n", encoding="utf-8")
         launcher.chmod(0o700)
         existing = {item["address"] for item in V1.all_clients()}
@@ -408,8 +408,8 @@ def main() -> int:
             report["error"] = report["error"] or str(caught)
         for splint_id in splint_ids:
             client("kill", splint_id, "--yes")
-        if window_id is not None:
-            client("close-window", window_id)
+        if dojo_id is not None:
+            client("close-dojo", dojo_id)
         daemon.send_signal(signal.SIGINT)
         try:
             daemon.wait(timeout=8)

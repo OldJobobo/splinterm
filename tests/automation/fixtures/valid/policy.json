@@ -1,7 +1,7 @@
 {
   "$schema_file": "policy.schema.json",
   "document": {
-    "schema": "splinterm.policy.v1",
+    "schema": "splinterm.policy.v2",
     "rules": [
       {
         "id": "readonly-build-pane",
@@ -22,12 +22,12 @@
             "incarnation": "current"
           },
           {
-            "kind": "dojo",
-            "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77111"
+            "kind": "lair",
+            "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77111"
           },
           {
-            "kind": "window",
-            "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77112"
+            "kind": "dojo",
+            "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77112"
           }
         ],
         "limits": {

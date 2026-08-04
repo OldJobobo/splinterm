@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v2/tools/read_scrollback.output.schema.json",
+  "title": "splinterm.read_scrollback successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {
+          "const": "splinterm.read_scrollback"
+        },
+        "content_trust": {
+          "const": "untrusted_terminal_data"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "content_encoding",
+            "title",
+            "rows",
+            "continuation_cursor",
+            "resync_required"
+          ],
+          "properties": {
+            "content_encoding": {
+              "const": "unicode_scalars"
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "rows": {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/terminal_rows"
+            },
+            "continuation_cursor": {
+              "oneOf": [
+                {
+                  "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/cursor"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resync_required": {
+              "type": "boolean"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "resync_required": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "resync_required"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "continuation_cursor": {
+                    "type": "null"
+                  },
+                  "rows": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/terminal_resource"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "truncated": {
+                "const": true
+              }
+            },
+            "required": [
+              "truncated"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "continuation_cursor": {
+                    "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/cursor"
+                  },
+                  "resync_required": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "data": {
+                "properties": {
+                  "resync_required": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "resync_required"
+                ]
+              }
+            },
+            "required": [
+              "data"
+            ]
+          },
+          "then": {
+            "properties": {
+              "truncated": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

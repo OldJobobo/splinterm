@@ -392,7 +392,7 @@ class SplintermController(HeadlessController):
         self.process: subprocess.Popen[str] | None = None
         self._server_identity: ProcessIdentity | None = None
         self.runtime_ids: dict[str, str] = {}
-        self.window_id: str | None = None
+        self.dojo_id: str | None = None
 
     @property
     def server_identity(self) -> ProcessIdentity:
@@ -420,7 +420,7 @@ class SplintermController(HeadlessController):
                 value = self._json_command(
                     ["new", f"splinterbench-{self.run_id}", "--", *argv]
                 )
-                self.window_id = str(value["resource"]["window_id"])
+                self.dojo_id = str(value["resource"]["dojo_id"])
             else:
                 axis = (
                     "horizontal" if action["direction"] == "left-right" else "vertical"
@@ -445,7 +445,7 @@ class SplintermController(HeadlessController):
         splints = [
             item
             for item in value["data"]["splints"]
-            if item["window_id"] == self.window_id
+            if item["dojo_id"] == self.dojo_id
         ]
         if {item["splint_id"] for item in splints} != set(self.runtime_ids.values()):
             raise RuntimeError(

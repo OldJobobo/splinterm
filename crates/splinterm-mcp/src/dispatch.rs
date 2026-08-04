@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use splinterm_automation_client::{
     Connection, project_terminal_rows, protocol_error, request_cancellation,
 };
-use splinterm_core::{Axis, DojoId, LayoutNode, SplintId, SplitRatio, SplitSide, WindowId};
+use splinterm_core::{Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
     AccessGrant, AccessScope, AuditDecision, AuditOperation, AuditOutcome, AutomationLaunch,
     ErrorCode, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
@@ -22,7 +22,7 @@ use splinterm_protocol::{
 };
 use tokio_util::sync::CancellationToken;
 
-const SCHEMA: &str = "splinterm.mcp.v1";
+const SCHEMA: &str = "splinterm.mcp.v2";
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(5);
 const MINIMUM_DEADLINE_MS: u64 = 100;
 const MAXIMUM_DEADLINE_MS: u64 = 30_000;
@@ -496,8 +496,8 @@ fn automation_scope_name(scope: splinterm_protocol::AutomationScope) -> &'static
 }
 
 fn authorization_resource(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     grant: &AccessGrant,
     revision: u64,
 ) -> Result<Value, DispatchFailure> {
@@ -506,8 +506,8 @@ fn authorization_resource(
     }
     Ok(json!({
         "kind": "authorization",
+        "lair_id": lair_id.to_string(),
         "dojo_id": dojo_id.to_string(),
-        "window_id": window_id.to_string(),
         "splint_id": grant.splint_id.to_string(),
         "incarnation": grant.incarnation,
         "grant_id": grant.grant_id.to_string(),
@@ -562,26 +562,26 @@ pub(crate) fn topology_data(snapshot: &TopologySnapshot) -> Result<Value, Dispat
     snapshot
         .validate()
         .map_err(|_| DispatchFailure::internal())?;
-    let mut dojos = Vec::new();
-    for dojo in snapshot.lair.dojos() {
-        let mut windows = Vec::new();
-        for window in &dojo.windows {
+    let mut lairs = Vec::new();
+    for lair in snapshot.topology.lairs() {
+        let mut dojos = Vec::new();
+        for dojo in &lair.dojos {
             let mut splints = Vec::new();
-            topology_splints(&window.root, snapshot, &mut splints)?;
-            windows.push(json!({
-                "window_id": window.id.to_string(),
-                "title": window.title,
-                "default_focus_splint_id": window.default_focus.to_string(),
+            topology_splints(&dojo.root, snapshot, &mut splints)?;
+            dojos.push(json!({
+                "dojo_id": dojo.id.to_string(),
+                "name": dojo.name,
+                "default_focus_splint_id": dojo.default_focus.to_string(),
                 "splints": splints,
             }));
         }
-        dojos.push(json!({
-            "dojo_id": dojo.id.to_string(),
-            "name": dojo.name,
-            "windows": windows,
+        lairs.push(json!({
+            "lair_id": lair.id.to_string(),
+            "name": lair.name,
+            "dojos": dojos,
         }));
     }
-    Ok(json!({"dojos": dojos}))
+    Ok(json!({"lairs": lairs}))
 }
 
 fn invalid_terminal_argument(message: &'static str) -> DispatchFailure {
@@ -607,8 +607,8 @@ fn terminal_resource(
     }
     Ok(json!({
         "kind": "terminal",
+        "lair_id": provenance.lair_id.to_string(),
         "dojo_id": provenance.dojo_id.to_string(),
-        "window_id": provenance.window_id.to_string(),
         "splint_id": requested_splint.to_string(),
         "incarnation": incarnation,
         "topology_revision": provenance.topology_revision.get(),
@@ -1047,15 +1047,15 @@ async fn search_scrollback(
     }
 }
 
-fn parse_dojo(arguments: &Value) -> Result<DojoId, DispatchFailure> {
-    arguments["dojo_id"]
+fn parse_lair(arguments: &Value) -> Result<LairId, DispatchFailure> {
+    arguments["lair_id"]
         .as_str()
         .and_then(|value| value.parse().ok())
         .ok_or_else(DispatchFailure::internal)
 }
 
-fn parse_window(arguments: &Value) -> Result<WindowId, DispatchFailure> {
-    arguments["window_id"]
+fn parse_dojo(arguments: &Value) -> Result<DojoId, DispatchFailure> {
+    arguments["dojo_id"]
         .as_str()
         .and_then(|value| value.parse().ok())
         .ok_or_else(DispatchFailure::internal)
@@ -1152,26 +1152,26 @@ fn unchanged_topology_revision(
     Ok(committed.get())
 }
 
-fn dojo_resource(dojo_id: DojoId, revision: u64) -> Value {
+fn lair_resource(lair_id: LairId, revision: u64) -> Value {
     json!({
-        "kind": "dojo",
-        "dojo_id": dojo_id.to_string(),
+        "kind": "lair",
+        "lair_id": lair_id.to_string(),
         "topology_revision": revision,
     })
 }
 
-fn window_resource(dojo_id: DojoId, window_id: WindowId, revision: u64) -> Value {
+fn dojo_resource(lair_id: LairId, dojo_id: DojoId, revision: u64) -> Value {
     json!({
-        "kind": "window",
+        "kind": "dojo",
+        "lair_id": lair_id.to_string(),
         "dojo_id": dojo_id.to_string(),
-        "window_id": window_id.to_string(),
         "topology_revision": revision,
     })
 }
 
 fn splint_resource(
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     splint_id: SplintId,
     incarnation: u64,
     revision: u64,
@@ -1181,8 +1181,8 @@ fn splint_resource(
     }
     Ok(json!({
         "kind": "splint",
+        "lair_id": lair_id.to_string(),
         "dojo_id": dojo_id.to_string(),
-        "window_id": window_id.to_string(),
         "splint_id": splint_id.to_string(),
         "incarnation": incarnation,
         "topology_revision": revision,
@@ -1192,35 +1192,19 @@ fn splint_resource(
 fn exact_splint_preparation(
     preparation: &MutationPreparation,
     splint_id: SplintId,
-) -> Result<(DojoId, WindowId, u64), DispatchFailure> {
+) -> Result<(LairId, DojoId, u64), DispatchFailure> {
     match (
+        preparation.lair_id,
         preparation.dojo_id,
-        preparation.window_id,
         preparation.splint_id,
         preparation.incarnation,
         preparation.targets.is_empty(),
     ) {
-        (Some(dojo_id), Some(window_id), Some(prepared), Some(incarnation), true)
+        (Some(lair_id), Some(dojo_id), Some(prepared), Some(incarnation), true)
             if prepared == splint_id && incarnation > 0 =>
         {
-            Ok((dojo_id, window_id, incarnation))
+            Ok((lair_id, dojo_id, incarnation))
         }
-        _ => Err(DispatchFailure::internal()),
-    }
-}
-
-fn exact_window_preparation(
-    preparation: &MutationPreparation,
-    window_id: WindowId,
-) -> Result<DojoId, DispatchFailure> {
-    match (
-        preparation.dojo_id,
-        preparation.window_id,
-        preparation.splint_id,
-        preparation.incarnation,
-        preparation.targets.is_empty(),
-    ) {
-        (Some(dojo_id), Some(prepared), None, None, true) if prepared == window_id => Ok(dojo_id),
         _ => Err(DispatchFailure::internal()),
     }
 }
@@ -1228,9 +1212,25 @@ fn exact_window_preparation(
 fn exact_dojo_preparation(
     preparation: &MutationPreparation,
     dojo_id: DojoId,
+) -> Result<LairId, DispatchFailure> {
+    match (
+        preparation.lair_id,
+        preparation.dojo_id,
+        preparation.splint_id,
+        preparation.incarnation,
+        preparation.targets.is_empty(),
+    ) {
+        (Some(lair_id), Some(prepared), None, None, true) if prepared == dojo_id => Ok(lair_id),
+        _ => Err(DispatchFailure::internal()),
+    }
+}
+
+fn exact_lair_preparation(
+    preparation: &MutationPreparation,
+    lair_id: LairId,
 ) -> Result<(), DispatchFailure> {
-    if preparation.dojo_id == Some(dojo_id)
-        && preparation.window_id.is_none()
+    if preparation.lair_id == Some(lair_id)
+        && preparation.dojo_id.is_none()
         && preparation.splint_id.is_none()
         && preparation.incarnation.is_none()
         && preparation.targets.is_empty()
@@ -1320,9 +1320,9 @@ async fn dispatch_mutation_to(
 ) -> Result<Value, DispatchFailure> {
     if matches!(
         tool,
-        "splinterm.create_dojo"
+        "splinterm.create_lair"
             | "splinterm.split_splint"
-            | "splinterm.new_window"
+            | "splinterm.new_dojo"
             | "splinterm.relaunch_splint"
     ) {
         let _ = automation_launch(arguments)?;
@@ -1332,12 +1332,12 @@ async fn dispatch_mutation_to(
     }
     let mut session = DaemonSession::connect_to(cancellation, socket).await?;
     match tool {
-        "splinterm.create_dojo" => {
+        "splinterm.create_lair" => {
             let launch = automation_launch(arguments)?;
             let preparation =
-                mutation_preflight(&mut session, MutationPreflight::CreateDojo).await?;
-            if preparation.dojo_id.is_some()
-                || preparation.window_id.is_some()
+                mutation_preflight(&mut session, MutationPreflight::CreateLair).await?;
+            if preparation.lair_id.is_some()
+                || preparation.dojo_id.is_some()
                 || preparation.splint_id.is_some()
                 || preparation.incarnation.is_some()
                 || !preparation.targets.is_empty()
@@ -1348,32 +1348,32 @@ async fn dispatch_mutation_to(
                 .as_str()
                 .ok_or_else(DispatchFailure::internal)?;
             match session
-                .request(Request::CreateDojoAutomation {
+                .request(Request::CreateLairAutomation {
                     expected_topology_revision: preparation.topology_revision,
                     name: name.to_owned(),
                     launch,
                 })
                 .await?
             {
-                Response::DojoCreated {
-                    dojo,
+                Response::LairCreated {
+                    lair,
                     incarnation,
                     topology_revision,
                 } => {
                     let revision = next_topology_revision(&preparation, topology_revision)?;
-                    if incarnation == 0 || dojo.windows.len() != 1 {
+                    if incarnation == 0 || lair.dojos.len() != 1 {
                         return Err(DispatchFailure::internal());
                     }
-                    let window = &dojo.windows[0];
-                    let LayoutNode::Leaf(splint) = &window.root else {
+                    let dojo = &lair.dojos[0];
+                    let LayoutNode::Leaf(splint) = &dojo.root else {
                         return Err(DispatchFailure::internal());
                     };
                     Ok(success(
                         tool,
-                        dojo_resource(dojo.id, revision),
+                        lair_resource(lair.id, revision),
                         json!({
                             "committed": true,
-                            "window_id": window.id.to_string(),
+                            "dojo_id": dojo.id.to_string(),
                             "splint_id": splint.id.to_string(),
                             "incarnation": incarnation,
                         }),
@@ -1392,7 +1392,7 @@ async fn dispatch_mutation_to(
                 MutationPreflight::SplitSplint { splint_id: target },
             )
             .await?;
-            let (dojo_id, window_id, _) = exact_splint_preparation(&preparation, target)?;
+            let (lair_id, dojo_id, _) = exact_splint_preparation(&preparation, target)?;
             let axis = match arguments["axis"].as_str() {
                 Some("horizontal") => Axis::Horizontal,
                 Some("vertical") => Axis::Vertical,
@@ -1423,7 +1423,7 @@ async fn dispatch_mutation_to(
                     let revision = next_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        splint_resource(dojo_id, window_id, splint_id, incarnation, revision)?,
+                        splint_resource(lair_id, dojo_id, splint_id, incarnation, revision)?,
                         json!({"committed": true}),
                         false,
                         "trusted_metadata",
@@ -1432,26 +1432,26 @@ async fn dispatch_mutation_to(
                 _ => Err(DispatchFailure::internal()),
             }
         }
-        "splinterm.new_window" => {
-            let dojo_id = parse_dojo(arguments)?;
+        "splinterm.new_dojo" => {
+            let lair_id = parse_lair(arguments)?;
             let launch = automation_launch(arguments)?;
             let preparation =
-                mutation_preflight(&mut session, MutationPreflight::NewWindow { dojo_id }).await?;
-            exact_dojo_preparation(&preparation, dojo_id)?;
-            let title = arguments["title"]
+                mutation_preflight(&mut session, MutationPreflight::NewDojo { lair_id }).await?;
+            exact_lair_preparation(&preparation, lair_id)?;
+            let name = arguments["name"]
                 .as_str()
                 .ok_or_else(DispatchFailure::internal)?;
             match session
-                .request(Request::NewWindowAutomation {
+                .request(Request::NewDojoAutomation {
                     expected_topology_revision: preparation.topology_revision,
-                    dojo_id,
-                    title: title.to_owned(),
+                    lair_id,
+                    name: name.to_owned(),
                     launch,
                 })
                 .await?
             {
-                Response::WindowStarted {
-                    window_id,
+                Response::DojoStarted {
+                    dojo_id,
                     splint_id,
                     incarnation,
                     topology_revision,
@@ -1459,7 +1459,7 @@ async fn dispatch_mutation_to(
                     let revision = next_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        window_resource(dojo_id, window_id, revision),
+                        dojo_resource(lair_id, dojo_id, revision),
                         json!({
                             "committed": true,
                             "splint_id": splint_id.to_string(),
@@ -1480,7 +1480,7 @@ async fn dispatch_mutation_to(
                 MutationPreflight::RelaunchSplint { splint_id },
             )
             .await?;
-            let (dojo_id, window_id, _) = exact_splint_preparation(&preparation, splint_id)?;
+            let (lair_id, dojo_id, _) = exact_splint_preparation(&preparation, splint_id)?;
             match session
                 .request(Request::RelaunchSplintAutomation {
                     expected_topology_revision: preparation.topology_revision,
@@ -1497,7 +1497,7 @@ async fn dispatch_mutation_to(
                     let revision = unchanged_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        splint_resource(dojo_id, window_id, splint_id, incarnation, revision)?,
+                        splint_resource(lair_id, dojo_id, splint_id, incarnation, revision)?,
                         json!({"committed": true}),
                         false,
                         "trusted_metadata",
@@ -1511,7 +1511,7 @@ async fn dispatch_mutation_to(
             let preparation =
                 mutation_preflight(&mut session, MutationPreflight::RestoreSplint { splint_id })
                     .await?;
-            let (dojo_id, window_id, _) = exact_splint_preparation(&preparation, splint_id)?;
+            let (lair_id, dojo_id, _) = exact_splint_preparation(&preparation, splint_id)?;
             match session
                 .request(Request::RestoreSplint {
                     expected_topology_revision: preparation.topology_revision,
@@ -1534,7 +1534,7 @@ async fn dispatch_mutation_to(
                         .ok_or_else(DispatchFailure::internal)?;
                     Ok(success(
                         tool,
-                        splint_resource(dojo_id, window_id, splint_id, incarnation, revision)?,
+                        splint_resource(lair_id, dojo_id, splint_id, incarnation, revision)?,
                         json!({"committed": true, "restored": true}),
                         false,
                         "trusted_metadata",
@@ -1543,40 +1543,12 @@ async fn dispatch_mutation_to(
                 _ => Err(DispatchFailure::internal()),
             }
         }
-        "splinterm.restore_window" => {
-            let window_id = parse_window(arguments)?;
-            let preparation =
-                mutation_preflight(&mut session, MutationPreflight::RestoreWindow { window_id })
-                    .await?;
-            let dojo_id = preparation.dojo_id.ok_or_else(DispatchFailure::internal)?;
-            if preparation.window_id != Some(window_id) || preparation.targets.is_empty() {
-                return Err(DispatchFailure::internal());
-            }
-            match session
-                .request(Request::RestoreWindow {
-                    expected_topology_revision: preparation.topology_revision,
-                    window_id,
-                })
-                .await?
-            {
-                Response::RestoreCompleted {
-                    topology_revision,
-                    results,
-                } => aggregate_restore_output(
-                    tool,
-                    &preparation,
-                    window_resource(dojo_id, window_id, topology_revision.get()),
-                    topology_revision,
-                    &results,
-                ),
-                _ => Err(DispatchFailure::internal()),
-            }
-        }
         "splinterm.restore_dojo" => {
             let dojo_id = parse_dojo(arguments)?;
             let preparation =
                 mutation_preflight(&mut session, MutationPreflight::RestoreDojo { dojo_id })
                     .await?;
+            let lair_id = preparation.lair_id.ok_or_else(DispatchFailure::internal)?;
             if preparation.dojo_id != Some(dojo_id) || preparation.targets.is_empty() {
                 return Err(DispatchFailure::internal());
             }
@@ -1593,7 +1565,35 @@ async fn dispatch_mutation_to(
                 } => aggregate_restore_output(
                     tool,
                     &preparation,
-                    dojo_resource(dojo_id, topology_revision.get()),
+                    dojo_resource(lair_id, dojo_id, topology_revision.get()),
+                    topology_revision,
+                    &results,
+                ),
+                _ => Err(DispatchFailure::internal()),
+            }
+        }
+        "splinterm.restore_lair" => {
+            let lair_id = parse_lair(arguments)?;
+            let preparation =
+                mutation_preflight(&mut session, MutationPreflight::RestoreLair { lair_id })
+                    .await?;
+            if preparation.lair_id != Some(lair_id) || preparation.targets.is_empty() {
+                return Err(DispatchFailure::internal());
+            }
+            match session
+                .request(Request::RestoreLair {
+                    expected_topology_revision: preparation.topology_revision,
+                    lair_id,
+                })
+                .await?
+            {
+                Response::RestoreCompleted {
+                    topology_revision,
+                    results,
+                } => aggregate_restore_output(
+                    tool,
+                    &preparation,
+                    lair_resource(lair_id, topology_revision.get()),
                     topology_revision,
                     &results,
                 ),
@@ -1605,7 +1605,7 @@ async fn dispatch_mutation_to(
             let preparation =
                 mutation_preflight(&mut session, MutationPreflight::CloseSplint { splint_id })
                     .await?;
-            let (dojo_id, window_id, incarnation) =
+            let (lair_id, dojo_id, incarnation) =
                 exact_splint_preparation(&preparation, splint_id)?;
             match session
                 .request(Request::CloseSplint {
@@ -1618,7 +1618,7 @@ async fn dispatch_mutation_to(
                     let revision = next_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        splint_resource(dojo_id, window_id, splint_id, incarnation, revision)?,
+                        splint_resource(lair_id, dojo_id, splint_id, incarnation, revision)?,
                         json!({"committed": true, "confirmed": true, "closed": true}),
                         false,
                         "trusted_metadata",
@@ -1627,16 +1627,15 @@ async fn dispatch_mutation_to(
                 _ => Err(DispatchFailure::internal()),
             }
         }
-        "splinterm.close_window" => {
-            let window_id = parse_window(arguments)?;
+        "splinterm.close_dojo" => {
+            let dojo_id = parse_dojo(arguments)?;
             let preparation =
-                mutation_preflight(&mut session, MutationPreflight::CloseWindow { window_id })
-                    .await?;
-            let dojo_id = exact_window_preparation(&preparation, window_id)?;
+                mutation_preflight(&mut session, MutationPreflight::CloseDojo { dojo_id }).await?;
+            let lair_id = exact_dojo_preparation(&preparation, dojo_id)?;
             match session
-                .request(Request::CloseWindow {
+                .request(Request::CloseDojo {
                     expected_topology_revision: preparation.topology_revision,
-                    window_id,
+                    dojo_id,
                 })
                 .await?
             {
@@ -1644,7 +1643,7 @@ async fn dispatch_mutation_to(
                     let revision = next_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        window_resource(dojo_id, window_id, revision),
+                        dojo_resource(lair_id, dojo_id, revision),
                         json!({"committed": true, "confirmed": true, "closed": true}),
                         false,
                         "trusted_metadata",
@@ -1664,7 +1663,7 @@ async fn dispatch_mutation_to(
                 },
             )
             .await?;
-            let (dojo_id, window_id, prepared_incarnation) =
+            let (lair_id, dojo_id, prepared_incarnation) =
                 exact_splint_preparation(&preparation, splint_id)?;
             if prepared_incarnation != incarnation {
                 return Err(DispatchFailure::internal());
@@ -1684,8 +1683,8 @@ async fn dispatch_mutation_to(
                     Ok(success(
                         tool,
                         splint_resource(
+                            lair_id,
                             dojo_id,
-                            window_id,
                             splint_id,
                             incarnation,
                             preparation.topology_revision.get(),
@@ -1703,7 +1702,7 @@ async fn dispatch_mutation_to(
             let preparation =
                 mutation_preflight(&mut session, MutationPreflight::SetSplitRatio { splint_id })
                     .await?;
-            let (dojo_id, window_id, incarnation) =
+            let (lair_id, dojo_id, incarnation) =
                 exact_splint_preparation(&preparation, splint_id)?;
             let (ratio, public_ratio) = split_ratio(arguments)?;
             match session
@@ -1718,8 +1717,37 @@ async fn dispatch_mutation_to(
                     let revision = next_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        splint_resource(dojo_id, window_id, splint_id, incarnation, revision)?,
+                        splint_resource(lair_id, dojo_id, splint_id, incarnation, revision)?,
                         json!({"committed": true, "ratio": public_ratio}),
+                        false,
+                        "trusted_metadata",
+                    ))
+                }
+                _ => Err(DispatchFailure::internal()),
+            }
+        }
+        "splinterm.rename_lair" => {
+            let lair_id = parse_lair(arguments)?;
+            let preparation =
+                mutation_preflight(&mut session, MutationPreflight::RenameLair { lair_id }).await?;
+            exact_lair_preparation(&preparation, lair_id)?;
+            let name = arguments["name"]
+                .as_str()
+                .ok_or_else(DispatchFailure::internal)?;
+            match session
+                .request(Request::RenameLair {
+                    expected_topology_revision: preparation.topology_revision,
+                    lair_id,
+                    name: name.to_owned(),
+                })
+                .await?
+            {
+                Response::TopologyCommitted { topology_revision } => {
+                    let revision = next_topology_revision(&preparation, topology_revision)?;
+                    Ok(success(
+                        tool,
+                        lair_resource(lair_id, revision),
+                        json!({"committed": true, "renamed": true}),
                         false,
                         "trusted_metadata",
                     ))
@@ -1731,7 +1759,7 @@ async fn dispatch_mutation_to(
             let dojo_id = parse_dojo(arguments)?;
             let preparation =
                 mutation_preflight(&mut session, MutationPreflight::RenameDojo { dojo_id }).await?;
-            exact_dojo_preparation(&preparation, dojo_id)?;
+            let lair_id = exact_dojo_preparation(&preparation, dojo_id)?;
             let name = arguments["name"]
                 .as_str()
                 .ok_or_else(DispatchFailure::internal)?;
@@ -1747,37 +1775,7 @@ async fn dispatch_mutation_to(
                     let revision = next_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        dojo_resource(dojo_id, revision),
-                        json!({"committed": true, "renamed": true}),
-                        false,
-                        "trusted_metadata",
-                    ))
-                }
-                _ => Err(DispatchFailure::internal()),
-            }
-        }
-        "splinterm.rename_window" => {
-            let window_id = parse_window(arguments)?;
-            let preparation =
-                mutation_preflight(&mut session, MutationPreflight::RenameWindow { window_id })
-                    .await?;
-            let dojo_id = exact_window_preparation(&preparation, window_id)?;
-            let title = arguments["title"]
-                .as_str()
-                .ok_or_else(DispatchFailure::internal)?;
-            match session
-                .request(Request::RenameWindow {
-                    expected_topology_revision: preparation.topology_revision,
-                    window_id,
-                    title: title.to_owned(),
-                })
-                .await?
-            {
-                Response::TopologyCommitted { topology_revision } => {
-                    let revision = next_topology_revision(&preparation, topology_revision)?;
-                    Ok(success(
-                        tool,
-                        window_resource(dojo_id, window_id, revision),
+                        dojo_resource(lair_id, dojo_id, revision),
                         json!({"committed": true, "renamed": true}),
                         false,
                         "trusted_metadata",
@@ -1791,7 +1789,7 @@ async fn dispatch_mutation_to(
             let preparation =
                 mutation_preflight(&mut session, MutationPreflight::RenameSplint { splint_id })
                     .await?;
-            let (dojo_id, window_id, incarnation) =
+            let (lair_id, dojo_id, incarnation) =
                 exact_splint_preparation(&preparation, splint_id)?;
             let title = arguments["title"]
                 .as_str()
@@ -1808,7 +1806,7 @@ async fn dispatch_mutation_to(
                     let revision = next_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        splint_resource(dojo_id, window_id, splint_id, incarnation, revision)?,
+                        splint_resource(lair_id, dojo_id, splint_id, incarnation, revision)?,
                         json!({"committed": true, "renamed": true}),
                         false,
                         "trusted_metadata",
@@ -1817,19 +1815,16 @@ async fn dispatch_mutation_to(
                 _ => Err(DispatchFailure::internal()),
             }
         }
-        "splinterm.set_window_default_focus" => {
-            let window_id = parse_window(arguments)?;
+        "splinterm.set_dojo_default_focus" => {
+            let dojo_id = parse_dojo(arguments)?;
             let splint_id = parse_splint(arguments)?;
             let preparation = mutation_preflight(
                 &mut session,
-                MutationPreflight::SetWindowDefaultFocus {
-                    window_id,
-                    splint_id,
-                },
+                MutationPreflight::SetDojoDefaultFocus { dojo_id, splint_id },
             )
             .await?;
-            let dojo_id = preparation.dojo_id.ok_or_else(DispatchFailure::internal)?;
-            if preparation.window_id != Some(window_id)
+            let lair_id = preparation.lair_id.ok_or_else(DispatchFailure::internal)?;
+            if preparation.dojo_id != Some(dojo_id)
                 || preparation.splint_id != Some(splint_id)
                 || preparation.incarnation.is_none()
                 || !preparation.targets.is_empty()
@@ -1837,9 +1832,9 @@ async fn dispatch_mutation_to(
                 return Err(DispatchFailure::internal());
             }
             match session
-                .request(Request::SetWindowDefaultFocus {
+                .request(Request::SetDojoDefaultFocus {
                     expected_topology_revision: preparation.topology_revision,
-                    window_id,
+                    dojo_id,
                     splint_id,
                 })
                 .await?
@@ -1848,7 +1843,7 @@ async fn dispatch_mutation_to(
                     let revision = next_topology_revision(&preparation, topology_revision)?;
                     Ok(success(
                         tool,
-                        window_resource(dojo_id, window_id, revision),
+                        dojo_resource(lair_id, dojo_id, revision),
                         json!({"committed": true, "splint_id": splint_id.to_string()}),
                         false,
                         "trusted_metadata",
@@ -1879,23 +1874,23 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
         AuditOperation::RequestAccess => "request_access",
         AuditOperation::AuthorizationStatus => "authorization_status",
         AuditOperation::RevokeAccess => "revoke_access",
-        AuditOperation::ListDojos => "list_dojos",
+        AuditOperation::ListLairs => "list_lairs",
         AuditOperation::InspectTopology => "inspect_topology",
         AuditOperation::SubscribeTopology => "subscribe_topology",
         AuditOperation::InspectSplint => "inspect_splint",
-        AuditOperation::CreateDojo => "create_dojo",
+        AuditOperation::CreateLair => "create_lair",
         AuditOperation::SplitSplint => "split_splint",
         AuditOperation::RelaunchSplint => "relaunch_splint",
         AuditOperation::RestoreSplint => "restore_splint",
-        AuditOperation::RestoreWindow => "restore_window",
         AuditOperation::RestoreDojo => "restore_dojo",
+        AuditOperation::RestoreLair => "restore_lair",
         AuditOperation::CloseSplint => "close_splint",
         AuditOperation::SetSplitRatio => "set_split_ratio",
-        AuditOperation::NewWindow => "new_window",
-        AuditOperation::CloseWindow => "close_window",
+        AuditOperation::NewDojo => "new_dojo",
+        AuditOperation::CloseDojo => "close_dojo",
+        AuditOperation::RenameLair => "rename_lair",
         AuditOperation::RenameDojo => "rename_dojo",
-        AuditOperation::RenameWindow => "rename_window",
-        AuditOperation::SetWindowDefaultFocus => "set_window_default_focus",
+        AuditOperation::SetDojoDefaultFocus => "set_dojo_default_focus",
         AuditOperation::RenameSplint => "rename_splint",
         AuditOperation::Attach => "attach",
         AuditOperation::ScrollbackPage => "scrollback_page",
@@ -1946,16 +1941,16 @@ pub(crate) async fn dispatch(
             )),
             _ => Err(DispatchFailure::internal()),
         },
-        "splinterm.list_dojos" => match daemon_request(Request::ListDojos, cancellation).await? {
-            Response::Dojos {
-                dojos,
+        "splinterm.list_lairs" => match daemon_request(Request::ListLairs, cancellation).await? {
+            Response::Lairs {
+                lairs,
                 topology_revision,
             } => Ok(success(
                 tool,
                 json!({"kind": "topology", "topology_revision": topology_revision.get()}),
                 json!({
-                    "dojos": dojos.into_iter().map(|dojo| json!({
-                        "dojo_id": dojo.id.to_string(),
+                    "lairs": lairs.into_iter().map(|dojo| json!({
+                        "lair_id": dojo.id.to_string(),
                         "name": dojo.name,
                     })).collect::<Vec<_>>()
                 }),
@@ -1980,8 +1975,8 @@ pub(crate) async fn dispatch(
             let splint_id = parse_splint(arguments)?;
             match daemon_request(Request::InspectSplint { splint_id }, cancellation).await? {
                 Response::Splint {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     title,
                     topology_revision,
                     runtime,
@@ -1989,8 +1984,8 @@ pub(crate) async fn dispatch(
                     tool,
                     json!({
                         "kind": "splint",
+                        "lair_id": lair_id.to_string(),
                         "dojo_id": dojo_id.to_string(),
-                        "window_id": window_id.to_string(),
                         "splint_id": splint_id.to_string(),
                         "current_incarnation": runtime.live_incarnation,
                         "last_incarnation": runtime.last_incarnation,
@@ -2010,21 +2005,21 @@ pub(crate) async fn dispatch(
         "splinterm.search_scrollback" => {
             search_scrollback(arguments, cancellation, cursor_registry).await
         }
-        "splinterm.create_dojo"
+        "splinterm.create_lair"
         | "splinterm.split_splint"
-        | "splinterm.new_window"
+        | "splinterm.new_dojo"
         | "splinterm.relaunch_splint"
         | "splinterm.restore_splint"
-        | "splinterm.restore_window"
         | "splinterm.restore_dojo"
+        | "splinterm.restore_lair"
         | "splinterm.close_splint"
-        | "splinterm.close_window"
+        | "splinterm.close_dojo"
         | "splinterm.kill_splint"
         | "splinterm.set_split_ratio"
+        | "splinterm.rename_lair"
         | "splinterm.rename_dojo"
-        | "splinterm.rename_window"
         | "splinterm.rename_splint"
-        | "splinterm.set_window_default_focus" => {
+        | "splinterm.set_dojo_default_focus" => {
             dispatch_mutation(tool, arguments, cancellation).await
         }
         "splinterm.request_access" => {
@@ -2054,8 +2049,8 @@ pub(crate) async fn dispatch(
             .await?
             {
                 Response::AccessGranted {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     authorization_revision,
                     grant,
                 } if grant.splint_id == splint_id && grant.incarnation == incarnation => {
@@ -2068,7 +2063,7 @@ pub(crate) async fn dispatch(
                         .ok_or_else(DispatchFailure::internal)?;
                     Ok(success(
                         tool,
-                        authorization_resource(dojo_id, window_id, &grant, authorization_revision)?,
+                        authorization_resource(lair_id, dojo_id, &grant, authorization_revision)?,
                         json!({
                             "committed": true,
                             "granted_scopes": granted_scopes,
@@ -2093,8 +2088,8 @@ pub(crate) async fn dispatch(
             .await?
             {
                 Response::AuthorizationStatus {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     incarnation,
                     topology_revision,
                     policy_generation,
@@ -2116,8 +2111,8 @@ pub(crate) async fn dispatch(
                         tool,
                         json!({
                             "kind": "splint",
+                            "lair_id": lair_id.to_string(),
                             "dojo_id": dojo_id.to_string(),
-                            "window_id": window_id.to_string(),
                             "splint_id": splint_id.to_string(),
                             "incarnation": incarnation,
                             "topology_revision": topology_revision.get(),
@@ -2138,13 +2133,13 @@ pub(crate) async fn dispatch(
             let grant_id = parse_grant_id(arguments)?;
             match daemon_request(Request::RevokeAccess { grant_id }, cancellation).await? {
                 Response::AccessRevoked {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     authorization_revision,
                     grant,
                 } if grant.grant_id == grant_id => Ok(success(
                     tool,
-                    authorization_resource(dojo_id, window_id, &grant, authorization_revision)?,
+                    authorization_resource(lair_id, dojo_id, &grant, authorization_revision)?,
                     json!({"committed": true}),
                     false,
                     "trusted_metadata",
@@ -2315,26 +2310,26 @@ mod tests {
 
     #[test]
     fn aggregate_restore_requires_runtime_only_revision_and_exact_results() {
-        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-        let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
         let first: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let second: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77104".parse().unwrap();
         let preparation = MutationPreparation {
             topology_revision: splinterm_core::TopologyRevision::new(7),
+            lair_id: Some(lair_id),
             dojo_id: Some(dojo_id),
-            window_id: Some(window_id),
             splint_id: None,
             incarnation: None,
             targets: vec![
                 splinterm_protocol::MutationTarget {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     splint_id: first,
                     incarnation: 2,
                 },
                 splinterm_protocol::MutationTarget {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     splint_id: second,
                     incarnation: 4,
                 },
@@ -2354,10 +2349,10 @@ mod tests {
             )),
         };
         let revision = splinterm_core::TopologyRevision::new(7);
-        let resource = window_resource(dojo_id, window_id, revision.get());
+        let resource = dojo_resource(lair_id, dojo_id, revision.get());
 
         let full = aggregate_restore_output(
-            "splinterm.restore_window",
+            "splinterm.restore_dojo",
             &preparation,
             resource.clone(),
             revision,
@@ -2368,7 +2363,7 @@ mod tests {
         assert_eq!(full["data"]["failed_count"], 0);
 
         let partial = aggregate_restore_output(
-            "splinterm.restore_window",
+            "splinterm.restore_dojo",
             &preparation,
             resource.clone(),
             revision,
@@ -2378,7 +2373,7 @@ mod tests {
         assert_eq!(partial["data"]["partial"], true);
 
         let zero = aggregate_restore_output(
-            "splinterm.restore_window",
+            "splinterm.restore_dojo",
             &preparation,
             resource.clone(),
             revision,
@@ -2391,7 +2386,7 @@ mod tests {
 
         assert!(
             aggregate_restore_output(
-                "splinterm.restore_window",
+                "splinterm.restore_dojo",
                 &preparation,
                 resource,
                 splinterm_core::TopologyRevision::new(8),
@@ -2406,8 +2401,8 @@ mod tests {
         let requested: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let other: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77104".parse().unwrap();
         let provenance = TerminalProvenance {
-            dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-            window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+            lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+            dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
             splint_id: requested,
             incarnation: 2,
             topology_revision: splinterm_core::TopologyRevision::new(1),

@@ -22,15 +22,15 @@ picker = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = picker
 SPEC.loader.exec_module(picker)
 
-DOJO = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101"
-WINDOW = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102"
+LAIR = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101"
+DOJO = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102"
 SPLINT = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103"
 INCARNATION = 2
 
 
 def envelope(operation: str, data: dict, resource: dict | None = None) -> dict:
     document = {
-        "schema": "splinterm.cli.v1",
+        "schema": "splinterm.cli.v2",
         "request_id": "1",
         "operation": operation,
         "ok": True,
@@ -45,12 +45,12 @@ def envelope(operation: str, data: dict, resource: dict | None = None) -> dict:
 TOPOLOGY = envelope(
     "inspect_topology",
     {
-        "dojos": [{"dojo_id": DOJO, "name": "main", "window_count": 1}],
-        "windows": [{"dojo_id": DOJO, "window_id": WINDOW, "title": "editor"}],
+        "lairs": [{"lair_id": LAIR, "name": "main", "dojo_count": 1}],
+        "dojos": [{"lair_id": LAIR, "dojo_id": DOJO, "name": "editor"}],
         "splints": [
             {
+                "lair_id": LAIR,
                 "dojo_id": DOJO,
-                "window_id": WINDOW,
                 "splint_id": SPLINT,
                 "title": "shell",
                 "lifecycle": "running",
@@ -91,18 +91,18 @@ if mode == "stderr_flood" and "subscribe" in args:
 if mode == "subscription_failure" and "subscribe" in args:
     raise SystemExit(6)
 if mode == "partial_event" and "subscribe" in args:
-    sys.stdout.write('{"schema":"splinterm.cli.event.v1"')
+    sys.stdout.write('{"schema":"splinterm.cli.event.v2"')
     raise SystemExit(0)
 if mode == "access_revoked" and "subscribe" in args:
     print(json.dumps({
-        "schema":"splinterm.cli.event.v1", "subscription_id":"1", "sequence":1,
+        "schema":"splinterm.cli.event.v2", "subscription_id":"1", "sequence":1,
         "event_type":"access_revoked", "stream":"terminal",
         "resource":{"splint_id":os.environ["FAKE_SPLINT"],"incarnation":2},
         "data":{"grant_id":"9"}, "truncated":False
     }))
     raise SystemExit(0)
 if mode == "malformed_topology":
-    topology["data"]["windows"] = [{}]
+    topology["data"]["dojos"] = [{}]
 if "window" in args and "--output" not in args:
     raise SystemExit(0)
 if "subscribe" in args:
@@ -111,7 +111,7 @@ if "subscribe" in args:
         "title":"shell", "visible_rows":[]
     } if mode != "malformed_snapshot" else {})
     print(json.dumps({
-        "schema":"splinterm.cli.event.v1", "subscription_id":"1", "sequence":1,
+        "schema":"splinterm.cli.event.v2", "subscription_id":"1", "sequence":1,
         "event_type":"snapshot", "stream":"terminal",
         "resource":{"splint_id":os.environ["FAKE_SPLINT"],"incarnation":2,
                     "terminal_revision":1,"history_generation":1},
@@ -120,7 +120,7 @@ if "subscribe" in args:
     if mode in {"snapshot_eof", "malformed_snapshot"}:
         raise SystemExit(0)
     print(json.dumps({
-        "schema":"splinterm.cli.event.v1", "subscription_id":"1", "sequence":2,
+        "schema":"splinterm.cli.event.v2", "subscription_id":"1", "sequence":2,
         "event_type":"resync_required", "stream":"terminal",
         "resource":{"splint_id":os.environ["FAKE_SPLINT"],"incarnation":2,
                     "terminal_revision":2,"history_generation":1},
@@ -132,30 +132,30 @@ if args[-1:] == ["topology"]:
     raise SystemExit(0)
 if "snapshot" in args:
     print(json.dumps({
-        "schema":"splinterm.cli.v1", "request_id":"1", "operation":"terminal_snapshot",
+        "schema":"splinterm.cli.v2", "request_id":"1", "operation":"terminal_snapshot",
         "ok":True, "truncated":False,
-        "resource":{"dojo_id":os.environ["FAKE_DOJO"],"window_id":os.environ["FAKE_WINDOW"],
+        "resource":{"lair_id":os.environ["FAKE_LAIR"],"dojo_id":os.environ["FAKE_DOJO"],
                     "splint_id":os.environ["FAKE_SPLINT"],"incarnation":2,
                     "terminal_revision":2,"history_generation":1},
         "data":{"content_encoding":"unicode_scalars","columns":80,"rows":[],
                 "cursor":{"column":0,"row":0,"visible":True},"continuation_cursor":None}
     }))
     raise SystemExit(0)
-operation = ("new_window" if "new-window" in args else
+operation = ("new_dojo" if "new-dojo" in args else
              "input" if "send" in args else "split_splint")
 if os.environ.get("FAKE_DENY") == operation:
     code = os.environ.get("FAKE_ERROR_CODE", "unauthorized")
     status = 3 if code == "unauthorized" else 5
     print(json.dumps({
-        "schema":"splinterm.cli.v1", "request_id":"1", "operation":operation,
+        "schema":"splinterm.cli.v2", "request_id":"1", "operation":operation,
         "ok":False, "truncated":False,
         "error":{"code":code,"message":"policy denied","retryable":False}
     }))
     raise SystemExit(status)
 print(json.dumps({
-    "schema":"splinterm.cli.v1", "request_id":"1", "operation":operation,
+    "schema":"splinterm.cli.v2", "request_id":"1", "operation":operation,
     "ok":True, "truncated":False,
-    "resource":{"dojo_id":os.environ["FAKE_DOJO"],"window_id":os.environ["FAKE_WINDOW"],
+    "resource":{"lair_id":os.environ["FAKE_LAIR"],"dojo_id":os.environ["FAKE_DOJO"],
                 "splint_id":os.environ["FAKE_SPLINT"],"incarnation":3,"topology_revision":8},
     "data":{"created":True}
 }))
@@ -175,12 +175,12 @@ class SessionPickerTests(unittest.TestCase):
             {
                 "FAKE_LOG": str(self.log),
                 "FAKE_TOPOLOGY": json.dumps(TOPOLOGY),
+                "FAKE_LAIR": LAIR,
                 "FAKE_DOJO": DOJO,
-                "FAKE_WINDOW": WINDOW,
                 "FAKE_SPLINT": SPLINT,
                 "FAKE_CHILD_PID": str(self.root / "child.pid"),
+                "SPLINTERM_LAIR_ID": LAIR,
                 "SPLINTERM_DOJO_ID": DOJO,
-                "SPLINTERM_WINDOW_ID": WINDOW,
                 "SPLINTERM_SPLINT_ID": SPLINT,
                 "SPLINTERM_SPLINT_INCARNATION": str(INCARNATION),
             }
@@ -227,7 +227,7 @@ class SessionPickerTests(unittest.TestCase):
     def test_direct_argv_is_never_joined_or_interpreted(self) -> None:
         dangerous = "$(touch should-not-exist); spaced value"
         completed = self.run_picker(
-            "start", DOJO, "--title", "task", "--cwd", str(self.root), "--",
+            "start", LAIR, "--name", "task", "--cwd", str(self.root), "--",
             "/usr/bin/editor", "--flag", dangerous,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -268,12 +268,12 @@ class SessionPickerTests(unittest.TestCase):
         expected = call.index("--expected-incarnation")
         self.assertEqual(call[expected + 1], str(INCARNATION))
 
-    def test_open_uses_validated_logical_ids_without_machine_output(self) -> None:
-        completed = self.run_picker("open", WINDOW)
+    def test_open_uses_validated_dojo_ids_without_machine_output(self) -> None:
+        completed = self.run_picker("open", DOJO)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(
             self.calls()[-1],
-            ["window", "--dojo-id", DOJO, "--window-id", WINDOW],
+            ["window", "--lair-id", LAIR, "--dojo-id", DOJO],
         )
 
     def test_terminal_resync_rebuilds_topology_and_snapshot(self) -> None:
@@ -317,7 +317,7 @@ class SessionPickerTests(unittest.TestCase):
         malformed["FAKE_MODE"] = "malformed_topology"
         completed = self.run_picker("list", environment=malformed)
         self.assertEqual(completed.returncode, 4)
-        self.assertIn("invalid window summary", completed.stderr)
+        self.assertIn("invalid Dojo summary", completed.stderr)
         self.assertNotIn("Traceback", completed.stderr)
 
     def test_malformed_snapshot_and_premature_clean_eof_fail(self) -> None:

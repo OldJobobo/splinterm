@@ -8,7 +8,7 @@ use std::{
 
 use serde_json::{Value, json};
 use splinterm_automation_client::Connection;
-use splinterm_core::{DojoId, SplintId, WindowId};
+use splinterm_core::{DojoId, LairId, SplintId};
 use splinterm_protocol::{
     ControlMode, ControlTransferDecision, ControlTransferOutcome, Request, Response,
     validate_control_modes,
@@ -23,14 +23,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{dispatch, resources::ResourceRegistry};
 
-const SCHEMA: &str = "splinterm.mcp.v1";
+const SCHEMA: &str = "splinterm.mcp.v2";
 const MAXIMUM_CONTROL_HANDLES: usize = 8;
 const TRANSFER_LIFETIME: Duration = Duration::from_secs(16);
 
 #[derive(Debug, Clone)]
 struct Metadata {
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     splint_id: SplintId,
     incarnation: u64,
     modes: Vec<ControlMode>,
@@ -276,8 +276,8 @@ impl ControlRegistry {
         .await?;
         let Response::ControlGranted {
             controller_id,
+            lair_id,
             dojo_id,
-            window_id,
         } = response
         else {
             return Err(dispatch::DispatchFailure::internal());
@@ -286,8 +286,8 @@ impl ControlRegistry {
             return Err(dispatch::DispatchFailure::internal());
         }
         let metadata = Metadata {
+            lair_id,
             dojo_id,
-            window_id,
             splint_id,
             incarnation,
             modes,
@@ -354,8 +354,8 @@ impl ControlRegistry {
         .await?;
         let Response::ControlTransferPending {
             transfer_id,
+            lair_id,
             dojo_id,
-            window_id,
         } = response
         else {
             return Err(dispatch::DispatchFailure::internal());
@@ -364,8 +364,8 @@ impl ControlRegistry {
             return Err(dispatch::DispatchFailure::internal());
         }
         let metadata = Metadata {
+            lair_id,
             dojo_id,
-            window_id,
             splint_id,
             incarnation,
             modes,
@@ -634,15 +634,15 @@ impl ControlRegistry {
             .await?;
             let Response::ControlGranted {
                 controller_id,
+                lair_id,
                 dojo_id,
-                window_id,
             } = granted
             else {
                 return Err(dispatch::DispatchFailure::internal());
             };
             let metadata = Metadata {
+                lair_id,
                 dojo_id,
-                window_id,
                 splint_id,
                 incarnation,
                 modes,
@@ -662,8 +662,8 @@ impl ControlRegistry {
             (metadata, response)
         };
         let Response::TerminalActionAcknowledged {
+            lair_id,
             dojo_id,
-            window_id,
             splint_id: acknowledged,
             incarnation: acknowledged_incarnation,
             terminal_revision,
@@ -672,8 +672,8 @@ impl ControlRegistry {
         else {
             return Err(dispatch::DispatchFailure::internal());
         };
-        if dojo_id != metadata.dojo_id
-            || window_id != metadata.window_id
+        if lair_id != metadata.lair_id
+            || dojo_id != metadata.dojo_id
             || acknowledged != metadata.splint_id
             || acknowledged_incarnation != metadata.incarnation
         {
@@ -1170,8 +1170,8 @@ fn action_request(
 fn resource(metadata: &Metadata, revision: u64) -> Value {
     json!({
         "kind": "control",
+        "lair_id": metadata.lair_id.to_string(),
         "dojo_id": metadata.dojo_id.to_string(),
-        "window_id": metadata.window_id.to_string(),
         "splint_id": metadata.splint_id.to_string(),
         "incarnation": metadata.incarnation,
         "control_revision": revision,
@@ -1280,7 +1280,7 @@ mod tests {
         stream
     }
 
-    fn ids() -> (DojoId, WindowId, SplintId) {
+    fn ids() -> (LairId, DojoId, SplintId) {
         (
             "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
             "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
@@ -1302,7 +1302,7 @@ mod tests {
     async fn cancellation_after_acquire_and_transfer_registration_rolls_back_authority() {
         let (directory, socket) = socket("registration-cancel");
         let listener = UnixListener::bind(&socket).unwrap();
-        let (dojo_id, window_id, splint_id) = ids();
+        let (lair_id, dojo_id, splint_id) = ids();
         let daemon = thread::spawn(move || {
             let mut cancelled_acquire = accept(&listener);
             let ClientFrame::Request {
@@ -1318,8 +1318,8 @@ mod tests {
                     request_id,
                     result: Response::ControlGranted {
                         controller_id: 10,
+                        lair_id,
                         dojo_id,
-                        window_id,
                     },
                 },
             );
@@ -1352,8 +1352,8 @@ mod tests {
                     request_id,
                     result: Response::ControlGranted {
                         controller_id: 20,
+                        lair_id,
                         dojo_id,
-                        window_id,
                     },
                 },
             );
@@ -1371,8 +1371,8 @@ mod tests {
                     request_id,
                     result: Response::ControlTransferPending {
                         transfer_id: 30,
+                        lair_id,
                         dojo_id,
-                        window_id,
                     },
                 },
             );
@@ -1458,7 +1458,7 @@ mod tests {
     async fn cancelled_handled_action(tool: &'static str) {
         let (directory, socket) = socket(tool);
         let listener = UnixListener::bind(&socket).unwrap();
-        let (dojo_id, window_id, splint_id) = ids();
+        let (lair_id, dojo_id, splint_id) = ids();
         let daemon = thread::spawn(move || {
             let mut owner = accept(&listener);
             let ClientFrame::Request {
@@ -1474,8 +1474,8 @@ mod tests {
                     request_id,
                     result: Response::ControlGranted {
                         controller_id: 40,
+                        lair_id,
                         dojo_id,
-                        window_id,
                     },
                 },
             );
@@ -1496,8 +1496,8 @@ mod tests {
                 &ServerFrame::Response {
                     request_id,
                     result: Response::TerminalActionAcknowledged {
+                        lair_id,
                         dojo_id,
-                        window_id,
                         splint_id,
                         incarnation: 2,
                         terminal_revision: 9,

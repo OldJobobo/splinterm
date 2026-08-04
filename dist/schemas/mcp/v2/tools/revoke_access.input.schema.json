@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v2/tools/revoke_access.input.schema.json",
+  "title": "splinterm.revoke_access input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grant_id",
+        "confirm"
+      ],
+      "properties": {
+        "grant_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/grant_id"
+        },
+        "confirm": {
+          "const": true
+        }
+      }
+    }
+  ]
+}

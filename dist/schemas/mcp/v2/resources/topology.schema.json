@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v2/resources/topology.schema.json",
+  "title": "Splinterm MCP v2 topology resource contents",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "uri",
+        "sequence",
+        "resync_required",
+        "content_trust",
+        "resource",
+        "data"
+      ],
+      "properties": {
+        "schema": {
+          "const": "splinterm.mcp.resource.v2"
+        },
+        "uri": {
+          "const": "splinterm://topology"
+        },
+        "sequence": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/positive_integer"
+        },
+        "resync_required": {
+          "type": "boolean"
+        },
+        "content_trust": {
+          "const": "untrusted_terminal_data"
+        },
+        "data": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/topology_data"
+        },
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/topology_resource"
+        }
+      }
+    }
+  ]
+}

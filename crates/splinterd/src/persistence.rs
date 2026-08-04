@@ -10,11 +10,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use splinterm_core::{LairDocument, MAX_LAIR_DOCUMENT_BYTES};
+use splinterm_core::{MAX_TOPOLOGY_DOCUMENT_BYTES, TopologyDocument};
 
 const STATE_DIRECTORY: &str = "splinterm";
-const PRIMARY_FILE: &str = "lair.json";
-const BACKUP_FILE: &str = "lair.json.previous";
+const PRIMARY_FILE: &str = "topology.json";
+const BACKUP_FILE: &str = "topology.json.previous";
+const LEGACY_PRIMARY_FILE: &str = "lair.json";
+const LEGACY_BACKUP_FILE: &str = "lair.json.previous";
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
 
 /// Owner-only durable metadata storage with an atomic previous-generation backup.
@@ -23,6 +25,8 @@ pub struct MetadataStore {
     directory: PathBuf,
     primary: PathBuf,
     backup: PathBuf,
+    legacy_primary: PathBuf,
+    legacy_backup: PathBuf,
 }
 
 impl MetadataStore {
@@ -47,11 +51,13 @@ impl MetadataStore {
         Self {
             primary: directory.join(PRIMARY_FILE),
             backup: directory.join(BACKUP_FILE),
+            legacy_primary: directory.join(LEGACY_PRIMARY_FILE),
+            legacy_backup: directory.join(LEGACY_BACKUP_FILE),
             directory,
         }
     }
 
-    pub fn load(&self) -> Result<Option<LairDocument>> {
+    pub fn load(&self) -> Result<Option<TopologyDocument>> {
         self.prepare_directory()?;
         match Self::read_if_present(&self.primary) {
             Ok(Some(document)) => return Ok(Some(document)),
@@ -63,20 +69,41 @@ impl MetadataStore {
             }
         }
         match Self::read_if_present(&self.backup) {
-            Ok(document) => Ok(document),
+            Ok(Some(document)) => return Ok(Some(document)),
+            Ok(None) => {}
             Err(error) => {
                 self.quarantine(&self.backup)
                     .context("failed to quarantine invalid backup metadata")?;
-                Err(error)
+                return Err(error);
             }
         }
+
+        // Schema-v2 installations used lair.json. Decode through the core's
+        // strict legacy DTO, commit canonical schema-v3 state, and retain the
+        // legacy file so a failed migration can never destroy the only copy.
+        for legacy in [&self.legacy_primary, &self.legacy_backup] {
+            match Self::read_if_present(legacy) {
+                Ok(Some(document)) => {
+                    self.save(&document)
+                        .context("failed to commit migrated topology metadata")?;
+                    return Ok(Some(document));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.quarantine(legacy)
+                        .context("failed to quarantine invalid legacy metadata")?;
+                    tracing::warn!(%error, path = %legacy.display(), "quarantined invalid legacy metadata");
+                }
+            }
+        }
+        Ok(None)
     }
 
-    pub fn save(&self, document: &LairDocument) -> Result<()> {
+    pub fn save(&self, document: &TopologyDocument) -> Result<()> {
         self.prepare_directory()?;
         let encoded = document
             .encode()
-            .context("failed to encode Lair metadata")?;
+            .context("failed to encode Topology metadata")?;
         let temp = self.temporary_path();
         let result = self.write_temp_and_commit(&temp, &encoded);
         if result.is_err() {
@@ -100,25 +127,25 @@ impl MetadataStore {
         Ok(())
     }
 
-    fn read_if_present(path: &Path) -> Result<Option<LairDocument>> {
+    fn read_if_present(path: &Path) -> Result<Option<TopologyDocument>> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         validate_file(path, &metadata)?;
-        if metadata.len() > u64::try_from(MAX_LAIR_DOCUMENT_BYTES).unwrap() {
+        if metadata.len() > u64::try_from(MAX_TOPOLOGY_DOCUMENT_BYTES).unwrap() {
             bail!("metadata file exceeds its size limit");
         }
         let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap());
         File::open(path)?
             .take(
-                u64::try_from(MAX_LAIR_DOCUMENT_BYTES)
+                u64::try_from(MAX_TOPOLOGY_DOCUMENT_BYTES)
                     .unwrap()
                     .saturating_add(1),
             )
             .read_to_end(&mut bytes)?;
-        let document = LairDocument::decode(&bytes).context("invalid Lair metadata")?;
+        let document = TopologyDocument::decode(&bytes).context("invalid Topology metadata")?;
         Ok(Some(document))
     }
 
@@ -155,10 +182,18 @@ impl MetadataStore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
+        let prefix = if path
+            .file_name()
+            .is_some_and(|name| name == LEGACY_PRIMARY_FILE || name == LEGACY_BACKUP_FILE)
+        {
+            "lair"
+        } else {
+            "topology"
+        };
         for suffix in 0..100_u8 {
             let candidate = self
                 .directory
-                .join(format!("lair.invalid-{timestamp}-{suffix}"));
+                .join(format!("{prefix}.invalid-{timestamp}-{suffix}"));
             if !candidate.exists() {
                 fs::rename(path, candidate)?;
                 File::open(&self.directory)?.sync_all()?;
@@ -170,8 +205,10 @@ impl MetadataStore {
 
     fn temporary_path(&self) -> PathBuf {
         let serial = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-        self.directory
-            .join(format!(".lair.json.tmp-{}-{serial}", std::process::id()))
+        self.directory.join(format!(
+            ".topology.json.tmp-{}-{serial}",
+            std::process::id()
+        ))
     }
 }
 
@@ -197,7 +234,7 @@ fn validate_file(path: &Path, metadata: &fs::Metadata) -> Result<()> {
 mod tests {
     use std::os::unix::fs::symlink;
 
-    use splinterm_core::{Lair, LayoutNode, SplintState};
+    use splinterm_core::{LayoutNode, SplintState, Topology};
 
     use super::*;
 
@@ -206,21 +243,21 @@ mod tests {
         env::temp_dir().join(format!("splinterd-{name}-{}-{serial}", std::process::id()))
     }
 
-    fn document(revision: u64) -> LairDocument {
-        let mut lair = Lair::new();
-        let dojo = lair.create_dojo("main", PathBuf::from("/tmp")).unwrap();
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+    fn document(revision: u64) -> TopologyDocument {
+        let mut lair = Topology::new();
+        let dojo = lair.create_lair("main", PathBuf::from("/tmp")).unwrap();
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             unreachable!()
         };
         let splint_id = splint.id;
         assert!(lair.set_splint_state(splint_id, SplintState::Exited(0)));
         if revision == 2 {
-            let dojo_id = lair.dojos().next().unwrap().id;
-            lair.rename_dojo_at(lair.revision(), dojo_id, "renamed")
+            let lair_id = lair.lairs().next().unwrap().id;
+            lair.rename_lair_at(lair.revision(), lair_id, "renamed")
                 .unwrap();
         }
         assert_eq!(lair.revision().get(), revision);
-        LairDocument::from_lair(&lair).unwrap()
+        TopologyDocument::from_topology(&lair).unwrap()
     }
 
     #[test]
@@ -234,7 +271,7 @@ mod tests {
                 .load()
                 .unwrap()
                 .unwrap()
-                .into_lair()
+                .into_topology()
                 .unwrap()
                 .revision()
                 .get(),
@@ -244,7 +281,7 @@ mod tests {
             MetadataStore::read_if_present(&store.backup)
                 .unwrap()
                 .unwrap()
-                .into_lair()
+                .into_topology()
                 .unwrap()
                 .revision()
                 .get(),
@@ -259,20 +296,62 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v2_lair_file_migrates_without_deleting_the_source() {
+        let base = test_base("legacy-v2");
+        let store = MetadataStore::from_base(&base);
+        store.prepare_directory().unwrap();
+        let legacy = serde_json::json!({
+            "schema_version": 2,
+            "revision": 7,
+            "dojos": [{
+                "id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+                "name": "main",
+                "windows": [{
+                    "id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+                    "title": "editor",
+                    "default_focus": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                    "root": {"Leaf": {
+                        "id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                        "title": "shell",
+                        "cwd": "/tmp",
+                        "command": [],
+                        "state": {"Exited": 0}
+                    }}
+                }]
+            }]
+        });
+        fs::write(&store.legacy_primary, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        fs::set_permissions(&store.legacy_primary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let topology = store.load().unwrap().unwrap().into_topology().unwrap();
+        let lair = topology.lairs().next().unwrap();
+        assert_eq!(topology.revision().get(), 7);
+        assert_eq!(lair.id.to_string(), "018f4d8c-2a18-4b31-8c2f-9e7c5de77101");
+        assert_eq!(
+            lair.dojos[0].id.to_string(),
+            "018f4d8c-2a18-4b31-8c2f-9e7c5de77102"
+        );
+        assert_eq!(lair.dojos[0].name, "editor");
+        assert!(store.primary.exists());
+        assert!(store.legacy_primary.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn invalid_primary_is_quarantined_and_backup_survives() {
         let base = test_base("quarantine");
         let store = MetadataStore::from_base(&base);
         store.save(&document(1)).unwrap();
         store.save(&document(2)).unwrap();
         fs::write(&store.primary, b"{truncated").unwrap();
-        let loaded = store.load().unwrap().unwrap().into_lair().unwrap();
+        let loaded = store.load().unwrap().unwrap().into_topology().unwrap();
         assert_eq!(loaded.revision().get(), 1);
         assert!(fs::read_dir(&store.directory).unwrap().any(|entry| {
             entry
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with("lair.invalid-")
+                .starts_with("topology.invalid-")
         }));
         fs::remove_dir_all(base).unwrap();
     }
@@ -299,7 +378,7 @@ mod tests {
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with("lair.invalid-")
+                .starts_with("topology.invalid-")
         }));
         fs::remove_dir_all(base).unwrap();
         fs::remove_dir_all(target).unwrap();

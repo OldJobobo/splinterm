@@ -2,36 +2,30 @@
 
 ## Session model
 
+### Topology
+
+The daemon's complete catalog of persistent sessions: Lairs, Dojos, Splints,
+layout trees, names, stable IDs, focus hints, and lifecycle metadata.
+
 ### Lair
 
-The complete collection of persistent sessions managed by one `splinterd`
-daemon. A Lair contains Dojos, their windows, and all associated Splints.
+A named persistent session or project managed by `splinterd`. A Lair contains
+zero or more Dojos.
 
 ### Dojo
 
-A named workspace within the Lair. A Dojo groups related logical windows, such
-as those belonging to one project or task.
-
-### Window
-
-A persistent logical terminal layout within a Dojo. A Window contains one or
-more Splints arranged in a layout tree. It exists independently of any native
-Wayland window displaying it.
+A persistent terminal layout within a Lair. A Dojo owns one binary layout tree
+whose leaves are Splints, plus a stable ID, name, and default-focus hint.
 
 ### Splint
 
-An individual terminal pane within a Window. A Splint has a stable ID, terminal
+An individual terminal pane within a Dojo. A Splint has a stable ID, terminal
 state, launch metadata, and a process lifecycle.
 
 ### Layout tree
 
 The horizontal and vertical split structure that arranges Splints inside a
-Window. Each branch records its axis and split ratio; each leaf is a Splint.
-
-### Topology
-
-The complete logical structure of the Lair: Dojos, Windows, Splints, layout
-trees, names, IDs, and lifecycle metadata.
+Dojo. Each branch records its axis and split ratio; each leaf is a Splint.
 
 ## Programs and presentation
 
@@ -44,13 +38,13 @@ Sessions can continue running while no graphical client is attached.
 ### `splinterm`
 
 The graphical Wayland terminal client and command-line interface. It connects
-to `splinterd` to display logical Windows or perform supported operations.
+to `splinterd` to display Dojos or perform supported operations.
 
-### Native window
+### Window
 
-A compositor-managed Wayland toplevel displaying one logical Splinterm Window.
-Opening, closing, moving, or focusing a native window is separate from changing
-the daemon's logical topology.
+A compositor-managed native Wayland toplevel displaying one Splinterm Dojo.
+Opening, closing, moving, or focusing a Window is separate from changing the
+daemon's persistent topology.
 
 ### PTY
 
@@ -61,13 +55,13 @@ to its terminal state.
 
 ### Attach
 
-Display and observe an existing logical Window or Splint through a client.
-Attaching does not create or restart its process.
+Display and observe an existing Dojo or Splint through a client. Attaching does
+not create or restart its process.
 
 ### Detach
 
-Stop displaying a logical Window without terminating its Splints or their
-processes.
+Stop displaying a Dojo in a native Window without terminating its Splints or
+their processes.
 
 ### Incarnation
 
@@ -83,7 +77,7 @@ replacement launch parameters.
 ### Restore
 
 Explicitly start an exited Splint from its saved launch metadata. Restoring can
-operate on one Splint or the exited Splints in a Window or Dojo.
+operate on one Splint or the exited Splints in a Dojo or Lair.
 
 ## Control and authorization
 
@@ -117,8 +111,8 @@ process.
 
 ### Resource selector
 
-A policy entry identifying the Lair or an exact Dojo, Window, or Splint. Dojo
-and Window selectors snapshot their existing descendants when the policy is
+A policy entry identifying the daemon or an exact Lair, Dojo, or Splint. Lair
+and Dojo selectors snapshot their existing descendants when the policy is
 published; they do not automatically authorize future descendants.
 
 ### Trusted UI
@@ -154,6 +148,6 @@ daemon policy, resource, controller, confirmation, and audit checks.
 
 ### In-Splint context
 
-The `SPLINTERM_DOJO_ID`, `SPLINTERM_WINDOW_ID`, `SPLINTERM_SPLINT_ID`, and
+The `SPLINTERM_LAIR_ID`, `SPLINTERM_DOJO_ID`, `SPLINTERM_SPLINT_ID`, and
 `SPLINTERM_SPLINT_INCARNATION` values injected into a Splint's child process.
 They are discovery hints, not credentials or authority.

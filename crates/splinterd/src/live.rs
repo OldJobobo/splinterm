@@ -2431,11 +2431,9 @@ async fn run_actor_body(
                 );
             }
             _ = interval.tick() => {
-                if child_exit.is_none() {
-                    if let Some(status) = session.try_wait()? {
-                        child_exit = Some(status.into());
-                        drain_deadline = Some(Instant::now() + config.exit_drain_timeout);
-                    }
+                if child_exit.is_none() && let Some(status) = session.try_wait()? {
+                    child_exit = Some(status.into());
+                    drain_deadline = Some(Instant::now() + config.exit_drain_timeout);
                 }
                 advance_shutdown(session, &mut shutdown, &config);
             }
@@ -3797,7 +3795,7 @@ mod tests {
         let mut subscribers = vec![subscriber];
         let mut publication = SynchronizedPublication::new(terminal.revision());
 
-        for byte in [b'A', b'B', b'C'] {
+        for byte in *b"ABC" {
             terminal.advance(&[byte]);
             assert_eq!(
                 publish_updates(
@@ -4184,7 +4182,7 @@ mod tests {
         let mut subscribers = vec![subscriber];
         let mut publication = SynchronizedPublication::new(terminal.revision());
 
-        for byte in [b'A', b'B', b'C'] {
+        for byte in *b"ABC" {
             terminal.advance(&[byte]);
             assert_eq!(
                 publish_updates(

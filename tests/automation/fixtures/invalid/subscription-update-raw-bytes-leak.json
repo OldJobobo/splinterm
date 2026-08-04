@@ -1,7 +1,7 @@
 {
   "$schema_file": "cli-event.schema.json",
   "document": {
-    "schema": "splinterm.cli.event.v1",
+    "schema": "splinterm.cli.event.v2",
     "subscription_id": "1",
     "sequence": 2,
     "event_type": "update",
@@ -13,7 +13,11 @@
     "data": {
       "content_encoding": "unicode_scalars",
       "changed": true,
-      "bytes": [27, 91, 65]
+      "bytes": [
+        27,
+        91,
+        65
+      ]
     },
     "truncated": false
   }

@@ -9,7 +9,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use splinterm_core::{
-    Axis, DojoId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision, WindowId,
+    Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision,
 };
 use splinterm_protocol::{
     AccessScope, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
@@ -55,8 +55,8 @@ impl Daemon {
         command
             .env("SPLINTERM_SOCKET", socket)
             .env("XDG_STATE_HOME", runtime.join("state"))
+            .env("SPLINTERM_LAIR_ID", "caller-supplied-dojo")
             .env("SPLINTERM_DOJO_ID", "caller-supplied-dojo")
-            .env("SPLINTERM_WINDOW_ID", "caller-supplied-window")
             .env("SPLINTERM_SPLINT_ID", "caller-supplied-splint")
             .env(
                 "SPLINTERM_SPLINT_INCARNATION",
@@ -460,16 +460,16 @@ fn snapshot_text(snapshot: &TerminalSnapshot) -> String {
 )]
 fn assert_terminal_provenance(
     provenance: &TerminalProvenance,
+    lair_id: LairId,
     dojo_id: DojoId,
-    window_id: WindowId,
     splint_id: SplintId,
     incarnation: u64,
     title: &str,
     terminal_revision: u64,
     history_generation: u64,
 ) {
+    assert_eq!(provenance.lair_id, lair_id);
     assert_eq!(provenance.dojo_id, dojo_id);
-    assert_eq!(provenance.window_id, window_id);
     assert_eq!(provenance.splint_id, splint_id);
     assert_eq!(provenance.incarnation, incarnation);
     assert!(provenance.topology_revision.get() > 0);
@@ -578,7 +578,7 @@ fn exact_headless_policy(splint: Option<(SplintId, u64)>) -> String {
         "audit_inspect",
         "topology_subscribe",
     ];
-    let mut resources = vec![serde_json::json!({"kind": "lair"})];
+    let mut resources = vec![serde_json::json!({"kind": "daemon"})];
     if let Some((splint_id, incarnation)) = splint {
         scopes.extend([
             "terminal_visible_read",
@@ -593,7 +593,7 @@ fn exact_headless_policy(splint: Option<(SplintId, u64)>) -> String {
         }));
     }
     serde_json::json!({
-        "schema": "splinterm.policy.v1",
+        "schema": "splinterm.policy.v2",
         "rules": [{
             "id": "headless-test",
             "executable": {"path": executable, "sha256": sha256},
@@ -612,13 +612,13 @@ fn exact_headless_policy(splint: Option<(SplintId, u64)>) -> String {
 fn current_metadata_policy(splint_id: SplintId) -> String {
     let (executable, sha256) = policy_executable_identity();
     serde_json::json!({
-        "schema": "splinterm.policy.v1",
+        "schema": "splinterm.policy.v2",
         "rules": [{
             "id": "restorable-metadata-test",
             "executable": {"path": executable, "sha256": sha256},
             "scopes": ["topology_metadata_read", "audit_inspect"],
             "resources": [
-                {"kind": "lair"},
+                {"kind": "daemon"},
                 {
                     "kind": "splint",
                     "splint_id": splint_id,
@@ -639,10 +639,10 @@ fn scoped_authorization_policy(splint_id: SplintId, incarnation: u64, scopes: &[
         "incarnation": incarnation
     })];
     if scopes.contains(&"audit_inspect") {
-        resources.push(serde_json::json!({"kind": "lair"}));
+        resources.push(serde_json::json!({"kind": "daemon"}));
     }
     serde_json::json!({
-        "schema": "splinterm.policy.v1",
+        "schema": "splinterm.policy.v2",
         "rules": [{
             "id": "authorization-only-test",
             "executable": {"path": executable, "sha256": sha256},
@@ -661,10 +661,10 @@ fn scoped_authorization_policy(splint_id: SplintId, incarnation: u64, scopes: &[
     .to_string()
 }
 
-fn parent_snapshot_policy(dojo_id: splinterm_core::DojoId) -> String {
+fn parent_snapshot_policy(lair_id: splinterm_core::LairId) -> String {
     let (executable, sha256) = policy_executable_identity();
     serde_json::json!({
-        "schema": "splinterm.policy.v1",
+        "schema": "splinterm.policy.v2",
         "rules": [{
             "id": "parent-snapshot-test",
             "executable": {"path": executable, "sha256": sha256},
@@ -677,8 +677,8 @@ fn parent_snapshot_policy(dojo_id: splinterm_core::DojoId) -> String {
                 "scrollback_read"
             ],
             "resources": [
-                {"kind": "lair"},
-                {"kind": "dojo", "dojo_id": dojo_id}
+                {"kind": "daemon"},
+                {"kind": "lair", "lair_id": lair_id}
             ],
             "limits": {
                 "max_spawn_count": 2,
@@ -710,10 +710,12 @@ async fn mutation_preflight_preserves_exact_scope_cas_and_descendant_denial() {
         let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
         let mut setup = daemon.connect().await;
         let revision = setup.topology_revision().await;
-        let Response::DojoCreated {
-            dojo, incarnation, ..
+        let Response::LairCreated {
+            lair: dojo,
+            incarnation,
+            ..
         } = setup
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "mutation-preflight".to_owned(),
                 launch: LaunchParameters {
@@ -730,9 +732,9 @@ async fn mutation_preflight_preserves_exact_scope_cas_and_descendant_denial() {
             })
             .await
         else {
-            panic!("mutation setup did not create a Dojo")
+            panic!("mutation setup did not create a Lair")
         };
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             panic!("mutation setup root was not a leaf")
         };
         let splint_id = splint.id;
@@ -928,12 +930,12 @@ async fn runtime_relaunch_and_restore_preserve_topology_revision() {
         let daemon = Daemon::start().await;
         let mut client = daemon.connect().await;
         let revision = client.topology_revision().await;
-        let Response::DojoCreated {
-            dojo,
+        let Response::LairCreated {
+            lair: dojo,
             incarnation: first_incarnation,
             topology_revision,
         } = client
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "runtime-relaunch".to_owned(),
                 launch: LaunchParameters {
@@ -946,9 +948,9 @@ async fn runtime_relaunch_and_restore_preserve_topology_revision() {
             })
             .await
         else {
-            panic!("runtime relaunch setup did not create a Dojo")
+            panic!("runtime relaunch setup did not create a Lair")
         };
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             panic!("runtime relaunch setup was not a leaf")
         };
         let splint_id = splint.id;
@@ -1032,10 +1034,12 @@ async fn mcp_controller_registry_owns_handled_and_atomic_actions() {
         let daemon = Daemon::start().await;
         let mut setup = daemon.connect().await;
         let revision = setup.topology_revision().await;
-        let Response::DojoCreated {
-            dojo, incarnation, ..
+        let Response::LairCreated {
+            lair: dojo,
+            incarnation,
+            ..
         } = setup
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "mcp-controller".to_owned(),
                 launch: LaunchParameters {
@@ -1048,9 +1052,9 @@ async fn mcp_controller_registry_owns_handled_and_atomic_actions() {
             })
             .await
         else {
-            panic!("controller setup did not create a Dojo");
+            panic!("controller setup did not create a Lair");
         };
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             panic!("controller setup was not a leaf");
         };
         let outputs = splinterm_mcp::dispatch_control_for_integration_test(
@@ -1096,10 +1100,10 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
         let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
         let mut setup = daemon.connect().await;
         let revision = setup.topology_revision().await;
-        let Response::DojoCreated {
-            dojo, incarnation, ..
+        let Response::LairCreated {
+            lair: dojo, incarnation, ..
         } = setup
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "history-scope".to_owned(),
                 launch: LaunchParameters {
@@ -1112,10 +1116,10 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
             })
             .await
         else {
-            panic!("history scope setup did not create a Dojo");
+            panic!("history scope setup did not create a Lair");
         };
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             panic!("history scope setup was not a leaf");
         };
         let splint_id = splint.id;
@@ -1172,7 +1176,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
         assert_terminal_provenance(
             &attached_provenance,
             dojo.id,
-            window_id,
+            dojo_id,
             splint_id,
             incarnation,
             "scope-title",
@@ -1280,7 +1284,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
         assert_terminal_provenance(
             &provenance,
             dojo.id,
-            window_id,
+            dojo_id,
             splint_id,
             incarnation,
             "scope-title",
@@ -1310,7 +1314,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
         assert_terminal_provenance(
             &continued_provenance,
             dojo.id,
-            window_id,
+            dojo_id,
             splint_id,
             provenance.incarnation,
             "scope-title",
@@ -1338,7 +1342,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
         assert_terminal_provenance(
             &scrollback_resync,
             dojo.id,
-            window_id,
+            dojo_id,
             splint_id,
             provenance.incarnation,
             "scope-title",
@@ -1399,7 +1403,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
         assert_terminal_provenance(
             &search_provenance,
             dojo.id,
-            window_id,
+            dojo_id,
             splint_id,
             incarnation,
             "scope-title",
@@ -1430,7 +1434,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
         assert_terminal_provenance(
             &resync,
             dojo.id,
-            window_id,
+            dojo_id,
             splint_id,
             search_provenance.incarnation,
             "scope-title",
@@ -1453,10 +1457,12 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
         let mut daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
         let mut connection = daemon.connect().await;
         let revision = connection.topology_revision().await;
-        let Response::DojoCreated {
-            dojo, incarnation, ..
+        let Response::LairCreated {
+            lair: dojo,
+            incarnation,
+            ..
         } = connection
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "authorization-scope".to_owned(),
                 launch: LaunchParameters {
@@ -1473,10 +1479,10 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
             })
             .await
         else {
-            panic!("authorization scope setup did not create a Dojo");
+            panic!("authorization scope setup did not create a Lair");
         };
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             panic!("authorization scope setup was not a leaf");
         };
         let splint_id = splint.id;
@@ -1488,12 +1494,12 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
         time::sleep(Duration::from_millis(50)).await;
         let mut connection = daemon.connect().await;
         let second_revision = connection.topology_revision().await;
-        let Response::DojoCreated {
-            dojo: other_dojo,
+        let Response::LairCreated {
+            lair: other_dojo,
             incarnation: other_incarnation,
             ..
         } = connection
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: second_revision,
                 name: "authorization-other".to_owned(),
                 launch: LaunchParameters {
@@ -1510,9 +1516,9 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
             })
             .await
         else {
-            panic!("authorization wrong-resource setup did not create a Dojo");
+            panic!("authorization wrong-resource setup did not create a Lair");
         };
-        let LayoutNode::Leaf(other_splint) = &other_dojo.windows[0].root else {
+        let LayoutNode::Leaf(other_splint) = &other_dojo.dojos[0].root else {
             panic!("authorization wrong-resource setup was not a leaf");
         };
         let other_splint_id = other_splint.id;
@@ -1537,8 +1543,8 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
 
         let mut scoped = daemon.connect().await;
         let Response::AuthorizationStatus {
-            dojo_id,
-            window_id: response_window_id,
+            lair_id,
+            dojo_id: response_dojo_id,
             incarnation: response_incarnation,
             topology_revision,
             policy_generation,
@@ -1554,8 +1560,8 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
         else {
             panic!("scoped authorization status response was not returned");
         };
-        assert_eq!(dojo_id, dojo.id);
-        assert_eq!(response_window_id, window_id);
+        assert_eq!(lair_id, dojo.id);
+        assert_eq!(response_dojo_id, dojo_id);
         assert_eq!(response_incarnation, incarnation);
         assert!(topology_revision.get() > 0);
         assert!(policy_generation > 1);
@@ -1563,8 +1569,8 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
         assert!(!development_bypass);
 
         let Response::AccessGranted {
+            lair_id: granted_lair_id,
             dojo_id: granted_dojo_id,
-            window_id: granted_window_id,
             authorization_revision: granted_revision,
             grant,
         } = scoped
@@ -1577,8 +1583,8 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
         else {
             panic!("exact scoped access grant was not returned");
         };
-        assert_eq!(granted_dojo_id, dojo.id);
-        assert_eq!(granted_window_id, window_id);
+        assert_eq!(granted_lair_id, dojo.id);
+        assert_eq!(granted_dojo_id, dojo_id);
         assert_eq!(granted_revision, 1);
         assert!(grant.grant_id > 0);
         assert_eq!(grant.splint_id, splint_id);
@@ -1596,8 +1602,8 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
         let mut scoped = daemon.connect().await;
 
         let Response::AccessRevoked {
+            lair_id: revoked_lair_id,
             dojo_id: revoked_dojo_id,
-            window_id: revoked_window_id,
             authorization_revision: revoked_revision,
             grant: revoked,
         } = scoped
@@ -1608,8 +1614,8 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
         else {
             panic!("exact scoped access revocation was not returned");
         };
-        assert_eq!(revoked_dojo_id, dojo.id);
-        assert_eq!(revoked_window_id, window_id);
+        assert_eq!(revoked_lair_id, dojo.id);
+        assert_eq!(revoked_dojo_id, dojo_id);
         assert_eq!(revoked_revision, granted_revision + 1);
         assert_eq!(revoked, grant);
         assert_eq!(
@@ -1738,7 +1744,7 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
             ErrorCode::Unauthorized
         );
 
-        fs::write(policy, r#"{"schema":"splinterm.policy.v1","rules":[]}"#).unwrap();
+        fs::write(policy, r#"{"schema":"splinterm.policy.v2","rules":[]}"#).unwrap();
         fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
         daemon.reload_policy();
         assert_connection_closed(&mut scoped, "deny-all policy reload").await;
@@ -1831,10 +1837,12 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         let marker = daemon.runtime.join("child-pid");
         let mut connection = daemon.connect().await;
         let revision = connection.topology_revision().await;
-        let Response::DojoCreated {
-            dojo, incarnation, ..
+        let Response::LairCreated {
+            lair: dojo,
+            incarnation,
+            ..
         } = connection
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "headless".into(),
                 launch: LaunchParameters {
@@ -1851,11 +1859,11 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
             })
             .await
         else {
-            panic!("headless Dojo was not created");
+            panic!("headless Lair was not created");
         };
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
-            panic!("created headless Dojo was not a leaf");
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
+            panic!("created headless Lair was not a leaf");
         };
         let splint_id = splint.id;
         let splint_title = splint.title.clone();
@@ -1866,7 +1874,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
                 scrollback_rows: 0,
             })
             .await
-            .expect_err("Lair creation authority must not cover the new Dojo descendant");
+            .expect_err("Topology creation authority must not cover the new Lair descendant");
         assert_eq!(lair_only_denial.code, ErrorCode::Unauthorized);
         let marker_deadline = Instant::now() + Duration::from_secs(5);
         while !marker.exists() {
@@ -1890,7 +1898,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         let create_audit = page
             .records
             .iter()
-            .find(|record| record.operation == splinterm_protocol::AuditOperation::CreateDojo)
+            .find(|record| record.operation == splinterm_protocol::AuditOperation::CreateLair)
             .expect("authorized create audit record was absent");
         let peer_executable = std::env::current_exe().unwrap().canonicalize().unwrap();
         let peer_metadata = fs::metadata(&peer_executable).unwrap();
@@ -1899,7 +1907,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
             .unwrap()
             .read_to_end(&mut peer_bytes)
             .unwrap();
-        assert_eq!(create_audit.schema, "splinterm.audit.v1");
+        assert_eq!(create_audit.schema, "splinterm.audit.v2");
         assert_eq!(create_audit.retention, "daemon_lifetime");
         assert_ne!(create_audit.audit_id, 0);
         assert_ne!(create_audit.policy_generation, Some(0));
@@ -2019,10 +2027,10 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         assert_eq!(restarted_runtime.live_incarnation, None);
         assert_eq!(restarted_runtime.last_incarnation, Some(incarnation));
         assert!(restarted_runtime.restorable);
-        let restarted_dojo = snapshot.lair.dojos().next().unwrap();
+        let restarted_dojo = snapshot.topology.lairs().next().unwrap();
         assert_eq!(restarted_dojo.id, dojo.id);
-        let restarted_window = &restarted_dojo.windows[0];
-        assert_eq!(restarted_window.id, window_id);
+        let restarted_window = &restarted_dojo.dojos[0];
+        assert_eq!(restarted_window.id, dojo_id);
         let LayoutNode::Leaf(restarted_splint) = &restarted_window.root else {
             panic!("restarted persisted topology was not the exact leaf");
         };
@@ -2034,8 +2042,8 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
             splinterm_core::SplintState::Exited(_)
         ));
         let Response::Splint {
+            lair_id: inspected_lair_id,
             dojo_id: inspected_dojo_id,
-            window_id: inspected_window_id,
             title: inspected_title,
             topology_revision: inspected_revision,
             runtime: inspected_runtime,
@@ -2045,8 +2053,8 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         else {
             panic!("restorable Splint targeted inspection was not returned");
         };
-        assert_eq!(inspected_dojo_id, dojo.id);
-        assert_eq!(inspected_window_id, window_id);
+        assert_eq!(inspected_lair_id, dojo.id);
+        assert_eq!(inspected_dojo_id, dojo_id);
         assert_eq!(inspected_title, splint_title);
         assert_eq!(inspected_revision, snapshot.revision);
         assert_eq!(inspected_runtime, *restarted_runtime);
@@ -2061,7 +2069,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
         };
         assert!(
             page.records.iter().all(|record| {
-                record.operation != splinterm_protocol::AuditOperation::CreateDojo
+                record.operation != splinterm_protocol::AuditOperation::CreateLair
             })
         );
         daemon.shutdown();
@@ -2076,8 +2084,8 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
         let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
         let mut bootstrap = daemon.connect().await;
         let revision = bootstrap.topology_revision().await;
-        let Response::DojoCreated { dojo, .. } = bootstrap
-            .request(Request::CreateDojo {
+        let Response::LairCreated { lair: dojo, .. } = bootstrap
+            .request(Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "snapshot-policy".into(),
                 launch: LaunchParameters {
@@ -2090,16 +2098,16 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
             })
             .await
         else {
-            panic!("snapshot policy Dojo was not created");
+            panic!("snapshot policy Lair was not created");
         };
-        let dojo_id = dojo.id;
-        let LayoutNode::Leaf(original) = &dojo.windows[0].root else {
-            panic!("snapshot policy Dojo was not a leaf");
+        let lair_id = dojo.id;
+        let LayoutNode::Leaf(original) = &dojo.dojos[0].root else {
+            panic!("snapshot policy Lair was not a leaf");
         };
         let original_id = original.id;
 
         let policy = daemon.policy.as_ref().unwrap();
-        fs::write(policy, parent_snapshot_policy(dojo_id)).unwrap();
+        fs::write(policy, parent_snapshot_policy(lair_id)).unwrap();
         fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
         daemon.reload_policy();
         assert_connection_closed(&mut bootstrap, "parent snapshot policy reload").await;
@@ -2139,7 +2147,7 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
             .expect_err("new descendant must not inherit the published parent snapshot");
         assert_eq!(denied.code, ErrorCode::Unauthorized);
 
-        fs::write(policy, parent_snapshot_policy(dojo_id)).unwrap();
+        fs::write(policy, parent_snapshot_policy(lair_id)).unwrap();
         fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
         daemon.reload_policy();
         assert_connection_closed(&mut connection, "explicit descendant policy reload").await;
@@ -2163,8 +2171,8 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
         let marker = daemon.runtime.join("resistant-child-pid");
         let mut connection = daemon.connect().await;
         let revision = connection.topology_revision().await;
-        let Response::DojoCreated { .. } = connection
-            .request(Request::CreateDojo {
+        let Response::LairCreated { .. } = connection
+            .request(Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "resistant-shutdown".into(),
                 launch: LaunchParameters {
@@ -2184,7 +2192,7 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
             })
             .await
         else {
-            panic!("signal-resistant Dojo was not created");
+            panic!("signal-resistant Lair was not created");
         };
         let marker_deadline = Instant::now() + Duration::from_secs(5);
         while !marker.exists() {
@@ -2209,20 +2217,20 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
-    reason = "one lifecycle scenario correlates create, restore, and new-window context"
+    reason = "one lifecycle scenario correlates create, restore, and new-Dojo context"
 )]
-async fn new_window_and_restore_inject_exact_current_context() {
+async fn new_dojo_and_restore_inject_exact_current_context() {
     time::timeout(TEST_TIMEOUT, async {
         let daemon = Daemon::start().await;
         let restored_marker = daemon.runtime.join("restored-context");
-        let window_marker = daemon.runtime.join("window-context");
+        let dojo_marker = daemon.runtime.join("window-context");
         let context_launch = |marker: &Path| LaunchParameters {
             cwd: std::env::current_dir().unwrap(),
             command: vec![
                 "/bin/sh".into(),
                 "-c".into(),
                 format!(
-                    "printf '%s|%s|%s|%s' \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_WINDOW_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\" > {}",
+                    "printf '%s|%s|%s|%s' \"$SPLINTERM_LAIR_ID\" \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\" > {}",
                     marker.display()
                 ),
             ],
@@ -2231,28 +2239,28 @@ async fn new_window_and_restore_inject_exact_current_context() {
             scrollback_lines: 100,
         };
         let mut connection = daemon.connect().await;
-        let Response::DojoCreated {
-            dojo,
+        let Response::LairCreated {
+            lair: dojo,
             incarnation: first_incarnation,
             ..
         } = connection
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "context-lifecycle".into(),
                 launch: context_launch(&restored_marker),
             })
             .await
         else {
-            panic!("context test Dojo was not created");
+            panic!("context test Lair was not created");
         };
-        let dojo_id = dojo.id;
-        let first_window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(first) = &dojo.windows[0].root else {
-            panic!("context test Dojo was not a leaf");
+        let lair_id = dojo.id;
+        let first_dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(first) = &dojo.dojos[0].root else {
+            panic!("context test Lair was not a leaf");
         };
         let first_id = first.id;
         let expected_first =
-            format!("{dojo_id}|{first_window_id}|{first_id}|{first_incarnation}");
+            format!("{lair_id}|{first_dojo_id}|{first_id}|{first_incarnation}");
         let marker_deadline = Instant::now() + Duration::from_secs(5);
         while !matches!(fs::read_to_string(&restored_marker), Ok(ref value) if value == &expected_first) {
             assert!(Instant::now() < marker_deadline, "initial context marker timed out");
@@ -2284,7 +2292,7 @@ async fn new_window_and_restore_inject_exact_current_context() {
         let restored_incarnation = results[0].incarnation.expect("restore must start process");
         assert_ne!(restored_incarnation, first_incarnation);
         let expected_restored =
-            format!("{dojo_id}|{first_window_id}|{first_id}|{restored_incarnation}");
+            format!("{lair_id}|{first_dojo_id}|{first_id}|{restored_incarnation}");
         let marker_deadline = Instant::now() + Duration::from_secs(5);
         while !matches!(fs::read_to_string(&restored_marker), Ok(ref value) if value == &expected_restored) {
             assert!(Instant::now() < marker_deadline, "restored context marker timed out");
@@ -2292,26 +2300,26 @@ async fn new_window_and_restore_inject_exact_current_context() {
         }
 
         let revision = connection.topology_revision().await;
-        let Response::WindowStarted {
-            window_id,
+        let Response::DojoStarted {
+            dojo_id,
             splint_id,
             incarnation,
             ..
         } = connection
-            .request(Request::NewWindow {
+            .request(Request::NewDojo {
                 expected_topology_revision: revision,
-                dojo_id,
-                title: "context-window".into(),
-                launch: context_launch(&window_marker),
+                lair_id,
+                name: "context-dojo".into(),
+                launch: context_launch(&dojo_marker),
             })
             .await
         else {
-            panic!("context test window was not created");
+            panic!("context test Dojo was not created");
         };
-        let expected_window = format!("{dojo_id}|{window_id}|{splint_id}|{incarnation}");
+        let expected_window = format!("{lair_id}|{dojo_id}|{splint_id}|{incarnation}");
         let marker_deadline = Instant::now() + Duration::from_secs(5);
-        while !matches!(fs::read_to_string(&window_marker), Ok(ref value) if value == &expected_window) {
-            assert!(Instant::now() < marker_deadline, "window context marker timed out");
+        while !matches!(fs::read_to_string(&dojo_marker), Ok(ref value) if value == &expected_window) {
+            assert!(Instant::now() < marker_deadline, "Dojo context marker timed out");
             time::sleep(Duration::from_millis(10)).await;
         }
         assert!(!expected_restored.contains("caller-supplied"));
@@ -2339,8 +2347,8 @@ async fn restart_restores_ids_without_running_saved_commands() {
             scrollback_lines: 100,
         };
         let mut connection = daemon.connect().await;
-        let Response::DojoCreated { dojo, .. } = connection
-            .request(Request::CreateDojo {
+        let Response::LairCreated { lair: dojo, .. } = connection
+            .request(Request::CreateLair {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "durable".into(),
                 launch,
@@ -2349,9 +2357,9 @@ async fn restart_restores_ids_without_running_saved_commands() {
         else {
             panic!("dojo was not created");
         };
-        let dojo_id = dojo.id;
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let lair_id = dojo.id;
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             panic!("created dojo was not a leaf");
         };
         let splint_id = splint.id;
@@ -2366,7 +2374,7 @@ async fn restart_restores_ids_without_running_saved_commands() {
         drop(connection);
 
         daemon.stop_preserving_state();
-        let primary = daemon.runtime.join("state/splinterm/lair.json");
+        let primary = daemon.runtime.join("state/splinterm/topology.json");
         fs::write(&primary, b"{truncated").unwrap();
         daemon.start_again().await;
         time::sleep(Duration::from_millis(100)).await;
@@ -2377,7 +2385,7 @@ async fn restart_restores_ids_without_running_saved_commands() {
                     .unwrap()
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("lair.invalid-"))
+                    .starts_with("topology.invalid-"))
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "run\n");
         let mut restored = daemon.connect().await;
@@ -2387,10 +2395,10 @@ async fn restart_restores_ids_without_running_saved_commands() {
         };
         snapshot.validate().unwrap();
         assert_eq!(snapshot.revision.get(), 1);
-        let restored_dojo = snapshot.lair.dojos().next().unwrap();
-        assert_eq!(restored_dojo.id, dojo_id);
-        assert_eq!(restored_dojo.windows[0].id, window_id);
-        let LayoutNode::Leaf(restored_splint) = &restored_dojo.windows[0].root else {
+        let restored_dojo = snapshot.topology.lairs().next().unwrap();
+        assert_eq!(restored_dojo.id, lair_id);
+        assert_eq!(restored_dojo.dojos[0].id, dojo_id);
+        let LayoutNode::Leaf(restored_splint) = &restored_dojo.dojos[0].root else {
             panic!("restored dojo was not a leaf");
         };
         assert_eq!(restored_splint.id, splint_id);
@@ -2425,7 +2433,7 @@ async fn restart_restores_ids_without_running_saved_commands() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
-    reason = "one scenario covers restore-one, restore-window, restore-dojo, and partial results"
+    reason = "one scenario covers restore-one, restore-Dojo, restore-Lair, and partial results"
 )]
 async fn explicit_restore_scopes_report_per_leaf_results() {
     time::timeout(TEST_TIMEOUT, async {
@@ -2438,8 +2446,8 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
             scrollback_lines: 100,
         };
         let mut connection = daemon.connect().await;
-        let Response::DojoCreated { dojo, .. } = connection
-            .request(Request::CreateDojo {
+        let Response::LairCreated { lair: dojo, .. } = connection
+            .request(Request::CreateLair {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "restore-scopes".into(),
                 launch: launch.clone(),
@@ -2448,9 +2456,9 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
         else {
             panic!("dojo was not created");
         };
-        let dojo_id = dojo.id;
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(first) = &dojo.windows[0].root else {
+        let lair_id = dojo.id;
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(first) = &dojo.dojos[0].root else {
             panic!("created dojo was not a leaf");
         };
         let first_id = first.id;
@@ -2472,20 +2480,20 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
         else {
             panic!("second Splint was not created");
         };
-        let Response::WindowStarted {
+        let Response::DojoStarted {
             splint_id: third_id,
             incarnation: third_incarnation,
             ..
         } = connection
-            .request(Request::NewWindow {
+            .request(Request::NewDojo {
                 expected_topology_revision: topology_revision,
-                dojo_id,
-                title: "second".into(),
+                lair_id,
+                name: "second".into(),
                 launch,
             })
             .await
         else {
-            panic!("second window was not created");
+            panic!("second Dojo was not created");
         };
         for (splint_id, incarnation) in [
             (first_id, first_incarnation),
@@ -2518,13 +2526,13 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
 
         let expected_topology_revision = connection.topology_revision().await;
         let Response::RestoreCompleted { results, .. } = connection
-            .request(Request::RestoreWindow {
+            .request(Request::RestoreDojo {
                 expected_topology_revision,
-                window_id,
+                dojo_id,
             })
             .await
         else {
-            panic!("window restore failed");
+            panic!("Dojo restore failed");
         };
         assert_eq!(results.len(), 2);
         assert_eq!(
@@ -2544,9 +2552,9 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
 
         let expected_topology_revision = connection.topology_revision().await;
         let Response::RestoreCompleted { results, .. } = connection
-            .request(Request::RestoreDojo {
+            .request(Request::RestoreLair {
                 expected_topology_revision,
-                dojo_id,
+                lair_id,
             })
             .await
         else {
@@ -2601,12 +2609,12 @@ async fn topology_cas_stream_and_complete_edits() {
 
         let mut first = daemon.connect().await;
         let mut second = daemon.connect().await;
-        let first_request = Request::CreateDojo {
+        let first_request = Request::CreateLair {
             expected_topology_revision: snapshot.revision,
             name: "race-first".into(),
             launch: launch.clone(),
         };
-        let second_request = Request::CreateDojo {
+        let second_request = Request::CreateLair {
             expected_topology_revision: snapshot.revision,
             name: "race-second".into(),
             launch: launch.clone(),
@@ -2616,8 +2624,8 @@ async fn topology_cas_stream_and_complete_edits() {
             second.request_result(second_request)
         );
         let (dojo, stale) = match (first_result, second_result) {
-            (Ok(Response::DojoCreated { dojo, .. }), Err(stale))
-            | (Err(stale), Ok(Response::DojoCreated { dojo, .. })) => (dojo, stale),
+            (Ok(Response::LairCreated { lair: dojo, .. }), Err(stale))
+            | (Err(stale), Ok(Response::LairCreated { lair: dojo, .. })) => (dojo, stale),
             results => panic!("exactly one racing create must commit: {results:?}"),
         };
         assert_eq!(stale.code, ErrorCode::StaleTopology);
@@ -2634,12 +2642,12 @@ async fn topology_cas_stream_and_complete_edits() {
         assert!(matches!(
             event,
             SubscriptionEvent::TopologyChanged { change }
-                if change.revision.get() == 1 && change.kind == TopologyChangeKind::DojoCreated
+                if change.revision.get() == 1 && change.kind == TopologyChangeKind::LairCreated
         ));
 
-        let dojo_id = dojo.id;
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(initial) = &dojo.windows[0].root else {
+        let lair_id = dojo.id;
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(initial) = &dojo.dojos[0].root else {
             panic!("created dojo was not a leaf");
         };
         let initial_id = initial.id;
@@ -2674,9 +2682,9 @@ async fn topology_cas_stream_and_complete_edits() {
         ));
         assert!(matches!(
             editor
-                .request(Request::RenameDojo {
+                .request(Request::RenameLair {
                     expected_topology_revision: splinterm_core::TopologyRevision::new(3),
-                    dojo_id,
+                    lair_id,
                     name: "renamed-dojo".into(),
                 })
                 .await,
@@ -2684,10 +2692,10 @@ async fn topology_cas_stream_and_complete_edits() {
         ));
         assert!(matches!(
             editor
-                .request(Request::RenameWindow {
+                .request(Request::RenameDojo {
                     expected_topology_revision: splinterm_core::TopologyRevision::new(4),
-                    window_id,
-                    title: "main-window".into(),
+                    dojo_id,
+                    name: "main-dojo".into(),
                 })
                 .await,
             Response::TopologyCommitted { topology_revision } if topology_revision.get() == 5
@@ -2702,41 +2710,41 @@ async fn topology_cas_stream_and_complete_edits() {
                 .await,
             Response::TopologyCommitted { topology_revision } if topology_revision.get() == 6
         ));
-        let Response::WindowStarted {
-            window_id: extra_window,
+        let Response::DojoStarted {
+            dojo_id: extra_window,
             splint_id: extra_splint,
             incarnation: extra_incarnation,
             topology_revision,
         } = editor
-            .request(Request::NewWindow {
+            .request(Request::NewDojo {
                 expected_topology_revision: splinterm_core::TopologyRevision::new(6),
-                dojo_id,
-                title: "extra-window".into(),
+                lair_id,
+                name: "extra-dojo".into(),
                 launch,
             })
             .await
         else {
-            panic!("new window did not commit");
+            panic!("new Dojo did not commit");
         };
         assert_eq!(topology_revision.get(), 7);
         let invalid_focus = editor
-            .request_result(Request::SetWindowDefaultFocus {
+            .request_result(Request::SetDojoDefaultFocus {
                 expected_topology_revision: topology_revision,
-                window_id,
+                dojo_id,
                 splint_id: extra_splint,
             })
             .await
             .unwrap_err();
         assert_eq!(invalid_focus.code, ErrorCode::InvalidArgument);
         let Response::TopologyCommitted { topology_revision } = editor
-            .request(Request::SetWindowDefaultFocus {
+            .request(Request::SetDojoDefaultFocus {
                 expected_topology_revision: topology_revision,
-                window_id,
+                dojo_id,
                 splint_id: sibling_id,
             })
             .await
         else {
-            panic!("window focus hint did not commit");
+            panic!("Dojo focus hint did not commit");
         };
         assert_eq!(topology_revision.get(), 8);
         assert!(matches!(
@@ -2750,9 +2758,9 @@ async fn topology_cas_stream_and_complete_edits() {
         ));
         assert!(matches!(
             editor
-                .request(Request::CloseWindow {
+                .request(Request::CloseDojo {
                     expected_topology_revision: topology_revision,
-                    window_id: extra_window,
+                    dojo_id: extra_window,
                 })
                 .await,
             Response::TopologyCommitted { topology_revision } if topology_revision.get() == 9
@@ -2782,7 +2790,7 @@ async fn topology_cas_stream_and_complete_edits() {
         snapshot.validate().unwrap();
         assert_eq!(snapshot.revision.get(), 10);
         assert_eq!(
-            snapshot.lair.find_window(window_id).unwrap().default_focus,
+            snapshot.topology.find_dojo(dojo_id).unwrap().default_focus,
             initial_id
         );
         assert_eq!(snapshot.runtimes.len(), 1);
@@ -2797,8 +2805,8 @@ async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
     time::timeout(TEST_TIMEOUT, async {
         let daemon = Daemon::start().await;
         let mut client = daemon.connect().await;
-        let Response::DojoCreated { dojo, .. } = client
-            .request(Request::CreateDojo {
+        let Response::LairCreated { lair: dojo, .. } = client
+            .request(Request::CreateLair {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "search".into(),
                 launch: LaunchParameters {
@@ -2813,7 +2821,7 @@ async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
         else {
             panic!("daemon did not create search Splint");
         };
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             panic!("new dojo was not a leaf");
         };
         let splint_id = splint.id;
@@ -2875,8 +2883,8 @@ async fn simultaneous_clients_transfer_control_explicitly() {
     time::timeout(TEST_TIMEOUT, async {
         let daemon = Daemon::start().await;
         let mut admin = daemon.connect().await;
-        let Response::DojoCreated { dojo, .. } = admin
-            .request(Request::CreateDojo {
+        let Response::LairCreated { lair: dojo, .. } = admin
+            .request(Request::CreateLair {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "control-transfer".into(),
                 launch: LaunchParameters {
@@ -2891,7 +2899,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
         else {
             panic!("daemon did not create transfer Splint");
         };
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             panic!("new dojo was not a leaf");
         };
         let splint_id = splint.id;
@@ -3039,8 +3047,8 @@ async fn two_splints_spawn_and_preserve_independent_output() {
             scrollback_lines: 100,
         };
         let mut admin = daemon.connect().await;
-        let Response::DojoCreated { dojo, .. } = admin
-            .request(Request::CreateDojo {
+        let Response::LairCreated { lair: dojo, .. } = admin
+            .request(Request::CreateLair {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "multiplex".into(),
                 launch: shell_launch(),
@@ -3049,9 +3057,9 @@ async fn two_splints_spawn_and_preserve_independent_output() {
         else {
             panic!("daemon did not create initial Splint");
         };
-        let dojo_id = dojo.id;
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(first) = &dojo.windows[0].root else {
+        let lair_id = dojo.id;
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(first) = &dojo.dojos[0].root else {
             panic!("new dojo was not a leaf");
         };
         let first_id = first.id;
@@ -3126,7 +3134,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
             .acquire_control(second_id, second_incarnation)
             .await;
         assert_ne!(first_controller, second_controller);
-        let context_command = b"printf 'CTX=%s|%s|%s|%s\\n' \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_WINDOW_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\"\n";
+        let context_command = b"printf 'CTX=%s|%s|%s|%s\\n' \"$SPLINTERM_LAIR_ID\" \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\"\n";
         first_client
             .input(first_id, first_incarnation, context_command)
             .await;
@@ -3155,10 +3163,10 @@ async fn two_splints_spawn_and_preserve_independent_output() {
         let first_text = snapshot_text(&first_snapshot);
         let second_text = snapshot_text(&second_snapshot);
         assert!(first_text.contains(&format!(
-            "CTX={dojo_id}|{window_id}|{first_id}|{first_incarnation}"
+            "CTX={lair_id}|{dojo_id}|{first_id}|{first_incarnation}"
         )));
         assert!(second_text.contains(&format!(
-            "CTX={dojo_id}|{window_id}|{second_id}|{second_incarnation}"
+            "CTX={lair_id}|{dojo_id}|{second_id}|{second_incarnation}"
         )));
         assert!(!first_text.contains("caller-supplied"));
         assert!(!second_text.contains("caller-supplied"));
@@ -3202,7 +3210,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
                     command: vec![
                         "/bin/sh".into(),
                         "-c".into(),
-                        "printf 'RELAUNCH=%s|%s|%s|%s\\n' \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_WINDOW_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\"; exec sleep 30".into(),
+                        "printf 'RELAUNCH=%s|%s|%s|%s\\n' \"$SPLINTERM_LAIR_ID\" \"$SPLINTERM_DOJO_ID\" \"$SPLINTERM_SPLINT_ID\" \"$SPLINTERM_SPLINT_INCARNATION\"; exec sleep 30".into(),
                     ],
                     ..shell_launch()
                 },
@@ -3233,7 +3241,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
         .await;
         let relaunched_text = snapshot_text(&relaunched);
         assert!(relaunched_text.contains(&format!(
-            "RELAUNCH={dojo_id}|{window_id}|{first_id}|{relaunched_incarnation}"
+            "RELAUNCH={lair_id}|{dojo_id}|{first_id}|{relaunched_incarnation}"
         )));
         assert!(!relaunched_text.contains("caller-supplied"));
 
@@ -3256,7 +3264,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         let mut creator = daemon.connect().await;
         let cwd = std::env::current_dir().unwrap();
         let dojo = match creator
-            .request(Request::CreateDojo {
+            .request(Request::CreateLair {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "phase8".into(),
                 launch: LaunchParameters {
@@ -3269,10 +3277,10 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             })
             .await
         {
-            Response::DojoCreated { dojo, .. } => dojo,
+            Response::LairCreated { lair: dojo, .. } => dojo,
             response => panic!("unexpected create response: {response:?}"),
         };
-        let LayoutNode::Leaf(model_splint) = &dojo.windows[0].root else {
+        let LayoutNode::Leaf(model_splint) = &dojo.dojos[0].root else {
             unreachable!()
         };
         let splint_id = model_splint.id;

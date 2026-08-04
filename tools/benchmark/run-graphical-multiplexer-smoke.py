@@ -123,25 +123,25 @@ def launch_spec(
     if stack == "splinterm-native":
         if not isinstance(controller, SplintermController):
             raise TypeError("native stack requires a Splinterm controller")
-        if controller.window_id is None:
+        if controller.dojo_id is None:
             raise RuntimeError("native stack has no benchmark window identity")
         topology = controller._json_command(["topology"])
-        dojo_ids = {
-            str(item["dojo_id"])
+        lair_ids = {
+            str(item["lair_id"])
             for item in topology["data"]["splints"]
-            if item["window_id"] == controller.window_id
+            if item["dojo_id"] == controller.dojo_id
             and item["splint_id"] in controller.runtime_ids.values()
         }
-        if len(dojo_ids) != 1:
+        if len(lair_ids) != 1:
             raise RuntimeError("native benchmark window has no unique dojo identity")
         return (
             [
                 str(controller.client),
                 "window",
+                "--lair-id",
+                lair_ids.pop(),
                 "--dojo-id",
-                dojo_ids.pop(),
-                "--window-id",
-                controller.window_id,
+                controller.dojo_id,
             ],
             dict(controller.environment),
         )
@@ -186,9 +186,9 @@ def launch_spec(
 
 def owned_window_token(controller: HeadlessController) -> str:
     if isinstance(controller, SplintermController):
-        if controller.window_id is None:
+        if controller.dojo_id is None:
             raise RuntimeError("native stack has no benchmark window identity")
-        return controller.window_id
+        return controller.dojo_id
     if isinstance(controller, (TmuxController, ZellijController)):
         return controller.plan.session_name
     raise TypeError("unsupported graphical controller")

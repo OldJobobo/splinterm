@@ -1,16 +1,16 @@
 {
   "$schema_file": "cli-event.schema.json",
   "document": {
-    "schema": "splinterm.cli.event.v1",
+    "schema": "splinterm.cli.event.v2",
     "subscription_id": "1",
     "sequence": 1,
     "event_type": "topology_snapshot",
     "resource": {
-      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77110"
+      "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77110"
     },
     "data": {
-      "dojo_count": 1,
-      "window_count": 2,
+      "lair_count": 1,
+      "dojo_count": 2,
       "splint_count": 3
     },
     "truncated": false

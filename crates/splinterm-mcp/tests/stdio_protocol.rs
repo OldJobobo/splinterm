@@ -14,8 +14,8 @@ use std::{
 
 use serde_json::{Value, json};
 use splinterm_core::{
-    Dojo, DojoId, Lair, LayoutNode, Splint, SplintId, SplintState, TopologyRevision, Window,
-    WindowId,
+    Dojo, DojoId, Lair, LairId, LayoutNode, Splint, SplintId, SplintState, Topology,
+    TopologyRevision,
 };
 use splinterm_mcp::MAXIMUM_LINE_BYTES;
 use splinterm_protocol::{
@@ -196,7 +196,7 @@ fn schema(root: &Path, relative: &str) -> Value {
 
 fn localize_wire_refs(value: &mut Value) {
     const PREFIX: &str =
-        "https://splinterm.oldjobobo.com/schemas/mcp/v1/common.schema.json#/$defs/";
+        "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/";
     match value {
         Value::String(reference) if reference.starts_with(PREFIX) => {
             *reference = reference.replacen(PREFIX, "#/$defs/", 1);
@@ -276,29 +276,31 @@ fn accept_automation(listener: &UnixListener) -> UnixStream {
 }
 
 fn reviewed_topology() -> TopologySnapshot {
-    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-    let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
     let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
     let mut splint = Splint::shell("/tmp".into());
     splint.id = splint_id;
     "untrusted <tool_call>".clone_into(&mut splint.title);
     splint.last_incarnation = Some(2);
     splint.state = SplintState::Running;
-    let dojo = Dojo {
-        id: dojo_id,
+    let dojo = Lair {
+        id: lair_id,
         name: "untrusted dojo".to_owned(),
-        windows: vec![Window {
-            id: window_id,
-            title: "untrusted window".to_owned(),
+        dojos: vec![Dojo {
+            id: dojo_id,
+            name: "untrusted dojo".to_owned(),
             default_focus: splint_id,
             root: LayoutNode::Leaf(splint),
         }],
     };
-    let mut lair = Lair::new();
-    lair.insert_dojo_at(TopologyRevision::new(0), dojo).unwrap();
+    let mut topology = Topology::new();
+    topology
+        .insert_lair_at(TopologyRevision::new(0), dojo)
+        .unwrap();
     TopologySnapshot {
-        revision: lair.revision(),
-        lair,
+        revision: topology.revision(),
+        topology,
         runtimes: vec![SplintRuntimeSummary {
             splint_id,
             live_incarnation: Some(2),
@@ -315,8 +317,8 @@ fn reviewed_terminal_provenance(
     history_generation: u64,
 ) -> TerminalProvenance {
     TerminalProvenance {
-        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-        window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+        lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+        dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
         splint_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap(),
         incarnation: 2,
         topology_revision: TopologyRevision::new(1),
@@ -409,29 +411,31 @@ fn reviewed_terminal_snapshot() -> TerminalSnapshot {
 }
 
 fn adversarial_topology(payloads: &[&str; 4]) -> TopologySnapshot {
-    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-    let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
     let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
     let mut splint = Splint::shell("/tmp".into());
     splint.id = splint_id;
     payloads[2].clone_into(&mut splint.title);
     splint.last_incarnation = Some(2);
     splint.state = SplintState::Running;
-    let dojo = Dojo {
-        id: dojo_id,
+    let dojo = Lair {
+        id: lair_id,
         name: payloads[0].to_owned(),
-        windows: vec![Window {
-            id: window_id,
-            title: payloads[1].to_owned(),
+        dojos: vec![Dojo {
+            id: dojo_id,
+            name: payloads[1].to_owned(),
             default_focus: splint_id,
             root: LayoutNode::Leaf(splint),
         }],
     };
-    let mut lair = Lair::new();
-    lair.insert_dojo_at(TopologyRevision::new(0), dojo).unwrap();
+    let mut topology = Topology::new();
+    topology
+        .insert_lair_at(TopologyRevision::new(0), dojo)
+        .unwrap();
     TopologySnapshot {
-        revision: lair.revision(),
-        lair,
+        revision: topology.revision(),
+        topology,
         runtimes: vec![SplintRuntimeSummary {
             splint_id,
             live_incarnation: Some(2),
@@ -448,10 +452,10 @@ fn reviewed_restorable_topology() -> TopologySnapshot {
     let splint_id = snapshot.runtimes[0].splint_id;
     assert!(
         snapshot
-            .lair
+            .topology
             .set_splint_state(splint_id, SplintState::Exited(0))
     );
-    snapshot.revision = snapshot.lair.revision();
+    snapshot.revision = snapshot.topology.revision();
     snapshot.runtimes[0] = SplintRuntimeSummary {
         splint_id,
         live_incarnation: None,
@@ -480,19 +484,19 @@ fn call_tool(server: &mut Harness, id: i64, name: &str, arguments: Value) -> Val
 }
 
 fn mutation_preparation(mutation: MutationPreflight) -> MutationPreparation {
-    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-    let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
     let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
     let mut preparation = MutationPreparation {
         topology_revision: TopologyRevision::new(7),
+        lair_id: None,
         dojo_id: None,
-        window_id: None,
         splint_id: None,
         incarnation: None,
         targets: Vec::new(),
     };
     match mutation {
-        MutationPreflight::CreateDojo => {}
+        MutationPreflight::CreateLair => {}
         MutationPreflight::SplitSplint {
             splint_id: requested,
         }
@@ -515,61 +519,57 @@ fn mutation_preparation(mutation: MutationPreflight) -> MutationPreparation {
             splint_id: requested,
             ..
         } if requested == splint_id => {
+            preparation.lair_id = Some(lair_id);
             preparation.dojo_id = Some(dojo_id);
-            preparation.window_id = Some(window_id);
             preparation.splint_id = Some(splint_id);
             preparation.incarnation = Some(2);
         }
-        MutationPreflight::NewWindow { dojo_id: requested }
-        | MutationPreflight::RenameDojo { dojo_id: requested }
+        MutationPreflight::NewDojo { lair_id: requested }
+        | MutationPreflight::RenameLair { lair_id: requested }
+            if requested == lair_id =>
+        {
+            preparation.lair_id = Some(lair_id);
+        }
+        MutationPreflight::RenameDojo { dojo_id: requested }
+        | MutationPreflight::CloseDojo { dojo_id: requested }
             if requested == dojo_id =>
         {
+            preparation.lair_id = Some(lair_id);
             preparation.dojo_id = Some(dojo_id);
         }
-        MutationPreflight::RenameWindow {
-            window_id: requested,
-        }
-        | MutationPreflight::CloseWindow {
-            window_id: requested,
-        } if requested == window_id => {
+        MutationPreflight::RestoreDojo { dojo_id: requested } if requested == dojo_id => {
+            preparation.lair_id = Some(lair_id);
             preparation.dojo_id = Some(dojo_id);
-            preparation.window_id = Some(window_id);
-        }
-        MutationPreflight::RestoreWindow {
-            window_id: requested,
-        } if requested == window_id => {
-            preparation.dojo_id = Some(dojo_id);
-            preparation.window_id = Some(window_id);
             preparation.targets = vec![
                 MutationTarget {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     splint_id,
                     incarnation: 2,
                 },
                 MutationTarget {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     splint_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77104".parse().unwrap(),
                     incarnation: 2,
                 },
             ];
         }
-        MutationPreflight::RestoreDojo { dojo_id: requested } if requested == dojo_id => {
-            preparation.dojo_id = Some(dojo_id);
+        MutationPreflight::RestoreLair { lair_id: requested } if requested == lair_id => {
+            preparation.lair_id = Some(lair_id);
             preparation.targets = vec![MutationTarget {
+                lair_id,
                 dojo_id,
-                window_id,
                 splint_id,
                 incarnation: 2,
             }];
         }
-        MutationPreflight::SetWindowDefaultFocus {
-            window_id: requested_window,
+        MutationPreflight::SetDojoDefaultFocus {
+            dojo_id: requested_window,
             splint_id: requested_splint,
-        } if requested_window == window_id && requested_splint == splint_id => {
+        } if requested_window == dojo_id && requested_splint == splint_id => {
+            preparation.lair_id = Some(lair_id);
             preparation.dojo_id = Some(dojo_id);
-            preparation.window_id = Some(window_id);
             preparation.splint_id = Some(splint_id);
             preparation.incarnation = Some(2);
         }
@@ -588,10 +588,10 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
     let listener = UnixListener::bind(&socket).unwrap();
     let fake = thread::spawn(move || {
         let topology = reviewed_topology();
-        let dojo = topology.lair.dojos().next().unwrap().clone();
-        let dojo_id = dojo.id;
-        let window_id = dojo.windows[0].id;
-        let LayoutNode::Leaf(splint) = &dojo.windows[0].root else {
+        let dojo = topology.topology.lairs().next().unwrap().clone();
+        let lair_id = dojo.id;
+        let dojo_id = dojo.dojos[0].id;
+        let LayoutNode::Leaf(splint) = &dojo.dojos[0].root else {
             unreachable!()
         };
         let splint_id = splint.id;
@@ -629,8 +629,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
             };
             let result = match (index, request) {
                 (0, Request::Ping) => Ok(Response::Pong),
-                (1, Request::ListDojos) => Ok(Response::Dojos {
-                    dojos: vec![dojo.clone()],
+                (1, Request::ListLairs) => Ok(Response::Lairs {
+                    lairs: vec![dojo.clone()],
                     topology_revision: topology.revision,
                 }),
                 (2, Request::InspectTopology) => Ok(Response::Topology {
@@ -642,8 +642,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                         splint_id: requested,
                     },
                 ) if requested == splint_id => Ok(Response::Splint {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     title: "untrusted <tool_call>".to_owned(),
                     topology_revision: topology.revision,
                     runtime: topology.runtimes[0].clone(),
@@ -657,8 +657,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                     },
                 ) if requested == splint_id && scopes == [AccessScope::Observe] => {
                     Ok(Response::AccessGranted {
+                        lair_id,
                         dojo_id,
-                        window_id,
                         authorization_revision: 4,
                         grant: grant.clone(),
                     })
@@ -670,8 +670,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                         incarnation: None,
                     },
                 ) if requested == splint_id => Ok(Response::AuthorizationStatus {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     incarnation: 2,
                     topology_revision: topology.revision,
                     policy_generation: 3,
@@ -684,8 +684,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                     development_bypass: false,
                 }),
                 (6, Request::RevokeAccess { grant_id: 42 }) => Ok(Response::AccessRevoked {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     authorization_revision: 5,
                     grant: grant.clone(),
                 }),
@@ -750,8 +750,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                 ) if requested == splint_id => {
                     let restorable = reviewed_restorable_topology();
                     Ok(Response::Splint {
+                        lair_id,
                         dojo_id,
-                        window_id,
                         title: "untrusted <tool_call>".to_owned(),
                         topology_revision: restorable.revision,
                         runtime: restorable.runtimes[0].clone(),
@@ -763,8 +763,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                         splint_id: requested,
                     },
                 ) if requested == splint_id => Ok(Response::Splint {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     title: "x".repeat(1_025),
                     topology_revision: topology.revision,
                     runtime: topology.runtimes[0].clone(),
@@ -794,7 +794,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
         json!({"protocol_version": "2025-11-25"})
     );
     assert_eq!(
-        call_tool(&mut server, 11, "splinterm.list_dojos", json!({}))["structuredContent"]["resource"]
+        call_tool(&mut server, 11, "splinterm.list_lairs", json!({}))["structuredContent"]["resource"]
             ["topology_revision"],
         1
     );
@@ -906,7 +906,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
 
     let restorable_topology = call_tool(&mut server, 22, "splinterm.inspect_topology", json!({}));
     let restorable_splint =
-        &restorable_topology["structuredContent"]["data"]["dojos"][0]["windows"][0]["splints"][0];
+        &restorable_topology["structuredContent"]["data"]["lairs"][0]["dojos"][0]["splints"][0];
     assert_eq!(restorable_splint["current_incarnation"], Value::Null);
     assert_eq!(restorable_splint["last_incarnation"], 2);
     assert_eq!(restorable_splint["state"], "restorable");
@@ -917,11 +917,11 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
         json!({"splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
     );
     assert_eq!(
-        restorable_inspect["structuredContent"]["resource"]["dojo_id"],
+        restorable_inspect["structuredContent"]["resource"]["lair_id"],
         "018f4d8c-2a18-4b31-8c2f-9e7c5de77101"
     );
     assert_eq!(
-        restorable_inspect["structuredContent"]["resource"]["window_id"],
+        restorable_inspect["structuredContent"]["resource"]["dojo_id"],
         "018f4d8c-2a18-4b31-8c2f-9e7c5de77102"
     );
     assert_eq!(
@@ -1548,15 +1548,15 @@ fn prompt_injection_values_remain_inert_untrusted_data() {
         "untrusted_terminal_data"
     );
     assert_eq!(
-        topology["structuredContent"]["data"]["dojos"][0]["name"],
+        topology["structuredContent"]["data"]["lairs"][0]["name"],
         PAYLOADS[0]
     );
     assert_eq!(
-        topology["structuredContent"]["data"]["dojos"][0]["windows"][0]["title"],
+        topology["structuredContent"]["data"]["lairs"][0]["dojos"][0]["name"],
         PAYLOADS[1]
     );
     assert_eq!(
-        topology["structuredContent"]["data"]["dojos"][0]["windows"][0]["splints"][0]["title"],
+        topology["structuredContent"]["data"]["lairs"][0]["dojos"][0]["splints"][0]["title"],
         PAYLOADS[2]
     );
 
@@ -1746,15 +1746,15 @@ fn successful_output_size_is_checked_after_schema_validation() {
         else {
             panic!("large-output daemon expected topology inspection");
         };
-        let mut lair = Lair::new();
+        let mut lair = Topology::new();
         let mut runtimes = Vec::new();
         for index in 0..256 {
-            let mut dojo = Dojo::new(format!("{index:04}{}", "d".repeat(124)), "/tmp".into());
+            let mut dojo = Lair::new(format!("{index:04}{}", "d".repeat(124)), "/tmp".into());
             for _ in 1..8 {
-                dojo.windows.push(Window::with_shell("/tmp".into()));
+                dojo.dojos.push(Dojo::with_shell("terminal", "/tmp".into()));
             }
-            for window in &mut dojo.windows {
-                window.title = "w".repeat(128);
+            for window in &mut dojo.dojos {
+                window.name = "w".repeat(128);
                 let LayoutNode::Leaf(splint) = &mut window.root else {
                     unreachable!()
                 };
@@ -1770,11 +1770,11 @@ fn successful_output_size_is_checked_after_schema_validation() {
                     exit_status: None,
                 });
             }
-            lair.insert_dojo_at(lair.revision(), dojo).unwrap();
+            lair.insert_lair_at(lair.revision(), dojo).unwrap();
         }
         let snapshot = TopologySnapshot {
             revision: lair.revision(),
-            lair,
+            topology: lair,
             runtimes,
         };
         snapshot.validate().unwrap();
@@ -1937,8 +1937,8 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
-                    dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-                    window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                    lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                    dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                     title: "build".to_owned(),
                     topology_revision: topology.revision,
                     runtime: topology.runtimes[0].clone(),
@@ -2010,10 +2010,10 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
         );
         thread::sleep(Duration::from_millis(100));
         let mut changed = reviewed_topology();
-        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
         changed.revision = changed
-            .lair
-            .rename_dojo_at(changed.revision, dojo_id, "renamed dojo")
+            .topology
+            .rename_lair_at(changed.revision, lair_id, "renamed dojo")
             .unwrap();
         write_private_frame(
             &mut stream,
@@ -2182,7 +2182,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
         assert_eq!(contents.as_array().unwrap().len(), 1);
         assert_eq!(contents[0]["mimeType"], "application/json");
         let body: Value = serde_json::from_str(contents[0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(body["schema"], "splinterm.mcp.resource.v1");
+        assert_eq!(body["schema"], "splinterm.mcp.resource.v2");
         assert_eq!(body["resource"]["kind"], kind);
         assert_eq!(body["sequence"], 1);
         assert_eq!(body["resync_required"], false);
@@ -2226,7 +2226,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
     assert_eq!(body["sequence"], 3);
     assert_eq!(body["resync_required"], true);
     assert_eq!(body["resource"]["topology_revision"], 3);
-    assert_eq!(body["data"]["dojos"], json!([]));
+    assert_eq!(body["data"]["lairs"], json!([]));
 
     server.send(&request(
         8,
@@ -2502,8 +2502,8 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
-                    dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-                    window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                    lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                    dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                     title: "build".to_owned(),
                     topology_revision: topology.revision,
                     runtime: topology.runtimes[0].clone(),
@@ -2741,7 +2741,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
     ));
     let body = read_body(&server, 17);
     assert_eq!(body["resync_required"], true);
-    assert_eq!(body["data"]["dojos"], json!([]));
+    assert_eq!(body["data"]["lairs"], json!([]));
     assert!(!body.to_string().contains("untrusted dojo"));
 
     server.close_input();
@@ -2971,7 +2971,7 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
         .clone();
     let expected_names = [
         "ping",
-        "list_dojos",
+        "list_lairs",
         "inspect_topology",
         "inspect_splint",
         "read_terminal",
@@ -2981,21 +2981,21 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
         "authorization_status",
         "revoke_access",
         "inspect_audit",
-        "create_dojo",
+        "create_lair",
         "split_splint",
-        "new_window",
+        "new_dojo",
         "relaunch_splint",
         "restore_splint",
-        "restore_window",
         "restore_dojo",
+        "restore_lair",
         "close_splint",
-        "close_window",
+        "close_dojo",
         "kill_splint",
         "set_split_ratio",
+        "rename_lair",
         "rename_dojo",
-        "rename_window",
         "rename_splint",
-        "set_window_default_focus",
+        "set_dojo_default_focus",
         "acquire_control",
         "request_control_transfer",
         "decide_control_transfer",
@@ -3004,7 +3004,7 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
         "resize",
     ];
     assert_eq!(tools.len(), expected_names.len());
-    let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/schemas/mcp/v1/tools");
+    let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/schemas/mcp/v2/tools");
     for (tool, stem) in tools.iter().zip(expected_names) {
         assert_eq!(tool["name"], format!("splinterm.{stem}"));
         assert_eq!(tool["execution"], json!({"taskSupport": "forbidden"}));
@@ -3028,7 +3028,7 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
         [
             "splinterm.revoke_access",
             "splinterm.close_splint",
-            "splinterm.close_window",
+            "splinterm.close_dojo",
             "splinterm.kill_splint"
         ]
     );
@@ -3041,7 +3041,7 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
         read_only,
         [
             "splinterm.ping",
-            "splinterm.list_dojos",
+            "splinterm.list_lairs",
             "splinterm.inspect_topology",
             "splinterm.inspect_splint",
             "splinterm.read_terminal",
@@ -3063,10 +3063,10 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
         idempotent_mutations,
         [
             "splinterm.set_split_ratio",
+            "splinterm.rename_lair",
             "splinterm.rename_dojo",
-            "splinterm.rename_window",
             "splinterm.rename_splint",
-            "splinterm.set_window_default_focus",
+            "splinterm.set_dojo_default_focus",
             "splinterm.resize"
         ]
     );
@@ -3284,8 +3284,8 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
     let (directory, socket) = isolated_socket("controller-tools");
     let listener = UnixListener::bind(&socket).unwrap();
     let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
-    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-    let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
     let daemon = thread::spawn(move || {
         let mut owner = accept_automation(&listener);
         let ClientFrame::Request {
@@ -3308,8 +3308,8 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
                 request_id,
                 result: Response::ControlGranted {
                     controller_id: 101,
+                    lair_id,
                     dojo_id,
-                    window_id,
                 },
             },
         );
@@ -3333,8 +3333,8 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
             &ServerFrame::Response {
                 request_id,
                 result: Response::TerminalActionAcknowledged {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     splint_id,
                     incarnation: 2,
                     terminal_revision: 9,
@@ -3357,8 +3357,8 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
                 request_id,
                 result: Response::ControlTransferPending {
                     transfer_id: 66,
+                    lair_id,
                     dojo_id,
-                    window_id,
                 },
             },
         );
@@ -3406,8 +3406,8 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
                 request_id,
                 result: Response::ControlTransferPending {
                     transfer_id: 77,
+                    lair_id,
                     dojo_id,
-                    window_id,
                 },
             },
         );
@@ -3468,8 +3468,8 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
                 request_id,
                 result: Response::ControlGranted {
                     controller_id: 303,
+                    lair_id,
                     dojo_id,
-                    window_id,
                 },
             },
         );
@@ -3495,8 +3495,8 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
             &ServerFrame::Response {
                 request_id,
                 result: Response::TerminalActionAcknowledged {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     splint_id,
                     incarnation: 2,
                     terminal_revision: 10,
@@ -3702,8 +3702,8 @@ fn controller_daemon_loss_invalidates_handle_before_reuse() {
                 request_id,
                 result: Response::ControlGranted {
                     controller_id: 9,
-                    dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-                    window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                    lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                    dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                 },
             },
         );
@@ -3747,8 +3747,8 @@ fn controller_registry_enforces_combined_eight_handle_limit_and_eof_cleanup() {
     let (directory, socket) = isolated_socket("controller-capacity");
     let listener = UnixListener::bind(&socket).unwrap();
     let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
-    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-    let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
     let daemon = thread::spawn(move || {
         let mut handlers = Vec::new();
         for private_id in 1..=8_u64 {
@@ -3766,8 +3766,8 @@ fn controller_registry_enforces_combined_eight_handle_limit_and_eof_cleanup() {
                     request_id,
                     result: Response::ControlGranted {
                         controller_id: private_id,
+                        lair_id,
                         dojo_id,
-                        window_id,
                     },
                 },
             );
@@ -3832,8 +3832,8 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
     let (directory, socket) = isolated_socket("controller-overlay");
     let listener = UnixListener::bind(&socket).unwrap();
     let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
-    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-    let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
     let daemon = thread::spawn(move || {
         let mut subscription = accept_automation(&listener);
         let ClientFrame::Request {
@@ -3852,8 +3852,8 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
+                    lair_id,
                     dojo_id,
-                    window_id,
                     title: "untrusted".to_owned(),
                     topology_revision: TopologyRevision::new(1),
                     runtime,
@@ -3902,8 +3902,8 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
                 request_id,
                 result: Response::ControlGranted {
                     controller_id: 99,
+                    lair_id,
                     dojo_id,
-                    window_id,
                 },
             },
         );
@@ -4368,8 +4368,8 @@ fn broken_stdout_awaits_live_controller_cleanup() {
                 request_id,
                 result: Response::ControlGranted {
                     controller_id: 404,
-                    dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
-                    window_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
+                    lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
+                    dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                 },
             },
         );
@@ -4539,7 +4539,7 @@ fn launch_nul_is_rejected_before_daemon_connection_without_echo() {
             json!({"name":"dojo","cwd":"/tmp","argv":["sh","has\u{0}nul"]}),
         ),
     ] {
-        let response = call_tool(&mut server, id, "splinterm.create_dojo", arguments);
+        let response = call_tool(&mut server, id, "splinterm.create_lair", arguments);
         assert_eq!(response["isError"], true);
         assert_eq!(
             response["structuredContent"]["error"]["code"],
@@ -4697,12 +4697,12 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
     let (directory, socket) = isolated_socket("slice6-mutations");
     let listener = UnixListener::bind(&socket).unwrap();
     let daemon = thread::spawn(move || {
-        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
-        let window_id: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let other_splint: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77104".parse().unwrap();
-        let new_dojo: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77105".parse().unwrap();
-        let new_window: WindowId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77106".parse().unwrap();
+        let new_lair: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77105".parse().unwrap();
+        let new_dojo: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77106".parse().unwrap();
         let new_splint: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77107".parse().unwrap();
         for _ in 0..15 {
             let mut stream = accept_automation(&listener);
@@ -4730,24 +4730,24 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                 panic!("expected actual mutation request")
             };
             let result = match request {
-                Request::CreateDojoAutomation {
+                Request::CreateLairAutomation {
                     expected_topology_revision,
                     name,
                     launch,
                 } if expected_topology_revision.get() == 7
-                    && name == "dojo"
+                    && name == "lair"
                     && launch.cwd == Some("/tmp".into())
                     && launch.argv == ["sh"] =>
                 {
                     let mut splint = Splint::shell("/tmp".into());
                     splint.id = new_splint;
-                    Response::DojoCreated {
-                        dojo: Dojo {
-                            id: new_dojo,
+                    Response::LairCreated {
+                        lair: Lair {
+                            id: new_lair,
                             name,
-                            windows: vec![Window {
-                                id: new_window,
-                                title: "window".to_owned(),
+                            dojos: vec![Dojo {
+                                id: new_dojo,
+                                name: "dojo".to_owned(),
                                 default_focus: new_splint,
                                 root: LayoutNode::Leaf(splint),
                             }],
@@ -4772,17 +4772,17 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                         topology_revision: TopologyRevision::new(8),
                     }
                 }
-                Request::NewWindowAutomation {
+                Request::NewDojoAutomation {
                     expected_topology_revision,
-                    dojo_id: requested,
+                    lair_id: requested,
                     launch,
                     ..
                 } if expected_topology_revision.get() == 7
-                    && requested == dojo_id
+                    && requested == lair_id
                     && launch.cwd.is_none() =>
                 {
-                    Response::WindowStarted {
-                        window_id: new_window,
+                    Response::DojoStarted {
+                        dojo_id: new_dojo,
                         splint_id: new_splint,
                         incarnation: 3,
                         topology_revision: TopologyRevision::new(8),
@@ -4815,10 +4815,10 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                         }],
                     }
                 }
-                Request::RestoreWindow {
+                Request::RestoreDojo {
                     expected_topology_revision,
-                    window_id: requested,
-                } if expected_topology_revision.get() == 7 && requested == window_id => {
+                    dojo_id: requested,
+                } if expected_topology_revision.get() == 7 && requested == dojo_id => {
                     Response::RestoreCompleted {
                         topology_revision: TopologyRevision::new(7),
                         results: vec![
@@ -4838,10 +4838,10 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                         ],
                     }
                 }
-                Request::RestoreDojo {
+                Request::RestoreLair {
                     expected_topology_revision,
-                    dojo_id: requested,
-                } if expected_topology_revision.get() == 7 && requested == dojo_id => {
+                    lair_id: requested,
+                } if expected_topology_revision.get() == 7 && requested == lair_id => {
                     Response::RestoreCompleted {
                         topology_revision: TopologyRevision::new(7),
                         results: vec![RestoreLeafResult {
@@ -4859,10 +4859,10 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                         topology_revision: TopologyRevision::new(8),
                     }
                 }
-                Request::CloseWindow {
+                Request::CloseDojo {
                     expected_topology_revision,
-                    window_id: requested,
-                } if expected_topology_revision.get() == 7 && requested == window_id => {
+                    dojo_id: requested,
+                } if expected_topology_revision.get() == 7 && requested == dojo_id => {
                     Response::TopologyCommitted {
                         topology_revision: TopologyRevision::new(8),
                     }
@@ -4887,6 +4887,18 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                         topology_revision: TopologyRevision::new(8),
                     }
                 }
+                Request::RenameLair {
+                    expected_topology_revision,
+                    lair_id: requested,
+                    name,
+                } if expected_topology_revision.get() == 7
+                    && requested == lair_id
+                    && name == "renamed" =>
+                {
+                    Response::TopologyCommitted {
+                        topology_revision: TopologyRevision::new(8),
+                    }
+                }
                 Request::RenameDojo {
                     expected_topology_revision,
                     dojo_id: requested,
@@ -4894,18 +4906,6 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                 } if expected_topology_revision.get() == 7
                     && requested == dojo_id
                     && name == "renamed" =>
-                {
-                    Response::TopologyCommitted {
-                        topology_revision: TopologyRevision::new(8),
-                    }
-                }
-                Request::RenameWindow {
-                    expected_topology_revision,
-                    window_id: requested,
-                    title,
-                } if expected_topology_revision.get() == 7
-                    && requested == window_id
-                    && title == "renamed" =>
                 {
                     Response::TopologyCommitted {
                         topology_revision: TopologyRevision::new(8),
@@ -4923,12 +4923,12 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                         topology_revision: TopologyRevision::new(8),
                     }
                 }
-                Request::SetWindowDefaultFocus {
+                Request::SetDojoDefaultFocus {
                     expected_topology_revision,
-                    window_id: requested_window,
+                    dojo_id: requested_window,
                     splint_id: requested_splint,
                 } if expected_topology_revision.get() == 7
-                    && requested_window == window_id
+                    && requested_window == dojo_id
                     && requested_splint == splint_id =>
                 {
                     Response::TopologyCommitted {
@@ -4957,16 +4957,16 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
 
     let calls = [
         (
-            "splinterm.create_dojo",
-            json!({"name":"dojo","cwd":"/tmp","argv":["sh"]}),
+            "splinterm.create_lair",
+            json!({"name":"lair","cwd":"/tmp","argv":["sh"]}),
         ),
         (
             "splinterm.split_splint",
             json!({"splint_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77103","axis":"horizontal","side":"after","ratio":0.5,"argv":[]}),
         ),
         (
-            "splinterm.new_window",
-            json!({"dojo_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77101","title":"window","argv":[]}),
+            "splinterm.new_dojo",
+            json!({"lair_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77101","name":"dojo","argv":[]}),
         ),
         (
             "splinterm.relaunch_splint",
@@ -4977,20 +4977,20 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
             json!({"splint_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
         ),
         (
-            "splinterm.restore_window",
-            json!({"window_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77102"}),
+            "splinterm.restore_dojo",
+            json!({"dojo_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77102"}),
         ),
         (
-            "splinterm.restore_dojo",
-            json!({"dojo_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77101"}),
+            "splinterm.restore_lair",
+            json!({"lair_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77101"}),
         ),
         (
             "splinterm.close_splint",
             json!({"splint_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77103","confirm":true}),
         ),
         (
-            "splinterm.close_window",
-            json!({"window_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77102","confirm":true}),
+            "splinterm.close_dojo",
+            json!({"dojo_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77102","confirm":true}),
         ),
         (
             "splinterm.kill_splint",
@@ -5001,20 +5001,20 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
             json!({"splint_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77103","ratio":0.4}),
         ),
         (
-            "splinterm.rename_dojo",
-            json!({"dojo_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77101","name":"renamed"}),
+            "splinterm.rename_lair",
+            json!({"lair_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77101","name":"renamed"}),
         ),
         (
-            "splinterm.rename_window",
-            json!({"window_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77102","title":"renamed"}),
+            "splinterm.rename_dojo",
+            json!({"dojo_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77102","name":"renamed"}),
         ),
         (
             "splinterm.rename_splint",
             json!({"splint_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77103","title":"renamed"}),
         ),
         (
-            "splinterm.set_window_default_focus",
-            json!({"window_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77102","splint_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
+            "splinterm.set_dojo_default_focus",
+            json!({"dojo_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77102","splint_id":"018f4d8c-2a18-4b31-8c2f-9e7c5de77103"}),
         ),
     ];
     for (index, (tool, arguments)) in calls.into_iter().enumerate() {

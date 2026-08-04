@@ -1,0 +1,3039 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/v2/cli-envelope.schema.json",
+  "title": "Splinterm CLI v2 one-shot envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "request_id",
+    "ok",
+    "truncated"
+  ],
+  "properties": {
+    "schema": {
+      "const": "splinterm.cli.v2"
+    },
+    "request_id": {
+      "$ref": "#/$defs/decimal_id"
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "ping",
+        "list_lairs",
+        "inspect_topology",
+        "inspect_splint",
+        "terminal_snapshot",
+        "scrollback_page",
+        "search_scrollback",
+        "authorization_status",
+        "revoke_access",
+        "audit_inspect",
+        "create_lair",
+        "split_splint",
+        "close_splint",
+        "set_split_ratio",
+        "new_dojo",
+        "close_dojo",
+        "rename_lair",
+        "rename_dojo",
+        "rename_splint",
+        "set_dojo_default_focus",
+        "relaunch_splint",
+        "restore_splint",
+        "restore_dojo",
+        "restore_lair",
+        "input",
+        "resize",
+        "kill_splint"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "resource": {
+      "$ref": "#/$defs/resource"
+    },
+    "data": {
+      "type": "object"
+    },
+    "error": {
+      "$ref": "#/$defs/error"
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "then": {
+        "required": [
+          "data"
+        ],
+        "not": {
+          "required": [
+            "error"
+          ]
+        }
+      },
+      "else": {
+        "properties": {
+          "truncated": {
+            "const": false
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "not": {
+          "required": [
+            "data"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "ping"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/ping_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/ping_error"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "required": [
+            "resource"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "list_lairs"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/list_lairs_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "inspect_topology"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/topology_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "inspect_splint"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/inspect_splint_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_splint_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "terminal_snapshot"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/terminal_snapshot_success"
+                }
+              },
+              "required": [
+                "resource"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "truncated": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "truncated"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "continuation_cursor": {
+                            "$ref": "#/$defs/cursor"
+                          }
+                        },
+                        "required": [
+                          "continuation_cursor"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "continuation_cursor": {
+                            "type": "null"
+                          }
+                        },
+                        "required": [
+                          "continuation_cursor"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_terminal"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "scrollback_page"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/scrollback_success"
+                }
+              },
+              "required": [
+                "resource"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "truncated": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "truncated"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "continuation_cursor": {
+                            "$ref": "#/$defs/cursor"
+                          }
+                        },
+                        "required": [
+                          "continuation_cursor"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "continuation_cursor": {
+                            "type": "null"
+                          }
+                        },
+                        "required": [
+                          "continuation_cursor"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_terminal"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "search_scrollback"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/search_success"
+                }
+              },
+              "required": [
+                "resource"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "truncated": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "truncated"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "continuation_cursor": {
+                            "$ref": "#/$defs/cursor"
+                          }
+                        },
+                        "required": [
+                          "continuation_cursor"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "continuation_cursor": {
+                            "type": "null"
+                          }
+                        },
+                        "required": [
+                          "continuation_cursor"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_terminal"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "authorization_status"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/authorization_status_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_authorization"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "revoke_access"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/revoke_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_authorization"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "audit_inspect"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/audit_success"
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "truncated": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "truncated"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "next_after_audit_id": {
+                            "$ref": "#/$defs/decimal_id"
+                          }
+                        },
+                        "required": [
+                          "next_after_audit_id"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "next_after_audit_id": {
+                            "type": "null"
+                          }
+                        },
+                        "required": [
+                          "next_after_audit_id"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "required": [
+            "resource"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "create_lair"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/created_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_live_splint"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "split_splint"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/created_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_live_splint"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "close_splint"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/confirmed_mutation_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_splint_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "set_split_ratio"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/mutation_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_splint_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "new_dojo"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/created_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_live_splint"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "close_dojo"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/confirmed_mutation_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_dojo_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "rename_lair"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/mutation_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_lair_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "rename_dojo"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/mutation_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_dojo_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "rename_splint"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/mutation_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_splint_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "set_dojo_default_focus"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/mutation_result"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_splint_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "relaunch_splint"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/process_started"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_live_splint"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "restore_splint"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/process_started"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_live_splint"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "restore_dojo"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/restore_many_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_dojo_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "restore_lair"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/restore_many_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_lair_topology"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "input"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/acknowledged"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_terminal"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "resize"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/resize_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_terminal"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "kill_splint"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/kill_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_authorization"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "decimal_id": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "counter": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "nonnegative": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{16,256}$"
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dojo_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/counter"
+        },
+        "topology_revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "terminal_revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "history_generation": {
+          "$ref": "#/$defs/counter"
+        }
+      },
+      "minProperties": 1
+    },
+    "resource_topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "topology_revision"
+      ],
+      "properties": {
+        "topology_revision": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "resource_lair_topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "topology_revision"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "topology_revision": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "resource_dojo_topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "dojo_id",
+        "topology_revision"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dojo_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "topology_revision": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "resource_splint_topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "dojo_id",
+        "splint_id",
+        "topology_revision"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dojo_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "topology_revision": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "resource_live_splint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "dojo_id",
+        "splint_id",
+        "incarnation",
+        "topology_revision"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dojo_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/counter"
+        },
+        "topology_revision": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "resource_terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "dojo_id",
+        "splint_id",
+        "incarnation",
+        "terminal_revision",
+        "history_generation"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dojo_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/counter"
+        },
+        "terminal_revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "history_generation": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "resource_authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "dojo_id",
+        "splint_id",
+        "incarnation"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dojo_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "ping_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "awake"
+        }
+      }
+    },
+    "acknowledged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acknowledged"
+      ],
+      "properties": {
+        "acknowledged": {
+          "const": true
+        }
+      }
+    },
+    "confirmed_acknowledged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acknowledged",
+        "confirmed"
+      ],
+      "properties": {
+        "acknowledged": {
+          "const": true
+        },
+        "confirmed": {
+          "const": true
+        }
+      }
+    },
+    "mutation_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "committed"
+      ],
+      "properties": {
+        "committed": {
+          "const": true
+        }
+      }
+    },
+    "confirmed_mutation_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "committed",
+        "confirmed"
+      ],
+      "properties": {
+        "committed": {
+          "const": true
+        },
+        "confirmed": {
+          "const": true
+        }
+      }
+    },
+    "process_started": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started"
+      ],
+      "properties": {
+        "started": {
+          "const": true
+        }
+      }
+    },
+    "created_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created"
+      ],
+      "properties": {
+        "created": {
+          "const": true
+        }
+      }
+    },
+    "lair_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "name",
+        "dojo_count"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "dojo_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "list_lairs_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lairs"
+      ],
+      "properties": {
+        "lairs": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/lair_summary"
+          }
+        }
+      }
+    },
+    "splint_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lair_id",
+        "dojo_id",
+        "splint_id",
+        "title",
+        "lifecycle",
+        "current_incarnation",
+        "last_incarnation"
+      ],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dojo_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "lifecycle": {
+          "enum": [
+            "running",
+            "exited",
+            "restorable"
+          ]
+        },
+        "current_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "last_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "topology_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lairs",
+        "dojos",
+        "splints"
+      ],
+      "properties": {
+        "lairs": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/lair_summary"
+          }
+        },
+        "dojos": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "lair_id",
+              "dojo_id",
+              "name"
+            ],
+            "properties": {
+              "lair_id": {
+                "$ref": "#/$defs/uuid"
+              },
+              "dojo_id": {
+                "$ref": "#/$defs/uuid"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 255
+              }
+            }
+          }
+        },
+        "splints": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/splint_summary"
+          }
+        }
+      }
+    },
+    "inspect_splint_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "lifecycle",
+        "current_incarnation",
+        "last_incarnation"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "lifecycle": {
+          "enum": [
+            "running",
+            "exited",
+            "restorable"
+          ]
+        },
+        "current_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "last_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 255
+        }
+      }
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "width"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        }
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_id",
+        "linebreak",
+        "cells"
+      ],
+      "properties": {
+        "row_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/counter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "linebreak": {
+          "type": "boolean"
+        },
+        "cells": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/cell"
+          }
+        }
+      }
+    },
+    "terminal_snapshot_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_encoding",
+        "columns",
+        "rows",
+        "cursor",
+        "continuation_cursor"
+      ],
+      "properties": {
+        "content_encoding": {
+          "const": "unicode_scalars"
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        },
+        "cursor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "column",
+            "row",
+            "visible"
+          ],
+          "properties": {
+            "column": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "row": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "visible": {
+              "type": "boolean"
+            }
+          }
+        },
+        "continuation_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "scrollback_page_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "content_encoding",
+        "rows",
+        "has_older",
+        "continuation_cursor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "page"
+        },
+        "content_encoding": {
+          "const": "unicode_scalars"
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        },
+        "has_older": {
+          "type": "boolean"
+        },
+        "continuation_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "has_older": {
+                "const": true
+              }
+            },
+            "required": [
+              "has_older"
+            ]
+          },
+          "then": {
+            "properties": {
+              "continuation_cursor": {
+                "$ref": "#/$defs/cursor"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "continuation_cursor": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "resync_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reason",
+        "continuation_cursor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "resync_required"
+        },
+        "reason": {
+          "enum": [
+            "stale_revision",
+            "history_replaced",
+            "retention_gap"
+          ]
+        },
+        "continuation_cursor": {
+          "type": "null"
+        }
+      }
+    },
+    "scrollback_success": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/scrollback_page_success"
+        },
+        {
+          "$ref": "#/$defs/resync_success"
+        }
+      ]
+    },
+    "search_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_id",
+        "start_column",
+        "end_column",
+        "preview"
+      ],
+      "properties": {
+        "row_id": {
+          "$ref": "#/$defs/counter"
+        },
+        "start_column": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_column": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "preview": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "search_results_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "matches",
+        "timed_out",
+        "continuation_cursor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "results"
+        },
+        "matches": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/search_match"
+          }
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "continuation_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "search_success": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/search_results_success"
+        },
+        {
+          "$ref": "#/$defs/resync_success"
+        }
+      ]
+    },
+    "grant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "scopes"
+      ],
+      "properties": {
+        "grant_id": {
+          "$ref": "#/$defs/decimal_id"
+        },
+        "source": {
+          "enum": [
+            "grant_once",
+            "persistent_policy"
+          ]
+        },
+        "policy_rule_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
+        },
+        "scopes": {
+          "type": "array",
+          "maxItems": 18,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "topology_metadata_read",
+              "topology_subscribe",
+              "terminal_visible_read",
+              "terminal_subscribe",
+              "scrollback_read",
+              "scrollback_search",
+              "controller_acquire",
+              "controller_transfer",
+              "input",
+              "resize",
+              "process_spawn",
+              "process_restore",
+              "process_terminate",
+              "topology_layout_mutate",
+              "topology_name_mutate",
+              "authorization_inspect",
+              "authorization_revoke",
+              "audit_inspect"
+            ]
+          }
+        },
+        "expires_unix_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "source": {
+                "const": "persistent_policy"
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
+          "then": {
+            "required": [
+              "policy_rule_id"
+            ],
+            "not": {
+              "required": [
+                "grant_id"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "grant_id"
+            ],
+            "not": {
+              "required": [
+                "policy_rule_id"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "authorization_status_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grants",
+        "development_bypass"
+      ],
+      "properties": {
+        "grants": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/grant"
+          }
+        },
+        "development_bypass": {
+          "type": "boolean"
+        }
+      }
+    },
+    "revoke_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revoked_grant_id",
+        "confirmed"
+      ],
+      "properties": {
+        "revoked_grant_id": {
+          "$ref": "#/$defs/decimal_id"
+        },
+        "confirmed": {
+          "const": true
+        }
+      }
+    },
+    "audit_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "lair_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "dojo_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/counter"
+        }
+      },
+      "minProperties": 1
+    },
+    "audit_peer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uid",
+        "executable_path",
+        "executable_sha256"
+      ],
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "executable_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "device": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inode": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "audit_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "retention",
+        "audit_id",
+        "unix_seconds",
+        "peer",
+        "operation",
+        "requested_scopes",
+        "decision",
+        "reason"
+      ],
+      "properties": {
+        "schema": {
+          "const": "splinterm.audit.v2"
+        },
+        "retention": {
+          "const": "daemon_lifetime"
+        },
+        "audit_id": {
+          "$ref": "#/$defs/decimal_id"
+        },
+        "unix_seconds": {
+          "$ref": "#/$defs/counter"
+        },
+        "policy_generation": {
+          "$ref": "#/$defs/counter"
+        },
+        "policy_rule_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
+        },
+        "peer": {
+          "$ref": "#/$defs/audit_peer"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "ping",
+            "request_access",
+            "authorization_status",
+            "revoke_access",
+            "list_lairs",
+            "inspect_topology",
+            "subscribe_topology",
+            "inspect_splint",
+            "create_lair",
+            "split_splint",
+            "relaunch_splint",
+            "restore_splint",
+            "restore_dojo",
+            "restore_lair",
+            "close_splint",
+            "set_split_ratio",
+            "new_dojo",
+            "close_dojo",
+            "rename_lair",
+            "rename_dojo",
+            "set_dojo_default_focus",
+            "rename_splint",
+            "attach",
+            "scrollback_page",
+            "search_scrollback",
+            "acquire_control",
+            "subscribe_control",
+            "request_control_transfer",
+            "decide_control_transfer",
+            "force_control_transfer",
+            "release_control",
+            "input",
+            "resize",
+            "detach",
+            "kill_splint",
+            "process_exit",
+            "audit_inspect",
+            "policy_reload"
+          ]
+        },
+        "resource": {
+          "$ref": "#/$defs/audit_resource"
+        },
+        "requested_scopes": {
+          "type": "array",
+          "maxItems": 18,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "topology_metadata_read",
+              "topology_subscribe",
+              "terminal_visible_read",
+              "terminal_subscribe",
+              "scrollback_read",
+              "scrollback_search",
+              "controller_acquire",
+              "controller_transfer",
+              "input",
+              "resize",
+              "process_spawn",
+              "process_restore",
+              "process_terminate",
+              "topology_layout_mutate",
+              "topology_name_mutate",
+              "authorization_inspect",
+              "authorization_revoke",
+              "audit_inspect"
+            ]
+          }
+        },
+        "decision": {
+          "enum": [
+            "allowed",
+            "denied",
+            "revoked",
+            "expired",
+            "matched",
+            "rejected"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "argument_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "executable_basename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/]+$"
+        }
+      }
+    },
+    "audit_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retention",
+        "records",
+        "retention_gap",
+        "oldest_available_audit_id",
+        "newest_available_audit_id",
+        "next_after_audit_id"
+      ],
+      "properties": {
+        "retention": {
+          "const": "daemon_lifetime"
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/audit_record"
+          }
+        },
+        "retention_gap": {
+          "type": "boolean"
+        },
+        "oldest_available_audit_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/decimal_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "newest_available_audit_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/decimal_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_after_audit_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/decimal_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "restore_leaf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splint_id",
+        "status"
+      ],
+      "properties": {
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/counter"
+        },
+        "status": {
+          "enum": [
+            "restored",
+            "already_running",
+            "failed"
+          ]
+        },
+        "error_code": {
+          "enum": [
+            "authentication_failed",
+            "handshake_required",
+            "incompatible_version",
+            "invalid_request",
+            "unsupported_schema",
+            "consent_unavailable",
+            "consent_denied",
+            "unauthorized",
+            "confirmation_required",
+            "controller_unavailable",
+            "control_transfer_unavailable",
+            "stale_topology",
+            "not_found",
+            "stale_incarnation",
+            "invalid_argument",
+            "resource_limit",
+            "cancelled",
+            "timeout",
+            "internal"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "error_code"
+            ],
+            "not": {
+              "required": [
+                "incarnation"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "incarnation"
+            ],
+            "not": {
+              "required": [
+                "error_code"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "restore_many_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "results"
+      ],
+      "properties": {
+        "results": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/restore_leaf"
+          }
+        }
+      }
+    },
+    "resize_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acknowledged",
+        "columns",
+        "rows"
+      ],
+      "properties": {
+        "acknowledged": {
+          "const": true
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        }
+      }
+    },
+    "kill_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "terminated",
+        "confirmed"
+      ],
+      "properties": {
+        "terminated": {
+          "const": true
+        },
+        "confirmed": {
+          "const": true
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "authentication_failed",
+            "handshake_required",
+            "incompatible_version",
+            "invalid_request",
+            "unsupported_schema",
+            "consent_unavailable",
+            "consent_denied",
+            "unauthorized",
+            "confirmation_required",
+            "controller_unavailable",
+            "control_transfer_unavailable",
+            "stale_topology",
+            "not_found",
+            "stale_incarnation",
+            "invalid_argument",
+            "resource_limit",
+            "cancelled",
+            "timeout",
+            "internal"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "current_topology_revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "current_terminal_revision": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "ping_error": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/error"
+        },
+        {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "current_topology_revision"
+                ]
+              },
+              {
+                "required": [
+                  "current_terminal_revision"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -25,7 +25,7 @@ fn test_directory(label: &str) -> PathBuf {
 
 fn write_policy(directory: &Path, mode: u32) -> PathBuf {
     let path = directory.join("policy.json");
-    fs::write(&path, r#"{"schema":"splinterm.policy.v1","rules":[]}"#).unwrap();
+    fs::write(&path, r#"{"schema":"splinterm.policy.v2","rules":[]}"#).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
     path
 }
@@ -43,19 +43,19 @@ fn policy_validate_and_inspect_use_secure_daemon_loader() {
     assert!(validated.status.success(), "{:?}", validated.stderr);
     assert_eq!(
         String::from_utf8(validated.stdout).unwrap(),
-        "valid splinterm.policy.v1 policy (0 rules)\n"
+        "valid splinterm.policy.v2 policy (0 rules)\n"
     );
 
     let inspected = output(binary().args(["policy", "inspect"]).arg(&policy));
     assert!(inspected.status.success(), "{:?}", inspected.stderr);
     let document: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
-    assert_eq!(document["schema"], "splinterm.policy.v1");
+    assert_eq!(document["schema"], "splinterm.policy.v2");
     assert_eq!(document["rules"], serde_json::json!([]));
 
     fs::write(
         &policy,
         format!(
-            r#"{{"schema":"splinterm.policy.v1","rules":[{{"id":"reader","executable":{{"path":"/usr/bin/client","sha256":"{}"}},"scopes":["topology_metadata_read"],"resources":[{{"kind":"lair"}}],"limits":{{"max_results":1}}}}]}}"#,
+            r#"{{"schema":"splinterm.policy.v2","rules":[{{"id":"reader","executable":{{"path":"/usr/bin/client","sha256":"{}"}},"scopes":["topology_metadata_read"],"resources":[{{"kind":"daemon"}}],"limits":{{"max_results":1}}}}]}}"#,
             "a".repeat(64)
         ),
     )
@@ -67,6 +67,17 @@ fn policy_validate_and_inspect_use_secure_daemon_loader() {
     assert!(rule.get("expires_at_unix_seconds").is_none());
     assert_eq!(rule["limits"], serde_json::json!({"max_results": 1}));
 
+    fs::write(&policy, r#"{"schema":"splinterm.policy.v1","rules":[]}"#).unwrap();
+    let legacy = output(binary().args(["policy", "validate"]).arg(&policy));
+    assert!(!legacy.status.success());
+    assert!(legacy.stdout.is_empty());
+    assert!(
+        String::from_utf8(legacy.stderr)
+            .unwrap()
+            .contains("unsupported policy schema")
+    );
+
+    fs::write(&policy, r#"{"schema":"splinterm.policy.v2","rules":[]}"#).unwrap();
     fs::set_permissions(&policy, fs::Permissions::from_mode(0o644)).unwrap();
     let rejected = output(binary().args(["policy", "validate"]).arg(&policy));
     assert!(!rejected.status.success());

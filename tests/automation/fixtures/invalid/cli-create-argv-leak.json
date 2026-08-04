@@ -1,14 +1,14 @@
 {
   "$schema_file": "cli-envelope.schema.json",
   "document": {
-    "schema": "splinterm.cli.v1",
+    "schema": "splinterm.cli.v2",
     "request_id": "10",
-    "operation": "create_dojo",
+    "operation": "create_lair",
     "ok": true,
     "truncated": false,
     "resource": {
-      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
-      "window_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+      "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
       "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
       "topology_revision": 7,
       "incarnation": 2

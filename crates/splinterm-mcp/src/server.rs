@@ -260,27 +260,27 @@ impl ServerHandler for SplintermServer {
         if !matches!(
             request.name.as_ref(),
             "splinterm.ping"
-                | "splinterm.list_dojos"
+                | "splinterm.list_lairs"
                 | "splinterm.inspect_topology"
                 | "splinterm.inspect_splint"
                 | "splinterm.read_terminal"
                 | "splinterm.read_scrollback"
                 | "splinterm.search_scrollback"
-                | "splinterm.create_dojo"
+                | "splinterm.create_lair"
                 | "splinterm.split_splint"
-                | "splinterm.new_window"
+                | "splinterm.new_dojo"
                 | "splinterm.relaunch_splint"
                 | "splinterm.restore_splint"
-                | "splinterm.restore_window"
                 | "splinterm.restore_dojo"
+                | "splinterm.restore_lair"
                 | "splinterm.close_splint"
-                | "splinterm.close_window"
+                | "splinterm.close_dojo"
                 | "splinterm.kill_splint"
                 | "splinterm.set_split_ratio"
+                | "splinterm.rename_lair"
                 | "splinterm.rename_dojo"
-                | "splinterm.rename_window"
                 | "splinterm.rename_splint"
-                | "splinterm.set_window_default_focus"
+                | "splinterm.set_dojo_default_focus"
                 | "splinterm.request_access"
                 | "splinterm.authorization_status"
                 | "splinterm.revoke_access"
@@ -429,7 +429,7 @@ mod tests {
     fn resource_uris_require_frozen_canonical_uuid_regex() {
         assert!(SplintermServer::known_resource(TOPOLOGY_URI));
         for version in b'1'..=b'5' {
-            for variant in [b'8', b'9', b'a', b'b'] {
+            for variant in *b"89ab" {
                 let uuid = format!(
                     "11111111-2222-{}333-{}444-555555555555",
                     char::from(version),

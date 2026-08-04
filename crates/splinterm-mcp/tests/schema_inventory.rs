@@ -4,34 +4,34 @@ const TOOLS: &[&str] = &[
     "acquire_control",
     "authorization_status",
     "close_splint",
-    "close_window",
-    "create_dojo",
+    "close_dojo",
+    "create_lair",
     "decide_control_transfer",
     "input",
     "inspect_audit",
     "inspect_splint",
     "inspect_topology",
     "kill_splint",
-    "list_dojos",
-    "new_window",
+    "list_lairs",
+    "new_dojo",
     "ping",
     "read_scrollback",
     "read_terminal",
     "relaunch_splint",
     "release_control",
-    "rename_dojo",
+    "rename_lair",
     "rename_splint",
-    "rename_window",
+    "rename_dojo",
     "request_access",
     "request_control_transfer",
     "resize",
-    "restore_dojo",
+    "restore_lair",
     "restore_splint",
-    "restore_window",
+    "restore_dojo",
     "revoke_access",
     "search_scrollback",
     "set_split_ratio",
-    "set_window_default_focus",
+    "set_dojo_default_focus",
     "split_splint",
 ];
 
@@ -58,227 +58,218 @@ const ERROR_CODES: &[&str] = &[
 ];
 
 const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
-    ("common.schema.json", 0xae6b_fe67_32f0_f36d),
-    ("error.schema.json", 0x4053_5e11_b0db_4733),
-    ("resources/control.schema.json", 0x3393_ec95_f7c9_7690),
-    ("resources/terminal.schema.json", 0x2d2a_83b3_94b2_2751),
-    ("resources/topology.schema.json", 0xe10f_4500_035f_0f82),
+    ("common.schema.json", 0x52c9_d943_f4ca_eb7f),
+    ("error.schema.json", 0x9dd2_e2af_f101_25fe),
+    ("resources/control.schema.json", 0xd4f3_1fbc_06b2_5c2b),
+    ("resources/terminal.schema.json", 0x20c0_6b33_9e25_c903),
+    ("resources/topology.schema.json", 0x9997_f7e0_b8cc_8fec),
     (
         "tools/acquire_control.input.schema.json",
-        0xa11e_ba62_346d_7477,
+        0x1861_1b1a_19c6_d82d,
     ),
     (
         "tools/acquire_control.output.schema.json",
-        0xe607_3dcb_3e8f_958d,
+        0xd76a_acdc_0311_6830,
     ),
     (
         "tools/authorization_status.input.schema.json",
-        0x0b7c_37ba_5ae8_1c63,
+        0xbc38_208b_d34f_5b43,
     ),
     (
         "tools/authorization_status.output.schema.json",
-        0x8ee6_8b43_a1da_8776,
+        0x1a6b_800b_4983_198d,
     ),
+    ("tools/close_dojo.input.schema.json", 0x8a94_83a8_db18_ddda),
+    ("tools/close_dojo.output.schema.json", 0xa13a_7239_1643_8d21),
     (
         "tools/close_splint.input.schema.json",
-        0x7f7f_5994_b8b0_1a1c,
+        0x6ba8_fd4c_9e76_cab2,
     ),
     (
         "tools/close_splint.output.schema.json",
-        0x7fe5_aa85_715b_cbf0,
+        0xf067_0bf7_49eb_d415,
     ),
+    ("tools/create_lair.input.schema.json", 0x81a0_812c_7013_b9a7),
     (
-        "tools/close_window.input.schema.json",
-        0x127a_fbf3_ff77_c540,
-    ),
-    (
-        "tools/close_window.output.schema.json",
-        0x31e4_67a4_14f4_ab18,
-    ),
-    ("tools/create_dojo.input.schema.json", 0x61de_2c09_a8fe_e045),
-    (
-        "tools/create_dojo.output.schema.json",
-        0x5eb9_3d75_f8dc_77eb,
+        "tools/create_lair.output.schema.json",
+        0x9c69_4126_cdd4_97e5,
     ),
     (
         "tools/decide_control_transfer.input.schema.json",
-        0xf007_00eb_006a_717d,
+        0x8b14_f73d_25f5_3a33,
     ),
     (
         "tools/decide_control_transfer.output.schema.json",
-        0xbc50_04e5_ccf7_99bd,
+        0xaff5_14f4_0f32_0867,
     ),
-    ("tools/input.input.schema.json", 0x4449_374a_d3cc_83fe),
-    ("tools/input.output.schema.json", 0x77bf_c206_fa4c_61f0),
+    ("tools/input.input.schema.json", 0xe79c_c053_2e93_6d2a),
+    ("tools/input.output.schema.json", 0x6f42_6194_56e8_137c),
     (
         "tools/inspect_audit.input.schema.json",
-        0x98ff_a9aa_40a2_c41b,
+        0x4098_738c_dde4_d3b3,
     ),
     (
         "tools/inspect_audit.output.schema.json",
-        0xc968_f027_5b40_25a9,
+        0x32d1_667b_845e_60ff,
     ),
     (
         "tools/inspect_splint.input.schema.json",
-        0xb802_ae31_d06d_17af,
+        0x8e0b_c2fa_1001_22cf,
     ),
     (
         "tools/inspect_splint.output.schema.json",
-        0xe9f8_b0d3_7958_7f08,
+        0xf6a7_7be0_15f7_3861,
     ),
     (
         "tools/inspect_topology.input.schema.json",
-        0xc2e0_c93a_9aad_d0e7,
+        0x49cf_480c_1bec_611a,
     ),
     (
         "tools/inspect_topology.output.schema.json",
-        0x581e_ab5e_70fb_890b,
+        0xf7ce_3c0b_1d85_b023,
     ),
-    ("tools/kill_splint.input.schema.json", 0x3c9f_43ef_a081_1353),
+    ("tools/kill_splint.input.schema.json", 0x3ec9_951a_7d7a_8daa),
     (
         "tools/kill_splint.output.schema.json",
-        0x4511_2f0b_564a_56c8,
+        0xe316_2dda_acca_4f2f,
     ),
-    ("tools/list_dojos.input.schema.json", 0x7320_4873_7e12_c347),
-    ("tools/list_dojos.output.schema.json", 0xd5b3_5626_1d6c_cbee),
-    ("tools/new_window.input.schema.json", 0x9ad8_688a_3b94_d9d7),
-    ("tools/new_window.output.schema.json", 0x6aa3_173c_8218_7a71),
-    ("tools/ping.input.schema.json", 0x9ec5_15a1_f0ef_2cff),
-    ("tools/ping.output.schema.json", 0xd840_42fc_2fba_cd5d),
+    ("tools/list_lairs.input.schema.json", 0xb83a_6e8c_b692_a7b6),
+    ("tools/list_lairs.output.schema.json", 0xa683_c49b_7cbb_f6e1),
+    ("tools/new_dojo.input.schema.json", 0x587d_7375_b47f_c586),
+    ("tools/new_dojo.output.schema.json", 0xfaa0_8cab_df12_f342),
+    ("tools/ping.input.schema.json", 0x330d_9f93_c9bc_3dea),
+    ("tools/ping.output.schema.json", 0xaf91_1919_d5ed_5480),
     (
         "tools/read_scrollback.input.schema.json",
-        0xd9cf_4d15_a24c_6a3a,
+        0x28f6_904a_3cdb_94ff,
     ),
     (
         "tools/read_scrollback.output.schema.json",
-        0xdd6e_6bd6_a593_789a,
+        0x33f8_770e_38b3_9b1a,
     ),
     (
         "tools/read_terminal.input.schema.json",
-        0x55d9_e2fd_ec56_03b5,
+        0xcc64_7db2_414b_cb0b,
     ),
     (
         "tools/read_terminal.output.schema.json",
-        0x576f_9ed5_aac8_bd84,
+        0x1786_c5df_5408_c388,
     ),
     (
         "tools/relaunch_splint.input.schema.json",
-        0x1490_4ef7_acb3_0ed1,
+        0x49ae_a46d_9d5a_df99,
     ),
     (
         "tools/relaunch_splint.output.schema.json",
-        0xdd78_eaec_7355_df76,
+        0xa6be_a9f9_86c7_02fd,
     ),
     (
         "tools/release_control.input.schema.json",
-        0x5aa1_c2fc_ba9d_65e3,
+        0x3d30_bd8b_2bdc_fa95,
     ),
     (
         "tools/release_control.output.schema.json",
-        0x7a56_ace0_ac98_f01c,
+        0x6517_d088_c2c4_22c9,
     ),
-    ("tools/rename_dojo.input.schema.json", 0x863d_bb26_b489_0bf5),
+    ("tools/rename_dojo.input.schema.json", 0xa351_c1fd_b43d_e1a8),
     (
         "tools/rename_dojo.output.schema.json",
-        0x741c_fada_77ab_4c71,
+        0xdab3_8d9f_db5c_757a,
+    ),
+    ("tools/rename_lair.input.schema.json", 0xfa87_d6b1_1bc0_ff80),
+    (
+        "tools/rename_lair.output.schema.json",
+        0x92a8_044b_3dc0_c8e6,
     ),
     (
         "tools/rename_splint.input.schema.json",
-        0x13fd_4802_6e8f_54a1,
+        0x75a0_bd0d_f0ec_1172,
     ),
     (
         "tools/rename_splint.output.schema.json",
-        0x2c08_b387_5258_0049,
-    ),
-    (
-        "tools/rename_window.input.schema.json",
-        0x7e8f_7d0f_eef2_258d,
-    ),
-    (
-        "tools/rename_window.output.schema.json",
-        0x7ff3_4bc0_b57c_fe25,
+        0x39ae_3deb_38d9_8bb6,
     ),
     (
         "tools/request_access.input.schema.json",
-        0x8407_d0d2_79f7_f83b,
+        0x405c_dc0e_5d8b_a4c3,
     ),
     (
         "tools/request_access.output.schema.json",
-        0x23c3_ff30_bcf6_42f5,
+        0x3e63_a65e_b3a0_5e83,
     ),
     (
         "tools/request_control_transfer.input.schema.json",
-        0xd7fe_596e_7b89_90ad,
+        0xd5ee_8269_2bb2_e35d,
     ),
     (
         "tools/request_control_transfer.output.schema.json",
-        0x5bb1_92cc_d760_4f87,
+        0x560a_70c0_8457_3ff0,
     ),
-    ("tools/resize.input.schema.json", 0xb830_ccf0_96f8_8ee7),
-    ("tools/resize.output.schema.json", 0xc2cd_5bda_332b_8b0e),
+    ("tools/resize.input.schema.json", 0x1a8c_b25e_4606_a63f),
+    ("tools/resize.output.schema.json", 0x0e4a_3a70_7d47_3460),
     (
         "tools/restore_dojo.input.schema.json",
-        0x47a3_3edb_d83b_8bcf,
+        0xf338_b917_05b9_35af,
     ),
     (
         "tools/restore_dojo.output.schema.json",
-        0xfe75_93a9_10a9_326a,
+        0x7b04_1551_7b32_9a6f,
+    ),
+    (
+        "tools/restore_lair.input.schema.json",
+        0x436d_bcf5_ce37_83c3,
+    ),
+    (
+        "tools/restore_lair.output.schema.json",
+        0x777f_ea53_ba8b_cedb,
     ),
     (
         "tools/restore_splint.input.schema.json",
-        0x7c94_0c32_f226_ad5b,
+        0xf2e6_93df_bf17_2557,
     ),
     (
         "tools/restore_splint.output.schema.json",
-        0xedb4_4e80_4d07_0d97,
-    ),
-    (
-        "tools/restore_window.input.schema.json",
-        0x31e0_61ec_b474_7737,
-    ),
-    (
-        "tools/restore_window.output.schema.json",
-        0xe8cc_f577_941b_6456,
+        0x932d_87e8_476c_411e,
     ),
     (
         "tools/revoke_access.input.schema.json",
-        0xdaaf_f64b_8ac0_9c3f,
+        0xfe63_60e0_216e_d22d,
     ),
     (
         "tools/revoke_access.output.schema.json",
-        0xfab6_c681_8e2e_2d71,
+        0x20bb_32dc_6ebc_6a6c,
     ),
     (
         "tools/search_scrollback.input.schema.json",
-        0x6e15_b917_4a29_b06c,
+        0x0d87_7d02_396e_f9f9,
     ),
     (
         "tools/search_scrollback.output.schema.json",
-        0x3929_7d8c_0372_ab6d,
+        0xa615_efec_c692_3ae0,
+    ),
+    (
+        "tools/set_dojo_default_focus.input.schema.json",
+        0x598f_8fb2_7aac_6402,
+    ),
+    (
+        "tools/set_dojo_default_focus.output.schema.json",
+        0x8567_1ff1_faf8_4b33,
     ),
     (
         "tools/set_split_ratio.input.schema.json",
-        0x02ff_f308_05f5_f9af,
+        0xe0bf_e828_9a61_b189,
     ),
     (
         "tools/set_split_ratio.output.schema.json",
-        0x7b46_8d12_5cbe_05c4,
-    ),
-    (
-        "tools/set_window_default_focus.input.schema.json",
-        0x1aca_681f_12b4_9e71,
-    ),
-    (
-        "tools/set_window_default_focus.output.schema.json",
-        0xd244_4068_e24c_151b,
+        0xb9d0_80fd_3ce1_cc7b,
     ),
     (
         "tools/split_splint.input.schema.json",
-        0x9148_e283_d622_e28c,
+        0x56d6_1db2_bf5e_ba98,
     ),
     (
         "tools/split_splint.output.schema.json",
-        0xfe09_2c41_9af7_5e3e,
+        0x79e4_1044_60a9_7ee3,
     ),
 ];
 
@@ -347,7 +338,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[test]
 fn schema_inventory_is_exactly_32_tools_and_three_resources() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let schema_root = root.join("dist/schemas/mcp/v1");
+    let schema_root = root.join("dist/schemas/mcp/v2");
     let tools = schema_root.join("tools");
     let resources = schema_root.join("resources");
 
@@ -389,7 +380,7 @@ fn schema_inventory_is_exactly_32_tools_and_three_resources() {
             &fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())),
         )
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-        let expected_id = format!("https://splinterm.oldjobobo.com/schemas/mcp/v1/{relative_path}");
+        let expected_id = format!("https://splinterm.oldjobobo.com/schemas/mcp/v2/{relative_path}");
         assert_eq!(
             schema["$schema"],
             "https://json-schema.org/draft/2020-12/schema",

@@ -1,6 +1,6 @@
 # ADR 0007: supported automation policy and audit boundary
 
-- **Status:** Accepted
+- **Status:** Accepted; hierarchy, selectors, and public schema amended by [ADR 0009](0009-topology-lair-dojo-migration.md)
 - **Date:** 2026-07-23
 - **Plan:** [Headless access and supported automation](../plans/0006-phase4-headless-automation.md)
 - **Supersedes:** the persistent-policy deferral in [ADR 0005](0005-trusted-consent-broker.md)

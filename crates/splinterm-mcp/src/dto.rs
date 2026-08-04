@@ -56,7 +56,7 @@ impl<'a> ToolFailure<'a> {
 
     fn new(tool: &'a str, code: &'static str, message: &'static str) -> Self {
         Self {
-            schema: "splinterm.mcp.v1",
+            schema: "splinterm.mcp.v2",
             tool,
             ok: false,
             error: ToolError {

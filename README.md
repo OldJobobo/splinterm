@@ -6,9 +6,10 @@ persistent multiplexing built in.
 
 - `splinterm` — terminal emulator and client
 - `splinterd` — persistent background server
-- **Lair** — the collection of persistent sessions
-- **Dojo** — a workspace containing windows and panes
-- **Splints** — individual terminal surfaces
+- **Topology** — the daemon's complete persistent session catalog
+- **Lair** — a named persistent session or project
+- **Dojo** — one persistent terminal layout within a Lair
+- **Splint** — an individual terminal pane/process
 
 > [!IMPORTANT]
 > Splinterm is a private prerelease. The Omarchy-native terminal MVP, headless
@@ -27,7 +28,7 @@ persistent multiplexing built in.
 crates/
 ├── splinterm/           # interactive client and native Wayland frontend
 ├── splinterd/           # persistent session daemon
-├── splinterm-core/      # Lair/Dojo/window/splint state model
+├── splinterm-core/      # Topology/Lair/Dojo/Splint state model
 ├── splinterm-protocol/  # versioned client-daemon wire protocol
 ├── splinterm-relay/     # dedicated policy-identified SSH stdio transport
 ├── splinterm-mcp/       # optional policy-identified MCP stdio adapter
@@ -57,7 +58,7 @@ Roadmap Phases 1, 2, and 3 are complete; the
 [Omarchy-native terminal MVP plan](docs/plans/0002-omarchy-terminal-mvp.md)
 links exact renderer, graphical sign-off, and private package evidence.
 Headless multiplexing, crash-safe metadata restore, independently attachable
-Dojo windows, and clipped multi-pane composition in one Wayland toplevel are implemented.
+Dojos, and clipped multi-pane composition in one Wayland Window are implemented.
 
 ## Install on Arch/Omarchy
 
@@ -76,27 +77,29 @@ package test suite, or `--yes` for an already-approved unattended installation.
 
 ## Daily use
 
-The normal desktop entry and `xdg-terminal-exec` path always open a fresh Dojo
-with one pane, running the requested command or the configured shell when none
+The normal desktop entry and `xdg-terminal-exec` path always open a fresh Lair
+with one Dojo and Splint, running the requested command or configured shell when none
 is supplied. Reopening is a separate, non-destructive action:
 
 ```bash
-splinterm sessions  # choose New Terminal or a recent running logical window
-splinterm reopen    # reopen the last locally remembered running window
+splinterm sessions  # choose New Terminal or a recent running Dojo
+splinterm reopen    # reopen the last locally remembered running Dojo
 ```
 
 From any focused managed Splinterm terminal, **Ctrl+Shift+S** opens Recent
-Sessions inside the current window. Escape returns to the current terminal;
+Sessions as trusted application chrome over dimmed live panes in the current
+window. Escape removes the overlay without replacing the terminal frontend;
 choosing a running session or New Terminal reuses that same Wayland window.
 This application-owned shortcut is not forwarded to the terminal process.
 
-The native Recent Sessions picker shows human Dojo/window names, starting
-directory, pane count, and running state without exposing UUIDs. Use arrow keys
+The native Recent Sessions picker shows human Lair/Dojo names, starting
+directory, Splint count, and running state without exposing UUIDs. Use arrow keys
 or J/K to select, Enter to open, N for a fresh terminal, Escape to cancel, or
-click an entry. Reopening maps a daemon-owned window whose complete pane layout
-is still running; it does not create, relaunch, or restore a process. Windows
-with exited panes remain available through the explicit `restore`,
-`restore-window`, and `restore-dojo` commands.
+click an entry. Compact and minimal windows page adaptively; vertical wheel or
+touchpad scrolling moves through actions when every row cannot fit. Reopening maps a daemon-owned Dojo into a native Window when its complete
+Splint layout is still running; it does not create, relaunch, or restore a
+process. Dojos with exited Splints remain available through the explicit
+`restore`, `restore-dojo`, and `restore-lair` commands.
 
 Packaged desktop actions expose **New Terminal**, **Recent Sessions**, and
 **Reopen Last Session**. Omarchy users can bind `splinterm-sessions` to a global
@@ -129,37 +132,37 @@ cargo run -p splinterd
 # Terminal 2
 cargo run -p splinterm -- ping
 cargo run -p splinterm -- new main
-# Active sessions only, with stable Dojo, window, and Splint UUIDs.
+# Active Lairs only, with stable Lair, Dojo, and Splint UUIDs.
 cargo run -p splinterm -- list
-# Include exited-only sessions and complete topology details.
+# Include exited-only Lairs and complete topology details.
 cargo run -p splinterm -- list --all
+LAIR_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 DOJO_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-WINDOW_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 SPLINT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 cargo run -p splinterm -- send "$SPLINT_ID" $'printf "hello from the PTY\\n"\n'
 cargo run -p splinterm -- snapshot "$SPLINT_ID"
 cargo run -p splinterm -- split "$SPLINT_ID" --axis horizontal --side second
 cargo run -p splinterm -- ratio "$SPLINT_ID" 650
-cargo run -p splinterm -- rename-dojo "$DOJO_ID" work
-cargo run -p splinterm -- rename-window "$WINDOW_ID" editor
+cargo run -p splinterm -- rename-lair "$LAIR_ID" work
+cargo run -p splinterm -- rename-dojo "$DOJO_ID" editor
 # Convenience metadata only; connected clients retain their own actual focus.
-cargo run -p splinterm -- window-focus-hint "$WINDOW_ID" "$SPLINT_ID"
+cargo run -p splinterm -- dojo-focus-hint "$DOJO_ID" "$SPLINT_ID"
 cargo run -p splinterm -- rename-splint "$SPLINT_ID" shell
-cargo run -p splinterm -- new-window "$DOJO_ID" --title logs
+cargo run -p splinterm -- new-dojo "$LAIR_ID" --name logs
 cargo run -p splinterm -- kill "$SPLINT_ID"       # prompts before termination
 cargo run -p splinterm -- relaunch "$SPLINT_ID"   # replacement launch parameters
 cargo run -p splinterm -- restore "$SPLINT_ID"    # saved launch metadata
-cargo run -p splinterm -- restore-window "$WINDOW_ID"
 cargo run -p splinterm -- restore-dojo "$DOJO_ID"
-# `close` and `close-window` require every affected Splint to have exited.
+cargo run -p splinterm -- restore-lair "$LAIR_ID"
+# `close` and `close-dojo` require every affected Splint to have exited.
 cargo run -p splinterm -- kill "$SPLINT_ID" --yes # required for non-interactive use
 cargo run -p splinterm -- close "$SPLINT_ID"
-cargo run -p splinterm -- close-window "$WINDOW_ID"
+cargo run -p splinterm -- close-dojo "$DOJO_ID"
 
-# Exactly one native toplevel for the selected daemon window.
-# Opening/closing the UI only attaches/detaches; it does not create, kill, restore,
-# focus, or otherwise alter another daemon window.
-cargo run -p splinterm -- window --dojo-id "$DOJO_ID" --window-id "$WINDOW_ID"
+# Exactly one native Window for the selected daemon-owned Dojo.
+# Opening/closing the Window only attaches/detaches; it does not create, kill,
+# restore, focus, or otherwise alter another Dojo.
+cargo run -p splinterm -- window --lair-id "$LAIR_ID" --dojo-id "$DOJO_ID"
 ```
 
 For the packaged systemd user service, reset every session through one guarded
@@ -182,7 +185,7 @@ scrollback bodies, clipboard data, PTY handles, grants, and controller tokens
 are never persisted.
 
 The `window` command keeps one ordered daemon subscription per pane, renders a
-persisted binary window tree into one clipped backing buffer, sends UTF-8 and
+persisted binary Dojo layout tree into one clipped backing buffer, sends UTF-8 and
 essential terminal keys to the client-local focused pane, and derives each
 PTY/grid size from its pane rectangle. Pane observers do not acquire controller
 leases merely by attaching or receiving focus. First input acquires the focused
