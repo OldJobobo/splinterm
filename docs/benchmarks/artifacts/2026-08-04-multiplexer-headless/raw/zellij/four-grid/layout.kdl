@@ -1,0 +1,20 @@
+layout {
+    pane split_direction="vertical" {
+        pane split_direction="horizontal" {
+            pane name="pane-0" command="/usr/bin/python" close_on_exit=true {
+                args "/home/oldjobobo/Projects/splinterm/tools/benchmark/workloads/bench-child.py" "idle" "--ready-file" "/home/oldjobobo/Projects/splinterm/docs/benchmarks/artifacts/2026-08-04-multiplexer-headless/raw/zellij/four-grid/pane-0-ready.json" "--idle-seconds" "15.0"
+            }
+            pane name="pane-1" command="/usr/bin/python" close_on_exit=true {
+                args "/home/oldjobobo/Projects/splinterm/tools/benchmark/workloads/bench-child.py" "idle" "--ready-file" "/home/oldjobobo/Projects/splinterm/docs/benchmarks/artifacts/2026-08-04-multiplexer-headless/raw/zellij/four-grid/pane-1-ready.json" "--idle-seconds" "15.0"
+            }
+        }
+        pane split_direction="horizontal" {
+            pane name="pane-2" command="/usr/bin/python" close_on_exit=true {
+                args "/home/oldjobobo/Projects/splinterm/tools/benchmark/workloads/bench-child.py" "idle" "--ready-file" "/home/oldjobobo/Projects/splinterm/docs/benchmarks/artifacts/2026-08-04-multiplexer-headless/raw/zellij/four-grid/pane-2-ready.json" "--idle-seconds" "15.0"
+            }
+            pane name="pane-3" command="/usr/bin/python" close_on_exit=true {
+                args "/home/oldjobobo/Projects/splinterm/tools/benchmark/workloads/bench-child.py" "idle" "--ready-file" "/home/oldjobobo/Projects/splinterm/docs/benchmarks/artifacts/2026-08-04-multiplexer-headless/raw/zellij/four-grid/pane-3-ready.json" "--idle-seconds" "15.0"
+            }
+        }
+    }
+}

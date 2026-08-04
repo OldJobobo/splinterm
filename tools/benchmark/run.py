@@ -12,15 +12,21 @@ from typing import Any
 
 from adapters import all_adapters
 from correctness import build_report, write_report
-from manifest import collect
 from latency import probe as probe_latency_boundary
+from manifest import collect
 from metrics import read_cgroup_v2, snapshot_process_tree
+from multiplexers import all_adapters as all_multiplexer_adapters
+from multiplexing import all_topologies, stack_identities
 from summary import summarize_samples
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEMA = pathlib.Path(__file__).with_name("result-schema.json")
 CORRECTNESS_SCHEMA = pathlib.Path(__file__).with_name("correctness-schema.json")
 LATENCY_SCHEMA = pathlib.Path(__file__).with_name("latency-schema.json")
+MULTIPLEXER_SCHEMA = pathlib.Path(__file__).with_name("multiplexer-schema.json")
+HEADLESS_MULTIPLEXER_SCHEMA = pathlib.Path(__file__).with_name(
+    "headless-multiplexer-schema.json"
+)
 
 
 def emit(value: Any, as_json: bool) -> None:
@@ -50,6 +56,42 @@ def command_probe(args: argparse.Namespace) -> int:
     )
 
 
+def command_probe_multiplexers(args: argparse.Namespace) -> int:
+    terminal_identities = [adapter.probe(ROOT) for adapter in all_adapters()]
+    identities = [adapter.probe(ROOT) for adapter in all_multiplexer_adapters()]
+    stacks = stack_identities(terminal_identities, identities)
+    value = {
+        "multiplexers": [identity.as_dict() for identity in identities],
+        "stacks": [identity.as_dict() for identity in stacks],
+        "topologies": [topology.as_dict() for topology in all_topologies()],
+    }
+    if args.json:
+        emit(value, True)
+    else:
+        print("Multiplexer probes")
+        for identity in identities:
+            if not identity.available:
+                print(f"  {identity.name:<10} unavailable")
+                continue
+            version = (identity.version or "version unknown").splitlines()[0]
+            sessions = (
+                "unknown"
+                if identity.default_session_count is None
+                else str(identity.default_session_count)
+            )
+            print(
+                f"  {identity.name:<10} {version}; "
+                f"ambient processes={identity.ambient_process_count}, "
+                f"default sessions={sessions}"
+            )
+        print("\nBenchmark stacks")
+        for stack in stacks:
+            status = "available" if stack.available else "unavailable"
+            print(f"  {stack.name:<18} {status}")
+        print("\nTopologies: " + ", ".join(item.name for item in all_topologies()))
+    return 1 if args.require_all and any(not item.available for item in stacks) else 0
+
+
 def command_manifest(args: argparse.Namespace) -> int:
     value = collect(ROOT)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -61,6 +103,8 @@ def command_manifest(args: argparse.Namespace) -> int:
     print(f"Manifest written: {args.output}")
     available = sum(bool(item["available"]) for item in value["terminals"])
     print(f"Terminals found: {available}/{len(value['terminals'])}")
+    multiplexers = sum(bool(item["available"]) for item in value["multiplexers"])
+    print(f"Multiplexers found: {multiplexers}/{len(value['multiplexers'])}")
     return 0
 
 
@@ -174,6 +218,22 @@ def command_validate_latency(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_validate_multiplexer(args: argparse.Namespace) -> int:
+    if error := validate_document(args.result, MULTIPLEXER_SCHEMA):
+        print(f"Multiplexer validation failed: {error}", file=sys.stderr)
+        return 2 if error.startswith("validation unavailable") else 1
+    print(f"Valid multiplexer result: {args.result}")
+    return 0
+
+
+def command_validate_headless_multiplexer(args: argparse.Namespace) -> int:
+    if error := validate_document(args.result, HEADLESS_MULTIPLEXER_SCHEMA):
+        print(f"Headless multiplexer validation failed: {error}", file=sys.stderr)
+        return 2 if error.startswith("validation unavailable") else 1
+    print(f"Valid headless multiplexer result: {args.result}")
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         description="Inspect and prepare portable Splinterbench measurements; never launches windows"
@@ -190,6 +250,20 @@ def parser() -> argparse.ArgumentParser:
         "--require-all", action="store_true", help="fail if any terminal is unavailable"
     )
     probe.set_defaults(handler=command_probe)
+
+    multiplexer_probe = commands.add_parser(
+        "probe-multiplexers",
+        help="inspect tmux/Zellij identities, stack availability, and topology contracts",
+    )
+    multiplexer_probe.add_argument(
+        "--json", action="store_true", help="emit machine-readable output"
+    )
+    multiplexer_probe.add_argument(
+        "--require-all",
+        action="store_true",
+        help="fail if any planned benchmark stack is unavailable",
+    )
+    multiplexer_probe.set_defaults(handler=command_probe_multiplexers)
 
     manifest = commands.add_parser("manifest", help="write a reproducibility manifest")
     manifest.add_argument("output", type=pathlib.Path)
@@ -251,6 +325,19 @@ def parser() -> argparse.ArgumentParser:
     )
     validate_latency.add_argument("result", type=pathlib.Path)
     validate_latency.set_defaults(handler=command_validate_latency)
+
+    validate_multiplexer = commands.add_parser(
+        "validate-multiplexer", help="validate one multiplexer benchmark result"
+    )
+    validate_multiplexer.add_argument("result", type=pathlib.Path)
+    validate_multiplexer.set_defaults(handler=command_validate_multiplexer)
+
+    validate_headless = commands.add_parser(
+        "validate-headless-multiplexer",
+        help="validate one headless multiplexer orchestration report",
+    )
+    validate_headless.add_argument("result", type=pathlib.Path)
+    validate_headless.set_defaults(handler=command_validate_headless_multiplexer)
     return root
 
 

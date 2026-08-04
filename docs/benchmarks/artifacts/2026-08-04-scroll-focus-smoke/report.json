@@ -1,0 +1,69 @@
+{
+  "candidate": {
+    "sha256": "f6d9c32b464faec1a483d7b867a8c2725e1a0023458996701217a9f6bf5ee4a7",
+    "splinterm": "/home/oldjobobo/Projects/splinterm/target/release/splinterm"
+  },
+  "captures": {
+    "history": {
+      "bytes": 751263,
+      "geometry": [
+        1138,
+        -806,
+        444,
+        564
+      ],
+      "path": "history.ppm",
+      "sha256": "7f362d031743e72df552f03fd0f627b291d97372ea2ebf471678a09a5d1c298c"
+    },
+    "live_baseline": {
+      "bytes": 751263,
+      "geometry": [
+        1138,
+        -806,
+        444,
+        564
+      ],
+      "path": "live-baseline.ppm",
+      "sha256": "2d92411f138cb056320a88c9c0471b3848be2cd351229ed4b358f4134edcf16d"
+    },
+    "returned_live": {
+      "bytes": 751263,
+      "geometry": [
+        1138,
+        -806,
+        444,
+        564
+      ],
+      "path": "returned-live.ppm",
+      "sha256": "2d92411f138cb056320a88c9c0471b3848be2cd351229ed4b358f4134edcf16d"
+    }
+  },
+  "cleanup": {
+    "failure": null,
+    "host_state_preserved": true,
+    "namespace_absent": true,
+    "process_forest_absent": true,
+    "server_absent": true,
+    "verified": true,
+    "window_absent": true,
+    "workloads_absent": true
+  },
+  "failure": null,
+  "isolation": {
+    "host_state_before": {
+      "cursor": {
+        "x": 1682,
+        "y": 932
+      },
+      "focus_address": "0x55d06bc2fe70",
+      "workspace": {
+        "id": 1,
+        "monitor": "DP-1"
+      }
+    },
+    "monitor": "DP-2",
+    "workspace": 8
+  },
+  "schema": "splinterm.scroll-focus-smoke.v1",
+  "valid": true
+}

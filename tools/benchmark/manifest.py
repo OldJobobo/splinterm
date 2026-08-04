@@ -10,6 +10,8 @@ import subprocess
 from typing import Any
 
 from adapters import all_adapters
+from multiplexers import all_adapters as all_multiplexer_adapters
+from multiplexing import stack_identities
 
 
 def _output(command: list[str], root: pathlib.Path) -> str | None:
@@ -62,6 +64,8 @@ def repository_identity(root: pathlib.Path) -> dict[str, str | bool] | None:
 def collect(root: pathlib.Path) -> dict[str, Any]:
     """Collect a schema-valid manifest with no benchmark samples."""
 
+    terminals = [adapter.probe(root) for adapter in all_adapters()]
+    multiplexers = [adapter.probe(root) for adapter in all_multiplexer_adapters()]
     return {
         "schema": "splinterm.benchmark.v1",
         "recorded_at": datetime.datetime.now(datetime.UTC).isoformat(),
@@ -74,6 +78,10 @@ def collect(root: pathlib.Path) -> dict[str, Any]:
             "python": platform.python_version(),
         },
         "repository": repository_identity(root),
-        "terminals": [adapter.probe(root).as_dict() for adapter in all_adapters()],
+        "terminals": [identity.as_dict() for identity in terminals],
+        "multiplexers": [identity.as_dict() for identity in multiplexers],
+        "benchmark_stacks": [
+            identity.as_dict() for identity in stack_identities(terminals, multiplexers)
+        ],
         "samples": [],
     }

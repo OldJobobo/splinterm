@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/oldjobobo/splinterm/tools/benchmark/multiplexer-schema.json",
+  "title": "Splinterbench multiplexer sample",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "stack", "topology", "case", "boundary", "iteration", "metrics", "resources", "processes", "isolation", "valid", "notes"],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.multiplexer.v1" },
+    "stack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "terminal", "multiplexer", "integration"],
+      "properties": {
+        "name": { "enum": ["splinterm-native", "foot-bare", "foot-tmux", "foot-zellij"] },
+        "terminal": { "enum": ["splinterm", "foot"] },
+        "multiplexer": { "enum": ["splinterm", "tmux", "zellij", null] },
+        "integration": { "enum": ["native", "nested", "none"] }
+      },
+      "oneOf": [
+        { "properties": { "name": { "const": "splinterm-native" }, "terminal": { "const": "splinterm" }, "multiplexer": { "const": "splinterm" }, "integration": { "const": "native" } } },
+        { "properties": { "name": { "const": "foot-bare" }, "terminal": { "const": "foot" }, "multiplexer": { "const": null }, "integration": { "const": "none" } } },
+        { "properties": { "name": { "const": "foot-tmux" }, "terminal": { "const": "foot" }, "multiplexer": { "const": "tmux" }, "integration": { "const": "nested" } } },
+        { "properties": { "name": { "const": "foot-zellij" }, "terminal": { "const": "foot" }, "multiplexer": { "const": "zellij" }, "integration": { "const": "nested" } } }
+      ]
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "pane_count", "panes"],
+      "properties": {
+        "name": { "enum": ["single", "two-columns", "four-grid"] },
+        "pane_count": { "enum": [1, 2, 4] },
+        "panes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^pane-[0-3]$" }
+        }
+      },
+      "oneOf": [
+        { "properties": { "name": { "const": "single" }, "pane_count": { "const": 1 }, "panes": { "const": ["pane-0"] } } },
+        { "properties": { "name": { "const": "two-columns" }, "pane_count": { "const": 2 }, "panes": { "const": ["pane-0", "pane-1"] } } },
+        { "properties": { "name": { "const": "four-grid" }, "pane_count": { "const": 4 }, "panes": { "const": ["pane-0", "pane-1", "pane-2", "pane-3"] } } }
+      ]
+    },
+    "case": { "enum": ["startup", "idle", "plain", "ansi", "unicode", "outer-resize", "divider-resize", "input", "detach-reattach", "lifecycle"] },
+    "boundary": { "enum": ["all-children-ready", "pty-write-complete", "visible-marker-approximation", "input-to-child", "input-to-visible-marker-approximation", "resize-settled", "reattach-visible", "process-exit"] },
+    "iteration": { "type": "integer", "minimum": 0 },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": { "type": ["integer", "number", "null"] }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["infrastructure", "total"],
+      "properties": {
+        "infrastructure": { "$ref": "#/$defs/resources" },
+        "total": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "processes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["infrastructure_root_pids", "workload_pids", "all_workloads_included", "roles"],
+      "properties": {
+        "infrastructure_root_pids": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "uniqueItems": true },
+        "workload_pids": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "uniqueItems": true },
+        "all_workloads_included": { "const": true },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "pids"],
+            "properties": {
+              "role": { "enum": ["daemon", "terminal", "multiplexer-server", "multiplexer-client", "workload"] },
+              "pids": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "uniqueItems": true }
+            }
+          }
+        }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "ambient_process_count", "ambient_processes_included", "graphical", "workspace", "monitor", "no_initial_focus", "cleanup_verified"],
+      "properties": {
+        "namespace": { "type": "string", "minLength": 1 },
+        "ambient_process_count": { "type": "integer", "minimum": 0 },
+        "ambient_processes_included": { "const": false },
+        "graphical": { "type": "boolean" },
+        "workspace": { "type": ["integer", "null"] },
+        "monitor": { "type": ["string", "null"] },
+        "no_initial_focus": { "type": ["boolean", "null"] },
+        "cleanup_verified": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "graphical": { "const": true } }, "required": ["graphical"] },
+          "then": {
+            "properties": {
+              "workspace": { "const": 8 },
+              "monitor": { "const": "DP-2" },
+              "no_initial_focus": { "const": true }
+            }
+          }
+        }
+      ]
+    },
+    "valid": { "type": "boolean" },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "valid": { "const": true } }, "required": ["valid"] },
+      "then": {
+        "properties": {
+          "isolation": {
+            "properties": { "cleanup_verified": { "const": true } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process_count", "cpu_ticks", "context_switches", "rss_bytes", "pss_bytes"],
+      "properties": {
+        "process_count": { "type": "integer", "minimum": 0 },
+        "cpu_ticks": { "type": "integer", "minimum": 0 },
+        "context_switches": { "type": "integer", "minimum": 0 },
+        "rss_bytes": { "type": "integer", "minimum": 0 },
+        "pss_bytes": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    }
+  }
+}

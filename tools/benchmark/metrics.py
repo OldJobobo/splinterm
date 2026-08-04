@@ -104,17 +104,37 @@ def snapshot_process_memory_forest(
         "shmem_bytes",
     )
     return {
-        "aggregate": {key: sum(getattr(item, key) for item in processes) for key in keys},
+        "aggregate": {
+            key: sum(getattr(item, key) for item in processes) for key in keys
+        },
         "processes": [item.as_dict() for item in processes],
     }
 
 
 def _children(proc_root: pathlib.Path, pid: int) -> list[int]:
-    path = proc_root / str(pid) / "task" / str(pid) / "children"
+    """Return children spawned by any thread in a process.
+
+    Linux exposes ``children`` per task. Reading only ``task/<pid>/children``
+    misses processes spawned by worker threads, including Splinterd PTYs.
+    """
+
+    task_root = proc_root / str(pid) / "task"
     try:
-        return [int(value) for value in path.read_text(encoding="utf-8").split()]
-    except (OSError, ValueError):
+        tasks = list(task_root.iterdir())
+    except OSError:
         return []
+    children: set[int] = set()
+    for task in tasks:
+        if not task.name.isdigit():
+            continue
+        try:
+            children.update(
+                int(value)
+                for value in (task / "children").read_text(encoding="utf-8").split()
+            )
+        except (OSError, ValueError):
+            continue
+    return sorted(children)
 
 
 def process_tree(proc_root: pathlib.Path, root_pid: int) -> list[int]:

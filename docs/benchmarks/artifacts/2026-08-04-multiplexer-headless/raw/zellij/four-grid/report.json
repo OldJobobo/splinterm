@@ -1,0 +1,163 @@
+{
+  "boundary": {
+    "clock": "CLOCK_MONOTONIC shared host namespace",
+    "launch_to_all_children_ready_ns": 170809379
+  },
+  "cleanup": {
+    "failure": null,
+    "invoked": true,
+    "namespace_absent": true,
+    "process_forest_absent": true,
+    "server_absent": true,
+    "verified": true,
+    "workloads_absent": true
+  },
+  "failure": null,
+  "implementation": "zellij",
+  "inspection": {
+    "suppressed_internal_plugin_panes": 1,
+    "terminal_panes": [
+      {
+        "columns": 25,
+        "id": 0,
+        "rows": 25,
+        "title": "pane-0",
+        "x": 0,
+        "y": 0
+      },
+      {
+        "columns": 25,
+        "id": 1,
+        "rows": 25,
+        "title": "pane-2",
+        "x": 25,
+        "y": 0
+      },
+      {
+        "columns": 25,
+        "id": 2,
+        "rows": 25,
+        "title": "pane-1",
+        "x": 0,
+        "y": 25
+      },
+      {
+        "columns": 25,
+        "id": 3,
+        "rows": 25,
+        "title": "pane-3",
+        "x": 25,
+        "y": 25
+      }
+    ],
+    "visible_plugin_panes": 0
+  },
+  "isolation": {
+    "ambient_after": {
+      "default_session_count": 1,
+      "process_count": 2
+    },
+    "ambient_before": {
+      "default_session_count": 1,
+      "process_count": 2
+    },
+    "ambient_counts_unchanged": true,
+    "ambient_names_recorded": false,
+    "graphical": false,
+    "run_id": "m1-zellij-four-grid"
+  },
+  "notes": [
+    "Headless orchestration evidence only; no terminal window was launched.",
+    "Suppressed Zellij internal plugin records are not visible plugin UI."
+  ],
+  "panes": [
+    {
+      "name": "pane-0",
+      "runtime_id": "terminal_0",
+      "workload": {
+        "pid": 156932,
+        "ready_monotonic_ns": 1196818375737
+      }
+    },
+    {
+      "name": "pane-1",
+      "runtime_id": "terminal_2",
+      "workload": {
+        "pid": 156941,
+        "ready_monotonic_ns": 1196842598697
+      }
+    },
+    {
+      "name": "pane-2",
+      "runtime_id": "terminal_1",
+      "workload": {
+        "pid": 156939,
+        "ready_monotonic_ns": 1196833472782
+      }
+    },
+    {
+      "name": "pane-3",
+      "runtime_id": "terminal_3",
+      "workload": {
+        "pid": 156997,
+        "ready_monotonic_ns": 1196852424892
+      }
+    }
+  ],
+  "process_roles": {
+    "role_sets_disjoint": true,
+    "roles": [
+      {
+        "processes": [
+          {
+            "pid": 156895,
+            "start_ticks": 119672
+          }
+        ],
+        "role": "server"
+      },
+      {
+        "processes": [],
+        "role": "helper"
+      },
+      {
+        "processes": [
+          {
+            "pid": 156932,
+            "start_ticks": 119677
+          },
+          {
+            "pid": 156939,
+            "start_ticks": 119678
+          },
+          {
+            "pid": 156997,
+            "start_ticks": 119680
+          },
+          {
+            "pid": 156941,
+            "start_ticks": 119679
+          }
+        ],
+        "role": "workload"
+      }
+    ]
+  },
+  "schema": "splinterm.benchmark.multiplexer-headless.v1",
+  "server": {
+    "pid": 156895,
+    "role": "multiplexer-server",
+    "start_ticks": 119672
+  },
+  "topology": {
+    "name": "four-grid",
+    "pane_count": 4,
+    "panes": [
+      "pane-0",
+      "pane-1",
+      "pane-2",
+      "pane-3"
+    ]
+  },
+  "valid": true
+}

@@ -1,0 +1,156 @@
+{
+  "capture": {
+    "height": 600,
+    "path": "splinterm-native.png",
+    "sha256": "2aa29f1c874aa780558e44e937fe5d35cea3276f64e2b124c391984ec85abe68",
+    "width": 960
+  },
+  "cleanup": {
+    "ambient_counts_unchanged": true,
+    "clients_absent": true,
+    "failure": null,
+    "namespace_absent": true,
+    "process_forest_absent": true,
+    "server_absent": true,
+    "verified": true,
+    "window_absent": true,
+    "workloads_absent": true
+  },
+  "failure": null,
+  "geometry": {
+    "after_graphical_attach": [
+      {
+        "columns": 57,
+        "name": "pane-0",
+        "rows": 28,
+        "runtime_id": "f9e529f2-0219-45df-8e8f-38b140c9e01e"
+      },
+      {
+        "columns": 57,
+        "name": "pane-1",
+        "rows": 28,
+        "runtime_id": "42e426dd-247c-45cd-8b4b-d60be9ede30a"
+      }
+    ],
+    "before_graphical_attach": [
+      {
+        "columns": 80,
+        "name": "pane-0",
+        "rows": 24,
+        "runtime_id": "f9e529f2-0219-45df-8e8f-38b140c9e01e"
+      },
+      {
+        "columns": 80,
+        "name": "pane-1",
+        "rows": 24,
+        "runtime_id": "42e426dd-247c-45cd-8b4b-d60be9ede30a"
+      }
+    ],
+    "stable_seconds": 0.3
+  },
+  "implementation": "splinterm",
+  "isolation": {
+    "ambient_after": {
+      "default_session_count": null,
+      "process_count": null
+    },
+    "ambient_before": {
+      "default_session_count": null,
+      "process_count": null
+    },
+    "ambient_names_recorded": false,
+    "host_state_before": {
+      "cursor": {
+        "x": 1682,
+        "y": 932
+      },
+      "focus_address": "0x55d06bc2fe70",
+      "workspace": {
+        "id": 1,
+        "monitor": "DP-1"
+      }
+    },
+    "host_state_preserved": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "run_id": "gsmoke-0-splinterm-native",
+    "workspace": 8
+  },
+  "notes": [
+    "Guarded development smoke only; readiness values are not a performance ranking.",
+    "The terminal was mapped silently on inactive workspace 8 / DP-2."
+  ],
+  "process_roles": {
+    "role_sets_disjoint": true,
+    "roles": [
+      {
+        "processes": [
+          {
+            "pid": 313973,
+            "start_ticks": 244115
+          }
+        ],
+        "role": "server"
+      },
+      {
+        "processes": [
+          {
+            "pid": 314001,
+            "start_ticks": 244127
+          }
+        ],
+        "role": "terminal-host"
+      },
+      {
+        "processes": [],
+        "role": "multiplexer-client"
+      },
+      {
+        "processes": [],
+        "role": "helper"
+      },
+      {
+        "processes": [
+          {
+            "pid": 313980,
+            "start_ticks": 244118
+          },
+          {
+            "pid": 313986,
+            "start_ticks": 244119
+          }
+        ],
+        "role": "workload"
+      }
+    ]
+  },
+  "readiness": {
+    "pane-0": {
+      "event": "ready",
+      "monotonic_ns": 2441220769516,
+      "pid": 313980,
+      "schema": "splinterm.benchmark.child.v1"
+    },
+    "pane-1": {
+      "event": "ready",
+      "monotonic_ns": 2441230217281,
+      "pid": 313986,
+      "schema": "splinterm.benchmark.child.v1"
+    }
+  },
+  "runtime_ids": {
+    "pane-0": "f9e529f2-0219-45df-8e8f-38b140c9e01e",
+    "pane-1": "42e426dd-247c-45cd-8b4b-d60be9ede30a"
+  },
+  "schema": "splinterm.benchmark.multiplexer-graphical-smoke.v1",
+  "stack": "splinterm-native",
+  "topology": {
+    "name": "two-columns",
+    "pane_count": 2,
+    "panes": [
+      "pane-0",
+      "pane-1"
+    ]
+  },
+  "valid": true
+}

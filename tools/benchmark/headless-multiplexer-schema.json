@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/oldjobobo/splinterm/tools/benchmark/headless-multiplexer-schema.json",
+  "title": "Splinterbench headless multiplexer orchestration evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "implementation", "topology", "boundary", "server", "panes", "process_roles", "inspection", "isolation", "cleanup", "failure", "valid", "notes"],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.multiplexer-headless.v1" },
+    "implementation": { "enum": ["splinterm", "tmux", "zellij"] },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "pane_count", "panes"],
+      "properties": {
+        "name": { "enum": ["single", "two-columns", "four-grid"] },
+        "pane_count": { "enum": [1, 2, 4] },
+        "panes": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
+      },
+      "oneOf": [
+        { "properties": { "name": { "const": "single" }, "pane_count": { "const": 1 }, "panes": { "const": ["pane-0"] } } },
+        { "properties": { "name": { "const": "two-columns" }, "pane_count": { "const": 2 }, "panes": { "const": ["pane-0", "pane-1"] } } },
+        { "properties": { "name": { "const": "four-grid" }, "pane_count": { "const": 4 }, "panes": { "const": ["pane-0", "pane-1", "pane-2", "pane-3"] } } }
+      ]
+    },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clock", "launch_to_all_children_ready_ns"],
+      "properties": {
+        "clock": { "const": "CLOCK_MONOTONIC shared host namespace" },
+        "launch_to_all_children_ready_ns": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "server": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "pid", "start_ticks"],
+          "properties": {
+            "role": { "enum": ["daemon", "multiplexer-server"] },
+            "pid": { "type": "integer", "minimum": 1 },
+            "start_ticks": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "panes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/pane" }
+    },
+    "process_roles": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role_sets_disjoint", "roles"],
+          "properties": {
+            "role_sets_disjoint": { "const": true },
+            "roles": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "allOf": [
+                    { "$ref": "#/$defs/role" },
+                    {
+                      "properties": {
+                        "role": { "const": "server" },
+                        "processes": { "minItems": 1, "maxItems": 1 }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "allOf": [
+                    { "$ref": "#/$defs/role" },
+                    { "properties": { "role": { "const": "helper" } } }
+                  ]
+                },
+                {
+                  "allOf": [
+                    { "$ref": "#/$defs/role" },
+                    { "properties": { "role": { "const": "workload" } } }
+                  ]
+                }
+              ],
+              "items": false,
+              "minItems": 3,
+              "maxItems": 3
+            }
+          }
+        }
+      ]
+    },
+    "inspection": { "type": ["object", "null"] },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "ambient_before", "ambient_after", "ambient_counts_unchanged", "ambient_names_recorded", "graphical"],
+      "properties": {
+        "run_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,47}$" },
+        "ambient_before": { "$ref": "#/$defs/ambient" },
+        "ambient_after": { "$ref": "#/$defs/ambient" },
+        "ambient_counts_unchanged": { "type": "boolean" },
+        "ambient_names_recorded": { "const": false },
+        "graphical": { "const": false }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invoked", "namespace_absent", "server_absent", "workloads_absent", "process_forest_absent", "verified", "failure"],
+      "properties": {
+        "invoked": { "const": true },
+        "namespace_absent": { "type": "boolean" },
+        "server_absent": { "type": "boolean" },
+        "workloads_absent": { "type": "boolean" },
+        "process_forest_absent": { "type": "boolean" },
+        "verified": { "type": "boolean" },
+        "failure": { "$ref": "#/$defs/failure" }
+      }
+    },
+    "failure": { "$ref": "#/$defs/failure" },
+    "valid": { "type": "boolean" },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "topology": { "properties": { "name": { "const": "single" } } } } },
+      "then": {
+        "properties": {
+          "panes": {
+            "prefixItems": [
+              { "allOf": [{ "$ref": "#/$defs/pane" }, { "properties": { "name": { "const": "pane-0" } } }] }
+            ],
+            "items": false,
+            "minItems": 1,
+            "maxItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "topology": { "properties": { "name": { "const": "two-columns" } } } } },
+      "then": {
+        "properties": {
+          "panes": {
+            "prefixItems": [
+              { "allOf": [{ "$ref": "#/$defs/pane" }, { "properties": { "name": { "const": "pane-0" } } }] },
+              { "allOf": [{ "$ref": "#/$defs/pane" }, { "properties": { "name": { "const": "pane-1" } } }] }
+            ],
+            "items": false,
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "topology": { "properties": { "name": { "const": "four-grid" } } } } },
+      "then": {
+        "properties": {
+          "panes": {
+            "prefixItems": [
+              { "allOf": [{ "$ref": "#/$defs/pane" }, { "properties": { "name": { "const": "pane-0" } } }] },
+              { "allOf": [{ "$ref": "#/$defs/pane" }, { "properties": { "name": { "const": "pane-1" } } }] },
+              { "allOf": [{ "$ref": "#/$defs/pane" }, { "properties": { "name": { "const": "pane-2" } } }] },
+              { "allOf": [{ "$ref": "#/$defs/pane" }, { "properties": { "name": { "const": "pane-3" } } }] }
+            ],
+            "items": false,
+            "minItems": 4,
+            "maxItems": 4
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "valid": { "const": true } }, "required": ["valid"] },
+      "then": {
+        "properties": {
+          "server": { "type": "object" },
+          "panes": {
+            "items": {
+              "properties": {
+                "runtime_id": { "type": "string", "minLength": 1 },
+                "workload": { "type": "object" }
+              }
+            }
+          },
+          "process_roles": { "type": "object" },
+          "inspection": { "type": "object" },
+          "failure": { "type": "null" },
+          "cleanup": {
+            "properties": {
+              "namespace_absent": { "const": true },
+              "server_absent": { "const": true },
+              "workloads_absent": { "const": true },
+              "process_forest_absent": { "const": true },
+              "verified": { "const": true },
+              "failure": { "type": "null" }
+            }
+          },
+          "isolation": { "properties": { "ambient_counts_unchanged": { "const": true } } },
+          "boundary": { "properties": { "launch_to_all_children_ready_ns": { "type": "integer" } } }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "pane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "runtime_id", "workload"],
+      "properties": {
+        "name": { "enum": ["pane-0", "pane-1", "pane-2", "pane-3"] },
+        "runtime_id": { "type": ["string", "null"] },
+        "workload": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["pid", "ready_monotonic_ns"],
+              "properties": {
+                "pid": { "type": "integer", "minimum": 1 },
+                "ready_monotonic_ns": { "type": "integer", "minimum": 0 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "start_ticks"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_ticks": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "processes"],
+      "properties": {
+        "role": { "enum": ["server", "helper", "workload"] },
+        "processes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/identity" }
+        }
+      }
+    },
+    "ambient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process_count", "default_session_count"],
+      "properties": {
+        "process_count": { "type": ["integer", "null"], "minimum": 0 },
+        "default_session_count": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "failure": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "message"],
+          "properties": {
+            "type": { "type": "string", "minLength": 1 },
+            "message": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+}

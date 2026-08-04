@@ -1,0 +1,104 @@
+{
+  "benchmark_stacks": [
+    {
+      "available": true,
+      "integration": "native",
+      "multiplexer": "splinterm",
+      "name": "splinterm-native",
+      "terminal": "splinterm"
+    },
+    {
+      "available": true,
+      "integration": "none",
+      "multiplexer": null,
+      "name": "foot-bare",
+      "terminal": "foot"
+    },
+    {
+      "available": true,
+      "integration": "nested",
+      "multiplexer": "tmux",
+      "name": "foot-tmux",
+      "terminal": "foot"
+    },
+    {
+      "available": true,
+      "integration": "nested",
+      "multiplexer": "zellij",
+      "name": "foot-zellij",
+      "terminal": "foot"
+    }
+  ],
+  "host": {
+    "architecture": "x86_64",
+    "clock_ticks_per_second": 100,
+    "cpu": "AMD Ryzen 5 5600G with Radeon Graphics",
+    "kernel": "7.1.5-arch1-2",
+    "os": "Omarchy",
+    "python": "3.14.6"
+  },
+  "multiplexers": [
+    {
+      "ambient_process_count": 0,
+      "available": true,
+      "default_session_count": 0,
+      "executable": "/usr/bin/tmux",
+      "name": "tmux",
+      "sha256": "d4ab9e564ee82d0f89cd06dbb6df234e0ecebdd1fbcb8a4987a1644c7268a5d2",
+      "version": "tmux 3.7b"
+    },
+    {
+      "ambient_process_count": 2,
+      "available": true,
+      "default_session_count": 1,
+      "executable": "/usr/bin/zellij",
+      "name": "zellij",
+      "sha256": "cb958b76b33a7016da785e3eb793a1459ca364ebf3330fe87488ce4c30a558f4",
+      "version": "zellij 0.44.3"
+    }
+  ],
+  "recorded_at": "2026-08-04T06:38:49.072897+00:00",
+  "repository": {
+    "commit": "4db5b4ce60fdf02cd6115ca7fb1e61250e7e3ca8",
+    "dirty": true
+  },
+  "samples": [],
+  "schema": "splinterm.benchmark.v1",
+  "terminals": [
+    {
+      "available": true,
+      "executable": "/home/oldjobobo/Projects/splinterm/target/release/splinterm",
+      "name": "splinterm",
+      "sha256": "442e991b3165423763f80670409a573964b5caebf32a60aa962f0fd5fddc215b",
+      "version": "splinterm 0.1.0"
+    },
+    {
+      "available": true,
+      "executable": "/usr/bin/foot",
+      "name": "foot",
+      "sha256": "79ce907b8c00ab1dec254d5b954365c7212f00d67ce54e876799c8706da1d4e5",
+      "version": "foot version: 1.27.0 (Jul 21 2026, branch 'makepkg') +pgo +ime +graphemes +toplevel-tag +blur -assertions"
+    },
+    {
+      "available": true,
+      "executable": "/usr/bin/kitty",
+      "name": "kitty",
+      "sha256": "940cbe42c8cf1dcb342f20b32ee35f51818bbcd8deffc11029f5766d844783a4",
+      "version": "kitty 0.48.2 created by Kovid Goyal"
+    },
+    {
+      "available": true,
+      "executable": "/usr/bin/ghostty",
+      "name": "ghostty",
+      "sha256": "d943cc1d6c6d24de8964b689bb7de6c827731560b37122e649f75d9e23b57580",
+      "version": "Ghostty 1.3.1-arch2\n\nVersion\n  - version: 1.3.1-arch2\n  - channel: tip\nBuild Config\n  - Zig version   : 0.15.2\n  - build mode    : .ReleaseFast\n  - app runtime   : .gtk\n  - font engine   : .fontconfig_freetype\n  - renderer      : renderer.generic.Renderer(renderer.OpenGL)\n  - libxev        : io_uring\n  - kernel version: 7.1.5-arch1-2\n  - desktop env   : other\n  - GTK version   :\n    build         : 4.22.2\n    runtime       : 4.22.4\n  - libadwaita    : enabled\n    build         : 1.9.0\n    runtime       : 1.9.3\n  - libX11        : enabled\n  - libwayland    : enabled"
+    },
+    {
+      "available": true,
+      "executable": "/usr/bin/alacritty",
+      "name": "alacritty",
+      "sha256": "0cf523596ad06112922350a3d7c0eb0875c7c45b7c05b0dcc405a40afc50e624",
+      "version": "alacritty 0.17.0 (94e7c887)"
+    }
+  ]
+}

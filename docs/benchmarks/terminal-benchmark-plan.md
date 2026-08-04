@@ -11,6 +11,12 @@ Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 remains Splinterm's behavioral oracle. Comparative measurements do not replace,
 modify, or regenerate that reference evidence.
 
+Terminal multiplexers occupy a separate stack axis. tmux and Zellij are never
+added to terminal-emulator rankings as though they were bare terminals. The
+initial multiplexer matrix compares Splinterm native multiplexing, Foot bare,
+Foot plus tmux, and Foot plus Zellij as specified by
+[Plan 0016](../plans/0016-multiplexer-benchmark-suite.md).
+
 ## Measurement lanes
 
 ### Common end-to-end performance
@@ -56,6 +62,21 @@ Correctness is reported independently from speed:
 
 Unsupported features are marked unsupported, not scored as zero-performance
 runs.
+
+### Multiplexer stacks
+
+The first multiplexer scaling curve uses one pane, two columns, and a four-pane
+grid. It measures topology readiness, idle resources, simultaneous output,
+outer and divider resize, active-pane input, detach/reattach, and lifecycle.
+Results identify terminal, multiplexer, integration mode, pane topology, and
+process roles explicitly.
+
+Resource reports preserve two totals: terminal/multiplexer infrastructure and
+the same infrastructure plus every workload child. Detached servers are
+explicit roots rather than assumed descendants of the graphical terminal.
+Ambient sessions are counted but excluded, and their names are not recorded.
+Every tmux and Zellij run uses a unique socket directory and session with an
+exact namespace-scoped cleanup command.
 
 ### Splinterm architecture
 
@@ -159,6 +180,15 @@ A benchmark command must not make graphical execution the default.
    these reduced Splinterm's screenshot-visible median from 371.45 ms to 184.88 ms;
    the bounded frame fix alone measured 203.22 ms, and current peer medians are
    179.53–189.21 ms.
+6. **Multiplexer foundation (in progress):** exact tmux/Zellij identities,
+   privacy-bounded ambient counts, isolated namespace plans, explicit stack
+   identities, deterministic one/two/four-pane topologies, tmux actions, Zellij
+   layouts, checked-in profiles, and standalone result schemas are implemented.
+   The nine-case native/tmux/Zellij headless topology matrix passes with explicit
+   process roles and verified cleanup. The gated two-column graphical smoke also
+   passes for Splinterm native, Foot+tmux, and Foot+Zellij on workspace 8 / DP-2
+   with preserved host state and exact cleanup. The measured multiplexer matrix
+   remains under Plan 0016.
 
 ## Current commands
 
@@ -167,6 +197,8 @@ The portable milestone is intentionally non-graphical:
 ```bash
 python tools/benchmark/run.py probe
 python tools/benchmark/run.py probe --json
+python tools/benchmark/run.py probe-multiplexers
+python tools/benchmark/run.py probe-multiplexers --json --require-all
 python tools/benchmark/run.py manifest /tmp/splinterbench-manifest.json
 python tools/benchmark/run.py validate /tmp/splinterbench-manifest.json
 python tools/benchmark/run.py summarize /tmp/splinterbench-manifest.json
@@ -174,6 +206,14 @@ python tools/benchmark/run.py sample-process $$ --json
 python tools/benchmark/run.py correctness-report /tmp/splinterbench-correctness
 python tools/benchmark/run.py validate-correctness \
   /tmp/splinterbench-correctness/report.json
+python tools/benchmark/run.py validate-multiplexer \
+  /tmp/splinterbench-multiplexer-sample.json
+python tools/benchmark/run-headless-multiplexer.py /tmp/splinterbench-headless \
+  --implementation splinterm --topology two-columns
+python tools/benchmark/run.py validate-headless-multiplexer \
+  /tmp/splinterbench-headless/report.json
+python tools/benchmark/run-headless-multiplexer-matrix.py \
+  /tmp/splinterbench-headless-matrix --seed 20260804
 python tools/benchmark/workloads/bench-child.py plain --lines 1000 >/dev/null
 ```
 

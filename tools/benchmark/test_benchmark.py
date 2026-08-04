@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import subprocess
 import sys
+import threading
+import types
+from typing import ClassVar
 
 import pytest
 
@@ -14,9 +18,19 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 BENCHMARK = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCHMARK))
 
-from adapters.base import TerminalAdapter, file_sha256  # noqa: E402
-from correctness import build_report, write_report  # noqa: E402
-from metrics import (  # noqa: E402
+import latency as latency_boundary
+from adapters.base import TerminalAdapter, file_sha256
+from correctness import build_report, write_report
+from headless_multiplexer import (
+    ProcessIdentity,
+    TmuxController,
+    pane_commands,
+    process_identity,
+    processes_with_exact_cmdline_token,
+    terminate_processes_exact,
+    verify_process_roles,
+)
+from metrics import (
     process_memory,
     process_tree,
     read_cgroup_v2,
@@ -24,8 +38,21 @@ from metrics import (  # noqa: E402
     snapshot_process_memory_forest,
     snapshot_process_tree,
 )
-from summary import summarize_samples, summarize_values  # noqa: E402
-import latency as latency_boundary  # noqa: E402
+from multiplexers.base import (
+    MultiplexerAdapter,
+    isolated_environment,
+    validate_run_id,
+)
+from multiplexers.tmux import TmuxAdapter
+from multiplexers.zellij import ZellijAdapter
+from multiplexing import (
+    all_topologies,
+    stack_identities,
+    tmux_actions,
+    topology_named,
+    zellij_layout,
+)
+from summary import summarize_samples, summarize_values
 
 
 def load_module(path: pathlib.Path, name: str):
@@ -47,6 +74,24 @@ class ExampleAdapter(TerminalAdapter):
     def candidates(self, root: pathlib.Path):
         del root
         return (self.executable,)
+
+
+class ExampleMultiplexer(MultiplexerAdapter):
+    name = "example-mux"
+    executable_names = ()
+    version_arguments = ("--version",)
+    process_name_prefixes = ("example-mux",)
+
+    def __init__(self, executable: pathlib.Path):
+        self.executable = executable
+
+    def candidates(self, root: pathlib.Path):
+        del root
+        return (self.executable,)
+
+    def default_session_count(self, executable: pathlib.Path) -> int | None:
+        assert executable == self.executable.resolve()
+        return 3
 
 
 def test_publication_metrics_overhead_bootstrap_is_deterministic() -> None:
@@ -105,6 +150,163 @@ def test_adapter_probe_records_exact_executable(tmp_path: pathlib.Path) -> None:
     assert identity.sha256 == file_sha256(executable)
 
 
+def test_multiplexer_probe_records_identity_without_ambient_session_names(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / "example-mux"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'example-mux 1.2.3\\n'\n", encoding="utf-8"
+    )
+    executable.chmod(0o700)
+    proc = tmp_path / "proc"
+    for pid, name in ((10, "example-mux"), (11, "example-mux: server"), (12, "other")):
+        process = proc / str(pid)
+        process.mkdir(parents=True)
+        (process / "comm").write_text(name + "\n", encoding="utf-8")
+
+    identity = ExampleMultiplexer(executable).probe(tmp_path, proc)
+    assert identity.available is True
+    assert identity.executable == str(executable.resolve())
+    assert identity.version == "example-mux 1.2.3"
+    assert identity.ambient_process_count == 2
+    assert identity.default_session_count == 3
+    assert set(identity.as_dict()) == {
+        "name",
+        "available",
+        "executable",
+        "version",
+        "sha256",
+        "ambient_process_count",
+        "default_session_count",
+    }
+
+
+def test_zellij_session_probe_counts_names_without_retaining_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "private-session-sentinel"
+
+    def run(command, **kwargs):
+        assert command[-3:] == ["list-sessions", "--short", "--no-formatting"]
+        return subprocess.CompletedProcess(command, 0, f"{sentinel}\nanother\n", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    count = ZellijAdapter().default_session_count(pathlib.Path("/usr/bin/zellij"))
+    assert count == 2
+    assert sentinel not in json.dumps({"default_session_count": count})
+
+
+def test_multiplexer_isolation_plans_never_use_default_namespaces(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "mux"
+    executable.write_text("mux", encoding="utf-8")
+    executable.chmod(0o700)
+    runtime = tmp_path / "runtime"
+
+    tmux = TmuxAdapter()
+    monkeypatch.setattr(tmux, "find_executable", lambda root: executable)
+    tmux_plan = tmux.isolation_plan(ROOT, runtime, "case-17")
+    assert tmux_plan.session_name == "splinterbench-case-17"
+    assert tmux_plan.environment == {"TMUX_TMPDIR": str(runtime.resolve())}
+    assert tmux_plan.command_prefix[1:3] == ("-L", "splinterbench-case-17")
+    assert tmux_plan.cleanup_command[-1] == "kill-server"
+    assert "default" not in json.dumps(tmux_plan.as_dict())
+
+    zellij = ZellijAdapter()
+    monkeypatch.setattr(zellij, "find_executable", lambda root: executable)
+    zellij_plan = zellij.isolation_plan(ROOT, runtime, "case-17")
+    assert zellij_plan.session_name == "splinterbench-case-17"
+    assert zellij_plan.environment["ZELLIJ_SOCKET_DIR"] == str(
+        runtime.resolve() / "zellij-sockets"
+    )
+    assert zellij_plan.cleanup_command[-2:] == (
+        "kill-session",
+        "splinterbench-case-17",
+    )
+    assert set(zellij_plan.as_dict()) == {
+        "multiplexer",
+        "run_id",
+        "runtime_directory",
+        "session_name",
+        "command_prefix",
+        "environment",
+        "cleanup_command",
+    }
+
+    monkeypatch.setenv("TMUX", "ambient-tmux")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "private-session-sentinel")
+    environment = isolated_environment(
+        {"EXAMPLE": "kept"}, remove=("TMUX", "ZELLIJ_SESSION_NAME")
+    )
+    assert environment["EXAMPLE"] == "kept"
+    assert "TMUX" not in environment
+    assert "ZELLIJ_SESSION_NAME" not in environment
+
+    assert validate_run_id("a-0") == "a-0"
+    for invalid in ("", "Upper", "../escape", "contains space", "a" * 49):
+        with pytest.raises(ValueError, match="run ID"):
+            validate_run_id(invalid)
+
+
+def test_multiplexer_stacks_and_topologies_are_explicit_and_deterministic() -> None:
+    class Identity:
+        def __init__(self, name: str, available: bool):
+            self.name = name
+            self.available = available
+
+    stacks = stack_identities(
+        [Identity("splinterm", True), Identity("foot", True)],
+        [Identity("tmux", True), Identity("zellij", False)],
+    )
+    assert [item.name for item in stacks] == [
+        "splinterm-native",
+        "foot-bare",
+        "foot-tmux",
+        "foot-zellij",
+    ]
+    assert [item.available for item in stacks] == [True, True, True, False]
+
+    topologies = all_topologies()
+    assert [(item.name, item.pane_names) for item in topologies] == [
+        ("single", ("pane-0",)),
+        ("two-columns", ("pane-0", "pane-1")),
+        ("four-grid", ("pane-0", "pane-1", "pane-2", "pane-3")),
+    ]
+    assert topology_named("four-grid").as_dict()["pane_count"] == 4
+    with pytest.raises(ValueError, match="unknown topology"):
+        topology_named("ambiguous-split")
+
+
+def test_tmux_and_zellij_topology_materialization_match() -> None:
+    topology = topology_named("four-grid")
+    commands = {
+        name: ("/usr/bin/python", "bench-child.py", name)
+        for name in topology.pane_names
+    }
+    actions = tmux_actions(topology, commands)
+    assert [(item["action"], item.get("target"), item["pane"]) for item in actions] == [
+        ("new-session", None, "pane-0"),
+        ("split-pane", "pane-0", "pane-2"),
+        ("split-pane", "pane-0", "pane-1"),
+        ("split-pane", "pane-2", "pane-3"),
+    ]
+    assert [item.get("direction") for item in actions[1:]] == [
+        "left-right",
+        "top-bottom",
+        "top-bottom",
+    ]
+
+    layout = zellij_layout(topology, commands)
+    assert layout.startswith("layout {\n")
+    assert layout.count('split_direction="vertical"') == 1
+    assert layout.count('split_direction="horizontal"') == 2
+    assert layout.count('command="/usr/bin/python"') == 4
+    assert all(f'name="{name}"' in layout for name in topology.pane_names)
+    with pytest.raises(ValueError, match="match topology panes exactly"):
+        zellij_layout(topology, {"pane-0": ("true",)})
+
+
 def _write_process(
     proc: pathlib.Path, pid: int, children: str, rss_kib: int, ticks: tuple[int, int]
 ) -> None:
@@ -135,6 +337,197 @@ def test_process_tree_snapshot_aggregates_descendants(tmp_path: pathlib.Path) ->
     assert metrics.context_switches == 15
     forest = snapshot_process_forest([10, 11], tmp_path)
     assert forest == metrics
+
+
+def test_process_tree_includes_children_spawned_by_nonleader_threads(
+    tmp_path: pathlib.Path,
+) -> None:
+    _write_process(tmp_path, 10, "\n", 4, (1, 1))
+    _write_process(tmp_path, 11, "\n", 5, (2, 2))
+    worker = tmp_path / "10" / "task" / "99"
+    worker.mkdir(parents=True)
+    (worker / "children").write_text("11\n", encoding="utf-8")
+
+    assert process_tree(tmp_path, 10) == [10, 11]
+    assert snapshot_process_tree(10, tmp_path).process_count == 2
+
+
+def test_headless_process_identity_and_namespace_match_are_incarnation_exact(
+    tmp_path: pathlib.Path,
+) -> None:
+    for pid, command in (
+        (10, ["zellij", "--server", "/tmp/exact/socket"]),
+        (11, ["zellij", "--server", "/tmp/exact/socket-extra"]),
+    ):
+        process = tmp_path / str(pid)
+        process.mkdir(parents=True)
+        fields = ["S", *("0" for _ in range(18)), str(100 + pid)]
+        (process / "stat").write_text(
+            f"{pid} (multiplexer server) {' '.join(fields)}\n", encoding="utf-8"
+        )
+        (process / "cmdline").write_bytes(b"\0".join(os.fsencode(v) for v in command))
+
+    assert process_identity(10, tmp_path).as_dict() == {
+        "pid": 10,
+        "start_ticks": 110,
+    }
+    assert processes_with_exact_cmdline_token("/tmp/exact/socket", tmp_path) == [10]
+
+
+def test_headless_role_accounting_classifies_every_descendant(
+    tmp_path: pathlib.Path,
+) -> None:
+    _write_process(tmp_path, 10, "11 12\n", 4, (1, 1))
+    _write_process(tmp_path, 11, "\n", 4, (1, 1))
+    _write_process(tmp_path, 12, "\n", 4, (1, 1))
+    for pid in (10, 11, 12):
+        fields = ["S", *("0" for _ in range(18)), str(100 + pid)]
+        (tmp_path / str(pid) / "stat").write_text(
+            f"{pid} (benchmark) {' '.join(fields)}\n", encoding="utf-8"
+        )
+    roles = verify_process_roles(
+        process_identity(10, tmp_path),
+        {"pane-0": {"pid": 11}},
+        tmp_path,
+    )
+    assert roles == {
+        "role_sets_disjoint": True,
+        "roles": [
+            {
+                "role": "server",
+                "processes": [process_identity(10, tmp_path).as_dict()],
+            },
+            {
+                "role": "helper",
+                "processes": [process_identity(12, tmp_path).as_dict()],
+            },
+            {
+                "role": "workload",
+                "processes": [process_identity(11, tmp_path).as_dict()],
+            },
+        ],
+    }
+
+
+def test_exact_incarnation_termination_is_bounded() -> None:
+    process = subprocess.Popen(["sleep", "30"])
+    reaper = threading.Thread(target=process.wait)
+    reaper.start()
+    try:
+        identity = process_identity(process.pid)
+        assert terminate_processes_exact([identity], timeout=1.0)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        reaper.join(timeout=2)
+
+
+def test_tmux_cleanup_falls_back_to_exact_server_identity(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import headless_multiplexer as module
+
+    runtime = tmp_path / "runtime"
+    socket = runtime / f"tmux-{os.getuid()}" / "splinterbench-fallback"
+    socket.parent.mkdir(parents=True)
+    socket.touch()
+    controller = TmuxController.__new__(TmuxController)
+    controller.plan = types.SimpleNamespace(
+        cleanup_command=("/bin/false",),
+        runtime_directory=runtime,
+        run_id="fallback",
+    )
+    controller.environment = {}
+    identity = ProcessIdentity(123, 456)
+    controller._server_identity = identity
+    terminated = []
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("tmux", 10)
+
+    monkeypatch.setattr(module.subprocess, "run", timeout)
+    monkeypatch.setattr(
+        module,
+        "terminate_processes_exact",
+        lambda identities: terminated.extend(identities) or True,
+    )
+    monkeypatch.setattr(module, "same_process", lambda candidate: False)
+
+    controller.cleanup()
+
+    assert terminated == [identity]
+    assert not runtime.exists()
+
+
+def test_headless_fallback_rejects_mismatched_server_incarnation(
+    tmp_path: pathlib.Path,
+) -> None:
+    runner = load_module(
+        BENCHMARK / "run-headless-multiplexer.py",
+        "headless_runner_mismatched_server",
+    )
+    server = tmp_path / "123"
+    server.mkdir()
+    fields = ["S", *(["0"] * 18), "999"]
+    (server / "stat").write_text(
+        f"123 (reused server pid) {' '.join(fields)}\n",
+        encoding="utf-8",
+    )
+
+    assert runner.process_forest_identities(ProcessIdentity(123, 456), tmp_path) == []
+
+
+def test_tmux_captures_server_identity_before_later_split_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import headless_multiplexer as module
+
+    controller = TmuxController.__new__(TmuxController)
+    controller.topology = topology_named("two-columns")
+    controller.plan = types.SimpleNamespace(
+        command_prefix=("tmux", "-L", "owned", "-f", "/dev/null"),
+        session_name="splinterbench-owned",
+    )
+    controller.environment = {}
+    controller.runtime_ids = {}
+    controller._server_identity = None
+    identity = ProcessIdentity(123, 456)
+    calls = 0
+
+    def checked_run(command, environment):
+        nonlocal calls
+        assert environment == {}
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(command, 0, "123\t%0\n", "")
+        raise RuntimeError("injected split failure")
+
+    monkeypatch.setattr(module, "checked_run", checked_run)
+    monkeypatch.setattr(module, "process_identity", lambda pid: identity)
+    commands = {"pane-0": ("true",), "pane-1": ("true",)}
+
+    with pytest.raises(RuntimeError, match="injected split failure"):
+        controller.start(commands)
+
+    assert controller.runtime_ids == {"pane-0": "%0"}
+    assert controller.server_identity == identity
+
+
+def test_headless_pane_commands_use_unique_readiness_channels(
+    tmp_path: pathlib.Path,
+) -> None:
+    topology = topology_named("four-grid")
+    commands = pane_commands(topology, tmp_path, 17.0)
+    assert set(commands) == set(topology.pane_names)
+    ready_files = {
+        command[command.index("--ready-file") + 1] for command in commands.values()
+    }
+    assert ready_files == {
+        str(tmp_path / f"pane-{index}-ready.json") for index in range(4)
+    }
+    assert all(
+        command[-2:] == ("--idle-seconds", "17.0") for command in commands.values()
+    )
 
 
 def test_smaps_rollup_attributes_processes_without_body_content(
@@ -396,7 +789,7 @@ def test_retention_v2_failure_record_preserves_phase_and_isolation_details() -> 
     )
 
     class ExampleIsolationError(RuntimeError):
-        details = {"observed_count": 0}
+        details: ClassVar[dict[str, int]] = {"observed_count": 0}
 
     error = ExampleIsolationError("window disappeared")
     assert retention.failure_record("settle_sampling", error) == {
@@ -439,7 +832,7 @@ def test_retention_v2_main_serializes_pretrigger_and_cleanup_failures(
     )
     monkeypatch.setattr(retention.V1, "assert_test_workspace_isolated", lambda: None)
     monkeypatch.setattr(retention.V1, "assert_user_workspace_untouched", lambda: None)
-    monkeypatch.setattr(retention.V1, "all_clients", lambda: [])
+    monkeypatch.setattr(retention.V1, "all_clients", list)
     monkeypatch.setattr(
         retention.V1,
         "kill_oracle_window",
@@ -684,7 +1077,7 @@ def test_cava_side_by_side_is_native_tiled_pipewire_and_focus_safe() -> None:
     assert "source = auto" in source
     assert '["pgrep", "-x", "cava"]' in source
     assert "ambient Cava processes would pollute the comparison" in source
-    assert 'stty cols 120 rows 40' in source
+    assert "stty cols 120 rows 40" in source
     assert "float = false" in source
     assert "no_initial_focus = true" in source
     assert "no_focus = true" in source
@@ -723,7 +1116,8 @@ def test_hyprland_056_absolute_window_move_uses_lua_dispatcher(
 
 
 def test_graphical_commands_are_controlled_and_terminal_specific(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = BENCHMARK / "run-graphical-idle.py"
     spec = importlib.util.spec_from_file_location("graphical_idle_test", path)
@@ -900,8 +1294,7 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
 
     assert module.theme_settings(tmp_path) == (1.0, False)
     (tmp_path / "foot.ini").write_text(
-        "[colors]\nalpha=0.61\nblur=no\n"
-        "[colors-light]\nalpha=0.99\nblur=yes\n",
+        "[colors]\nalpha=0.61\nblur=no\n[colors-light]\nalpha=0.99\nblur=yes\n",
         encoding="utf-8",
     )
     assert module.theme_settings(tmp_path) == (0.61, False)
@@ -920,9 +1313,7 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
     )
     assert module.theme_settings(tmp_path) == (1.0, False)
 
-    (tmp_path / "foot.ini").write_text(
-        "[colors-dark]\nalpha=1.1\n", encoding="utf-8"
-    )
+    (tmp_path / "foot.ini").write_text("[colors-dark]\nalpha=1.1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="between"):
         module.theme_settings(tmp_path)
     (tmp_path / "foot.ini").write_text(
@@ -1098,6 +1489,248 @@ def test_graphical_cava_progress_counts_distinct_body_free_revisions(
     ) == {"client_apply": 1, "draw_commit": 1}
 
 
+def test_headless_multiplexer_report_contract_requires_cleanup_and_exact_topology(
+    tmp_path: pathlib.Path,
+) -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    document = {
+        "schema": "splinterm.benchmark.multiplexer-headless.v1",
+        "implementation": "tmux",
+        "topology": {
+            "name": "single",
+            "pane_count": 1,
+            "panes": ["pane-0"],
+        },
+        "boundary": {
+            "clock": "CLOCK_MONOTONIC shared host namespace",
+            "launch_to_all_children_ready_ns": 10,
+        },
+        "server": {"role": "multiplexer-server", "pid": 10, "start_ticks": 20},
+        "panes": [
+            {
+                "name": "pane-0",
+                "runtime_id": "%0",
+                "workload": {"pid": 11, "ready_monotonic_ns": 30},
+            }
+        ],
+        "process_roles": {
+            "role_sets_disjoint": True,
+            "roles": [
+                {"role": "server", "processes": [{"pid": 10, "start_ticks": 20}]},
+                {"role": "helper", "processes": []},
+                {"role": "workload", "processes": [{"pid": 11, "start_ticks": 21}]},
+            ],
+        },
+        "inspection": {"terminal_panes": [{"runtime_id": "%0"}]},
+        "isolation": {
+            "run_id": "tmux-1",
+            "ambient_before": {"process_count": 0, "default_session_count": 0},
+            "ambient_after": {"process_count": 0, "default_session_count": 0},
+            "ambient_counts_unchanged": True,
+            "ambient_names_recorded": False,
+            "graphical": False,
+        },
+        "cleanup": {
+            "invoked": True,
+            "namespace_absent": True,
+            "server_absent": True,
+            "workloads_absent": True,
+            "process_forest_absent": True,
+            "verified": True,
+            "failure": None,
+        },
+        "failure": None,
+        "valid": True,
+        "notes": [],
+    }
+    schema = json.loads((BENCHMARK / "headless-multiplexer-schema.json").read_text())
+    validator = jsonschema.Draft202012Validator(schema)
+    validator.validate(document)
+    for keys, value in (
+        (("topology", "pane_count"), 4),
+        (("cleanup", "namespace_absent"), False),
+        (("cleanup", "server_absent"), False),
+        (("cleanup", "workloads_absent"), False),
+        (("cleanup", "process_forest_absent"), False),
+        (("cleanup", "verified"), False),
+        (("cleanup", "failure"), {"type": "RuntimeError", "message": "leak"}),
+        (("isolation", "ambient_counts_unchanged"), False),
+    ):
+        invalid = json.loads(json.dumps(document))
+        invalid[keys[0]][keys[1]] = value
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(invalid)
+    extra_pane = json.loads(json.dumps(document))
+    extra_pane["panes"].append(extra_pane["panes"][0])
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(extra_pane)
+    path = tmp_path / "headless.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK / "run.py"),
+            "validate-headless-multiplexer",
+            str(path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_headless_matrix_summary_keeps_orchestration_out_of_rankings() -> None:
+    module = load_module(
+        BENCHMARK / "run-headless-multiplexer-matrix.py", "headless_matrix"
+    )
+    records = [
+        {
+            "implementation": "splinterm",
+            "topology": "single",
+            "pane_count": 1,
+            "report": {
+                "boundary": {"launch_to_all_children_ready_ns": 1_500_000},
+                "cleanup": {"verified": True},
+                "valid": True,
+            },
+        }
+    ]
+    summary = module.markdown(records, 7)
+    assert "not a performance ranking" in summary
+    assert "Ambient sessions are represented only by counts" in summary
+    assert "1.5 ms" in summary
+    assert "verified" in summary
+
+
+def test_multiplexer_sample_contract_separates_infrastructure_and_total_resources(
+    tmp_path: pathlib.Path,
+) -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    document = {
+        "schema": "splinterm.benchmark.multiplexer.v1",
+        "stack": {
+            "name": "foot-zellij",
+            "terminal": "foot",
+            "multiplexer": "zellij",
+            "integration": "nested",
+        },
+        "topology": {
+            "name": "two-columns",
+            "pane_count": 2,
+            "panes": ["pane-0", "pane-1"],
+        },
+        "case": "idle",
+        "boundary": "all-children-ready",
+        "iteration": 0,
+        "metrics": {"duration_ns": 10},
+        "resources": {
+            "infrastructure": {
+                "process_count": 3,
+                "cpu_ticks": 1,
+                "context_switches": 2,
+                "rss_bytes": 100,
+                "pss_bytes": 80,
+            },
+            "total": {
+                "process_count": 5,
+                "cpu_ticks": 3,
+                "context_switches": 6,
+                "rss_bytes": 140,
+                "pss_bytes": 110,
+            },
+        },
+        "processes": {
+            "infrastructure_root_pids": [10, 11],
+            "workload_pids": [12, 13],
+            "all_workloads_included": True,
+            "roles": [
+                {"role": "terminal", "pids": [10]},
+                {"role": "multiplexer-server", "pids": [11]},
+                {"role": "workload", "pids": [12, 13]},
+            ],
+        },
+        "isolation": {
+            "namespace": "/tmp/splinterbench-case/zellij-sockets",
+            "ambient_process_count": 1,
+            "ambient_processes_included": False,
+            "graphical": False,
+            "workspace": None,
+            "monitor": None,
+            "no_initial_focus": None,
+            "cleanup_verified": True,
+        },
+        "valid": True,
+        "notes": [],
+    }
+    schema = json.loads((BENCHMARK / "multiplexer-schema.json").read_text())
+    validator = jsonschema.Draft202012Validator(schema)
+    validator.validate(document)
+    mutations = (
+        ("stack tuple", ("stack", "terminal"), "splinterm"),
+        ("topology tuple", ("topology", "pane_count"), 4),
+        ("cleanup validity", ("isolation", "cleanup_verified"), False),
+    )
+    for _name, keys, value in mutations:
+        invalid = json.loads(json.dumps(document))
+        invalid[keys[0]][keys[1]] = value
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(invalid)
+    failed = json.loads(json.dumps(document))
+    failed["valid"] = False
+    failed["isolation"]["cleanup_verified"] = False
+    validator.validate(failed)
+
+    path = tmp_path / "multiplexer.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(BENCHMARK / "run.py"), "validate-multiplexer", str(path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_multiplexer_probe_is_non_graphical_and_machine_readable() -> None:
+    result = subprocess.run(
+        [sys.executable, str(BENCHMARK / "run.py"), "probe-multiplexers", "--json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    value = json.loads(result.stdout)
+    assert [item["name"] for item in value["multiplexers"]] == ["tmux", "zellij"]
+    assert [item["name"] for item in value["stacks"]] == [
+        "splinterm-native",
+        "foot-bare",
+        "foot-tmux",
+        "foot-zellij",
+    ]
+    assert [item["name"] for item in value["topologies"]] == [
+        "single",
+        "two-columns",
+        "four-grid",
+    ]
+    assert all(
+        set(item)
+        == {
+            "name",
+            "available",
+            "executable",
+            "version",
+            "sha256",
+            "ambient_process_count",
+            "default_session_count",
+        }
+        for item in value["multiplexers"]
+    )
+
+
 def test_manifest_matches_result_schema(tmp_path: pathlib.Path) -> None:
     jsonschema = pytest.importorskip("jsonschema")
     output = tmp_path / "manifest.json"
@@ -1114,6 +1747,17 @@ def test_manifest_matches_result_schema(tmp_path: pathlib.Path) -> None:
     jsonschema.Draft202012Validator(
         schema, format_checker=jsonschema.FormatChecker()
     ).validate(document)
+    assert [item["name"] for item in document["multiplexers"]] == ["tmux", "zellij"]
+    assert [item["name"] for item in document["benchmark_stacks"]] == [
+        "splinterm-native",
+        "foot-bare",
+        "foot-tmux",
+        "foot-zellij",
+    ]
+    invalid = json.loads(json.dumps(document))
+    invalid["benchmark_stacks"][2]["multiplexer"] = "zellij"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(invalid)
 
 
 def _successful_correctness_run(
@@ -1154,12 +1798,9 @@ def test_correctness_report_is_evidence_bounded_and_schema_valid(
     assert all(item["exact"] for item in report["final_buffer_evidence"])
     assert report["fuzzing"]["status"] == "available-not-run"
     assert report["fuzzing"]["recorded_duration_seconds"] is None
-    assert {item["status"] for item in report["external_observations"]} == {
-        "observed"
-    }
+    assert {item["status"] for item in report["external_observations"]} == {"observed"}
     assert all(
-        "private" in item["claim_limit"]
-        or "does not prove" in item["claim_limit"]
+        "private" in item["claim_limit"] or "does not prove" in item["claim_limit"]
         for item in report["external_observations"]
     )
     sixel = next(
@@ -1179,7 +1820,9 @@ def test_correctness_report_is_evidence_bounded_and_schema_valid(
 
 
 def test_correctness_report_does_not_hide_failed_checks() -> None:
-    def failing_run(command: list[str] | tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    def failing_run(
+        command: list[str] | tuple[str, ...],
+    ) -> subprocess.CompletedProcess[str]:
         if list(command)[:2] == ["git", "rev-parse"]:
             return subprocess.CompletedProcess(command, 0, "1" * 40 + "\n", "")
         if list(command)[:2] == ["git", "status"]:

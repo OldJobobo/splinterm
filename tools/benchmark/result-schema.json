@@ -33,6 +33,14 @@
       "type": "array",
       "items": { "$ref": "#/$defs/terminal" }
     },
+    "multiplexers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/multiplexer" }
+    },
+    "benchmark_stacks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/benchmark_stack" }
+    },
     "samples": {
       "type": "array",
       "items": { "$ref": "#/$defs/sample" }
@@ -50,6 +58,38 @@
         "version": { "type": ["string", "null"] },
         "sha256": { "type": ["string", "null" ] }
       }
+    },
+    "multiplexer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "available", "executable", "version", "sha256", "ambient_process_count", "default_session_count"],
+      "properties": {
+        "name": { "enum": ["tmux", "zellij"] },
+        "available": { "type": "boolean" },
+        "executable": { "type": ["string", "null"] },
+        "version": { "type": ["string", "null"] },
+        "sha256": { "type": ["string", "null"] },
+        "ambient_process_count": { "type": "integer", "minimum": 0 },
+        "default_session_count": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "benchmark_stack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "terminal", "multiplexer", "integration", "available"],
+      "properties": {
+        "name": { "enum": ["splinterm-native", "foot-bare", "foot-tmux", "foot-zellij"] },
+        "terminal": { "enum": ["splinterm", "foot"] },
+        "multiplexer": { "enum": ["splinterm", "tmux", "zellij", null] },
+        "integration": { "enum": ["native", "nested", "none"] },
+        "available": { "type": "boolean" }
+      },
+      "oneOf": [
+        { "properties": { "name": { "const": "splinterm-native" }, "terminal": { "const": "splinterm" }, "multiplexer": { "const": "splinterm" }, "integration": { "const": "native" } } },
+        { "properties": { "name": { "const": "foot-bare" }, "terminal": { "const": "foot" }, "multiplexer": { "const": null }, "integration": { "const": "none" } } },
+        { "properties": { "name": { "const": "foot-tmux" }, "terminal": { "const": "foot" }, "multiplexer": { "const": "tmux" }, "integration": { "const": "nested" } } },
+        { "properties": { "name": { "const": "foot-zellij" }, "terminal": { "const": "foot" }, "multiplexer": { "const": "zellij" }, "integration": { "const": "nested" } } }
+      ]
     },
     "sample": {
       "type": "object",

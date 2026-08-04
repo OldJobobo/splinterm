@@ -1,0 +1,169 @@
+{
+  "capture": {
+    "height": 600,
+    "path": "foot-zellij.png",
+    "sha256": "92a3135ce40a5d9690e3a14cd035bf5995ac16dbb41cb7ceb0b7e8d5184036e5",
+    "width": 960
+  },
+  "cleanup": {
+    "ambient_counts_unchanged": true,
+    "clients_absent": true,
+    "failure": null,
+    "namespace_absent": true,
+    "process_forest_absent": true,
+    "server_absent": true,
+    "verified": true,
+    "window_absent": true,
+    "workloads_absent": true
+  },
+  "failure": null,
+  "geometry": {
+    "after_graphical_attach": [
+      {
+        "columns": 59,
+        "name": "pane-0",
+        "rows": 28,
+        "runtime_id": "terminal_0",
+        "x": 0,
+        "y": 0
+      },
+      {
+        "columns": 58,
+        "name": "pane-1",
+        "rows": 28,
+        "runtime_id": "terminal_1",
+        "x": 59,
+        "y": 0
+      }
+    ],
+    "before_graphical_attach": [
+      {
+        "columns": 25,
+        "name": "pane-0",
+        "rows": 50,
+        "runtime_id": "terminal_0",
+        "x": 0,
+        "y": 0
+      },
+      {
+        "columns": 25,
+        "name": "pane-1",
+        "rows": 50,
+        "runtime_id": "terminal_1",
+        "x": 25,
+        "y": 0
+      }
+    ],
+    "stable_seconds": 0.3
+  },
+  "implementation": "zellij",
+  "isolation": {
+    "ambient_after": {
+      "default_session_count": 1,
+      "process_count": 2
+    },
+    "ambient_before": {
+      "default_session_count": 1,
+      "process_count": 2
+    },
+    "ambient_names_recorded": false,
+    "host_state_before": {
+      "cursor": {
+        "x": 1682,
+        "y": 932
+      },
+      "focus_address": "0x55d06bc2fe70",
+      "workspace": {
+        "id": 1,
+        "monitor": "DP-1"
+      }
+    },
+    "host_state_preserved": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "run_id": "gsmoke-2-foot-zellij",
+    "workspace": 8
+  },
+  "notes": [
+    "Guarded development smoke only; readiness values are not a performance ranking.",
+    "The terminal was mapped silently on inactive workspace 8 / DP-2."
+  ],
+  "process_roles": {
+    "role_sets_disjoint": true,
+    "roles": [
+      {
+        "processes": [
+          {
+            "pid": 314445,
+            "start_ticks": 244405
+          }
+        ],
+        "role": "server"
+      },
+      {
+        "processes": [
+          {
+            "pid": 314494,
+            "start_ticks": 244428
+          }
+        ],
+        "role": "terminal-host"
+      },
+      {
+        "processes": [
+          {
+            "pid": 314501,
+            "start_ticks": 244431
+          }
+        ],
+        "role": "multiplexer-client"
+      },
+      {
+        "processes": [],
+        "role": "helper"
+      },
+      {
+        "processes": [
+          {
+            "pid": 314469,
+            "start_ticks": 244409
+          },
+          {
+            "pid": 314476,
+            "start_ticks": 244410
+          }
+        ],
+        "role": "workload"
+      }
+    ]
+  },
+  "readiness": {
+    "pane-0": {
+      "event": "ready",
+      "monotonic_ns": 2444137864286,
+      "pid": 314469,
+      "schema": "splinterm.benchmark.child.v1"
+    },
+    "pane-1": {
+      "event": "ready",
+      "monotonic_ns": 2444147441331,
+      "pid": 314476,
+      "schema": "splinterm.benchmark.child.v1"
+    }
+  },
+  "runtime_ids": {
+    "pane-0": "terminal_0",
+    "pane-1": "terminal_1"
+  },
+  "schema": "splinterm.benchmark.multiplexer-graphical-smoke.v1",
+  "stack": "foot-zellij",
+  "topology": {
+    "name": "two-columns",
+    "pane_count": 2,
+    "panes": [
+      "pane-0",
+      "pane-1"
+    ]
+  },
+  "valid": true
+}

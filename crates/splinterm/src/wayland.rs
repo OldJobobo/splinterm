@@ -1764,7 +1764,19 @@ fn rebuild_pane_scaled_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool
     )?);
     pane.rendered_viewport_offset = pane.scrollback_viewport.offset_from_bottom();
     pane.viewport_dirty = false;
+    pane.scroll_started_at = None;
+    pane.prepare_dirty_rows.fill(false);
+    pane.raster_dirty_rows.fill(false);
+    pane.surface_dirty_rows.fill(false);
+    pane.pending_scrolls.clear();
     Ok(true)
+}
+
+fn rebuild_dirty_pane_viewport_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool> {
+    if !pane.viewport_dirty {
+        return Ok(false);
+    }
+    rebuild_pane_scaled_frame(pane, scale_120)
 }
 
 impl PaneView {
@@ -6306,6 +6318,11 @@ impl App {
             self.pane.rendered_viewport_offset = current_offset;
             self.pane.viewport_dirty = false;
         }
+        for pane in &mut self.inactive_panes {
+            if rebuild_dirty_pane_viewport_frame(pane, self.scale_120)? {
+                self.full_redraw = true;
+            }
+        }
         let pane_layout = self.computed_pane_layout()?;
         let pane_cell_width = self
             .pane
@@ -8758,6 +8775,61 @@ mod tests {
         let display = pane.display_snapshot().unwrap();
         assert_eq!(display.visible_rows[0].row_id, Some(2));
         assert_ne!(display.visible_rows[0].cells[0].content, "live-four");
+    }
+
+    #[test]
+    fn dirty_viewport_frame_rebuilds_after_pane_becomes_inactive() {
+        let mut initial = valid_snapshot(SplintId::new());
+        initial.visible_rows[0].row_id = Some(2);
+        initial.scrollback_rows = vec![history_row(1, 0)];
+        initial.available_scrollback_rows = 1;
+        initial.oldest_available_scrollback_row_id = Some(1);
+        initial.newest_available_scrollback_row_id = Some(1);
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut formerly_active = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: initial,
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+        formerly_active
+            .scrollback_viewport
+            .scroll_up(1, formerly_active.snapshot.as_ref().unwrap());
+        formerly_active.viewport_dirty = true;
+
+        let mut newly_active =
+            PaneView::from_options(pane_options(SplintId::new()), SCALE_DENOMINATOR).unwrap();
+        std::mem::swap(&mut formerly_active, &mut newly_active);
+        assert!(newly_active.viewport_dirty);
+        assert_eq!(newly_active.rendered_viewport_offset, 0);
+        newly_active.scroll_started_at = Some(Instant::now());
+        newly_active
+            .pending_scrolls
+            .push(splinterm_protocol::TerminalScroll {
+                direction: splinterm_protocol::ScrollDirection::Reverse,
+                start_row: 0,
+                end_row: 1,
+                rows: 1,
+            });
+
+        assert!(rebuild_dirty_pane_viewport_frame(&mut newly_active, SCALE_DENOMINATOR).unwrap());
+        assert!(!newly_active.viewport_dirty);
+        assert_eq!(newly_active.rendered_viewport_offset, 1);
+        assert!(newly_active.scroll_started_at.is_none());
+        assert!(newly_active.pending_scrolls.is_empty());
+
+        newly_active.scrollback_viewport.return_to_live();
+        newly_active.viewport_dirty = true;
+        assert!(rebuild_dirty_pane_viewport_frame(&mut newly_active, SCALE_DENOMINATOR).unwrap());
+        assert_eq!(newly_active.rendered_viewport_offset, 0);
+        assert!(newly_active.scrollback_viewport.is_live());
     }
 
     #[test]
