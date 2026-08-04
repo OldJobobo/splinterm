@@ -4176,6 +4176,88 @@ struct ControllerOutputs {
 
 type PaneResize = (u16, u16, u16, u16);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingPaneResize {
+    size: PaneResize,
+    claim_control: bool,
+}
+
+impl PendingPaneResize {
+    fn from_command(command: WindowCommand) -> std::result::Result<Self, WindowCommand> {
+        match command {
+            WindowCommand::Resize {
+                columns,
+                rows,
+                pixel_width,
+                pixel_height,
+            } => Ok(Self {
+                size: (columns, rows, pixel_width, pixel_height),
+                claim_control: true,
+            }),
+            WindowCommand::PrepareResize {
+                columns,
+                rows,
+                pixel_width,
+                pixel_height,
+            } => Ok(Self {
+                size: (columns, rows, pixel_width, pixel_height),
+                claim_control: false,
+            }),
+            command => Err(command),
+        }
+    }
+
+    fn merge(&mut self, next: Self) {
+        self.size = next.size;
+        self.claim_control |= next.claim_control;
+    }
+
+    fn into_command(self) -> WindowCommand {
+        let (columns, rows, pixel_width, pixel_height) = self.size;
+        if self.claim_control {
+            WindowCommand::Resize {
+                columns,
+                rows,
+                pixel_width,
+                pixel_height,
+            }
+        } else {
+            WindowCommand::PrepareResize {
+                columns,
+                rows,
+                pixel_width,
+                pixel_height,
+            }
+        }
+    }
+}
+
+fn queue_pane_resize(
+    pending: &mut Option<PendingPaneResize>,
+    deadline: &mut Option<tokio::time::Instant>,
+    next: PendingPaneResize,
+    delay: Duration,
+    now: tokio::time::Instant,
+) -> Option<WindowCommand> {
+    if delay.is_zero() {
+        return Some(next.into_command());
+    }
+    if let Some(pending) = pending {
+        pending.merge(next);
+    } else {
+        *pending = Some(next);
+    }
+    *deadline = Some(now + delay);
+    None
+}
+
+async fn wait_for_resize_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 fn terminal_action_matches(response: &Response, splint_id: SplintId, incarnation: u64) -> bool {
     matches!(
         response,
@@ -4185,6 +4267,35 @@ fn terminal_action_matches(response: &Response, splint_id: SplintId, incarnation
             ..
         } if *acknowledged_splint == splint_id && *acknowledged_incarnation == incarnation
     )
+}
+
+async fn apply_prepared_pane_resize(
+    control: &mut Connection,
+    controller_id: Option<u64>,
+    prepared_resize: &mut Option<PaneResize>,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<()> {
+    let (Some(controller_id), Some((columns, rows, pixel_width, pixel_height))) =
+        (controller_id, prepared_resize.take())
+    else {
+        return Ok(());
+    };
+    let response = control
+        .request(Request::Resize {
+            controller_id,
+            splint_id,
+            incarnation,
+            columns,
+            rows,
+            pixel_width,
+            pixel_height,
+        })
+        .await?;
+    if !terminal_action_matches(&response, splint_id, incarnation) {
+        bail!("splinterd did not acknowledge prepared pane resize");
+    }
+    Ok(())
 }
 
 async fn ensure_pane_control(
@@ -4215,22 +4326,14 @@ async fn ensure_pane_control(
     *active_controller = Some(controller_id);
     let _ = updates.send(WindowUpdate::Control(true)).await;
     if apply_prepared_resize {
-        if let Some((columns, rows, pixel_width, pixel_height)) = prepared_resize.take() {
-            let response = control
-                .request(Request::Resize {
-                    controller_id,
-                    splint_id,
-                    incarnation,
-                    columns,
-                    rows,
-                    pixel_width,
-                    pixel_height,
-                })
-                .await?;
-            if !terminal_action_matches(&response, splint_id, incarnation) {
-                bail!("splinterd did not acknowledge prepared pane resize");
-            }
-        }
+        apply_prepared_pane_resize(
+            control,
+            *active_controller,
+            prepared_resize,
+            splint_id,
+            incarnation,
+        )
+        .await?;
     }
     Ok(Some(controller_id))
 }
@@ -4270,7 +4373,7 @@ async fn handle_scrollback_fetch(
     }
 }
 
-fn resolved_active_resize_request(
+fn resolved_resize_request(
     controller_id: Option<u64>,
     prepared_resize: &mut Option<PaneResize>,
     identity: (SplintId, u64),
@@ -4300,11 +4403,7 @@ async fn active_resize_request(
     updates: &mpsc::Sender<WindowUpdate>,
     identity: (SplintId, u64),
     resize: PaneResize,
-    resize_delay_ms: u64,
 ) -> Result<Option<Request>> {
-    if resize_delay_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(resize_delay_ms)).await;
-    }
     let (splint_id, incarnation) = identity;
     let controller_id = ensure_pane_control(
         control,
@@ -4316,7 +4415,7 @@ async fn active_resize_request(
         false,
     )
     .await?;
-    Ok(resolved_active_resize_request(
+    Ok(resolved_resize_request(
         controller_id,
         prepared_resize,
         (splint_id, incarnation),
@@ -4329,7 +4428,7 @@ async fn handle_control_event(
     subscription_id: u64,
     active_controller: &mut Option<u64>,
     updates: &mpsc::Sender<WindowUpdate>,
-) -> Result<()> {
+) -> Result<bool> {
     let ServerFrame::Event {
         subscription_id: event_subscription,
         event,
@@ -4339,8 +4438,9 @@ async fn handle_control_event(
         bail!("splinterd sent an unexpected control-subscription frame");
     };
     if event_subscription != subscription_id {
-        return Ok(());
+        return Ok(false);
     }
+    let mut control_acquired = false;
     match event {
         SubscriptionEvent::ControlStatusChanged { status } => {
             if !status.locally_owned {
@@ -4362,6 +4462,7 @@ async fn handle_control_event(
         } => {
             if outcome == ControlTransferOutcome::Granted {
                 *active_controller = controller_id;
+                control_acquired = controller_id.is_some();
             }
             let _ = updates
                 .send(WindowUpdate::ControlTransferResolved(outcome))
@@ -4369,7 +4470,7 @@ async fn handle_control_event(
         }
         _ => {}
     }
-    Ok(())
+    Ok(control_acquired)
 }
 
 #[allow(
@@ -4387,6 +4488,10 @@ async fn run_controller(
 ) -> Result<()> {
     let mut active_controller = controller_id;
     let mut prepared_resize = None;
+    let mut pending_resize = None;
+    let mut resize_deadline = None;
+    let mut deferred_command = None;
+    let resize_delay = Duration::from_millis(resize_delay_ms);
     let Response::ControlSubscribed {
         subscription_id: control_subscription,
         status: initial_status,
@@ -4406,19 +4511,77 @@ async fn run_controller(
         .await;
     let result = async {
         loop {
-            let command = tokio::select! {
-                frame = control.next_server_frame() => {
-                    handle_control_event(
-                        frame?,
-                        control_subscription,
-                        &mut active_controller,
-                        &outputs.updates,
-                    ).await?;
-                    continue;
+            let (command, debounce_incoming_resize) = if let Some(command) = deferred_command.take()
+            {
+                (Some(command), false)
+            } else {
+                tokio::select! {
+                    biased;
+                    frame = control.next_server_frame() => {
+                        let control_acquired = handle_control_event(
+                            frame?,
+                            control_subscription,
+                            &mut active_controller,
+                            &outputs.updates,
+                        ).await?;
+                        if control_acquired && pending_resize.is_none() {
+                            apply_prepared_pane_resize(
+                                &mut control,
+                                active_controller,
+                                &mut prepared_resize,
+                                splint_id,
+                                incarnation,
+                            ).await?;
+                        }
+                        continue;
+                    }
+                    command = commands.recv() => (command, true),
+                    () = wait_for_resize_deadline(resize_deadline) => {
+                        resize_deadline = None;
+                        (
+                            pending_resize.take().map(PendingPaneResize::into_command),
+                            false,
+                        )
+                    }
                 }
-                command = commands.recv() => command,
             };
-            let Some(command) = command else { break };
+            let (command, debounce_incoming_resize) = match command {
+                Some(command) => (command, debounce_incoming_resize),
+                None => {
+                    resize_deadline = None;
+                    let Some(pending) = pending_resize.take() else {
+                        break;
+                    };
+                    (pending.into_command(), false)
+                }
+            };
+            let command = if debounce_incoming_resize {
+                match PendingPaneResize::from_command(command) {
+                    Ok(next) => {
+                        let Some(command) = queue_pane_resize(
+                            &mut pending_resize,
+                            &mut resize_deadline,
+                            next,
+                            resize_delay,
+                            tokio::time::Instant::now(),
+                        ) else {
+                            continue;
+                        };
+                        command
+                    }
+                    Err(command) => {
+                        if let Some(pending) = pending_resize.take() {
+                            resize_deadline = None;
+                            deferred_command = Some(command);
+                            pending.into_command()
+                        } else {
+                            command
+                        }
+                    }
+                }
+            } else {
+                command
+            };
             let request = match command {
                 WindowCommand::Input(bytes) => {
                     let Some(controller_id) = ensure_pane_control(
@@ -4454,7 +4617,6 @@ async fn run_controller(
                         &outputs.updates,
                         (splint_id, incarnation),
                         (columns, rows, pixel_width, pixel_height),
-                        resize_delay_ms,
                     )
                     .await?
                     else {
@@ -4468,8 +4630,15 @@ async fn run_controller(
                     pixel_width,
                     pixel_height,
                 } => {
-                    prepared_resize = Some((columns, rows, pixel_width, pixel_height));
-                    continue;
+                    let Some(request) = resolved_resize_request(
+                        active_controller,
+                        &mut prepared_resize,
+                        (splint_id, incarnation),
+                        (columns, rows, pixel_width, pixel_height),
+                    ) else {
+                        continue;
+                    };
+                    request
                 }
                 WindowCommand::FetchScrollback {
                     splint_id,
@@ -4528,6 +4697,14 @@ async fn run_controller(
                         _ => bail!("splinterd did not grant forced control"),
                     };
                     let _ = outputs.updates.send(WindowUpdate::Control(true)).await;
+                    apply_prepared_pane_resize(
+                        &mut control,
+                        active_controller,
+                        &mut prepared_resize,
+                        splint_id,
+                        incarnation,
+                    )
+                    .await?;
                     continue;
                 }
                 WindowCommand::Search {
@@ -7136,17 +7313,15 @@ mod tests {
     }
 
     #[test]
-    fn active_resize_is_retained_until_control_is_available() {
+    fn resize_is_retained_until_control_is_available_and_uses_existing_control() {
         let splint_id = SplintId::new();
         let resize = (80, 40, 800, 800);
         let mut prepared = None;
 
-        assert!(
-            resolved_active_resize_request(None, &mut prepared, (splint_id, 3), resize).is_none()
-        );
+        assert!(resolved_resize_request(None, &mut prepared, (splint_id, 3), resize).is_none());
         assert_eq!(prepared, Some(resize));
 
-        let request = resolved_active_resize_request(
+        let request = resolved_resize_request(
             Some(9),
             &mut prepared,
             (splint_id, 3),
@@ -7166,6 +7341,118 @@ mod tests {
             } if requested_splint == splint_id
         ));
         assert_eq!(prepared, None);
+    }
+
+    #[test]
+    fn pane_resize_debounce_keeps_latest_size_any_control_claim_and_idle_deadline() {
+        let mut pending = None;
+        let mut deadline = None;
+        let delay = Duration::from_millis(100);
+        let started = tokio::time::Instant::now();
+        assert!(
+            queue_pane_resize(
+                &mut pending,
+                &mut deadline,
+                PendingPaneResize {
+                    size: (80, 24, 800, 480),
+                    claim_control: false,
+                },
+                delay,
+                started,
+            )
+            .is_none()
+        );
+        assert_eq!(deadline, Some(started + delay));
+
+        let latest_at = started + Duration::from_millis(50);
+        assert!(
+            queue_pane_resize(
+                &mut pending,
+                &mut deadline,
+                PendingPaneResize {
+                    size: (100, 40, 1_000, 800),
+                    claim_control: true,
+                },
+                delay,
+                latest_at,
+            )
+            .is_none()
+        );
+        assert_eq!(deadline, Some(latest_at + delay));
+        assert_eq!(
+            pending,
+            Some(PendingPaneResize {
+                size: (100, 40, 1_000, 800),
+                claim_control: true,
+            })
+        );
+    }
+
+    #[test]
+    fn zero_resize_delay_returns_immediate_command_without_pending_state() {
+        let mut pending = None;
+        let mut deadline = None;
+        let immediate = queue_pane_resize(
+            &mut pending,
+            &mut deadline,
+            PendingPaneResize {
+                size: (80, 24, 800, 480),
+                claim_control: true,
+            },
+            Duration::ZERO,
+            tokio::time::Instant::now(),
+        );
+
+        assert!(matches!(immediate, Some(WindowCommand::Resize { .. })));
+        assert!(pending.is_none());
+        assert!(deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn granted_control_event_exposes_controller_for_prepared_resize() {
+        let (updates, mut receiver) = mpsc::channel(1);
+        let mut active_controller = None;
+        let acquired = handle_control_event(
+            ServerFrame::Event {
+                subscription_id: 7,
+                sequence: 1,
+                event: SubscriptionEvent::ControlTransferResolved {
+                    transfer_id: 11,
+                    outcome: ControlTransferOutcome::Granted,
+                    controller_id: Some(9),
+                },
+            },
+            7,
+            &mut active_controller,
+            &updates,
+        )
+        .await
+        .unwrap();
+
+        assert!(acquired);
+        assert_eq!(active_controller, Some(9));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(WindowUpdate::ControlTransferResolved(
+                ControlTransferOutcome::Granted
+            ))
+        ));
+        let mut prepared = Some((100, 40, 1_000, 800));
+        assert!(matches!(
+            resolved_resize_request(
+                active_controller,
+                &mut prepared,
+                (SplintId::new(), 3),
+                (100, 40, 1_000, 800),
+            ),
+            Some(Request::Resize {
+                controller_id: 9,
+                columns: 100,
+                rows: 40,
+                ..
+            })
+        ));
+        assert!(prepared.is_none());
     }
 
     #[test]

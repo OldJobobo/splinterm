@@ -1027,7 +1027,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         GraphicalInputProbe::from_environment(options.authority.development_bypass)?;
     let inactive_panes = inactive_options
         .into_iter()
-        .map(|pane| PaneView::from_options(pane, SCALE_DENOMINATOR))
+        .map(|pane| PaneView::from_inactive_options(pane, SCALE_DENOMINATOR))
         .collect::<Result<Vec<_>>>()?;
     let background_effect_manager = globals
         .bind::<ExtBackgroundEffectManagerV1, _, _>(&queue_handle, 1..=1, ())
@@ -1768,6 +1768,12 @@ fn rebuild_pane_scaled_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool
 }
 
 impl PaneView {
+    fn from_inactive_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
+        let mut pane = Self::from_options(options, scale_120)?;
+        pane.initial_resize_requires_control = !pane.controller_active;
+        Ok(pane)
+    }
+
     fn from_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
         let snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
             &options.snapshot,
@@ -5377,7 +5383,7 @@ impl App {
             logical_width,
             logical_height,
             scale_120,
-            pane.initial_resize_requires_control,
+            pane.controller_active || pane.initial_resize_requires_control,
         )?;
         if pane.last_resize.is_some() {
             pane.initial_resize_requires_control = false;
@@ -5438,9 +5444,8 @@ impl App {
         let removed = removed.into_iter().collect::<HashSet<_>>();
         for mut pane in added {
             apply_theme(&mut pane.snapshot, self.theme);
-            let mut pane = PaneView::from_options(pane, self.scale_120)?;
-            pane.initial_resize_requires_control = true;
-            self.inactive_panes.push(pane);
+            self.inactive_panes
+                .push(PaneView::from_inactive_options(pane, self.scale_120)?);
         }
         if let Some(focused) = focused {
             anyhow::ensure!(
@@ -8797,11 +8802,36 @@ mod tests {
     }
 
     #[test]
-    fn newly_added_inactive_pane_applies_its_first_resize_immediately() {
+    fn controlled_inactive_pane_applies_resize_after_layout_change() {
+        let splint_id = SplintId::new();
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: true,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+
+        App::emit_inactive_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR).unwrap();
+        assert!(matches!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Resize { .. }
+        ));
+    }
+
+    #[test]
+    fn uncontrolled_inactive_pane_claims_control_for_its_first_resize() {
         let splint_id = SplintId::new();
         let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
         let (commands, mut command_receiver) = tokio::sync::mpsc::channel(2);
-        let mut pane = PaneView::from_options(
+        let mut pane = PaneView::from_inactive_options(
             WindowPaneOptions {
                 snapshot: valid_snapshot(splint_id),
                 updates: update_receiver,
@@ -8813,7 +8843,6 @@ mod tests {
             SCALE_DENOMINATOR,
         )
         .unwrap();
-        pane.initial_resize_requires_control = true;
 
         App::emit_inactive_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR).unwrap();
         assert!(matches!(
@@ -9562,6 +9591,14 @@ mod tests {
             &scroll,
             ActiveScreen::Normal,
             true
+        ));
+        let mut resize_with_scroll = scroll.clone();
+        resize_with_scroll.columns = Some(80);
+        resize_with_scroll.row_count = Some(24);
+        assert!(terminal_update_requires_full_frame(
+            &resize_with_scroll,
+            ActiveScreen::Normal,
+            false
         ));
 
         let mut screen = empty_update();

@@ -20,7 +20,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `main.login-shell` | use login-style argv[0] for the shell | yes |
 | `main.title` | fixed window title; otherwise OSC title | unset |
 | `main.app-id` | diagnostic only | fixed to `com.oldjobobo.splinterm` |
-| `main.resize-delay-ms` | bounded delay before resize command | 0–1000; 0 |
+| `main.resize-delay-ms` | idle debounce before terminal reflow and PTY resize | 0–1000; 100 |
 | `main.dpi-aware` | deprecated **legacy Splinterm** key: `yes` maps only to `output-scale`; `no` fails with migration guidance | unset |
 | `main.theme` | explicit Splinterm JSON palette override; disables native Omarchy discovery | unset |
 | `colors.alpha` | optional Foot-compatible override for theme background translucency | 0.0–1.0; unset (theme-owned) |

@@ -90,7 +90,7 @@ impl Default for AppConfig {
             scrollback_lines: 1_000,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
-            resize_delay_ms: 0,
+            resize_delay_ms: 100,
             background_alpha: None,
             background_blur: None,
             theme_path: None,
@@ -852,8 +852,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_font_size_is_laptop_reasonable() {
-        assert_eq!(AppConfig::default().font_size, FontSize::Pixels(14.0));
+    fn defaults_match_foot_font_and_resize_behavior() {
+        let defaults = AppConfig::default();
+        assert_eq!(defaults.font_size, FontSize::Pixels(14.0));
+        assert_eq!(defaults.resize_delay_ms, 100);
     }
 
     #[test]
