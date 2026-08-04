@@ -4270,7 +4270,7 @@ async fn handle_scrollback_fetch(
     }
 }
 
-fn resolved_active_resize_request(
+fn resolved_resize_request(
     controller_id: Option<u64>,
     prepared_resize: &mut Option<PaneResize>,
     identity: (SplintId, u64),
@@ -4316,7 +4316,7 @@ async fn active_resize_request(
         false,
     )
     .await?;
-    Ok(resolved_active_resize_request(
+    Ok(resolved_resize_request(
         controller_id,
         prepared_resize,
         (splint_id, incarnation),
@@ -4468,8 +4468,15 @@ async fn run_controller(
                     pixel_width,
                     pixel_height,
                 } => {
-                    prepared_resize = Some((columns, rows, pixel_width, pixel_height));
-                    continue;
+                    let Some(request) = resolved_resize_request(
+                        active_controller,
+                        &mut prepared_resize,
+                        (splint_id, incarnation),
+                        (columns, rows, pixel_width, pixel_height),
+                    ) else {
+                        continue;
+                    };
+                    request
                 }
                 WindowCommand::FetchScrollback {
                     splint_id,
@@ -7136,17 +7143,15 @@ mod tests {
     }
 
     #[test]
-    fn active_resize_is_retained_until_control_is_available() {
+    fn resize_is_retained_until_control_is_available_and_uses_existing_control() {
         let splint_id = SplintId::new();
         let resize = (80, 40, 800, 800);
         let mut prepared = None;
 
-        assert!(
-            resolved_active_resize_request(None, &mut prepared, (splint_id, 3), resize).is_none()
-        );
+        assert!(resolved_resize_request(None, &mut prepared, (splint_id, 3), resize).is_none());
         assert_eq!(prepared, Some(resize));
 
-        let request = resolved_active_resize_request(
+        let request = resolved_resize_request(
             Some(9),
             &mut prepared,
             (splint_id, 3),
