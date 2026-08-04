@@ -7167,7 +7167,7 @@ impl App {
                             Self::buffer_rect(rect, self.scale_120)?,
                             terminal_cursor_blink,
                             self.cursor_style,
-                            CursorPresentation::for_keyboard_focus(false),
+                            CursorPresentation::INACTIVE_PANE,
                         );
                     }
                     paint_snapshot_region_presented(
@@ -7240,7 +7240,7 @@ impl App {
                             region,
                             terminal_cursor_blink,
                             self.cursor_style,
-                            CursorPresentation::for_keyboard_focus(false),
+                            CursorPresentation::INACTIVE_PANE,
                         );
                         inactive_damage_regions.push(region);
                     }

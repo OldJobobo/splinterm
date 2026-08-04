@@ -5320,8 +5320,16 @@ enum CloseAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingTopologyFocus {
+    splint_id: SplintId,
+    revision: TopologyRevision,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TopologyCommandOutcome {
-    Updated,
+    Updated {
+        pending_focus: Option<PendingTopologyFocus>,
+    },
     WindowClosed,
 }
 
@@ -5427,7 +5435,9 @@ async fn close_focused_splint(
                 return Ok(TopologyCommandOutcome::WindowClosed);
             }
             Ok(Response::TopologyCommitted { .. }) => {
-                return Ok(TopologyCommandOutcome::Updated);
+                return Ok(TopologyCommandOutcome::Updated {
+                    pending_focus: None,
+                });
             }
             Ok(response) => {
                 bail!("splinterd returned unexpected close response: {response:?}");
@@ -5445,7 +5455,9 @@ async fn close_focused_splint(
                         return Ok(TopologyCommandOutcome::WindowClosed);
                     }
                     RefreshedCloseState::TargetClosed => {
-                        return Ok(TopologyCommandOutcome::Updated);
+                        return Ok(TopologyCommandOutcome::Updated {
+                            pending_focus: None,
+                        });
                     }
                     RefreshedCloseState::Retry => {}
                 }
@@ -5509,10 +5521,24 @@ async fn apply_topology_command(
             unreachable!("session commands are handled by the topology manager")
         }
     };
-    match connection.request(request).await? {
-        Response::TopologyCommitted { .. } | Response::SplintStarted { .. } => {
-            Ok(TopologyCommandOutcome::Updated)
-        }
+    topology_command_outcome(connection.request(request).await?)
+}
+
+fn topology_command_outcome(response: Response) -> Result<TopologyCommandOutcome> {
+    match response {
+        Response::SplintStarted {
+            splint_id,
+            topology_revision,
+            ..
+        } => Ok(TopologyCommandOutcome::Updated {
+            pending_focus: Some(PendingTopologyFocus {
+                splint_id,
+                revision: topology_revision,
+            }),
+        }),
+        Response::TopologyCommitted { .. } => Ok(TopologyCommandOutcome::Updated {
+            pending_focus: None,
+        }),
         response => bail!("splinterd returned unexpected topology response: {response:?}"),
     }
 }
@@ -5537,11 +5563,31 @@ fn topology_identity_diff(
     )
 }
 
+fn pending_focus_for_observation(
+    pending: Option<PendingTopologyFocus>,
+    observed_revision: TopologyRevision,
+    added: &[SplintId],
+) -> (Option<SplintId>, bool) {
+    let Some(pending) = pending else {
+        return (None, false);
+    };
+    if observed_revision < pending.revision {
+        return (None, false);
+    }
+    (
+        added
+            .contains(&pending.splint_id)
+            .then_some(pending.splint_id),
+        true,
+    )
+}
+
 async fn reconcile_window_topology(
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
     root: &mut LayoutNode,
     next: LayoutNode,
+    focused: Option<SplintId>,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
     pane_tasks: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<bool> {
@@ -5560,7 +5606,7 @@ async fn reconcile_window_topology(
             layout: next.clone(),
             added,
             removed,
-            focused: None,
+            focused,
             switched: false,
         })
         .await
@@ -5716,6 +5762,7 @@ enum TopologyManagerCommandOutcome {
 struct TopologyManagerState {
     dojo_id: DojoId,
     root: LayoutNode,
+    pending_focus: Option<PendingTopologyFocus>,
     pane_tasks: Vec<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -5742,7 +5789,10 @@ async fn finish_managed_window_switch(
         Err(error) => Err(error),
     };
     match result {
-        Ok(true) => TopologyManagerCommandOutcome::Continue,
+        Ok(true) => {
+            state.pending_focus = None;
+            TopologyManagerCommandOutcome::Continue
+        }
         Ok(false) => TopologyManagerCommandOutcome::Stop,
         Err(error) => {
             let _ = updates
@@ -5800,6 +5850,33 @@ async fn handle_session_manager_command(
     }
 }
 
+async fn reconcile_managed_topology(
+    config: &AppConfig,
+    image_cache: &SharedImageContentCache,
+    state: &mut TopologyManagerState,
+    revision: TopologyRevision,
+    authoritative: LayoutNode,
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+) -> Result<bool> {
+    let (added, _) = topology_identity_diff(&state.root, &authoritative);
+    let (focused, pending_focus_consumed) =
+        pending_focus_for_observation(state.pending_focus, revision, &added);
+    let reconciled = reconcile_window_topology(
+        config,
+        image_cache,
+        &mut state.root,
+        authoritative,
+        focused,
+        updates,
+        &mut state.pane_tasks,
+    )
+    .await?;
+    if pending_focus_consumed {
+        state.pending_focus = None;
+    }
+    Ok(reconciled)
+}
+
 async fn run_topology_manager(
     config: AppConfig,
     image_cache: SharedImageContentCache,
@@ -5815,6 +5892,7 @@ async fn run_topology_manager(
     let mut state = TopologyManagerState {
         dojo_id,
         root,
+        pending_focus: None,
         pane_tasks,
     };
     loop {
@@ -5850,13 +5928,13 @@ async fn run_topology_manager(
                     return Err(error);
                 }
             };
-        let reconciled = match reconcile_window_topology(
+        let reconciled = match reconcile_managed_topology(
             &config,
             &image_cache,
-            &mut state.root,
+            &mut state,
+            revision,
             authoritative,
             &updates,
-            &mut state.pane_tasks,
         )
         .await
         {
@@ -5887,7 +5965,9 @@ async fn run_topology_manager(
         )
         .await
         {
-            Ok(TopologyCommandOutcome::Updated) => {}
+            Ok(TopologyCommandOutcome::Updated { pending_focus }) => {
+                state.pending_focus = pending_focus;
+            }
             Ok(TopologyCommandOutcome::WindowClosed) => {
                 let _ = updates.send(WindowTopologyUpdate::Closed).await;
                 break;
@@ -7329,6 +7409,61 @@ mod tests {
         assert!(pane_claims_initial_control(second_id, second_id));
         assert!(!pane_claims_initial_control(first_id, second_id));
         assert_eq!(parent_ratio(&nested, third_id).unwrap().get(), 650);
+    }
+
+    #[test]
+    fn successful_split_focuses_the_new_local_splint() {
+        let splint_id = SplintId::new();
+        assert_eq!(
+            topology_command_outcome(Response::SplintStarted {
+                splint_id,
+                incarnation: 1,
+                topology_revision: TopologyRevision::new(2),
+            })
+            .unwrap(),
+            TopologyCommandOutcome::Updated {
+                pending_focus: Some(PendingTopologyFocus {
+                    splint_id,
+                    revision: TopologyRevision::new(2),
+                })
+            }
+        );
+        assert_eq!(
+            topology_command_outcome(Response::TopologyCommitted {
+                topology_revision: TopologyRevision::new(3),
+            })
+            .unwrap(),
+            TopologyCommandOutcome::Updated {
+                pending_focus: None
+            }
+        );
+    }
+
+    #[test]
+    fn pending_split_focus_is_revision_bound_and_requires_the_added_splint() {
+        let splint_id = SplintId::new();
+        let unrelated = SplintId::new();
+        let pending = Some(PendingTopologyFocus {
+            splint_id,
+            revision: TopologyRevision::new(4),
+        });
+
+        assert_eq!(
+            pending_focus_for_observation(pending, TopologyRevision::new(3), &[splint_id]),
+            (None, false)
+        );
+        assert_eq!(
+            pending_focus_for_observation(pending, TopologyRevision::new(4), &[splint_id]),
+            (Some(splint_id), true)
+        );
+        assert_eq!(
+            pending_focus_for_observation(pending, TopologyRevision::new(4), &[unrelated]),
+            (None, true)
+        );
+        assert_eq!(
+            pending_focus_for_observation(pending, TopologyRevision::new(5), &[]),
+            (None, true)
+        );
     }
 
     #[test]

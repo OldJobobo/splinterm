@@ -4919,6 +4919,10 @@ impl CursorPresentation {
         keyboard_focused: true,
         unfocused_style: UnfocusedCursorStyle::Unchanged,
     };
+    pub const INACTIVE_PANE: Self = Self {
+        keyboard_focused: false,
+        unfocused_style: UnfocusedCursorStyle::None,
+    };
 
     #[must_use]
     pub const fn for_keyboard_focus(keyboard_focused: bool) -> Self {
@@ -7067,14 +7071,7 @@ mod tests {
                 EffectiveCursorShape::Hollow
             );
             assert_eq!(
-                effective_cursor_shape(
-                    style,
-                    true,
-                    CursorPresentation {
-                        keyboard_focused: false,
-                        unfocused_style: UnfocusedCursorStyle::None,
-                    }
-                ),
+                effective_cursor_shape(style, true, CursorPresentation::INACTIVE_PANE),
                 EffectiveCursorShape::None
             );
         }
@@ -8927,6 +8924,49 @@ mod tests {
             )
             .unwrap();
         assert!(!sources.contains(&metadata).unwrap());
+    }
+
+    #[test]
+    fn inactive_pane_paint_never_draws_a_terminal_cursor() {
+        let mut frame = damage_test_frame();
+        frame.cursor = Some((0, 1));
+        let geometry = frame.tight_geometry().unwrap();
+        let mut without_cursor = vec![0; 2 * 6 * 4];
+        paint_snapshot_presented(
+            &mut without_cursor,
+            2,
+            6,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+            CursorPresentation::FOCUSED_STEADY,
+        );
+        let mut inactive = vec![0; 2 * 6 * 4];
+        paint_snapshot_presented(
+            &mut inactive,
+            2,
+            6,
+            &frame,
+            &geometry,
+            true,
+            CursorStyle::Block,
+            CursorPresentation::INACTIVE_PANE,
+        );
+        assert_eq!(inactive, without_cursor);
+
+        let mut unfocused_window = vec![0; 2 * 6 * 4];
+        paint_snapshot_presented(
+            &mut unfocused_window,
+            2,
+            6,
+            &frame,
+            &geometry,
+            true,
+            CursorStyle::Block,
+            CursorPresentation::for_keyboard_focus(false),
+        );
+        assert_ne!(unfocused_window, without_cursor);
     }
 
     #[test]
