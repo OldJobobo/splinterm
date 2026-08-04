@@ -560,6 +560,22 @@ async fn stable_snapshot_after_marker(
     }
 }
 
+async fn wait_for_pid_marker(marker: &Path, label: &str) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(contents) = fs::read_to_string(marker)
+            && let Ok(pid) = contents.trim().parse()
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label} PID marker was not completed"
+        );
+        time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 fn policy_executable_identity() -> (PathBuf, String) {
     let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
     let mut file = fs::File::open(&executable).unwrap();
@@ -1876,15 +1892,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
             .await
             .expect_err("Topology creation authority must not cover the new Lair descendant");
         assert_eq!(lair_only_denial.code, ErrorCode::Unauthorized);
-        let marker_deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() {
-            assert!(
-                Instant::now() < marker_deadline,
-                "child PID marker was not written"
-            );
-            time::sleep(Duration::from_millis(10)).await;
-        }
-        let child_pid: u32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        let child_pid = wait_for_pid_marker(&marker, "child").await;
 
         let Response::AuditPage { page } = connection
             .request(Request::AuditInspect {
@@ -2194,15 +2202,7 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
         else {
             panic!("signal-resistant Lair was not created");
         };
-        let marker_deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() {
-            assert!(
-                Instant::now() < marker_deadline,
-                "signal-resistant child PID marker was not written"
-            );
-            time::sleep(Duration::from_millis(10)).await;
-        }
-        let child_pid: u32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        let child_pid = wait_for_pid_marker(&marker, "signal-resistant child").await;
         drop(connection);
 
         tokio::task::spawn_blocking(move || daemon.shutdown())
