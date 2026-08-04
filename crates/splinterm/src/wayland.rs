@@ -3092,6 +3092,18 @@ fn history_overlay_status(
     })
 }
 
+fn pointer_axis_focus_target(
+    has_vertical_axis: bool,
+    pointer_grab_active: bool,
+    pane_under_pointer: Option<SplintId>,
+    focused_pane: Option<SplintId>,
+) -> Option<SplintId> {
+    (has_vertical_axis && !pointer_grab_active)
+        .then_some(pane_under_pointer)
+        .flatten()
+        .filter(|target| Some(*target) != focused_pane)
+}
+
 fn history_return_to_live_hit(
     position: (f64, f64),
     logical_width: u32,
@@ -7899,6 +7911,7 @@ impl PointerHandler for App {
     ) {
         let modal_frame = self.inline_picker_open();
         let mut picker_changed = false;
+        let mut pane_focus_changed = false;
         for event in events {
             if &event.surface != self.window.wl_surface() {
                 continue;
@@ -8084,6 +8097,18 @@ impl PointerHandler for App {
                     if vertical.is_none() {
                         continue;
                     }
+                    if let Some(splint_id) = pointer_axis_focus_target(
+                        true,
+                        !self.pressed_buttons.is_empty(),
+                        self.splint_at_point(event.position),
+                        self.focused_splint(),
+                    ) && self.focus_splint(splint_id)
+                    {
+                        cell = self.pointer_cell_at(event.position);
+                        self.pane.pointer_cell = cell;
+                        self.update_ime_cursor_rectangle();
+                        pane_focus_changed = true;
+                    }
                     if let Err(error) = self.handle_vertical_wheel(
                         cell,
                         vertical.absolute,
@@ -8106,6 +8131,7 @@ impl PointerHandler for App {
         if self.configured
             && !self.session_picker_reconcile_pending
             && (picker_changed && self.inline_picker_open()
+                || pane_focus_changed
                 || self.pane.viewport_dirty
                 || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
                 || self.pane.surface_dirty_rows.iter().any(|dirty| *dirty))
@@ -9953,6 +9979,34 @@ mod tests {
         assert_eq!(
             wheel.push_scaled(0.0, 1, 0, SCROLLBACK_WHEEL_MULTIPLIER, 29),
             Some((MouseAction::WheelDown, 3))
+        );
+    }
+
+    #[test]
+    fn vertical_axis_targets_the_pane_under_the_pointer() {
+        let left = SplintId::new();
+        let right = SplintId::new();
+
+        assert_eq!(
+            pointer_axis_focus_target(true, false, Some(right), Some(left)),
+            Some(right)
+        );
+        assert_eq!(
+            pointer_axis_focus_target(true, false, Some(right), Some(right)),
+            None
+        );
+        assert_eq!(
+            pointer_axis_focus_target(false, false, Some(right), Some(left)),
+            None
+        );
+        assert_eq!(
+            pointer_axis_focus_target(true, true, Some(right), Some(left)),
+            None,
+            "an active pointer grab must retain pane ownership"
+        );
+        assert_eq!(
+            pointer_axis_focus_target(true, false, None, Some(left)),
+            None
         );
     }
 
