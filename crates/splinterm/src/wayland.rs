@@ -5377,7 +5377,7 @@ impl App {
             logical_width,
             logical_height,
             scale_120,
-            pane.controller_active || pane.initial_resize_requires_control,
+            pane.initial_resize_requires_control,
         )?;
         if pane.last_resize.is_some() {
             pane.initial_resize_requires_control = false;
@@ -8794,31 +8794,6 @@ mod tests {
         row.row_id = Some(id);
         row.cells[0].content = "x".repeat(content_bytes);
         row
-    }
-
-    #[test]
-    fn controlled_inactive_pane_applies_resize_immediately() {
-        let splint_id = SplintId::new();
-        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
-        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(1);
-        let mut pane = PaneView::from_options(
-            WindowPaneOptions {
-                snapshot: valid_snapshot(splint_id),
-                updates: update_receiver,
-                commands,
-                authority: AuthorityStatus::default(),
-                controlled: true,
-                image_sources: ImageContentLeaseSet::default(),
-            },
-            SCALE_DENOMINATOR,
-        )
-        .unwrap();
-
-        App::emit_inactive_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR).unwrap();
-        assert!(matches!(
-            command_receiver.try_recv().unwrap(),
-            WindowCommand::Resize { .. }
-        ));
     }
 
     #[test]
