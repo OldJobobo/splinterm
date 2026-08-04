@@ -253,3 +253,37 @@ Do not claim that a slice is complete unless both of the following exist:
 
 * Recorded validation evidence.
 * Recorded review.
+
+### 4.4 Local Client Installation and Trusted-UI Identity
+
+The daemon grants the graphical trusted-UI bypass only when the client process
+matches the device and inode of the `splinterm` binary adjacent to the running
+`splinterd` executable. On the packaged system, that authority is
+`/usr/bin/splinterm` next to `/usr/bin/splinterd`.
+
+Do not install a development client to `~/.local/bin/splinterm`,
+`~/.cargo/bin/splinterm`, or another earlier `PATH` entry and then claim the
+desktop launcher is installed. The packaged desktop wrapper resolves
+`splinterm` through `PATH`; a shadowing user-local copy does not match the
+system daemon's trusted-UI inode and exits as unauthorized before mapping a
+window.
+
+For local installation work:
+
+* First inspect `command -v splinterm`, the desktop-launcher process `PATH`, the
+  running daemon executable, and both executable device/inode identities.
+* Remember that `./install.sh` deliberately packages only a clean committed
+  `HEAD`; it cannot install an uncommitted worktree implementation.
+* Ask before replacing the Pacman-owned `/usr/bin/splinterm`. When approved,
+  save a rollback copy, use `pkexec` for the privileged replacement, remove any
+  shadowing user-local client, and disclose that Pacman integrity checks will
+  report the file as altered until reinstall or upgrade.
+* Reopen existing Splinterm windows after replacement. Their running executable
+  retains the old inode and no longer matches the newly installed trusted UI.
+* Validate non-graphically with normal human-mode `/usr/bin/splinterm list`,
+  checksum and ownership checks, `command -v splinterm`, and
+  `desktop-file-validate`. Do not use `--output json list` as the trusted-UI
+  check: machine mode intentionally uses the automation role and may be denied
+  without a persistent policy even when installation is correct.
+* Do not launch the desktop entry as validation unless the user has separately
+  approved the guarded graphical test sequence in Section 3.
