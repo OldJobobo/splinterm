@@ -5,6 +5,7 @@
 //! The client owns these objects; the daemon remains headless.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     io,
     os::fd::{AsFd, OwnedFd},
@@ -2013,6 +2014,14 @@ impl PaneView {
         Some(display)
     }
 
+    fn display_snapshot_cow(&self) -> Option<Cow<'_, TerminalSnapshot>> {
+        if self.scrollback_viewport.is_live() {
+            self.snapshot.as_ref().map(Cow::Borrowed)
+        } else {
+            self.display_snapshot().map(Cow::Owned)
+        }
+    }
+
     fn apply_background_pages(
         &mut self,
         pages: Vec<splinterm_protocol::ScrollbackPage>,
@@ -2952,6 +2961,26 @@ fn selection_display_bounds(
             },
         },
     ))
+}
+
+fn transient_overlay_rows(
+    row_count: usize,
+    selection: Option<((usize, usize), (usize, usize))>,
+    hovered_url: Option<((usize, usize), (usize, usize))>,
+) -> Vec<bool> {
+    let mut dirty = vec![false; row_count];
+    let mut mark = |start: usize, end: usize| {
+        let start = start.min(row_count);
+        let end = end.saturating_add(1).min(row_count);
+        dirty[start..end].fill(true);
+    };
+    if let Some((start, end)) = selection {
+        mark(start.0, end.0);
+    }
+    if let Some((start, end)) = hovered_url {
+        mark(start.0, end.0);
+    }
+    dirty
 }
 
 fn selection_is_retained(snapshot: &TerminalSnapshot, selection: Selection) -> bool {
@@ -4419,6 +4448,10 @@ impl App {
         self.pane.display_snapshot()
     }
 
+    fn display_snapshot_cow(&self) -> Option<Cow<'_, TerminalSnapshot>> {
+        self.pane.display_snapshot_cow()
+    }
+
     fn request_older_history(&mut self) -> Result<()> {
         if self.pane.history_page_pending || self.pane.history_selection_pin_blocked {
             return Ok(());
@@ -4832,7 +4865,7 @@ impl App {
     }
 
     fn begin_selection(&mut self, position: CellPosition) -> bool {
-        let Some(snapshot) = self.display_snapshot() else {
+        let Some(snapshot) = self.display_snapshot_cow() else {
             return false;
         };
         let Some(endpoint) = selection_endpoint(&snapshot, position) else {
@@ -4851,13 +4884,17 @@ impl App {
     }
 
     fn extend_selection(&mut self, position: CellPosition) -> bool {
-        let (Some(mut selection), Some(snapshot)) = (self.pane.selection, self.display_snapshot())
+        let (Some(mut selection), Some(snapshot)) =
+            (self.pane.selection, self.display_snapshot_cow())
         else {
             return false;
         };
         let Some(endpoint) = selection_endpoint(&snapshot, position) else {
             return false;
         };
+        if endpoint == selection.end {
+            return false;
+        }
         self.dirty_selection(Some(selection));
         selection.end = endpoint;
         self.pane.selection = Some(selection);
@@ -4919,12 +4956,18 @@ impl App {
     fn dirty_selection(&mut self, selection: Option<Selection>) {
         let bounds = selection.and_then(|selection| {
             let snapshot = self.pane.snapshot.as_ref()?;
-            let display = self.display_snapshot()?;
+            let display = self.display_snapshot_cow()?;
             selection_display_bounds(snapshot, &display, selection)
         });
         if let Some((start, end)) = bounds {
-            for row in start.row..=end.row {
-                self.dirty_row(row);
+            let rows = self
+                .pane
+                .snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.rows);
+            self.pane.surface_dirty_rows.resize(rows, false);
+            for row in start.row..=end.row.min(rows.saturating_sub(1)) {
+                self.pane.surface_dirty_rows[row] = true;
             }
         }
     }
@@ -7037,7 +7080,7 @@ impl App {
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
         let resolved_selection = self.pane.selection.and_then(|selection| {
             let snapshot = self.pane.snapshot.as_ref()?;
-            let display = self.display_snapshot()?;
+            let display = self.display_snapshot_cow()?;
             selection_display_bounds(snapshot, &display, selection)
                 .map(|(start, end)| ((start.row, start.column), (end.row, end.column)))
         });
@@ -7256,11 +7299,16 @@ impl App {
                 history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref());
             // Pane chrome is deterministically repainted after synchronization, so
             // row scanline copies may overwrite it without contaminating reuse.
-            let transient_canvas_content = selection.is_some()
-                || hovered_url.is_some()
-                || history_status.is_some()
-                || self.trusted_consent.is_some()
-                || inline_picker_open;
+            let overlay_rows = transient_overlay_rows(
+                self.pane
+                    .snapshot
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.rows),
+                selection,
+                hovered_url,
+            );
+            let full_transient_canvas_content =
+                history_status.is_some() || self.trusted_consent.is_some() || inline_picker_open;
             let full_backing_sync =
                 self.full_redraw || capture_image_count > 0 || backing_scroll_changed;
             for buffer in &mut self.buffers {
@@ -7327,8 +7375,10 @@ impl App {
             if self.trusted_consent.is_some() {
                 paint_trusted_consent_chrome(canvas, width, height);
             }
-            if transient_canvas_content {
+            if full_transient_canvas_content {
                 self.buffers[buffer_index].stale.mark_full();
+            } else {
+                self.buffers[buffer_index].stale.mark_rows(&overlay_rows);
             }
         } else if self.pane.snapshot_frame.is_some() {
             let [_, red, green, blue] = self.theme.background.to_be_bytes();
@@ -8100,12 +8150,14 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Motion { .. } => {
                     self.pane.pointer_cell = cell;
-                    let display = self.display_snapshot();
-                    self.pane.hovered_url = cell.and_then(|position| {
-                        display
-                            .as_ref()
-                            .and_then(|snapshot| url_at(snapshot, position))
-                    });
+                    self.pane.hovered_url = if self.pane.selecting {
+                        None
+                    } else {
+                        cell.and_then(|position| {
+                            let display = self.display_snapshot_cow()?;
+                            url_at(&display, position)
+                        })
+                    };
                     if self.pane.selecting {
                         if let Some(position) = cell {
                             self.extend_selection(position);
@@ -9074,6 +9126,20 @@ mod tests {
         assert!(restart_cursor_blink(true, &mut visible, &mut last_blink));
         assert!(visible);
         assert!(last_blink > original);
+    }
+
+    #[test]
+    fn transient_overlays_only_stale_the_rows_they_touch() {
+        assert_eq!(
+            transient_overlay_rows(5, Some(((1, 3), (3, 7))), Some(((4, 0), (4, 8)))),
+            vec![false, true, true, true, true]
+        );
+        assert_eq!(transient_overlay_rows(3, None, None), vec![false; 3]);
+        assert!(transient_overlay_rows(0, Some(((0, 0), (2, 0))), None).is_empty());
+        assert_eq!(
+            transient_overlay_rows(3, Some(((7, 0), (9, 0))), None),
+            vec![false; 3]
+        );
     }
 
     #[test]
