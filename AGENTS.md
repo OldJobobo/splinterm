@@ -177,58 +177,53 @@ Do not repeat a failed, expensive command until both of the following have occur
 
 ### 2.6 Graphical Test Matrices
 
-Request approval once for the complete bounded graphical sequence, naming the
-smoke and the matrix it gates. After that approval:
+   Request approval once for the complete bounded graphical sequence, identifying
+   the target window, permitted focus/input actions, smoke test, gated matrix, and
+   cleanup plan.
 
-1. Run one guarded test case.
-2. Confirm that the guarded smoke test succeeds.
-3. Run the approved full matrix after that success without inserting another
-   confirmation gate.
+   Run one guarded smoke case first. If it succeeds, continue with the approved
+   matrix without another confirmation gate. Abort on wrong-target input, placement
+   failure, focus failure, or cleanup failure.
 
-A smoke failure, placement/focus violation, or cleanup failure aborts the
-sequence and blocks the matrix. Diagnose it non-graphically before proposing a
-new bounded graphical attempt. Do not repeatedly ask for approval between stages
-of a sequence the user already authorized.
+## 3. Graphical Testing
 
-## 3. Graphical Test Isolation
+### 3.1 Allowed Test Targets
 
-### 3.1 Required Test Location
+Graphical tests may use either:
 
-Run graphical tests only on:
+* An isolated test window on workspace 8 / DP-2.
+* An existing active user window when the user explicitly approves a bounded
+  sequence and identifies the intended window.
 
-* Workspace: `8`
-* Monitor: `DP-2`
+### 3.2 Active-Window Authorization
 
-Workspace 8 must be inactive when graphical testing begins.
+After explicit approval, the agent may focus, raise, resize, and send bounded
+keyboard or pointer input to the identified active window. Authorization applies
+only to the named test sequence and target window.
 
-### 3.2 Prohibited Effects
+Before manipulating an active window:
 
-Never:
+* Record its address, process ID, workspace, monitor, and current focus.
+* State the exact actions and expected cleanup.
+* Target actions by window address whenever possible.
+* Preserve unrelated windows and user processes.
 
-* Switch the user to workspace 8.
-* Focus a test window.
-* Map a test window to any other workspace.
-* Map a test window to any other monitor.
+Do not close the window, terminate its shell, restart its daemon, move unrelated
+windows, or enter terminal commands unless those actions were explicitly
+approved.
 
-### 3.3 Placement and Focus Controls
+### 3.3 Abort and Cleanup
 
-Use:
+Abort immediately if input reaches the wrong window, an unrelated window moves,
+or the approved target cannot be identified reliably.
 
-* Pre-map placement rules.
-* No-focus rules.
+After testing, restore the original focus, workspace, monitor, size, and position
+when practical, and report anything that could not be restored.
 
-If any placement or focus violation occurs:
+### 3.4 Isolated Testing
 
-1. Abort the graphical test immediately.
-2. Clean up the test immediately.
-
-### 3.4 Non-Graphical Commands
-
-The following commands may run normally from the repository because they do not launch windows:
-
-* Non-graphical build commands.
-* Lint commands.
-* Unit-test commands.
+When active-window manipulation was not explicitly approved, retain the existing
+workspace 8 / DP-2 placement and no-focus isolation requirements.
 
 ## 4. Repository Safety
 
