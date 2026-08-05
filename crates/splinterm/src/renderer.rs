@@ -101,7 +101,7 @@ fn compatible_renderer_options(current: &RendererOptions, next: &RendererOptions
     current.font == next.font
         && current.font_size == next.font_size
         && current.font_sizing_policy == next.font_sizing_policy
-        && current.physical_dpi == next.physical_dpi
+        && current.physical_dpi.to_bits() == next.physical_dpi.to_bits()
         && current.padding == next.padding
 }
 
@@ -1540,7 +1540,7 @@ fn round_to_i32(value: f32) -> i32 {
     value.round() as i32
 }
 
-fn fill_rect(
+pub(crate) fn fill_rect(
     canvas: &mut [u8],
     canvas_width: u32,
     canvas_height: u32,
@@ -2608,6 +2608,7 @@ pub(crate) fn paint_session_picker_overlay(
     canvas: &mut [u8],
     canvas_width: u32,
     canvas_height: u32,
+    scrim_rect: Rect,
     scale_120: u32,
     renderer_generation: u64,
     layout: &SessionPickerOverlayLayout,
@@ -2622,7 +2623,7 @@ pub(crate) fn paint_session_picker_overlay(
         canvas,
         canvas_width,
         canvas_height,
-        (0, 0, canvas_width, canvas_height),
+        rect_tuple(scrim_rect),
         palette.scrim,
     );
     let panel = picker_buffer_rect(layout.panel, scale_120);
@@ -4194,16 +4195,27 @@ pub(crate) fn history_overlay_layout(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "content-relative trusted overlay painting keeps geometry and palette explicit"
+)]
 pub(crate) fn paint_history_overlay(
     canvas: &mut [u8],
     width: u32,
     height: u32,
+    content: Rect,
     scale_120: u32,
     status: HistoryOverlayStatus,
     background: u32,
     accent: u32,
 ) -> Option<HistoryOverlayLayout> {
-    let layout = history_overlay_layout(width, height, scale_120)?;
+    let mut layout = history_overlay_layout(content.width, content.height, scale_120)?;
+    let offset_x = i32::try_from(content.x).ok()?;
+    let offset_y = i32::try_from(content.y).ok()?;
+    layout.panel.0 = layout.panel.0.saturating_add(offset_x);
+    layout.panel.1 = layout.panel.1.saturating_add(offset_y);
+    layout.return_to_live.0 = layout.return_to_live.0.saturating_add(offset_x);
+    layout.return_to_live.1 = layout.return_to_live.1.saturating_add(offset_y);
     let [_, bg_red, bg_green, bg_blue] = background.to_be_bytes();
     let [_, red, green, blue] = accent.to_be_bytes();
     fill_rect(
@@ -6403,6 +6415,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn session_picker_painter_marks_transient_chrome_without_rebuilding_text() {
         let theme = ResolvedTheme::default();
         let palette = session_picker_palette(theme);
@@ -6432,6 +6445,12 @@ mod tests {
             &mut canvas,
             960,
             600,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 960,
+                height: 600,
+            },
             120,
             1,
             &layout,
@@ -6482,6 +6501,12 @@ mod tests {
             &mut canvas,
             960,
             600,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 960,
+                height: 600,
+            },
             120,
             1,
             &layout,
@@ -6530,6 +6555,12 @@ mod tests {
                 &mut canvas,
                 960,
                 600,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 960,
+                    height: 600,
+                },
                 120,
                 1,
                 &layout,
@@ -7848,6 +7879,12 @@ mod tests {
             &mut clamped,
             width,
             height,
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
             120,
             HistoryOverlayStatus {
                 offset_from_bottom: 12,
@@ -7863,6 +7900,12 @@ mod tests {
             &mut maximum,
             width,
             height,
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
             120,
             HistoryOverlayStatus {
                 offset_from_bottom: 12,

@@ -15,11 +15,13 @@ pub mod geometry;
 pub mod pane;
 pub mod renderer;
 pub mod session_picker;
+#[doc(hidden)]
+pub mod tab;
 pub mod viewport;
 pub mod wayland;
 
 pub use wayland::{
     AuthorityStatus, SessionPickerDecision, SessionPickerItem, SessionPickerUi, ThemeUpdate,
-    TrustedConsentUi, WindowCommand, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
-    WindowTopologyUpdate, WindowUpdate, run as run_window,
+    TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, run as run_window,
 };

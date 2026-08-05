@@ -21,8 +21,8 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use splinterm::{
     AuthorityStatus, SessionPickerDecision, SessionPickerItem, SessionPickerUi, ThemeUpdate,
-    TrustedConsentUi, WindowCommand, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
-    WindowTopologyUpdate, WindowUpdate,
+    TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
     automation::{
         CliEnvelopeV2, CliErrorCodeV2, CliEventV2, Connection, ImageContentLeaseSet,
         MAX_RENDERER_IMAGE_RESIDENT_BYTES, MutationIdentityV2, PingEnvelopeV2, ReadResyncReasonV2,
@@ -42,6 +42,7 @@ use splinterm::{
     renderer::{self, RendererOptions},
     run_window,
     session_picker::{RecentDojos, SessionEntry, collect_sessions},
+    tab::{DojoTab, OpenTabOutcome, WindowTabSet},
 };
 use splinterm_core::{
     Axis, DojoId, LairId, LayoutNode, SplintId, SplintState, SplitRatio, SplitSide,
@@ -4457,8 +4458,9 @@ async fn handle_control_event(
 }
 
 #[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
-    reason = "one task serializes control ownership, search, resize, and input for a pane"
+    reason = "one task serializes control ownership, search, resize, input, and cancellation"
 )]
 async fn run_controller(
     mut control: Connection,
@@ -4468,6 +4470,7 @@ async fn run_controller(
     splint_id: SplintId,
     incarnation: u64,
     resize_delay_ms: u64,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let mut active_controller = controller_id;
     let mut prepared_resize = None;
@@ -4500,6 +4503,7 @@ async fn run_controller(
             } else {
                 tokio::select! {
                     biased;
+                    () = cancellation.cancelled() => break,
                     frame = control.next_server_frame() => {
                         let control_acquired = handle_control_event(
                             frame?,
@@ -4528,15 +4532,14 @@ async fn run_controller(
                     }
                 }
             };
-            let (command, debounce_incoming_resize) = match command {
-                Some(command) => (command, debounce_incoming_resize),
-                None => {
-                    resize_deadline = None;
-                    let Some(pending) = pending_resize.take() else {
-                        break;
-                    };
-                    (pending.into_command(), false)
-                }
+            let (command, debounce_incoming_resize) = if let Some(command) = command {
+                (command, debounce_incoming_resize)
+            } else {
+                resize_deadline = None;
+                let Some(pending) = pending_resize.take() else {
+                    break;
+                };
+                (pending.into_command(), false)
             };
             let command = if debounce_incoming_resize {
                 match PendingPaneResize::from_command(command) {
@@ -4932,9 +4935,14 @@ async fn watch_theme(
     }
 }
 
+struct PaneTask {
+    cancellation: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<Result<()>>,
+}
+
 struct PreparedPane {
     options: WindowPaneOptions,
-    task: tokio::task::JoinHandle<Result<()>>,
+    task: PaneTask,
 }
 
 fn pane_claims_initial_control(splint_id: SplintId, default_focus: SplintId) -> bool {
@@ -5017,6 +5025,7 @@ async fn prepare_live_pane(
     let (resync_sender, resyncs) = mpsc::channel(1);
     let controller_updates = updates.clone();
     let resize_delay_ms = config.resize_delay_ms;
+    let cancellation = tokio_util::sync::CancellationToken::new();
     let controller = tokio::spawn(run_controller(
         control,
         commands,
@@ -5028,6 +5037,7 @@ async fn prepare_live_pane(
         splint_id,
         incarnation,
         resize_delay_ms,
+        cancellation.clone(),
     ));
     let task_updates = updates.clone();
     let task = tokio::spawn(run_pane_subscription(
@@ -5039,6 +5049,7 @@ async fn prepare_live_pane(
         splint_id,
         incarnation,
         image_cache.clone(),
+        cancellation.clone(),
     ));
     Ok(PreparedPane {
         options: WindowPaneOptions {
@@ -5049,7 +5060,7 @@ async fn prepare_live_pane(
             controlled: controller_id.is_some(),
             image_sources,
         },
-        task,
+        task: PaneTask { cancellation, task },
     })
 }
 
@@ -5135,11 +5146,15 @@ async fn run_pane_subscription(
     splint_id: SplintId,
     incarnation: u64,
     image_cache: SharedImageContentCache,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let mut last_revision = attachment.snapshot.revision;
     let mut last_sequence = 0_u64;
     loop {
         tokio::select! {
+            () = cancellation.cancelled() => {
+                return controller.await.context("pane controller task failed")?;
+            }
             result = &mut controller => return result.context("pane controller task failed")?,
             Some(()) = resyncs.recv() => {
                 attachment = resynchronize(
@@ -5478,7 +5493,15 @@ async fn apply_topology_command(
     expected_topology_revision: TopologyRevision,
     command: WindowTopologyCommand,
 ) -> Result<TopologyCommandOutcome> {
-    if let WindowTopologyCommand::Close { target } = command {
+    if let WindowTopologyCommand::Close {
+        dojo_id: target_dojo,
+        target,
+    } = command
+    {
+        anyhow::ensure!(
+            target_dojo == dojo_id,
+            "topology close targeted another Dojo"
+        );
         return close_focused_splint(
             connection,
             dojo_id,
@@ -5489,19 +5512,34 @@ async fn apply_topology_command(
         .await;
     }
     let request = match command {
-        WindowTopologyCommand::Split { target, axis } => Request::SplitSplint {
-            expected_topology_revision,
-            target_splint_id: target,
+        WindowTopologyCommand::Split {
+            dojo_id: target_dojo,
+            target,
             axis,
-            side: SplitSide::Second,
-            ratio: SplitRatio::new(500).expect("fixed split ratio is valid"),
-            launch: launch_parameters(
-                env::current_dir().context("failed to read current directory")?,
-                Vec::new(),
-                config,
-            ),
-        },
-        WindowTopologyCommand::AdjustRatio { target, delta } => {
+        } => {
+            anyhow::ensure!(
+                target_dojo == dojo_id,
+                "topology split targeted another Dojo"
+            );
+            Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: target,
+                axis,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).expect("fixed split ratio is valid"),
+                launch: launch_parameters(
+                    env::current_dir().context("failed to read current directory")?,
+                    Vec::new(),
+                    config,
+                ),
+            }
+        }
+        WindowTopologyCommand::AdjustRatio {
+            dojo_id: target_dojo,
+            target,
+            delta,
+        } => {
+            anyhow::ensure!(target_dojo == dojo_id, "ratio edit targeted another Dojo");
             let current = i32::from(
                 parent_ratio(root, target)
                     .context("focused pane has no adjustable parent ratio")?
@@ -5516,8 +5554,11 @@ async fn apply_topology_command(
         }
         WindowTopologyCommand::Close { .. } => unreachable!("close handled above"),
         WindowTopologyCommand::RequestSessionPicker
-        | WindowTopologyCommand::SwitchDojo { .. }
-        | WindowTopologyCommand::NewDojo => {
+        | WindowTopologyCommand::OpenDojo { .. }
+        | WindowTopologyCommand::NewLair
+        | WindowTopologyCommand::NewDojo { .. }
+        | WindowTopologyCommand::ActivateTab { .. }
+        | WindowTopologyCommand::CloseTab { .. } => {
             unreachable!("session commands are handled by the topology manager")
         }
     };
@@ -5582,38 +5623,66 @@ fn pending_focus_for_observation(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one transactional reconciliation owns identity, layout, updates, and task cleanup"
+)]
 async fn reconcile_window_topology(
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
+    dojo_id: DojoId,
     root: &mut LayoutNode,
     next: LayoutNode,
     focused: Option<SplintId>,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
-    pane_tasks: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
+    pane_tasks: &mut HashMap<SplintId, PaneTask>,
 ) -> Result<bool> {
     if *root == next {
         return Ok(true);
     }
     let (added_ids, removed) = topology_identity_diff(root, &next);
-    let mut added = Vec::new();
+    let mut prepared = Vec::new();
     for splint_id in added_ids {
-        let pane = prepare_live_pane(config, splint_id, image_cache.clone(), false).await?;
-        pane_tasks.push(pane.task);
+        match prepare_live_pane(config, splint_id, image_cache.clone(), false).await {
+            Ok(pane) => prepared.push((splint_id, pane)),
+            Err(error) => {
+                let tasks = prepared
+                    .into_iter()
+                    .map(|(splint_id, pane)| (splint_id, pane.task))
+                    .collect();
+                cancel_pane_tasks(tasks).await;
+                return Err(error);
+            }
+        }
+    }
+    let mut added = Vec::with_capacity(prepared.len());
+    let mut new_tasks = HashMap::with_capacity(prepared.len());
+    for (splint_id, pane) in prepared {
         added.push(pane.options);
+        new_tasks.insert(splint_id, pane.task);
     }
     if updates
         .send(WindowTopologyUpdate::Apply {
+            dojo_id,
             layout: next.clone(),
             added,
-            removed,
+            removed: removed.clone(),
             focused,
-            switched: false,
         })
         .await
         .is_err()
     {
+        cancel_pane_tasks(new_tasks).await;
         return Ok(false);
     }
+    let mut removed_tasks = HashMap::new();
+    for removed_id in &removed {
+        if let Some(task) = pane_tasks.remove(removed_id) {
+            removed_tasks.insert(*removed_id, task);
+        }
+    }
+    cancel_pane_tasks(removed_tasks).await;
+    pane_tasks.extend(new_tasks);
     *root = next;
     Ok(true)
 }
@@ -5636,14 +5705,30 @@ async fn session_picker_catalog(
     Ok((items, targets))
 }
 
+fn window_dojo_identity(
+    lair: &splinterm_core::Lair,
+    dojo: &splinterm_core::Dojo,
+) -> WindowDojoIdentity {
+    WindowDojoIdentity {
+        lair_id: lair.id,
+        dojo_id: dojo.id,
+        lair_name: lair.name.clone(),
+        dojo_name: dojo.name.clone(),
+    }
+}
+
 async fn reopenable_dojo(
     connection: &mut Connection,
     lair_id: LairId,
     dojo_id: DojoId,
-) -> Result<splinterm_core::Dojo> {
+) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its session list");
     };
+    let lair = lairs
+        .iter()
+        .find(|lair| lair.id == lair_id)
+        .context("selected Lair is absent")?;
     let dojo = select_dojo_from(&lairs, (lair_id, dojo_id))?;
     anyhow::ensure!(
         collect_sessions(&lairs, &[])
@@ -5651,19 +5736,19 @@ async fn reopenable_dojo(
             .any(|entry| entry.dojo_id == dojo_id && entry.reopenable()),
         "selected session no longer has a fully running pane layout"
     );
-    Ok(dojo)
+    Ok((window_dojo_identity(lair, &dojo), dojo))
 }
 
 async fn create_daily_dojo(
     connection: &mut Connection,
     config: &AppConfig,
-) -> Result<splinterm_core::Dojo> {
+) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let expected = connection.topology_revision().await?;
-    let Response::LairCreated { lair: dojo, .. } = connection
+    let Response::LairCreated { lair, .. } = connection
         .request(create_request(
             expected,
             format!("terminal-{stamp}-{}", std::process::id()),
@@ -5675,82 +5760,98 @@ async fn create_daily_dojo(
     else {
         bail!("splinterd did not create the requested terminal");
     };
-    dojo.dojos
+    let dojo = lair
+        .dojos
         .first()
         .cloned()
-        .context("new Lair did not contain a Dojo")
+        .context("new Lair did not contain a Dojo")?;
+    Ok((window_dojo_identity(&lair, &dojo), dojo))
 }
 
-async fn replace_managed_window(
+async fn create_dojo_in_lair(
+    connection: &mut Connection,
+    config: &AppConfig,
+    lair_id: LairId,
+) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
+    let expected_topology_revision = connection.topology_revision().await?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let Response::DojoStarted { dojo_id, .. } = connection
+        .request(Request::NewDojo {
+            expected_topology_revision,
+            lair_id,
+            name: format!("terminal-{stamp}"),
+            launch: launch_parameters(
+                env::current_dir().context("failed to read current directory")?,
+                Vec::new(),
+                config,
+            ),
+        })
+        .await?
+    else {
+        bail!("splinterd did not create the requested Dojo");
+    };
+    reopenable_dojo(connection, lair_id, dojo_id).await
+}
+
+struct ManagedDojo {
+    identity: WindowDojoIdentity,
+    root: LayoutNode,
+    pending_focus: Option<PendingTopologyFocus>,
+    pane_tasks: HashMap<SplintId, PaneTask>,
+}
+
+async fn cancel_pane_tasks(pane_tasks: HashMap<SplintId, PaneTask>) {
+    let tasks = pane_tasks.into_values().collect::<Vec<_>>();
+    for task in &tasks {
+        task.cancellation.cancel();
+    }
+    for task in tasks {
+        let _ = task.task.await;
+    }
+}
+
+struct PreparedManagedDojo {
+    identity: WindowDojoIdentity,
+    dojo: splinterm_core::Dojo,
+    panes: Vec<WindowPaneOptions>,
+    pane_tasks: HashMap<SplintId, PaneTask>,
+}
+
+async fn prepare_managed_dojo(
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
-    dojo_id: &mut DojoId,
-    root: &mut LayoutNode,
-    target: splinterm_core::Dojo,
-    updates: &mpsc::Sender<WindowTopologyUpdate>,
-    pane_tasks: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
-) -> Result<bool> {
-    if target.id == *dojo_id {
-        remember_dojo(target.id);
-        return Ok(updates
-            .send(WindowTopologyUpdate::SessionSwitchComplete)
-            .await
-            .is_ok());
-    }
+    identity: WindowDojoIdentity,
+    dojo: splinterm_core::Dojo,
+) -> Result<PreparedManagedDojo> {
     anyhow::ensure!(
-        target.root.find_splint(target.default_focus).is_some(),
+        dojo.root.find_splint(dojo.default_focus).is_some(),
         "target Dojo focus is absent from its layout"
     );
     let mut ids = Vec::new();
-    layout_splint_ids(&target.root, &mut ids);
-    let mut prepared = Vec::with_capacity(ids.len());
+    layout_splint_ids(&dojo.root, &mut ids);
+    let mut panes = Vec::with_capacity(ids.len());
+    let mut pane_tasks = HashMap::with_capacity(ids.len());
     for splint_id in ids {
-        match prepare_live_pane(
-            config,
-            splint_id,
-            image_cache.clone(),
-            pane_claims_initial_control(splint_id, target.default_focus),
-        )
-        .await
-        {
-            Ok(pane) => prepared.push(pane),
+        match prepare_live_pane(config, splint_id, image_cache.clone(), false).await {
+            Ok(pane) => {
+                panes.push(pane.options);
+                pane_tasks.insert(splint_id, pane.task);
+            }
             Err(error) => {
-                for pane in prepared {
-                    pane.task.abort();
-                }
+                cancel_pane_tasks(pane_tasks).await;
                 return Err(error);
             }
         }
     }
-    let mut removed = Vec::new();
-    layout_splint_ids(root, &mut removed);
-    let mut added = Vec::with_capacity(prepared.len());
-    let mut tasks = Vec::with_capacity(prepared.len());
-    for pane in prepared {
-        added.push(pane.options);
-        tasks.push(pane.task);
-    }
-    if updates
-        .send(WindowTopologyUpdate::Apply {
-            layout: target.root.clone(),
-            added,
-            removed,
-            focused: Some(target.default_focus),
-            switched: true,
-        })
-        .await
-        .is_err()
-    {
-        for task in tasks {
-            task.abort();
-        }
-        return Ok(false);
-    }
-    pane_tasks.extend(tasks);
-    *dojo_id = target.id;
-    *root = target.root;
-    remember_dojo(target.id);
-    Ok(true)
+    Ok(PreparedManagedDojo {
+        identity,
+        dojo,
+        panes,
+        pane_tasks,
+    })
 }
 
 enum TopologyManagerCommandOutcome {
@@ -5760,49 +5861,109 @@ enum TopologyManagerCommandOutcome {
 }
 
 struct TopologyManagerState {
-    dojo_id: DojoId,
-    root: LayoutNode,
-    pending_focus: Option<PendingTopologyFocus>,
-    pane_tasks: Vec<tokio::task::JoinHandle<Result<()>>>,
+    tabs: WindowTabSet<ManagedDojo>,
 }
 
-async fn finish_managed_window_switch(
-    target: Result<splinterm_core::Dojo>,
+const fn window_has_tab_capacity(tab_count: usize) -> bool {
+    tab_count < splinterm::tab::MAX_WINDOW_TABS
+}
+
+async fn finish_managed_window_open(
+    target: Result<(WindowDojoIdentity, splinterm_core::Dojo)>,
     state: &mut TopologyManagerState,
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
 ) -> TopologyManagerCommandOutcome {
-    let result = match target {
-        Ok(target) => {
-            replace_managed_window(
-                config,
-                image_cache,
-                &mut state.dojo_id,
-                &mut state.root,
-                target,
-                updates,
-                &mut state.pane_tasks,
-            )
+    let target_id = target.as_ref().ok().map(|(_, dojo)| dojo.id);
+    let result = async {
+        let (identity, dojo) = target?;
+        if state.tabs.activate(dojo.id) {
+            remember_dojo(dojo.id);
+            updates
+                .send(WindowTopologyUpdate::ActivateTab { dojo_id: dojo.id })
+                .await
+                .map_err(|_| anyhow::anyhow!("Wayland tab update channel closed"))?;
+            return Ok(OpenTabOutcome::ActivatedExisting);
+        }
+        anyhow::ensure!(
+            state.tabs.len() < splinterm::tab::MAX_WINDOW_TABS,
+            "a Window may contain at most {} Dojo tabs",
+            splinterm::tab::MAX_WINDOW_TABS
+        );
+        let prepared = prepare_managed_dojo(config, image_cache, identity, dojo).await?;
+        let dojo_id = prepared.dojo.id;
+        let lair_id = prepared.identity.lair_id;
+        let (acknowledged, acknowledgement) = tokio::sync::oneshot::channel();
+        if updates
+            .send(WindowTopologyUpdate::OpenTab {
+                identity: prepared.identity.clone(),
+                layout: prepared.dojo.root.clone(),
+                panes: prepared.panes,
+                focused: prepared.dojo.default_focus,
+                acknowledged,
+            })
             .await
+            .is_err()
+        {
+            cancel_pane_tasks(prepared.pane_tasks).await;
+            bail!("Wayland tab update channel closed");
         }
-        Err(error) => Err(error),
-    };
+        match acknowledgement.await {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                cancel_pane_tasks(prepared.pane_tasks).await;
+                bail!("Wayland rejected Dojo tab: {message}");
+            }
+            Err(_) => {
+                cancel_pane_tasks(prepared.pane_tasks).await;
+                bail!("Wayland dropped Dojo tab acknowledgement");
+            }
+        }
+        state.tabs.open_or_activate(DojoTab::new(
+            lair_id,
+            dojo_id,
+            ManagedDojo {
+                identity: prepared.identity,
+                root: prepared.dojo.root,
+                pending_focus: None,
+                pane_tasks: prepared.pane_tasks,
+            },
+        ))?;
+        remember_dojo(dojo_id);
+        Ok(OpenTabOutcome::Opened)
+    }
+    .await;
     match result {
-        Ok(true) => {
-            state.pending_focus = None;
-            TopologyManagerCommandOutcome::Continue
-        }
-        Ok(false) => TopologyManagerCommandOutcome::Stop,
+        Ok(_) => TopologyManagerCommandOutcome::Continue,
         Err(error) => {
             let _ = updates
-                .send(WindowTopologyUpdate::SessionPickerFailed(format!(
-                    "{error:#}"
-                )))
+                .send(WindowTopologyUpdate::TabFailed {
+                    dojo_id: target_id,
+                    message: format!("{error:#}"),
+                })
                 .await;
             TopologyManagerCommandOutcome::Continue
         }
     }
+}
+
+async fn remove_frontend_tab(
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+    dojo_id: DojoId,
+) -> bool {
+    let (acknowledged, acknowledgement) = tokio::sync::oneshot::channel();
+    if updates
+        .send(WindowTopologyUpdate::RemoveTab {
+            dojo_id,
+            acknowledged,
+        })
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    acknowledgement.await.is_ok()
 }
 
 async fn handle_session_manager_command(
@@ -5835,65 +5996,199 @@ async fn handle_session_manager_command(
             }
             TopologyManagerCommandOutcome::Continue
         }
-        WindowTopologyCommand::SwitchDojo {
+        WindowTopologyCommand::OpenDojo {
             lair_id,
             dojo_id: target_id,
         } => {
             let target = reopenable_dojo(connection, lair_id, target_id).await;
-            finish_managed_window_switch(target, state, config, image_cache, updates).await
+            finish_managed_window_open(target, state, config, image_cache, updates).await
         }
-        WindowTopologyCommand::NewDojo => {
+        WindowTopologyCommand::NewLair => {
+            if !window_has_tab_capacity(state.tabs.len()) {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: None,
+                        message: format!(
+                            "a Window may contain at most {} Dojo tabs",
+                            splinterm::tab::MAX_WINDOW_TABS
+                        ),
+                    })
+                    .await;
+                return TopologyManagerCommandOutcome::Continue;
+            }
             let target = create_daily_dojo(connection, config).await;
-            finish_managed_window_switch(target, state, config, image_cache, updates).await
+            finish_managed_window_open(target, state, config, image_cache, updates).await
+        }
+        WindowTopologyCommand::NewDojo { lair_id } => {
+            if !window_has_tab_capacity(state.tabs.len()) {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: None,
+                        message: format!(
+                            "a Window may contain at most {} Dojo tabs",
+                            splinterm::tab::MAX_WINDOW_TABS
+                        ),
+                    })
+                    .await;
+                return TopologyManagerCommandOutcome::Continue;
+            }
+            let target = create_dojo_in_lair(connection, config, lair_id).await;
+            finish_managed_window_open(target, state, config, image_cache, updates).await
+        }
+        WindowTopologyCommand::ActivateTab { dojo_id } => {
+            if state.tabs.activate(dojo_id)
+                && updates
+                    .send(WindowTopologyUpdate::ActivateTab { dojo_id })
+                    .await
+                    .is_err()
+            {
+                return TopologyManagerCommandOutcome::Stop;
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::CloseTab { dojo_id } => {
+            if let Some(removed) = state.tabs.close(dojo_id) {
+                let acknowledged = remove_frontend_tab(updates, dojo_id).await;
+                cancel_pane_tasks(removed.value.pane_tasks).await;
+                if !acknowledged {
+                    return TopologyManagerCommandOutcome::Stop;
+                }
+                if state.tabs.is_empty() {
+                    let _ = updates.send(WindowTopologyUpdate::Closed).await;
+                    return TopologyManagerCommandOutcome::Stop;
+                }
+            }
+            TopologyManagerCommandOutcome::Continue
         }
         command => TopologyManagerCommandOutcome::Edit(command),
     }
+}
+
+async fn inspect_managed_topology(
+    connection: &mut Connection,
+) -> Result<splinterm_protocol::TopologySnapshot> {
+    let Response::Topology { snapshot } = connection.request(Request::InspectTopology).await?
+    else {
+        bail!("splinterd did not return topology for Window reconciliation");
+    };
+    snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    Ok(snapshot)
 }
 
 async fn reconcile_managed_topology(
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
     state: &mut TopologyManagerState,
-    revision: TopologyRevision,
-    authoritative: LayoutNode,
+    snapshot: &splinterm_protocol::TopologySnapshot,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
 ) -> Result<bool> {
-    let (added, _) = topology_identity_diff(&state.root, &authoritative);
-    let (focused, pending_focus_consumed) =
-        pending_focus_for_observation(state.pending_focus, revision, &added);
-    let reconciled = reconcile_window_topology(
-        config,
-        image_cache,
-        &mut state.root,
-        authoritative,
-        focused,
-        updates,
-        &mut state.pane_tasks,
-    )
-    .await?;
-    if pending_focus_consumed {
-        state.pending_focus = None;
+    let authoritative = snapshot
+        .topology
+        .lairs()
+        .flat_map(|lair| {
+            lair.dojos.iter().map(move |dojo| {
+                (
+                    dojo.id,
+                    (window_dojo_identity(lair, dojo), dojo.root.clone()),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let dojo_ids = state.tabs.iter().map(|tab| tab.dojo_id).collect::<Vec<_>>();
+    for dojo_id in dojo_ids {
+        let Some((identity, root)) = authoritative.get(&dojo_id).cloned() else {
+            if let Some(removed) = state.tabs.close(dojo_id) {
+                let acknowledged = remove_frontend_tab(updates, dojo_id).await;
+                cancel_pane_tasks(removed.value.pane_tasks).await;
+                if !acknowledged {
+                    return Ok(false);
+                }
+            }
+            continue;
+        };
+        let managed = &mut state
+            .tabs
+            .get_mut(dojo_id)
+            .context("managed Dojo disappeared during reconciliation")?
+            .value;
+        if managed.identity != identity {
+            if updates
+                .send(WindowTopologyUpdate::UpdateIdentity(identity.clone()))
+                .await
+                .is_err()
+            {
+                return Ok(false);
+            }
+            managed.identity = identity;
+        }
+        let (added, _) = topology_identity_diff(&managed.root, &root);
+        let (focused, consumed) =
+            pending_focus_for_observation(managed.pending_focus, snapshot.revision, &added);
+        match reconcile_window_topology(
+            config,
+            image_cache,
+            dojo_id,
+            &mut managed.root,
+            root,
+            focused,
+            updates,
+            &mut managed.pane_tasks,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(error) => {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: Some(dojo_id),
+                        message: format!("{error:#}"),
+                    })
+                    .await;
+            }
+        }
+        if consumed {
+            managed.pending_focus = None;
+        }
     }
-    Ok(reconciled)
+    if state.tabs.is_empty() {
+        let _ = updates.send(WindowTopologyUpdate::Closed).await;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "poll reconciliation, stable command targeting, and owned task shutdown share one loop"
+)]
 async fn run_topology_manager(
     config: AppConfig,
     image_cache: SharedImageContentCache,
-    dojo_id: DojoId,
+    initial_identity: WindowDojoIdentity,
     root: LayoutNode,
     mut commands: mpsc::Receiver<WindowTopologyCommand>,
     updates: mpsc::Sender<WindowTopologyUpdate>,
-    pane_tasks: Vec<tokio::task::JoinHandle<Result<()>>>,
+    pane_tasks: HashMap<SplintId, PaneTask>,
 ) -> Result<()> {
     let mut connection = Connection::connect().await?;
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let initial_lair_id = initial_identity.lair_id;
+    let initial_dojo_id = initial_identity.dojo_id;
     let mut state = TopologyManagerState {
-        dojo_id,
-        root,
-        pending_focus: None,
-        pane_tasks,
+        tabs: WindowTabSet::new(DojoTab::new(
+            initial_lair_id,
+            initial_dojo_id,
+            ManagedDojo {
+                identity: initial_identity,
+                root,
+                pending_focus: None,
+                pane_tasks,
+            },
+        )),
     };
     loop {
         let command = tokio::select! {
@@ -5918,27 +6213,8 @@ async fn run_topology_manager(
         } else {
             None
         };
-        let (revision, authoritative) =
-            match inspect_dojo_state(&mut connection, state.dojo_id).await {
-                Ok(state) => state,
-                Err(error) => {
-                    let _ = updates
-                        .send(WindowTopologyUpdate::Shutdown(format!("{error:#}")))
-                        .await;
-                    return Err(error);
-                }
-            };
-        let reconciled = match reconcile_managed_topology(
-            &config,
-            &image_cache,
-            &mut state,
-            revision,
-            authoritative,
-            &updates,
-        )
-        .await
-        {
-            Ok(reconciled) => reconciled,
+        let snapshot = match inspect_managed_topology(&mut connection).await {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 let _ = updates
                     .send(WindowTopologyUpdate::Shutdown(format!("{error:#}")))
@@ -5946,7 +6222,9 @@ async fn run_topology_manager(
                 return Err(error);
             }
         };
-        if !reconciled {
+        if !reconcile_managed_topology(&config, &image_cache, &mut state, &snapshot, &updates)
+            .await?
+        {
             break;
         }
         let Some(command) = command else {
@@ -5955,28 +6233,50 @@ async fn run_topology_manager(
             }
             continue;
         };
+        let (WindowTopologyCommand::Split { dojo_id, .. }
+        | WindowTopologyCommand::Close { dojo_id, .. }
+        | WindowTopologyCommand::AdjustRatio { dojo_id, .. }) = command
+        else {
+            unreachable!("session command escaped manager dispatch");
+        };
+        let managed = &mut state
+            .tabs
+            .get_mut(dojo_id)
+            .context("topology command targeted a closed Dojo tab")?
+            .value;
         match apply_topology_command(
             &mut connection,
             &config,
-            state.dojo_id,
-            &state.root,
-            revision,
+            dojo_id,
+            &managed.root,
+            snapshot.revision,
             command,
         )
         .await
         {
             Ok(TopologyCommandOutcome::Updated { pending_focus }) => {
-                state.pending_focus = pending_focus;
+                managed.pending_focus = pending_focus;
             }
             Ok(TopologyCommandOutcome::WindowClosed) => {
-                let _ = updates.send(WindowTopologyUpdate::Closed).await;
-                break;
+                let removed = state.tabs.close(dojo_id).expect("edited tab remains");
+                let acknowledged = remove_frontend_tab(&updates, dojo_id).await;
+                cancel_pane_tasks(removed.value.pane_tasks).await;
+                if !acknowledged || state.tabs.is_empty() {
+                    break;
+                }
             }
             Err(error) => eprintln!("splinterm topology edit rejected: {error:#}"),
         }
     }
-    for task in state.pane_tasks {
-        task.await.context("pane subscription task failed")??;
+    let mut remaining_tasks = Vec::new();
+    for tab in state.tabs.iter_mut() {
+        remaining_tasks.extend(tab.value.pane_tasks.drain().map(|(_, task)| task));
+    }
+    for task in &remaining_tasks {
+        task.cancellation.cancel();
+    }
+    for task in remaining_tasks {
+        let _ = task.task.await;
     }
     Ok(())
 }
@@ -5994,6 +6294,7 @@ fn pane_chrome_capture() -> Result<Option<PathBuf>> {
 
 fn spawn_topology_smoke(
     commands: mpsc::Sender<WindowTopologyCommand>,
+    dojo_id: DojoId,
     target: SplintId,
 ) -> Result<Option<tokio::task::JoinHandle<Result<()>>>> {
     if env::var_os("SPLINTERM_TOPOLOGY_SMOKE").is_none() {
@@ -6007,6 +6308,7 @@ fn spawn_topology_smoke(
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
         commands
             .send(WindowTopologyCommand::Split {
+                dojo_id,
                 target,
                 axis: Axis::Horizontal,
             })
@@ -6014,16 +6316,34 @@ fn spawn_topology_smoke(
             .map_err(|_| anyhow::anyhow!("topology smoke split channel closed"))?;
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
         commands
-            .send(WindowTopologyCommand::AdjustRatio { target, delta: 100 })
+            .send(WindowTopologyCommand::AdjustRatio {
+                dojo_id,
+                target,
+                delta: 100,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("topology smoke ratio channel closed"))
     })))
+}
+
+async fn initial_window_dojo_identity(dojo_id: DojoId) -> Result<WindowDojoIdentity> {
+    let mut connection = Connection::connect().await?;
+    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+        bail!("splinterd did not return its Lairs for Window identity");
+    };
+    for lair in &lairs {
+        if let Some(dojo) = lair.dojos.iter().find(|dojo| dojo.id == dojo_id) {
+            return Ok(window_dojo_identity(lair, dojo));
+        }
+    }
+    bail!("initial Dojo is absent from daemon topology")
 }
 
 async fn run_live_multipane_window(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
 ) -> Result<()> {
+    let initial_identity = initial_window_dojo_identity(dojo_model.id).await?;
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
@@ -6059,21 +6379,25 @@ async fn run_live_multipane_window(
         ThemeUpdateSink::Topology(topology_update_sender.clone()),
     ));
     let mut panes = Vec::with_capacity(prepared.len());
-    let mut tasks = Vec::with_capacity(prepared.len());
+    let mut tasks = HashMap::with_capacity(prepared.len());
     for pane in prepared {
+        let splint_id = pane.options.snapshot.splint_id;
         panes.push(pane.options);
-        tasks.push(pane.task);
+        tasks.insert(splint_id, pane.task);
     }
-    let topology_smoke = spawn_topology_smoke(topology_commands.clone(), dojo_model.default_focus)?;
+    let topology_smoke = spawn_topology_smoke(
+        topology_commands.clone(),
+        dojo_model.id,
+        dojo_model.default_focus,
+    )?;
     let window_config = config.clone();
     let root = dojo_model.root;
     let manager_root = root.clone();
     let active_splint = dojo_model.default_focus;
-    let dojo_id = dojo_model.id;
     let topology_manager = tokio::spawn(run_topology_manager(
         config,
         image_cache,
-        dojo_id,
+        initial_identity.clone(),
         manager_root,
         topology_command_receiver,
         topology_update_sender,
@@ -6087,6 +6411,7 @@ async fn run_live_multipane_window(
             active_splint: Some(active_splint),
             topology_updates: Some(topology_updates),
             topology_commands: Some(topology_commands),
+            initial_dojo: Some(initial_identity),
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
             cursor_style: window_config.cursor_style,
@@ -6173,6 +6498,7 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
     ));
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
     let (resync_sender, mut resyncs) = mpsc::channel(1);
+    let controller_cancellation = tokio_util::sync::CancellationToken::new();
     let mut controller = tokio::spawn(run_controller(
         control,
         commands,
@@ -6184,6 +6510,7 @@ async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
         splint_id,
         incarnation,
         config.resize_delay_ms,
+        controller_cancellation,
     ));
     let mut last_revision = attachment.snapshot.revision;
     let initial_snapshot = attachment.snapshot;
@@ -7374,6 +7701,13 @@ mod tests {
             "bad control request",
         ));
         assert!(optional_pane_controller(Err(invalid)).is_err());
+    }
+
+    #[test]
+    fn tab_creation_capacity_is_rejected_before_daemon_creation() {
+        assert!(window_has_tab_capacity(0));
+        assert!(window_has_tab_capacity(splinterm::tab::MAX_WINDOW_TABS - 1));
+        assert!(!window_has_tab_capacity(splinterm::tab::MAX_WINDOW_TABS));
     }
 
     #[test]

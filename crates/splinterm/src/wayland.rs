@@ -122,16 +122,19 @@ use crate::geometry::{
 };
 use crate::pane::{FocusDirection, PaneChrome, PaneDivider, PaneLayout};
 use crate::renderer::{
-    ChromeText, CursorPresentation, HistoryOverlayStatus, PickerHitTarget,
+    ChromeText, ChromeTextStyle, CursorPresentation, HistoryOverlayStatus, PickerHitTarget,
     SessionPickerOverlayLayout, SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame,
-    SnapshotOverlays, TextRow, configured_background_bgra, history_overlay_layout, paint,
-    paint_box_drawing_cell, paint_history_overlay, paint_session_picker_overlay,
+    SnapshotOverlays, TextRow, configured_background_bgra, fill_rect, history_overlay_layout,
+    paint, paint_box_drawing_cell, paint_history_overlay, paint_session_picker_overlay,
     paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
     paint_snapshot_rows_presented, scroll_snapshot_pixels, session_picker_hit_test,
     session_picker_overlay_layout, session_picker_palette, set_background_alpha,
     set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
 };
-use crate::viewport::ScrollbackViewport;
+use crate::{
+    tab::{DojoTab, WindowTabSet, sanitized_tab_label},
+    viewport::ScrollbackViewport,
+};
 
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 600;
@@ -156,6 +159,143 @@ const IDLE_EVENT_LOOP_TIMEOUT: Duration = Duration::from_secs(60);
 const RECEIVER_DRAIN_BUDGET: usize = 8;
 const MAX_SHM_BUFFERS: usize = 2;
 const BTN_RIGHT: u32 = 0x111;
+const TAB_STRIP_LOGICAL_HEIGHT: u32 = 34;
+const TAB_PREFERRED_LOGICAL_WIDTH: u32 = 180;
+const TAB_MIN_LOGICAL_WIDTH: u32 = 96;
+const TAB_ACTION_LOGICAL_WIDTH: u32 = 34;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabHitTarget {
+    Activate(DojoId),
+    Close(DojoId),
+    New,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VisibleTabLayout {
+    dojo_id: DojoId,
+    rect: Rect,
+    label_rect: Rect,
+    close_rect: Rect,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TabStripLayout {
+    rect: Rect,
+    tabs: Vec<VisibleTabLayout>,
+    new_rect: Rect,
+}
+
+fn tab_strip_layout(width: u32, dojo_ids: &[DojoId], active: usize) -> Option<TabStripLayout> {
+    if width == 0 || dojo_ids.is_empty() || active >= dojo_ids.len() {
+        return None;
+    }
+    let new_width = TAB_ACTION_LOGICAL_WIDTH.min((width / 4).max(u32::from(width > 0)));
+    let tab_space = width.saturating_sub(new_width);
+    let capacity = usize::try_from((tab_space / TAB_MIN_LOGICAL_WIDTH).max(1)).unwrap_or(1);
+    let visible_count = dojo_ids.len().min(capacity);
+    let mut start = active.saturating_sub(visible_count / 2);
+    start = start.min(dojo_ids.len().saturating_sub(visible_count));
+    let tab_width = if visible_count == 0 {
+        0
+    } else {
+        (tab_space / u32::try_from(visible_count).unwrap_or(1)).min(TAB_PREFERRED_LOGICAL_WIDTH)
+    };
+    let mut tabs = Vec::with_capacity(visible_count);
+    let mut x = 0;
+    for dojo_id in dojo_ids.iter().skip(start).take(visible_count).copied() {
+        let remaining = tab_space.saturating_sub(x);
+        let width = tab_width.min(remaining);
+        let close_width = TAB_ACTION_LOGICAL_WIDTH.min((width / 3).max(u32::from(width > 1)));
+        let label_space = width.saturating_sub(close_width);
+        let label_inset = 10_u32.min(label_space / 4);
+        tabs.push(VisibleTabLayout {
+            dojo_id,
+            rect: Rect {
+                x,
+                y: 0,
+                width,
+                height: TAB_STRIP_LOGICAL_HEIGHT,
+            },
+            label_rect: Rect {
+                x: x.saturating_add(label_inset),
+                y: 0,
+                width: label_space.saturating_sub(label_inset.saturating_mul(2)),
+                height: TAB_STRIP_LOGICAL_HEIGHT,
+            },
+            close_rect: Rect {
+                x: x.saturating_add(width.saturating_sub(close_width)),
+                y: 0,
+                width: close_width,
+                height: TAB_STRIP_LOGICAL_HEIGHT,
+            },
+        });
+        x = x.saturating_add(width);
+    }
+    Some(TabStripLayout {
+        rect: Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: TAB_STRIP_LOGICAL_HEIGHT,
+        },
+        tabs,
+        new_rect: Rect {
+            x: width.saturating_sub(new_width),
+            y: 0,
+            width: new_width,
+            height: TAB_STRIP_LOGICAL_HEIGHT,
+        },
+    })
+}
+
+fn translated_rect(mut rect: Rect, origin: Rect) -> Rect {
+    rect.x = rect.x.saturating_add(origin.x);
+    rect.y = rect.y.saturating_add(origin.y);
+    rect
+}
+
+fn translate_picker_layout(
+    mut layout: SessionPickerOverlayLayout,
+    origin: Rect,
+) -> SessionPickerOverlayLayout {
+    layout.panel = translated_rect(layout.panel, origin);
+    layout.header = translated_rect(layout.header, origin);
+    layout.action = translated_rect(layout.action, origin);
+    layout.list = translated_rect(layout.list, origin);
+    layout.footer = translated_rect(layout.footer, origin);
+    for row in &mut layout.rows {
+        row.rect = translated_rect(row.rect, origin);
+        row.title_clip = translated_rect(row.title_clip, origin);
+        row.metadata_clip = translated_rect(row.metadata_clip, origin);
+    }
+    layout
+}
+
+fn rect_contains(rect: Rect, position: (f64, f64)) -> bool {
+    position.0 >= f64::from(rect.x)
+        && position.1 >= f64::from(rect.y)
+        && position.0 < f64::from(rect.x.saturating_add(rect.width))
+        && position.1 < f64::from(rect.y.saturating_add(rect.height))
+}
+
+fn tab_strip_hit_test(layout: &TabStripLayout, position: (f64, f64)) -> Option<TabHitTarget> {
+    if !rect_contains(layout.rect, position) {
+        return None;
+    }
+    if rect_contains(layout.new_rect, position) {
+        return Some(TabHitTarget::New);
+    }
+    layout.tabs.iter().find_map(|tab| {
+        if rect_contains(tab.close_rect, position) {
+            Some(TabHitTarget::Close(tab.dojo_id))
+        } else if rect_contains(tab.rect, position) {
+            Some(TabHitTarget::Activate(tab.dojo_id))
+        } else {
+            None
+        }
+    })
+}
 
 struct UpdateWake(Ping);
 
@@ -483,12 +623,13 @@ fn pane_stream_has_terminal_notice(updates: &[WindowUpdate]) -> bool {
 }
 
 fn enqueue_pending_exited_splints(
+    dojo_id: DojoId,
     pending: &mut HashSet<SplintId>,
     commands: &Sender<WindowTopologyCommand>,
 ) -> bool {
     let targets = pending.iter().copied().collect::<Vec<_>>();
     for target in targets {
-        match commands.try_send(WindowTopologyCommand::Close { target }) {
+        match commands.try_send(WindowTopologyCommand::Close { dojo_id, target }) {
             Ok(()) => {
                 pending.remove(&target);
             }
@@ -845,41 +986,79 @@ fn picker_terminal_snapshot(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowDojoIdentity {
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    pub lair_name: String,
+    pub dojo_name: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowTopologyCommand {
     Split {
+        dojo_id: DojoId,
         target: SplintId,
         axis: splinterm_core::Axis,
     },
     Close {
+        dojo_id: DojoId,
         target: SplintId,
     },
     AdjustRatio {
+        dojo_id: DojoId,
         target: SplintId,
         delta: i16,
     },
     RequestSessionPicker,
-    SwitchDojo {
+    OpenDojo {
         lair_id: LairId,
         dojo_id: DojoId,
     },
-    NewDojo,
+    NewLair,
+    NewDojo {
+        lair_id: LairId,
+    },
+    ActivateTab {
+        dojo_id: DojoId,
+    },
+    CloseTab {
+        dojo_id: DojoId,
+    },
 }
 
 pub enum WindowTopologyUpdate {
     Apply {
+        dojo_id: DojoId,
         layout: LayoutNode,
         added: Vec<WindowPaneOptions>,
         removed: Vec<SplintId>,
         focused: Option<SplintId>,
-        switched: bool,
+    },
+    OpenTab {
+        identity: WindowDojoIdentity,
+        layout: LayoutNode,
+        panes: Vec<WindowPaneOptions>,
+        focused: SplintId,
+        acknowledged: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+    },
+    ActivateTab {
+        dojo_id: DojoId,
+    },
+    RemoveTab {
+        dojo_id: DojoId,
+        acknowledged: tokio::sync::oneshot::Sender<()>,
+    },
+    UpdateIdentity(WindowDojoIdentity),
+    TabFailed {
+        dojo_id: Option<DojoId>,
+        message: String,
     },
     ShowSessionPicker {
         items: Vec<SessionPickerItem>,
         targets: Vec<(LairId, DojoId)>,
     },
     SessionPickerFailed(String),
-    SessionSwitchComplete,
     Theme(ThemeUpdate),
     Closed,
     Shutdown(String),
@@ -935,6 +1114,8 @@ pub struct WindowOptions {
     pub active_splint: Option<SplintId>,
     pub topology_updates: Option<Receiver<WindowTopologyUpdate>>,
     pub topology_commands: Option<Sender<WindowTopologyCommand>>,
+    /// Stable identity for the initial managed Dojo; absent for legacy/evidence windows.
+    pub initial_dojo: Option<WindowDojoIdentity>,
 }
 
 impl WindowOptions {
@@ -1014,6 +1195,7 @@ impl Default for WindowOptions {
             active_splint: None,
             topology_updates: None,
             topology_commands: None,
+            initial_dojo: None,
         }
     }
 }
@@ -1031,6 +1213,7 @@ impl Default for WindowOptions {
     reason = "Wayland global binding and application state initialization form one startup transaction"
 )]
 pub fn run(mut options: WindowOptions) -> Result<()> {
+    let managed_tabs = options.initial_dojo.is_some();
     let inactive_options = options.activate_multi_pane_input()?;
     if let Some(snapshot) = options.snapshot.as_mut() {
         snapshot
@@ -1050,11 +1233,16 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             SnapshotFrame::load_scaled_with_sources(snapshot, 120, Some(&options.image_sources))
         })
         .transpose()?;
-    let (initial_width, initial_height) = snapshot_frame
+    let (initial_width, mut initial_height) = snapshot_frame
         .as_ref()
         .map_or(Ok((INITIAL_WIDTH, INITIAL_HEIGHT)), |frame| {
             frame.initial_logical_size(options.initial_columns, options.initial_rows, 120)
         })?;
+    if managed_tabs {
+        initial_height = initial_height
+            .checked_add(TAB_STRIP_LOGICAL_HEIGHT)
+            .context("initial tab strip height overflow")?;
+    }
     let connection = Connection::connect_to_env().context("connect to Wayland compositor")?;
     let (globals, event_queue) =
         registry_queue_init(&connection).context("read Wayland registry")?;
@@ -1146,6 +1334,17 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         .into_iter()
         .map(|pane| PaneView::from_inactive_options(pane, SCALE_DENOMINATOR))
         .collect::<Result<Vec<_>>>()?;
+    let initial_identity = options
+        .initial_dojo
+        .take()
+        .unwrap_or_else(|| WindowDojoIdentity {
+            lair_id: LairId::new(),
+            dojo_id: DojoId::new(),
+            lair_name: String::new(),
+            dojo_name: String::new(),
+        });
+    let initial_lair_id = initial_identity.lair_id;
+    let initial_dojo_id = initial_identity.dojo_id;
     let background_effect_manager = globals
         .bind::<ExtBackgroundEffectManagerV1, _, _>(&queue_handle, 1..=1, ())
         .ok();
@@ -1221,6 +1420,14 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         },
         inactive_panes,
         layout: options.layout,
+        tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
+        active_identity: initial_identity,
+        managed_tabs,
+        tab_strip_layout: None,
+        tab_strip_pressed: None,
+        tab_label_cache: HashMap::new(),
+        tab_close_text: None,
+        tab_new_text: None,
         topology_updates: options.topology_updates,
         topology_commands: options.topology_commands,
         signoff,
@@ -2266,7 +2473,171 @@ struct CachedFrameTitle {
     source: String,
     maximum_cells: u32,
     scale_120: u32,
+    bold: bool,
     text: ChromeText,
+}
+
+struct DojoTabView {
+    identity: WindowDojoIdentity,
+    pane: PaneView,
+    inactive_panes: Vec<PaneView>,
+    layout: Option<LayoutNode>,
+    pending_exited_splints: HashSet<SplintId>,
+    frame_titles: HashMap<SplintId, CachedFrameTitle>,
+    dirty_inactive_panes: HashSet<SplintId>,
+}
+
+impl DojoTabView {
+    fn focused_splint(&self) -> Option<SplintId> {
+        self.pane
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.splint_id)
+    }
+
+    fn focus_splint(&mut self, splint_id: SplintId) -> bool {
+        if self.focused_splint() == Some(splint_id) {
+            return true;
+        }
+        let Some(index) = self.inactive_panes.iter().position(|pane| {
+            pane.snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.splint_id == splint_id)
+        }) else {
+            return false;
+        };
+        std::mem::swap(&mut self.pane, &mut self.inactive_panes[index]);
+        true
+    }
+
+    fn apply_topology(
+        &mut self,
+        layout: LayoutNode,
+        added: Vec<WindowPaneOptions>,
+        removed: Vec<SplintId>,
+        focused: Option<SplintId>,
+        theme: ResolvedTheme,
+        scale_120: u32,
+    ) -> Result<()> {
+        let removed = removed.into_iter().collect::<HashSet<_>>();
+        let mut prepared = Vec::with_capacity(added.len());
+        for mut pane in added {
+            apply_theme(&mut pane.snapshot, theme);
+            prepared.push(PaneView::from_inactive_options(pane, scale_120)?);
+        }
+        let prepared_ids = prepared
+            .iter()
+            .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id));
+        let mut identities = std::iter::once(&self.pane)
+            .chain(self.inactive_panes.iter())
+            .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id))
+            .filter(|splint_id| !removed.contains(splint_id))
+            .chain(prepared_ids)
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            identities.len() == layout.splint_count()
+                && identities
+                    .iter()
+                    .all(|splint_id| layout.find_splint(*splint_id).is_some()),
+            "topology update pane identities do not match its layout"
+        );
+        let next_focus = focused.or_else(|| {
+            self.focused_splint()
+                .filter(|splint_id| !removed.contains(splint_id))
+        });
+        let next_focus = next_focus.unwrap_or_else(|| layout.first_splint_id());
+        anyhow::ensure!(
+            identities.remove(&next_focus),
+            "topology update focus is absent"
+        );
+
+        self.pending_exited_splints
+            .retain(|splint_id| !removed.contains(splint_id));
+        self.inactive_panes.extend(prepared);
+        let focused = self.focus_splint(next_focus);
+        debug_assert!(focused);
+        self.inactive_panes.retain(|pane| {
+            pane.snapshot
+                .as_ref()
+                .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
+        });
+        self.layout = Some(layout);
+        Ok(())
+    }
+
+    fn drain_hidden_updates(&mut self, waker: &Waker, theme: ResolvedTheme) -> Result<()> {
+        for pane in std::iter::once(&mut self.pane).chain(self.inactive_panes.iter_mut()) {
+            let mut pending = Vec::new();
+            let mut disconnected = false;
+            if let Some(updates) = &mut pane.updates {
+                let drained = drain_receiver(updates, waker);
+                pending = drained.items;
+                disconnected = drained.disconnected;
+            }
+            let terminal_notice = pane_stream_has_terminal_notice(&pending);
+            if disconnected && !terminal_notice {
+                anyhow::bail!("hidden pane update stream disconnected unexpectedly");
+            }
+            for update in pending {
+                if let WindowUpdate::Exited { splint_id } = update {
+                    self.pending_exited_splints.insert(splint_id);
+                    let impact =
+                        pane.apply_background_update(WindowUpdate::Exited { splint_id }, theme)?;
+                    if impact.frame_dirty {
+                        self.dirty_inactive_panes.insert(splint_id);
+                    }
+                    continue;
+                }
+                if matches!(update, WindowUpdate::Theme(_)) {
+                    continue;
+                }
+                let splint_id = pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id);
+                let impact = pane.apply_background_update(update, theme)?;
+                if impact.frame_dirty
+                    && let Some(splint_id) = splint_id
+                {
+                    self.dirty_inactive_panes.insert(splint_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn from_open(
+        identity: WindowDojoIdentity,
+        layout: LayoutNode,
+        mut panes: Vec<WindowPaneOptions>,
+        focused: SplintId,
+        theme: ResolvedTheme,
+        scale_120: u32,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            layout.find_splint(focused).is_some() && layout.splint_count() == panes.len(),
+            "opened tab panes do not match its layout"
+        );
+        for pane in &mut panes {
+            apply_theme(&mut pane.snapshot, theme);
+        }
+        let active_index = panes
+            .iter()
+            .position(|pane| pane.snapshot.splint_id == focused)
+            .context("opened tab focus is absent from its panes")?;
+        let active = panes.remove(active_index);
+        let pane = PaneView::from_options(active, scale_120)?;
+        let inactive_panes = panes
+            .into_iter()
+            .map(|pane| PaneView::from_inactive_options(pane, scale_120))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            identity,
+            pane,
+            inactive_panes,
+            layout: Some(layout),
+            pending_exited_splints: HashSet::new(),
+            frame_titles: HashMap::new(),
+            dirty_inactive_panes: HashSet::new(),
+        })
+    }
 }
 
 #[allow(
@@ -2311,6 +2682,14 @@ struct App {
     pane: PaneView,
     inactive_panes: Vec<PaneView>,
     layout: Option<LayoutNode>,
+    tabs: WindowTabSet<Option<DojoTabView>>,
+    active_identity: WindowDojoIdentity,
+    managed_tabs: bool,
+    tab_strip_layout: Option<TabStripLayout>,
+    tab_strip_pressed: Option<(u32, TabHitTarget)>,
+    tab_label_cache: HashMap<DojoId, CachedFrameTitle>,
+    tab_close_text: Option<(u32, ChromeText)>,
+    tab_new_text: Option<(u32, ChromeText)>,
     topology_updates: Option<Receiver<WindowTopologyUpdate>>,
     topology_commands: Option<Sender<WindowTopologyCommand>>,
     signoff: Option<SignoffProbe>,
@@ -3135,23 +3514,20 @@ fn pointer_axis_focus_target(
         .filter(|target| Some(*target) != focused_pane)
 }
 
-fn history_return_to_live_hit(
-    position: (f64, f64),
-    logical_width: u32,
-    logical_height: u32,
-    detached: bool,
-) -> bool {
+fn history_return_to_live_hit(position: (f64, f64), content: Rect, detached: bool) -> bool {
     if !detached || !position.0.is_finite() || !position.1.is_finite() {
         return false;
     }
-    let Some(layout) = history_overlay_layout(logical_width, logical_height, 120) else {
+    let Some(layout) = history_overlay_layout(content.width, content.height, 120) else {
         return false;
     };
     let (x, y, width, height) = layout.return_to_live;
-    position.0 >= f64::from(x)
-        && position.1 >= f64::from(y)
-        && position.0 < f64::from(x) + f64::from(width)
-        && position.1 < f64::from(y) + f64::from(height)
+    let x = f64::from(content.x) + f64::from(x);
+    let y = f64::from(content.y) + f64::from(y);
+    position.0 >= x
+        && position.1 >= y
+        && position.0 < x + f64::from(width)
+        && position.1 < y + f64::from(height)
 }
 
 fn mouse_button_code(button: u32) -> Option<u8> {
@@ -3470,6 +3846,46 @@ fn session_picker_shortcut_action(
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabShortcutAction {
+    Next,
+    Previous,
+    NewDojo,
+    Close,
+    Consume,
+}
+
+fn tab_shortcut_action(
+    keysym: Keysym,
+    modifiers: Modifiers,
+    repeat: bool,
+    managed_tabs: bool,
+) -> Option<TabShortcutAction> {
+    if !managed_tabs || !modifiers.ctrl || modifiers.alt || modifiers.logo {
+        return None;
+    }
+    let action = match keysym {
+        Keysym::Tab if !modifiers.shift => TabShortcutAction::Next,
+        Keysym::Tab | Keysym::ISO_Left_Tab if modifiers.shift => TabShortcutAction::Previous,
+        Keysym::d | Keysym::D if modifiers.shift => TabShortcutAction::NewDojo,
+        Keysym::q | Keysym::Q if modifiers.shift => TabShortcutAction::Close,
+        _ => return None,
+    };
+    Some(if repeat {
+        TabShortcutAction::Consume
+    } else {
+        action
+    })
+}
+
+const fn tab_action_dispatch_allowed(blocking_states: [bool; 5]) -> bool {
+    !(blocking_states[0]
+        || blocking_states[1]
+        || blocking_states[2]
+        || blocking_states[3]
+        || blocking_states[4])
+}
+
 fn pane_topology_action(keysym: Keysym, modifiers: Modifiers) -> Option<PaneTopologyAction> {
     if !modifiers.ctrl || !modifiers.shift || modifiers.alt || modifiers.logo {
         return None;
@@ -3491,7 +3907,6 @@ fn pane_topology_action(keysym: Keysym, modifiers: Modifiers) -> Option<PaneTopo
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PaneFocusAction {
     Direction(FocusDirection),
-    Next { reverse: bool },
 }
 
 fn pane_focus_action(keysym: Keysym, modifiers: Modifiers) -> Option<PaneFocusAction> {
@@ -3503,8 +3918,6 @@ fn pane_focus_action(keysym: Keysym, modifiers: Modifiers) -> Option<PaneFocusAc
         Keysym::Right => Some(PaneFocusAction::Direction(FocusDirection::Right)),
         Keysym::Up => Some(PaneFocusAction::Direction(FocusDirection::Up)),
         Keysym::Down => Some(PaneFocusAction::Direction(FocusDirection::Down)),
-        Keysym::Tab => Some(PaneFocusAction::Next { reverse: false }),
-        Keysym::ISO_Left_Tab => Some(PaneFocusAction::Next { reverse: true }),
         _ => None,
     }
 }
@@ -4103,6 +4516,323 @@ fn background_effect_trace_line(action: EffectAction) -> Option<String> {
 }
 
 impl App {
+    fn content_rect(&self) -> Rect {
+        let y = if self.managed_tabs {
+            TAB_STRIP_LOGICAL_HEIGHT.min(self.logical_height)
+        } else {
+            0
+        };
+        Rect {
+            x: 0,
+            y,
+            width: self.logical_width,
+            height: self.logical_height.saturating_sub(y),
+        }
+    }
+
+    fn tab_identity(&self, dojo_id: DojoId) -> Option<&WindowDojoIdentity> {
+        if dojo_id == self.active_dojo_id() {
+            return Some(&self.active_identity);
+        }
+        self.tabs
+            .get(dojo_id)
+            .and_then(|tab| tab.value.as_ref())
+            .map(|view| &view.identity)
+    }
+
+    fn current_tab_strip_layout(&self) -> Option<TabStripLayout> {
+        if !self.managed_tabs {
+            return None;
+        }
+        let ids = self.tabs.iter().map(|tab| tab.dojo_id).collect::<Vec<_>>();
+        let active = ids
+            .iter()
+            .position(|dojo_id| *dojo_id == self.active_dojo_id())?;
+        tab_strip_layout(self.logical_width, &ids, active)
+    }
+
+    fn tab_label(&self, dojo_id: DojoId) -> String {
+        let Some(identity) = self.tab_identity(dojo_id) else {
+            return "Untitled Dojo".to_owned();
+        };
+        let dojo_label = sanitized_tab_label(&identity.dojo_name, 128, 48);
+        let ambiguous = self.tabs.iter().filter(|tab| {
+            self.tab_identity(tab.dojo_id).is_some_and(|candidate| {
+                sanitized_tab_label(&candidate.dojo_name, 128, 48) == dojo_label
+            })
+        });
+        if ambiguous.count() > 1 {
+            sanitized_tab_label(
+                &format!("{} / {}", identity.lair_name, identity.dojo_name),
+                128,
+                48,
+            )
+        } else {
+            dojo_label
+        }
+    }
+
+    fn prepare_tab_strip_text(&mut self, layout: &TabStripLayout) -> Result<()> {
+        let visible = layout
+            .tabs
+            .iter()
+            .map(|tab| tab.dojo_id)
+            .collect::<HashSet<_>>();
+        self.tab_label_cache
+            .retain(|dojo_id, _| visible.contains(dojo_id));
+        for tab in &layout.tabs {
+            let source = self.tab_label(tab.dojo_id);
+            let maximum_cells = (tab.label_rect.width / 8).max(1);
+            let active = tab.dojo_id == self.active_dojo_id();
+            let current = self
+                .tab_label_cache
+                .get(&tab.dojo_id)
+                .is_some_and(|cached| {
+                    cached.source == source
+                        && cached.maximum_cells == maximum_cells
+                        && cached.scale_120 == self.scale_120
+                        && cached.bold == active
+                });
+            if !current {
+                let style = if active {
+                    ChromeTextStyle::Bold
+                } else {
+                    ChromeTextStyle::Regular
+                };
+                self.tab_label_cache.insert(
+                    tab.dojo_id,
+                    CachedFrameTitle {
+                        text: ChromeText::load_styled(&source, self.scale_120, style)?,
+                        source,
+                        maximum_cells,
+                        scale_120: self.scale_120,
+                        bold: active,
+                    },
+                );
+            }
+        }
+        if self
+            .tab_close_text
+            .as_ref()
+            .is_none_or(|(scale, _)| *scale != self.scale_120)
+        {
+            self.tab_close_text = Some((self.scale_120, ChromeText::load("×", self.scale_120)?));
+            self.tab_new_text = Some((self.scale_120, ChromeText::load("+", self.scale_120)?));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_tab_strip(
+        canvas: &mut [u8],
+        width: u32,
+        height: u32,
+        layout: &TabStripLayout,
+        scale_120: u32,
+        theme: ResolvedTheme,
+        active_dojo: DojoId,
+        labels: &HashMap<DojoId, CachedFrameTitle>,
+        close_text: Option<&ChromeText>,
+        new_text: Option<&ChromeText>,
+    ) -> Result<()> {
+        let rgba = |color: u32| {
+            [
+                u8::try_from((color >> 16) & 0xff).unwrap_or(0),
+                u8::try_from((color >> 8) & 0xff).unwrap_or(0),
+                u8::try_from(color & 0xff).unwrap_or(0),
+                u8::MAX,
+            ]
+        };
+        let position = |value| i32::try_from(value).unwrap_or(i32::MAX);
+        let strip = Self::buffer_rect(layout.rect, scale_120)?;
+        fill_rect(
+            canvas,
+            width,
+            height,
+            (
+                position(strip.x),
+                position(strip.y),
+                strip.width,
+                strip.height,
+            ),
+            rgba(theme.background),
+        );
+        for tab in &layout.tabs {
+            let rect = Self::buffer_rect(tab.rect, scale_120)?;
+            if tab.dojo_id == active_dojo {
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (position(rect.x), position(rect.y), rect.width, rect.height),
+                    rgba(theme.selection),
+                );
+                let underline = logical_extent_to_buffer(3, scale_120)?.max(1);
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (
+                        position(rect.x),
+                        position(rect.y.saturating_add(rect.height.saturating_sub(underline))),
+                        rect.width,
+                        underline,
+                    ),
+                    rgba(theme.ui_accent),
+                );
+            }
+            let label_rect = Self::buffer_rect(tab.label_rect, scale_120)?;
+            if let Some(label) = labels.get(&tab.dojo_id) {
+                let y = label_rect.y.saturating_add(
+                    label_rect.height.saturating_sub(label.text.pixel_height()) / 2,
+                );
+                label.text.paint(
+                    canvas,
+                    width,
+                    height,
+                    (label_rect.x, y),
+                    label_rect,
+                    theme.foreground,
+                );
+            }
+            let close = Self::buffer_rect(tab.close_rect, scale_120)?;
+            if let Some(text) = close_text {
+                text.paint(
+                    canvas,
+                    width,
+                    height,
+                    (
+                        close
+                            .x
+                            .saturating_add(close.width.saturating_sub(text.pixel_width()) / 2),
+                        close
+                            .y
+                            .saturating_add(close.height.saturating_sub(text.pixel_height()) / 2),
+                    ),
+                    close,
+                    theme.foreground,
+                );
+            }
+        }
+        let new_rect = Self::buffer_rect(layout.new_rect, scale_120)?;
+        if let Some(text) = new_text {
+            text.paint(
+                canvas,
+                width,
+                height,
+                (
+                    new_rect
+                        .x
+                        .saturating_add(new_rect.width.saturating_sub(text.pixel_width()) / 2),
+                    new_rect
+                        .y
+                        .saturating_add(new_rect.height.saturating_sub(text.pixel_height()) / 2),
+                ),
+                new_rect,
+                theme.ui_accent,
+            );
+        }
+        Ok(())
+    }
+
+    fn active_dojo_id(&self) -> DojoId {
+        self.active_identity.dojo_id
+    }
+
+    fn release_tab_controllers(view: &mut DojoTabView) -> Result<()> {
+        for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
+            if pane.controller_active {
+                let commands = pane
+                    .commands
+                    .as_ref()
+                    .context("controlled pane has no command channel")?;
+                try_window_command(commands, WindowCommand::ReleaseControl)?;
+                pane.controller_active = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn activate_tab(&mut self, dojo_id: DojoId) -> Result<bool> {
+        let started = Instant::now();
+        let previous_id = self.active_dojo_id();
+        if previous_id == dojo_id {
+            return Ok(false);
+        }
+        let next = self
+            .tabs
+            .get_mut(dojo_id)
+            .and_then(|tab| tab.value.take())
+            .context("activated Dojo tab has no hidden frontend")?;
+        self.settle_terminal_presses_for_picker();
+        self.input_generation = self.input_generation.saturating_add(1);
+        if self.terminal_focus_reported {
+            self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
+            self.terminal_focus_reported = false;
+        }
+        for pane in std::iter::once(&mut self.pane).chain(self.inactive_panes.iter_mut()) {
+            if pane.controller_active {
+                let commands = pane
+                    .commands
+                    .as_ref()
+                    .context("controlled pane has no command channel")?;
+                try_window_command(commands, WindowCommand::ReleaseControl)?;
+                pane.controller_active = false;
+            }
+        }
+        let previous = DojoTabView {
+            identity: std::mem::replace(&mut self.active_identity, next.identity),
+            pane: std::mem::replace(&mut self.pane, next.pane),
+            inactive_panes: std::mem::replace(&mut self.inactive_panes, next.inactive_panes),
+            layout: std::mem::replace(&mut self.layout, next.layout),
+            pending_exited_splints: std::mem::replace(
+                &mut self.pending_exited_splints,
+                next.pending_exited_splints,
+            ),
+            frame_titles: std::mem::replace(&mut self.frame_titles, next.frame_titles),
+            dirty_inactive_panes: std::mem::replace(
+                &mut self.dirty_inactive_panes,
+                next.dirty_inactive_panes,
+            ),
+        };
+        self.tabs
+            .get_mut(previous_id)
+            .context("previous Dojo tab disappeared")?
+            .value = Some(previous);
+        anyhow::ensure!(self.tabs.activate(dojo_id), "activated Dojo tab is absent");
+        rebuild_pane_scaled_frame(&mut self.pane, self.scale_120)?;
+        for pane in &mut self.inactive_panes {
+            rebuild_pane_scaled_frame(pane, self.scale_120)?;
+        }
+        self.dirty_inactive_panes.clear();
+        self.restored_frontend_needs_resize = true;
+        self.cursor_blink_visible = true;
+        self.last_cursor_blink = Instant::now();
+        self.full_redraw = true;
+        self.update_window_title();
+        self.clear_ime_preedit();
+        self.update_ime_cursor_rectangle();
+        if self.keyboard_focused && self.input_modes().focus_reporting {
+            self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
+            self.terminal_focus_reported = true;
+        }
+        if perf_trace_enabled() {
+            emit_perf_trace(
+                "splinterm",
+                "tab_switch",
+                PerfTraceEvent {
+                    splint_id: self.focused_splint(),
+                    duration_ns: Some(
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    ),
+                    count: Some(u64::try_from(self.tabs.len()).unwrap_or(u64::MAX)),
+                    ..PerfTraceEvent::default()
+                },
+            );
+        }
+        Ok(true)
+    }
+
     fn trace_background_effect_action(&self, action: EffectAction) {
         if self.background_effect_trace
             && let Some(line) = background_effect_trace_line(action)
@@ -4286,29 +5016,6 @@ impl App {
             .is_some_and(|next| self.focus_splint(next))
     }
 
-    fn focus_next(&mut self, reverse: bool) -> bool {
-        let (Some(layout), Some(current)) = (&self.layout, self.focused_splint()) else {
-            return false;
-        };
-        let Ok(layout) = PaneLayout::compute(
-            layout,
-            Rect {
-                x: 0,
-                y: 0,
-                width: 1_000_000,
-                height: 1_000_000,
-            },
-            1,
-            1,
-            1,
-        ) else {
-            return false;
-        };
-        layout
-            .next(current, reverse)
-            .is_some_and(|next| self.focus_splint(next))
-    }
-
     fn prepare_frame_titles(
         &mut self,
         pane_layout: Option<&PaneLayout>,
@@ -4359,6 +5066,7 @@ impl App {
                         source,
                         maximum_cells,
                         scale_120: self.scale_120,
+                        bold: false,
                     },
                 );
             }
@@ -4396,12 +5104,7 @@ impl App {
                     .context("minimum pane height overflow")?;
                 PaneLayout::compute_with_chrome(
                     layout,
-                    Rect {
-                        x: 0,
-                        y: 0,
-                        width: self.logical_width,
-                        height: self.logical_height,
-                    },
+                    self.content_rect(),
                     chrome,
                     minimum_width,
                     minimum_height,
@@ -4921,8 +5624,14 @@ impl App {
                 .flatten()
                 .and_then(|layout| layout.rect(splint_id))
         });
+        let content = self.content_rect();
         let (logical_width, logical_height, x, y) = pane_rect.map_or(
-            (self.logical_width, self.logical_height, 0.0, 0.0),
+            (
+                content.width,
+                content.height,
+                f64::from(content.x),
+                f64::from(content.y),
+            ),
             |rect| {
                 (
                     rect.width,
@@ -5275,12 +5984,7 @@ impl App {
                     .flatten()
                     .and_then(|layout| layout.rect(splint_id))
             })
-            .unwrap_or(Rect {
-                x: 0,
-                y: 0,
-                width: self.logical_width,
-                height: self.logical_height,
-            })
+            .unwrap_or_else(|| self.content_rect())
     }
 
     fn ime_cursor_rectangle(&self) -> Option<(i32, i32, i32, i32)> {
@@ -5427,6 +6131,9 @@ impl App {
         self.font_zoom_steps = next;
         self.renderer_generation = self.renderer_generation.saturating_add(1);
         self.session_picker_text_cache.clear();
+        self.tab_label_cache.clear();
+        self.tab_close_text = None;
+        self.tab_new_text = None;
         self.session_picker_layout = None;
         if !raster_changed {
             if self.inline_picker_open() && self.configured {
@@ -5489,6 +6196,62 @@ impl App {
         }
         if let Err(error) = self.refresh_session_picker() {
             self.fail(error);
+        }
+    }
+
+    fn handle_tab_strip_pointer(&mut self, event: &PointerEvent) -> Result<bool> {
+        let Some(layout) = self.tab_strip_layout.as_ref() else {
+            return Ok(false);
+        };
+        let target = tab_strip_hit_test(layout, event.position);
+        let in_strip = rect_contains(layout.rect, event.position);
+        match event.kind {
+            PointerEventKind::Press { button, .. }
+                if in_strip && matches!(button, BTN_LEFT | BTN_MIDDLE) =>
+            {
+                if let Some(target) = target {
+                    self.tab_strip_pressed = Some((button, target));
+                }
+                self.pane.pointer_cell = None;
+                self.pane.hovered_url = None;
+                Ok(true)
+            }
+            PointerEventKind::Release { button, .. } => {
+                let Some((pressed_button, _)) = self.tab_strip_pressed else {
+                    return Ok(false);
+                };
+                if pressed_button != button {
+                    return Ok(false);
+                }
+                let (_, pressed_target) = self
+                    .tab_strip_pressed
+                    .take()
+                    .expect("matching chrome press remains present");
+                if Some(pressed_target) == target {
+                    let command = match (button, pressed_target) {
+                        (BTN_LEFT, TabHitTarget::Activate(dojo_id)) => {
+                            Some(WindowTopologyCommand::ActivateTab { dojo_id })
+                        }
+                        (BTN_LEFT | BTN_MIDDLE, TabHitTarget::Close(dojo_id))
+                        | (BTN_MIDDLE, TabHitTarget::Activate(dojo_id)) => {
+                            Some(WindowTopologyCommand::CloseTab { dojo_id })
+                        }
+                        (BTN_LEFT, TabHitTarget::New) => Some(WindowTopologyCommand::NewDojo {
+                            lair_id: self.active_identity.lair_id,
+                        }),
+                        _ => None,
+                    };
+                    if let Some(command) = command {
+                        self.send_topology_command(command)?;
+                    }
+                }
+                Ok(true)
+            }
+            PointerEventKind::Leave { .. } => {
+                self.tab_strip_pressed = None;
+                Ok(in_strip)
+            }
+            _ => Ok(in_strip || self.tab_strip_pressed.is_some()),
         }
     }
 
@@ -5576,14 +6339,14 @@ impl App {
     fn decide_session_picker(&mut self, decision: SessionPickerDecision) {
         if self.inline_picker_open() {
             let command = match decision {
-                SessionPickerDecision::New => WindowTopologyCommand::NewDojo,
+                SessionPickerDecision::New => WindowTopologyCommand::NewLair,
                 SessionPickerDecision::Open(index) => {
                     let Some((lair_id, dojo_id)) = self.session_picker_targets.get(index).copied()
                     else {
                         self.fail(anyhow::anyhow!("session picker selected an invalid target"));
                         return;
                     };
-                    WindowTopologyCommand::SwitchDojo { lair_id, dojo_id }
+                    WindowTopologyCommand::OpenDojo { lair_id, dojo_id }
                 }
             };
             self.close_inline_session_picker();
@@ -5905,8 +6668,9 @@ impl App {
         let active_rect = self
             .focused_splint()
             .and_then(|splint_id| layout.as_ref().and_then(|layout| layout.rect(splint_id)));
+        let content = self.content_rect();
         let (active_width, active_height) = active_rect
-            .map_or((self.logical_width, self.logical_height), |rect| {
+            .map_or((content.width, content.height), |rect| {
                 (rect.width, rect.height)
             });
         let controller_active = self.pane.controller_active;
@@ -5992,48 +6756,26 @@ impl App {
         added: Vec<WindowPaneOptions>,
         removed: Vec<SplintId>,
         focused: Option<SplintId>,
-        switched: bool,
     ) -> Result<()> {
         anyhow::ensure!(
             !self.inline_picker_open(),
             "topology replacement arrived while the session picker was open"
         );
         let removed = removed.into_iter().collect::<HashSet<_>>();
-        self.pending_exited_splints
-            .retain(|splint_id| !removed.contains(splint_id));
+        let mut prepared = Vec::with_capacity(added.len());
         for mut pane in added {
             apply_theme(&mut pane.snapshot, self.theme);
-            self.inactive_panes
-                .push(PaneView::from_inactive_options(pane, self.scale_120)?);
+            prepared.push(PaneView::from_inactive_options(pane, self.scale_120)?);
         }
-        if let Some(focused) = focused {
-            anyhow::ensure!(
-                layout.find_splint(focused).is_some() && self.focus_splint(focused),
-                "topology update focus is absent"
-            );
-        } else if self
-            .focused_splint()
-            .is_some_and(|splint_id| removed.contains(&splint_id))
-        {
-            let fallback = layout.first_splint_id();
-            anyhow::ensure!(
-                self.focus_splint(fallback),
-                "topology focus fallback is absent"
-            );
-        }
-        self.inactive_panes.retain(|pane| {
-            pane.snapshot
-                .as_ref()
-                .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
-        });
-        let mut identities = self
-            .inactive_panes
+        let prepared_ids = prepared
             .iter()
+            .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id));
+        let mut identities = std::iter::once(&self.pane)
+            .chain(self.inactive_panes.iter())
             .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id))
+            .filter(|splint_id| !removed.contains(splint_id))
+            .chain(prepared_ids)
             .collect::<HashSet<_>>();
-        if let Some(focused) = self.focused_splint() {
-            identities.insert(focused);
-        }
         anyhow::ensure!(
             identities.len() == layout.splint_count()
                 && identities
@@ -6041,16 +6783,55 @@ impl App {
                     .all(|splint_id| layout.find_splint(*splint_id).is_some()),
             "topology update pane identities do not match its layout"
         );
+        let next_focus = focused
+            .or_else(|| {
+                self.focused_splint()
+                    .filter(|splint_id| !removed.contains(splint_id))
+            })
+            .unwrap_or_else(|| layout.first_splint_id());
+        anyhow::ensure!(
+            identities.remove(&next_focus),
+            "topology update focus is absent"
+        );
+
+        self.pending_exited_splints
+            .retain(|splint_id| !removed.contains(splint_id));
+        self.inactive_panes.extend(prepared);
+        let focused = self.focus_splint(next_focus);
+        debug_assert!(focused);
+        self.inactive_panes.retain(|pane| {
+            pane.snapshot
+                .as_ref()
+                .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
+        });
         self.layout = Some(layout);
-        if switched {
-            self.session_switch_pending = false;
-            self.frame_titles.clear();
-            self.update_window_title();
-        }
         self.full_redraw = true;
         Ok(())
     }
 
+    fn apply_targeted_topology_replacement(
+        &mut self,
+        dojo_id: DojoId,
+        layout: LayoutNode,
+        added: Vec<WindowPaneOptions>,
+        removed: Vec<SplintId>,
+        focused: Option<SplintId>,
+    ) -> Result<bool> {
+        if dojo_id == self.active_dojo_id() {
+            self.apply_topology_replacement(layout, added, removed, focused)?;
+            return Ok(true);
+        }
+        let theme = self.theme;
+        let scale_120 = self.scale_120;
+        self.tabs
+            .get_mut(dojo_id)
+            .and_then(|tab| tab.value.as_mut())
+            .context("updated Dojo tab has no hidden frontend")?
+            .apply_topology(layout, added, removed, focused, theme, scale_120)?;
+        Ok(false)
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn apply_topology_updates(&mut self) -> Result<(bool, Option<ThemeUpdate>)> {
         let mut pending = VecDeque::new();
         if let Some(updates) = &mut self.topology_updates {
@@ -6068,21 +6849,45 @@ impl App {
         let mut changed = false;
         let mut next_theme = None;
         while let Some(update) = pending.pop_front() {
+            let defer_for_picker = self.inline_picker_open()
+                && matches!(
+                    &update,
+                    WindowTopologyUpdate::Apply { .. }
+                        | WindowTopologyUpdate::OpenTab { .. }
+                        | WindowTopologyUpdate::ActivateTab { .. }
+                        | WindowTopologyUpdate::RemoveTab { .. }
+                        | WindowTopologyUpdate::UpdateIdentity(_)
+                );
+            if defer_for_picker {
+                if self.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES {
+                    self.deferred_topology_updates.push(update);
+                    continue;
+                }
+                self.close_inline_session_picker();
+                eprintln!("splinterm session picker: cancelled to apply queued topology updates");
+                let mut replay =
+                    VecDeque::from(std::mem::take(&mut self.deferred_topology_updates));
+                replay.push_back(update);
+                replay.append(&mut pending);
+                pending = replay;
+                changed = true;
+                continue;
+            }
             match update {
                 WindowTopologyUpdate::Apply {
+                    dojo_id,
                     layout,
                     added,
                     removed,
                     focused,
-                    switched,
                 } => {
                     if self.inline_picker_open() {
                         let update = WindowTopologyUpdate::Apply {
+                            dojo_id,
                             layout,
                             added,
                             removed,
                             focused,
-                            switched,
                         };
                         if self.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES {
                             self.deferred_topology_updates.push(update);
@@ -6099,9 +6904,109 @@ impl App {
                             changed = true;
                         }
                     } else {
-                        self.apply_topology_replacement(layout, added, removed, focused, switched)?;
-                        changed = true;
+                        changed |= self.apply_targeted_topology_replacement(
+                            dojo_id, layout, added, removed, focused,
+                        )?;
                     }
+                }
+                WindowTopologyUpdate::OpenTab {
+                    identity,
+                    layout,
+                    panes,
+                    focused,
+                    acknowledged,
+                } => {
+                    let dojo_id = identity.dojo_id;
+                    let lair_id = identity.lair_id;
+                    let view = match DojoTabView::from_open(
+                        identity,
+                        layout,
+                        panes,
+                        focused,
+                        self.theme,
+                        self.scale_120,
+                    ) {
+                        Ok(view) => view,
+                        Err(error) => {
+                            self.session_switch_pending = false;
+                            let message = format!("{error:#}");
+                            let _ = acknowledged.send(Err(message.clone()));
+                            eprintln!("splinterm Dojo tab {dojo_id}: {message}");
+                            continue;
+                        }
+                    };
+                    let previous_id = self.active_dojo_id();
+                    self.tabs
+                        .open_or_activate(DojoTab::new(lair_id, dojo_id, Some(view)))
+                        .map_err(anyhow::Error::from)?;
+                    anyhow::ensure!(
+                        self.tabs.activate(previous_id),
+                        "active Dojo tab disappeared while opening another"
+                    );
+                    self.session_switch_pending = false;
+                    changed |= self.activate_tab(dojo_id)?;
+                    let _ = acknowledged.send(Ok(()));
+                }
+                WindowTopologyUpdate::ActivateTab { dojo_id } => {
+                    self.session_switch_pending = false;
+                    changed |= self.activate_tab(dojo_id)?;
+                }
+                WindowTopologyUpdate::RemoveTab {
+                    dojo_id,
+                    acknowledged,
+                } => {
+                    let was_active = self.active_dojo_id() == dojo_id;
+                    if was_active {
+                        if let Some(selected) = self.tabs.selection_after_close(dojo_id) {
+                            changed |= self.activate_tab(selected)?;
+                        } else {
+                            for pane in std::iter::once(&mut self.pane)
+                                .chain(self.inactive_panes.iter_mut())
+                            {
+                                if pane.controller_active {
+                                    let commands = pane
+                                        .commands
+                                        .as_ref()
+                                        .context("controlled pane has no command channel")?;
+                                    try_window_command(commands, WindowCommand::ReleaseControl)?;
+                                    pane.controller_active = false;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(mut removed) = self.tabs.close(dojo_id) {
+                        if let Some(view) = removed.value.as_mut() {
+                            Self::release_tab_controllers(view)?;
+                        }
+                        if self.tabs.is_empty() {
+                            self.exit = true;
+                        }
+                    }
+                    let _ = acknowledged.send(());
+                }
+                WindowTopologyUpdate::UpdateIdentity(identity) => {
+                    let dojo_id = identity.dojo_id;
+                    if dojo_id == self.active_dojo_id() {
+                        self.active_identity = identity;
+                    } else if let Some(view) = self
+                        .tabs
+                        .get_mut(dojo_id)
+                        .and_then(|tab| tab.value.as_mut())
+                    {
+                        view.identity = identity;
+                    }
+                    self.tab_label_cache.clear();
+                    self.full_redraw = true;
+                    changed = true;
+                }
+                WindowTopologyUpdate::TabFailed { dojo_id, message } => {
+                    self.close_inline_session_picker();
+                    self.session_picker_requested = false;
+                    self.session_switch_pending = false;
+                    eprintln!(
+                        "splinterm Dojo tab{}: {message}",
+                        dojo_id.map_or_else(String::new, |id| format!(" {id}"))
+                    );
                 }
                 WindowTopologyUpdate::ShowSessionPicker { items, targets } => {
                     if self.session_picker_requested
@@ -6119,9 +7024,6 @@ impl App {
                     self.session_switch_pending = false;
                     eprintln!("splinterm session picker: {message}");
                 }
-                WindowTopologyUpdate::SessionSwitchComplete => {
-                    self.session_switch_pending = false;
-                }
                 WindowTopologyUpdate::Theme(update) => {
                     if self.inline_picker_open() {
                         retain_newest_theme(&mut self.deferred_picker_theme, update);
@@ -6138,9 +7040,9 @@ impl App {
         Ok((changed, next_theme))
     }
 
-    fn apply_resolved_theme(&mut self, update: ThemeUpdate) -> Result<ThemeUpdateImpact> {
+    fn apply_resolved_theme(&mut self, update: ThemeUpdate) -> ThemeUpdateImpact {
         if update.generation <= self.theme_generation {
-            return Ok(ThemeUpdateImpact::default());
+            return ThemeUpdateImpact::default();
         }
         self.theme_generation = update.generation;
         let theme = update.theme;
@@ -6152,7 +7054,7 @@ impl App {
         set_background_alpha(theme.background_alpha);
         self.theme = theme;
         if !impact.rebuild_pixels {
-            return Ok(impact);
+            return impact;
         }
         if let Some(snapshot) = self.pane.snapshot.as_mut() {
             apply_theme(snapshot, theme);
@@ -6162,8 +7064,21 @@ impl App {
                 apply_theme(snapshot, theme);
             }
         }
+        for tab in self.tabs.iter_mut() {
+            if let Some(view) = tab.value.as_mut() {
+                let mut dirty = Vec::new();
+                for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
+                    if let Some(snapshot) = pane.snapshot.as_mut() {
+                        apply_theme(snapshot, theme);
+                        dirty.push(snapshot.splint_id);
+                    }
+                }
+                view.dirty_inactive_panes.extend(dirty);
+            }
+        }
+        self.tab_label_cache.clear();
         self.full_redraw = true;
-        Ok(impact)
+        impact
     }
 
     fn apply_inactive_updates(&mut self) -> Result<InactiveUpdateDrain> {
@@ -6229,6 +7144,21 @@ impl App {
     )]
     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         let (topology_changed, topology_theme) = self.apply_topology_updates()?;
+        let theme = self.theme;
+        let waker = self.update_waker.clone();
+        let topology_commands = self.topology_commands.clone();
+        for tab in self.tabs.iter_mut() {
+            if let Some(view) = tab.value.as_mut() {
+                view.drain_hidden_updates(&waker, theme)?;
+                if let Some(commands) = &topology_commands {
+                    enqueue_pending_exited_splints(
+                        tab.dojo_id,
+                        &mut view.pending_exited_splints,
+                        commands,
+                    );
+                }
+            }
+        }
         if self.exit {
             return Ok(());
         }
@@ -6279,7 +7209,7 @@ impl App {
             if inline_picker_open {
                 retain_newest_theme(&mut self.deferred_picker_theme, update);
             } else {
-                let impact = self.apply_resolved_theme(update)?;
+                let impact = self.apply_resolved_theme(update);
                 visual_changed |= impact.rebuild_pixels;
                 focused_visual_changed |= impact.rebuild_pixels;
                 full_frame_reload |= impact.rebuild_pixels;
@@ -6595,7 +7525,7 @@ impl App {
                     if self.inline_picker_open() {
                         retain_newest_theme(&mut self.deferred_picker_theme, update);
                     } else {
-                        let impact = self.apply_resolved_theme(update)?;
+                        let impact = self.apply_resolved_theme(update);
                         visual_changed |= impact.rebuild_pixels;
                         focused_visual_changed |= impact.rebuild_pixels;
                         full_frame_reload |= impact.rebuild_pixels;
@@ -6640,7 +7570,11 @@ impl App {
         }
         if !self.pending_exited_splints.is_empty() {
             let topology_queue_open = self.topology_commands.as_ref().is_some_and(|commands| {
-                enqueue_pending_exited_splints(&mut self.pending_exited_splints, commands)
+                enqueue_pending_exited_splints(
+                    self.active_identity.dojo_id,
+                    &mut self.pending_exited_splints,
+                    commands,
+                )
             });
             if !topology_queue_open {
                 self.topology_commands = None;
@@ -6812,6 +7746,9 @@ impl App {
         let raster_changed = update_output_dpi(observation, self.scale_120)?;
         self.renderer_generation = self.renderer_generation.saturating_add(1);
         self.session_picker_text_cache.clear();
+        self.tab_label_cache.clear();
+        self.tab_close_text = None;
+        self.tab_new_text = None;
         self.session_picker_layout = None;
         if !raster_changed {
             if self.inline_picker_open() && self.configured {
@@ -6866,6 +7803,9 @@ impl App {
         self.scale_120 = scale_120;
         self.renderer_generation = self.renderer_generation.saturating_add(1);
         self.session_picker_text_cache.clear();
+        self.tab_label_cache.clear();
+        self.tab_close_text = None;
+        self.tab_new_text = None;
         self.session_picker_layout = None;
         if self.inline_picker_open() {
             self.restored_frontend_needs_resize = true;
@@ -7048,9 +7988,14 @@ impl App {
         let window_geometry = if let Some(rect) = active_rect {
             Self::pane_geometry(&self.pane, rect, self.scale_120)
         } else {
+            let content = self.content_rect();
             self.pane.snapshot_frame.as_ref().map_or(Ok(None), |frame| {
                 frame
-                    .window_geometry(self.logical_width, self.logical_height, self.scale_120)
+                    .window_geometry(content.width, content.height, self.scale_120)?
+                    .translated(
+                        logical_extent_to_buffer(content.x, self.scale_120)?,
+                        logical_extent_to_buffer(content.y, self.scale_120)?,
+                    )
                     .map(Some)
             })
         }
@@ -7061,7 +8006,7 @@ impl App {
                 Err(error)
             }
         })?;
-        let (width, height, stride) = if pane_layout.is_some() {
+        let (width, height, stride) = if pane_layout.is_some() || self.managed_tabs {
             buffer_dimensions(
                 self.logical_width.max(1),
                 self.logical_height.max(1),
@@ -7086,18 +8031,20 @@ impl App {
         });
         let inline_picker_open = self.inline_picker_open();
         let picker_layout = if inline_picker_open {
+            let content = self.content_rect();
             let picker = self
                 .session_picker
                 .as_mut()
                 .context("inline picker exists")?;
             let layout = session_picker_overlay_layout(
-                self.logical_width,
-                self.logical_height,
+                content.width,
+                content.height,
                 self.scale_120,
                 picker.items.len(),
                 picker.selected,
                 picker.visible_start,
-            );
+            )
+            .map(|layout| translate_picker_layout(layout, content));
             if let Some(layout) = &layout {
                 picker.visible_start = layout.visible_range.start;
             }
@@ -7105,6 +8052,13 @@ impl App {
         } else {
             None
         };
+        let tab_layout = self.current_tab_strip_layout();
+        let content_buffer_rect = Self::buffer_rect(self.content_rect(), self.scale_120)?;
+        let active_dojo = self.active_dojo_id();
+        if let Some(layout) = &tab_layout {
+            self.prepare_tab_strip_text(layout)?;
+        }
+        self.tab_strip_layout.clone_from(&tab_layout);
         let terminal_cursor_blink =
             presented_cursor_visible(inline_picker_open, self.cursor_blink_visible);
         let terminal_keyboard_focused = self.keyboard_focused && !inline_picker_open;
@@ -7366,6 +8320,7 @@ impl App {
                     canvas,
                     width,
                     height,
+                    content_buffer_rect,
                     self.scale_120,
                     status,
                     self.theme.background,
@@ -7399,6 +8354,21 @@ impl App {
         } else {
             anyhow::bail!("window has no prepared renderer content");
         }
+        if let Some(layout) = tab_layout.as_ref() {
+            Self::paint_tab_strip(
+                canvas,
+                width,
+                height,
+                layout,
+                self.scale_120,
+                self.theme,
+                active_dojo,
+                &self.tab_label_cache,
+                self.tab_close_text.as_ref().map(|(_, text)| text),
+                self.tab_new_text.as_ref().map(|(_, text)| text),
+            )?;
+            self.buffers[buffer_index].stale.mark_full();
+        }
         if let (Some(layout), Some(picker)) = (picker_layout.as_ref(), self.session_picker.as_ref())
         {
             let items = picker
@@ -7416,6 +8386,7 @@ impl App {
                 canvas,
                 width,
                 height,
+                content_buffer_rect,
                 self.scale_120,
                 self.renderer_generation,
                 layout,
@@ -7483,11 +8454,14 @@ impl App {
             }
         }
         if history_status != self.pane.painted_history_status {
-            if let Some(layout) = history_overlay_layout(width, height, self.scale_120) {
+            let content = Self::buffer_rect(self.content_rect(), self.scale_120)?;
+            if let Some(layout) =
+                history_overlay_layout(content.width, content.height, self.scale_120)
+            {
                 let (x, y, overlay_width, overlay_height) = layout.panel;
                 self.window.wl_surface().damage_buffer(
-                    x,
-                    y,
+                    x.saturating_add(i32::try_from(content.x).unwrap_or(i32::MAX)),
+                    y.saturating_add(i32::try_from(content.y).unwrap_or(i32::MAX)),
                     i32::try_from(overlay_width).unwrap_or(i32::MAX),
                     i32::try_from(overlay_height).unwrap_or(i32::MAX),
                 );
@@ -7929,6 +8903,7 @@ impl KeyboardHandler for App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn press_key(
         &mut self,
         _connection: &Connection,
@@ -7939,6 +8914,43 @@ impl KeyboardHandler for App {
     ) {
         if self.session_picker.is_some() {
             self.session_picker_consumed_keys.insert(event.raw_code);
+        }
+        if let Some(action) =
+            tab_shortcut_action(event.keysym, self.modifiers, false, self.managed_tabs)
+        {
+            self.session_picker_consumed_keys.insert(event.raw_code);
+            if !tab_action_dispatch_allowed([
+                self.session_picker.is_some(),
+                self.trusted_consent.is_some(),
+                self.session_picker_requested,
+                self.session_switch_pending,
+                self.session_picker_reconcile_pending,
+            ]) {
+                return;
+            }
+            let target = match action {
+                TabShortcutAction::Next => self
+                    .tabs
+                    .next()
+                    .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
+                TabShortcutAction::Previous => self
+                    .tabs
+                    .previous()
+                    .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
+                TabShortcutAction::NewDojo => Some(WindowTopologyCommand::NewDojo {
+                    lair_id: self.active_identity.lair_id,
+                }),
+                TabShortcutAction::Close => Some(WindowTopologyCommand::CloseTab {
+                    dojo_id: self.active_dojo_id(),
+                }),
+                TabShortcutAction::Consume => None,
+            };
+            if let Some(target) = target
+                && let Err(error) = self.send_topology_command(target)
+            {
+                self.fail(error);
+            }
+            return;
         }
         if let Some(action) = session_picker_shortcut_action(
             event.keysym,
@@ -7978,14 +8990,19 @@ impl KeyboardHandler for App {
             && let Some(action) = pane_topology_action(event.keysym, self.modifiers)
         {
             if let Some(target) = self.focused_splint() {
+                let dojo_id = self.active_dojo_id();
                 let command = match action {
-                    PaneTopologyAction::Split(axis) => {
-                        WindowTopologyCommand::Split { target, axis }
-                    }
-                    PaneTopologyAction::Close => WindowTopologyCommand::Close { target },
-                    PaneTopologyAction::AdjustRatio(delta) => {
-                        WindowTopologyCommand::AdjustRatio { target, delta }
-                    }
+                    PaneTopologyAction::Split(axis) => WindowTopologyCommand::Split {
+                        dojo_id,
+                        target,
+                        axis,
+                    },
+                    PaneTopologyAction::Close => WindowTopologyCommand::Close { dojo_id, target },
+                    PaneTopologyAction::AdjustRatio(delta) => WindowTopologyCommand::AdjustRatio {
+                        dojo_id,
+                        target,
+                        delta,
+                    },
                 };
                 if let Err(error) = self.send_topology_command(command) {
                     self.fail(error);
@@ -7996,7 +9013,6 @@ impl KeyboardHandler for App {
         if let Some(action) = pane_focus_action(event.keysym, self.modifiers) {
             let changed = match action {
                 PaneFocusAction::Direction(direction) => self.focus_direction(direction),
-                PaneFocusAction::Next { reverse } => self.focus_next(reverse),
             };
             if changed {
                 self.update_ime_cursor_rectangle();
@@ -8056,6 +9072,10 @@ impl KeyboardHandler for App {
             return;
         }
         if self.session_picker_consumed_keys.contains(&event.raw_code) {
+            return;
+        }
+        if tab_shortcut_action(event.keysym, self.modifiers, true, self.managed_tabs).is_some() {
+            self.session_picker_consumed_keys.insert(event.raw_code);
             return;
         }
         if session_picker_shortcut_action(
@@ -8137,6 +9157,14 @@ impl PointerHandler for App {
                 picker_changed |= self.handle_session_picker_pointer(event);
                 continue;
             }
+            match self.handle_tab_strip_pointer(event) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            }
             let previous_hover = self.pane.hovered_url.clone();
             let mut cell = self.pointer_cell_at(event.position);
             match event.kind {
@@ -8217,8 +9245,7 @@ impl PointerHandler for App {
                     if button == BTN_LEFT
                         && history_return_to_live_hit(
                             event.position,
-                            self.logical_width,
-                            self.logical_height,
+                            self.content_rect(),
                             !self.pane.scrollback_viewport.is_live(),
                         )
                     {
@@ -9052,23 +10079,46 @@ mod tests {
         let first = SplintId::new();
         let second = SplintId::new();
         let mut pending = HashSet::from([first, second]);
+        let dojo_id = DojoId::new();
         let (commands, mut receiver) = tokio::sync::mpsc::channel(1);
 
-        assert!(enqueue_pending_exited_splints(&mut pending, &commands));
+        assert!(enqueue_pending_exited_splints(
+            dojo_id,
+            &mut pending,
+            &commands
+        ));
         assert_eq!(pending.len(), 1);
-        let WindowTopologyCommand::Close { target: accepted } = receiver.try_recv().unwrap() else {
+        let WindowTopologyCommand::Close {
+            dojo_id: accepted_dojo,
+            target: accepted,
+        } = receiver.try_recv().unwrap()
+        else {
             panic!("expected automatic close command");
         };
+        assert_eq!(accepted_dojo, dojo_id);
         assert!(!pending.contains(&accepted));
 
-        assert!(enqueue_pending_exited_splints(&mut pending, &commands));
+        assert!(enqueue_pending_exited_splints(
+            dojo_id,
+            &mut pending,
+            &commands
+        ));
         assert!(pending.is_empty());
-        let WindowTopologyCommand::Close { target: retained } = receiver.try_recv().unwrap() else {
+        let WindowTopologyCommand::Close {
+            dojo_id: retained_dojo,
+            target: retained,
+        } = receiver.try_recv().unwrap()
+        else {
             panic!("expected retried automatic close command");
         };
+        assert_eq!(retained_dojo, dojo_id);
         drop(receiver);
         pending.insert(retained);
-        assert!(!enqueue_pending_exited_splints(&mut pending, &commands));
+        assert!(!enqueue_pending_exited_splints(
+            dojo_id,
+            &mut pending,
+            &commands
+        ));
         assert_eq!(pending, HashSet::from([retained]));
     }
 
@@ -9116,7 +10166,9 @@ mod tests {
 
     #[test]
     fn inactive_only_visual_changes_preserve_focused_cursor_blink_phase() {
-        let original = Instant::now() - Duration::from_millis(250);
+        let original = Instant::now()
+            .checked_sub(Duration::from_millis(250))
+            .unwrap();
         let mut last_blink = original;
         let mut visible = false;
         assert!(!restart_cursor_blink(false, &mut visible, &mut last_blink));
@@ -9686,6 +10738,86 @@ mod tests {
     }
 
     #[test]
+    fn tab_strip_layout_keeps_active_visible_with_bounded_non_overlapping_targets() {
+        let ids = (0..12).map(|_| DojoId::new()).collect::<Vec<_>>();
+        let layout = tab_strip_layout(420, &ids, 10).unwrap();
+        assert!(layout.tabs.iter().any(|tab| tab.dojo_id == ids[10]));
+        assert!(layout.tabs.len() < ids.len());
+        assert!(layout.tabs.iter().all(|tab| {
+            tab.rect.x.saturating_add(tab.rect.width) <= layout.new_rect.x
+                && tab.label_rect.x.saturating_add(tab.label_rect.width) <= tab.close_rect.x
+        }));
+        for pair in layout.tabs.windows(2) {
+            assert!(pair[0].rect.x.saturating_add(pair[0].rect.width) <= pair[1].rect.x);
+        }
+        let close = layout.tabs[0].close_rect;
+        assert_eq!(
+            tab_strip_hit_test(&layout, (f64::from(close.x), f64::from(close.y)),),
+            Some(TabHitTarget::Close(layout.tabs[0].dojo_id))
+        );
+    }
+
+    #[test]
+    fn tab_strip_compact_layout_retains_active_close_and_new_targets() {
+        let ids = [DojoId::new(), DojoId::new(), DojoId::new()];
+        let layout = tab_strip_layout(80, &ids, 1).unwrap();
+        assert_eq!(layout.tabs.len(), 1);
+        assert_eq!(layout.tabs[0].dojo_id, ids[1]);
+        assert!(layout.tabs[0].label_rect.width > 0);
+        assert!(layout.tabs[0].close_rect.width > 0);
+        assert!(layout.new_rect.width > 0);
+        for width in [3, 35] {
+            let compact = tab_strip_layout(width, &ids, 1).unwrap();
+            assert!(compact.tabs[0].label_rect.width > 0);
+            assert!(compact.tabs[0].close_rect.width > 0);
+            assert!(compact.new_rect.width > 0);
+        }
+    }
+
+    #[test]
+    fn tab_shortcuts_are_exact_managed_and_repeat_consumed() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ..ctrl
+        };
+        assert_eq!(
+            tab_shortcut_action(Keysym::Tab, ctrl, false, true),
+            Some(TabShortcutAction::Next)
+        );
+        assert_eq!(
+            tab_shortcut_action(Keysym::ISO_Left_Tab, ctrl_shift, false, true),
+            Some(TabShortcutAction::Previous)
+        );
+        assert_eq!(
+            tab_shortcut_action(Keysym::d, ctrl_shift, false, true),
+            Some(TabShortcutAction::NewDojo)
+        );
+        assert_eq!(
+            tab_shortcut_action(Keysym::q, ctrl_shift, false, true),
+            Some(TabShortcutAction::Close)
+        );
+        assert_eq!(
+            tab_shortcut_action(Keysym::Tab, ctrl, true, true),
+            Some(TabShortcutAction::Consume)
+        );
+        assert_eq!(tab_shortcut_action(Keysym::Tab, ctrl, false, false), None);
+        assert_eq!(
+            tab_shortcut_action(Keysym::Tab, Modifiers::default(), false, true),
+            None
+        );
+        assert!(tab_action_dispatch_allowed([false; 5]));
+        for blocked in 0..5 {
+            let mut states = [false; 5];
+            states[blocked] = true;
+            assert!(!tab_action_dispatch_allowed(states));
+        }
+    }
+
+    #[test]
     fn pane_focus_bindings_are_explicit_and_do_not_capture_plain_arrows() {
         let modifiers = Modifiers {
             ctrl: true,
@@ -9696,10 +10828,7 @@ mod tests {
             pane_focus_action(Keysym::Left, modifiers),
             Some(PaneFocusAction::Direction(FocusDirection::Left))
         );
-        assert_eq!(
-            pane_focus_action(Keysym::Tab, modifiers),
-            Some(PaneFocusAction::Next { reverse: false })
-        );
+        assert_eq!(pane_focus_action(Keysym::Tab, modifiers), None);
         assert_eq!(pane_focus_action(Keysym::Left, Modifiers::default()), None);
         assert_eq!(
             pane_topology_action(Keysym::Return, modifiers),
@@ -10557,21 +11686,25 @@ mod tests {
 
     #[test]
     fn trusted_history_return_target_is_half_open_and_detached_only() {
+        let content = Rect {
+            x: 0,
+            y: 0,
+            width: 960,
+            height: 600,
+        };
         let layout = history_overlay_layout(960, 600, 120).expect("overlay layout");
         let (x, y, width, height) = layout.return_to_live;
         let inside = (f64::from(x) + 1.0, f64::from(y) + 1.0);
-        assert!(history_return_to_live_hit(inside, 960, 600, true));
-        assert!(!history_return_to_live_hit(inside, 960, 600, false));
+        assert!(history_return_to_live_hit(inside, content, true));
+        assert!(!history_return_to_live_hit(inside, content, false));
         assert!(!history_return_to_live_hit(
             (f64::from(x) + f64::from(width), f64::from(y) + 1.0),
-            960,
-            600,
+            content,
             true,
         ));
         assert!(!history_return_to_live_hit(
             (f64::from(x) + 1.0, f64::from(y) + f64::from(height)),
-            960,
-            600,
+            content,
             true,
         ));
     }
@@ -11115,7 +12248,7 @@ mod tests {
             WindowTopologyCommand::RequestSessionPicker,
         )
         .expect("first topology command");
-        let error = try_topology_command(&topology_sender, WindowTopologyCommand::NewDojo)
+        let error = try_topology_command(&topology_sender, WindowTopologyCommand::NewLair)
             .expect_err("bounded topology overflow");
         assert!(error.to_string().contains("full"));
         assert!(topology_receiver.try_recv().is_ok());
