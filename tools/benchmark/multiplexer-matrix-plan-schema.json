@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.local/schema/multiplexer-matrix-plan.json",
+  "title": "Splinterbench multiplexer matrix execution plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "seed",
+    "warmup_runs",
+    "sample_runs",
+    "stacks",
+    "topologies",
+    "cases",
+    "implementation_sha256",
+    "execution_identity",
+    "execution_identity_sha256",
+    "parameters",
+    "schedule",
+    "plan_sha256"
+  ],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.multiplexer-matrix-plan.v1" },
+    "seed": { "type": "integer" },
+    "warmup_runs": { "type": "integer", "minimum": 0 },
+    "sample_runs": { "type": "integer", "minimum": 1 },
+    "stacks": {
+      "const": ["splinterm-native", "foot-bare", "foot-tmux", "foot-zellij"]
+    },
+    "topologies": { "const": ["single", "two-columns", "four-grid"] },
+    "cases": {
+      "const": [
+        "startup",
+        "idle",
+        "plain",
+        "ansi",
+        "unicode",
+        "outer-resize",
+        "divider-resize",
+        "input",
+        "detach-reattach",
+        "lifecycle"
+      ]
+    },
+    "implementation_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "execution_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "repository", "terminals", "multiplexers", "benchmark_stacks", "extra_executables"],
+      "properties": {
+        "host": { "type": "object" },
+        "repository": { "type": ["object", "null"] },
+        "terminals": { "type": "array", "minItems": 2, "maxItems": 2 },
+        "multiplexers": { "type": "array", "minItems": 2, "maxItems": 2 },
+        "benchmark_stacks": { "type": "array", "minItems": 4, "maxItems": 4 },
+        "extra_executables": { "type": "array", "minItems": 3, "maxItems": 3 }
+      }
+    },
+    "execution_identity_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idle_warmup_seconds",
+        "idle_sample_seconds",
+        "lines",
+        "columns",
+        "settle_seconds",
+        "ready_timeout_seconds",
+        "operation_timeout_seconds",
+        "lifetime_seconds",
+        "cell_timeout_seconds",
+        "timeout_cleanup_grace_seconds"
+      ],
+      "properties": {
+        "idle_warmup_seconds": { "type": "number", "minimum": 0 },
+        "idle_sample_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "lines": { "type": "integer", "minimum": 1 },
+        "columns": { "type": "integer", "minimum": 20 },
+        "settle_seconds": { "type": "number", "minimum": 0 },
+        "ready_timeout_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "operation_timeout_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "lifetime_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "cell_timeout_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "timeout_cleanup_grace_seconds": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "schedule": {
+      "type": "array",
+      "minItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phase",
+          "iteration",
+          "execution_index",
+          "stack",
+          "topology",
+          "case_id"
+        ],
+        "properties": {
+          "phase": { "enum": ["warmup", "measured"] },
+          "iteration": { "type": "integer", "minimum": 0 },
+          "execution_index": { "type": "integer", "minimum": 0 },
+          "stack": {
+            "enum": ["splinterm-native", "foot-bare", "foot-tmux", "foot-zellij"]
+          },
+          "topology": { "enum": ["single", "two-columns", "four-grid"] },
+          "case_id": {
+            "type": "string",
+            "pattern": "^(warmup|measured)-[0-9]{2}-[0-9]{4}-(splinterm-native|foot-bare|foot-tmux|foot-zellij)-(single|two-columns|four-grid)$"
+          }
+        }
+      }
+    },
+    "plan_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

@@ -9,7 +9,8 @@ import os
 import pathlib
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 
 MARKER = "SPLINTERBENCH_DONE"
 VISIBLE_MARKER_RGB = (17, 239, 113)
@@ -74,7 +75,7 @@ WORKLOADS: dict[str, Callable[[int, int], bytes]] = {
 }
 
 
-def write_record(path: pathlib.Path | None, value: dict[str, int | str]) -> None:
+def write_record(path: pathlib.Path | None, value: Mapping[str, Any]) -> None:
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,11 +84,143 @@ def write_record(path: pathlib.Path | None, value: dict[str, int | str]) -> None
     temporary.replace(path)
 
 
+def read_command(path: pathlib.Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        raise TypeError("benchmark control command must be a JSON object")
+    return value
+
+
+def run_controlled(
+    control_dir: pathlib.Path,
+    timeout_seconds: float,
+    default_columns: int,
+    input_token: str,
+) -> int:
+    control_dir.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout_seconds
+    sequence = 0
+    while time.monotonic() < deadline:
+        command_path = control_dir / f"command-{sequence:03d}.json"
+        command = read_command(command_path)
+        if command is None:
+            time.sleep(0.002)
+            continue
+        if command.get("schema") != "splinterm.benchmark.child-command.v1":
+            print("unsupported benchmark control command", file=sys.stderr)
+            return 1
+        if command.get("sequence") != sequence:
+            print("benchmark control command sequence mismatch", file=sys.stderr)
+            return 1
+        action = command.get("action")
+        result_path = control_dir / f"result-{sequence:03d}.json"
+        started_ns = time.monotonic_ns()
+        if action == "output":
+            workload = str(command.get("workload"))
+            if workload not in WORKLOADS:
+                print("unsupported controlled output workload", file=sys.stderr)
+                return 1
+            lines = int(command.get("lines", 0))
+            columns = int(command.get("columns", default_columns))
+            if lines <= 0 or columns < 20:
+                print("invalid controlled output dimensions", file=sys.stderr)
+                return 1
+            payload = WORKLOADS[workload](lines, columns)
+            output = sys.stdout.buffer
+            output.write(b"\x1b[2J\x1b[H")
+            output.write(payload)
+            output.write(f"\x1b[0m{MARKER}\n".encode())
+            output.write(visible_marker(columns))
+            output.flush()
+            completed_ns = time.monotonic_ns()
+            write_record(
+                result_path,
+                {
+                    "schema": "splinterm.benchmark.child-result.v1",
+                    "event": "write_complete",
+                    "sequence": sequence,
+                    "workload": workload,
+                    "monotonic_ns": completed_ns,
+                    "pid": os.getpid(),
+                    "duration_ns": completed_ns - started_ns,
+                    "payload_bytes": len(payload),
+                    "total_bytes": len(payload)
+                    + len(f"\x1b[0m{MARKER}\n".encode())
+                    + len(visible_marker(columns)),
+                },
+            )
+        elif action == "clear":
+            output = sys.stdout.buffer
+            output.write(b"\x1b[2J\x1b[H")
+            output.flush()
+            write_record(
+                result_path,
+                {
+                    "schema": "splinterm.benchmark.child-result.v1",
+                    "event": "cleared",
+                    "sequence": sequence,
+                    "monotonic_ns": time.monotonic_ns(),
+                    "pid": os.getpid(),
+                },
+            )
+        elif action == "input":
+            token = str(command.get("token", input_token))
+            received = sys.stdin.buffer.readline(16)
+            received_ns = time.monotonic_ns()
+            if received != f"{token}\n".encode():
+                print(
+                    f"unexpected controlled benchmark input: {received!r}",
+                    file=sys.stderr,
+                )
+                return 1
+            output = sys.stdout.buffer
+            output.write(b"\x1b[2J\x1b[H")
+            output.write(f"\x1b[0m{MARKER}\n".encode())
+            output.write(visible_marker(default_columns))
+            output.flush()
+            completed_ns = time.monotonic_ns()
+            write_record(
+                result_path,
+                {
+                    "schema": "splinterm.benchmark.child-result.v1",
+                    "event": "input_received",
+                    "sequence": sequence,
+                    "monotonic_ns": received_ns,
+                    "write_complete_monotonic_ns": completed_ns,
+                    "pid": os.getpid(),
+                    "token": token,
+                },
+            )
+        elif action == "exit":
+            write_record(
+                result_path,
+                {
+                    "schema": "splinterm.benchmark.child-result.v1",
+                    "event": "exit_started",
+                    "sequence": sequence,
+                    "monotonic_ns": time.monotonic_ns(),
+                    "pid": os.getpid(),
+                },
+            )
+            return 0
+        elif action == "stop":
+            return 0
+        else:
+            print(f"unsupported benchmark control action: {action!r}", file=sys.stderr)
+            return 1
+        sequence += 1
+    print("benchmark control loop timed out", file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Emit a deterministic terminal workload"
     )
-    parser.add_argument("case", choices=(*WORKLOADS, "idle", "input"))
+    parser.add_argument("case", choices=(*WORKLOADS, "idle", "input", "multiplexer"))
     parser.add_argument("--lines", type=int, default=1000)
     parser.add_argument("--idle-seconds", type=float, default=60.0)
     parser.add_argument("--columns", type=int, default=80)
@@ -98,6 +231,7 @@ def main() -> int:
     parser.add_argument("--received-file", type=pathlib.Path)
     parser.add_argument("--input-token", default="x")
     parser.add_argument("--hold-seconds", type=float, default=0.0)
+    parser.add_argument("--control-dir", type=pathlib.Path)
     args = parser.parse_args()
     if args.lines < 0:
         parser.error("--lines must not be negative")
@@ -110,9 +244,11 @@ def main() -> int:
 
     if len(args.input_token) != 1 or not args.input_token.isascii():
         parser.error("--input-token must be one ASCII character")
+    if args.case == "multiplexer" and args.control_dir is None:
+        parser.error("--control-dir is required for the multiplexer workload")
     payload = (
         b""
-        if args.case in ("idle", "input")
+        if args.case in ("idle", "input", "multiplexer")
         else WORKLOADS[args.case](args.lines, args.columns)
     )
     ready_ns = time.monotonic_ns()
@@ -128,6 +264,14 @@ def main() -> int:
     if args.case == "idle":
         time.sleep(args.idle_seconds)
         return 0
+    if args.case == "multiplexer":
+        assert args.control_dir is not None
+        return run_controlled(
+            args.control_dir,
+            args.idle_seconds,
+            args.columns,
+            args.input_token,
+        )
     if args.start_file is not None:
         deadline = time.monotonic() + args.start_timeout
         while not args.start_file.exists():

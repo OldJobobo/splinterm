@@ -51,6 +51,21 @@ class HeadlessController:
     def namespace_absent(self) -> bool:
         raise NotImplementedError
 
+    def focus_pane(self, pane_name: str) -> None:
+        raise NotImplementedError
+
+    def send_input(self, pane_name: str, token: str) -> None:
+        raise NotImplementedError
+
+    def resize_divider(self, pane_name: str) -> None:
+        raise NotImplementedError
+
+    def close_pane(self, pane_name: str) -> None:
+        raise NotImplementedError
+
+    def lifecycle_state(self, pane_name: str) -> dict[str, Any]:
+        raise NotImplementedError
+
     @property
     def server_identity(self) -> ProcessIdentity:
         raise NotImplementedError
@@ -204,6 +219,92 @@ class TmuxController(HeadlessController):
             not self._socket_path().exists()
             and not self.plan.runtime_directory.exists()
         )
+
+    def focus_pane(self, pane_name: str) -> None:
+        checked_run(
+            [
+                *self.plan.command_prefix,
+                "select-pane",
+                "-t",
+                self._runtime_id(pane_name),
+            ],
+            self.environment,
+        )
+
+    def send_input(self, pane_name: str, token: str) -> None:
+        target = self._runtime_id(pane_name)
+        checked_run(
+            [*self.plan.command_prefix, "send-keys", "-t", target, "-l", token],
+            self.environment,
+        )
+        checked_run(
+            [*self.plan.command_prefix, "send-keys", "-t", target, "Enter"],
+            self.environment,
+        )
+
+    def resize_divider(self, pane_name: str) -> None:
+        checked_run(
+            [
+                *self.plan.command_prefix,
+                "resize-pane",
+                "-t",
+                self._runtime_id(pane_name),
+                "-D" if self.topology.name == "four-grid" else "-R",
+                "2" if self.topology.name == "four-grid" else "6",
+            ],
+            self.environment,
+        )
+
+    def close_pane(self, pane_name: str) -> None:
+        checked_run(
+            [
+                *self.plan.command_prefix,
+                "kill-pane",
+                "-t",
+                self._runtime_id(pane_name),
+            ],
+            self.environment,
+        )
+
+    def lifecycle_state(self, pane_name: str) -> dict[str, Any]:
+        selected = self._runtime_id(pane_name)
+        result = subprocess.run(
+            [*self.plan.command_prefix, "list-panes", "-a", "-F", "#{pane_id}"],
+            env=self.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode:
+            if len(self.runtime_ids) == 1 and not same_process(self.server_identity):
+                return {
+                    "selected_runtime_id": selected,
+                    "selected_state": "removed",
+                    "remaining_runtime_ids": [],
+                    "session_state": "exited",
+                }
+            raise RuntimeError(
+                "tmux lifecycle inventory is unavailable before settlement"
+            )
+        remaining = sorted(result.stdout.splitlines())
+        expected = sorted(set(self.runtime_ids.values()) - {selected})
+        if remaining != expected:
+            raise RuntimeError(
+                f"tmux lifecycle inventory has not settled: {remaining!r}"
+            )
+        return {
+            "selected_runtime_id": selected,
+            "selected_state": "removed",
+            "remaining_runtime_ids": remaining,
+            "session_state": "running",
+        }
+
+    def _runtime_id(self, pane_name: str) -> str:
+        try:
+            return self.runtime_ids[pane_name]
+        except KeyError as error:
+            raise ValueError(f"unknown benchmark pane: {pane_name}") from error
 
     def _socket_path(self) -> pathlib.Path:
         return (
@@ -362,6 +463,124 @@ class ZellijController(HeadlessController):
         socket_absent = self._socket is None or not self._socket.exists()
         return socket_absent and not self.plan.runtime_directory.exists()
 
+    def focus_pane(self, pane_name: str) -> None:
+        checked_run(
+            [
+                *self.plan.command_prefix,
+                "--session",
+                self.plan.session_name,
+                "action",
+                "focus-pane-id",
+                self._runtime_id(pane_name),
+            ],
+            self.environment,
+        )
+
+    def send_input(self, pane_name: str, token: str) -> None:
+        checked_run(
+            [
+                *self.plan.command_prefix,
+                "--session",
+                self.plan.session_name,
+                "action",
+                "write-chars",
+                "--pane-id",
+                self._runtime_id(pane_name),
+                f"{token}\n",
+            ],
+            self.environment,
+        )
+
+    def resize_divider(self, pane_name: str) -> None:
+        checked_run(
+            [
+                *self.plan.command_prefix,
+                "--session",
+                self.plan.session_name,
+                "action",
+                "resize",
+                "--pane-id",
+                self._runtime_id(pane_name),
+                "increase",
+                "down" if self.topology.name == "four-grid" else "right",
+            ],
+            self.environment,
+        )
+
+    def close_pane(self, pane_name: str) -> None:
+        checked_run(
+            [
+                *self.plan.command_prefix,
+                "--session",
+                self.plan.session_name,
+                "action",
+                "close-pane",
+                "--pane-id",
+                self._runtime_id(pane_name),
+            ],
+            self.environment,
+        )
+
+    def lifecycle_state(self, pane_name: str) -> dict[str, Any]:
+        selected = self._runtime_id(pane_name)
+        executable = self.plan.command_prefix[0]
+        profile = self.plan.command_prefix[2]
+        result = subprocess.run(
+            [
+                executable,
+                "--config",
+                profile,
+                "--session",
+                self.plan.session_name,
+                "action",
+                "list-panes",
+                "--json",
+                "--all",
+            ],
+            env=self.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode:
+            if len(self.runtime_ids) == 1 and not same_process(self.server_identity):
+                return {
+                    "selected_runtime_id": selected,
+                    "selected_state": "removed",
+                    "remaining_runtime_ids": [],
+                    "session_state": "exited",
+                }
+            raise RuntimeError(
+                "Zellij lifecycle inventory is unavailable before settlement"
+            )
+        try:
+            panes = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("Zellij lifecycle inventory is malformed") from error
+        remaining = sorted(
+            f"terminal_{int(item['id'])}"
+            for item in panes
+            if not item.get("is_plugin", False)
+        )
+        expected = sorted(set(self.runtime_ids.values()) - {selected})
+        if remaining != expected:
+            raise RuntimeError(
+                f"Zellij lifecycle inventory has not settled: {remaining!r}"
+            )
+        return {
+            "selected_runtime_id": selected,
+            "selected_state": "removed",
+            "remaining_runtime_ids": remaining,
+            "session_state": "running",
+        }
+
+    def _runtime_id(self, pane_name: str) -> str:
+        try:
+            return self.runtime_ids[pane_name]
+        except KeyError as error:
+            raise ValueError(f"unknown benchmark pane: {pane_name}") from error
+
 
 class SplintermController(HeadlessController):
     implementation = "splinterm"
@@ -443,9 +662,7 @@ class SplintermController(HeadlessController):
     def inspect(self) -> dict[str, Any]:
         value = self._json_command(["topology"])
         splints = [
-            item
-            for item in value["data"]["splints"]
-            if item["dojo_id"] == self.dojo_id
+            item for item in value["data"]["splints"] if item["dojo_id"] == self.dojo_id
         ]
         if {item["splint_id"] for item in splints} != set(self.runtime_ids.values()):
             raise RuntimeError(
@@ -488,6 +705,64 @@ class SplintermController(HeadlessController):
             and not self.socket.with_name(self.socket.name + ".content").exists()
             and not self.runtime_directory.exists()
         )
+
+    def focus_pane(self, pane_name: str) -> None:
+        self._runtime_id(pane_name)
+
+    def send_input(self, pane_name: str, token: str) -> None:
+        self._json_command(["send", self._runtime_id(pane_name), f"{token}\n"])
+
+    def resize_divider(self, pane_name: str) -> None:
+        self._json_command(["ratio", self._runtime_id(pane_name), "550"])
+
+    def close_pane(self, pane_name: str) -> None:
+        self._json_command(["kill", "--yes", self._runtime_id(pane_name)])
+
+    def lifecycle_state(self, pane_name: str) -> dict[str, Any]:
+        selected = self._runtime_id(pane_name)
+        value = self._json_command(["topology"])
+        splints = {
+            str(item["splint_id"]): item
+            for item in value["data"]["splints"]
+            if item["dojo_id"] == self.dojo_id
+        }
+        original = set(self.runtime_ids.values())
+        expected_remaining = original - {selected}
+        observed = set(splints)
+        if observed == original:
+            if splints[selected]["lifecycle"] != "restorable":
+                raise RuntimeError(
+                    "Splinterm selected leaf has not reached retained restorable state"
+                )
+            selected_state = "exited-retained-restorable"
+            session_state = "running"
+        elif observed == expected_remaining:
+            selected_state = "exited-auto-closed-by-graphical-client"
+            session_state = "running" if observed else "final-dojo-removed"
+        else:
+            raise RuntimeError(
+                "Splinterm lifecycle changed an unaffected topology identity"
+            )
+        remaining = sorted(
+            runtime_id
+            for runtime_id in expected_remaining
+            if splints[runtime_id]["lifecycle"] == "running"
+        )
+        if remaining != sorted(expected_remaining):
+            raise RuntimeError("Splinterm unaffected leaves are not all running")
+        return {
+            "selected_runtime_id": selected,
+            "selected_state": selected_state,
+            "remaining_runtime_ids": remaining,
+            "session_state": session_state,
+            "topology_revision": int(value["resource"]["topology_revision"]),
+        }
+
+    def _runtime_id(self, pane_name: str) -> str:
+        try:
+            return self.runtime_ids[pane_name]
+        except KeyError as error:
+            raise ValueError(f"unknown benchmark pane: {pane_name}") from error
 
     def _json_command(self, arguments: Sequence[str]) -> dict[str, Any]:
         result = checked_run(

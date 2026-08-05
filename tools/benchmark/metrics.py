@@ -173,14 +173,13 @@ def _process_metrics(proc_root: pathlib.Path, pid: int) -> ProcessMetrics | None
     return ProcessMetrics(1, cpu_ticks, rss_bytes, context_switches)
 
 
-def snapshot_process_forest(
-    root_pids: list[int], proc_root: pathlib.Path = pathlib.Path("/proc")
+def snapshot_processes(
+    pids: list[int], proc_root: pathlib.Path = pathlib.Path("/proc")
 ) -> ProcessMetrics:
-    """Aggregate unique processes reachable from one or more architecture roots."""
+    """Aggregate an exact PID set without recursively including descendants."""
 
-    pids = {pid for root_pid in root_pids for pid in process_tree(proc_root, root_pid)}
     total = ProcessMetrics()
-    for pid in sorted(pids):
+    for pid in sorted(set(pids)):
         item = _process_metrics(proc_root, pid)
         if item is None:
             continue
@@ -191,6 +190,41 @@ def snapshot_process_forest(
             context_switches=total.context_switches + item.context_switches,
         )
     return total
+
+
+def snapshot_process_memory(
+    pids: list[int], proc_root: pathlib.Path = pathlib.Path("/proc")
+) -> dict[str, Any]:
+    """Return body-free memory attribution for one exact, deduplicated PID set."""
+
+    processes = [
+        item
+        for pid in sorted(set(pids))
+        if (item := process_memory(pid, proc_root)) is not None
+    ]
+    keys = (
+        "rss_bytes",
+        "pss_bytes",
+        "private_anon_bytes",
+        "private_file_bytes",
+        "shared_bytes",
+        "shmem_bytes",
+    )
+    return {
+        "aggregate": {
+            key: sum(getattr(item, key) for item in processes) for key in keys
+        },
+        "processes": [item.as_dict() for item in processes],
+    }
+
+
+def snapshot_process_forest(
+    root_pids: list[int], proc_root: pathlib.Path = pathlib.Path("/proc")
+) -> ProcessMetrics:
+    """Aggregate unique processes reachable from one or more architecture roots."""
+
+    pids = [pid for root_pid in root_pids for pid in process_tree(proc_root, root_pid)]
+    return snapshot_processes(pids, proc_root)
 
 
 def snapshot_process_tree(

@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.local/schema/graphical-multiplexer.json",
+  "title": "Splinterbench measured graphical multiplexer cell",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "case_id", "plan_sha256", "phase", "iteration",
+    "execution_index", "stack", "topology", "runtime_ids", "windows",
+    "processes", "operations", "isolation", "cleanup", "failure", "valid", "notes"
+  ],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.multiplexer-cell.v1" },
+    "case_id": { "type": "string", "minLength": 1 },
+    "plan_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "phase": { "enum": ["warmup", "measured"] },
+    "iteration": { "type": "integer", "minimum": 0 },
+    "execution_index": { "type": "integer", "minimum": 0 },
+    "stack": { "$ref": "#/$defs/stack" },
+    "topology": { "$ref": "#/$defs/topology" },
+    "runtime_ids": {
+      "type": "object",
+      "propertyNames": { "pattern": "^pane-[0-3]$" },
+      "additionalProperties": { "type": "string", "minLength": 1 },
+      "minProperties": 0,
+      "maxProperties": 4
+    },
+    "windows": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/window" }
+    },
+    "processes": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["infrastructure_pids", "workload_pids", "roles", "role_history", "role_sets_disjoint"],
+          "properties": {
+            "infrastructure_pids": { "$ref": "#/$defs/pids" },
+            "workload_pids": { "$ref": "#/$defs/pids" },
+            "roles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["role", "processes"],
+                "properties": {
+                  "role": { "enum": ["daemon", "terminal", "multiplexer-server", "multiplexer-client", "helper", "workload"] },
+                  "processes": { "type": "array", "items": { "$ref": "#/$defs/identity" } }
+                }
+              }
+            },
+            "role_history": {
+              "type":"array", "minItems":1,
+              "items": {
+                "type":"object", "additionalProperties":false,
+                "required":["stage","infrastructure_pids","workload_pids","roles"],
+                "properties": {
+                  "stage":{"enum":["initial-attach","reattach"]},
+                  "infrastructure_pids":{"$ref":"#/$defs/pids"},
+                  "workload_pids":{"$ref":"#/$defs/pids"},
+                  "roles":{"type":"array"}
+                }
+              }
+            },
+            "role_sets_disjoint": { "const": true }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "operations": {
+      "type": "array",
+      "prefixItems": [
+        { "$ref": "#/$defs/startup" }, { "$ref": "#/$defs/idle" },
+        { "$ref": "#/$defs/plain" }, { "$ref": "#/$defs/ansi" },
+        { "$ref": "#/$defs/unicode" }, { "$ref": "#/$defs/outer-resize" },
+        { "$ref": "#/$defs/divider-resize" }, { "$ref": "#/$defs/input" },
+        { "$ref": "#/$defs/detach-reattach" }, { "$ref": "#/$defs/lifecycle" }
+      ],
+      "items": false,
+      "minItems": 10,
+      "maxItems": 10
+    },
+    "isolation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["namespace", "workspace", "monitor", "no_initial_focus", "host_state_before", "host_state_after", "host_state_preserved", "ambient_before", "ambient_after", "ambient_names_recorded"],
+      "properties": {
+        "namespace": { "type": "string", "minLength": 1 },
+        "workspace": { "const": 8 }, "monitor": { "const": "DP-2" },
+        "no_initial_focus": { "const": true },
+        "host_state_before": { "type": ["object", "null"] },
+        "host_state_after": { "type": ["object", "null"] },
+        "host_state_preserved": { "type": "boolean" },
+        "ambient_before": { "$ref": "#/$defs/ambient" },
+        "ambient_after": { "type": ["object", "null"] },
+        "ambient_names_recorded": { "const": false }
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["windows_absent", "namespace_absent", "server_absent", "clients_absent", "workloads_absent", "process_forest_absent", "ambient_counts_unchanged", "verified", "failure"],
+      "properties": {
+        "windows_absent": { "type": "boolean" }, "namespace_absent": { "type": "boolean" },
+        "server_absent": { "type": "boolean" }, "clients_absent": { "type": "boolean" },
+        "workloads_absent": { "type": "boolean" }, "process_forest_absent": { "type": "boolean" },
+        "ambient_counts_unchanged": { "type": "boolean" }, "verified": { "type": "boolean" },
+        "failure": { "type": ["string", "null"] }
+      }
+    },
+    "failure": { "type": ["string", "null"] },
+    "valid": { "type": "boolean" },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "valid": { "const": true } }, "required": ["valid"] },
+      "then": {
+        "properties": {
+          "runtime_ids": { "minProperties": 1 }, "windows": { "minItems": 1 },
+          "processes": { "type": "object" }, "failure": { "type": "null" },
+          "operations": { "not": { "contains": { "properties": { "valid": { "const": false } }, "required": ["valid"] } } },
+          "isolation": { "properties": { "host_state_preserved": { "const": true } } },
+          "cleanup": { "properties": {
+            "windows_absent": { "const": true }, "namespace_absent": { "const": true },
+            "server_absent": { "const": true }, "clients_absent": { "const": true },
+            "workloads_absent": { "const": true }, "process_forest_absent": { "const": true },
+            "ambient_counts_unchanged": { "const": true }, "verified": { "const": true },
+            "failure": { "type": "null" }
+          } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "valid": { "const": true },
+          "stack": { "properties": { "name": { "const": "foot-bare" } } }
+        },
+        "required": ["valid", "stack"]
+      },
+      "then": {
+        "allOf": [
+          { "if": { "properties": { "topology": { "properties": { "name": { "const": "single" } } } } }, "then": { "properties": { "windows": { "minItems": 1, "maxItems": 1 } } } },
+          { "if": { "properties": { "topology": { "properties": { "name": { "const": "two-columns" } } } } }, "then": { "properties": { "windows": { "minItems": 2, "maxItems": 2 } } } },
+          { "if": { "properties": { "topology": { "properties": { "name": { "const": "four-grid" } } } } }, "then": { "properties": { "windows": { "minItems": 4, "maxItems": 4 } } } }
+        ]
+      },
+      "else": {
+        "if": { "properties": { "valid": { "const": true } }, "required": ["valid"] },
+        "then": { "properties": { "windows": { "minItems": 1, "maxItems": 1 } } }
+      }
+    }
+  ],
+  "$defs": {
+    "stack": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "terminal", "multiplexer", "integration"],
+      "properties": {
+        "name": { "enum": ["splinterm-native", "foot-bare", "foot-tmux", "foot-zellij"] },
+        "terminal": { "enum": ["splinterm", "foot"] },
+        "multiplexer": { "enum": ["splinterm", "tmux", "zellij", null] },
+        "integration": { "enum": ["native", "nested", "none"] }
+      },
+      "oneOf": [
+        { "properties": { "name": {"const":"splinterm-native"}, "terminal": {"const":"splinterm"}, "multiplexer": {"const":"splinterm"}, "integration": {"const":"native"} } },
+        { "properties": { "name": {"const":"foot-bare"}, "terminal": {"const":"foot"}, "multiplexer": {"const":null}, "integration": {"const":"none"} } },
+        { "properties": { "name": {"const":"foot-tmux"}, "terminal": {"const":"foot"}, "multiplexer": {"const":"tmux"}, "integration": {"const":"nested"} } },
+        { "properties": { "name": {"const":"foot-zellij"}, "terminal": {"const":"foot"}, "multiplexer": {"const":"zellij"}, "integration": {"const":"nested"} } }
+      ]
+    },
+    "topology": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "pane_count", "panes", "tree"],
+      "properties": {
+        "name": { "enum": ["single", "two-columns", "four-grid"] },
+        "pane_count": { "enum": [1, 2, 4] },
+        "panes": { "type": "array", "items": { "pattern": "^pane-[0-3]$" }, "uniqueItems": true },
+        "tree": { "type": "object" }
+      },
+      "oneOf": [
+        { "properties": { "name": {"const":"single"}, "pane_count": {"const":1}, "panes": {"const":["pane-0"]} } },
+        { "properties": { "name": {"const":"two-columns"}, "pane_count": {"const":2}, "panes": {"const":["pane-0","pane-1"]} } },
+        { "properties": { "name": {"const":"four-grid"}, "pane_count": {"const":4}, "panes": {"const":["pane-0","pane-1","pane-2","pane-3"]} } }
+      ]
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pid", "start_ticks"],
+      "properties": { "pid": { "type": "integer", "minimum": 1 }, "start_ticks": { "type": "integer", "minimum": 1 } }
+    },
+    "pids": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "uniqueItems": true },
+    "window": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pane", "address", "pid", "start_ticks", "class", "workspace", "monitor", "geometry"],
+      "properties": {
+        "pane": { "type": ["string", "null"] }, "address": { "type": "string", "minLength": 1 },
+        "pid": { "type": "integer", "minimum": 1 }, "start_ticks": { "type": "integer", "minimum": 1 },
+        "class": { "type": "string", "minLength": 1 }, "workspace": { "const": 8 }, "monitor": { "type": "integer", "minimum": 0 },
+        "geometry": { "type": "array", "prefixItems": [{"type":"integer"},{"type":"integer"},{"type":"integer","minimum":1},{"type":"integer","minimum":1}], "items": false }
+      }
+    },
+    "resources": {
+      "type": "object", "additionalProperties": false,
+      "required": ["infrastructure", "total"],
+      "properties": { "infrastructure": { "$ref": "#/$defs/resource" }, "total": { "$ref": "#/$defs/resource" } }
+    },
+    "resource": {
+      "type": "object", "additionalProperties": false,
+      "required": ["process_count", "cpu_ticks", "context_switches", "rss_bytes", "pss_bytes"],
+      "properties": {
+        "process_count": {"type":"integer","minimum":0}, "cpu_ticks": {"type":"integer","minimum":0},
+        "context_switches": {"type":"integer","minimum":0}, "rss_bytes": {"type":"integer","minimum":0}, "pss_bytes": {"type":"integer","minimum":0}
+      }
+    },
+    "membership": {
+      "type":"object", "additionalProperties":false,
+      "required":["infrastructure","workload"],
+      "properties": {
+        "infrastructure":{"type":"array","items":{"$ref":"#/$defs/identity"}},
+        "workload":{"type":"array","items":{"$ref":"#/$defs/identity"}}
+      }
+    },
+    "resource-evidence": {
+      "type":"object", "additionalProperties":false,
+      "required":["before","after","before_membership","after_membership","membership_changed","delta"],
+      "properties": {
+        "before":{"$ref":"#/$defs/resources"}, "after":{"$ref":"#/$defs/resources"},
+        "before_membership":{"$ref":"#/$defs/membership"}, "after_membership":{"$ref":"#/$defs/membership"},
+        "membership_changed":{"type":"boolean"},
+        "delta":{"oneOf":[{"$ref":"#/$defs/resources"},{"type":"null"}]}
+      },
+      "allOf": [
+        {"if":{"properties":{"membership_changed":{"const":true}}},"then":{"properties":{"delta":{"type":"null"}}}},
+        {"if":{"properties":{"membership_changed":{"const":false}}},"then":{"properties":{"delta":{"type":"object"}}}}
+      ]
+    },
+    "applicability": {
+      "type": "object", "additionalProperties": false, "required": ["status", "reason"],
+      "properties": { "status": {"enum":["measured","not-applicable"]}, "reason": {"type":"string","minLength":1} }
+    },
+    "operation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "case", "applicability", "boundary", "metrics", "pane_metrics", "resources", "valid", "notes"],
+      "properties": {
+        "schema": {"const":"splinterm.benchmark.multiplexer-operation.v1"},
+        "case": {"enum":["startup","idle","plain","ansi","unicode","outer-resize","divider-resize","input","detach-reattach","lifecycle"]},
+        "applicability": {"$ref":"#/$defs/applicability"}, "boundary": {"type":["string","null"]},
+        "metrics": {"type":"object"}, "pane_metrics": {"type":"object"},
+        "resources": {"oneOf":[{"$ref":"#/$defs/resource-evidence"},{"type":"null"}]},
+        "valid": {"type":"boolean"}, "notes": {"type":"array","items":{"type":"string"}}
+      },
+      "allOf": [
+        {"if":{"properties":{"applicability":{"properties":{"status":{"const":"measured"}}},"valid":{"const":true}},"required":["applicability","valid"]},"then":{"properties":{"boundary":{"type":"string","minLength":1},"resources":{"type":"object"}}}},
+        {"if":{"properties":{"applicability":{"properties":{"status":{"const":"not-applicable"}}}}},"then":{"properties":{"boundary":{"type":"null"},"resources":{"type":"null"},"valid":{"const":true},"metrics":{"maxProperties":0},"pane_metrics":{"maxProperties":0}}}}
+      ]
+    },
+    "startup": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"startup"}}}]},
+    "idle": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"idle"}}}]},
+    "plain": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"plain"}}}]},
+    "ansi": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"ansi"}}}]},
+    "unicode": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"unicode"}}}]},
+    "outer-resize": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"outer-resize"}}}]},
+    "divider-resize": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"divider-resize"}}}]},
+    "input": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"input"}}}]},
+    "detach-reattach": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"detach-reattach"}}}]},
+    "lifecycle": {"allOf":[{"$ref":"#/$defs/operation"},{"properties":{"case":{"const":"lifecycle"}}}]},
+    "ambient": {
+      "type":"object", "additionalProperties":false, "required":["process_count","default_session_count"],
+      "properties":{"process_count":{"type":["integer","null"],"minimum":0},"default_session_count":{"type":["integer","null"],"minimum":0}}
+    }
+  }
+}

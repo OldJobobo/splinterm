@@ -156,6 +156,42 @@ three topologies. Establish startup, idle, output, resize, targeted input,
 detach/reattach, and lifecycle reports. Retain raw records, execution order,
 profiles, executable identities, implementation snapshots, and checksums.
 
+Implementation and the guarded development gate completed 2026-08-05. The
+measured runner now covers all ten cases in one isolated stack/topology cell;
+the matrix persists an immutable seeded plan, exact resume identity, raw
+per-pane records, infrastructure and workload-inclusive resources, source and
+profile snapshots, executable identities, cleanup evidence, summaries, and
+checksums. Independent Foot uses one window per pane at equivalent aggregate
+geometry; its divider and detach cases are explicit not-applicable results.
+
+A randomized one-sample smoke with seed `13372075` passed all 12 stack/topology
+cells, 111 measured operations, nine explicit not-applicable operations, schema
+and semantic validation, and exact cleanup. This is implementation and safety
+evidence, not a performance ranking.
+
+The initial full-scale ANSI blocker is resolved. Revision tracing showed the
+daemon publishing large intermediate ANSI grids faster than the wire/client
+could consume them. Terminal subscriptions now pace admitted frames at 33 ms
+while compact mailboxes coalesce output; revocation and expiry remain
+preemptive, lag fails closed, and final update/exit ordering bypasses pacing.
+A guarded 2,000-line native smoke reduced ANSI visibility from a 60-second
+timeout to under one second. Two fresh read-only review rounds rejected the
+first security-sensitive draft, then approved the corrected implementation.
+
+Full-matrix execution also exposed and fixed native detach/lifecycle races:
+managed windows now use topology authority rather than transient layout
+materialization, final resync-plus-exit bypasses impossible post-exit resync,
+and controller completion no longer races terminal lifecycle observation.
+Repeated native single/two-column regressions and exact cleanup pass.
+
+The required Milestone 3 evidence run remains pending. The latest fresh 3+10
+attempt passed 18 cells, including all native ANSI and lifecycle cases reached,
+then stopped when a Foot/Zellij divider operation activated reserved workspace
+8. Owned windows, processes, and namespace were removed, but the host-state
+cleanup assertion correctly remained invalid because focus entered the test
+workspace. Do not retry the graphical matrix without a fresh approved guarded
+sequence.
+
 ### Milestone 4 — current baseline and publication review
 
 Rerun the current bare five-terminal baseline before interpreting the new
