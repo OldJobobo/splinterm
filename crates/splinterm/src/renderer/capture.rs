@@ -10,8 +10,9 @@ use crate::{
 };
 
 use super::{
-    CursorPresentation, SnapshotFrame, paint_snapshot_presented,
-    raster::{background_alpha_u8, premultiplied_rgba},
+    CursorPresentation, RenderContext, SnapshotFrame, compatibility_render_context,
+    paint_snapshot_presented,
+    raster::{alpha_u8, premultiplied_rgba},
 };
 
 /// Exact output of the production snapshot painter before Wayland submission.
@@ -67,6 +68,27 @@ pub fn capture_final_buffer(
     )
 }
 
+/// Captures through one explicit renderer context.
+///
+/// # Errors
+/// Returns an error for invalid snapshot geometry, scale, font state, or allocation bounds.
+pub fn capture_final_buffer_in_context(
+    context: &RenderContext,
+    snapshot: &TerminalSnapshot,
+    scale_120: u32,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+) -> Result<FinalBufferCapture> {
+    capture_final_buffer_presented_in_context(
+        context,
+        snapshot,
+        scale_120,
+        show_cursor,
+        cursor_style,
+        CursorPresentation::FOCUSED_STEADY,
+    )
+}
+
 /// Paints a snapshot with resolved immutable image sources.
 ///
 /// # Errors
@@ -103,12 +125,35 @@ pub fn capture_final_buffer_presented(
     cursor_style: CursorStyle,
     presentation: CursorPresentation,
 ) -> Result<FinalBufferCapture> {
+    let context = compatibility_render_context()?;
+    capture_final_buffer_presented_in_context(
+        &context,
+        snapshot,
+        scale_120,
+        show_cursor,
+        cursor_style,
+        presentation,
+    )
+}
+
+/// Presented capture through one explicit renderer context.
+///
+/// # Errors
+/// Returns an error for invalid snapshot geometry, scale, font state, or allocation bounds.
+pub fn capture_final_buffer_presented_in_context(
+    context: &RenderContext,
+    snapshot: &TerminalSnapshot,
+    scale_120: u32,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+    presentation: CursorPresentation,
+) -> Result<FinalBufferCapture> {
     snapshot
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    let frame = SnapshotFrame::load_scaled(snapshot, scale_120)?;
+    let frame = SnapshotFrame::load_scaled_with_context(snapshot, scale_120, context)?;
     let geometry = frame.tight_geometry()?;
-    capture_prepared_frame(&frame, geometry, show_cursor, cursor_style, presentation)
+    capture_prepared_frame_inner(&frame, geometry, show_cursor, cursor_style, presentation)
 }
 
 /// Paints a snapshot into an explicitly configured logical surface.
@@ -177,6 +222,16 @@ pub(super) fn capture_prepared_frame(
     cursor_style: CursorStyle,
     presentation: CursorPresentation,
 ) -> Result<FinalBufferCapture> {
+    capture_prepared_frame_inner(frame, geometry, show_cursor, cursor_style, presentation)
+}
+
+fn capture_prepared_frame_inner(
+    frame: &SnapshotFrame,
+    geometry: WindowGeometry,
+    show_cursor: bool,
+    cursor_style: CursorStyle,
+    presentation: CursorPresentation,
+) -> Result<FinalBufferCapture> {
     let origin_x = geometry.actual_padding.left;
     let origin_y = geometry.actual_padding.top;
     let width = geometry.buffer_width();
@@ -225,7 +280,8 @@ pub(super) fn capture_prepared_frame(
         origin_y,
         cursor: show_cursor.then_some(frame.cursor).flatten(),
         background_bgra: {
-            let background = premultiplied_rgba(frame.canvas_background, background_alpha_u8());
+            let background =
+                premultiplied_rgba(frame.canvas_background, alpha_u8(frame.background_alpha));
             [background[2], background[1], background[0], background[3]]
         },
     })

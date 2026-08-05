@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::geometry::Rect;
 
-use super::{SnapshotFrame, blend_glyph, packed_rgb, round_to_i32};
+use super::{RenderContext, SnapshotFrame, blend_glyph, packed_rgb, round_to_i32};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ChromeTextStyle {
@@ -24,11 +24,31 @@ pub(crate) struct ChromeText {
 }
 
 impl ChromeText {
+    #[cfg(test)]
     pub(crate) fn load(text: &str, scale_120: u32) -> Result<Self> {
         Self::load_styled(text, scale_120, ChromeTextStyle::Regular)
     }
 
+    pub(crate) fn load_with_context(
+        text: &str,
+        scale_120: u32,
+        context: &RenderContext,
+    ) -> Result<Self> {
+        Self::load_styled_with_context(text, scale_120, ChromeTextStyle::Regular, context)
+    }
+
+    #[cfg(test)]
     pub(crate) fn load_styled(text: &str, scale_120: u32, style: ChromeTextStyle) -> Result<Self> {
+        let context = super::compatibility_render_context()?;
+        Self::load_styled_with_context(text, scale_120, style, &context)
+    }
+
+    pub(crate) fn load_styled_with_context(
+        text: &str,
+        scale_120: u32,
+        style: ChromeTextStyle,
+        context: &RenderContext,
+    ) -> Result<Self> {
         let attributes = CellAttributes {
             bold: style == ChromeTextStyle::Bold,
             dim: false,
@@ -122,7 +142,7 @@ impl ChromeText {
             exited_signal: None,
         };
         Ok(Self {
-            frame: SnapshotFrame::load_scaled(&snapshot, scale_120)?,
+            frame: SnapshotFrame::load_scaled_with_context(&snapshot, scale_120, context)?,
             cells: cell_count,
         })
     }

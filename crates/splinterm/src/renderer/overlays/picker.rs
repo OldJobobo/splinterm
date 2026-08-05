@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{config::ResolvedTheme, frontend::PickerHitTarget, geometry::Rect};
 
-use super::super::{ChromeText, ChromeTextStyle, blend_rect, fill_rect};
+use super::super::{ChromeText, ChromeTextStyle, RenderContext, blend_rect, fill_rect};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionPickerPresentationMode {
@@ -549,6 +549,7 @@ fn truncate_picker_text(source: &str, maximum_cells: usize) -> String {
 #[allow(clippy::too_many_arguments)]
 fn paint_picker_text(
     cache: &mut SessionPickerTextCache,
+    context: &RenderContext,
     used: &mut HashSet<SessionPickerTextKey>,
     canvas: &mut [u8],
     canvas_width: u32,
@@ -572,12 +573,12 @@ fn paint_picker_text(
         renderer_generation,
     };
     if !cache.entries.contains_key(&key) {
-        let mut text = ChromeText::load_styled(source, scale_120, style)?;
+        let mut text = ChromeText::load_styled_with_context(source, scale_120, style, context)?;
         if text.pixel_width() > clip.width {
             let maximum_cells =
                 usize::try_from(clip.width / text.frame.cell_width.max(1)).unwrap_or(usize::MAX);
             let truncated = truncate_picker_text(source, maximum_cells);
-            text = ChromeText::load_styled(&truncated, scale_120, style)?;
+            text = ChromeText::load_styled_with_context(&truncated, scale_120, style, context)?;
         }
         cache.entries.insert(key.clone(), text);
     }
@@ -600,12 +601,14 @@ fn paint_picker_text(
 }
 
 #[allow(
+    clippy::similar_names,
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "the specialized picker painter keeps ordered chrome composition in one bounded seam"
 )]
 pub(crate) fn paint_session_picker_overlay(
     cache: &mut SessionPickerTextCache,
+    context: &RenderContext,
     canvas: &mut [u8],
     canvas_width: u32,
     canvas_height: u32,
@@ -728,6 +731,7 @@ pub(crate) fn paint_session_picker_overlay(
     };
     paint_picker_text(
         cache,
+        context,
         &mut used,
         canvas,
         canvas_width,
@@ -748,6 +752,7 @@ pub(crate) fn paint_session_picker_overlay(
         let count = format!("{} available", items.len());
         paint_picker_text(
             cache,
+            context,
             &mut used,
             canvas,
             canvas_width,
@@ -768,6 +773,7 @@ pub(crate) fn paint_session_picker_overlay(
     if layout.mode == SessionPickerPresentationMode::Normal {
         paint_picker_text(
             cache,
+            context,
             &mut used,
             canvas,
             canvas_width,
@@ -853,6 +859,7 @@ pub(crate) fn paint_session_picker_overlay(
         if is_selected {
             paint_picker_text(
                 cache,
+                context,
                 &mut used,
                 canvas,
                 canvas_width,
@@ -914,6 +921,7 @@ pub(crate) fn paint_session_picker_overlay(
             };
             paint_picker_text(
                 cache,
+                context,
                 &mut used,
                 canvas,
                 canvas_width,
@@ -928,6 +936,7 @@ pub(crate) fn paint_session_picker_overlay(
             )?;
             paint_picker_text(
                 cache,
+                context,
                 &mut used,
                 canvas,
                 canvas_width,
@@ -942,6 +951,7 @@ pub(crate) fn paint_session_picker_overlay(
             )?;
             paint_picker_text(
                 cache,
+                context,
                 &mut used,
                 canvas,
                 canvas_width,
@@ -971,6 +981,7 @@ pub(crate) fn paint_session_picker_overlay(
             };
             paint_picker_text(
                 cache,
+                context,
                 &mut used,
                 canvas,
                 canvas_width,
@@ -986,6 +997,7 @@ pub(crate) fn paint_session_picker_overlay(
             if layout.mode != SessionPickerPresentationMode::Minimal {
                 paint_picker_text(
                     cache,
+                    context,
                     &mut used,
                     canvas,
                     canvas_width,
@@ -1016,6 +1028,7 @@ pub(crate) fn paint_session_picker_overlay(
     };
     paint_picker_text(
         cache,
+        context,
         &mut used,
         canvas,
         canvas_width,
@@ -1203,6 +1216,7 @@ mod tests {
         let mut cache = SessionPickerTextCache::default();
         paint_session_picker_overlay(
             &mut cache,
+            &RenderContext::new(u16::MAX),
             &mut canvas,
             960,
             600,
@@ -1259,6 +1273,7 @@ mod tests {
         );
         paint_session_picker_overlay(
             &mut cache,
+            &RenderContext::new(u16::MAX),
             &mut canvas,
             960,
             600,
@@ -1313,6 +1328,7 @@ mod tests {
             visible_start = layout.visible_range.start;
             paint_session_picker_overlay(
                 &mut cache,
+                &RenderContext::new(u16::MAX),
                 &mut canvas,
                 960,
                 600,

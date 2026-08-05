@@ -1,12 +1,10 @@
 //! Low-level deterministic CPU raster and alpha-composition primitives.
 
-use std::sync::atomic::Ordering;
-
 use swash::scale::image::Content;
 
 use crate::{box_drawing, geometry::Rect};
 
-use super::{BACKGROUND_ALPHA, CachedGlyph};
+use super::CachedGlyph;
 
 pub(crate) fn fill_rect(
     canvas: &mut [u8],
@@ -172,14 +170,6 @@ pub(super) fn alpha_u8(alpha: u16) -> u8 {
     u8::try_from(u32::from(alpha) * 255 / u32::from(u16::MAX)).expect("16-bit alpha maps to u8")
 }
 
-pub(super) fn background_alpha_u8() -> u8 {
-    alpha_u8(BACKGROUND_ALPHA.load(Ordering::Relaxed))
-}
-
-pub(crate) fn set_background_alpha(alpha: u16) {
-    BACKGROUND_ALPHA.store(alpha, Ordering::Relaxed);
-}
-
 pub(super) fn premultiplied_rgba(rgb: [u8; 3], alpha: u8) -> [u8; 4] {
     [
         u8::try_from(pixman_multiply_unorm8(rgb[0], u32::from(alpha))).unwrap(),
@@ -189,8 +179,8 @@ pub(super) fn premultiplied_rgba(rgb: [u8; 3], alpha: u8) -> [u8; 4] {
     ]
 }
 
-pub(crate) fn configured_background_bgra(rgb: [u8; 3]) -> [u8; 4] {
-    let rgba = premultiplied_rgba(rgb, background_alpha_u8());
+pub(crate) fn background_bgra(rgb: [u8; 3], alpha: u16) -> [u8; 4] {
+    let rgba = premultiplied_rgba(rgb, alpha_u8(alpha));
     [rgba[2], rgba[1], rgba[0], rgba[3]]
 }
 

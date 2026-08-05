@@ -1,9 +1,6 @@
-//! Process-global renderer configuration, output DPI, runtime zoom, and alpha.
+//! Immutable renderer resources, explicit per-window state, and compatibility adapters.
 
-use std::sync::{
-    Mutex, OnceLock,
-    atomic::{AtomicI32, AtomicU16, Ordering},
-};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use splinterm_freetype::{MAX_PIXEL_SIZE_26_6, MIN_PIXEL_SIZE_26_6};
@@ -15,12 +12,16 @@ use crate::geometry::{
 
 pub(super) const BASE_FONT_SIZE: f32 = 22.0;
 pub(super) const PRIMARY_FONT: &str = "JetBrains Mono Nerd Font:style=Regular";
-
-static RENDERER_OPTIONS: OnceLock<RendererOptions> = OnceLock::new();
-static OUTPUT_DPI: OnceLock<Mutex<OutputDpiObservation>> = OnceLock::new();
-static FONT_ZOOM_STEPS: AtomicI32 = AtomicI32::new(0);
-pub(super) static BACKGROUND_ALPHA: AtomicU16 = AtomicU16::new(u16::MAX);
 const FONT_ZOOM_STEP_POINTS: f32 = 0.5;
+
+/// Immutable process resources shared by renderer contexts.
+#[derive(Debug)]
+pub struct RendererResources {
+    options: RendererOptions,
+}
+
+static RENDERER_RESOURCES: OnceLock<RendererResources> = OnceLock::new();
+static COMPATIBILITY_CONTEXT: OnceLock<Mutex<RenderContext>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct RendererOptions {
@@ -45,6 +46,114 @@ impl Default for RendererOptions {
     }
 }
 
+/// Mutable renderer settings owned by one graphical window.
+#[derive(Clone, Debug)]
+pub struct RenderContext {
+    resources: &'static RendererResources,
+    output_dpi: OutputDpiObservation,
+    font_zoom_steps: i16,
+    background_alpha: u16,
+}
+
+impl RenderContext {
+    /// Creates independent mutable state over the configured immutable resources.
+    ///
+    /// # Panics
+    /// Panics only if the already-validated configured physical DPI becomes invalid.
+    #[must_use]
+    pub fn new(background_alpha: u16) -> Self {
+        let resources = renderer_resources();
+        Self {
+            resources,
+            output_dpi: OutputDpiObservation::provided(resources.options.physical_dpi)
+                .expect("configured physical DPI was validated"),
+            font_zoom_steps: 0,
+            background_alpha,
+        }
+    }
+
+    #[must_use]
+    pub(super) fn padding(&self) -> TerminalPadding {
+        self.resources.options.padding
+    }
+
+    #[must_use]
+    pub const fn background_alpha(&self) -> u16 {
+        self.background_alpha
+    }
+
+    pub(crate) const fn set_background_alpha(&mut self, alpha: u16) {
+        self.background_alpha = alpha;
+    }
+
+    /// Resolves this context's font against surface scale and output DPI.
+    ///
+    /// # Errors
+    /// Returns an error for invalid scale, DPI, zoom, or effective raster size.
+    pub fn effective_font_resolution(
+        &self,
+        surface_scale_120: u32,
+    ) -> Result<crate::geometry::ResolvedFontSize> {
+        let options = &self.resources.options;
+        resolve_font_size_with_output(
+            zoomed_font_size(options, self.font_zoom_steps, &self.output_dpi)?,
+            options.font_sizing_policy,
+            surface_scale_120,
+            &self.output_dpi,
+        )
+    }
+
+    pub(super) fn effective_font_size(&self, surface_scale_120: u32) -> Result<f32> {
+        Ok(self
+            .effective_font_resolution(surface_scale_120)?
+            .pixel_size)
+    }
+
+    /// Applies Foot's default 0.5-point runtime zoom offset.
+    pub(super) fn apply_font_zoom_steps(
+        &mut self,
+        steps: i16,
+        surface_scale_120: u32,
+    ) -> Result<Option<bool>> {
+        let previous = self.effective_font_resolution(surface_scale_120)?;
+        let options = &self.resources.options;
+        let Ok(size) = zoomed_font_size(options, steps, &self.output_dpi) else {
+            return Ok(None);
+        };
+        let next = resolve_font_size_with_output(
+            size,
+            options.font_sizing_policy,
+            surface_scale_120,
+            &self.output_dpi,
+        )?;
+        if !effective_raster_size_supported(next.effective_pixel_size_26_6)? {
+            return Ok(None);
+        }
+        self.font_zoom_steps = steps;
+        Ok(Some(
+            previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6,
+        ))
+    }
+
+    /// Updates this context's current output observation.
+    pub(super) fn apply_output_dpi(
+        &mut self,
+        observation: OutputDpiObservation,
+        surface_scale_120: u32,
+    ) -> Result<bool> {
+        let options = &self.resources.options;
+        let previous = self.effective_font_resolution(surface_scale_120)?;
+        let next = resolve_font_size_with_output(
+            zoomed_font_size(options, self.font_zoom_steps, &observation)?,
+            options.font_sizing_policy,
+            surface_scale_120,
+            &observation,
+        )?;
+        self.output_dpi = observation;
+        Ok(previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6)
+    }
+}
+
 pub(super) fn compatible_renderer_options(
     current: &RendererOptions,
     next: &RendererOptions,
@@ -56,24 +165,18 @@ pub(super) fn compatible_renderer_options(
         && current.padding == next.padding
 }
 
-fn accept_compatible_reconfiguration(options: &RendererOptions) -> Result<()> {
-    let current = RENDERER_OPTIONS
-        .get()
-        .context("renderer configuration disappeared during initialization")?;
-    anyhow::ensure!(
-        compatible_renderer_options(current, options),
-        "renderer is already configured with different immutable options"
-    );
-    BACKGROUND_ALPHA.store(options.background_alpha, Ordering::Relaxed);
-    Ok(())
+fn compatibility_context() -> Result<std::sync::MutexGuard<'static, RenderContext>> {
+    COMPATIBILITY_CONTEXT
+        .get_or_init(|| Mutex::new(RenderContext::new(renderer_options().background_alpha)))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("renderer compatibility context lock is poisoned"))
 }
 
-/// Installs immutable per-process renderer configuration before a window opens.
-/// Repeated compatible setup supports application-owned chooser-to-window
-/// transitions without allowing font or geometry caches to mix configurations.
+/// Installs immutable per-process resources and updates only the legacy compatibility context.
+/// Explicit window contexts remain isolated from compatible reconfiguration.
 ///
 /// # Errors
-/// Returns an error for an invalid size or an incompatible configuration attempt.
+/// Returns an error for invalid sizing or incompatible immutable reconfiguration.
 pub fn configure(options: RendererOptions) -> Result<()> {
     if !options.font_size.value().is_finite() || !(6.0..=96.0).contains(&options.font_size.value())
     {
@@ -86,17 +189,27 @@ pub fn configure(options: RendererOptions) -> Result<()> {
         options.physical_dpi,
     )?;
     let background_alpha = options.background_alpha;
-    match RENDERER_OPTIONS.set(options) {
-        Ok(()) => {
-            BACKGROUND_ALPHA.store(background_alpha, Ordering::Relaxed);
-            Ok(())
+    match RENDERER_RESOURCES.set(RendererResources { options }) {
+        Ok(()) => {}
+        Err(resources) => {
+            anyhow::ensure!(
+                compatible_renderer_options(&renderer_resources().options, &resources.options),
+                "renderer is already configured with different immutable options"
+            );
         }
-        Err(options) => accept_compatible_reconfiguration(&options),
     }
+    compatibility_context()?.set_background_alpha(background_alpha);
+    Ok(())
+}
+
+pub(super) fn renderer_resources() -> &'static RendererResources {
+    RENDERER_RESOURCES.get_or_init(|| RendererResources {
+        options: RendererOptions::default(),
+    })
 }
 
 pub(super) fn renderer_options() -> &'static RendererOptions {
-    RENDERER_OPTIONS.get_or_init(RendererOptions::default)
+    &renderer_resources().options
 }
 
 pub(super) fn zoomed_font_size(
@@ -127,96 +240,29 @@ pub(super) fn effective_raster_size_supported(pixel_size_26_6: u32) -> Result<bo
     Ok((MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&pixels))
 }
 
-fn configured_zoom_steps() -> Result<i16> {
-    i16::try_from(FONT_ZOOM_STEPS.load(Ordering::Relaxed)).context("font zoom steps fit i16")
-}
-
-fn output_dpi() -> Result<OutputDpiObservation> {
-    let default = || {
-        OutputDpiObservation::provided(renderer_options().physical_dpi)
-            .expect("configured physical DPI was validated")
-    };
-    OUTPUT_DPI
-        .get_or_init(|| Mutex::new(default()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("renderer output DPI lock is poisoned"))
-        .map(|observation| observation.clone())
-}
-
-/// Resolves the current configured font against surface scale and output DPI.
+/// Resolves the legacy compatibility context's effective font size.
 ///
 /// # Errors
-/// Returns an error for invalid scale, DPI, or effective raster size.
+/// Returns an error for invalid scale, DPI, zoom, or poisoned compatibility state.
 pub fn effective_font_resolution(
     surface_scale_120: u32,
 ) -> Result<crate::geometry::ResolvedFontSize> {
-    let options = renderer_options();
-    let observation = output_dpi()?;
-    resolve_font_size_with_output(
-        zoomed_font_size(options, configured_zoom_steps()?, &observation)?,
-        options.font_sizing_policy,
-        surface_scale_120,
-        &observation,
-    )
-}
-
-/// Applies Foot's default 0.5-point runtime zoom offset.
-/// Returns true when the effective raster size changed.
-///
-/// # Errors
-/// Returns an error if the adjusted size leaves the bounded renderer range.
-pub(crate) fn set_font_zoom_steps(steps: i16, surface_scale_120: u32) -> Result<Option<bool>> {
-    let previous = effective_font_resolution(surface_scale_120)?;
-    let options = renderer_options();
-    let observation = output_dpi()?;
-    let Ok(size) = zoomed_font_size(options, steps, &observation) else {
-        return Ok(None);
-    };
-    let next = resolve_font_size_with_output(
-        size,
-        options.font_sizing_policy,
-        surface_scale_120,
-        &observation,
-    )?;
-    if !effective_raster_size_supported(next.effective_pixel_size_26_6)? {
-        return Ok(None);
-    }
-    FONT_ZOOM_STEPS.store(i32::from(steps), Ordering::Relaxed);
-    Ok(Some(
-        previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6,
-    ))
+    compatibility_context()?.effective_font_resolution(surface_scale_120)
 }
 
 pub(super) fn effective_font_size(surface_scale_120: u32) -> Result<f32> {
     Ok(effective_font_resolution(surface_scale_120)?.pixel_size)
 }
 
-/// Updates the most recently entered Wayland output DPI observation.
-/// Returns true only when the effective font raster size changes at this scale.
-///
-/// # Errors
-/// Returns an error for invalid scale/DPI/font resolution or a poisoned state lock.
 pub fn update_output_dpi(
     observation: OutputDpiObservation,
     surface_scale_120: u32,
 ) -> Result<bool> {
-    let options = renderer_options();
-    // Validate and compare resolutions before publishing the observation.
-    let previous = effective_font_resolution(surface_scale_120)?;
-    let next = resolve_font_size_with_output(
-        zoomed_font_size(options, configured_zoom_steps()?, &observation)?,
-        options.font_sizing_policy,
-        surface_scale_120,
-        &observation,
-    )?;
-    let mut current = OUTPUT_DPI
-        .get_or_init(|| Mutex::new(observation.clone()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("renderer output DPI lock is poisoned"))?;
-    *current = observation;
-    let changed = previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6;
-    drop(current);
-    Ok(changed)
+    compatibility_context()?.apply_output_dpi(observation, surface_scale_120)
+}
+
+pub(super) fn compatibility_render_context() -> Result<RenderContext> {
+    Ok(compatibility_context()?.clone())
 }
 
 #[cfg(test)]
@@ -277,5 +323,23 @@ mod tests {
         let maximum = u32::try_from(MAX_PIXEL_SIZE_26_6).unwrap();
         assert!(effective_raster_size_supported(maximum).unwrap());
         assert!(!effective_raster_size_supported(maximum + 1).unwrap());
+    }
+
+    #[test]
+    fn render_contexts_keep_dpi_zoom_and_alpha_isolated() {
+        let first = RenderContext::new(10_000);
+        let mut second = RenderContext::new(50_000);
+        let first_before = first.effective_font_resolution(120).unwrap();
+        second
+            .apply_output_dpi(OutputDpiObservation::provided(192.0).unwrap(), 120)
+            .unwrap();
+        second.apply_font_zoom_steps(2, 120).unwrap();
+        assert_eq!(first.background_alpha(), 10_000);
+        assert_eq!(second.background_alpha(), 50_000);
+        assert_eq!(first.effective_font_resolution(120).unwrap(), first_before);
+        assert_ne!(
+            first.effective_font_resolution(120).unwrap(),
+            second.effective_font_resolution(120).unwrap()
+        );
     }
 }

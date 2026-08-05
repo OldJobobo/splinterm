@@ -13,7 +13,7 @@ use super::{
     cursor::{cursor_colors_for_cell, cursor_span, effective_cursor_shape, paint_effective_cursor},
     decorations::paint_decoration_span,
     images::paint_snapshot_images,
-    raster::{background_alpha_u8, blend_glyph, fill_rect, premultiplied_rgba},
+    raster::{alpha_u8, blend_glyph, fill_rect, premultiplied_rgba},
     round_to_i32,
 };
 
@@ -132,7 +132,8 @@ fn compose_snapshot_rows(
                 .unwrap_or(false)
         })
     };
-    let canvas_background = premultiplied_rgba(frame.canvas_background, background_alpha_u8());
+    let canvas_background =
+        premultiplied_rgba(frame.canvas_background, alpha_u8(frame.background_alpha));
     let visible_columns = frame.columns.min(geometry.columns);
     for row in 0..frame.rows {
         if !row_is_dirty(row) || visible_columns == 0 {
@@ -317,7 +318,7 @@ pub(crate) fn paint_snapshot_region_presented(
     cursor_style: CursorStyle,
     presentation: CursorPresentation,
 ) {
-    let background = premultiplied_rgba(frame.canvas_background, background_alpha_u8());
+    let background = premultiplied_rgba(frame.canvas_background, alpha_u8(frame.background_alpha));
     fill_rect(
         canvas,
         width,

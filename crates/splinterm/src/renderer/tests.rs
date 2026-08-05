@@ -223,6 +223,32 @@ fn default_attributes() -> CellAttributes {
     }
 }
 
+#[test]
+fn explicit_render_contexts_are_pixel_and_metric_isolated_when_interleaved() {
+    let snapshot = incremental_snapshot();
+    let first = RenderContext::new(12_000);
+    let mut second = RenderContext::new(52_000);
+    second.set_font_zoom_steps(2, 120).unwrap();
+
+    let first_before =
+        capture_final_buffer_in_context(&first, &snapshot, 120, false, CursorStyle::Block).unwrap();
+    let second_capture =
+        capture_final_buffer_in_context(&second, &snapshot, 120, false, CursorStyle::Block)
+            .unwrap();
+    let first_after =
+        capture_final_buffer_in_context(&first, &snapshot, 120, false, CursorStyle::Block).unwrap();
+
+    assert_eq!(first_before.pixels, first_after.pixels);
+    assert_eq!(first_before.cell_width, first_after.cell_width);
+    assert_eq!(first_before.cell_height, first_after.cell_height);
+    assert_eq!(first_before.background_bgra, first_after.background_bgra);
+    assert_ne!(first_before.cell_height, second_capture.cell_height);
+    assert_ne!(first_before.background_bgra, second_capture.background_bgra);
+    assert_eq!(first_before.pixels[3], alpha_u8(12_000));
+    assert_eq!(first_after.pixels[3], alpha_u8(12_000));
+    assert_eq!(second_capture.pixels[3], alpha_u8(52_000));
+}
+
 fn incremental_snapshot() -> TerminalSnapshot {
     let attributes = default_attributes();
     TerminalSnapshot {
@@ -1336,6 +1362,7 @@ fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
         padding: TerminalPadding::uniform(2),
         cursor: None,
         canvas_background: [14, 18, 22],
+        background_alpha: u16::MAX,
         cursor_color: [0xeb, 0xeb, 0xeb],
         images: Vec::new(),
         scale_120: 120,
@@ -1396,6 +1423,7 @@ fn damage_test_frame() -> SnapshotFrame {
         padding: TerminalPadding::uniform(0),
         cursor: None,
         canvas_background: [0, 0, 0],
+        background_alpha: u16::MAX,
         cursor_color: [255, 255, 255],
         images: Vec::new(),
         scale_120: 120,
@@ -2140,6 +2168,7 @@ fn terminal_size_calculation_clamps_minimum_and_protocol_limits() {
         padding: TerminalPadding::uniform(10),
         cursor: None,
         canvas_background: [14, 18, 22],
+        background_alpha: u16::MAX,
         cursor_color: [0xeb, 0xeb, 0xeb],
         images: Vec::new(),
         scale_120: 120,

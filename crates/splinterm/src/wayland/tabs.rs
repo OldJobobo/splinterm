@@ -1,7 +1,7 @@
 use super::{
     App, CachedFrameTitle, ChromeText, ChromeTextStyle, Context, DojoId, HashMap, HashSet,
-    LayoutNode, PaneView, Receiver, Rect, ResolvedTheme, Result, Sender, SplintId, Waker,
-    WindowDojoIdentity, WindowPaneOptions, WindowTabSet, WindowTopologyCommand,
+    LayoutNode, PaneView, Receiver, Rect, RenderContext, ResolvedTheme, Result, Sender, SplintId,
+    Waker, WindowDojoIdentity, WindowPaneOptions, WindowTabSet, WindowTopologyCommand,
     WindowTopologyUpdate, WindowUpdate, apply_theme, drain_receiver, fill_rect,
     logical_extent_to_buffer, pane_stream_has_terminal_notice, rect_contains, sanitized_tab_label,
 };
@@ -154,6 +154,7 @@ impl DojoTabView {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_topology(
         &mut self,
         layout: LayoutNode,
@@ -162,12 +163,15 @@ impl DojoTabView {
         focused: Option<SplintId>,
         theme: ResolvedTheme,
         scale_120: u32,
+        context: &RenderContext,
     ) -> Result<()> {
         let removed = removed.into_iter().collect::<HashSet<_>>();
         let mut prepared = Vec::with_capacity(added.len());
         for mut pane in added {
             apply_theme(&mut pane.snapshot, theme);
-            prepared.push(PaneView::from_inactive_options(pane, scale_120)?);
+            prepared.push(PaneView::from_inactive_options_with_context(
+                pane, scale_120, context,
+            )?);
         }
         let prepared_ids = prepared
             .iter()
@@ -258,6 +262,7 @@ impl DojoTabView {
         focused: SplintId,
         theme: ResolvedTheme,
         scale_120: u32,
+        context: &RenderContext,
     ) -> Result<Self> {
         anyhow::ensure!(
             layout.find_splint(focused).is_some() && layout.splint_count() == panes.len(),
@@ -271,11 +276,11 @@ impl DojoTabView {
             .position(|pane| pane.snapshot.splint_id == focused)
             .context("opened tab focus is absent from its panes")?;
         let active = panes.remove(active_index);
-        let mut pane = PaneView::from_options(active, scale_120)?;
+        let mut pane = PaneView::from_options_with_context(active, scale_120, context)?;
         pane.initial_resize_requires_control = !pane.controller_active;
         let inactive_panes = panes
             .into_iter()
-            .map(|pane| PaneView::from_inactive_options(pane, scale_120))
+            .map(|pane| PaneView::from_inactive_options_with_context(pane, scale_120, context))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             identity,
@@ -390,7 +395,12 @@ impl App {
                 self.tab_state.tab_label_cache.insert(
                     tab.dojo_id,
                     CachedFrameTitle {
-                        text: ChromeText::load_styled(&source, self.surface.scale_120, style)?,
+                        text: ChromeText::load_styled_with_context(
+                            &source,
+                            self.surface.scale_120,
+                            style,
+                            &self.presentation.render_context,
+                        )?,
                         source,
                         maximum_cells,
                         scale_120: self.surface.scale_120,
@@ -407,11 +417,19 @@ impl App {
         {
             self.tab_state.tab_close_text = Some((
                 self.surface.scale_120,
-                ChromeText::load("×", self.surface.scale_120)?,
+                ChromeText::load_with_context(
+                    "×",
+                    self.surface.scale_120,
+                    &self.presentation.render_context,
+                )?,
             ));
             self.tab_state.tab_new_text = Some((
                 self.surface.scale_120,
-                ChromeText::load("+", self.surface.scale_120)?,
+                ChromeText::load_with_context(
+                    "+",
+                    self.surface.scale_120,
+                    &self.presentation.render_context,
+                )?,
             ));
         }
         Ok(())

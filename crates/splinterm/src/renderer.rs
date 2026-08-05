@@ -49,7 +49,8 @@ pub(crate) use crate::frontend::PickerHitTarget;
 #[cfg(test)]
 use capture::capture_prepared_frame;
 pub use capture::{
-    FinalBufferCapture, capture_final_buffer, capture_final_buffer_presented,
+    FinalBufferCapture, capture_final_buffer, capture_final_buffer_in_context,
+    capture_final_buffer_presented, capture_final_buffer_presented_in_context,
     capture_final_buffer_sized, capture_final_buffer_sized_presented,
     capture_final_buffer_with_sources,
 };
@@ -94,22 +95,45 @@ pub(crate) use overlays::picker::{
 use raster::premultiplied_rgba;
 #[cfg(test)]
 use raster::{alpha_u8, pixel_index};
+pub(crate) use raster::{background_bgra, fill_rect, paint_box_drawing_cell};
 use raster::{blend_glyph, blend_rect};
-pub(crate) use raster::{
-    configured_background_bgra, fill_rect, paint_box_drawing_cell, set_background_alpha,
-};
 use settings::{
-    BACKGROUND_ALPHA, BASE_FONT_SIZE, PRIMARY_FONT, effective_font_size, renderer_options,
+    BASE_FONT_SIZE, PRIMARY_FONT, compatibility_render_context, effective_font_size,
+    renderer_options,
 };
-pub use settings::{RendererOptions, configure, effective_font_resolution};
+pub use settings::{
+    RenderContext, RendererOptions, RendererResources, configure, effective_font_resolution,
+};
 pub(crate) use text::{ChromeText, ChromeTextStyle};
 
-pub(crate) fn set_font_zoom_steps(steps: i16, surface_scale_120: u32) -> Result<Option<bool>> {
-    let changed = settings::set_font_zoom_steps(steps, surface_scale_120)?;
-    if changed.is_some() {
-        clear_snapshot_caches();
+impl RenderContext {
+    pub(crate) fn set_font_zoom_steps(
+        &mut self,
+        steps: i16,
+        surface_scale_120: u32,
+    ) -> Result<Option<bool>> {
+        let changed = self.apply_font_zoom_steps(steps, surface_scale_120)?;
+        if changed.is_some() {
+            clear_snapshot_caches();
+        }
+        Ok(changed)
     }
-    Ok(changed)
+
+    /// Updates this context's output observation and invalidates size-dependent caches.
+    ///
+    /// # Errors
+    /// Returns an error for invalid scale, DPI, font resolution, or cache state.
+    pub fn update_output_dpi(
+        &mut self,
+        observation: OutputDpiObservation,
+        surface_scale_120: u32,
+    ) -> Result<bool> {
+        let changed = self.apply_output_dpi(observation, surface_scale_120)?;
+        if changed {
+            clear_snapshot_caches();
+        }
+        Ok(changed)
+    }
 }
 
 /// Updates the active output DPI and clears font caches when its raster size changes.

@@ -126,13 +126,12 @@ use crate::geometry::{
 use crate::pane::{FocusDirection, PaneChrome, PaneDivider, PaneLayout};
 use crate::renderer::{
     ChromeText, ChromeTextStyle, CursorPresentation, HistoryOverlayStatus, PickerHitTarget,
-    SessionPickerOverlayLayout, SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame,
-    SnapshotOverlays, TextRow, configured_background_bgra, fill_rect, history_overlay_layout,
+    RenderContext, SessionPickerOverlayLayout, SessionPickerTextCache, SessionPickerTextItem,
+    SnapshotFrame, SnapshotOverlays, TextRow, background_bgra, fill_rect, history_overlay_layout,
     paint, paint_box_drawing_cell, paint_history_overlay, paint_session_picker_overlay,
     paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
     paint_snapshot_rows_presented, scroll_snapshot_pixels, session_picker_hit_test,
-    session_picker_overlay_layout, session_picker_palette, set_background_alpha,
-    set_font_zoom_steps, snapshot_row_rect, update_output_dpi, write_ppm,
+    session_picker_overlay_layout, session_picker_palette, snapshot_row_rect, write_ppm,
 };
 use crate::{
     tab::{DojoTab, WindowTabSet, sanitized_tab_label},
@@ -535,6 +534,7 @@ impl WindowOptions {
 )]
 pub fn run(mut options: WindowOptions) -> Result<()> {
     let managed_tabs = options.initial_dojo.is_some();
+    let render_context = RenderContext::new(options.theme.background_alpha);
     let inactive_options = options.activate_multi_pane_input()?;
     if let Some(snapshot) = options.snapshot.as_mut() {
         snapshot
@@ -551,7 +551,12 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         .snapshot
         .as_ref()
         .map(|snapshot| {
-            SnapshotFrame::load_scaled_with_sources(snapshot, 120, Some(&options.image_sources))
+            SnapshotFrame::load_scaled_with_sources_and_context(
+                snapshot,
+                120,
+                Some(&options.image_sources),
+                &render_context,
+            )
         })
         .transpose()?;
     let (initial_width, mut initial_height) = snapshot_frame
@@ -653,7 +658,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         GraphicalInputProbe::from_environment(options.authority.development_bypass)?;
     let inactive_panes = inactive_options
         .into_iter()
-        .map(|pane| PaneView::from_inactive_options(pane, SCALE_DENOMINATOR))
+        .map(|pane| {
+            PaneView::from_inactive_options_with_context(pane, SCALE_DENOMINATOR, &render_context)
+        })
         .collect::<Result<Vec<_>>>()?;
     let initial_identity = options
         .initial_dojo
@@ -721,6 +728,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             integer_fallback_scale: 1,
         },
         presentation: PresentationState {
+            render_context,
             text_row,
             renderer_generation: 0,
             theme_generation: 0,
@@ -1018,9 +1026,16 @@ fn sanitize_frame_title(title: &str, maximum_cells: u32) -> String {
     output.trim_end().to_owned()
 }
 
-fn fill_chrome_background(canvas: &mut [u8], width: u32, height: u32, rect: Rect, color: u32) {
+fn fill_chrome_background(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: Rect,
+    color: u32,
+    background_alpha: u16,
+) {
     let [_, red, green, blue] = color.to_be_bytes();
-    let pixel = configured_background_bgra([red, green, blue]);
+    let pixel = background_bgra([red, green, blue], background_alpha);
     let right = rect.x.saturating_add(rect.width).min(width);
     let bottom = rect.y.saturating_add(rect.height).min(height);
     for y in rect.y.min(height)..bottom {
@@ -1338,7 +1353,14 @@ fn paint_pane_chrome(
                             .saturating_mul(cell_width),
                         height: cell_height,
                     };
-                    fill_chrome_background(canvas, width, height, clear, theme.background);
+                    fill_chrome_background(
+                        canvas,
+                        width,
+                        height,
+                        clear,
+                        theme.background,
+                        theme.background_alpha,
+                    );
                     title.text.paint(
                         canvas,
                         width,
@@ -1434,6 +1456,7 @@ struct PaneView {
     hovered_url: Option<(CellPosition, CellPosition, String)>,
 }
 
+#[cfg(test)]
 fn rebuild_pane_scaled_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool> {
     let Some(display) = pane.display_snapshot() else {
         return Ok(false);
@@ -1443,6 +1466,29 @@ fn rebuild_pane_scaled_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool
         scale_120,
         Some(&pane.image_sources),
     )?);
+    finish_rebuilt_pane_frame(pane);
+    Ok(true)
+}
+
+fn rebuild_pane_scaled_frame_with_context(
+    pane: &mut PaneView,
+    scale_120: u32,
+    context: &RenderContext,
+) -> Result<bool> {
+    let Some(display) = pane.display_snapshot() else {
+        return Ok(false);
+    };
+    pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources_and_context(
+        &display,
+        scale_120,
+        Some(&pane.image_sources),
+        context,
+    )?);
+    finish_rebuilt_pane_frame(pane);
+    Ok(true)
+}
+
+fn finish_rebuilt_pane_frame(pane: &mut PaneView) {
     pane.rendered_viewport_offset = pane.scrollback_viewport.offset_from_bottom();
     pane.viewport_dirty = false;
     pane.scroll_started_at = None;
@@ -1450,14 +1496,25 @@ fn rebuild_pane_scaled_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool
     pane.raster_dirty_rows.fill(false);
     pane.surface_dirty_rows.fill(false);
     pane.pending_scrolls.clear();
-    Ok(true)
 }
 
+#[cfg(test)]
 fn rebuild_dirty_pane_viewport_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool> {
     if !pane.viewport_dirty {
         return Ok(false);
     }
     rebuild_pane_scaled_frame(pane, scale_120)
+}
+
+fn rebuild_dirty_pane_viewport_frame_with_context(
+    pane: &mut PaneView,
+    scale_120: u32,
+    context: &RenderContext,
+) -> Result<bool> {
+    if !pane.viewport_dirty {
+        return Ok(false);
+    }
+    rebuild_pane_scaled_frame_with_context(pane, scale_120, context)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1482,19 +1539,52 @@ impl BackgroundUpdateImpact {
 }
 
 impl PaneView {
+    #[cfg(test)]
     fn from_inactive_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
         let mut pane = Self::from_options(options, scale_120)?;
         pane.initial_resize_requires_control = !pane.controller_active;
         Ok(pane)
     }
 
+    fn from_inactive_options_with_context(
+        options: WindowPaneOptions,
+        scale_120: u32,
+        context: &RenderContext,
+    ) -> Result<Self> {
+        let mut pane = Self::from_options_with_context(options, scale_120, context)?;
+        pane.initial_resize_requires_control = !pane.controller_active;
+        Ok(pane)
+    }
+
+    #[cfg(test)]
     fn from_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
         let snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
             &options.snapshot,
             scale_120,
             Some(&options.image_sources),
         )?);
-        Ok(Self {
+        Ok(Self::from_options_and_frame(options, snapshot_frame))
+    }
+
+    fn from_options_with_context(
+        options: WindowPaneOptions,
+        scale_120: u32,
+        context: &RenderContext,
+    ) -> Result<Self> {
+        let snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources_and_context(
+            &options.snapshot,
+            scale_120,
+            Some(&options.image_sources),
+            context,
+        )?);
+        Ok(Self::from_options_and_frame(options, snapshot_frame))
+    }
+
+    fn from_options_and_frame(
+        options: WindowPaneOptions,
+        snapshot_frame: Option<SnapshotFrame>,
+    ) -> Self {
+        Self {
             snapshot: Some(options.snapshot),
             snapshot_frame,
             image_sources: options.image_sources,
@@ -1522,7 +1612,7 @@ impl PaneView {
             selecting: false,
             pointer_cell: None,
             hovered_url: None,
-        })
+        }
     }
 
     fn clear_local_content_state(&mut self) {
@@ -1791,6 +1881,7 @@ fn apply_inactive_update_batch(
     Ok(batch)
 }
 
+#[cfg(test)]
 fn rebuild_inactive_frames(
     panes: &mut [PaneView],
     dirty: &HashSet<SplintId>,
@@ -1805,6 +1896,27 @@ fn rebuild_inactive_frames(
                 .as_ref()
                 .is_some_and(|snapshot| dirty.contains(&snapshot.splint_id));
         if selected && rebuild_pane_scaled_frame(pane, scale_120)? {
+            rebuilt += 1;
+        }
+    }
+    Ok(rebuilt)
+}
+
+fn rebuild_inactive_frames_with_context(
+    panes: &mut [PaneView],
+    dirty: &HashSet<SplintId>,
+    rebuild_all: bool,
+    scale_120: u32,
+    context: &RenderContext,
+) -> Result<usize> {
+    let mut rebuilt = 0;
+    for pane in panes {
+        let selected = rebuild_all
+            || pane
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| dirty.contains(&snapshot.splint_id));
+        if selected && rebuild_pane_scaled_frame_with_context(pane, scale_120, context)? {
             rebuilt += 1;
         }
     }
@@ -1867,6 +1979,7 @@ struct SurfaceState {
 }
 
 struct PresentationState {
+    render_context: RenderContext,
     text_row: Option<TextRow>,
     renderer_generation: u64,
     theme_generation: u64,
@@ -2434,9 +2547,17 @@ impl App {
             self.tab_state.tabs.activate(dojo_id),
             "activated Dojo tab is absent"
         );
-        rebuild_pane_scaled_frame(&mut self.panes.pane, self.surface.scale_120)?;
+        rebuild_pane_scaled_frame_with_context(
+            &mut self.panes.pane,
+            self.surface.scale_120,
+            &self.presentation.render_context,
+        )?;
         for pane in &mut self.panes.inactive_panes {
-            rebuild_pane_scaled_frame(pane, self.surface.scale_120)?;
+            rebuild_pane_scaled_frame_with_context(
+                pane,
+                self.surface.scale_120,
+                &self.presentation.render_context,
+            )?;
         }
         self.panes.dirty_inactive_panes.clear();
         self.panes.restored_frontend_needs_resize = true;
@@ -2703,7 +2824,11 @@ impl App {
                 self.presentation.frame_titles.insert(
                     splint_id,
                     CachedFrameTitle {
-                        text: ChromeText::load(&source, self.surface.scale_120)?,
+                        text: ChromeText::load_with_context(
+                            &source,
+                            self.surface.scale_120,
+                            &self.presentation.render_context,
+                        )?,
                         source,
                         maximum_cells,
                         scale_120: self.surface.scale_120,
@@ -3746,7 +3871,11 @@ impl App {
         };
         let mut dirty = vec![false; render_snapshot.rows];
         dirty[row] = true;
-        frame.refresh_rows(&render_snapshot, &dirty)?;
+        frame.refresh_rows_with_context(
+            &render_snapshot,
+            &dirty,
+            &self.presentation.render_context,
+        )?;
         self.panes
             .pane
             .raster_dirty_rows
@@ -3761,9 +3890,17 @@ impl App {
     }
 
     fn rebuild_scaled_pane_frames(&mut self, scale_120: u32) -> Result<bool> {
-        let mut rebuilt = rebuild_pane_scaled_frame(&mut self.panes.pane, scale_120)?;
+        let mut rebuilt = rebuild_pane_scaled_frame_with_context(
+            &mut self.panes.pane,
+            scale_120,
+            &self.presentation.render_context,
+        )?;
         for pane in &mut self.panes.inactive_panes {
-            rebuilt |= rebuild_pane_scaled_frame(pane, scale_120)?;
+            rebuilt |= rebuild_pane_scaled_frame_with_context(
+                pane,
+                scale_120,
+                &self.presentation.render_context,
+            )?;
         }
         Ok(rebuilt)
     }
@@ -3781,7 +3918,11 @@ impl App {
         if next == self.presentation.font_zoom_steps {
             return Ok(true);
         }
-        let Some(raster_changed) = set_font_zoom_steps(next, self.surface.scale_120)? else {
+        let Some(raster_changed) = self
+            .presentation
+            .render_context
+            .set_font_zoom_steps(next, self.surface.scale_120)?
+        else {
             return Ok(true);
         };
         self.presentation.font_zoom_steps = next;
@@ -3840,7 +3981,11 @@ impl App {
         let mut snapshot = picker.snapshot();
         apply_theme(&mut snapshot, self.presentation.theme);
         self.panes.pane.snapshot = Some(snapshot);
-        rebuild_pane_scaled_frame(&mut self.panes.pane, self.surface.scale_120)?;
+        rebuild_pane_scaled_frame_with_context(
+            &mut self.panes.pane,
+            self.surface.scale_120,
+            &self.presentation.render_context,
+        )?;
         self.surface.buffers.clear();
         self.surface.backing.clear();
         self.presentation.full_redraw = true;
@@ -4463,9 +4608,10 @@ impl App {
         let mut prepared = Vec::with_capacity(added.len());
         for mut pane in added {
             apply_theme(&mut pane.snapshot, self.presentation.theme);
-            prepared.push(PaneView::from_inactive_options(
+            prepared.push(PaneView::from_inactive_options_with_context(
                 pane,
                 self.surface.scale_120,
+                &self.presentation.render_context,
             )?);
         }
         let prepared_ids = prepared
@@ -4531,7 +4677,15 @@ impl App {
             .get_mut(dojo_id)
             .and_then(|tab| tab.value.as_mut())
             .context("updated Dojo tab has no hidden frontend")?
-            .apply_topology(layout, added, removed, focused, theme, scale_120)?;
+            .apply_topology(
+                layout,
+                added,
+                removed,
+                focused,
+                theme,
+                scale_120,
+                &self.presentation.render_context,
+            )?;
         Ok(false)
     }
 
@@ -4636,6 +4790,7 @@ impl App {
                         focused,
                         self.presentation.theme,
                         self.surface.scale_120,
+                        &self.presentation.render_context,
                     ) {
                         Ok(view) => view,
                         Err(error) => {
@@ -4766,7 +4921,9 @@ impl App {
             .background_effect_state
             .set_background_alpha(theme.background_alpha);
         let impact = classify_theme_update(self.presentation.theme, theme);
-        set_background_alpha(theme.background_alpha);
+        self.presentation
+            .render_context
+            .set_background_alpha(theme.background_alpha);
         self.presentation.theme = theme;
         if !impact.rebuild_pixels {
             return impact;
@@ -5310,11 +5467,12 @@ impl App {
                 self.tab_state.topology_commands = None;
             }
         }
-        let rebuilt_inactive = rebuild_inactive_frames(
+        let rebuilt_inactive = rebuild_inactive_frames_with_context(
             &mut self.panes.inactive_panes,
             &inactive.dirty_frames,
             rebuild_all_inactive,
             self.surface.scale_120,
+            &self.presentation.render_context,
         )?;
         visual_changed |= rebuilt_inactive > 0;
         if rebuild_all_inactive {
@@ -5372,13 +5530,19 @@ impl App {
                 .or(self.panes.pane.snapshot.as_ref())
                 .context("updated snapshot exists")?;
             if full_frame_reload || self.panes.pane.snapshot_frame.is_none() || !live_viewport {
-                self.panes.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
-                    display,
-                    self.surface.scale_120,
-                    Some(&self.panes.pane.image_sources),
-                )?);
+                self.panes.pane.snapshot_frame =
+                    Some(SnapshotFrame::load_scaled_with_sources_and_context(
+                        display,
+                        self.surface.scale_120,
+                        Some(&self.panes.pane.image_sources),
+                        &self.presentation.render_context,
+                    )?);
             } else if let Some(frame) = &mut self.panes.pane.snapshot_frame {
-                frame.refresh_rows(display, &self.panes.pane.prepare_dirty_rows)?;
+                frame.refresh_rows_with_context(
+                    display,
+                    &self.panes.pane.prepare_dirty_rows,
+                    &self.presentation.render_context,
+                )?;
                 frame.refresh_images(display, &self.panes.pane.image_sources)?;
                 frame.refresh_cursor(display);
             }
@@ -5481,7 +5645,10 @@ impl App {
         queue_handle: &QueueHandle<Self>,
     ) -> Result<()> {
         let observation = self.platform.output_dpi_observation(output);
-        let raster_changed = update_output_dpi(observation, self.surface.scale_120)?;
+        let raster_changed = self
+            .presentation
+            .render_context
+            .update_output_dpi(observation, self.surface.scale_120)?;
         self.presentation.renderer_generation =
             self.presentation.renderer_generation.saturating_add(1);
         self.modal.session_picker_text_cache.clear();
@@ -5693,7 +5860,11 @@ impl App {
             self.panes.pane.pending_scrolls.clear();
             let incremental = if display.images.is_none() {
                 if let (Some(frame), Some(delta)) = (&mut self.panes.pane.snapshot_frame, delta) {
-                    let scroll = frame.scroll_viewport_rows(&display, delta)?;
+                    let scroll = frame.scroll_viewport_rows_with_context(
+                        &display,
+                        delta,
+                        &self.presentation.render_context,
+                    )?;
                     frame.refresh_cursor(&display);
                     scroll
                 } else {
@@ -5724,18 +5895,24 @@ impl App {
                 self.panes.pane.surface_dirty_rows.fill(true);
                 self.panes.pane.pending_scrolls.push(scroll);
             } else {
-                self.panes.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
-                    &display,
-                    self.surface.scale_120,
-                    Some(&self.panes.pane.image_sources),
-                )?);
+                self.panes.pane.snapshot_frame =
+                    Some(SnapshotFrame::load_scaled_with_sources_and_context(
+                        &display,
+                        self.surface.scale_120,
+                        Some(&self.panes.pane.image_sources),
+                        &self.presentation.render_context,
+                    )?);
                 self.presentation.full_redraw = true;
             }
             self.panes.pane.rendered_viewport_offset = current_offset;
             self.panes.pane.viewport_dirty = false;
         }
         for pane in &mut self.panes.inactive_panes {
-            if rebuild_dirty_pane_viewport_frame(pane, self.surface.scale_120)? {
+            if rebuild_dirty_pane_viewport_frame_with_context(
+                pane,
+                self.surface.scale_120,
+                &self.presentation.render_context,
+            )? {
                 self.presentation.full_redraw = true;
             }
         }
@@ -5914,7 +6091,10 @@ impl App {
             if self.presentation.full_redraw {
                 if let Some(layout) = pane_layout.as_ref() {
                     let [_, red, green, blue] = self.presentation.theme.background.to_be_bytes();
-                    let background = configured_background_bgra([red, green, blue]);
+                    let background = background_bgra(
+                        [red, green, blue],
+                        self.presentation.render_context.background_alpha(),
+                    );
                     for pixel in self.surface.backing.chunks_exact_mut(4) {
                         pixel.copy_from_slice(&background);
                     }
@@ -6133,7 +6313,10 @@ impl App {
             }
         } else if self.panes.pane.snapshot_frame.is_some() {
             let [_, red, green, blue] = self.presentation.theme.background.to_be_bytes();
-            let background = configured_background_bgra([red, green, blue]);
+            let background = background_bgra(
+                [red, green, blue],
+                self.presentation.render_context.background_alpha(),
+            );
             for pixel in self.surface.backing.chunks_exact_mut(4) {
                 pixel.copy_from_slice(&background);
             }
@@ -6182,6 +6365,7 @@ impl App {
                 .collect::<Vec<_>>();
             paint_session_picker_overlay(
                 &mut self.modal.session_picker_text_cache,
+                &self.presentation.render_context,
                 canvas,
                 width,
                 height,
@@ -7511,6 +7695,7 @@ mod tests {
             splint_id,
             ResolvedTheme::default(),
             SCALE_DENOMINATOR,
+            &RenderContext::new(u16::MAX),
         )
         .unwrap();
         let mut pane = view.pane;

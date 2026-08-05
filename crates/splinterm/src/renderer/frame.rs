@@ -19,13 +19,13 @@ use crate::{
 };
 
 use super::{
-    BOX_DRAWING_FACE, CachedGlyph, FontFace, GlyphKey, SNAPSHOT_CJK, SNAPSHOT_EMOJI,
+    BOX_DRAWING_FACE, CachedGlyph, FontFace, GlyphKey, RenderContext, SNAPSHOT_CJK, SNAPSHOT_EMOJI,
     SNAPSHOT_PRIMARY_BOLD, SNAPSHOT_PRIMARY_BOLD_ITALIC, SNAPSHOT_PRIMARY_ITALIC,
-    SNAPSHOT_PRIMARY_REGULAR, cell_metrics,
+    SNAPSHOT_PRIMARY_REGULAR, cell_metrics, compatibility_render_context,
     decorations::{DecorationMetrics, DecorationSpan},
-    effective_font_size, font_ref,
+    font_ref,
     images::{SnapshotImage, prepare_snapshot_images},
-    renderer_options, snapshot_color_advance, snapshot_faces, snapshot_glyph, u32_to_f32,
+    snapshot_color_advance, snapshot_faces, snapshot_glyph, u32_to_f32,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +69,7 @@ pub(crate) struct SnapshotFrame {
     pub(super) padding: TerminalPadding,
     pub(super) cursor: Option<(u32, u32)>,
     pub(super) canvas_background: [u8; 3],
+    pub(super) background_alpha: u16,
     pub(super) cursor_color: [u8; 3],
     pub(super) images: Vec<SnapshotImage>,
     pub(super) scale_120: u16,
@@ -218,17 +219,36 @@ impl SnapshotFrame {
     }
 
     pub(crate) fn load_scaled(snapshot: &TerminalSnapshot, scale_120: u32) -> Result<Self> {
-        Self::load_scaled_with_sources(snapshot, scale_120, None)
+        let context = compatibility_render_context()?;
+        Self::load_scaled_with_context(snapshot, scale_120, &context)
+    }
+
+    pub(crate) fn load_scaled_with_context(
+        snapshot: &TerminalSnapshot,
+        scale_120: u32,
+        context: &RenderContext,
+    ) -> Result<Self> {
+        Self::load_scaled_with_sources_and_context(snapshot, scale_120, None, context)
+    }
+
+    pub(crate) fn load_scaled_with_sources(
+        snapshot: &TerminalSnapshot,
+        scale_120: u32,
+        sources: Option<&ImageContentLeaseSet>,
+    ) -> Result<Self> {
+        let context = compatibility_render_context()?;
+        Self::load_scaled_with_sources_and_context(snapshot, scale_120, sources, &context)
     }
 
     #[allow(
         clippy::too_many_lines,
         reason = "bounded text and image source preparation share one immutable frame transaction"
     )]
-    pub(crate) fn load_scaled_with_sources(
+    pub(crate) fn load_scaled_with_sources_and_context(
         snapshot: &TerminalSnapshot,
         scale_120: u32,
         sources: Option<&ImageContentLeaseSet>,
+        context: &RenderContext,
     ) -> Result<Self> {
         if snapshot.columns > usize::from(MAX_COLUMNS) || snapshot.rows > usize::from(MAX_ROWS) {
             bail!(
@@ -243,7 +263,7 @@ impl SnapshotFrame {
             bail!("scale must be between 1x and 8x");
         }
         let scale_120 = u16::try_from(scale_120).context("scale fits u16")?;
-        let font_size = effective_font_size(u32::from(scale_120))?;
+        let font_size = context.effective_font_size(u32::from(scale_120))?;
         let faces = snapshot_faces()?;
         let metrics = cell_metrics(&faces[0], font_size)?;
         let cell_width = metrics.width;
@@ -324,9 +344,10 @@ impl SnapshotFrame {
             underline_thickness: metrics.underline_thickness,
             strike_position: metrics.strike_position,
             strike_thickness: metrics.strike_thickness,
-            padding: renderer_options().padding,
+            padding: context.padding(),
             cursor,
             canvas_background: default_background,
+            background_alpha: context.background_alpha(),
             cursor_color,
             images,
             scale_120,
@@ -341,6 +362,16 @@ impl SnapshotFrame {
         snapshot: &TerminalSnapshot,
         dirty_rows: &[bool],
     ) -> Result<()> {
+        let context = compatibility_render_context()?;
+        self.refresh_rows_with_context(snapshot, dirty_rows, &context)
+    }
+
+    pub(crate) fn refresh_rows_with_context(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        dirty_rows: &[bool],
+        context: &RenderContext,
+    ) -> Result<()> {
         if snapshot.columns != self.columns as usize || snapshot.rows != self.rows as usize {
             bail!("incremental frame dimensions changed");
         }
@@ -348,7 +379,7 @@ impl SnapshotFrame {
             bail!("snapshot palette must contain exactly 256 colors");
         }
         let faces = snapshot_faces()?;
-        let font_size = effective_font_size(u32::from(self.scale_120))?;
+        let font_size = context.effective_font_size(u32::from(self.scale_120))?;
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
         let mut shape_context = ShapeContext::new();
@@ -419,10 +450,21 @@ impl SnapshotFrame {
 
     /// Shifts prepared viewport rows and rebuilds only rows exposed by local
     /// history navigation. Returns the equivalent pixel scroll operation.
+    #[cfg(test)]
     pub(crate) fn scroll_viewport_rows(
         &mut self,
         snapshot: &TerminalSnapshot,
         offset_delta: isize,
+    ) -> Result<Option<TerminalScroll>> {
+        let context = compatibility_render_context()?;
+        self.scroll_viewport_rows_with_context(snapshot, offset_delta, &context)
+    }
+
+    pub(crate) fn scroll_viewport_rows_with_context(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        offset_delta: isize,
+        context: &RenderContext,
     ) -> Result<Option<TerminalScroll>> {
         if offset_delta == 0 || self.rows == 0 {
             return Ok(None);
@@ -486,7 +528,7 @@ impl SnapshotFrame {
         for row in exposed {
             dirty[row] = true;
         }
-        self.refresh_rows(snapshot, &dirty)?;
+        self.refresh_rows_with_context(snapshot, &dirty, context)?;
         Ok(Some(TerminalScroll {
             direction,
             start_row: 0,
