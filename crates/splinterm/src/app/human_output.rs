@@ -165,7 +165,7 @@ fn render_lairs(lairs: &[splinterm_core::Lair], all: bool) -> String {
     output
 }
 
-pub(crate) fn print_lairs(lairs: &[splinterm_core::Lair], all: bool) {
+pub(in crate::app) fn print_lairs(lairs: &[splinterm_core::Lair], all: bool) {
     print!("{}", render_lairs(lairs, all));
 }
 
@@ -173,7 +173,7 @@ pub(crate) fn print_lairs(lairs: &[splinterm_core::Lair], all: bool) {
     clippy::too_many_lines,
     reason = "the CLI keeps exhaustive human rendering for every private protocol response"
 )]
-pub(crate) fn print_response(response: Response) -> Result<()> {
+pub(in crate::app) fn print_response(response: Response) -> Result<()> {
     match response {
         Response::Pong => println!("splinterd is awake"),
         Response::MutationPrepared { .. } => {

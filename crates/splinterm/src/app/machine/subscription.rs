@@ -356,7 +356,7 @@ async fn run_control_subscription(
     }
 }
 
-pub(crate) async fn run_machine_subscription(
+pub(in crate::app) async fn run_machine_subscription(
     stream: SubscribeCommand,
     schema_major: u16,
     timeout_ms: u64,

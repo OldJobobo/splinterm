@@ -1,17 +1,27 @@
 //! Daemon-to-frontend pane protocol bridge.
 
-use crate::{
-    AccessGrant, AccessScope, AppConfig, AuthorityStatus, Connection, Context, ControlMode,
-    ControlTransferOutcome, Duration, ErrorCode, ImageContentLeaseSet, Instant, LayoutNode,
-    PerfTraceEvent, Request, Response, Result, ServerFrame, SharedImageContentCache, SplintId,
-    SubscriptionEvent, TerminalSnapshot, TerminalUpdate, WINDOW_COMMAND_QUEUE, WINDOW_UPDATE_QUEUE,
-    WindowCommand, WindowPaneOptions, WindowUpdate, bail, emit_perf_trace, mpsc,
-    perf_trace_enabled, protocol_error,
-};
+use std::time::{Duration, Instant};
 
-pub(crate) struct Attachment {
-    pub(crate) subscription_id: u64,
-    pub(crate) snapshot: TerminalSnapshot,
+use anyhow::{Context, Result, bail};
+use splinterm::automation::{
+    Connection, ImageContentLeaseSet, SharedImageContentCache, protocol_error,
+};
+use splinterm::config::AppConfig;
+use splinterm::{AuthorityStatus, WindowCommand, WindowPaneOptions, WindowUpdate};
+use splinterm_core::{LayoutNode, SplintId};
+use splinterm_protocol::{
+    AccessGrant, AccessScope, ControlMode, ControlTransferOutcome, ErrorCode, Request, Response,
+    ServerFrame, SubscriptionEvent, TerminalSnapshot, TerminalUpdate,
+    perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
+};
+use tokio::sync::mpsc;
+
+pub(in crate::app) const WINDOW_UPDATE_QUEUE: usize = 4;
+pub(in crate::app) const WINDOW_COMMAND_QUEUE: usize = 64;
+
+pub(in crate::app) struct Attachment {
+    pub(in crate::app) subscription_id: u64,
+    pub(in crate::app) snapshot: TerminalSnapshot,
 }
 
 #[allow(
@@ -19,7 +29,7 @@ pub(crate) struct Attachment {
     reason = "subscription events already own bounded protocol snapshots"
 )]
 #[derive(Debug, PartialEq)]
-pub(crate) enum EventAction {
+pub(in crate::app) enum EventAction {
     Ignore,
     Snapshot {
         sequence: u64,
@@ -34,7 +44,7 @@ pub(crate) enum EventAction {
     Shutdown,
 }
 
-pub(crate) fn classify_subscription_event(
+pub(in crate::app) fn classify_subscription_event(
     expected_subscription: u64,
     last_sequence: u64,
     subscription_id: u64,
@@ -59,11 +69,11 @@ pub(crate) fn classify_subscription_event(
     }
 }
 
-pub(crate) fn update_advances_from(update: &TerminalUpdate, current_revision: u64) -> bool {
+pub(in crate::app) fn update_advances_from(update: &TerminalUpdate, current_revision: u64) -> bool {
     update.base_revision == current_revision && update.revision > current_revision
 }
 
-pub(crate) fn validate_attached_snapshot(
+pub(in crate::app) fn validate_attached_snapshot(
     snapshot: &TerminalSnapshot,
     splint_id: SplintId,
     incarnation: u64,
@@ -77,7 +87,7 @@ pub(crate) fn validate_attached_snapshot(
     Ok(())
 }
 
-pub(crate) async fn attach(
+pub(in crate::app) async fn attach(
     connection: &mut Connection,
     splint_id: SplintId,
     incarnation: u64,
@@ -103,7 +113,7 @@ pub(crate) async fn attach(
     })
 }
 
-pub(crate) async fn resynchronize(
+pub(in crate::app) async fn resynchronize(
     connection: &mut Connection,
     old_subscription: u64,
     splint_id: SplintId,
@@ -117,7 +127,7 @@ pub(crate) async fn resynchronize(
     attach(connection, splint_id, incarnation).await
 }
 
-pub(crate) fn authority_status(
+pub(in crate::app) fn authority_status(
     grants: Vec<AccessGrant>,
     development_bypass: bool,
 ) -> AuthorityStatus {
@@ -139,7 +149,7 @@ pub(crate) fn authority_status(
     }
 }
 
-pub(crate) async fn load_authority_status(
+pub(in crate::app) async fn load_authority_status(
     connection: &mut Connection,
     splint_id: SplintId,
     incarnation: u64,
@@ -161,7 +171,7 @@ pub(crate) async fn load_authority_status(
     }
 }
 
-pub(crate) fn validate_scrollback_page_response(
+pub(in crate::app) fn validate_scrollback_page_response(
     page: &splinterm_protocol::ScrollbackPage,
     splint_id: SplintId,
     incarnation: u64,
@@ -186,7 +196,7 @@ pub(crate) fn validate_scrollback_page_response(
     Ok(())
 }
 
-pub(crate) async fn fetch_scrollback_pages(
+pub(in crate::app) async fn fetch_scrollback_pages(
     connection: &mut Connection,
     splint_id: SplintId,
     incarnation: u64,
@@ -246,17 +256,17 @@ pub(crate) async fn fetch_scrollback_pages(
     Ok(Some(pages))
 }
 
-pub(crate) struct ControllerOutputs {
-    pub(crate) updates: mpsc::Sender<WindowUpdate>,
-    pub(crate) resyncs: mpsc::Sender<()>,
+pub(in crate::app) struct ControllerOutputs {
+    pub(in crate::app) updates: mpsc::Sender<WindowUpdate>,
+    pub(in crate::app) resyncs: mpsc::Sender<()>,
 }
 
 type PaneResize = (u16, u16, u16, u16);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PendingPaneResize {
-    pub(crate) size: PaneResize,
-    pub(crate) claim_control: bool,
+pub(in crate::app) struct PendingPaneResize {
+    pub(in crate::app) size: PaneResize,
+    pub(in crate::app) claim_control: bool,
 }
 
 impl PendingPaneResize {
@@ -309,7 +319,7 @@ impl PendingPaneResize {
     }
 }
 
-pub(crate) fn queue_pane_resize(
+pub(in crate::app) fn queue_pane_resize(
     pending: &mut Option<PendingPaneResize>,
     deadline: &mut Option<tokio::time::Instant>,
     next: PendingPaneResize,
@@ -328,14 +338,14 @@ pub(crate) fn queue_pane_resize(
     None
 }
 
-pub(crate) async fn wait_for_resize_deadline(deadline: Option<tokio::time::Instant>) {
+pub(in crate::app) async fn wait_for_resize_deadline(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
     }
 }
 
-pub(crate) fn terminal_action_matches(
+pub(in crate::app) fn terminal_action_matches(
     response: &Response,
     splint_id: SplintId,
     incarnation: u64,
@@ -350,7 +360,7 @@ pub(crate) fn terminal_action_matches(
     )
 }
 
-pub(crate) async fn apply_prepared_pane_resize(
+pub(in crate::app) async fn apply_prepared_pane_resize(
     control: &mut Connection,
     controller_id: Option<u64>,
     prepared_resize: &mut Option<PaneResize>,
@@ -379,7 +389,7 @@ pub(crate) async fn apply_prepared_pane_resize(
     Ok(())
 }
 
-pub(crate) async fn ensure_pane_control(
+pub(in crate::app) async fn ensure_pane_control(
     control: &mut Connection,
     active_controller: &mut Option<u64>,
     prepared_resize: &mut Option<PaneResize>,
@@ -419,7 +429,7 @@ pub(crate) async fn ensure_pane_control(
     Ok(Some(controller_id))
 }
 
-pub(crate) async fn handle_scrollback_fetch(
+pub(in crate::app) async fn handle_scrollback_fetch(
     control: &mut Connection,
     outputs: &ControllerOutputs,
     splint_id: SplintId,
@@ -454,7 +464,7 @@ pub(crate) async fn handle_scrollback_fetch(
     }
 }
 
-pub(crate) fn resolved_resize_request(
+pub(in crate::app) fn resolved_resize_request(
     controller_id: Option<u64>,
     prepared_resize: &mut Option<PaneResize>,
     identity: (SplintId, u64),
@@ -477,7 +487,7 @@ pub(crate) fn resolved_resize_request(
     })
 }
 
-pub(crate) async fn active_resize_request(
+pub(in crate::app) async fn active_resize_request(
     control: &mut Connection,
     active_controller: &mut Option<u64>,
     prepared_resize: &mut Option<PaneResize>,
@@ -504,7 +514,7 @@ pub(crate) async fn active_resize_request(
     ))
 }
 
-pub(crate) async fn handle_control_event(
+pub(in crate::app) async fn handle_control_event(
     frame: ServerFrame,
     subscription_id: u64,
     active_controller: &mut Option<u64>,
@@ -559,7 +569,7 @@ pub(crate) async fn handle_control_event(
     clippy::too_many_lines,
     reason = "one task serializes control ownership, search, resize, input, and cancellation"
 )]
-pub(crate) async fn run_controller(
+pub(in crate::app) async fn run_controller(
     mut control: Connection,
     mut commands: mpsc::Receiver<WindowCommand>,
     outputs: ControllerOutputs,
@@ -860,21 +870,24 @@ pub(crate) async fn run_controller(
     result
 }
 
-pub(crate) struct PaneTask {
-    pub(crate) cancellation: tokio_util::sync::CancellationToken,
-    pub(crate) task: tokio::task::JoinHandle<Result<()>>,
+pub(in crate::app) struct PaneTask {
+    pub(in crate::app) cancellation: tokio_util::sync::CancellationToken,
+    pub(in crate::app) task: tokio::task::JoinHandle<Result<()>>,
 }
 
-pub(crate) struct PreparedPane {
-    pub(crate) options: WindowPaneOptions,
-    pub(crate) task: PaneTask,
+pub(in crate::app) struct PreparedPane {
+    pub(in crate::app) options: WindowPaneOptions,
+    pub(in crate::app) task: PaneTask,
 }
 
-pub(crate) fn pane_claims_initial_control(splint_id: SplintId, default_focus: SplintId) -> bool {
+pub(in crate::app) fn pane_claims_initial_control(
+    splint_id: SplintId,
+    default_focus: SplintId,
+) -> bool {
     splint_id == default_focus
 }
 
-pub(crate) fn layout_splint_ids(root: &LayoutNode, ids: &mut Vec<SplintId>) {
+pub(in crate::app) fn layout_splint_ids(root: &LayoutNode, ids: &mut Vec<SplintId>) {
     match root {
         LayoutNode::Leaf(splint) => ids.push(splint.id),
         LayoutNode::Branch { first, second, .. } => {
@@ -884,7 +897,7 @@ pub(crate) fn layout_splint_ids(root: &LayoutNode, ids: &mut Vec<SplintId>) {
     }
 }
 
-pub(crate) fn optional_pane_controller(result: Result<u64>) -> Result<Option<u64>> {
+pub(in crate::app) fn optional_pane_controller(result: Result<u64>) -> Result<Option<u64>> {
     match result {
         Ok(controller_id) => Ok(Some(controller_id)),
         Err(error)
@@ -897,7 +910,7 @@ pub(crate) fn optional_pane_controller(result: Result<u64>) -> Result<Option<u64
     }
 }
 
-pub(crate) async fn prepare_live_pane(
+pub(in crate::app) async fn prepare_live_pane(
     config: &AppConfig,
     splint_id: SplintId,
     image_cache: SharedImageContentCache,
@@ -989,7 +1002,7 @@ pub(crate) async fn prepare_live_pane(
     })
 }
 
-pub(crate) fn lease_snapshot_images(
+pub(in crate::app) fn lease_snapshot_images(
     cache: &SharedImageContentCache,
     snapshot: &TerminalSnapshot,
 ) -> Result<ImageContentLeaseSet> {
@@ -999,7 +1012,7 @@ pub(crate) fn lease_snapshot_images(
     )
 }
 
-pub(crate) fn lease_update_images(
+pub(in crate::app) fn lease_update_images(
     cache: &SharedImageContentCache,
     update: &TerminalUpdate,
 ) -> Result<Option<ImageContentLeaseSet>> {
@@ -1010,7 +1023,7 @@ pub(crate) fn lease_update_images(
         .transpose()
 }
 
-pub(crate) async fn resolve_image_contents(
+pub(in crate::app) async fn resolve_image_contents(
     connection: &mut Connection,
     snapshot: &TerminalSnapshot,
     cache: &SharedImageContentCache,
@@ -1035,7 +1048,7 @@ pub(crate) async fn resolve_image_contents(
     Ok(())
 }
 
-pub(crate) async fn resolve_update_images(
+pub(in crate::app) async fn resolve_update_images(
     connection: &mut Connection,
     update: &TerminalUpdate,
     splint_id: SplintId,
@@ -1062,7 +1075,7 @@ pub(crate) async fn resolve_update_images(
     clippy::too_many_lines,
     reason = "subscription ordering and controller resynchronization form one pane lifecycle"
 )]
-pub(crate) async fn run_pane_subscription(
+pub(in crate::app) async fn run_pane_subscription(
     mut connection: Connection,
     mut attachment: Attachment,
     mut controller: tokio::task::JoinHandle<Result<()>>,

@@ -146,7 +146,7 @@ fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
     }
 }
 
-pub(crate) fn run_consent_client() -> Result<()> {
+pub(in crate::app) fn run_consent_client() -> Result<()> {
     let prompt: ConsentPrompt = read_private_frame(&mut io::stdin().lock())?;
     if prompt.capability.len() != splinterm_protocol::CONSENT_CAPABILITY_BYTES
         || prompt.scopes.is_empty()

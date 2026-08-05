@@ -93,7 +93,7 @@ fn load_startup_theme_with_reporter(
     loaded.theme
 }
 
-pub(crate) fn load_startup_theme(config: &AppConfig) -> ResolvedTheme {
+pub(in crate::app) fn load_startup_theme(config: &AppConfig) -> ResolvedTheme {
     load_startup_theme_with_reporter(config, |diagnostic| eprintln!("{diagnostic}"))
 }
 
@@ -126,12 +126,12 @@ impl ThemeReloadDiagnostics {
     }
 }
 
-pub(crate) enum ThemeUpdateSink {
+pub(in crate::app) enum ThemeUpdateSink {
     Panes(Vec<mpsc::Sender<WindowUpdate>>),
     Topology(mpsc::Sender<WindowTopologyUpdate>),
 }
 
-pub(crate) async fn watch_theme(
+pub(in crate::app) async fn watch_theme(
     source: ThemeSource,
     alpha_override: Option<u16>,
     blur_override: Option<bool>,

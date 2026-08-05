@@ -13,9 +13,9 @@ use clap::CommandFactory;
 use splinterm::automation::socket_path as configured_socket_path;
 use splinterm_core::SplintId;
 
-use crate::{Cli, PolicyCommand};
+use super::commands::{Cli, PolicyCommand};
 
-pub(crate) fn confirm_kill(splint_id: SplintId) -> Result<bool> {
+pub(in crate::app) fn confirm_kill(splint_id: SplintId) -> Result<bool> {
     if !io::stdin().is_terminal() {
         bail!(
             "refusing to kill {splint_id} without an interactive terminal; pass --yes to confirm"
@@ -57,13 +57,13 @@ fn confirm_reset() -> Result<bool> {
 
 // The client needs concurrent local IPC and theme watching, not one allocator
 // arena per CPU. Wayland rendering already runs on a bounded blocking worker.
-pub(crate) fn usage_error(message: &str) -> ! {
+pub(in crate::app) fn usage_error(message: &str) -> ! {
     Cli::command()
         .error(clap::error::ErrorKind::ArgumentConflict, message)
         .exit()
 }
 
-pub(crate) fn run_relay_command(stdio: bool) -> Result<()> {
+pub(in crate::app) fn run_relay_command(stdio: bool) -> Result<()> {
     if !stdio {
         bail!("relay requires --stdio");
     }
@@ -73,7 +73,7 @@ pub(crate) fn run_relay_command(stdio: bool) -> Result<()> {
     Err(error).with_context(|| format!("failed to execute {}", relay.display()))
 }
 
-pub(crate) fn run_policy_command(command: PolicyCommand) -> Result<()> {
+pub(in crate::app) fn run_policy_command(command: PolicyCommand) -> Result<()> {
     match command {
         PolicyCommand::Validate { path } => {
             let (rule_count, _) = splinterd::inspect_policy_file(&path)
@@ -199,7 +199,7 @@ fn reset_readiness_context(backup: Option<&Path>) -> String {
     }
 }
 
-pub(crate) fn run_reset_command(yes: bool) -> Result<()> {
+pub(in crate::app) fn run_reset_command(yes: bool) -> Result<()> {
     if !yes && !confirm_reset()? {
         println!("Reset cancelled.");
         return Ok(());

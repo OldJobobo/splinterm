@@ -8,47 +8,24 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    SessionPickerDecision, SessionPickerItem, SessionPickerUi, WindowOptions,
+    SessionPickerDecision, SessionPickerUi, WindowOptions,
     automation::Connection,
     config::{AppConfig, ResolvedTheme},
     renderer::{self, RendererOptions},
     run_window,
-    session_picker::{RecentDojos, SessionEntry, collect_sessions},
+    session_picker::{SessionEntry, collect_sessions},
 };
-use splinterm_core::{DojoId, LairId, SplintId, TopologyRevision};
-use splinterm_protocol::{LaunchParameters, Request, Response};
+use splinterm_core::{DojoId, LairId, SplintId};
+use splinterm_protocol::{Request, Response};
 
-use crate::{run_live_multipane_window, run_live_window};
+use super::{
+    session_catalog::{
+        create_request, recent_dojo_ids, remember_dojo, select_dojo_from, session_picker_item,
+    },
+    window::{run_live_multipane_window, run_live_window},
+};
 
 use super::theme_watch::load_startup_theme;
-
-pub(crate) fn launch_parameters(
-    cwd: PathBuf,
-    command: Vec<String>,
-    config: &AppConfig,
-) -> LaunchParameters {
-    LaunchParameters {
-        cwd,
-        command,
-        shell: config.shell.clone(),
-        login_shell: config.login_shell,
-        scrollback_lines: config.scrollback_lines,
-    }
-}
-
-pub(crate) fn create_request(
-    expected_topology_revision: TopologyRevision,
-    name: String,
-    cwd: PathBuf,
-    command: Vec<String>,
-    config: &AppConfig,
-) -> Request {
-    Request::CreateLair {
-        expected_topology_revision,
-        name,
-        launch: launch_parameters(cwd, command, config),
-    }
-}
 
 fn collect_choices(
     node: &splinterm_core::LayoutNode,
@@ -121,26 +98,6 @@ fn choose_session(lairs: &[splinterm_core::Lair], allow_new: bool) -> Result<Opt
     parse_session_choice(&choices, allow_new, &answer)
 }
 
-pub(crate) fn select_dojo_from(
-    lairs: &[splinterm_core::Lair],
-    selection: (LairId, DojoId),
-) -> Result<splinterm_core::Dojo> {
-    let (lair_id, dojo_id) = selection;
-    let lair = lairs
-        .iter()
-        .find(|lair| lair.id == lair_id)
-        .context("selected Lair is not present in the current topology")?;
-    let dojo = lair
-        .dojos
-        .iter()
-        .find(|dojo| dojo.id == dojo_id)
-        .context("selected Dojo does not belong to the selected Dojo")?;
-    dojo.root
-        .find_splint(dojo.default_focus)
-        .context("selected Dojo has an invalid default-focus hint")?;
-    Ok(dojo.clone())
-}
-
 fn dojo_containing(
     lairs: &[splinterm_core::Lair],
     splint_id: SplintId,
@@ -152,7 +109,7 @@ fn dojo_containing(
         .cloned()
 }
 
-pub(crate) async fn select_dojo(
+pub(in crate::app) async fn select_dojo(
     selection: Option<(LairId, DojoId)>,
 ) -> Result<splinterm_core::Dojo> {
     let mut connection = Connection::connect().await?;
@@ -168,23 +125,6 @@ pub(crate) async fn select_dojo(
     }
 }
 
-pub(crate) fn recent_dojo_ids() -> Vec<DojoId> {
-    RecentDojos::discover().map_or_else(
-        |error| {
-            eprintln!("splinterm recent sessions unavailable: {error:#}");
-            Vec::new()
-        },
-        |store| store.load(),
-    )
-}
-
-pub(crate) fn remember_dojo(dojo_id: DojoId) {
-    match RecentDojos::discover().and_then(|store| store.record(dojo_id)) {
-        Ok(()) => {}
-        Err(error) => eprintln!("splinterm could not update recent sessions: {error:#}"),
-    }
-}
-
 fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result<()> {
     renderer::configure(RendererOptions {
         font: config.font.clone(),
@@ -194,15 +134,6 @@ fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result
         padding: config.padding,
         background_alpha: theme.background_alpha,
     })
-}
-
-pub(crate) fn session_picker_item(entry: &SessionEntry) -> SessionPickerItem {
-    SessionPickerItem {
-        display_title: entry.display_title(),
-        working_directory: entry.working_directory(),
-        pane_count: entry.pane_count,
-        running_pane_count: entry.running_panes,
-    }
 }
 
 fn choose_recent_session(
@@ -245,7 +176,7 @@ async fn select_reopenable_dojo(lair_id: LairId, dojo_id: DojoId) -> Result<spli
     Ok(dojo)
 }
 
-pub(crate) async fn run_sessions(config: AppConfig) -> Result<()> {
+pub(in crate::app) async fn run_sessions(config: AppConfig) -> Result<()> {
     let mut connection = Connection::connect()
         .await
         .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
@@ -291,7 +222,7 @@ pub(crate) async fn run_sessions(config: AppConfig) -> Result<()> {
     }
 }
 
-pub(crate) async fn reopen_recent(config: AppConfig) -> Result<()> {
+pub(in crate::app) async fn reopen_recent(config: AppConfig) -> Result<()> {
     let mut connection = Connection::connect()
         .await
         .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
@@ -319,7 +250,7 @@ fn fresh_dojo_name(now: SystemTime, process_id: u32) -> String {
     format!("terminal-{stamp}-{process_id}")
 }
 
-pub(crate) async fn launch(
+pub(in crate::app) async fn launch(
     name: Option<String>,
     cwd: PathBuf,
     splint_id: Option<SplintId>,

@@ -2,7 +2,7 @@ use super::{
     CliEnvelopeV2, CliErrorCodeV2, ErrorCode, Result, protocol_error, write_json_document,
 };
 
-pub(crate) fn machine_exit_code(error: &anyhow::Error) -> i32 {
+pub(in crate::app) fn machine_exit_code(error: &anyhow::Error) -> i32 {
     if let Some(protocol) = protocol_error(error) {
         return match protocol.code {
             ErrorCode::ConsentUnavailable | ErrorCode::ConsentDenied | ErrorCode::Unauthorized => 3,

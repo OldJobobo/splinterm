@@ -21,8 +21,11 @@ use splinterm_protocol::{ErrorCode, Request, Response};
 use tokio::sync::mpsc;
 
 use super::{
-    PaneTask, create_request, launch_parameters, layout_splint_ids, prepare_live_pane,
-    recent_dojo_ids, remember_dojo, select_dojo_from, session_picker_item,
+    pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane},
+    session_catalog::{
+        create_request, launch_parameters, recent_dojo_ids, remember_dojo, select_dojo_from,
+        session_picker_item,
+    },
 };
 
 fn parent_ratio(root: &LayoutNode, target: SplintId) -> Option<SplitRatio> {
@@ -912,7 +915,7 @@ async fn reconcile_managed_topology(
     clippy::too_many_lines,
     reason = "poll reconciliation, stable command targeting, and owned task shutdown share one loop"
 )]
-pub(crate) async fn run_topology_manager(
+pub(in crate::app) async fn run_topology_manager(
     config: AppConfig,
     image_cache: SharedImageContentCache,
     initial_identity: WindowDojoIdentity,
@@ -1029,7 +1032,7 @@ pub(crate) async fn run_topology_manager(
     Ok(())
 }
 
-pub(crate) fn spawn_topology_smoke(
+pub(in crate::app) fn spawn_topology_smoke(
     commands: mpsc::Sender<WindowTopologyCommand>,
     dojo_id: DojoId,
     target: SplintId,
@@ -1063,7 +1066,9 @@ pub(crate) fn spawn_topology_smoke(
     })))
 }
 
-pub(crate) async fn initial_window_dojo_identity(dojo_id: DojoId) -> Result<WindowDojoIdentity> {
+pub(in crate::app) async fn initial_window_dojo_identity(
+    dojo_id: DojoId,
+) -> Result<WindowDojoIdentity> {
     let mut connection = Connection::connect().await?;
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its Lairs for Window identity");
@@ -1087,7 +1092,7 @@ mod tests {
         topology_command_outcome, topology_identity_diff, validate_exited_close_target,
         window_has_tab_capacity,
     };
-    use crate::app::pane_claims_initial_control;
+    use crate::app::pane_bridge::pane_claims_initial_control;
 
     #[test]
     fn close_action_kills_live_panes_and_removes_exited_panes() {

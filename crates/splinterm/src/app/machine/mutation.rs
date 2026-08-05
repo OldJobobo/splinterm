@@ -209,14 +209,14 @@ fn topology_splint_location(
         .context("requested Splint was not found")
 }
 
-pub(crate) fn require_incarnation(actual: u64, expected: Option<u64>) -> Result<()> {
+pub(in crate::app) fn require_incarnation(actual: u64, expected: Option<u64>) -> Result<()> {
     if expected.is_some_and(|expected| actual != expected) {
         bail!("selected Splint does not match expected incarnation");
     }
     Ok(())
 }
 
-pub(crate) fn require_expected_incarnation(
+pub(in crate::app) fn require_expected_incarnation(
     topology: &splinterm_protocol::TopologySnapshot,
     splint_id: SplintId,
     expected: Option<u64>,
