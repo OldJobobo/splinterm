@@ -3,6 +3,7 @@
 mod consent;
 mod human_output;
 mod local_service;
+mod machine;
 mod pane_bridge;
 mod sessions;
 mod theme_watch;
@@ -28,4 +29,9 @@ pub(super) use pane_bridge::{
 pub(super) use pane_bridge::{
     PendingPaneResize, handle_control_event, optional_pane_controller, queue_pane_resize,
     resolved_resize_request, terminal_action_matches, validate_scrollback_page_response,
+};
+
+pub(super) use machine::{
+    machine_exit_code, require_expected_incarnation, require_incarnation, run_machine_command,
+    run_machine_subscription,
 };
