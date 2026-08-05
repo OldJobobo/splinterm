@@ -51,10 +51,14 @@ avoids claiming arbitrary `foot.ini` compatibility.
 
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste and Ctrl+Shift+S
 to open the native Recent Sessions picker inside any focused managed terminal
-window. These application-owned chords are not forwarded to the terminal
-process. In managed multi-Splint windows, Ctrl+Shift+W terminates and closes the
-focused pane;
-legacy direct single-Splint attachments leave that chord to the terminal.
+Window. Ctrl+Tab and Ctrl+Shift+Tab cycle Window-local Dojo tabs;
+Ctrl+Shift+D creates and opens a Dojo in the active tab's Lair; Ctrl+Shift+Q
+detaches the active tab and closes the Window when it was the final tab. These
+application-owned chords are consumed on press, repeat, and release rather than
+forwarded to the terminal process. Directional Ctrl+Shift+Arrow remains pane
+navigation. In managed multi-Splint windows, Ctrl+Shift+W terminates and closes
+the focused Splint; legacy direct single-Splint attachments leave that chord to
+the terminal.
 Ctrl+Shift+R revokes active access, and Ctrl+Shift+L releases control.
 Ctrl+Shift+T requests transfer from the current controller; its trusted UI uses
 Ctrl+Shift+Y/N to accept/deny, while Ctrl+Shift+U opens separate trusted
@@ -76,11 +80,15 @@ splinterm-reopen    → last locally remembered running Dojo
 ```
 
 The in-window Ctrl+Shift+S shortcut paints a trusted modal overlay over dimmed
-live panes without creating another Wayland window or replacing the terminal
-frontend. Escape removes the overlay and presents the newest valid pane state;
-choosing a session or New Terminal reuses the same window. The overlay adapts to
-compact and minimal sizes, and vertical wheel or touchpad scrolling navigates
-hidden actions without reaching terminal history or mouse reporting.
+live panes without creating another Wayland Window or replacing an existing tab.
+Escape removes the overlay and presents the newest valid pane state. Choosing a
+running session opens or activates its Dojo tab; New Terminal creates a fresh
+Lair and opens its initial Dojo as a tab. One Window accepts at most 32 distinct
+Dojo tabs, may mix Lairs, and does not restore tab order after exit. Tabs use a
+sanitized Dojo label unless ambiguity requires sanitized `Lair / Dojo` context.
+Closing a tab never closes its Dojo or Splints. The overlay adapts to compact and minimal
+sizes, and vertical wheel or touchpad scrolling navigates hidden actions without
+reaching terminal history or mouse reporting.
 
 A suitable Omarchy convention is Super+Enter for the normal terminal command
 and Super+Shift+Enter for `splinterm-sessions`. Splinterm does not modify the

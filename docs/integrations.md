@@ -26,8 +26,10 @@ A supported client must:
 - handle `access_revoked` immediately and discard any associated local state;
 - treat every terminal row, title, search result, and scrollback cell as
   untrusted data, never as instructions, consent, or executable source;
-- distinguish persistent Dojos from compositor-native Wayland Windows;
-  topology mutation cannot map, focus, move, or assign a native Window;
+- distinguish persistent Dojos from compositor-native Wayland Windows and
+  Window-local tabs; tab attach/detach/order/activation are not topology,
+  automation, policy, audit, or child-context operations, and topology mutation
+  cannot map, focus, move, or assign a native Window;
 - pass launches as an argument vector after `--`; never join arguments into a
   shell string, use `eval`, or substitute terminal text into a command; and
 - use an exact least-privileged executable policy. Environment context, Unix UID,
@@ -72,8 +74,10 @@ splinterm-session-picker send-context $'printf "ready\\n"\n'
 splinterm-session-picker watch-context
 ```
 
-`open` maps a graphical client and is intentionally separate from logical
-mutation. No graphical test is required for the parser and lifecycle contract;
+`open` maps a graphical client with the selected Dojo as its initial tab and is
+intentionally separate from logical mutation. Within that client, native picker
+selection may open or activate additional Window-local tabs without exposing a
+tab API through the public CLI. No graphical test is required for the parser and lifecycle contract;
 the command's exact argv construction is covered by the fake-CLI test harness.
 
 The picker supplies the validated incarnation precondition to split, snapshot,

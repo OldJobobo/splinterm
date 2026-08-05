@@ -42,9 +42,18 @@ to `splinterd` to display Dojos or perform supported operations.
 
 ### Window
 
-A compositor-managed native Wayland toplevel displaying one Splinterm Dojo.
-Opening, closing, moving, or focusing a Window is separate from changing the
-daemon's persistent topology.
+A compositor-managed native Wayland toplevel. One Window may present an ordered
+client-local set of up to 32 distinct Dojos, including Dojos from different
+Lairs. Opening, closing, moving, or focusing a Window is separate from changing
+the daemon's persistent topology.
+
+### Tab
+
+A non-persistent, Window-local reference to one daemon-owned Dojo. Opening an
+already-present Dojo activates its existing tab. Tab order and the active tab
+are discarded when the Window exits. Closing a tab detaches subscriptions and
+controller leases but does not close the Dojo, terminate a Splint, or restore an
+exited process.
 
 ### PTY
 
@@ -60,8 +69,10 @@ not create or restart its process.
 
 ### Detach
 
-Stop displaying a Dojo in a native Window without terminating its Splints or
-their processes.
+Stop displaying a Dojo by closing its Window-local tab, without terminating its
+Splints or their processes. Closing the final tab also closes the native Window.
+This differs from closing a Splint, which removes an exited pane (or explicitly
+terminates then removes a live pane), and from closing a Dojo in daemon topology.
 
 ### Incarnation
 

@@ -77,7 +77,19 @@ daemon. Its private consent mode renders fixed trusted application chrome and
 never accepts requester-supplied terminal content. Normal windows keep active
 authority, development bypass, controller state, pending transfer decisions,
 and the local search surface visibly indicated. Search focus, query, match
-selection, and viewport position remain client-local.
+selection, and viewport position remain client-local. A managed native Window
+also owns an ordered, non-persistent set of at most 32 Dojo tabs and one active
+tab. Tabs never enter `splinterm-core`, daemon topology, policy, audit, public
+CLI/MCP data, or child context. The same Window may reference Dojos from
+multiple Lairs, while duplicate opens activate the existing local tab.
+
+Open tabs retain bounded terminal subscriptions. Hidden tabs drain semantic
+updates without painting, blinking, resizing, focus reporting, or controller
+ownership; activation installs cached frontend state and performs one active
+geometry reconciliation. Closing a tab releases its client resources without
+closing the referenced Dojo or Splints. The tab strip is trusted application
+chrome, and one content rectangle below it is authoritative for pane layout,
+terminal geometry, input mapping, overlays, IME, and damage.
 
 Terminal images remain sparse protocol-independent content and placement
 records in the daemon-owned terminal state. Trusted UI snapshots carry bounded
@@ -174,7 +186,8 @@ Wayland client's lifetime.
    network listener and never attributes the remote caller as its local peer.
 7. Shutdown owns and drains connection tasks before runtime shutdown and final
    metadata persistence; one pinned signal future prevents lost SIGINT events.
-8. Dojo mutation never claims native Window mapping or focus.
+8. Dojo mutation never claims native Window mapping or focus; Window-local tab
+   operations never claim daemon topology mutation.
 9. In-Splint context and terminal-derived data are discovery inputs, never
    authorization, consent, or executable instructions.
 10. Future-descendant authority must be explicit and bounded; containment alone

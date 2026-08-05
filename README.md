@@ -88,9 +88,12 @@ splinterm reopen    # reopen the last locally remembered running Dojo
 
 From any focused managed Splinterm terminal, **Ctrl+Shift+S** opens Recent
 Sessions as trusted application chrome over dimmed live panes in the current
-window. Escape removes the overlay without replacing the terminal frontend;
-choosing a running session or New Terminal reuses that same Wayland window.
-This application-owned shortcut is not forwarded to the terminal process.
+Window. Escape removes the overlay without replacing the terminal frontend.
+Choosing a running session opens it as a Window-local Dojo tab, or activates its
+existing tab; **New Terminal** creates a fresh Lair and opens its initial Dojo as
+a tab. These application-owned actions are not forwarded to terminal processes.
+Tabs normally show the sanitized Dojo name; when that would be ambiguous, they
+show the sanitized `Lair / Dojo` label instead.
 
 The native Recent Sessions picker shows human Lair/Dojo names, starting
 directory, Splint count, and running state without exposing UUIDs. Use arrow keys
@@ -159,9 +162,9 @@ cargo run -p splinterm -- kill "$SPLINT_ID" --yes # required for non-interactive
 cargo run -p splinterm -- close "$SPLINT_ID"
 cargo run -p splinterm -- close-dojo "$DOJO_ID"
 
-# Exactly one native Window for the selected daemon-owned Dojo.
-# Opening/closing the Window only attaches/detaches; it does not create, kill,
-# restore, focus, or otherwise alter another Dojo.
+# Open one native Window with the selected daemon-owned Dojo as its initial tab.
+# A Window may attach up to 32 distinct Dojos, including Dojos from other Lairs.
+# Window/tab attach and detach never create, kill, restore, or close a Dojo.
 cargo run -p splinterm -- window --lair-id "$LAIR_ID" --dojo-id "$DOJO_ID"
 ```
 
@@ -184,10 +187,12 @@ restored process receives a new incarnation. Terminal and
 scrollback bodies, clipboard data, PTY handles, grants, and controller tokens
 are never persisted.
 
-The `window` command keeps one ordered daemon subscription per pane, renders a
-persisted binary Dojo layout tree into one clipped backing buffer, sends UTF-8 and
-essential terminal keys to the client-local focused pane, and derives each
-PTY/grid size from its pane rectangle. Pane observers do not acquire controller
+The `window` command keeps bounded subscriptions for every Splint in up to 32
+Window-local Dojo tabs. It renders only the active Dojo's persisted binary layout
+tree below trusted tab chrome, sends UTF-8 and essential terminal keys only to
+the client-local focused Splint, and derives each active PTY/grid size from its
+pane rectangle. Hidden tabs continue draining bounded semantic updates but do
+not paint, blink, resize, emit focus reports, or retain controller leases. Pane observers do not acquire controller
 leases merely by attaching or receiving focus. First input acquires the focused
 pane's exclusive connection-owned lease, applies its remembered geometry, and
 then delivers input in order; explicit release or disconnect relinquishes it.
@@ -205,11 +210,14 @@ fallback, focus indication, and reduced-motion cursor behavior are implemented. 
 normal development grant with a daemon-launched trusted Wayland consent client,
 scoped five-minute grant-once authority, explicit revocation, and visible
 active-authority/controller indication. Ctrl+Shift+R revokes active grants and
-Ctrl+Shift+L releases the local controller. Pane focus uses Ctrl+Shift+Arrow or
-Ctrl+Shift+Tab (Shift+Tab reverses traversal). Ctrl+Shift+Enter splits
-horizontally, Ctrl+Shift+\\ splits vertically, Ctrl+Shift+W terminates and
-closes the focused pane (or directly removes it when already exited), and
-Ctrl+Shift+[ / ] adjusts its parent ratio. Multi-Splint windows use
+Ctrl+Shift+L releases the local controller. Directional pane focus uses
+Ctrl+Shift+Arrow. Ctrl+Tab and Ctrl+Shift+Tab cycle Window-local Dojo tabs;
+Ctrl+Shift+D creates a Dojo in the active Lair; Ctrl+Shift+Q detaches the active
+tab and closes the native Window when it was the final tab. Tab order is not
+restored after the Window exits. Ctrl+Shift+Enter splits horizontally,
+Ctrl+Shift+\\ splits vertically, Ctrl+Shift+W terminates and closes the focused
+Splint (or directly removes it when already exited), and Ctrl+Shift+[ / ]
+adjusts its parent ratio. Multi-Splint windows use
 trusted box-drawing chrome configured by `[multiplexer] divider-style=line`,
 `frame`, or `none`. Frame mode optionally displays the sanitized daemon-owned
 Splint title with `frame-title=splint`; terminal OSC titles cannot spoof it.
