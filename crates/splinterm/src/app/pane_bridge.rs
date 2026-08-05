@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use splinterm::automation::{
     Connection, ImageContentLeaseSet, SharedImageContentCache, protocol_error,
 };
@@ -697,6 +697,12 @@ pub(in crate::app) async fn run_controller(
                         bytes,
                     }
                 }
+                WindowCommand::Resynchronize => {
+                    if outputs.resyncs.send(()).await.is_err() {
+                        bail!("pane subscription stopped before resynchronization");
+                    }
+                    continue;
+                }
                 WindowCommand::Resize {
                     columns,
                     rows,
@@ -1070,6 +1076,24 @@ pub(in crate::app) async fn resolve_update_images(
     Ok(())
 }
 
+fn report_pane_controller_result(result: Result<Result<()>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("splinterm pane controller stopped: {error:#}"),
+        Err(error) => eprintln!("splinterm pane controller task failed: {error}"),
+    }
+}
+
+async fn finish_pane_controller(
+    controller: &mut tokio::task::JoinHandle<Result<()>>,
+    completed: bool,
+) -> Result<()> {
+    if !completed {
+        report_pane_controller_result(controller.await);
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -1088,12 +1112,17 @@ pub(in crate::app) async fn run_pane_subscription(
 ) -> Result<()> {
     let mut last_revision = attachment.snapshot.revision;
     let mut last_sequence = 0_u64;
+    let mut controller_completed = false;
     loop {
         tokio::select! {
             () = cancellation.cancelled() => {
-                return controller.await.context("pane controller task failed")?;
+                return finish_pane_controller(&mut controller, controller_completed).await;
             }
-            result = &mut controller => return result.context("pane controller task failed")?,
+            result = &mut controller, if !controller_completed => {
+                report_pane_controller_result(result);
+                controller_completed = true;
+                let _ = updates.send(WindowUpdate::Control(false)).await;
+            }
             Some(()) = resyncs.recv() => {
                 attachment = resynchronize(
                     &mut connection, attachment.subscription_id, splint_id, incarnation,
@@ -1105,8 +1134,9 @@ pub(in crate::app) async fn run_pane_subscription(
                 if updates.send(WindowUpdate::Snapshot {
                     snapshot: attachment.snapshot.clone(),
                     image_sources,
+                    authoritative: true,
                 }).await.is_err() {
-                    return controller.await.context("pane controller task failed")?;
+                    return finish_pane_controller(&mut controller, controller_completed).await;
                 }
             }
             frame = connection.next_server_frame() => {
@@ -1122,8 +1152,12 @@ pub(in crate::app) async fn run_pane_subscription(
                         last_revision = snapshot.revision;
                         resolve_image_contents(&mut connection, &snapshot, &image_cache).await?;
                         let image_sources = lease_snapshot_images(&image_cache, &snapshot)?;
-                        if updates.send(WindowUpdate::Snapshot { snapshot, image_sources }).await.is_err() {
-                            return controller.await.context("pane controller task failed")?;
+                        if updates.send(WindowUpdate::Snapshot {
+                            snapshot,
+                            image_sources,
+                            authoritative: false,
+                        }).await.is_err() {
+                            return finish_pane_controller(&mut controller, controller_completed).await;
                         }
                         last_sequence = sequence;
                     }
@@ -1160,7 +1194,7 @@ pub(in crate::app) async fn run_pane_subscription(
                         let queue_depth = updates.max_capacity().saturating_sub(updates.capacity());
                         let enqueue_started = perf_trace_enabled().then(Instant::now);
                         if updates.send(WindowUpdate::Update { update, image_sources }).await.is_err() {
-                            return controller.await.context("pane controller task failed")?;
+                            return finish_pane_controller(&mut controller, controller_completed).await;
                         }
                         if let Some(started) = enqueue_started {
                             emit_perf_trace(
@@ -1197,17 +1231,18 @@ pub(in crate::app) async fn run_pane_subscription(
                         if updates.send(WindowUpdate::Snapshot {
                             snapshot: attachment.snapshot.clone(),
                             image_sources,
+                            authoritative: true,
                         }).await.is_err() {
-                            return controller.await.context("pane controller task failed")?;
+                            return finish_pane_controller(&mut controller, controller_completed).await;
                         }
                     }
                     EventAction::Exited => {
                         let _ = updates.send(WindowUpdate::Exited { splint_id }).await;
-                        return controller.await.context("pane controller task failed")?;
+                        return finish_pane_controller(&mut controller, controller_completed).await;
                     }
                     EventAction::Shutdown => {
                         let _ = updates.send(WindowUpdate::Shutdown).await;
-                        return controller.await.context("pane controller task failed")?;
+                        return finish_pane_controller(&mut controller, controller_completed).await;
                     }
                 }
             }

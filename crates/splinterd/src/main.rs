@@ -12,6 +12,7 @@ use std::{
         unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -25,8 +26,8 @@ use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 use splinterd::{
     CompactSubscription, LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot,
-    LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, ProcessIncarnation, SubscriptionReceive,
-    authorization, executable_identity,
+    LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, ProcessExit, ProcessIncarnation,
+    SubscriptionReceive, authorization, executable_identity,
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     policy,
 };
@@ -83,6 +84,7 @@ const OUTBOUND_QUEUE: usize = 32;
 const CONTROL_QUEUE: usize = 4;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const TERMINAL_SUBSCRIPTION_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const CONTROL_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15);
 const EXIT_OBSERVER_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_EVENT_QUEUE: usize = 32;
@@ -5164,6 +5166,108 @@ async fn record_subscription_expiry(audit: &SubscriptionAudit, handle: &LiveSpli
     });
 }
 
+fn terminal_subscription_frame_sleep() -> time::Sleep {
+    time::sleep(TERMINAL_SUBSCRIPTION_FRAME_INTERVAL)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FramePacingOutcome {
+    Ready,
+    Revoke(u64),
+    Expire(u64),
+    Terminate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RevocationDecision {
+    Continue,
+    Revoke(u64),
+    Terminate,
+}
+
+fn classify_revocation(
+    result: &Result<Revocation, broadcast::error::RecvError>,
+    grant_id: Option<u64>,
+) -> RevocationDecision {
+    match result {
+        Ok(revocation) if Some(revocation.grant_id) == grant_id => {
+            RevocationDecision::Revoke(revocation.grant_id)
+        }
+        Ok(_) => RevocationDecision::Continue,
+        Err(broadcast::error::RecvError::Lagged(_) | broadcast::error::RecvError::Closed) => {
+            RevocationDecision::Terminate
+        }
+    }
+}
+
+async fn wait_terminal_subscription_frame(
+    revocations: &mut broadcast::Receiver<Revocation>,
+    grant_id: Option<u64>,
+    mut expiry: Pin<&mut time::Sleep>,
+) -> FramePacingOutcome {
+    let frame_pacing = terminal_subscription_frame_sleep();
+    tokio::pin!(frame_pacing);
+    loop {
+        tokio::select! {
+            () = &mut frame_pacing => return FramePacingOutcome::Ready,
+            revoked = revocations.recv(), if grant_id.is_some() => {
+                match classify_revocation(&revoked, grant_id) {
+                    RevocationDecision::Continue => {}
+                    RevocationDecision::Revoke(grant_id) => {
+                        return FramePacingOutcome::Revoke(grant_id);
+                    }
+                    RevocationDecision::Terminate => return FramePacingOutcome::Terminate,
+                }
+            }
+            () = expiry.as_mut(), if grant_id.is_some() => {
+                return grant_id.map_or(FramePacingOutcome::Terminate, FramePacingOutcome::Expire);
+            }
+        }
+    }
+}
+
+fn exited_subscription_frame(
+    subscription_id: u64,
+    sequence: u64,
+    status: ProcessExit,
+) -> ServerFrame {
+    ServerFrame::Event {
+        subscription_id,
+        sequence,
+        event: SubscriptionEvent::Exited {
+            code: status.code,
+            signal: status.signal,
+        },
+    }
+}
+
+async fn send_final_subscription_frames(
+    outbound: &mpsc::Sender<ServerFrame>,
+    update: ServerFrame,
+    subscription_id: u64,
+    sequence: u64,
+    status: ProcessExit,
+) -> bool {
+    let resync_required = matches!(
+        &update,
+        ServerFrame::Event {
+            event: SubscriptionEvent::ResyncRequired { .. },
+            ..
+        }
+    );
+    if !resync_required && outbound.send(update).await.is_err() {
+        return false;
+    }
+    outbound
+        .send(exited_subscription_frame(
+            subscription_id,
+            sequence + u64::from(!resync_required),
+            status,
+        ))
+        .await
+        .is_ok()
+}
+
 async fn send_access_revoked(
     control: &mpsc::Sender<ServerFrame>,
     subscription_id: u64,
@@ -5204,23 +5308,17 @@ fn spawn_subscription(
         let mut previous_visible_rows = access.visible_rows.clone();
         let expiry = time::sleep(consent::GRANT_LIFETIME);
         tokio::pin!(expiry);
-        loop {
+        'subscription: loop {
             let (received, trailing_exit) = tokio::select! {
                 value = subscription.recv_coalesced() => value,
                 revoked = revocations.recv(), if access.grant_id.is_some() => {
-                    match revoked {
-                        Ok(revocation) if Some(revocation.grant_id) == access.grant_id => {
-                            send_access_revoked(
-                                &outputs.control,
-                                id,
-                                sequence,
-                                revocation.grant_id,
-                            )
-                            .await;
+                    match classify_revocation(&revoked, access.grant_id) {
+                        RevocationDecision::Revoke(grant_id) => {
+                            send_access_revoked(&outputs.control, id, sequence, grant_id).await;
                             break;
                         }
-                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        RevocationDecision::Continue => continue,
+                        RevocationDecision::Terminate => break,
                     }
                 }
                 () = &mut expiry, if access.grant_id.is_some() => {
@@ -5247,14 +5345,10 @@ fn spawn_subscription(
                     break;
                 }
                 SubscriptionReceive::Event(LiveEvent::Exited { status, .. }) => {
-                    let _ = outputs.outbound.try_send(ServerFrame::Event {
-                        subscription_id: id,
-                        sequence,
-                        event: SubscriptionEvent::Exited {
-                            code: status.code,
-                            signal: status.signal,
-                        },
-                    });
+                    let _ = outputs
+                        .outbound
+                        .send(exited_subscription_frame(id, sequence, status))
+                        .await;
                     break;
                 }
                 SubscriptionReceive::Event(LiveEvent::Update {
@@ -5309,9 +5403,32 @@ fn spawn_subscription(
                             sequence,
                             event,
                         };
-                        if !frame_within_policy_limit(&frame, access.maximum_returned_bytes)
-                            || outputs.outbound.try_send(frame).is_err()
-                        {
+                        if !frame_within_policy_limit(&frame, access.maximum_returned_bytes) {
+                            let revision = current_revision(&handle, access.scrollback_rows).await;
+                            let _ = outputs
+                                .control
+                                .send(ServerFrame::Event {
+                                    subscription_id: id,
+                                    sequence,
+                                    event: SubscriptionEvent::ResyncRequired {
+                                        current_revision: revision,
+                                    },
+                                })
+                                .await;
+                            break;
+                        }
+                        if let Some(status) = trailing_exit {
+                            let _ = send_final_subscription_frames(
+                                &outputs.outbound,
+                                frame,
+                                id,
+                                sequence,
+                                status,
+                            )
+                            .await;
+                            break;
+                        }
+                        if outputs.outbound.try_send(frame).is_err() {
                             let revision = current_revision(&handle, access.scrollback_rows).await;
                             let _ = outputs
                                 .control
@@ -5326,17 +5443,25 @@ fn spawn_subscription(
                             break;
                         }
                         sequence += 1;
-                    }
-                    if let Some(status) = trailing_exit {
-                        let _ = outputs.outbound.try_send(ServerFrame::Event {
-                            subscription_id: id,
-                            sequence,
-                            event: SubscriptionEvent::Exited {
-                                code: status.code,
-                                signal: status.signal,
-                            },
-                        });
-                        break;
+                        match wait_terminal_subscription_frame(
+                            &mut revocations,
+                            access.grant_id,
+                            expiry.as_mut(),
+                        )
+                        .await
+                        {
+                            FramePacingOutcome::Ready => {}
+                            FramePacingOutcome::Revoke(grant_id) => {
+                                send_access_revoked(&outputs.control, id, sequence, grant_id).await;
+                                break 'subscription;
+                            }
+                            FramePacingOutcome::Expire(grant_id) => {
+                                send_access_revoked(&outputs.control, id, sequence, grant_id).await;
+                                record_subscription_expiry(&audit, &handle).await;
+                                break 'subscription;
+                            }
+                            FramePacingOutcome::Terminate => break 'subscription,
+                        }
                     }
                 }
                 SubscriptionReceive::Closed => break,
@@ -6149,6 +6274,120 @@ mod tests {
         assert!(scrolls.is_empty());
         assert!(damaged.iter().all(|damaged| *damaged));
         assert!(damaged.len() <= splinterm_protocol::MAX_UPDATE_ROW_PATCHES);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_subscription_pacing_handles_time_and_revocation_outcomes() {
+        let (revocations, mut receiver) = broadcast::channel(1);
+        let expiry = time::sleep(Duration::from_secs(1));
+        tokio::pin!(expiry);
+        let started = time::Instant::now();
+        assert_eq!(
+            wait_terminal_subscription_frame(&mut receiver, None, expiry.as_mut()).await,
+            FramePacingOutcome::Ready
+        );
+        assert_eq!(started.elapsed(), TERMINAL_SUBSCRIPTION_FRAME_INTERVAL);
+
+        let expiry = time::sleep(Duration::from_secs(1));
+        tokio::pin!(expiry);
+        revocations.send(Revocation { grant_id: 8 }).unwrap();
+        assert_eq!(
+            wait_terminal_subscription_frame(&mut receiver, Some(7), expiry.as_mut()).await,
+            FramePacingOutcome::Ready
+        );
+
+        let expiry = time::sleep(Duration::from_secs(1));
+        tokio::pin!(expiry);
+        revocations.send(Revocation { grant_id: 7 }).unwrap();
+        assert_eq!(
+            wait_terminal_subscription_frame(&mut receiver, Some(7), expiry.as_mut()).await,
+            FramePacingOutcome::Revoke(7)
+        );
+
+        let expiry = time::sleep(Duration::from_millis(10));
+        tokio::pin!(expiry);
+        assert_eq!(
+            wait_terminal_subscription_frame(&mut receiver, Some(7), expiry.as_mut()).await,
+            FramePacingOutcome::Expire(7)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_subscription_pacing_fails_closed_on_revocation_lag() {
+        let (revocations, mut receiver) = broadcast::channel(1);
+        revocations.send(Revocation { grant_id: 1 }).unwrap();
+        revocations.send(Revocation { grant_id: 2 }).unwrap();
+        let expiry = time::sleep(Duration::from_secs(1));
+        tokio::pin!(expiry);
+
+        assert_eq!(
+            wait_terminal_subscription_frame(&mut receiver, Some(7), expiry.as_mut()).await,
+            FramePacingOutcome::Terminate
+        );
+    }
+
+    #[test]
+    fn terminal_subscription_revocation_classification_fails_closed_on_lag() {
+        assert_eq!(
+            classify_revocation(&Ok(Revocation { grant_id: 7 }), Some(7)),
+            RevocationDecision::Revoke(7)
+        );
+        assert_eq!(
+            classify_revocation(&Ok(Revocation { grant_id: 8 }), Some(7)),
+            RevocationDecision::Continue
+        );
+        assert_eq!(
+            classify_revocation(&Err(broadcast::error::RecvError::Lagged(1)), Some(7)),
+            RevocationDecision::Terminate
+        );
+        assert_eq!(
+            classify_revocation(&Err(broadcast::error::RecvError::Closed), Some(7)),
+            RevocationDecision::Terminate
+        );
+    }
+
+    #[tokio::test]
+    async fn final_terminal_update_precedes_its_trailing_exit_without_pacing() {
+        let (outbound, mut receiver) = mpsc::channel(2);
+        let update = ServerFrame::Event {
+            subscription_id: 11,
+            sequence: 4,
+            event: SubscriptionEvent::AccessRevoked { grant_id: 7 },
+        };
+        let status = ProcessExit {
+            code: Some(0),
+            signal: None,
+        };
+
+        assert!(send_final_subscription_frames(&outbound, update.clone(), 11, 4, status).await);
+        assert_eq!(receiver.recv().await, Some(update));
+        assert_eq!(
+            receiver.recv().await,
+            Some(exited_subscription_frame(11, 5, status))
+        );
+    }
+
+    #[tokio::test]
+    async fn final_terminal_exit_bypasses_an_impossible_resynchronization() {
+        let (outbound, mut receiver) = mpsc::channel(1);
+        let resync = ServerFrame::Event {
+            subscription_id: 11,
+            sequence: 4,
+            event: SubscriptionEvent::ResyncRequired {
+                current_revision: 19,
+            },
+        };
+        let status = ProcessExit {
+            code: Some(0),
+            signal: None,
+        };
+
+        assert!(send_final_subscription_frames(&outbound, resync, 11, 4, status).await);
+        assert_eq!(
+            receiver.recv().await,
+            Some(exited_subscription_frame(11, 4, status))
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

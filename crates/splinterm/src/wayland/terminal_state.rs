@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use splinterm_protocol::{
-    ActiveScreen, CellAttributes, ColorSource, HistoryTransition, TerminalCell, TerminalRow,
-    TerminalSnapshot, TerminalUpdate, UnderlineStyle,
+    CellAttributes, ColorSource, HistoryTransition, ScrollDirection, TerminalCell, TerminalRow,
+    TerminalScroll, TerminalSnapshot, TerminalUpdate, UnderlineStyle,
 };
 
 pub(super) const MAX_CACHED_HISTORY_ROWS: usize = 4096;
@@ -23,6 +23,15 @@ pub(super) fn snapshot_is_newer(
         );
     }
     Ok(candidate.revision > current.revision)
+}
+
+pub(super) fn snapshot_replaces(
+    current: &TerminalSnapshot,
+    candidate: &TerminalSnapshot,
+    authoritative: bool,
+) -> Result<bool> {
+    Ok(snapshot_is_newer(current, candidate)?
+        || (authoritative && candidate.revision == current.revision))
 }
 
 #[cfg(test)]
@@ -129,6 +138,45 @@ pub(super) fn bound_history_page_with_pins(
         .then_some(rows)
 }
 
+pub(super) fn changed_terminal_patch_rows(
+    update: &TerminalUpdate,
+    current: &TerminalSnapshot,
+) -> Vec<usize> {
+    if update
+        .columns
+        .is_some_and(|columns| columns != current.columns)
+        || update.row_count.is_some_and(|rows| rows != current.rows)
+    {
+        return update.rows.iter().map(|patch| patch.index).collect();
+    }
+    let mut projected_rows = current.visible_rows.clone();
+    for scroll in &update.scrolls {
+        if scroll.start_row >= scroll.end_row
+            || scroll.rows == 0
+            || scroll.end_row > projected_rows.len()
+            || scroll.rows > scroll.end_row.saturating_sub(scroll.start_row)
+        {
+            return update.rows.iter().map(|patch| patch.index).collect();
+        }
+        apply_terminal_scroll(&mut projected_rows, current.columns, *scroll);
+    }
+    let row_identity_is_visual = current
+        .images
+        .as_ref()
+        .is_some_and(|images| !images.placements.is_empty());
+    update
+        .rows
+        .iter()
+        .filter(|patch| {
+            projected_rows.get(patch.index).is_none_or(|row| {
+                row.cells != patch.row.cells
+                    || (row_identity_is_visual && row.row_id != patch.row.row_id)
+            })
+        })
+        .map(|patch| patch.index)
+        .collect()
+}
+
 pub(super) fn terminal_update_changes_visible_content(update: &TerminalUpdate) -> bool {
     !update.rows.is_empty()
         || !update.scrolls.is_empty()
@@ -143,29 +191,45 @@ pub(super) fn terminal_update_changes_visible_content(update: &TerminalUpdate) -
 
 pub(super) fn terminal_update_full_frame_reasons(
     update: &TerminalUpdate,
-    current_active_screen: ActiveScreen,
-    current_has_images: bool,
+    current: &TerminalSnapshot,
 ) -> u64 {
-    u64::from(update.columns.is_some())
-        | (u64::from(update.row_count.is_some()) << 1)
-        | (u64::from(update.palette.is_some()) << 2)
-        | (u64::from(update.default_colors.is_some()) << 3)
+    u64::from(
+        update
+            .columns
+            .is_some_and(|columns| columns != current.columns),
+    ) | (u64::from(update.row_count.is_some_and(|rows| rows != current.rows)) << 1)
+        | (u64::from(
+            update
+                .palette
+                .as_ref()
+                .is_some_and(|palette| palette.get(16..) != current.palette.get(16..)),
+        ) << 2)
         | (u64::from(
             update
                 .active_screen
-                .is_some_and(|active_screen| active_screen != current_active_screen),
+                .is_some_and(|active_screen| active_screen != current.active_screen),
         ) << 4)
-        | (u64::from(update.images.is_some()) << 5)
-        | (u64::from(current_has_images && !update.scrolls.is_empty()) << 6)
+        | (u64::from(
+            update
+                .images
+                .as_ref()
+                .is_some_and(|images| current.images.as_ref() != Some(images)),
+        ) << 5)
+        | (u64::from(
+            current
+                .images
+                .as_ref()
+                .is_some_and(|images| !images.placements.is_empty())
+                && !update.scrolls.is_empty(),
+        ) << 6)
 }
 
 #[cfg(test)]
 pub(super) fn terminal_update_requires_full_frame(
     update: &TerminalUpdate,
-    current_active_screen: ActiveScreen,
-    current_has_images: bool,
+    current: &TerminalSnapshot,
 ) -> bool {
-    terminal_update_full_frame_reasons(update, current_active_screen, current_has_images) != 0
+    terminal_update_full_frame_reasons(update, current) != 0
 }
 
 pub(super) fn apply_scrollback_update(
@@ -223,6 +287,25 @@ pub(super) fn apply_scrollback_update(
     Ok(())
 }
 
+fn apply_terminal_scroll(visible_rows: &mut [TerminalRow], columns: usize, scroll: TerminalScroll) {
+    let region = &mut visible_rows[scroll.start_row..scroll.end_row];
+    match scroll.direction {
+        ScrollDirection::Forward => {
+            region.rotate_left(scroll.rows);
+            let exposed_start = region.len() - scroll.rows;
+            for row in &mut region[exposed_start..] {
+                *row = blank_row(columns);
+            }
+        }
+        ScrollDirection::Reverse => {
+            region.rotate_right(scroll.rows);
+            for row in &mut region[..scroll.rows] {
+                *row = blank_row(columns);
+            }
+        }
+    }
+}
+
 pub(super) fn apply_terminal_update(
     snapshot: &mut TerminalSnapshot,
     update: TerminalUpdate,
@@ -250,6 +333,9 @@ pub(super) fn apply_terminal_update(
             .visible_rows
             .resize_with(rows, || blank_row(snapshot.columns));
         snapshot.visible_rows.truncate(rows);
+    }
+    for scroll in update.scrolls {
+        apply_terminal_scroll(&mut snapshot.visible_rows, snapshot.columns, scroll);
     }
     for patch in update.rows {
         if patch.index >= snapshot.rows || patch.row.cells.len() > snapshot.columns {

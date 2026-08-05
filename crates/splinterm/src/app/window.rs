@@ -268,6 +268,7 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                     .send(WindowUpdate::Snapshot {
                         snapshot: attachment.snapshot.clone(),
                         image_sources,
+                        authoritative: true,
                     })
                     .await
                     .is_err()
@@ -298,7 +299,11 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                             last_revision = snapshot.revision;
                             resolve_image_contents(&mut connection, &snapshot, &image_cache).await?;
                             let image_sources = lease_snapshot_images(&image_cache, &snapshot)?;
-                            if updates.send(WindowUpdate::Snapshot { snapshot, image_sources }).await.is_err() {
+                            if updates.send(WindowUpdate::Snapshot {
+                                snapshot,
+                                image_sources,
+                                authoritative: false,
+                            }).await.is_err() {
                                 let window_result = window.await.context("Wayland window task failed")?;
                                 controller.await.context("window controller task failed")??;
                                 return window_result;
@@ -342,6 +347,7 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                                 .send(WindowUpdate::Snapshot {
                                     snapshot: attachment.snapshot.clone(),
                                     image_sources,
+                                    authoritative: true,
                                 })
                                 .await
                                 .is_err()
@@ -371,6 +377,7 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                                 .send(WindowUpdate::Snapshot {
                                     snapshot: attachment.snapshot.clone(),
                                     image_sources,
+                                    authoritative: true,
                                 })
                                 .await
                                 .is_err()

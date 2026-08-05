@@ -178,10 +178,13 @@ use selection::{
     selection_is_retained, selection_text, transient_overlay_rows, url_at,
 };
 use tabs::{DojoTabView, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, TabsState, tab_strip_hit_test};
+#[cfg(test)]
+use terminal_state::snapshot_is_newer;
 use terminal_state::{
     MAX_CACHED_HISTORY_BYTES, MAX_CACHED_HISTORY_ROWS, apply_terminal_update,
-    bound_history_page_with_pins, history_cache_bytes, omitted_rows_before_cache,
-    snapshot_is_newer, terminal_update_changes_visible_content, terminal_update_full_frame_reasons,
+    bound_history_page_with_pins, changed_terminal_patch_rows, history_cache_bytes,
+    omitted_rows_before_cache, snapshot_replaces, terminal_update_changes_visible_content,
+    terminal_update_full_frame_reasons,
 };
 #[cfg(test)]
 use terminal_state::{
@@ -1153,29 +1156,45 @@ impl PaneView {
         if self.scrollback_viewport.is_live() {
             return Some(snapshot.clone());
         }
-        let mut display = snapshot.clone();
         let cursor_row = viewport_cursor_row(
             snapshot.cursor_row,
             self.scrollback_viewport.offset_from_bottom(),
             snapshot.rows,
         );
+        let mut input_modes = snapshot.input_modes;
         if cursor_row.is_none() {
-            display.input_modes.cursor_visible = false;
+            input_modes.cursor_visible = false;
         }
-        display.cursor_column = cursor_row.map_or(-1, |_| snapshot.cursor_column);
-        display.cursor_row = cursor_row.unwrap_or(-1);
-        display.cursor_deferred_wrap = false;
-        display.visible_rows = self
-            .scrollback_viewport
-            .visible_rows(snapshot)
-            .into_iter()
-            .cloned()
-            .collect();
-        display.oldest_available_scrollback_row_id = None;
-        display.newest_available_scrollback_row_id = None;
-        display.scrollback_rows.clear();
-        display.omitted_oldest_scrollback_rows = display.available_scrollback_rows;
-        Some(display)
+        Some(TerminalSnapshot {
+            splint_id: snapshot.splint_id,
+            incarnation: snapshot.incarnation,
+            revision: snapshot.revision,
+            columns: snapshot.columns,
+            rows: snapshot.rows,
+            cursor_column: cursor_row.map_or(-1, |_| snapshot.cursor_column),
+            cursor_row: cursor_row.unwrap_or(-1),
+            cursor_deferred_wrap: false,
+            active_screen: snapshot.active_screen,
+            input_modes,
+            palette: snapshot.palette.clone(),
+            default_colors: snapshot.default_colors,
+            title: snapshot.title.clone(),
+            visible_rows: self
+                .scrollback_viewport
+                .visible_rows(snapshot)
+                .into_iter()
+                .cloned()
+                .collect(),
+            history_generation: snapshot.history_generation,
+            oldest_available_scrollback_row_id: None,
+            newest_available_scrollback_row_id: None,
+            scrollback_rows: Vec::new(),
+            available_scrollback_rows: snapshot.available_scrollback_rows,
+            omitted_oldest_scrollback_rows: snapshot.available_scrollback_rows,
+            images: snapshot.images.clone(),
+            exited_code: snapshot.exited_code,
+            exited_signal: snapshot.exited_signal,
+        })
     }
 
     fn display_snapshot_cow(&self) -> Option<Cow<'_, TerminalSnapshot>> {
@@ -1263,13 +1282,14 @@ impl PaneView {
             WindowUpdate::Snapshot {
                 mut snapshot,
                 image_sources,
+                authoritative,
             } => {
                 snapshot
                     .validate()
                     .map_err(|error| anyhow::anyhow!(error.message))?;
                 apply_theme(&mut snapshot, theme);
                 if let Some(current) = self.snapshot.as_ref()
-                    && !snapshot_is_newer(current, &snapshot)?
+                    && !snapshot_replaces(current, &snapshot, authoritative)?
                 {
                     return Ok(BackgroundUpdateImpact::NONE);
                 }
@@ -1680,6 +1700,32 @@ fn try_window_command(commands: &Sender<WindowCommand>, command: WindowCommand) 
         TrySendError::Full(_) => anyhow::anyhow!("Wayland command queue overflow"),
         TrySendError::Closed(_) => anyhow::anyhow!("Wayland command receiver disconnected"),
     })
+}
+
+fn terminal_update_has_visual_damage(
+    full: bool,
+    cursor_changed: bool,
+    raster_dirty_rows: &[bool],
+    surface_dirty_rows: &[bool],
+) -> bool {
+    full || cursor_changed
+        || raster_dirty_rows.iter().any(|dirty| *dirty)
+        || surface_dirty_rows.iter().any(|dirty| *dirty)
+}
+
+fn request_return_live_resync(
+    commands: Option<&Sender<WindowCommand>>,
+    previous_offset: usize,
+    current_offset: usize,
+) -> Result<bool> {
+    if previous_offset == 0 || current_offset != 0 {
+        return Ok(false);
+    }
+    let Some(commands) = commands else {
+        return Ok(false);
+    };
+    try_window_command(commands, WindowCommand::Resynchronize)?;
+    Ok(true)
 }
 
 fn try_topology_command(
@@ -2494,7 +2540,13 @@ impl App {
                 .scroll_down(lines, snapshot),
             _ => return Ok(false),
         }
-        let moved = self.panes.pane.scrollback_viewport.offset_from_bottom() != previous_offset;
+        let current_offset = self.panes.pane.scrollback_viewport.offset_from_bottom();
+        let moved = current_offset != previous_offset;
+        request_return_live_resync(
+            self.panes.pane.commands.as_ref(),
+            previous_offset,
+            current_offset,
+        )?;
         if action == MouseAction::WheelUp {
             let loaded = snapshot.scrollback_rows.len();
             let remaining =
@@ -4620,6 +4672,7 @@ impl App {
                 WindowUpdate::Snapshot {
                     mut snapshot,
                     image_sources,
+                    authoritative,
                 } => {
                     self.panes.pane.history_page_pending = false;
                     snapshot
@@ -4627,7 +4680,7 @@ impl App {
                         .map_err(|error| anyhow::anyhow!(error.message))?;
                     apply_theme(&mut snapshot, self.presentation.theme);
                     let accept = match self.panes.pane.snapshot.as_ref() {
-                        Some(current) => snapshot_is_newer(current, &snapshot)?,
+                        Some(current) => snapshot_replaces(current, &snapshot, authoritative)?,
                         None => true,
                     };
                     if accept {
@@ -4673,8 +4726,6 @@ impl App {
                             .ok()
                             .filter(|row| *row < snapshot.rows)
                     });
-                    let patched_rows: Vec<_> =
-                        update.rows.iter().map(|patch| patch.index).collect();
                     let scrolls = update.scrolls.clone();
                     let history_changed = update.scrollback.is_some();
                     let current = self
@@ -4683,15 +4734,15 @@ impl App {
                         .snapshot
                         .as_ref()
                         .context("terminal update arrived before initial snapshot")?;
-                    let full_frame_reasons = terminal_update_full_frame_reasons(
-                        &update,
-                        current.active_screen,
-                        current.images.is_some(),
-                    );
+                    let patched_rows = changed_terminal_patch_rows(&update, current);
+                    let full_frame_reasons = terminal_update_full_frame_reasons(&update, current);
                     let mut full = full_frame_reasons != 0;
                     let content_changed = terminal_update_changes_visible_content(&update);
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
+                    if content_changed {
+                        self.dirty_selection(self.panes.pane.selection);
+                    }
                     let previous_generation = self
                         .panes
                         .pane
@@ -4764,13 +4815,8 @@ impl App {
                         }
                         for row in patched_rows.into_iter().filter(|row| *row < rows) {
                             self.panes.pane.prepare_dirty_rows[row] = true;
-                            let copied = scrolls
-                                .iter()
-                                .any(|scroll| row >= scroll.start_row && row < scroll.end_row);
-                            if !copied {
-                                self.panes.pane.raster_dirty_rows[row] = true;
-                                self.panes.pane.surface_dirty_rows[row] = true;
-                            }
+                            self.panes.pane.raster_dirty_rows[row] = true;
+                            self.panes.pane.surface_dirty_rows[row] = true;
                         }
                         if cursor_changed {
                             if let Some(row) = old_cursor_row {
@@ -4786,9 +4832,12 @@ impl App {
                         }
                         self.panes.pane.pending_scrolls.extend(scrolls);
                     }
-                    let update_visual_changed = full
-                        || cursor_changed
-                        || self.panes.pane.raster_dirty_rows.iter().any(|dirty| *dirty);
+                    let update_visual_changed = terminal_update_has_visual_damage(
+                        full,
+                        cursor_changed,
+                        &self.panes.pane.raster_dirty_rows,
+                        &self.panes.pane.surface_dirty_rows,
+                    );
                     visual_changed |= update_visual_changed;
                     focused_visual_changed |= update_visual_changed;
                     if let Some(started) = apply_started {
@@ -4946,7 +4995,7 @@ impl App {
                         self.panes.focused_splint() == Some(splint_id),
                         "focused pane exit identity does not match its snapshot"
                     );
-                    if self.panes.layout.is_some() {
+                    if self.tab_state.topology_commands.is_some() {
                         self.panes.pending_exited_splints.insert(splint_id);
                         self.panes.pane.controller_active = false;
                         self.panes.pane.commands = None;
@@ -5353,9 +5402,9 @@ impl App {
             self.scheduling.redraw_pending = true;
             Ok(())
         } else {
-            // A released buffer may be committed again even when its earlier frame
-            // callback is delayed. Reusing it avoids both callback latency and an
-            // unbounded replacement-buffer path.
+            // Terminal damage is coalesced while a compositor frame callback is
+            // pending so bursty PTY redraws cannot render obsolete intermediate
+            // states faster than they can be presented.
             self.draw(queue_handle)
         }
     }
@@ -6976,6 +7025,45 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_equal_revision_snapshot_rebuilds_a_diverged_pane() {
+        let splint_id = SplintId::new();
+        let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
+        let revision = pane.snapshot.as_ref().unwrap().revision;
+        let mut authoritative = pane.snapshot.as_ref().unwrap().clone();
+        authoritative.visible_rows[0].cells[0].content = "authoritative-live".into();
+        pane.snapshot_frame = None;
+
+        let impact = apply_inactive_update_batch(
+            &mut pane,
+            [WindowUpdate::Snapshot {
+                snapshot: authoritative,
+                image_sources: ImageContentLeaseSet::default(),
+                authoritative: true,
+            }],
+            ResolvedTheme::default(),
+        )
+        .unwrap();
+
+        assert_eq!(impact, BackgroundUpdateImpact::FRAME);
+        assert_eq!(pane.snapshot.as_ref().unwrap().revision, revision);
+        assert_eq!(
+            pane.snapshot.as_ref().unwrap().visible_rows[0].cells[0].content,
+            "authoritative-live"
+        );
+        assert_eq!(
+            rebuild_inactive_frames(
+                std::slice::from_mut(&mut pane),
+                &HashSet::from([splint_id]),
+                false,
+                SCALE_DENOMINATOR,
+            )
+            .unwrap(),
+            1
+        );
+        assert!(pane.snapshot_frame.is_some());
+    }
+
+    #[test]
     fn inactive_pane_batch_defers_one_rebuild_until_after_contiguous_burst() {
         let splint_id = SplintId::new();
         let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
@@ -7030,6 +7118,60 @@ mod tests {
     }
 
     #[test]
+    fn bounded_detached_display_matches_legacy_snapshot_semantics() {
+        let mut initial = valid_snapshot(SplintId::new());
+        initial.rows = 2;
+        initial.visible_rows = vec![history_row(4, 0), history_row(5, 0)];
+        initial.scrollback_rows = vec![history_row(1, 0), history_row(2, 0), history_row(3, 0)];
+        initial.available_scrollback_rows = 3;
+        initial.oldest_available_scrollback_row_id = Some(1);
+        initial.newest_available_scrollback_row_id = Some(3);
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: initial,
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+        pane.scrollback_viewport
+            .scroll_up(2, pane.snapshot.as_ref().unwrap());
+
+        let snapshot = pane.snapshot.as_ref().unwrap();
+        let mut expected = snapshot.clone();
+        let cursor_row = viewport_cursor_row(
+            snapshot.cursor_row,
+            pane.scrollback_viewport.offset_from_bottom(),
+            snapshot.rows,
+        );
+        if cursor_row.is_none() {
+            expected.input_modes.cursor_visible = false;
+        }
+        expected.cursor_column = cursor_row.map_or(-1, |_| snapshot.cursor_column);
+        expected.cursor_row = cursor_row.unwrap_or(-1);
+        expected.cursor_deferred_wrap = false;
+        expected.visible_rows = pane
+            .scrollback_viewport
+            .visible_rows(snapshot)
+            .into_iter()
+            .cloned()
+            .collect();
+        expected.oldest_available_scrollback_row_id = None;
+        expected.newest_available_scrollback_row_id = None;
+        expected.scrollback_rows.clear();
+        expected.omitted_oldest_scrollback_rows = expected.available_scrollback_rows;
+
+        assert_eq!(pane.display_snapshot().unwrap(), expected);
+        assert_eq!(snapshot.scrollback_rows.len(), 3);
+    }
+
+    #[test]
     fn inactive_detached_pane_batches_snapshot_and_theme_into_one_anchored_frame() {
         let splint_id = SplintId::new();
         let mut initial = valid_snapshot(splint_id);
@@ -7069,6 +7211,7 @@ mod tests {
             [WindowUpdate::Snapshot {
                 snapshot: next,
                 image_sources: ImageContentLeaseSet::default(),
+                authoritative: false,
             }],
             ResolvedTheme::default(),
         )
@@ -7465,11 +7608,97 @@ mod tests {
     }
 
     #[test]
+    fn semantic_scroll_survives_return_to_live_frame_rebuild() {
+        let splint_id = SplintId::new();
+        let mut initial = valid_snapshot(splint_id);
+        initial.rows = 4;
+        initial.scrollback_rows = vec![history_row(1, 0)];
+        initial.available_scrollback_rows = 1;
+        initial.oldest_available_scrollback_row_id = Some(1);
+        initial.newest_available_scrollback_row_id = Some(1);
+        initial.visible_rows = (2..=5)
+            .zip(["a", "b", "c", "d"])
+            .map(|(row_id, content)| {
+                let mut row = history_row(row_id, 0);
+                row.cells[0].content = content.into();
+                row
+            })
+            .collect();
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: initial,
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+        let mut exposed = history_row(6, 0);
+        exposed.cells[0].content = "e".into();
+
+        apply_terminal_update(
+            pane.snapshot.as_mut().unwrap(),
+            TerminalUpdate {
+                base_revision: 1,
+                revision: 2,
+                rows: vec![splinterm_protocol::TerminalRowPatch {
+                    index: 3,
+                    row: exposed,
+                }],
+                scrolls: vec![splinterm_protocol::TerminalScroll {
+                    direction: splinterm_protocol::ScrollDirection::Forward,
+                    start_row: 0,
+                    end_row: 4,
+                    rows: 1,
+                }],
+                cursor: None,
+                title: None,
+                input_modes: None,
+                active_screen: None,
+                palette: None,
+                default_colors: None,
+                columns: None,
+                row_count: None,
+                scrollback: None,
+                images: None,
+            },
+        )
+        .unwrap();
+        pane.scrollback_viewport
+            .scroll_up(1, pane.snapshot.as_ref().unwrap());
+        pane.viewport_dirty = true;
+        assert!(rebuild_dirty_pane_viewport_frame(&mut pane, SCALE_DENOMINATOR).unwrap());
+
+        pane.scrollback_viewport.return_to_live();
+        pane.viewport_dirty = true;
+        assert!(rebuild_dirty_pane_viewport_frame(&mut pane, SCALE_DENOMINATOR).unwrap());
+
+        assert!(pane.scrollback_viewport.is_live());
+        assert_eq!(pane.rendered_viewport_offset, 0);
+        let live = pane.display_snapshot().unwrap();
+        assert_eq!(
+            live.visible_rows
+                .iter()
+                .map(|row| row.cells[0].content.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "c", "d", "e"]
+        );
+    }
+
+    #[test]
     fn snapshot_order_accepts_only_newer_matching_identity() {
         let splint_id = SplintId::new();
         let current = snapshot(splint_id, 7, 10);
         assert!(snapshot_is_newer(&current, &snapshot(splint_id, 7, 11)).expect("matching"));
-        assert!(!snapshot_is_newer(&current, &snapshot(splint_id, 7, 10)).expect("duplicate"));
+        let equal = snapshot(splint_id, 7, 10);
+        assert!(!snapshot_is_newer(&current, &equal).expect("duplicate"));
+        assert!(!snapshot_replaces(&current, &equal, false).expect("ordinary duplicate"));
+        assert!(snapshot_replaces(&current, &equal, true).expect("authoritative duplicate"));
         assert!(!snapshot_is_newer(&current, &snapshot(splint_id, 7, 9)).expect("stale"));
         assert!(snapshot_is_newer(&current, &snapshot(SplintId::new(), 7, 11)).is_err());
         assert!(snapshot_is_newer(&current, &snapshot(splint_id, 8, 11)).is_err());
@@ -7762,6 +7991,18 @@ mod tests {
             row: blank_row(1),
         });
         assert!(terminal_update_changes_visible_content(&row));
+        let current_rows = valid_snapshot(SplintId::new());
+        let mut repeated = empty_update();
+        repeated.rows.push(splinterm_protocol::TerminalRowPatch {
+            index: 0,
+            row: current_rows.visible_rows[0].clone(),
+        });
+        assert!(changed_terminal_patch_rows(&repeated, &current_rows).is_empty());
+        repeated.rows[0].row.row_id = Some(999);
+        assert!(changed_terminal_patch_rows(&repeated, &current_rows).is_empty());
+        repeated.rows[0].row.cells[0].content = "changed".into();
+        assert_eq!(changed_terminal_patch_rows(&repeated, &current_rows), [0]);
+
         let mut scroll = empty_update();
         scroll.scrolls.push(splinterm_protocol::TerminalScroll {
             direction: splinterm_protocol::ScrollDirection::Forward,
@@ -7770,38 +8011,117 @@ mod tests {
             rows: 1,
         });
         assert!(terminal_update_changes_visible_content(&scroll));
+        let mut current = snapshot(SplintId::new(), 1, 1);
+        current.columns = 1;
+        current.rows = 2;
+        current.visible_rows.resize_with(2, || blank_row(1));
+        current.visible_rows[0].cells[0].content = "top".into();
+        current.visible_rows[1].cells[0].content = "bottom".into();
+        let mut projected_scroll = scroll.clone();
+        projected_scroll.rows = vec![
+            splinterm_protocol::TerminalRowPatch {
+                index: 0,
+                row: current.visible_rows[1].clone(),
+            },
+            splinterm_protocol::TerminalRowPatch {
+                index: 1,
+                row: blank_row(1),
+            },
+        ];
+        assert!(changed_terminal_patch_rows(&projected_scroll, &current).is_empty());
+        projected_scroll.rows[0].row.cells[0].content = "changed after scroll".into();
+        assert_eq!(
+            changed_terminal_patch_rows(&projected_scroll, &current),
+            [0]
+        );
+        projected_scroll.scrolls[0].rows = 0;
+        assert_eq!(
+            changed_terminal_patch_rows(&projected_scroll, &current),
+            [0, 1]
+        );
+        projected_scroll.scrolls[0].rows = 1;
+        projected_scroll.scrolls[0].end_row = projected_scroll.scrolls[0].start_row;
+        assert_eq!(
+            changed_terminal_patch_rows(&projected_scroll, &current),
+            [0, 1]
+        );
+        let mut repeated_metadata = empty_update();
+        repeated_metadata.columns = Some(current.columns);
+        repeated_metadata.row_count = Some(current.rows);
+        let mut repeated_palette = current.palette.clone();
+        repeated_palette[0] ^= 0x00ff_ffff;
+        repeated_metadata.palette = Some(repeated_palette);
+        repeated_metadata.default_colors = Some([1, 2, 3]);
+        repeated_metadata.active_screen = Some(current.active_screen);
         assert!(!terminal_update_requires_full_frame(
-            &scroll,
-            ActiveScreen::Normal,
-            false
+            &repeated_metadata,
+            &current
         ));
+        repeated_metadata.palette.as_mut().unwrap()[16] ^= 0x00ff_ffff;
         assert!(terminal_update_requires_full_frame(
-            &scroll,
-            ActiveScreen::Normal,
-            true
+            &repeated_metadata,
+            &current
         ));
+        repeated_metadata.palette = Some(current.palette.clone());
+        assert!(!terminal_update_requires_full_frame(&scroll, &current));
+        current.images = Some(Box::new(splinterm_protocol::TerminalImagePlane {
+            screen: ActiveScreen::Normal,
+            contents: Vec::new(),
+            placements: Vec::new(),
+        }));
+        assert!(!terminal_update_requires_full_frame(&scroll, &current));
+        current
+            .images
+            .as_mut()
+            .unwrap()
+            .placements
+            .push(splinterm_protocol::ImagePlacement {
+                placement_id: 1,
+                content_id: 1,
+                row_id: 1,
+                column: 0,
+                source: splinterm_protocol::ImagePixelRect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                destination_columns: 1,
+                destination_rows: 1,
+                source_cell_size: None,
+                x_offset: 0,
+                y_offset: 0,
+                z_index: 0,
+                application_image_id: None,
+                application_placement_id: None,
+                creation_order: 1,
+                erase_policy: splinterm_protocol::ImageErasePolicy::TextOverwrite,
+            });
+        assert!(terminal_update_requires_full_frame(&scroll, &current));
+        let mut identity_update = empty_update();
+        let mut identity_row = current.visible_rows[0].clone();
+        identity_row.row_id = Some(999);
+        identity_update
+            .rows
+            .push(splinterm_protocol::TerminalRowPatch {
+                index: 0,
+                row: identity_row,
+            });
+        assert_eq!(changed_terminal_patch_rows(&identity_update, &current), [0]);
+        current.images = None;
         let mut resize_with_scroll = scroll.clone();
         resize_with_scroll.columns = Some(80);
         resize_with_scroll.row_count = Some(24);
         assert!(terminal_update_requires_full_frame(
             &resize_with_scroll,
-            ActiveScreen::Normal,
-            false
+            &current
         ));
 
         let mut screen = empty_update();
         screen.active_screen = Some(ActiveScreen::Normal);
-        assert!(!terminal_update_requires_full_frame(
-            &screen,
-            ActiveScreen::Normal,
-            false
-        ));
+        assert!(!terminal_update_requires_full_frame(&screen, &current));
         screen.active_screen = Some(ActiveScreen::Alternate);
-        assert!(terminal_update_requires_full_frame(
-            &screen,
-            ActiveScreen::Normal,
-            false
-        ));
+        assert!(terminal_update_requires_full_frame(&screen, &current));
 
         let mut image_update = empty_update();
         image_update.images = Some(Box::new(splinterm_protocol::TerminalImagePlane {
@@ -7809,14 +8129,28 @@ mod tests {
             contents: Vec::new(),
             placements: Vec::new(),
         }));
-        assert!(terminal_update_requires_full_frame(
+        assert!(terminal_update_requires_full_frame(&image_update, &current));
+        current.images.clone_from(&image_update.images);
+        assert!(!terminal_update_requires_full_frame(
             &image_update,
-            ActiveScreen::Normal,
-            false
+            &current
         ));
         let mut colors = empty_update();
         colors.default_colors = Some([1, 2, 3]);
         assert!(terminal_update_changes_visible_content(&colors));
+
+        assert!(terminal_update_has_visual_damage(
+            false,
+            false,
+            &[false, false],
+            &[false, true]
+        ));
+        assert!(!terminal_update_has_visual_damage(
+            false,
+            false,
+            &[false, false],
+            &[false, false]
+        ));
     }
 
     #[test]
@@ -7910,6 +8244,16 @@ mod tests {
             },
         );
         assert_eq!(pending.map(|update| update.generation), Some(13));
+    }
+
+    #[test]
+    fn return_to_live_queues_one_authoritative_resynchronization() {
+        let (commands, mut receiver) = tokio::sync::mpsc::channel(1);
+
+        assert!(!request_return_live_resync(Some(&commands), 0, 0).unwrap());
+        assert!(!request_return_live_resync(Some(&commands), 4, 2).unwrap());
+        assert!(request_return_live_resync(Some(&commands), 2, 0).unwrap());
+        assert_eq!(receiver.try_recv().unwrap(), WindowCommand::Resynchronize);
     }
 
     #[test]

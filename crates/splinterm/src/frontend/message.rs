@@ -24,6 +24,7 @@ pub enum WindowUpdate {
     Snapshot {
         snapshot: TerminalSnapshot,
         image_sources: ImageContentLeaseSet,
+        authoritative: bool,
     },
     Update {
         update: TerminalUpdate,
@@ -54,6 +55,7 @@ pub struct ThemeUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowCommand {
     Input(Vec<u8>),
+    Resynchronize,
     Resize {
         columns: u16,
         rows: u16,

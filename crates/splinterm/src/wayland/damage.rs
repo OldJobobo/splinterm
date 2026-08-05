@@ -5,8 +5,8 @@ use crate::{
     renderer::snapshot_row_rect,
 };
 
-pub(super) fn terminal_draw_waits_for_frame(frame_pending: bool, buffer_available: bool) -> bool {
-    frame_pending && !buffer_available
+pub(super) fn terminal_draw_waits_for_frame(frame_pending: bool, _buffer_available: bool) -> bool {
+    frame_pending
 }
 
 pub(super) fn pending_draw_waits_for_frame(frame_pending: bool, terminal_priority: bool) -> bool {
@@ -202,15 +202,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_draw_bypasses_delayed_frame_only_with_a_released_buffer() {
+    fn terminal_draws_obey_the_compositor_frame_boundary() {
         assert!(!terminal_draw_waits_for_frame(false, false));
         assert!(!terminal_draw_waits_for_frame(false, true));
-        assert!(!terminal_draw_waits_for_frame(true, true));
+        assert!(terminal_draw_waits_for_frame(true, true));
         assert!(terminal_draw_waits_for_frame(true, false));
     }
 
     #[test]
-    fn terminal_priority_retries_pending_draw_before_delayed_frame() {
+    fn terminal_priority_retries_through_the_frame_gated_scheduler() {
         assert!(!pending_draw_waits_for_frame(false, false));
         assert!(!pending_draw_waits_for_frame(false, true));
         assert!(pending_draw_waits_for_frame(true, false));
