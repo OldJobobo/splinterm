@@ -2023,6 +2023,15 @@ async fn finalize_exit_if_current(
     let Ok(_transaction) = state.topology_transactions.acquire().await else {
         return false;
     };
+    finalize_exit_if_current_under_transaction(state, splint_id, incarnation, code).await
+}
+
+async fn finalize_exit_if_current_under_transaction(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+    code: i32,
+) -> bool {
     let current = state
         .runtimes
         .lock()
@@ -3494,7 +3503,7 @@ async fn handle_authorized_request(
             Response::ImageContentReady { transfer }
         }
         Request::PrepareMutation { mutation } => Response::MutationPrepared {
-            preparation: prepare_mutation(&topology_snapshot(state).await, mutation)?,
+            preparation: prepare_mutation(&consistent_topology_snapshot(state).await, mutation)?,
         },
         Request::ListLairs => {
             let lair = state.topology.read().await;
@@ -3504,7 +3513,7 @@ async fn handle_authorized_request(
             }
         }
         Request::InspectTopology => Response::Topology {
-            snapshot: topology_snapshot(state).await,
+            snapshot: consistent_topology_snapshot(state).await,
         },
         Request::SubscribeTopology => {
             let (id, snapshot, stream) = subscribe_topology(state).await;
@@ -3521,7 +3530,7 @@ async fn handle_authorized_request(
             });
         }
         Request::InspectSplint { splint_id } => {
-            let snapshot = topology_snapshot(state).await;
+            let snapshot = consistent_topology_snapshot(state).await;
             let runtime = snapshot
                 .runtimes
                 .iter()
@@ -4741,15 +4750,18 @@ async fn handle_authorized_request(
                 )
                 .await?;
             }
-            let runtime = state
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let handle = state
                 .runtimes
                 .lock()
                 .await
-                .remove(splint_id)
+                .handle(splint_id)
                 .ok_or_else(not_found)?;
-            let handle = runtime.handle();
             if handle.incarnation.value() != incarnation {
-                let _ = state.runtimes.lock().await.insert(runtime);
                 return Err(ProtocolError::new(
                     ErrorCode::StaleIncarnation,
                     "process incarnation is stale",
@@ -4769,12 +4781,25 @@ async fn handle_authorized_request(
             for grant_id in revoked {
                 let _ = state.revocations.send(Revocation { grant_id });
             }
-            let status = runtime.shutdown().await.map_err(|_| internal())?;
+            handle.shutdown().await.map_err(|_| internal())?;
+            let status = handle.wait_for_exit().await.ok_or_else(internal)?;
             let code = status
                 .code
                 .or_else(|| status.signal.map(|signal| 128 + signal))
                 .unwrap_or(1);
-            finalize_exit_if_current(state, splint_id, incarnation, code).await;
+            if !finalize_exit_if_current_under_transaction(state, splint_id, incarnation, code)
+                .await
+            {
+                return Err(internal());
+            }
+            let runtime = state
+                .runtimes
+                .lock()
+                .await
+                .remove(splint_id)
+                .ok_or_else(internal)?;
+            let reaped = runtime.wait().await.map_err(|_| internal())?;
+            debug_assert_eq!(reaped, status);
             Response::SplintKilled {
                 splint_id,
                 incarnation,
@@ -4809,6 +4834,11 @@ async fn handle_authorized_request(
 }
 
 async fn subscribe_topology(state: &DaemonState) -> (u64, TopologySnapshot, TopologySubscription) {
+    let _transaction = state
+        .topology_transactions
+        .acquire()
+        .await
+        .expect("topology transaction barrier remains open while daemon state is live");
     let lair_guard = state.topology.read().await;
     let lair = lair_guard.clone();
     let live = state.runtimes.lock().await.handles();
@@ -4817,6 +4847,15 @@ async fn subscribe_topology(state: &DaemonState) -> (u64, TopologySnapshot, Topo
     let subscription = state.topology_hub.lock().await.subscribe(id);
     drop(lair_guard);
     (id, snapshot, subscription)
+}
+
+async fn consistent_topology_snapshot(state: &DaemonState) -> TopologySnapshot {
+    let _transaction = state
+        .topology_transactions
+        .acquire()
+        .await
+        .expect("topology transaction barrier remains open while daemon state is live");
+    topology_snapshot(state).await
 }
 
 async fn topology_snapshot(state: &DaemonState) -> TopologySnapshot {

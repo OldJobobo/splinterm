@@ -1873,7 +1873,7 @@ impl LiveSplintHandle {
         }
     }
 
-    async fn shutdown(&self) -> Result<(), LiveError> {
+    pub async fn shutdown(&self) -> Result<(), LiveError> {
         let (sender, receiver) = oneshot::channel();
         self.commands
             .send(Command::Shutdown(sender))
