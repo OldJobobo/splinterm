@@ -141,6 +141,7 @@ use crate::{
 
 mod clipboard;
 mod damage;
+mod dispatch;
 mod input;
 mod selection;
 mod terminal_state;
@@ -789,156 +790,177 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         }
     }
     let mut app = App {
-        registry_state: RegistryState::new(&globals),
-        compositor,
-        seat_state: SeatState::new(&globals, &queue_handle),
-        output_state: OutputState::new(&globals, &queue_handle),
-        data_device_manager,
-        primary_selection_manager,
-        fractional_scale,
-        viewport,
-        text_input_manager,
-        text_input: None,
-        background_effect_manager,
-        background_effect: None,
-        background_effect_state,
-        background_effect_deferred_commit: None,
-        background_effect_reconcile_schedule: BackgroundEffectReconcileSchedule::default(),
-        background_effect_capabilities_received: false,
-        background_effect_trace,
-        text_input_seat: None,
-        ime: ImeState::default(),
-        reduced_motion: reduced_motion_requested(),
-        keyboard_focused: false,
-        shm,
-        window,
-        pool,
-        text_row,
-        pane: PaneView {
-            snapshot: options.snapshot,
-            snapshot_frame,
-            image_sources: options.image_sources,
-            scrollback_viewport: ScrollbackViewport::default(),
-            painted_history_status: None,
-            history_page_pending: false,
-            history_selection_pin_blocked: false,
-            scroll_started_at: None,
-            rendered_viewport_offset: 0,
-            viewport_dirty: false,
-            updates: options.updates,
-            commands: options.commands,
-            controller_active,
-            pending_control_transfer: None,
-            search: SearchUiState::default(),
-            authority: options.authority,
-            last_resize: None,
-            initial_resize_requires_control: false,
-            prepare_dirty_rows: Vec::new(),
-            raster_dirty_rows: Vec::new(),
-            surface_dirty_rows: Vec::new(),
-            pending_scrolls: Vec::new(),
-            selected_text: None,
-            selection: None,
-            selecting: false,
-            pointer_cell: None,
-            hovered_url: None,
+        platform: PlatformState {
+            registry_state: RegistryState::new(&globals),
+            compositor,
+            seat_state: SeatState::new(&globals, &queue_handle),
+            output_state: OutputState::new(&globals, &queue_handle),
+            data_device_manager,
+            primary_selection_manager,
+            text_input_manager,
+            shm,
+            loop_handle: event_loop.handle(),
+            update_waker,
+            output_count: 0,
+            entered_outputs: Vec::new(),
+            seat_count: 0,
         },
-        inactive_panes,
-        layout: options.layout,
-        tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
-        active_identity: initial_identity,
-        managed_tabs,
-        tab_strip_layout: None,
-        tab_strip_pressed: None,
-        tab_label_cache: HashMap::new(),
-        tab_close_text: None,
-        tab_new_text: None,
-        topology_updates: options.topology_updates,
-        topology_commands: options.topology_commands,
-        signoff,
-        graphical_input_probe,
-        scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
-        trusted_consent,
-        session_picker,
-        session_picker_targets: Vec::new(),
-        session_picker_layout: None,
-        session_picker_pressed: None,
-        session_picker_text_cache: SessionPickerTextCache::default(),
-        session_picker_wheel: WheelAccumulator::default(),
-        session_picker_consumed_keys: HashSet::new(),
-        session_picker_redraw: false,
-        session_picker_reconcile_pending: false,
-        session_picker_open_focus: None,
-        session_picker_requested: false,
-        session_switch_pending: false,
-        restored_frontend_needs_resize: false,
-        pending_exited_splints: HashSet::new(),
-        deferred_picker_theme: None,
-        renderer_generation: 0,
-        theme_generation: 0,
-        input_generation: 0,
-        terminal_focus_reported: false,
-        ime_generation: 0,
-        ime_modal_barrier: false,
-        deferred_topology_updates: Vec::new(),
-        cursor_style: options.cursor_style,
-        cursor_blink: options.cursor_blink,
-        title_override: options.title,
-        theme: options.theme,
-        pane_divider_style: options.pane_divider_style,
-        frame_title_mode: options.frame_title_mode,
-        frame_titles: HashMap::new(),
-        evidence_close_shortcuts: options.evidence_close_shortcuts,
-        modifiers: Modifiers::default(),
-        font_zoom_steps: 0,
-        capture: options.capture,
-        capture_scale: options.capture_scale,
-        buffers: Vec::new(),
-        backing: Vec::new(),
-        full_redraw: true,
-        dirty_inactive_panes: HashSet::new(),
-        keyboard: None,
-        keyboard_seat: None,
-        pointer: None,
-        pointer_seat: None,
-        data_device: None,
-        primary_device: None,
-        clipboard_offer: None,
-        primary_offer: None,
-        clipboard_sources: Vec::new(),
-        primary_sources: Vec::new(),
-        clipboard_tx,
-        clipboard_rx,
-        last_pointer_serial: None,
-        pressed_buttons: HashMap::new(),
-        vertical_wheel: WheelAccumulator::default(),
-        scrollback_wheel: WheelAccumulator::default(),
-        loop_handle: event_loop.handle(),
-        update_waker,
-        logical_width: initial_width,
-        logical_height: initial_height,
-        configured: false,
-        exit: false,
-        failure: None,
-        frame_pending: false,
-        redraw_pending: false,
-        terminal_redraw_pending: false,
-        cursor_blink_visible: true,
-        last_cursor_blink: Instant::now(),
-        scale_120: SCALE_DENOMINATOR,
-        integer_fallback_scale: 1,
-        output_count: 0,
-        entered_outputs: Vec::new(),
-        seat_count: 0,
+        surface: SurfaceState {
+            fractional_scale,
+            viewport,
+            background_effect_manager,
+            background_effect: None,
+            background_effect_state,
+            background_effect_deferred_commit: None,
+            background_effect_reconcile_schedule: BackgroundEffectReconcileSchedule::default(),
+            background_effect_capabilities_received: false,
+            background_effect_trace,
+            window,
+            pool,
+            buffers: Vec::new(),
+            backing: Vec::new(),
+            logical_width: initial_width,
+            logical_height: initial_height,
+            configured: false,
+            scale_120: SCALE_DENOMINATOR,
+            integer_fallback_scale: 1,
+        },
+        presentation: PresentationState {
+            text_row,
+            renderer_generation: 0,
+            theme_generation: 0,
+            cursor_style: options.cursor_style,
+            cursor_blink: options.cursor_blink,
+            title_override: options.title,
+            theme: options.theme,
+            pane_divider_style: options.pane_divider_style,
+            frame_title_mode: options.frame_title_mode,
+            frame_titles: HashMap::new(),
+            evidence_close_shortcuts: options.evidence_close_shortcuts,
+            font_zoom_steps: 0,
+            capture: options.capture,
+            capture_scale: options.capture_scale,
+            full_redraw: true,
+        },
+        input: InputState {
+            text_input: None,
+            text_input_seat: None,
+            ime: ImeState::default(),
+            reduced_motion: reduced_motion_requested(),
+            keyboard_focused: false,
+            input_generation: 0,
+            terminal_focus_reported: false,
+            ime_generation: 0,
+            ime_modal_barrier: false,
+            modifiers: Modifiers::default(),
+            keyboard: None,
+            keyboard_seat: None,
+            pointer: None,
+            pointer_seat: None,
+            last_pointer_serial: None,
+            pressed_buttons: HashMap::new(),
+            vertical_wheel: WheelAccumulator::default(),
+            scrollback_wheel: WheelAccumulator::default(),
+            cursor_blink_visible: true,
+            last_cursor_blink: Instant::now(),
+        },
+        clipboard: ClipboardState {
+            data_device: None,
+            primary_device: None,
+            clipboard_offer: None,
+            primary_offer: None,
+            clipboard_sources: Vec::new(),
+            primary_sources: Vec::new(),
+            clipboard_tx,
+            clipboard_rx,
+        },
+        panes: PanesState {
+            pane: PaneView {
+                snapshot: options.snapshot,
+                snapshot_frame,
+                image_sources: options.image_sources,
+                scrollback_viewport: ScrollbackViewport::default(),
+                painted_history_status: None,
+                history_page_pending: false,
+                history_selection_pin_blocked: false,
+                scroll_started_at: None,
+                rendered_viewport_offset: 0,
+                viewport_dirty: false,
+                updates: options.updates,
+                commands: options.commands,
+                controller_active,
+                pending_control_transfer: None,
+                search: SearchUiState::default(),
+                authority: options.authority,
+                last_resize: None,
+                initial_resize_requires_control: false,
+                prepare_dirty_rows: Vec::new(),
+                raster_dirty_rows: Vec::new(),
+                surface_dirty_rows: Vec::new(),
+                pending_scrolls: Vec::new(),
+                selected_text: None,
+                selection: None,
+                selecting: false,
+                pointer_cell: None,
+                hovered_url: None,
+            },
+            inactive_panes,
+            layout: options.layout,
+            restored_frontend_needs_resize: false,
+            pending_exited_splints: HashSet::new(),
+            dirty_inactive_panes: HashSet::new(),
+        },
+        tab_state: TabsState {
+            tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
+            active_identity: initial_identity,
+            managed_tabs,
+            tab_strip_layout: None,
+            tab_strip_pressed: None,
+            tab_label_cache: HashMap::new(),
+            tab_close_text: None,
+            tab_new_text: None,
+            topology_updates: options.topology_updates,
+            topology_commands: options.topology_commands,
+            session_switch_pending: false,
+            deferred_topology_updates: Vec::new(),
+        },
+        modal: ModalState {
+            trusted_consent,
+            session_picker,
+            session_picker_targets: Vec::new(),
+            session_picker_layout: None,
+            session_picker_pressed: None,
+            session_picker_text_cache: SessionPickerTextCache::default(),
+            session_picker_wheel: WheelAccumulator::default(),
+            session_picker_consumed_keys: HashSet::new(),
+            session_picker_redraw: false,
+            session_picker_reconcile_pending: false,
+            session_picker_open_focus: None,
+            session_picker_requested: false,
+            deferred_picker_theme: None,
+        },
+        scheduling: SchedulingState {
+            signoff,
+            graphical_input_probe,
+            scroll_trace: std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some(),
+            exit: false,
+            failure: None,
+            frame_pending: false,
+            redraw_pending: false,
+            terminal_redraw_pending: false,
+        },
     };
 
     let event_loop_result: Result<()> = (|| {
-        while !app.exit {
+        while !app.scheduling.exit {
             app.apply_updates(&queue_handle)?;
-            if app.redraw_pending
-                && !pending_draw_waits_for_frame(app.frame_pending, app.terminal_redraw_pending)
+            if app.scheduling.redraw_pending
+                && !pending_draw_waits_for_frame(
+                    app.scheduling.frame_pending,
+                    app.scheduling.terminal_redraw_pending,
+                )
             {
-                if app.terminal_redraw_pending {
+                if app.scheduling.terminal_redraw_pending {
                     app.schedule_terminal_draw(&queue_handle)?;
                 } else {
                     app.schedule_draw(&queue_handle)?;
@@ -957,7 +979,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         Ok(())
     })();
     app.release_background_effect();
-    let failure = app.failure.take();
+    let failure = app.scheduling.failure.take();
     drop(app);
     drop(event_loop);
     let teardown_result = connection
@@ -2075,21 +2097,26 @@ struct ShmFrameBuffer {
     stale: BackingDamage,
 }
 
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "independent Wayland lifecycle and rendering flags are not one state machine"
-)]
-struct App {
+struct PlatformState {
     registry_state: RegistryState,
     compositor: CompositorState,
     seat_state: SeatState,
     output_state: OutputState,
     data_device_manager: DataDeviceManagerState,
     primary_selection_manager: Option<PrimarySelectionManagerState>,
+    text_input_manager: Option<ZwpTextInputManagerV3>,
+    shm: Shm,
+    loop_handle: LoopHandle<'static, App>,
+    update_waker: Waker,
+    output_count: usize,
+    /// Enter order is significant: the last element is Foot's most-recent output.
+    entered_outputs: Vec<wl_output::WlOutput>,
+    seat_count: usize,
+}
+
+struct SurfaceState {
     fractional_scale: Option<WpFractionalScaleV1>,
     viewport: Option<WpViewport>,
-    text_input_manager: Option<ZwpTextInputManagerV3>,
-    text_input: Option<ZwpTextInputV3>,
     background_effect_manager: Option<ExtBackgroundEffectManagerV1>,
     background_effect: Option<ExtBackgroundEffectSurfaceV1>,
     background_effect_state: BackgroundEffectState,
@@ -2097,17 +2124,83 @@ struct App {
     background_effect_reconcile_schedule: BackgroundEffectReconcileSchedule,
     background_effect_capabilities_received: bool,
     background_effect_trace: bool,
+    window: Window,
+    pool: SlotPool,
+    buffers: Vec<ShmFrameBuffer>,
+    backing: Vec<u8>,
+    logical_width: u32,
+    logical_height: u32,
+    configured: bool,
+    scale_120: u32,
+    integer_fallback_scale: u32,
+}
+
+struct PresentationState {
+    text_row: Option<TextRow>,
+    renderer_generation: u64,
+    theme_generation: u64,
+    cursor_style: CursorStyle,
+    cursor_blink: bool,
+    title_override: Option<String>,
+    theme: ResolvedTheme,
+    pane_divider_style: PaneDividerStyle,
+    frame_title_mode: FrameTitleMode,
+    frame_titles: HashMap<SplintId, CachedFrameTitle>,
+    evidence_close_shortcuts: bool,
+    font_zoom_steps: i16,
+    capture: Option<PathBuf>,
+    capture_scale: Option<u32>,
+    full_redraw: bool,
+}
+
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent keyboard, IME, focus-reporting, and cursor-blink protocol flags"
+)]
+struct InputState {
+    text_input: Option<ZwpTextInputV3>,
     text_input_seat: Option<wl_seat::WlSeat>,
     ime: ImeState,
     reduced_motion: bool,
     keyboard_focused: bool,
-    shm: Shm,
-    window: Window,
-    pool: SlotPool,
-    text_row: Option<TextRow>,
+    input_generation: u64,
+    terminal_focus_reported: bool,
+    ime_generation: u64,
+    ime_modal_barrier: bool,
+    modifiers: Modifiers,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    keyboard_seat: Option<wl_seat::WlSeat>,
+    pointer: Option<wl_pointer::WlPointer>,
+    pointer_seat: Option<wl_seat::WlSeat>,
+    last_pointer_serial: Option<u32>,
+    pressed_buttons: HashMap<u32, PressOwner>,
+    vertical_wheel: WheelAccumulator,
+    scrollback_wheel: WheelAccumulator,
+    cursor_blink_visible: bool,
+    last_cursor_blink: Instant,
+}
+
+struct ClipboardState {
+    data_device: Option<DataDevice>,
+    primary_device: Option<PrimarySelectionDevice>,
+    clipboard_offer: Option<SelectionOffer>,
+    primary_offer: Option<PrimarySelectionOffer>,
+    clipboard_sources: Vec<(CopyPasteSource, Arc<[u8]>)>,
+    primary_sources: Vec<(PrimarySelectionSource, Arc<[u8]>)>,
+    clipboard_tx: StdSender<ClipboardRead>,
+    clipboard_rx: StdReceiver<ClipboardRead>,
+}
+
+struct PanesState {
     pane: PaneView,
     inactive_panes: Vec<PaneView>,
     layout: Option<LayoutNode>,
+    restored_frontend_needs_resize: bool,
+    pending_exited_splints: HashSet<SplintId>,
+    dirty_inactive_panes: HashSet<SplintId>,
+}
+
+struct TabsState {
     tabs: WindowTabSet<Option<DojoTabView>>,
     active_identity: WindowDojoIdentity,
     managed_tabs: bool,
@@ -2118,9 +2211,11 @@ struct App {
     tab_new_text: Option<(u32, ChromeText)>,
     topology_updates: Option<Receiver<WindowTopologyUpdate>>,
     topology_commands: Option<Sender<WindowTopologyCommand>>,
-    signoff: Option<SignoffProbe>,
-    graphical_input_probe: Option<GraphicalInputProbe>,
-    scroll_trace: bool,
+    session_switch_pending: bool,
+    deferred_topology_updates: Vec<WindowTopologyUpdate>,
+}
+
+struct ModalState {
     trusted_consent: Option<TrustedConsentUi>,
     session_picker: Option<SessionPickerUi>,
     session_picker_targets: Vec<(LairId, DojoId)>,
@@ -2133,67 +2228,134 @@ struct App {
     session_picker_reconcile_pending: bool,
     session_picker_open_focus: Option<bool>,
     session_picker_requested: bool,
-    session_switch_pending: bool,
-    restored_frontend_needs_resize: bool,
-    pending_exited_splints: HashSet<SplintId>,
     deferred_picker_theme: Option<ThemeUpdate>,
-    renderer_generation: u64,
-    theme_generation: u64,
-    input_generation: u64,
-    terminal_focus_reported: bool,
-    ime_generation: u64,
-    ime_modal_barrier: bool,
-    deferred_topology_updates: Vec<WindowTopologyUpdate>,
-    cursor_style: CursorStyle,
-    cursor_blink: bool,
-    title_override: Option<String>,
-    theme: ResolvedTheme,
-    pane_divider_style: PaneDividerStyle,
-    frame_title_mode: FrameTitleMode,
-    frame_titles: HashMap<SplintId, CachedFrameTitle>,
-    evidence_close_shortcuts: bool,
-    modifiers: Modifiers,
-    font_zoom_steps: i16,
-    capture: Option<PathBuf>,
-    capture_scale: Option<u32>,
-    buffers: Vec<ShmFrameBuffer>,
-    backing: Vec<u8>,
-    full_redraw: bool,
-    dirty_inactive_panes: HashSet<SplintId>,
-    keyboard: Option<wl_keyboard::WlKeyboard>,
-    keyboard_seat: Option<wl_seat::WlSeat>,
-    pointer: Option<wl_pointer::WlPointer>,
-    pointer_seat: Option<wl_seat::WlSeat>,
-    data_device: Option<DataDevice>,
-    primary_device: Option<PrimarySelectionDevice>,
-    clipboard_offer: Option<SelectionOffer>,
-    primary_offer: Option<PrimarySelectionOffer>,
-    clipboard_sources: Vec<(CopyPasteSource, Arc<[u8]>)>,
-    primary_sources: Vec<(PrimarySelectionSource, Arc<[u8]>)>,
-    clipboard_tx: StdSender<ClipboardRead>,
-    clipboard_rx: StdReceiver<ClipboardRead>,
-    last_pointer_serial: Option<u32>,
-    pressed_buttons: HashMap<u32, PressOwner>,
-    vertical_wheel: WheelAccumulator,
-    scrollback_wheel: WheelAccumulator,
-    loop_handle: LoopHandle<'static, App>,
-    update_waker: Waker,
-    logical_width: u32,
-    logical_height: u32,
-    configured: bool,
+}
+
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent lifecycle, frame-callback, redraw-priority, and trace flags"
+)]
+struct SchedulingState {
+    signoff: Option<SignoffProbe>,
+    graphical_input_probe: Option<GraphicalInputProbe>,
+    scroll_trace: bool,
     exit: bool,
     failure: Option<anyhow::Error>,
     frame_pending: bool,
     redraw_pending: bool,
     terminal_redraw_pending: bool,
-    cursor_blink_visible: bool,
-    last_cursor_blink: Instant,
-    scale_120: u32,
-    integer_fallback_scale: u32,
-    output_count: usize,
-    /// Enter order is significant: the last element is Foot's most-recent output.
-    entered_outputs: Vec<wl_output::WlOutput>,
-    seat_count: usize,
+}
+
+struct App {
+    platform: PlatformState,
+    surface: SurfaceState,
+    presentation: PresentationState,
+    input: InputState,
+    clipboard: ClipboardState,
+    panes: PanesState,
+    tab_state: TabsState,
+    modal: ModalState,
+    scheduling: SchedulingState,
+}
+
+impl PlatformState {
+    fn output_dpi_observation(&self, output: &wl_output::WlOutput) -> OutputDpiObservation {
+        let Some(info) = self.output_state.info(output) else {
+            return OutputDpiObservation::unavailable("output-info-pending");
+        };
+        let current_mode = info
+            .modes
+            .iter()
+            .find(|mode| mode.current)
+            .map(|mode| mode.dimensions);
+        OutputDpiObservation::from_wayland(info.id, info.name, current_mode, info.physical_size)
+    }
+}
+
+impl PanesState {
+    fn focused_splint(&self) -> Option<SplintId> {
+        self.pane
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.splint_id)
+    }
+
+    fn display_snapshot(&self) -> Option<TerminalSnapshot> {
+        self.pane.display_snapshot()
+    }
+
+    fn display_snapshot_cow(&self) -> Option<Cow<'_, TerminalSnapshot>> {
+        self.pane.display_snapshot_cow()
+    }
+
+    fn input_modes(&self) -> TerminalInputModes {
+        self.pane.snapshot.as_ref().map_or(
+            TerminalInputModes {
+                application_cursor: false,
+                application_keypad: false,
+                focus_reporting: false,
+                bracketed_paste: false,
+                cursor_visible: true,
+                cursor_blink: true,
+                mouse_tracking: MouseTracking::None,
+                sgr_mouse: false,
+            },
+            |snapshot| snapshot.input_modes,
+        )
+    }
+}
+
+impl TabsState {
+    const fn active_dojo_id(&self) -> DojoId {
+        self.active_identity.dojo_id
+    }
+
+    fn tab_identity(&self, dojo_id: DojoId) -> Option<&WindowDojoIdentity> {
+        if dojo_id == self.active_dojo_id() {
+            return Some(&self.active_identity);
+        }
+        self.tabs
+            .get(dojo_id)
+            .and_then(|tab| tab.value.as_ref())
+            .map(|view| &view.identity)
+    }
+
+    fn tab_label(&self, dojo_id: DojoId) -> String {
+        let Some(identity) = self.tab_identity(dojo_id) else {
+            return "Untitled Dojo".to_owned();
+        };
+        let dojo_label = sanitized_tab_label(&identity.dojo_name, 128, 48);
+        let ambiguous = self.tabs.iter().filter(|tab| {
+            self.tab_identity(tab.dojo_id).is_some_and(|candidate| {
+                sanitized_tab_label(&candidate.dojo_name, 128, 48) == dojo_label
+            })
+        });
+        if ambiguous.count() > 1 {
+            sanitized_tab_label(
+                &format!("{} / {}", identity.lair_name, identity.dojo_name),
+                128,
+                48,
+            )
+        } else {
+            dojo_label
+        }
+    }
+}
+
+impl ModalState {
+    fn inline_picker_open(&self) -> bool {
+        self.session_picker
+            .as_ref()
+            .is_some_and(SessionPickerUi::is_inline)
+    }
+}
+
+impl SchedulingState {
+    fn fail(&mut self, error: anyhow::Error) {
+        eprintln!("Wayland client failure: {error:#}");
+        self.failure = Some(error);
+        self.exit = true;
+    }
 }
 
 fn try_window_command(commands: &Sender<WindowCommand>, command: WindowCommand) -> Result<()> {
@@ -2512,59 +2674,33 @@ fn background_effect_trace_line(action: EffectAction) -> Option<String> {
 
 impl App {
     fn content_rect(&self) -> Rect {
-        let y = if self.managed_tabs {
-            TAB_STRIP_LOGICAL_HEIGHT.min(self.logical_height)
+        let y = if self.tab_state.managed_tabs {
+            TAB_STRIP_LOGICAL_HEIGHT.min(self.surface.logical_height)
         } else {
             0
         };
         Rect {
             x: 0,
             y,
-            width: self.logical_width,
-            height: self.logical_height.saturating_sub(y),
+            width: self.surface.logical_width,
+            height: self.surface.logical_height.saturating_sub(y),
         }
-    }
-
-    fn tab_identity(&self, dojo_id: DojoId) -> Option<&WindowDojoIdentity> {
-        if dojo_id == self.active_dojo_id() {
-            return Some(&self.active_identity);
-        }
-        self.tabs
-            .get(dojo_id)
-            .and_then(|tab| tab.value.as_ref())
-            .map(|view| &view.identity)
     }
 
     fn current_tab_strip_layout(&self) -> Option<TabStripLayout> {
-        if !self.managed_tabs {
+        if !self.tab_state.managed_tabs {
             return None;
         }
-        let ids = self.tabs.iter().map(|tab| tab.dojo_id).collect::<Vec<_>>();
+        let ids = self
+            .tab_state
+            .tabs
+            .iter()
+            .map(|tab| tab.dojo_id)
+            .collect::<Vec<_>>();
         let active = ids
             .iter()
-            .position(|dojo_id| *dojo_id == self.active_dojo_id())?;
-        tab_strip_layout(self.logical_width, &ids, active)
-    }
-
-    fn tab_label(&self, dojo_id: DojoId) -> String {
-        let Some(identity) = self.tab_identity(dojo_id) else {
-            return "Untitled Dojo".to_owned();
-        };
-        let dojo_label = sanitized_tab_label(&identity.dojo_name, 128, 48);
-        let ambiguous = self.tabs.iter().filter(|tab| {
-            self.tab_identity(tab.dojo_id).is_some_and(|candidate| {
-                sanitized_tab_label(&candidate.dojo_name, 128, 48) == dojo_label
-            })
-        });
-        if ambiguous.count() > 1 {
-            sanitized_tab_label(
-                &format!("{} / {}", identity.lair_name, identity.dojo_name),
-                128,
-                48,
-            )
-        } else {
-            dojo_label
-        }
+            .position(|dojo_id| *dojo_id == self.tab_state.active_dojo_id())?;
+        tab_strip_layout(self.surface.logical_width, &ids, active)
     }
 
     fn prepare_tab_strip_text(&mut self, layout: &TabStripLayout) -> Result<()> {
@@ -2573,19 +2709,21 @@ impl App {
             .iter()
             .map(|tab| tab.dojo_id)
             .collect::<HashSet<_>>();
-        self.tab_label_cache
+        self.tab_state
+            .tab_label_cache
             .retain(|dojo_id, _| visible.contains(dojo_id));
         for tab in &layout.tabs {
-            let source = self.tab_label(tab.dojo_id);
+            let source = self.tab_state.tab_label(tab.dojo_id);
             let maximum_cells = (tab.label_rect.width / 8).max(1);
-            let active = tab.dojo_id == self.active_dojo_id();
+            let active = tab.dojo_id == self.tab_state.active_dojo_id();
             let current = self
+                .tab_state
                 .tab_label_cache
                 .get(&tab.dojo_id)
                 .is_some_and(|cached| {
                     cached.source == source
                         && cached.maximum_cells == maximum_cells
-                        && cached.scale_120 == self.scale_120
+                        && cached.scale_120 == self.surface.scale_120
                         && cached.bold == active
                 });
             if !current {
@@ -2594,25 +2732,32 @@ impl App {
                 } else {
                     ChromeTextStyle::Regular
                 };
-                self.tab_label_cache.insert(
+                self.tab_state.tab_label_cache.insert(
                     tab.dojo_id,
                     CachedFrameTitle {
-                        text: ChromeText::load_styled(&source, self.scale_120, style)?,
+                        text: ChromeText::load_styled(&source, self.surface.scale_120, style)?,
                         source,
                         maximum_cells,
-                        scale_120: self.scale_120,
+                        scale_120: self.surface.scale_120,
                         bold: active,
                     },
                 );
             }
         }
         if self
+            .tab_state
             .tab_close_text
             .as_ref()
-            .is_none_or(|(scale, _)| *scale != self.scale_120)
+            .is_none_or(|(scale, _)| *scale != self.surface.scale_120)
         {
-            self.tab_close_text = Some((self.scale_120, ChromeText::load("×", self.scale_120)?));
-            self.tab_new_text = Some((self.scale_120, ChromeText::load("+", self.scale_120)?));
+            self.tab_state.tab_close_text = Some((
+                self.surface.scale_120,
+                ChromeText::load("×", self.surface.scale_120)?,
+            ));
+            self.tab_state.tab_new_text = Some((
+                self.surface.scale_120,
+                ChromeText::load("+", self.surface.scale_120)?,
+            ));
         }
         Ok(())
     }
@@ -2730,10 +2875,6 @@ impl App {
         Ok(())
     }
 
-    fn active_dojo_id(&self) -> DojoId {
-        self.active_identity.dojo_id
-    }
-
     fn release_tab_controllers(view: &mut DojoTabView) -> Result<()> {
         for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
             if pane.controller_active {
@@ -2750,22 +2891,25 @@ impl App {
 
     fn activate_tab(&mut self, dojo_id: DojoId) -> Result<bool> {
         let started = Instant::now();
-        let previous_id = self.active_dojo_id();
+        let previous_id = self.tab_state.active_dojo_id();
         if previous_id == dojo_id {
             return Ok(false);
         }
         let next = self
+            .tab_state
             .tabs
             .get_mut(dojo_id)
             .and_then(|tab| tab.value.take())
             .context("activated Dojo tab has no hidden frontend")?;
         self.settle_terminal_presses_for_picker();
-        self.input_generation = self.input_generation.saturating_add(1);
-        if self.terminal_focus_reported {
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
+        if self.input.terminal_focus_reported {
             self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
-            self.terminal_focus_reported = false;
+            self.input.terminal_focus_reported = false;
         }
-        for pane in std::iter::once(&mut self.pane).chain(self.inactive_panes.iter_mut()) {
+        for pane in
+            std::iter::once(&mut self.panes.pane).chain(self.panes.inactive_panes.iter_mut())
+        {
             if pane.controller_active {
                 let commands = pane
                     .commands
@@ -2776,51 +2920,55 @@ impl App {
             }
         }
         let previous = DojoTabView {
-            identity: std::mem::replace(&mut self.active_identity, next.identity),
-            pane: std::mem::replace(&mut self.pane, next.pane),
-            inactive_panes: std::mem::replace(&mut self.inactive_panes, next.inactive_panes),
-            layout: std::mem::replace(&mut self.layout, next.layout),
+            identity: std::mem::replace(&mut self.tab_state.active_identity, next.identity),
+            pane: std::mem::replace(&mut self.panes.pane, next.pane),
+            inactive_panes: std::mem::replace(&mut self.panes.inactive_panes, next.inactive_panes),
+            layout: std::mem::replace(&mut self.panes.layout, next.layout),
             pending_exited_splints: std::mem::replace(
-                &mut self.pending_exited_splints,
+                &mut self.panes.pending_exited_splints,
                 next.pending_exited_splints,
             ),
-            frame_titles: std::mem::replace(&mut self.frame_titles, next.frame_titles),
+            frame_titles: std::mem::replace(&mut self.presentation.frame_titles, next.frame_titles),
             dirty_inactive_panes: std::mem::replace(
-                &mut self.dirty_inactive_panes,
+                &mut self.panes.dirty_inactive_panes,
                 next.dirty_inactive_panes,
             ),
         };
-        self.tabs
+        self.tab_state
+            .tabs
             .get_mut(previous_id)
             .context("previous Dojo tab disappeared")?
             .value = Some(previous);
-        anyhow::ensure!(self.tabs.activate(dojo_id), "activated Dojo tab is absent");
-        rebuild_pane_scaled_frame(&mut self.pane, self.scale_120)?;
-        for pane in &mut self.inactive_panes {
-            rebuild_pane_scaled_frame(pane, self.scale_120)?;
+        anyhow::ensure!(
+            self.tab_state.tabs.activate(dojo_id),
+            "activated Dojo tab is absent"
+        );
+        rebuild_pane_scaled_frame(&mut self.panes.pane, self.surface.scale_120)?;
+        for pane in &mut self.panes.inactive_panes {
+            rebuild_pane_scaled_frame(pane, self.surface.scale_120)?;
         }
-        self.dirty_inactive_panes.clear();
-        self.restored_frontend_needs_resize = true;
-        self.cursor_blink_visible = true;
-        self.last_cursor_blink = Instant::now();
-        self.full_redraw = true;
+        self.panes.dirty_inactive_panes.clear();
+        self.panes.restored_frontend_needs_resize = true;
+        self.input.cursor_blink_visible = true;
+        self.input.last_cursor_blink = Instant::now();
+        self.presentation.full_redraw = true;
         self.update_window_title();
         self.clear_ime_preedit();
         self.update_ime_cursor_rectangle();
-        if self.keyboard_focused && self.input_modes().focus_reporting {
+        if self.input.keyboard_focused && self.panes.input_modes().focus_reporting {
             self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
-            self.terminal_focus_reported = true;
+            self.input.terminal_focus_reported = true;
         }
         if perf_trace_enabled() {
             emit_perf_trace(
                 "splinterm",
                 "tab_switch",
                 PerfTraceEvent {
-                    splint_id: self.focused_splint(),
+                    splint_id: self.panes.focused_splint(),
                     duration_ns: Some(
                         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                     ),
-                    count: Some(u64::try_from(self.tabs.len()).unwrap_or(u64::MAX)),
+                    count: Some(u64::try_from(self.tab_state.tabs.len()).unwrap_or(u64::MAX)),
                     ..PerfTraceEvent::default()
                 },
             );
@@ -2829,7 +2977,7 @@ impl App {
     }
 
     fn trace_background_effect_action(&self, action: EffectAction) {
-        if self.background_effect_trace
+        if self.surface.background_effect_trace
             && let Some(line) = background_effect_trace_line(action)
         {
             eprintln!("{line}");
@@ -2841,7 +2989,7 @@ impl App {
         queue_handle: &QueueHandle<Self>,
         commit_mode: BackgroundEffectCommitMode,
     ) -> Result<()> {
-        for action in self.background_effect_state.reconcile() {
+        for action in self.surface.background_effect_state.reconcile() {
             self.trace_background_effect_action(action);
             match action {
                 EffectAction::Diagnostic(diagnostic) => {
@@ -2849,25 +2997,27 @@ impl App {
                 }
                 EffectAction::CreateEffect => {
                     anyhow::ensure!(
-                        self.background_effect.is_none(),
+                        self.surface.background_effect.is_none(),
                         "background effect reducer attempted duplicate object creation"
                     );
                     let manager = self
+                        .surface
                         .background_effect_manager
                         .as_ref()
                         .context("background effect manager disappeared before creation")?;
-                    self.background_effect = Some(manager.get_background_effect(
-                        self.window.wl_surface(),
+                    self.surface.background_effect = Some(manager.get_background_effect(
+                        self.surface.window.wl_surface(),
                         queue_handle,
                         (),
                     ));
                 }
                 EffectAction::SetBlurRegion(size) => {
                     let effect = self
+                        .surface
                         .background_effect
                         .as_ref()
                         .context("background effect region requested without an object")?;
-                    let region = Region::new(&self.compositor)
+                    let region = Region::new(&self.platform.compositor)
                         .context("create finite background effect region")?;
                     region.add(0, 0, size.width(), size.height());
                     effect.set_blur_region(Some(region.wl_region()));
@@ -2875,6 +3025,7 @@ impl App {
                 }
                 EffectAction::DestroyEffect => {
                     let effect = self
+                        .surface
                         .background_effect
                         .take()
                         .context("background effect destroy requested without an object")?;
@@ -2882,15 +3033,17 @@ impl App {
                 }
                 EffectAction::CommitSurface(reason) => match commit_mode {
                     BackgroundEffectCommitMode::Immediate => {
-                        self.window.commit();
+                        self.surface.window.commit();
                         anyhow::ensure!(
-                            self.background_effect_state.surface_committed() == Some(reason),
+                            self.surface.background_effect_state.surface_committed()
+                                == Some(reason),
                             "background effect commit did not match reducer state"
                         );
                     }
                     BackgroundEffectCommitMode::DeferToDraw => {
                         anyhow::ensure!(
-                            self.background_effect_deferred_commit
+                            self.surface
+                                .background_effect_deferred_commit
                                 .replace(reason)
                                 .is_none(),
                             "background effect already has a deferred surface commit"
@@ -2903,11 +3056,11 @@ impl App {
     }
 
     fn complete_background_effect_draw_commit(&mut self) -> Result<()> {
-        let Some(expected) = self.background_effect_deferred_commit.take() else {
+        let Some(expected) = self.surface.background_effect_deferred_commit.take() else {
             return Ok(());
         };
         anyhow::ensure!(
-            self.background_effect_state.surface_committed() == Some(expected),
+            self.surface.background_effect_state.surface_committed() == Some(expected),
             "draw commit did not match deferred background effect state"
         );
         Ok(())
@@ -2918,7 +3071,8 @@ impl App {
         queue_handle: &QueueHandle<Self>,
         commit_mode: BackgroundEffectCommitMode,
     ) -> Result<()> {
-        if self.background_effect_manager.is_none() || self.background_effect_capabilities_received
+        if self.surface.background_effect_manager.is_none()
+            || self.surface.background_effect_capabilities_received
         {
             self.execute_background_effect_actions(queue_handle, commit_mode)?;
         }
@@ -2926,35 +3080,30 @@ impl App {
     }
 
     fn queue_background_effect_geometry_for_draw(&mut self) -> Result<()> {
-        self.background_effect_state.set_logical_size(
-            i64::from(self.logical_width),
-            i64::from(self.logical_height),
+        self.surface.background_effect_state.set_logical_size(
+            i64::from(self.surface.logical_width),
+            i64::from(self.surface.logical_height),
         )?;
-        self.background_effect_reconcile_schedule.queue_geometry();
+        self.surface
+            .background_effect_reconcile_schedule
+            .queue_geometry();
         Ok(())
     }
 
     fn release_background_effect(&mut self) {
-        for action in self.background_effect_state.destroy_surface() {
+        for action in self.surface.background_effect_state.destroy_surface() {
             self.trace_background_effect_action(action);
             if action == EffectAction::DestroyEffect
-                && let Some(effect) = self.background_effect.take()
+                && let Some(effect) = self.surface.background_effect.take()
             {
                 effect.destroy();
             }
         }
-        self.background_effect_deferred_commit = None;
-        self.background_effect_reconcile_schedule.clear();
-        if let Some(manager) = self.background_effect_manager.take() {
+        self.surface.background_effect_deferred_commit = None;
+        self.surface.background_effect_reconcile_schedule.clear();
+        if let Some(manager) = self.surface.background_effect_manager.take() {
             manager.destroy();
         }
-    }
-
-    fn focused_splint(&self) -> Option<SplintId> {
-        self.pane
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.splint_id)
     }
 
     fn splint_at_point(&self, point: (f64, f64)) -> Option<SplintId> {
@@ -2971,25 +3120,26 @@ impl App {
     }
 
     fn focus_splint(&mut self, splint_id: SplintId) -> bool {
-        if self.focused_splint() == Some(splint_id) {
+        if self.panes.focused_splint() == Some(splint_id) {
             return false;
         }
-        let Some(index) = self.inactive_panes.iter().position(|pane| {
+        let Some(index) = self.panes.inactive_panes.iter().position(|pane| {
             pane.snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.splint_id == splint_id)
         }) else {
             return false;
         };
-        std::mem::swap(&mut self.pane, &mut self.inactive_panes[index]);
-        self.pane.pointer_cell = None;
-        self.pane.hovered_url = None;
-        self.full_redraw = true;
+        std::mem::swap(&mut self.panes.pane, &mut self.panes.inactive_panes[index]);
+        self.panes.pane.pointer_cell = None;
+        self.panes.pane.hovered_url = None;
+        self.presentation.full_redraw = true;
         true
     }
 
     fn focus_direction(&mut self, direction: FocusDirection) -> bool {
-        let (Some(layout), Some(current)) = (&self.layout, self.focused_splint()) else {
+        let (Some(layout), Some(current)) = (&self.panes.layout, self.panes.focused_splint())
+        else {
             return false;
         };
         let Ok(layout) = PaneLayout::compute(
@@ -3016,19 +3166,19 @@ impl App {
         pane_layout: Option<&PaneLayout>,
         cell_width: u32,
     ) -> Result<()> {
-        if self.pane_divider_style != PaneDividerStyle::Frame
-            || self.frame_title_mode != FrameTitleMode::Splint
+        if self.presentation.pane_divider_style != PaneDividerStyle::Frame
+            || self.presentation.frame_title_mode != FrameTitleMode::Splint
         {
-            self.frame_titles.clear();
+            self.presentation.frame_titles.clear();
             return Ok(());
         }
-        let (Some(pane_layout), Some(topology)) = (pane_layout, self.layout.as_ref()) else {
-            self.frame_titles.clear();
+        let (Some(pane_layout), Some(topology)) = (pane_layout, self.panes.layout.as_ref()) else {
+            self.presentation.frame_titles.clear();
             return Ok(());
         };
         let mut requested = Vec::new();
         for pane in &pane_layout.panes {
-            let allocation = Self::buffer_rect(pane.allocation, self.scale_120)?;
+            let allocation = Self::buffer_rect(pane.allocation, self.surface.scale_120)?;
             let columns = allocation.width / cell_width.max(1);
             let Some(maximum_cells) = columns.checked_sub(6).filter(|cells| *cells > 0) else {
                 continue;
@@ -3045,22 +3195,27 @@ impl App {
             .iter()
             .map(|(splint_id, _, _)| *splint_id)
             .collect::<HashSet<_>>();
-        self.frame_titles
+        self.presentation
+            .frame_titles
             .retain(|splint_id, _| requested_ids.contains(splint_id));
         for (splint_id, source, maximum_cells) in requested {
-            let current = self.frame_titles.get(&splint_id).is_some_and(|cached| {
-                cached.source == source
-                    && cached.maximum_cells == maximum_cells
-                    && cached.scale_120 == self.scale_120
-            });
+            let current = self
+                .presentation
+                .frame_titles
+                .get(&splint_id)
+                .is_some_and(|cached| {
+                    cached.source == source
+                        && cached.maximum_cells == maximum_cells
+                        && cached.scale_120 == self.surface.scale_120
+                });
             if !current {
-                self.frame_titles.insert(
+                self.presentation.frame_titles.insert(
                     splint_id,
                     CachedFrameTitle {
-                        text: ChromeText::load(&source, self.scale_120)?,
+                        text: ChromeText::load(&source, self.surface.scale_120)?,
                         source,
                         maximum_cells,
-                        scale_120: self.scale_120,
+                        scale_120: self.surface.scale_120,
                         bold: false,
                     },
                 );
@@ -3070,17 +3225,21 @@ impl App {
     }
 
     fn computed_pane_layout(&self) -> Result<Option<PaneLayout>> {
-        self.layout
+        self.panes
+            .layout
             .as_ref()
             .map(|layout| {
                 let frame = self
+                    .panes
                     .pane
                     .snapshot_frame
                     .as_ref()
                     .context("multi-pane layout requires an active snapshot frame")?;
-                let cell_width = buffer_to_logical_ceil(frame.cell_width(), self.scale_120)?;
-                let cell_height = buffer_to_logical_ceil(frame.cell_height(), self.scale_120)?;
-                let chrome = match self.pane_divider_style {
+                let cell_width =
+                    buffer_to_logical_ceil(frame.cell_width(), self.surface.scale_120)?;
+                let cell_height =
+                    buffer_to_logical_ceil(frame.cell_height(), self.surface.scale_120)?;
+                let chrome = match self.presentation.pane_divider_style {
                     PaneDividerStyle::None => PaneChrome::None,
                     PaneDividerStyle::Line => PaneChrome::Line {
                         vertical_width: cell_width,
@@ -3142,19 +3301,11 @@ impl App {
         )?))
     }
 
-    fn display_snapshot(&self) -> Option<TerminalSnapshot> {
-        self.pane.display_snapshot()
-    }
-
-    fn display_snapshot_cow(&self) -> Option<Cow<'_, TerminalSnapshot>> {
-        self.pane.display_snapshot_cow()
-    }
-
     fn request_older_history(&mut self) -> Result<()> {
-        if self.pane.history_page_pending || self.pane.history_selection_pin_blocked {
+        if self.panes.pane.history_page_pending || self.panes.pane.history_selection_pin_blocked {
             return Ok(());
         }
-        let Some(snapshot) = self.pane.snapshot.as_ref() else {
+        let Some(snapshot) = self.panes.pane.snapshot.as_ref() else {
             return Ok(());
         };
         if snapshot.omitted_oldest_scrollback_rows == 0 {
@@ -3164,7 +3315,7 @@ impl App {
         else {
             return Ok(());
         };
-        let Some(commands) = self.pane.commands.as_ref() else {
+        let Some(commands) = self.panes.pane.commands.as_ref() else {
             return Ok(());
         };
         try_window_command(
@@ -3177,27 +3328,36 @@ impl App {
                 before_row_id,
             },
         )?;
-        self.pane.history_page_pending = true;
+        self.panes.pane.history_page_pending = true;
         Ok(())
     }
 
     fn scroll_history(&mut self, action: MouseAction, lines: usize) -> Result<bool> {
         let snapshot = self
+            .panes
             .pane
             .snapshot
             .as_ref()
             .context("scroll requires snapshot")?;
-        let previous_offset = self.pane.scrollback_viewport.offset_from_bottom();
+        let previous_offset = self.panes.pane.scrollback_viewport.offset_from_bottom();
         match action {
-            MouseAction::WheelUp => self.pane.scrollback_viewport.scroll_up(lines, snapshot),
-            MouseAction::WheelDown => self.pane.scrollback_viewport.scroll_down(lines, snapshot),
+            MouseAction::WheelUp => self
+                .panes
+                .pane
+                .scrollback_viewport
+                .scroll_up(lines, snapshot),
+            MouseAction::WheelDown => self
+                .panes
+                .pane
+                .scrollback_viewport
+                .scroll_down(lines, snapshot),
             _ => return Ok(false),
         }
-        let moved = self.pane.scrollback_viewport.offset_from_bottom() != previous_offset;
+        let moved = self.panes.pane.scrollback_viewport.offset_from_bottom() != previous_offset;
         if action == MouseAction::WheelUp {
             let loaded = snapshot.scrollback_rows.len();
             let remaining =
-                loaded.saturating_sub(self.pane.scrollback_viewport.offset_from_bottom());
+                loaded.saturating_sub(self.panes.pane.scrollback_viewport.offset_from_bottom());
             let prefetch_distance = snapshot.rows.saturating_mul(2).max(32);
             if remaining <= prefetch_distance {
                 self.request_older_history()?;
@@ -3206,19 +3366,22 @@ impl App {
         if !moved {
             return Ok(false);
         }
-        self.pane.scroll_started_at.get_or_insert_with(Instant::now);
+        self.panes
+            .pane
+            .scroll_started_at
+            .get_or_insert_with(Instant::now);
         self.invalidate_viewport_local_state();
         self.refresh_ime_preedit()?;
         self.update_ime_cursor_rectangle();
         // Coalesce high-resolution wheel events until the next compositor frame.
         // Re-shaping the entire viewport synchronously for every axis event made
         // fast scrolling stall the Wayland dispatch loop.
-        self.pane.viewport_dirty = true;
+        self.panes.pane.viewport_dirty = true;
         Ok(true)
     }
 
     fn tick_signoff(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        let Some(mut probe) = self.signoff.take() else {
+        let Some(mut probe) = self.scheduling.signoff.take() else {
             return Ok(());
         };
         let result = self.advance_signoff(&mut probe);
@@ -3227,9 +3390,9 @@ impl App {
         } else {
             self.write_signoff_report(&probe, probe.step == SignoffStep::Complete, None)?;
         }
-        self.signoff = Some(probe);
+        self.scheduling.signoff = Some(probe);
         result?;
-        if self.configured && self.pane.viewport_dirty {
+        if self.surface.configured && self.panes.pane.viewport_dirty {
             self.schedule_draw(queue_handle)?;
         }
         Ok(())
@@ -3245,7 +3408,7 @@ impl App {
             "sign-off probe timed out at {:?}",
             probe.step
         );
-        let Some(snapshot) = self.pane.snapshot.as_ref() else {
+        let Some(snapshot) = self.panes.pane.snapshot.as_ref() else {
             return Ok(());
         };
         match probe.step {
@@ -3257,6 +3420,7 @@ impl App {
             SignoffStep::LoadSelectionWindow => {
                 self.scroll_history(MouseAction::WheelUp, usize::MAX)?;
                 if self
+                    .panes
                     .pane
                     .snapshot
                     .as_ref()
@@ -3267,7 +3431,12 @@ impl App {
             }
             SignoffStep::LoadClientCache => {
                 self.scroll_history(MouseAction::WheelUp, usize::MAX)?;
-                let snapshot = self.pane.snapshot.as_ref().context("sign-off snapshot")?;
+                let snapshot = self
+                    .panes
+                    .pane
+                    .snapshot
+                    .as_ref()
+                    .context("sign-off snapshot")?;
                 let cache_bytes = history_cache_bytes(&snapshot.scrollback_rows);
                 let loaded_rows = snapshot.scrollback_rows.len();
                 let first_row_id = snapshot.scrollback_rows.first().and_then(|row| row.row_id);
@@ -3282,7 +3451,7 @@ impl App {
                 let row_capacity_hit = loaded_rows >= MAX_CACHED_HISTORY_ROWS;
                 let byte_capacity_hit = cache_bytes >= MAX_CACHED_HISTORY_BYTES;
                 if (row_capacity_hit || byte_capacity_hit || bounded_eviction_observed)
-                    && self.pane.scrollback_viewport.offset_from_bottom()
+                    && self.panes.pane.scrollback_viewport.offset_from_bottom()
                         >= snapshot.scrollback_rows.len().saturating_sub(snapshot.rows)
                 {
                     anyhow::ensure!(
@@ -3296,7 +3465,7 @@ impl App {
                         "loaded_bytes": cache_bytes,
                         "available_rows": snapshot.available_scrollback_rows,
                         "omitted_oldest_rows": snapshot.omitted_oldest_scrollback_rows,
-                        "offset": self.pane.scrollback_viewport.offset_from_bottom(),
+                        "offset": self.panes.pane.scrollback_viewport.offset_from_bottom(),
                         "row_capacity_hit": row_capacity_hit,
                         "byte_capacity_hit": byte_capacity_hit,
                         "bounded_eviction_observed": bounded_eviction_observed,
@@ -3308,6 +3477,7 @@ impl App {
             SignoffStep::BeginSelection => {
                 if self.begin_selection(CellPosition { row: 0, column: 0 }) {
                     probe.selection_revision = self
+                        .panes
                         .pane
                         .snapshot
                         .as_ref()
@@ -3319,6 +3489,7 @@ impl App {
             SignoffStep::ExtendSelection => {
                 self.scroll_history(MouseAction::WheelDown, 512)?;
                 let row = self
+                    .panes
                     .display_snapshot()
                     .context("selection display")?
                     .rows
@@ -3327,7 +3498,7 @@ impl App {
                     self.extend_selection(CellPosition { row, column: 8 }),
                     "could not extend cross-page selection"
                 );
-                let selection = self.pane.selection.context("selection exists")?;
+                let selection = self.panes.pane.selection.context("selection exists")?;
                 let row_span = selection.anchor.row_id.abs_diff(selection.end.row_id);
                 anyhow::ensure!(row_span > 256, "selection did not cross a history page");
                 probe.evidence.push(serde_json::json!({
@@ -3340,7 +3511,11 @@ impl App {
             }
             SignoffStep::WaitSelectedOutput => {
                 if snapshot.revision >= probe.selection_revision.saturating_add(20) {
-                    let selection = self.pane.selection.context("selection survived output")?;
+                    let selection = self
+                        .panes
+                        .pane
+                        .selection
+                        .context("selection survived output")?;
                     anyhow::ensure!(
                         selection_is_retained(snapshot, selection),
                         "selection endpoints were not retained during output"
@@ -3349,7 +3524,7 @@ impl App {
                         "check": "selection_during_detached_output",
                         "revision_before": probe.selection_revision,
                         "revision_after": snapshot.revision,
-                        "unseen_rows": self.pane.scrollback_viewport.unseen_rows(),
+                        "unseen_rows": self.panes.pane.scrollback_viewport.unseen_rows(),
                         "retained": true,
                     }));
                     probe.step = SignoffStep::FinishSelection;
@@ -3379,10 +3554,10 @@ impl App {
                     "before": before,
                     "after": after,
                 }));
-                self.dirty_selection(self.pane.selection);
-                self.pane.selection = None;
-                self.pane.selected_text = None;
-                self.pane.history_selection_pin_blocked = false;
+                self.dirty_selection(self.panes.pane.selection);
+                self.panes.pane.selection = None;
+                self.panes.pane.selected_text = None;
+                self.panes.pane.history_selection_pin_blocked = false;
                 probe.step = SignoffStep::LoadClientCache;
             }
             SignoffStep::WaitMouseTracking => {
@@ -3414,7 +3589,7 @@ impl App {
             }
             SignoffStep::ReturnLive => {
                 self.scroll_history(MouseAction::WheelDown, usize::MAX)?;
-                if self.pane.scrollback_viewport.is_live() {
+                if self.panes.pane.scrollback_viewport.is_live() {
                     probe.evidence.push(serde_json::json!({
                         "check": "return_to_live",
                         "offset": 0,
@@ -3433,7 +3608,7 @@ impl App {
         exact: bool,
         error: Option<&str>,
     ) -> Result<()> {
-        let snapshot = self.pane.snapshot.as_ref();
+        let snapshot = self.panes.pane.snapshot.as_ref();
         let report = serde_json::json!({
             "schema": "splinterm.signoff.interactions.v1",
             "exact": exact,
@@ -3447,10 +3622,10 @@ impl App {
                 "loaded_history_bytes": snapshot.map(|value| history_cache_bytes(&value.scrollback_rows)),
                 "first_loaded_row_id": snapshot.and_then(|value| value.scrollback_rows.first()).and_then(|row| row.row_id),
                 "omitted_oldest_rows": snapshot.map(|value| value.omitted_oldest_scrollback_rows),
-                "history_page_pending": self.pane.history_page_pending,
-                "viewport_offset": self.pane.scrollback_viewport.offset_from_bottom(),
+                "history_page_pending": self.panes.pane.history_page_pending,
+                "viewport_offset": self.panes.pane.scrollback_viewport.offset_from_bottom(),
                 "mouse_tracking": snapshot.map(|value| format!("{:?}", value.input_modes.mouse_tracking)),
-                "selection_active": self.pane.selection.is_some(),
+                "selection_active": self.panes.pane.selection.is_some(),
             },
             "evidence": probe.evidence,
         });
@@ -3468,29 +3643,32 @@ impl App {
     ) -> Result<bool> {
         let Some(navigation) = history_navigation(
             event.keysym,
-            self.modifiers.shift,
-            !self.pane.scrollback_viewport.is_live(),
+            self.input.modifiers.shift,
+            !self.panes.pane.scrollback_viewport.is_live(),
         ) else {
             return Ok(false);
         };
         let page = self
+            .panes
             .pane
             .snapshot
             .as_ref()
             .map_or(1, |snapshot| snapshot.rows.saturating_sub(1).max(1));
         match navigation {
             HistoryNavigation::PageUp => {
-                if self.scroll_history(MouseAction::WheelUp, page)? && self.configured {
+                if self.scroll_history(MouseAction::WheelUp, page)? && self.surface.configured {
                     self.schedule_draw(queue_handle)?;
                 }
             }
             HistoryNavigation::PageDown => {
-                if self.scroll_history(MouseAction::WheelDown, page)? && self.configured {
+                if self.scroll_history(MouseAction::WheelDown, page)? && self.surface.configured {
                     self.schedule_draw(queue_handle)?;
                 }
             }
             HistoryNavigation::ReturnToLive => {
-                if self.scroll_history(MouseAction::WheelDown, usize::MAX)? && self.configured {
+                if self.scroll_history(MouseAction::WheelDown, usize::MAX)?
+                    && self.surface.configured
+                {
                     self.schedule_draw(queue_handle)?;
                 }
             }
@@ -3499,10 +3677,10 @@ impl App {
     }
 
     fn send_input(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if self.inline_picker_open() {
+        if self.modal.inline_picker_open() {
             return Ok(());
         }
-        if let Some(commands) = &self.pane.commands {
+        if let Some(commands) = &self.panes.pane.commands {
             try_window_command(commands, WindowCommand::Input(bytes))?;
         }
         Ok(())
@@ -3515,15 +3693,16 @@ impl App {
         discrete: i32,
         value120: i32,
     ) -> Result<WheelOutcome> {
-        let modes = self.input_modes();
+        let modes = self.panes.input_modes();
         let cell_height = self
+            .panes
             .pane
             .snapshot_frame
             .as_ref()
             .map_or(1, SnapshotFrame::cell_height);
         if modes.mouse_tracking == MouseTracking::None {
-            let before = self.pane.scrollback_viewport.offset_from_bottom();
-            let Some((action, count)) = self.scrollback_wheel.push_scaled(
+            let before = self.panes.pane.scrollback_viewport.offset_from_bottom();
+            let Some((action, count)) = self.input.scrollback_wheel.push_scaled(
                 absolute,
                 discrete,
                 value120,
@@ -3535,11 +3714,12 @@ impl App {
             self.scroll_history(action, count)?;
             return Ok(WheelOutcome::History {
                 before,
-                after: self.pane.scrollback_viewport.offset_from_bottom(),
+                after: self.panes.pane.scrollback_viewport.offset_from_bottom(),
             });
         }
         let Some((action, count)) =
-            self.vertical_wheel
+            self.input
+                .vertical_wheel
                 .push(absolute, discrete, value120, cell_height)
         else {
             return Ok(WheelOutcome::Noop);
@@ -3547,7 +3727,8 @@ impl App {
         let Some(position) = position else {
             return Ok(WheelOutcome::Noop);
         };
-        let Some(report) = mouse_report(action, position, self.modifiers, modes.sgr_mouse) else {
+        let Some(report) = mouse_report(action, position, self.input.modifiers, modes.sgr_mouse)
+        else {
             return Ok(WheelOutcome::Noop);
         };
         let bytes = report.len().saturating_mul(count);
@@ -3563,27 +3744,27 @@ impl App {
     }
 
     fn begin_selection(&mut self, position: CellPosition) -> bool {
-        let Some(snapshot) = self.display_snapshot_cow() else {
+        let Some(snapshot) = self.panes.display_snapshot_cow() else {
             return false;
         };
         let Some(endpoint) = selection_endpoint(&snapshot, position) else {
             return false;
         };
-        self.dirty_selection(self.pane.selection);
+        self.dirty_selection(self.panes.pane.selection);
         let selection = Selection {
             anchor: endpoint,
             end: endpoint,
         };
-        self.pane.selection = Some(selection);
-        self.pane.selecting = true;
-        self.pane.history_selection_pin_blocked = false;
+        self.panes.pane.selection = Some(selection);
+        self.panes.pane.selecting = true;
+        self.panes.pane.history_selection_pin_blocked = false;
         self.dirty_selection(Some(selection));
         true
     }
 
     fn extend_selection(&mut self, position: CellPosition) -> bool {
         let (Some(mut selection), Some(snapshot)) =
-            (self.pane.selection, self.display_snapshot_cow())
+            (self.panes.pane.selection, self.panes.display_snapshot_cow())
         else {
             return false;
         };
@@ -3595,25 +3776,25 @@ impl App {
         }
         self.dirty_selection(Some(selection));
         selection.end = endpoint;
-        self.pane.selection = Some(selection);
+        self.panes.pane.selection = Some(selection);
         self.dirty_selection(Some(selection));
         true
     }
 
     fn finish_selection(&mut self) -> Option<&[u8]> {
-        self.pane.selecting = false;
-        self.pane.selected_text = self.pane.selection.and_then(|selection| {
-            self.pane
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| selection_text(snapshot, selection).map(String::into_bytes))
-        });
-        self.pane.selected_text.as_deref()
+        self.panes.pane.selecting = false;
+        self.panes.pane.selected_text =
+            self.panes.pane.selection.and_then(|selection| {
+                self.panes.pane.snapshot.as_ref().and_then(|snapshot| {
+                    selection_text(snapshot, selection).map(String::into_bytes)
+                })
+            });
+        self.panes.pane.selected_text.as_deref()
     }
 
     fn pointer_cell_at(&self, position: (f64, f64)) -> Option<CellPosition> {
-        let frame = self.pane.snapshot_frame.as_ref()?;
-        let pane_rect = self.focused_splint().and_then(|splint_id| {
+        let frame = self.panes.pane.snapshot_frame.as_ref()?;
+        let pane_rect = self.panes.focused_splint().and_then(|splint_id| {
             self.computed_pane_layout()
                 .ok()
                 .flatten()
@@ -3637,7 +3818,7 @@ impl App {
             },
         );
         let geometry = frame
-            .window_geometry(logical_width, logical_height, self.scale_120)
+            .window_geometry(logical_width, logical_height, self.surface.scale_120)
             .ok()?;
         let (row, column) = frame.cell_at(position.0 - x, position.1 - y, &geometry)?;
         Some(CellPosition { row, column })
@@ -3645,101 +3826,104 @@ impl App {
 
     fn dirty_row(&mut self, row: usize) {
         let rows = self
+            .panes
             .pane
             .snapshot
             .as_ref()
             .map_or(0, |snapshot| snapshot.rows);
-        self.pane.raster_dirty_rows.resize(rows, false);
-        self.pane.surface_dirty_rows.resize(rows, false);
+        self.panes.pane.raster_dirty_rows.resize(rows, false);
+        self.panes.pane.surface_dirty_rows.resize(rows, false);
         if row < rows {
-            self.pane.raster_dirty_rows[row] = true;
-            self.pane.surface_dirty_rows[row] = true;
+            self.panes.pane.raster_dirty_rows[row] = true;
+            self.panes.pane.surface_dirty_rows[row] = true;
         }
     }
 
     fn dirty_selection(&mut self, selection: Option<Selection>) {
         let bounds = selection.and_then(|selection| {
-            let snapshot = self.pane.snapshot.as_ref()?;
-            let display = self.display_snapshot_cow()?;
+            let snapshot = self.panes.pane.snapshot.as_ref()?;
+            let display = self.panes.display_snapshot_cow()?;
             selection_display_bounds(snapshot, &display, selection)
         });
         if let Some((start, end)) = bounds {
             let rows = self
+                .panes
                 .pane
                 .snapshot
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.rows);
-            self.pane.surface_dirty_rows.resize(rows, false);
+            self.panes.pane.surface_dirty_rows.resize(rows, false);
             for row in start.row..=end.row.min(rows.saturating_sub(1)) {
-                self.pane.surface_dirty_rows[row] = true;
+                self.panes.pane.surface_dirty_rows[row] = true;
             }
         }
     }
 
     fn invalidate_viewport_local_state(&mut self) {
-        if let Some((start, _, _)) = &self.pane.hovered_url {
+        if let Some((start, _, _)) = &self.panes.pane.hovered_url {
             self.dirty_row(start.row);
         }
-        self.pane.selected_text = None;
-        self.pane.hovered_url = None;
-        let selecting = self.pane.selecting;
-        self.pressed_buttons.retain(|_, owner| {
+        self.panes.pane.selected_text = None;
+        self.panes.pane.hovered_url = None;
+        let selecting = self.panes.pane.selecting;
+        self.input.pressed_buttons.retain(|_, owner| {
             matches!(owner, PressOwner::Application { .. })
                 || selecting && matches!(owner, PressOwner::Selection)
         });
     }
 
     fn invalidate_local_content_state(&mut self) {
-        self.dirty_selection(self.pane.selection);
-        self.pane.selection = None;
-        self.pane.selecting = false;
-        self.pane.history_selection_pin_blocked = false;
+        self.dirty_selection(self.panes.pane.selection);
+        self.panes.pane.selection = None;
+        self.panes.pane.selecting = false;
+        self.panes.pane.history_selection_pin_blocked = false;
         self.invalidate_viewport_local_state();
     }
 
     fn reconcile_selection_after_content_change(&mut self) {
-        let retained = self.pane.selection.is_none_or(|selection| {
-            self.pane
+        let retained = self.panes.pane.selection.is_none_or(|selection| {
+            self.panes
+                .pane
                 .snapshot
                 .as_ref()
                 .is_some_and(|snapshot| selection_is_retained(snapshot, selection))
         });
         if !retained {
-            self.pane.selection = None;
-            self.pane.selecting = false;
-            self.pane.history_selection_pin_blocked = false;
+            self.panes.pane.selection = None;
+            self.panes.pane.selecting = false;
+            self.panes.pane.history_selection_pin_blocked = false;
         }
         self.invalidate_viewport_local_state();
     }
 
     fn recompute_hovered_url(&mut self) {
-        let previous = self.pane.hovered_url.take();
-        let display = self.display_snapshot();
-        self.pane.hovered_url = self.pane.pointer_cell.and_then(|position| {
+        let previous = self.panes.pane.hovered_url.take();
+        let display = self.panes.display_snapshot();
+        self.panes.pane.hovered_url = self.panes.pane.pointer_cell.and_then(|position| {
             display
                 .as_ref()
                 .and_then(|snapshot| url_at(snapshot, position))
         });
-        if previous != self.pane.hovered_url {
+        if previous != self.panes.pane.hovered_url {
             if let Some((start, _, _)) = previous {
                 self.dirty_row(start.row);
             }
-            if let Some((start, _, _)) = &self.pane.hovered_url {
+            if let Some((start, _, _)) = &self.panes.pane.hovered_url {
                 self.dirty_row(start.row);
             }
         }
     }
 
     fn begin_clipboard_read(&mut self, target: PasteTarget) {
-        if self.inline_picker_open() {
+        if self.modal.inline_picker_open() {
             return;
         }
-        let tx = self.clipboard_tx.clone();
-        let waker = self.update_waker.clone();
-        let input_generation = self.input_generation;
+        let tx = self.clipboard.clipboard_tx.clone();
+        let waker = self.platform.update_waker.clone();
+        let input_generation = self.input.input_generation;
         match target {
             PasteTarget::Clipboard => {
-                let Some(offer) = self.clipboard_offer.clone() else {
+                let Some(offer) = self.clipboard.clipboard_offer.clone() else {
                     return;
                 };
                 let mime = offer.with_mime_types(accepted_text_mime);
@@ -3749,7 +3933,7 @@ impl App {
                 }
             }
             PasteTarget::Primary => {
-                let Some(offer) = self.primary_offer.clone() else {
+                let Some(offer) = self.clipboard.primary_offer.clone() else {
                     return;
                 };
                 let mime = offer.with_mime_types(accepted_text_mime);
@@ -3762,10 +3946,10 @@ impl App {
     }
 
     fn apply_clipboard_reads(&mut self) -> Result<()> {
-        while let Ok(read) = self.clipboard_rx.try_recv() {
+        while let Ok(read) = self.clipboard.clipboard_rx.try_recv() {
             if !clipboard_read_is_current(
-                self.inline_picker_open(),
-                self.input_generation,
+                self.modal.inline_picker_open(),
+                self.input.input_generation,
                 read.input_generation,
             ) {
                 continue;
@@ -3777,6 +3961,7 @@ impl App {
                 continue;
             };
             let bracketed = self
+                .panes
                 .pane
                 .snapshot
                 .as_ref()
@@ -3788,7 +3973,7 @@ impl App {
     }
 
     fn publish_clipboard(&mut self, qh: &QueueHandle<Self>, serial: u32, primary: bool) {
-        let Some(text) = self.pane.selected_text.as_ref() else {
+        let Some(text) = self.panes.pane.selected_text.as_ref() else {
             return;
         };
         if text.is_empty() {
@@ -3798,37 +3983,34 @@ impl App {
         let mimes: Vec<_> = TEXT_MIMES.iter().map(|mime| (*mime).to_owned()).collect();
         if primary {
             if let (Some(manager), Some(device)) = (
-                self.primary_selection_manager.as_ref(),
-                self.primary_device.as_ref(),
+                self.platform.primary_selection_manager.as_ref(),
+                self.clipboard.primary_device.as_ref(),
             ) {
                 let source = manager.create_selection_source(qh, mimes);
                 source.set_selection(device, serial);
-                self.primary_sources.clear();
-                self.primary_sources.push((source, payload));
+                self.clipboard.primary_sources.clear();
+                self.clipboard.primary_sources.push((source, payload));
             }
-        } else if let Some(device) = self.data_device.as_ref() {
-            let source = self.data_device_manager.create_copy_paste_source(qh, mimes);
+        } else if let Some(device) = self.clipboard.data_device.as_ref() {
+            let source = self
+                .platform
+                .data_device_manager
+                .create_copy_paste_source(qh, mimes);
             source.set_selection(device, serial);
-            self.clipboard_sources.clear();
-            self.clipboard_sources.push((source, payload));
+            self.clipboard.clipboard_sources.clear();
+            self.clipboard.clipboard_sources.push((source, payload));
         }
     }
 
     fn open_hovered_url(&self) {
-        let Some((_, _, url)) = &self.pane.hovered_url else {
+        let Some((_, _, url)) = &self.panes.pane.hovered_url else {
             return;
         };
         let _ = Command::new("xdg-open").arg(url).spawn();
     }
 
-    fn inline_picker_open(&self) -> bool {
-        self.session_picker
-            .as_ref()
-            .is_some_and(SessionPickerUi::is_inline)
-    }
-
     fn settle_terminal_presses_for_picker(&mut self) {
-        let pressed = std::mem::take(&mut self.pressed_buttons);
+        let pressed = std::mem::take(&mut self.input.pressed_buttons);
         for owner in pressed.into_values() {
             if let PressOwner::Application {
                 code,
@@ -3836,22 +4018,22 @@ impl App {
                 modifiers,
                 ..
             } = owner
-                && let Some(position) = self.pane.pointer_cell
+                && let Some(position) = self.panes.pane.pointer_cell
                 && let Some(report) =
                     mouse_report(MouseAction::Release(code), position, modifiers, sgr)
             {
                 self.send_command(WindowCommand::Input(report));
             }
         }
-        if self.pane.selecting {
-            let selection = self.pane.selection.take();
+        if self.panes.pane.selecting {
+            let selection = self.panes.pane.selection.take();
             self.dirty_selection(selection);
-            self.pane.selecting = false;
-            self.pane.selected_text = None;
-            self.pane.history_selection_pin_blocked = false;
+            self.panes.pane.selecting = false;
+            self.panes.pane.selected_text = None;
+            self.panes.pane.history_selection_pin_blocked = false;
         }
-        self.pane.pointer_cell = None;
-        self.pane.hovered_url = None;
+        self.panes.pane.pointer_cell = None;
+        self.panes.pane.hovered_url = None;
     }
 
     fn reconcile_terminal_focus_report(&mut self, modal_focus_changed: bool) {
@@ -3859,14 +4041,14 @@ impl App {
             return;
         }
         let Some(report) = reconciled_focus_report(
-            self.input_modes().focus_reporting,
-            self.terminal_focus_reported,
-            self.keyboard_focused,
+            self.panes.input_modes().focus_reporting,
+            self.input.terminal_focus_reported,
+            self.input.keyboard_focused,
         ) else {
             return;
         };
         self.send_command(WindowCommand::Input(report));
-        self.terminal_focus_reported = self.keyboard_focused;
+        self.input.terminal_focus_reported = self.input.keyboard_focused;
     }
 
     fn show_embedded_session_picker(
@@ -3875,7 +4057,7 @@ impl App {
         targets: Vec<(LairId, DojoId)>,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.session_picker.is_none(),
+            self.modal.session_picker.is_none(),
             "session picker is already open"
         );
         anyhow::ensure!(
@@ -3883,54 +4065,49 @@ impl App {
             "session picker targets differ"
         );
         self.settle_terminal_presses_for_picker();
-        self.input_generation = self.input_generation.saturating_add(1);
-        self.session_picker_wheel = WheelAccumulator::default();
-        self.ime_modal_barrier = self.ime.entered && self.text_input.is_some();
-        if self.ime_modal_barrier {
-            if let Some(text_input) = &self.text_input {
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
+        self.modal.session_picker_wheel = WheelAccumulator::default();
+        self.input.ime_modal_barrier = self.input.ime.entered && self.input.text_input.is_some();
+        if self.input.ime_modal_barrier {
+            if let Some(text_input) = &self.input.text_input {
                 text_input.disable();
             }
             self.commit_text_input();
         }
         self.clear_ime_preedit();
-        self.session_picker = Some(SessionPickerUi::inline(items));
-        self.session_picker_targets = targets;
-        self.session_picker_layout = None;
-        self.session_picker_pressed = None;
-        self.session_picker_text_cache.clear();
-        self.session_picker_redraw = false;
-        self.session_picker_reconcile_pending = false;
-        self.session_picker_open_focus = Some(self.keyboard_focused);
-        self.session_picker_requested = false;
-        self.window.set_title("Splinterm — Recent Sessions");
-        self.full_redraw = true;
+        self.modal.session_picker = Some(SessionPickerUi::inline(items));
+        self.modal.session_picker_targets = targets;
+        self.modal.session_picker_layout = None;
+        self.modal.session_picker_pressed = None;
+        self.modal.session_picker_text_cache.clear();
+        self.modal.session_picker_redraw = false;
+        self.modal.session_picker_reconcile_pending = false;
+        self.modal.session_picker_open_focus = Some(self.input.keyboard_focused);
+        self.modal.session_picker_requested = false;
+        self.surface.window.set_title("Splinterm — Recent Sessions");
+        self.presentation.full_redraw = true;
         Ok(())
     }
 
     fn close_inline_session_picker(&mut self) -> bool {
-        if !self.inline_picker_open() {
+        if !self.modal.inline_picker_open() {
             return false;
         }
-        self.session_picker = None;
-        self.session_picker_targets.clear();
-        self.session_picker_layout = None;
-        self.session_picker_pressed = None;
-        self.session_picker_text_cache.clear();
-        self.session_picker_wheel = WheelAccumulator::default();
-        self.session_picker_redraw = false;
-        self.session_picker_reconcile_pending = true;
-        self.session_picker_requested = false;
+        self.modal.session_picker = None;
+        self.modal.session_picker_targets.clear();
+        self.modal.session_picker_layout = None;
+        self.modal.session_picker_pressed = None;
+        self.modal.session_picker_text_cache.clear();
+        self.modal.session_picker_wheel = WheelAccumulator::default();
+        self.modal.session_picker_redraw = false;
+        self.modal.session_picker_reconcile_pending = true;
+        self.modal.session_picker_requested = false;
         true
-    }
-
-    fn fail(&mut self, error: anyhow::Error) {
-        eprintln!("Wayland client failure: {error:#}");
-        self.failure = Some(error);
-        self.exit = true;
     }
 
     fn send_topology_command(&self, command: WindowTopologyCommand) -> Result<()> {
         let commands = self
+            .tab_state
             .topology_commands
             .as_ref()
             .context("topology command queue is unavailable")?;
@@ -3938,41 +4115,43 @@ impl App {
     }
 
     fn send_command(&mut self, command: WindowCommand) {
-        if self.inline_picker_open() && matches!(command, WindowCommand::Input(_)) {
+        if self.modal.inline_picker_open() && matches!(command, WindowCommand::Input(_)) {
             return;
         }
-        let Some(commands) = &self.pane.commands else {
+        let Some(commands) = &self.panes.pane.commands else {
             return;
         };
         if let Err(error) = try_window_command(commands, command) {
-            self.fail(error);
+            self.scheduling.fail(error);
         }
     }
 
     fn send_coalescible_input(&mut self, bytes: Vec<u8>) {
-        if self.inline_picker_open() {
+        if self.modal.inline_picker_open() {
             return;
         }
-        let Some(commands) = &self.pane.commands else {
+        let Some(commands) = &self.panes.pane.commands else {
             return;
         };
         match commands.try_send(WindowCommand::Input(bytes)) {
             Ok(()) | Err(TrySendError::Full(_)) => {}
             Err(TrySendError::Closed(_)) => {
-                self.fail(anyhow::anyhow!("Wayland command receiver disconnected"));
+                self.scheduling
+                    .fail(anyhow::anyhow!("Wayland command receiver disconnected"));
             }
         }
     }
 
     fn commit_text_input(&mut self) {
-        if let Some(text_input) = &self.text_input {
+        if let Some(text_input) = &self.input.text_input {
             text_input.commit();
-            self.ime.note_client_commit();
+            self.input.ime.note_client_commit();
         }
     }
 
     fn focused_logical_rect(&self) -> Rect {
-        self.focused_splint()
+        self.panes
+            .focused_splint()
             .and_then(|splint_id| {
                 self.computed_pane_layout()
                     .ok()
@@ -3983,19 +4162,19 @@ impl App {
     }
 
     fn ime_cursor_rectangle(&self) -> Option<(i32, i32, i32, i32)> {
-        let frame = self.pane.snapshot_frame.as_ref()?;
+        let frame = self.panes.pane.snapshot_frame.as_ref()?;
         let rect = self.focused_logical_rect();
         let geometry = frame
-            .window_geometry(rect.width, rect.height, self.scale_120)
+            .window_geometry(rect.width, rect.height, self.surface.scale_120)
             .ok()?;
         offset_cursor_rectangle(frame.cursor_rectangle(&geometry)?, rect)
     }
 
     fn update_ime_cursor_rectangle(&mut self) {
-        if !self.ime.entered || !self.ime.focused {
+        if !self.input.ime.entered || !self.input.ime.focused {
             return;
         }
-        let Some(text_input) = &self.text_input else {
+        let Some(text_input) = &self.input.text_input else {
             return;
         };
         if let Some((x, y, width, height)) = self.ime_cursor_rectangle() {
@@ -4005,34 +4184,38 @@ impl App {
     }
 
     fn set_ime_focus(&mut self, focused: bool) {
-        self.keyboard_focused = focused;
-        self.ime.focused = focused;
-        if !focused && self.ime.entered {
-            if let Some(text_input) = &self.text_input {
+        self.input.keyboard_focused = focused;
+        self.input.ime.focused = focused;
+        if !focused && self.input.ime.entered {
+            if let Some(text_input) = &self.input.text_input {
                 text_input.disable();
             }
             self.commit_text_input();
             self.clear_ime_preedit();
-        } else if focused && self.ime.entered && !self.inline_picker_open() {
+        } else if focused && self.input.ime.entered && !self.modal.inline_picker_open() {
             self.enable_text_input();
         }
     }
 
     fn renew_text_input(&mut self, queue_handle: &QueueHandle<Self>) {
-        if let Some(text_input) = self.text_input.take() {
+        if let Some(text_input) = self.input.text_input.take() {
             text_input.destroy();
         }
-        self.ime_generation = self.ime_generation.saturating_add(1);
-        self.ime.entered = false;
-        self.ime.clear_composition();
-        self.ime_modal_barrier = false;
-        if let (Some(manager), Some(seat)) = (&self.text_input_manager, &self.text_input_seat) {
-            self.text_input = Some(manager.get_text_input(seat, queue_handle, self.ime_generation));
+        self.input.ime_generation = self.input.ime_generation.saturating_add(1);
+        self.input.ime.entered = false;
+        self.input.ime.clear_composition();
+        self.input.ime_modal_barrier = false;
+        if let (Some(manager), Some(seat)) = (
+            &self.platform.text_input_manager,
+            &self.input.text_input_seat,
+        ) {
+            self.input.text_input =
+                Some(manager.get_text_input(seat, queue_handle, self.input.ime_generation));
         }
     }
 
     fn enable_text_input(&mut self) {
-        let Some(text_input) = &self.text_input else {
+        let Some(text_input) = &self.input.text_input else {
             return;
         };
         text_input.enable();
@@ -4047,8 +4230,8 @@ impl App {
     }
 
     fn clear_ime_preedit(&mut self) {
-        let had_preedit = self.ime.visible_preedit.is_some();
-        self.ime.clear_composition();
+        let had_preedit = self.input.ime.visible_preedit.is_some();
+        self.input.ime.clear_composition();
         if had_preedit {
             let _ = self.refresh_ime_preedit();
         }
@@ -4056,52 +4239,39 @@ impl App {
 
     fn refresh_ime_preedit(&mut self) -> Result<()> {
         // The prepared frame represents the display viewport, which may be
-        // detached from the live grid. Refreshing it from `self.pane.snapshot`
+        // detached from the live grid. Refreshing it from `self.panes.pane.snapshot`
         // corrupts an unrelated history row when focus loss clears preedit.
-        let Some(mut render_snapshot) = self.display_snapshot() else {
+        let Some(mut render_snapshot) = self.panes.display_snapshot() else {
             return Ok(());
         };
-        let Some(row) =
-            apply_ime_preedit(&mut render_snapshot, self.ime.visible_preedit.as_deref())
-        else {
+        let Some(row) = apply_ime_preedit(
+            &mut render_snapshot,
+            self.input.ime.visible_preedit.as_deref(),
+        ) else {
             return Ok(());
         };
-        let Some(frame) = &mut self.pane.snapshot_frame else {
+        let Some(frame) = &mut self.panes.pane.snapshot_frame else {
             return Ok(());
         };
         let mut dirty = vec![false; render_snapshot.rows];
         dirty[row] = true;
         frame.refresh_rows(&render_snapshot, &dirty)?;
-        self.pane
+        self.panes
+            .pane
             .raster_dirty_rows
             .resize(render_snapshot.rows, false);
-        self.pane
+        self.panes
+            .pane
             .surface_dirty_rows
             .resize(render_snapshot.rows, false);
-        self.pane.raster_dirty_rows[row] = true;
-        self.pane.surface_dirty_rows[row] = true;
+        self.panes.pane.raster_dirty_rows[row] = true;
+        self.panes.pane.surface_dirty_rows[row] = true;
         Ok(())
     }
 
-    fn input_modes(&self) -> TerminalInputModes {
-        self.pane.snapshot.as_ref().map_or(
-            TerminalInputModes {
-                application_cursor: false,
-                application_keypad: false,
-                focus_reporting: false,
-                bracketed_paste: false,
-                cursor_visible: true,
-                cursor_blink: true,
-                mouse_tracking: MouseTracking::None,
-                sgr_mouse: false,
-            },
-            |snapshot| snapshot.input_modes,
-        )
-    }
-
     fn rebuild_scaled_pane_frames(&mut self, scale_120: u32) -> Result<bool> {
-        let mut rebuilt = rebuild_pane_scaled_frame(&mut self.pane, scale_120)?;
-        for pane in &mut self.inactive_panes {
+        let mut rebuilt = rebuild_pane_scaled_frame(&mut self.panes.pane, scale_120)?;
+        for pane in &mut self.panes.inactive_panes {
             rebuilt |= rebuild_pane_scaled_frame(pane, scale_120)?;
         }
         Ok(rebuilt)
@@ -4113,42 +4283,43 @@ impl App {
         queue_handle: &QueueHandle<Self>,
     ) -> Result<bool> {
         let next = match action {
-            FontZoomAction::Increase => self.font_zoom_steps.saturating_add(1),
-            FontZoomAction::Decrease => self.font_zoom_steps.saturating_sub(1),
+            FontZoomAction::Increase => self.presentation.font_zoom_steps.saturating_add(1),
+            FontZoomAction::Decrease => self.presentation.font_zoom_steps.saturating_sub(1),
             FontZoomAction::Reset => 0,
         };
-        if next == self.font_zoom_steps {
+        if next == self.presentation.font_zoom_steps {
             return Ok(true);
         }
-        let Some(raster_changed) = set_font_zoom_steps(next, self.scale_120)? else {
+        let Some(raster_changed) = set_font_zoom_steps(next, self.surface.scale_120)? else {
             return Ok(true);
         };
-        self.font_zoom_steps = next;
-        self.renderer_generation = self.renderer_generation.saturating_add(1);
-        self.session_picker_text_cache.clear();
-        self.tab_label_cache.clear();
-        self.tab_close_text = None;
-        self.tab_new_text = None;
-        self.session_picker_layout = None;
+        self.presentation.font_zoom_steps = next;
+        self.presentation.renderer_generation =
+            self.presentation.renderer_generation.saturating_add(1);
+        self.modal.session_picker_text_cache.clear();
+        self.tab_state.tab_label_cache.clear();
+        self.tab_state.tab_close_text = None;
+        self.tab_state.tab_new_text = None;
+        self.modal.session_picker_layout = None;
         if !raster_changed {
-            if self.inline_picker_open() && self.configured {
-                self.session_picker_redraw = true;
+            if self.modal.inline_picker_open() && self.surface.configured {
+                self.modal.session_picker_redraw = true;
                 self.schedule_draw(queue_handle)?;
             }
             return Ok(true);
         }
-        self.rebuild_scaled_pane_frames(self.scale_120)?;
-        self.buffers.clear();
-        self.backing.clear();
-        self.pane.pending_scrolls.clear();
-        self.full_redraw = true;
-        self.cursor_blink_visible = true;
-        self.last_cursor_blink = Instant::now();
+        self.rebuild_scaled_pane_frames(self.surface.scale_120)?;
+        self.surface.buffers.clear();
+        self.surface.backing.clear();
+        self.panes.pane.pending_scrolls.clear();
+        self.presentation.full_redraw = true;
+        self.input.cursor_blink_visible = true;
+        self.input.last_cursor_blink = Instant::now();
         self.refresh_ime_preedit()?;
         self.update_ime_cursor_rectangle();
-        if self.configured {
-            if self.inline_picker_open() {
-                self.restored_frontend_needs_resize = true;
+        if self.surface.configured {
+            if self.modal.inline_picker_open() {
+                self.panes.restored_frontend_needs_resize = true;
             } else {
                 self.emit_resize()?;
             }
@@ -4158,44 +4329,44 @@ impl App {
     }
 
     fn decide_consent(&mut self, granted: bool) {
-        if let Some(consent) = self.trusted_consent.take() {
+        if let Some(consent) = self.modal.trusted_consent.take() {
             let _ = consent.decision.send(granted);
         }
-        self.exit = true;
+        self.scheduling.exit = true;
     }
 
     fn refresh_session_picker(&mut self) -> Result<()> {
-        let Some(picker) = self.session_picker.as_mut() else {
+        let Some(picker) = self.modal.session_picker.as_mut() else {
             return Ok(());
         };
         if picker.is_inline() {
             picker.clear_hovered();
-            self.session_picker_layout = None;
-            self.session_picker_pressed = None;
-            self.session_picker_redraw = true;
+            self.modal.session_picker_layout = None;
+            self.modal.session_picker_pressed = None;
+            self.modal.session_picker_redraw = true;
             return Ok(());
         }
         let mut snapshot = picker.snapshot();
-        apply_theme(&mut snapshot, self.theme);
-        self.pane.snapshot = Some(snapshot);
-        rebuild_pane_scaled_frame(&mut self.pane, self.scale_120)?;
-        self.buffers.clear();
-        self.backing.clear();
-        self.full_redraw = true;
+        apply_theme(&mut snapshot, self.presentation.theme);
+        self.panes.pane.snapshot = Some(snapshot);
+        rebuild_pane_scaled_frame(&mut self.panes.pane, self.surface.scale_120)?;
+        self.surface.buffers.clear();
+        self.surface.backing.clear();
+        self.presentation.full_redraw = true;
         Ok(())
     }
 
     fn move_session_picker(&mut self, delta: isize) {
-        if let Some(picker) = self.session_picker.as_mut() {
+        if let Some(picker) = self.modal.session_picker.as_mut() {
             picker.move_selection(delta);
         }
         if let Err(error) = self.refresh_session_picker() {
-            self.fail(error);
+            self.scheduling.fail(error);
         }
     }
 
     fn handle_tab_strip_pointer(&mut self, event: &PointerEvent) -> Result<bool> {
-        let Some(layout) = self.tab_strip_layout.as_ref() else {
+        let Some(layout) = self.tab_state.tab_strip_layout.as_ref() else {
             return Ok(false);
         };
         let target = tab_strip_hit_test(layout, event.position);
@@ -4205,20 +4376,21 @@ impl App {
                 if in_strip && matches!(button, BTN_LEFT | BTN_MIDDLE) =>
             {
                 if let Some(target) = target {
-                    self.tab_strip_pressed = Some((button, target));
+                    self.tab_state.tab_strip_pressed = Some((button, target));
                 }
-                self.pane.pointer_cell = None;
-                self.pane.hovered_url = None;
+                self.panes.pane.pointer_cell = None;
+                self.panes.pane.hovered_url = None;
                 Ok(true)
             }
             PointerEventKind::Release { button, .. } => {
-                let Some((pressed_button, _)) = self.tab_strip_pressed else {
+                let Some((pressed_button, _)) = self.tab_state.tab_strip_pressed else {
                     return Ok(false);
                 };
                 if pressed_button != button {
                     return Ok(false);
                 }
                 let (_, pressed_target) = self
+                    .tab_state
                     .tab_strip_pressed
                     .take()
                     .expect("matching chrome press remains present");
@@ -4232,7 +4404,7 @@ impl App {
                             Some(WindowTopologyCommand::CloseTab { dojo_id })
                         }
                         (BTN_LEFT, TabHitTarget::New) => Some(WindowTopologyCommand::NewDojo {
-                            lair_id: self.active_identity.lair_id,
+                            lair_id: self.tab_state.active_identity.lair_id,
                         }),
                         _ => None,
                     };
@@ -4243,15 +4415,16 @@ impl App {
                 Ok(true)
             }
             PointerEventKind::Leave { .. } => {
-                self.tab_strip_pressed = None;
+                self.tab_state.tab_strip_pressed = None;
                 Ok(in_strip)
             }
-            _ => Ok(in_strip || self.tab_strip_pressed.is_some()),
+            _ => Ok(in_strip || self.tab_state.tab_strip_pressed.is_some()),
         }
     }
 
     fn handle_session_picker_pointer(&mut self, event: &PointerEvent) -> bool {
         let target = self
+            .modal
             .session_picker_layout
             .as_ref()
             .and_then(|layout| session_picker_hit_test(layout, event.position));
@@ -4259,32 +4432,32 @@ impl App {
         let mut activate = None;
         match event.kind {
             PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
-                if let Some(picker) = self.session_picker.as_mut() {
+                if let Some(picker) = self.modal.session_picker.as_mut() {
                     changed |= picker.update_hovered(target);
                 }
             }
             PointerEventKind::Leave { .. } => {
-                if let Some(picker) = self.session_picker.as_mut() {
+                if let Some(picker) = self.modal.session_picker.as_mut() {
                     changed |= picker.clear_hovered();
                 }
             }
             PointerEventKind::Press { button, .. } => {
                 let next = (button == BTN_LEFT).then_some(target).flatten();
-                if self.session_picker_pressed != next {
-                    self.session_picker_pressed = next;
+                if self.modal.session_picker_pressed != next {
+                    self.modal.session_picker_pressed = next;
                     changed = true;
                 }
             }
             PointerEventKind::Release { button, .. } => {
                 if button == BTN_LEFT {
-                    let pressed = self.session_picker_pressed.take();
+                    let pressed = self.modal.session_picker_pressed.take();
                     changed |= pressed.is_some();
                     activate = picker_release_activation(pressed, target);
                 }
             }
             PointerEventKind::Axis { vertical, .. } => {
                 if !vertical.is_none()
-                    && let Some((direction, count)) = self.session_picker_wheel.push(
+                    && let Some((direction, count)) = self.modal.session_picker_wheel.push(
                         vertical.absolute,
                         vertical.discrete,
                         vertical.value120,
@@ -4298,8 +4471,8 @@ impl App {
                         _ => 0,
                     };
                     self.move_session_picker(delta);
-                    self.session_picker_layout = None;
-                    if let Some(picker) = self.session_picker.as_mut() {
+                    self.modal.session_picker_layout = None;
+                    if let Some(picker) = self.modal.session_picker.as_mut() {
                         picker.clear_hovered();
                     }
                     changed = true;
@@ -4314,72 +4487,79 @@ impl App {
             self.decide_session_picker(decision);
             changed = true;
         }
-        if changed && self.inline_picker_open() {
-            self.session_picker_redraw = true;
+        if changed && self.modal.inline_picker_open() {
+            self.modal.session_picker_redraw = true;
         }
         changed
     }
 
     fn cancel_session_picker(&mut self) {
         if !self.close_inline_session_picker() {
-            self.exit = true;
+            self.scheduling.exit = true;
         }
     }
 
     fn decide_session_picker(&mut self, decision: SessionPickerDecision) {
-        if self.inline_picker_open() {
+        if self.modal.inline_picker_open() {
             let command = match decision {
                 SessionPickerDecision::New => WindowTopologyCommand::NewLair,
                 SessionPickerDecision::Open(index) => {
-                    let Some((lair_id, dojo_id)) = self.session_picker_targets.get(index).copied()
+                    let Some((lair_id, dojo_id)) =
+                        self.modal.session_picker_targets.get(index).copied()
                     else {
-                        self.fail(anyhow::anyhow!("session picker selected an invalid target"));
+                        self.scheduling
+                            .fail(anyhow::anyhow!("session picker selected an invalid target"));
                         return;
                     };
                     WindowTopologyCommand::OpenDojo { lair_id, dojo_id }
                 }
             };
             self.close_inline_session_picker();
-            self.session_switch_pending = true;
+            self.tab_state.session_switch_pending = true;
             if let Err(error) = self.send_topology_command(command) {
-                self.session_switch_pending = false;
+                self.tab_state.session_switch_pending = false;
                 eprintln!("splinterm session switch: {error:#}");
             }
             return;
         }
         if let Some(sender) = self
+            .modal
             .session_picker
             .take()
             .and_then(SessionPickerUi::into_standalone_decision)
         {
             let _ = sender.send(decision);
         }
-        self.exit = true;
+        self.scheduling.exit = true;
     }
 
     fn update_window_title(&self) {
-        if let Some(snapshot) = &self.pane.snapshot {
-            self.window.set_title(window_title(
-                self.title_override.as_deref().or(Some(&snapshot.title)),
-                self.pane.controller_active,
-                &self.pane.authority,
-                self.pane.pending_control_transfer.is_some(),
-                Some(&self.pane.search),
+        if let Some(snapshot) = &self.panes.pane.snapshot {
+            self.surface.window.set_title(window_title(
+                self.presentation
+                    .title_override
+                    .as_deref()
+                    .or(Some(&snapshot.title)),
+                self.panes.pane.controller_active,
+                &self.panes.pane.authority,
+                self.panes.pane.pending_control_transfer.is_some(),
+                Some(&self.panes.pane.search),
             ));
         }
     }
 
     fn reveal_pending_search_match(&mut self) {
-        let Some(item) = self.pane.search.pending_reveal.clone() else {
+        let Some(item) = self.panes.pane.search.pending_reveal.clone() else {
             return;
         };
-        let Some(snapshot) = self.pane.snapshot.as_ref() else {
+        let Some(snapshot) = self.panes.pane.snapshot.as_ref() else {
             return;
         };
         if snapshot.active_screen != ActiveScreen::Normal {
             return;
         }
         if self
+            .panes
             .pane
             .scrollback_viewport
             .reveal_row(item.row_id, snapshot)
@@ -4390,14 +4570,14 @@ impl App {
                 row_id: item.row_id,
                 column,
             };
-            self.pane.selection = Some(Selection {
+            self.panes.pane.selection = Some(Selection {
                 anchor: endpoint(item.start_column),
                 end: endpoint(item.end_column.saturating_sub(1)),
             });
-            self.pane.search.pending_reveal = None;
-            self.pane.viewport_dirty = true;
-            self.full_redraw = true;
-        } else if !self.pane.history_page_pending {
+            self.panes.pane.search.pending_reveal = None;
+            self.panes.pane.viewport_dirty = true;
+            self.presentation.full_redraw = true;
+        } else if !self.panes.pane.history_page_pending {
             let before_row_id = snapshot
                 .scrollback_rows
                 .first()
@@ -4408,7 +4588,7 @@ impl App {
                         .and_then(|id| id.checked_add(1))
                 });
             if let Some(before_row_id) = before_row_id {
-                self.pane.history_page_pending = true;
+                self.panes.pane.history_page_pending = true;
                 self.send_command(WindowCommand::FetchScrollback {
                     splint_id: snapshot.splint_id,
                     incarnation: snapshot.incarnation,
@@ -4421,10 +4601,10 @@ impl App {
     }
 
     fn submit_search(&mut self, cursor: Option<String>) {
-        let Some(snapshot) = self.pane.snapshot.as_ref() else {
+        let Some(snapshot) = self.panes.pane.snapshot.as_ref() else {
             return;
         };
-        let query = self.pane.search.query.clone();
+        let query = self.panes.pane.search.query.clone();
         if query.is_empty() {
             return;
         }
@@ -4442,28 +4622,29 @@ impl App {
         reason = "trusted local shortcuts and search editing share one ordered keyboard boundary"
     )]
     fn handle_key(&mut self, event: &KeyEvent) {
-        if self.session_picker.is_some() {
+        if self.modal.session_picker.is_some() {
             match event.keysym {
                 Keysym::Up | Keysym::k | Keysym::K => self.move_session_picker(-1),
                 Keysym::Down | Keysym::j | Keysym::J => self.move_session_picker(1),
                 Keysym::Home => {
-                    if let Some(picker) = self.session_picker.as_mut() {
+                    if let Some(picker) = self.modal.session_picker.as_mut() {
                         picker.select_first();
                     }
                     if let Err(error) = self.refresh_session_picker() {
-                        self.fail(error);
+                        self.scheduling.fail(error);
                     }
                 }
                 Keysym::End => {
-                    if let Some(picker) = self.session_picker.as_mut() {
+                    if let Some(picker) = self.modal.session_picker.as_mut() {
                         picker.select_last();
                     }
                     if let Err(error) = self.refresh_session_picker() {
-                        self.fail(error);
+                        self.scheduling.fail(error);
                     }
                 }
                 Keysym::Return | Keysym::KP_Enter => {
                     if let Some(decision) = self
+                        .modal
                         .session_picker
                         .as_ref()
                         .map(SessionPickerUi::selected_decision)
@@ -4479,7 +4660,7 @@ impl App {
             }
             return;
         }
-        if self.trusted_consent.is_some() {
+        if self.modal.trusted_consent.is_some() {
             match event.keysym {
                 Keysym::g | Keysym::G | Keysym::Return | Keysym::KP_Enter => {
                     self.decide_consent(true);
@@ -4489,30 +4670,32 @@ impl App {
             }
             return;
         }
-        if self.pane.search.input.is_some() {
-            if self.modifiers.ctrl && matches!(event.keysym, Keysym::n | Keysym::N) {
-                if self.pane.search.selected + 1 < self.pane.search.matches.len() {
-                    self.pane.search.selected += 1;
-                    self.pane.search.pending_reveal = self
+        if self.panes.pane.search.input.is_some() {
+            if self.input.modifiers.ctrl && matches!(event.keysym, Keysym::n | Keysym::N) {
+                if self.panes.pane.search.selected + 1 < self.panes.pane.search.matches.len() {
+                    self.panes.pane.search.selected += 1;
+                    self.panes.pane.search.pending_reveal = self
+                        .panes
                         .pane
                         .search
                         .matches
-                        .get(self.pane.search.selected)
+                        .get(self.panes.pane.search.selected)
                         .cloned();
                     self.reveal_pending_search_match();
-                } else if let Some(cursor) = self.pane.search.next_cursor.clone() {
+                } else if let Some(cursor) = self.panes.pane.search.next_cursor.clone() {
                     self.submit_search(Some(cursor));
                 }
                 self.update_window_title();
                 return;
             }
-            if self.modifiers.ctrl && matches!(event.keysym, Keysym::p | Keysym::P) {
-                self.pane.search.selected = self.pane.search.selected.saturating_sub(1);
-                self.pane.search.pending_reveal = self
+            if self.input.modifiers.ctrl && matches!(event.keysym, Keysym::p | Keysym::P) {
+                self.panes.pane.search.selected = self.panes.pane.search.selected.saturating_sub(1);
+                self.panes.pane.search.pending_reveal = self
+                    .panes
                     .pane
                     .search
                     .matches
-                    .get(self.pane.search.selected)
+                    .get(self.panes.pane.search.selected)
                     .cloned();
                 self.reveal_pending_search_match();
                 self.update_window_title();
@@ -4520,11 +4703,12 @@ impl App {
             }
             match event.keysym {
                 Keysym::Escape => {
-                    self.pane.search = SearchUiState::default();
-                    self.pane.selection = None;
+                    self.panes.pane.search = SearchUiState::default();
+                    self.panes.pane.selection = None;
                 }
                 Keysym::Return | Keysym::KP_Enter => {
-                    self.pane.search.query = self
+                    self.panes.pane.search.query = self
+                        .panes
                         .pane
                         .search
                         .input
@@ -4534,13 +4718,13 @@ impl App {
                     self.submit_search(None);
                 }
                 Keysym::BackSpace => {
-                    if let Some(input) = self.pane.search.input.as_mut() {
+                    if let Some(input) = self.panes.pane.search.input.as_mut() {
                         input.pop();
                     }
                 }
-                _ if !self.modifiers.ctrl && !self.modifiers.alt => {
+                _ if !self.input.modifiers.ctrl && !self.input.modifiers.alt => {
                     if let (Some(input), Some(text)) =
-                        (self.pane.search.input.as_mut(), event.utf8.as_deref())
+                        (self.panes.pane.search.input.as_mut(), event.utf8.as_deref())
                     {
                         for character in text.chars().filter(|character| !character.is_control()) {
                             if input.len() + character.len_utf8()
@@ -4556,11 +4740,12 @@ impl App {
             self.update_window_title();
             return;
         }
-        if self.modifiers.ctrl
-            && self.modifiers.shift
+        if self.input.modifiers.ctrl
+            && self.input.modifiers.shift
             && matches!(event.keysym, Keysym::r | Keysym::R)
         {
             let ids: Vec<_> = self
+                .panes
                 .pane
                 .authority
                 .grants
@@ -4570,28 +4755,31 @@ impl App {
             for id in ids {
                 self.send_command(WindowCommand::RevokeAccess(id));
             }
-            self.pane.authority.grants.clear();
-            if let Some(snapshot) = &self.pane.snapshot {
-                self.window.set_title(window_title(
-                    self.title_override.as_deref().or(Some(&snapshot.title)),
-                    self.pane.controller_active,
-                    &self.pane.authority,
-                    self.pane.pending_control_transfer.is_some(),
-                    Some(&self.pane.search),
+            self.panes.pane.authority.grants.clear();
+            if let Some(snapshot) = &self.panes.pane.snapshot {
+                self.surface.window.set_title(window_title(
+                    self.presentation
+                        .title_override
+                        .as_deref()
+                        .or(Some(&snapshot.title)),
+                    self.panes.pane.controller_active,
+                    &self.panes.pane.authority,
+                    self.panes.pane.pending_control_transfer.is_some(),
+                    Some(&self.panes.pane.search),
                 ));
             }
             return;
         }
-        if self.modifiers.ctrl && self.modifiers.shift {
+        if self.input.modifiers.ctrl && self.input.modifiers.shift {
             match event.keysym {
                 Keysym::t | Keysym::T => {
                     self.send_command(WindowCommand::RequestControlTransfer);
                     return;
                 }
                 Keysym::f | Keysym::F => {
-                    self.pane.search.input = Some(String::new());
-                    self.pane.search.matches.clear();
-                    self.pane.search.next_cursor = None;
+                    self.panes.pane.search.input = Some(String::new());
+                    self.panes.pane.search.matches.clear();
+                    self.panes.pane.search.next_cursor = None;
                     self.update_window_title();
                     return;
                 }
@@ -4600,7 +4788,7 @@ impl App {
                     return;
                 }
                 Keysym::y | Keysym::Y => {
-                    if let Some(transfer_id) = self.pane.pending_control_transfer.take() {
+                    if let Some(transfer_id) = self.panes.pane.pending_control_transfer.take() {
                         self.send_command(WindowCommand::DecideControlTransfer {
                             transfer_id,
                             decision: ControlTransferDecision::Accept,
@@ -4609,7 +4797,7 @@ impl App {
                     return;
                 }
                 Keysym::n | Keysym::N => {
-                    if let Some(transfer_id) = self.pane.pending_control_transfer.take() {
+                    if let Some(transfer_id) = self.panes.pane.pending_control_transfer.take() {
                         self.send_command(WindowCommand::DecideControlTransfer {
                             transfer_id,
                             decision: ControlTransferDecision::Deny,
@@ -4620,35 +4808,46 @@ impl App {
                 _ => {}
             }
         }
-        if self.modifiers.ctrl
-            && self.modifiers.shift
+        if self.input.modifiers.ctrl
+            && self.input.modifiers.shift
             && matches!(event.keysym, Keysym::l | Keysym::L)
         {
             self.send_command(WindowCommand::ReleaseControl);
-            self.pane.controller_active = false;
-            if let Some(snapshot) = &self.pane.snapshot {
-                self.window.set_title(window_title(
-                    self.title_override.as_deref().or(Some(&snapshot.title)),
-                    self.pane.controller_active,
-                    &self.pane.authority,
-                    self.pane.pending_control_transfer.is_some(),
-                    Some(&self.pane.search),
+            self.panes.pane.controller_active = false;
+            if let Some(snapshot) = &self.panes.pane.snapshot {
+                self.surface.window.set_title(window_title(
+                    self.presentation
+                        .title_override
+                        .as_deref()
+                        .or(Some(&snapshot.title)),
+                    self.panes.pane.controller_active,
+                    &self.panes.pane.authority,
+                    self.panes.pane.pending_control_transfer.is_some(),
+                    Some(&self.panes.pane.search),
                 ));
             }
             return;
         }
-        if self.evidence_close_shortcuts
+        if self.presentation.evidence_close_shortcuts
             && matches!(event.keysym, Keysym::Escape | Keysym::q | Keysym::Q)
         {
-            self.exit = true;
+            self.scheduling.exit = true;
             return;
         }
-        let utf8 = if self.ime.composing() && !self.modifiers.ctrl && !self.modifiers.alt {
+        let utf8 = if self.input.ime.composing()
+            && !self.input.modifiers.ctrl
+            && !self.input.modifiers.alt
+        {
             None
         } else {
             event.utf8.as_deref()
         };
-        if let Some(bytes) = key_input(event.keysym, utf8, self.modifiers, self.input_modes()) {
+        if let Some(bytes) = key_input(
+            event.keysym,
+            utf8,
+            self.input.modifiers,
+            self.panes.input_modes(),
+        ) {
             self.send_command(WindowCommand::Input(bytes));
         }
     }
@@ -4656,6 +4855,7 @@ impl App {
     fn emit_resize(&mut self) -> Result<()> {
         let layout = self.computed_pane_layout()?;
         let active_rect = self
+            .panes
             .focused_splint()
             .and_then(|splint_id| layout.as_ref().and_then(|layout| layout.rect(splint_id)));
         let content = self.content_rect();
@@ -4663,15 +4863,20 @@ impl App {
             .map_or((content.width, content.height), |rect| {
                 (rect.width, rect.height)
             });
-        Self::emit_active_pane_resize(&mut self.pane, active_width, active_height, self.scale_120)?;
-        for pane in &mut self.inactive_panes {
+        Self::emit_active_pane_resize(
+            &mut self.panes.pane,
+            active_width,
+            active_height,
+            self.surface.scale_120,
+        )?;
+        for pane in &mut self.panes.inactive_panes {
             let Some(splint_id) = pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id) else {
                 continue;
             };
             let Some(rect) = layout.as_ref().and_then(|layout| layout.rect(splint_id)) else {
                 continue;
             };
-            Self::emit_inactive_pane_resize(pane, rect.width, rect.height, self.scale_120)?;
+            Self::emit_inactive_pane_resize(pane, rect.width, rect.height, self.surface.scale_120)?;
         }
         Ok(())
     }
@@ -4760,20 +4965,23 @@ impl App {
         focused: Option<SplintId>,
     ) -> Result<()> {
         anyhow::ensure!(
-            !self.inline_picker_open(),
+            !self.modal.inline_picker_open(),
             "topology replacement arrived while the session picker was open"
         );
         let removed = removed.into_iter().collect::<HashSet<_>>();
         let mut prepared = Vec::with_capacity(added.len());
         for mut pane in added {
-            apply_theme(&mut pane.snapshot, self.theme);
-            prepared.push(PaneView::from_inactive_options(pane, self.scale_120)?);
+            apply_theme(&mut pane.snapshot, self.presentation.theme);
+            prepared.push(PaneView::from_inactive_options(
+                pane,
+                self.surface.scale_120,
+            )?);
         }
         let prepared_ids = prepared
             .iter()
             .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id));
-        let mut identities = std::iter::once(&self.pane)
-            .chain(self.inactive_panes.iter())
+        let mut identities = std::iter::once(&self.panes.pane)
+            .chain(self.panes.inactive_panes.iter())
             .filter_map(|pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id))
             .filter(|splint_id| !removed.contains(splint_id))
             .chain(prepared_ids)
@@ -4787,7 +4995,8 @@ impl App {
         );
         let next_focus = focused
             .or_else(|| {
-                self.focused_splint()
+                self.panes
+                    .focused_splint()
                     .filter(|splint_id| !removed.contains(splint_id))
             })
             .unwrap_or_else(|| layout.first_splint_id());
@@ -4796,18 +5005,19 @@ impl App {
             "topology update focus is absent"
         );
 
-        self.pending_exited_splints
+        self.panes
+            .pending_exited_splints
             .retain(|splint_id| !removed.contains(splint_id));
-        self.inactive_panes.extend(prepared);
+        self.panes.inactive_panes.extend(prepared);
         let focused = self.focus_splint(next_focus);
         debug_assert!(focused);
-        self.inactive_panes.retain(|pane| {
+        self.panes.inactive_panes.retain(|pane| {
             pane.snapshot
                 .as_ref()
                 .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
         });
-        self.layout = Some(layout);
-        self.full_redraw = true;
+        self.panes.layout = Some(layout);
+        self.presentation.full_redraw = true;
         Ok(())
     }
 
@@ -4819,13 +5029,14 @@ impl App {
         removed: Vec<SplintId>,
         focused: Option<SplintId>,
     ) -> Result<bool> {
-        if dojo_id == self.active_dojo_id() {
+        if dojo_id == self.tab_state.active_dojo_id() {
             self.apply_topology_replacement(layout, added, removed, focused)?;
             return Ok(true);
         }
-        let theme = self.theme;
-        let scale_120 = self.scale_120;
-        self.tabs
+        let theme = self.presentation.theme;
+        let scale_120 = self.surface.scale_120;
+        self.tab_state
+            .tabs
             .get_mut(dojo_id)
             .and_then(|tab| tab.value.as_mut())
             .context("updated Dojo tab has no hidden frontend")?
@@ -4836,22 +5047,25 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn apply_topology_updates(&mut self) -> Result<(bool, Option<ThemeUpdate>)> {
         let mut pending = VecDeque::new();
-        if let Some(updates) = &mut self.topology_updates {
-            let drained = drain_receiver(updates, &self.update_waker);
+        if let Some(updates) = &mut self.tab_state.topology_updates {
+            let drained = drain_receiver(updates, &self.platform.update_waker);
             pending = drained.items.into();
             if drained.disconnected {
-                self.topology_updates = None;
+                self.tab_state.topology_updates = None;
             }
         }
-        if !self.inline_picker_open() && !self.deferred_topology_updates.is_empty() {
-            let mut deferred = VecDeque::from(std::mem::take(&mut self.deferred_topology_updates));
+        if !self.modal.inline_picker_open() && !self.tab_state.deferred_topology_updates.is_empty()
+        {
+            let mut deferred = VecDeque::from(std::mem::take(
+                &mut self.tab_state.deferred_topology_updates,
+            ));
             deferred.append(&mut pending);
             pending = deferred;
         }
         let mut changed = false;
         let mut next_theme = None;
         while let Some(update) = pending.pop_front() {
-            let defer_for_picker = self.inline_picker_open()
+            let defer_for_picker = self.modal.inline_picker_open()
                 && matches!(
                     &update,
                     WindowTopologyUpdate::Apply { .. }
@@ -4861,14 +5075,15 @@ impl App {
                         | WindowTopologyUpdate::UpdateIdentity(_)
                 );
             if defer_for_picker {
-                if self.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES {
-                    self.deferred_topology_updates.push(update);
+                if self.tab_state.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES {
+                    self.tab_state.deferred_topology_updates.push(update);
                     continue;
                 }
                 self.close_inline_session_picker();
                 eprintln!("splinterm session picker: cancelled to apply queued topology updates");
-                let mut replay =
-                    VecDeque::from(std::mem::take(&mut self.deferred_topology_updates));
+                let mut replay = VecDeque::from(std::mem::take(
+                    &mut self.tab_state.deferred_topology_updates,
+                ));
                 replay.push_back(update);
                 replay.append(&mut pending);
                 pending = replay;
@@ -4883,7 +5098,7 @@ impl App {
                     removed,
                     focused,
                 } => {
-                    if self.inline_picker_open() {
+                    if self.modal.inline_picker_open() {
                         let update = WindowTopologyUpdate::Apply {
                             dojo_id,
                             layout,
@@ -4891,15 +5106,18 @@ impl App {
                             removed,
                             focused,
                         };
-                        if self.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES {
-                            self.deferred_topology_updates.push(update);
+                        if self.tab_state.deferred_topology_updates.len()
+                            < MAX_DEFERRED_TOPOLOGY_UPDATES
+                        {
+                            self.tab_state.deferred_topology_updates.push(update);
                         } else {
                             self.close_inline_session_picker();
                             eprintln!(
                                 "splinterm session picker: cancelled to apply queued topology updates"
                             );
-                            let mut replay =
-                                VecDeque::from(std::mem::take(&mut self.deferred_topology_updates));
+                            let mut replay = VecDeque::from(std::mem::take(
+                                &mut self.tab_state.deferred_topology_updates,
+                            ));
                             replay.push_back(update);
                             replay.append(&mut pending);
                             pending = replay;
@@ -4925,45 +5143,46 @@ impl App {
                         layout,
                         panes,
                         focused,
-                        self.theme,
-                        self.scale_120,
+                        self.presentation.theme,
+                        self.surface.scale_120,
                     ) {
                         Ok(view) => view,
                         Err(error) => {
-                            self.session_switch_pending = false;
+                            self.tab_state.session_switch_pending = false;
                             let message = format!("{error:#}");
                             let _ = acknowledged.send(Err(message.clone()));
                             eprintln!("splinterm Dojo tab {dojo_id}: {message}");
                             continue;
                         }
                     };
-                    let previous_id = self.active_dojo_id();
-                    self.tabs
+                    let previous_id = self.tab_state.active_dojo_id();
+                    self.tab_state
+                        .tabs
                         .open_or_activate(DojoTab::new(lair_id, dojo_id, Some(view)))
                         .map_err(anyhow::Error::from)?;
                     anyhow::ensure!(
-                        self.tabs.activate(previous_id),
+                        self.tab_state.tabs.activate(previous_id),
                         "active Dojo tab disappeared while opening another"
                     );
-                    self.session_switch_pending = false;
+                    self.tab_state.session_switch_pending = false;
                     changed |= self.activate_tab(dojo_id)?;
                     let _ = acknowledged.send(Ok(()));
                 }
                 WindowTopologyUpdate::ActivateTab { dojo_id } => {
-                    self.session_switch_pending = false;
+                    self.tab_state.session_switch_pending = false;
                     changed |= self.activate_tab(dojo_id)?;
                 }
                 WindowTopologyUpdate::RemoveTab {
                     dojo_id,
                     acknowledged,
                 } => {
-                    let was_active = self.active_dojo_id() == dojo_id;
+                    let was_active = self.tab_state.active_dojo_id() == dojo_id;
                     if was_active {
-                        if let Some(selected) = self.tabs.selection_after_close(dojo_id) {
+                        if let Some(selected) = self.tab_state.tabs.selection_after_close(dojo_id) {
                             changed |= self.activate_tab(selected)?;
                         } else {
-                            for pane in std::iter::once(&mut self.pane)
-                                .chain(self.inactive_panes.iter_mut())
+                            for pane in std::iter::once(&mut self.panes.pane)
+                                .chain(self.panes.inactive_panes.iter_mut())
                             {
                                 if pane.controller_active {
                                     let commands = pane
@@ -4976,45 +5195,46 @@ impl App {
                             }
                         }
                     }
-                    if let Some(mut removed) = self.tabs.close(dojo_id) {
+                    if let Some(mut removed) = self.tab_state.tabs.close(dojo_id) {
                         if let Some(view) = removed.value.as_mut() {
                             Self::release_tab_controllers(view)?;
                         }
-                        if self.tabs.is_empty() {
-                            self.exit = true;
+                        if self.tab_state.tabs.is_empty() {
+                            self.scheduling.exit = true;
                         }
                     }
                     let _ = acknowledged.send(());
                 }
                 WindowTopologyUpdate::UpdateIdentity(identity) => {
                     let dojo_id = identity.dojo_id;
-                    if dojo_id == self.active_dojo_id() {
-                        self.active_identity = identity;
+                    if dojo_id == self.tab_state.active_dojo_id() {
+                        self.tab_state.active_identity = identity;
                     } else if let Some(view) = self
+                        .tab_state
                         .tabs
                         .get_mut(dojo_id)
                         .and_then(|tab| tab.value.as_mut())
                     {
                         view.identity = identity;
                     }
-                    self.tab_label_cache.clear();
-                    self.full_redraw = true;
+                    self.tab_state.tab_label_cache.clear();
+                    self.presentation.full_redraw = true;
                     changed = true;
                 }
                 WindowTopologyUpdate::TabFailed { dojo_id, message } => {
                     self.close_inline_session_picker();
-                    self.session_picker_requested = false;
-                    self.session_switch_pending = false;
+                    self.modal.session_picker_requested = false;
+                    self.tab_state.session_switch_pending = false;
                     eprintln!(
                         "splinterm Dojo tab{}: {message}",
                         dojo_id.map_or_else(String::new, |id| format!(" {id}"))
                     );
                 }
                 WindowTopologyUpdate::ShowSessionPicker { items, targets } => {
-                    if self.session_picker_requested
-                        && self.session_picker.is_none()
-                        && !self.session_switch_pending
-                        && !self.session_picker_reconcile_pending
+                    if self.modal.session_picker_requested
+                        && self.modal.session_picker.is_none()
+                        && !self.tab_state.session_switch_pending
+                        && !self.modal.session_picker_reconcile_pending
                     {
                         self.show_embedded_session_picker(items, targets)?;
                         changed = true;
@@ -5022,18 +5242,18 @@ impl App {
                 }
                 WindowTopologyUpdate::SessionPickerFailed(message) => {
                     self.close_inline_session_picker();
-                    self.session_picker_requested = false;
-                    self.session_switch_pending = false;
+                    self.modal.session_picker_requested = false;
+                    self.tab_state.session_switch_pending = false;
                     eprintln!("splinterm session picker: {message}");
                 }
                 WindowTopologyUpdate::Theme(update) => {
-                    if self.inline_picker_open() {
-                        retain_newest_theme(&mut self.deferred_picker_theme, update);
+                    if self.modal.inline_picker_open() {
+                        retain_newest_theme(&mut self.modal.deferred_picker_theme, update);
                     } else {
                         retain_newest_theme(&mut next_theme, update);
                     }
                 }
-                WindowTopologyUpdate::Closed => self.exit = true,
+                WindowTopologyUpdate::Closed => self.scheduling.exit = true,
                 WindowTopologyUpdate::Shutdown(message) => {
                     anyhow::bail!("topology manager stopped: {message}");
                 }
@@ -5043,30 +5263,32 @@ impl App {
     }
 
     fn apply_resolved_theme(&mut self, update: ThemeUpdate) -> ThemeUpdateImpact {
-        if update.generation <= self.theme_generation {
+        if update.generation <= self.presentation.theme_generation {
             return ThemeUpdateImpact::default();
         }
-        self.theme_generation = update.generation;
+        self.presentation.theme_generation = update.generation;
         let theme = update.theme;
-        self.background_effect_state
+        self.surface
+            .background_effect_state
             .set_requested_blur(theme.background_blur);
-        self.background_effect_state
+        self.surface
+            .background_effect_state
             .set_background_alpha(theme.background_alpha);
-        let impact = classify_theme_update(self.theme, theme);
+        let impact = classify_theme_update(self.presentation.theme, theme);
         set_background_alpha(theme.background_alpha);
-        self.theme = theme;
+        self.presentation.theme = theme;
         if !impact.rebuild_pixels {
             return impact;
         }
-        if let Some(snapshot) = self.pane.snapshot.as_mut() {
+        if let Some(snapshot) = self.panes.pane.snapshot.as_mut() {
             apply_theme(snapshot, theme);
         }
-        for pane in &mut self.inactive_panes {
+        for pane in &mut self.panes.inactive_panes {
             if let Some(snapshot) = pane.snapshot.as_mut() {
                 apply_theme(snapshot, theme);
             }
         }
-        for tab in self.tabs.iter_mut() {
+        for tab in self.tab_state.tabs.iter_mut() {
             if let Some(view) = tab.value.as_mut() {
                 let mut dirty = Vec::new();
                 for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
@@ -5078,8 +5300,8 @@ impl App {
                 view.dirty_inactive_panes.extend(dirty);
             }
         }
-        self.tab_label_cache.clear();
-        self.full_redraw = true;
+        self.tab_state.tab_label_cache.clear();
+        self.presentation.full_redraw = true;
         impact
     }
 
@@ -5088,11 +5310,11 @@ impl App {
         let mut next_theme = None;
         let mut dirty_frames = HashSet::new();
         let mut exited = Vec::new();
-        for pane in &mut self.inactive_panes {
+        for pane in &mut self.panes.inactive_panes {
             let mut pending = Vec::new();
             let mut disconnected = false;
             if let Some(updates) = &mut pane.updates {
-                let drained = drain_receiver(updates, &self.update_waker);
+                let drained = drain_receiver(updates, &self.platform.update_waker);
                 pending = drained.items;
                 disconnected = drained.disconnected;
             }
@@ -5124,7 +5346,8 @@ impl App {
                     update => terminal_updates.push(update),
                 }
             }
-            let impact = apply_inactive_update_batch(pane, terminal_updates, self.theme)?;
+            let impact =
+                apply_inactive_update_batch(pane, terminal_updates, self.presentation.theme)?;
             changed |= impact.visual_changed;
             if impact.frame_dirty
                 && let Some(snapshot) = pane.snapshot.as_ref()
@@ -5146,10 +5369,10 @@ impl App {
     )]
     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         let (topology_changed, topology_theme) = self.apply_topology_updates()?;
-        let theme = self.theme;
-        let waker = self.update_waker.clone();
-        let topology_commands = self.topology_commands.clone();
-        for tab in self.tabs.iter_mut() {
+        let theme = self.presentation.theme;
+        let waker = self.platform.update_waker.clone();
+        let topology_commands = self.tab_state.topology_commands.clone();
+        for tab in self.tab_state.tabs.iter_mut() {
             if let Some(view) = tab.value.as_mut() {
                 view.drain_hidden_updates(&waker, theme)?;
                 if let Some(commands) = &topology_commands {
@@ -5161,21 +5384,21 @@ impl App {
                 }
             }
         }
-        if self.exit {
+        if self.scheduling.exit {
             return Ok(());
         }
-        let inline_picker_open = self.inline_picker_open();
-        let picker_reconcile_pending = self.session_picker_reconcile_pending;
+        let inline_picker_open = self.modal.inline_picker_open();
+        let picker_reconcile_pending = self.modal.session_picker_reconcile_pending;
         let mut next_theme = (!inline_picker_open)
-            .then(|| self.deferred_picker_theme.take())
+            .then(|| self.modal.deferred_picker_theme.take())
             .flatten();
         if let Some(update) = topology_theme {
             retain_newest_theme(&mut next_theme, update);
         }
-        let restored_frontend = std::mem::take(&mut self.restored_frontend_needs_resize);
+        let restored_frontend = std::mem::take(&mut self.panes.restored_frontend_needs_resize);
         let final_resize_reconciliation = topology_changed || restored_frontend;
         if inline_picker_open && restored_frontend {
-            self.restored_frontend_needs_resize = true;
+            self.panes.restored_frontend_needs_resize = true;
         } else if final_resize_reconciliation && !picker_reconcile_pending {
             self.emit_resize()?;
         }
@@ -5187,17 +5410,17 @@ impl App {
         // post-topology focused receiver so it cannot fall back to the timed tick.
         let mut pending = Vec::new();
         let mut disconnected = false;
-        if let Some(updates) = &mut self.pane.updates {
-            let drained = drain_receiver(updates, &self.update_waker);
+        if let Some(updates) = &mut self.panes.pane.updates {
+            let drained = drain_receiver(updates, &self.platform.update_waker);
             pending = drained.items;
             disconnected = drained.disconnected;
         }
         if disconnected && !pane_stream_has_terminal_notice(&pending) {
-            self.exit = true;
+            self.scheduling.exit = true;
             return Ok(());
         }
         let inactive = self.apply_inactive_updates()?;
-        self.pending_exited_splints.extend(inactive.exited);
+        self.panes.pending_exited_splints.extend(inactive.exited);
         if let Some(update) = inactive.theme {
             retain_newest_theme(&mut next_theme, update);
         }
@@ -5209,7 +5432,7 @@ impl App {
         let mut effect_desired_changed = false;
         if let Some(update) = next_theme {
             if inline_picker_open {
-                retain_newest_theme(&mut self.deferred_picker_theme, update);
+                retain_newest_theme(&mut self.modal.deferred_picker_theme, update);
             } else {
                 let impact = self.apply_resolved_theme(update);
                 visual_changed |= impact.rebuild_pixels;
@@ -5225,17 +5448,18 @@ impl App {
                     mut snapshot,
                     image_sources,
                 } => {
-                    self.pane.history_page_pending = false;
+                    self.panes.pane.history_page_pending = false;
                     snapshot
                         .validate()
                         .map_err(|error| anyhow::anyhow!(error.message))?;
-                    apply_theme(&mut snapshot, self.theme);
-                    let accept = match self.pane.snapshot.as_ref() {
+                    apply_theme(&mut snapshot, self.presentation.theme);
+                    let accept = match self.panes.pane.snapshot.as_ref() {
                         Some(current) => snapshot_is_newer(current, &snapshot)?,
                         None => true,
                     };
                     if accept {
                         let previous_generation = self
+                            .panes
                             .pane
                             .snapshot
                             .as_ref()
@@ -5243,19 +5467,20 @@ impl App {
                                 current.history_generation
                             });
                         let previous_rows = self
+                            .panes
                             .pane
                             .snapshot
                             .as_ref()
                             .map_or_else(Vec::new, |current| current.scrollback_rows.clone());
-                        self.pane.scrollback_viewport.observe_history_change(
+                        self.panes.pane.scrollback_viewport.observe_history_change(
                             previous_generation,
                             &previous_rows,
                             &snapshot,
                         );
                         self.invalidate_local_content_state();
-                        self.pane.snapshot = Some(snapshot);
-                        self.pane.image_sources = image_sources;
-                        self.full_redraw = true;
+                        self.panes.pane.snapshot = Some(snapshot);
+                        self.panes.pane.image_sources = image_sources;
+                        self.presentation.full_redraw = true;
                         full_frame_reload = true;
                         visual_changed = true;
                         focused_visual_changed = true;
@@ -5270,7 +5495,7 @@ impl App {
                     let trace_base_revision = update.base_revision;
                     let trace_revision = update.revision;
                     let trace_rows = update.rows.len();
-                    let old_cursor_row = self.pane.snapshot.as_ref().and_then(|snapshot| {
+                    let old_cursor_row = self.panes.pane.snapshot.as_ref().and_then(|snapshot| {
                         usize::try_from(snapshot.cursor_row)
                             .ok()
                             .filter(|row| *row < snapshot.rows)
@@ -5280,6 +5505,7 @@ impl App {
                     let scrolls = update.scrolls.clone();
                     let history_changed = update.scrollback.is_some();
                     let current = self
+                        .panes
                         .pane
                         .snapshot
                         .as_ref()
@@ -5294,55 +5520,59 @@ impl App {
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
                     let previous_generation = self
+                        .panes
                         .pane
                         .snapshot
                         .as_ref()
                         .map_or(1, |snapshot| snapshot.history_generation);
                     let previous_rows = self
+                        .panes
                         .pane
                         .snapshot
                         .as_ref()
                         .map_or_else(Vec::new, |snapshot| snapshot.scrollback_rows.clone());
                     let snapshot = self
+                        .panes
                         .pane
                         .snapshot
                         .as_mut()
                         .context("terminal update arrived before initial snapshot")?;
                     apply_terminal_update(snapshot, update)?;
-                    apply_theme(snapshot, self.theme);
-                    self.pane.scrollback_viewport.observe_history_change(
+                    apply_theme(snapshot, self.presentation.theme);
+                    self.panes.pane.scrollback_viewport.observe_history_change(
                         previous_generation,
                         &previous_rows,
                         snapshot,
                     );
-                    if history_changed && !self.pane.scrollback_viewport.is_live() {
+                    if history_changed && !self.panes.pane.scrollback_viewport.is_live() {
                         full = true;
                     }
                     if content_changed {
                         self.reconcile_selection_after_content_change();
                     }
                     let snapshot = self
+                        .panes
                         .pane
                         .snapshot
                         .as_ref()
                         .context("updated terminal snapshot exists")?;
                     let rows = snapshot.rows;
                     if let Some(image_sources) = image_sources {
-                        self.pane.image_sources = image_sources;
+                        self.panes.pane.image_sources = image_sources;
                     }
-                    self.pane.prepare_dirty_rows.resize(rows, false);
-                    self.pane.raster_dirty_rows.resize(rows, false);
-                    self.pane.surface_dirty_rows.resize(rows, false);
+                    self.panes.pane.prepare_dirty_rows.resize(rows, false);
+                    self.panes.pane.raster_dirty_rows.resize(rows, false);
+                    self.panes.pane.surface_dirty_rows.resize(rows, false);
                     if full {
-                        self.full_redraw = true;
+                        self.presentation.full_redraw = true;
                         full_frame_reload = true;
                     } else {
                         for scroll in &scrolls {
                             for row in scroll.start_row..scroll.end_row.min(rows) {
                                 // Rebuilding the bounded semantic scroll region keeps prepared
                                 // row geometry correct while pixel movement still uses scroll-copy.
-                                self.pane.prepare_dirty_rows[row] = true;
-                                self.pane.surface_dirty_rows[row] = true;
+                                self.panes.pane.prepare_dirty_rows[row] = true;
+                                self.panes.pane.surface_dirty_rows[row] = true;
                             }
                             let count = scroll
                                 .rows
@@ -5356,36 +5586,36 @@ impl App {
                                 }
                             };
                             for row in exposed.filter(|row| *row < rows) {
-                                self.pane.raster_dirty_rows[row] = true;
+                                self.panes.pane.raster_dirty_rows[row] = true;
                             }
                         }
                         for row in patched_rows.into_iter().filter(|row| *row < rows) {
-                            self.pane.prepare_dirty_rows[row] = true;
+                            self.panes.pane.prepare_dirty_rows[row] = true;
                             let copied = scrolls
                                 .iter()
                                 .any(|scroll| row >= scroll.start_row && row < scroll.end_row);
                             if !copied {
-                                self.pane.raster_dirty_rows[row] = true;
-                                self.pane.surface_dirty_rows[row] = true;
+                                self.panes.pane.raster_dirty_rows[row] = true;
+                                self.panes.pane.surface_dirty_rows[row] = true;
                             }
                         }
                         if cursor_changed {
                             if let Some(row) = old_cursor_row {
-                                self.pane.raster_dirty_rows[row] = true;
-                                self.pane.surface_dirty_rows[row] = true;
+                                self.panes.pane.raster_dirty_rows[row] = true;
+                                self.panes.pane.surface_dirty_rows[row] = true;
                             }
                             if let Ok(row) = usize::try_from(snapshot.cursor_row) {
                                 if row < rows {
-                                    self.pane.raster_dirty_rows[row] = true;
-                                    self.pane.surface_dirty_rows[row] = true;
+                                    self.panes.pane.raster_dirty_rows[row] = true;
+                                    self.panes.pane.surface_dirty_rows[row] = true;
                                 }
                             }
                         }
-                        self.pane.pending_scrolls.extend(scrolls);
+                        self.panes.pane.pending_scrolls.extend(scrolls);
                     }
                     let update_visual_changed = full
                         || cursor_changed
-                        || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty);
+                        || self.panes.pane.raster_dirty_rows.iter().any(|dirty| *dirty);
                     visual_changed |= update_visual_changed;
                     focused_visual_changed |= update_visual_changed;
                     if let Some(started) = apply_started {
@@ -5411,12 +5641,14 @@ impl App {
                     }
                 }
                 WindowUpdate::ScrollbackPages(pages) => {
-                    self.pane.history_page_pending = false;
+                    self.panes.pane.history_page_pending = false;
                     let pinned_selection_rows = self
+                        .panes
                         .pane
                         .selection
                         .map(|selection| [selection.anchor.row_id, selection.end.row_id]);
                     let snapshot = self
+                        .panes
                         .pane
                         .snapshot
                         .as_mut()
@@ -5472,60 +5704,61 @@ impl App {
                                 snapshot.newest_available_scrollback_row_id = newest;
                             }
                         } else {
-                            self.pane.history_selection_pin_blocked = true;
+                            self.panes.pane.history_selection_pin_blocked = true;
                         }
                     }
                 }
                 WindowUpdate::ScrollbackResyncRequired => {
-                    self.pane.history_page_pending = false;
+                    self.panes.pane.history_page_pending = false;
                     self.invalidate_local_content_state();
                     visual_changed = true;
                     focused_visual_changed = true;
                 }
                 WindowUpdate::Authority(authority) => {
-                    self.pane.authority = authority;
+                    self.panes.pane.authority = authority;
                     title_changed = true;
                     visual_changed = true;
                     focused_visual_changed = true;
-                    self.full_redraw = true;
+                    self.presentation.full_redraw = true;
                 }
                 WindowUpdate::Control(active) => {
-                    self.pane.controller_active = active;
+                    self.panes.pane.controller_active = active;
                     title_changed = true;
                     visual_changed = true;
                     focused_visual_changed = true;
-                    self.full_redraw = true;
+                    self.presentation.full_redraw = true;
                 }
                 WindowUpdate::ControlTransferRequested(transfer_id) => {
-                    self.pane.pending_control_transfer = Some(transfer_id);
+                    self.panes.pane.pending_control_transfer = Some(transfer_id);
                     title_changed = true;
                 }
                 WindowUpdate::ControlTransferResolved(_) => {
-                    self.pane.pending_control_transfer = None;
+                    self.panes.pane.pending_control_transfer = None;
                     title_changed = true;
                 }
                 WindowUpdate::SearchResults(page) => {
-                    self.pane.search.matches = page.matches;
-                    self.pane.search.selected = 0;
-                    self.pane.search.next_cursor = page.next_cursor;
-                    self.pane.search.pending_reveal = self.pane.search.matches.first().cloned();
+                    self.panes.pane.search.matches = page.matches;
+                    self.panes.pane.search.selected = 0;
+                    self.panes.pane.search.next_cursor = page.next_cursor;
+                    self.panes.pane.search.pending_reveal =
+                        self.panes.pane.search.matches.first().cloned();
                     title_changed = true;
                     visual_changed = true;
                     focused_visual_changed = true;
-                    self.full_redraw = true;
+                    self.presentation.full_redraw = true;
                 }
                 WindowUpdate::SearchResyncRequired => {
-                    self.pane.search.matches.clear();
-                    self.pane.search.next_cursor = None;
-                    self.pane.search.pending_reveal = None;
+                    self.panes.pane.search.matches.clear();
+                    self.panes.pane.search.next_cursor = None;
+                    self.panes.pane.search.pending_reveal = None;
                     title_changed = true;
                     visual_changed = true;
                     focused_visual_changed = true;
-                    self.full_redraw = true;
+                    self.presentation.full_redraw = true;
                 }
                 WindowUpdate::Theme(update) => {
-                    if self.inline_picker_open() {
-                        retain_newest_theme(&mut self.deferred_picker_theme, update);
+                    if self.modal.inline_picker_open() {
+                        retain_newest_theme(&mut self.modal.deferred_picker_theme, update);
                     } else {
                         let impact = self.apply_resolved_theme(update);
                         visual_changed |= impact.rebuild_pixels;
@@ -5537,116 +5770,131 @@ impl App {
                 }
                 WindowUpdate::Exited { splint_id } => {
                     anyhow::ensure!(
-                        self.focused_splint() == Some(splint_id),
+                        self.panes.focused_splint() == Some(splint_id),
                         "focused pane exit identity does not match its snapshot"
                     );
-                    if self.layout.is_some() {
-                        self.pending_exited_splints.insert(splint_id);
-                        self.pane.controller_active = false;
-                        self.pane.commands = None;
-                        self.pane.updates = None;
+                    if self.panes.layout.is_some() {
+                        self.panes.pending_exited_splints.insert(splint_id);
+                        self.panes.pane.controller_active = false;
+                        self.panes.pane.commands = None;
+                        self.panes.pane.updates = None;
                         title_changed = true;
                         visual_changed = true;
                         focused_visual_changed = true;
-                        self.full_redraw = true;
+                        self.presentation.full_redraw = true;
                     } else {
-                        self.exit = true;
+                        self.scheduling.exit = true;
                         return Ok(());
                     }
                 }
                 WindowUpdate::Shutdown => {
-                    if self.layout.is_some() {
-                        self.pane.controller_active = false;
-                        self.pane.commands = None;
-                        self.pane.updates = None;
+                    if self.panes.layout.is_some() {
+                        self.panes.pane.controller_active = false;
+                        self.panes.pane.commands = None;
+                        self.panes.pane.updates = None;
                         title_changed = true;
                         visual_changed = true;
                         focused_visual_changed = true;
-                        self.full_redraw = true;
+                        self.presentation.full_redraw = true;
                     } else {
-                        self.exit = true;
+                        self.scheduling.exit = true;
                         return Ok(());
                     }
                 }
             }
         }
-        if !self.pending_exited_splints.is_empty() {
-            let topology_queue_open = self.topology_commands.as_ref().is_some_and(|commands| {
-                enqueue_pending_exited_splints(
-                    self.active_identity.dojo_id,
-                    &mut self.pending_exited_splints,
-                    commands,
-                )
-            });
+        if !self.panes.pending_exited_splints.is_empty() {
+            let topology_queue_open =
+                self.tab_state
+                    .topology_commands
+                    .as_ref()
+                    .is_some_and(|commands| {
+                        enqueue_pending_exited_splints(
+                            self.tab_state.active_identity.dojo_id,
+                            &mut self.panes.pending_exited_splints,
+                            commands,
+                        )
+                    });
             if !topology_queue_open {
-                self.topology_commands = None;
+                self.tab_state.topology_commands = None;
             }
         }
         let rebuilt_inactive = rebuild_inactive_frames(
-            &mut self.inactive_panes,
+            &mut self.panes.inactive_panes,
             &inactive.dirty_frames,
             rebuild_all_inactive,
-            self.scale_120,
+            self.surface.scale_120,
         )?;
         visual_changed |= rebuilt_inactive > 0;
         if rebuild_all_inactive {
-            self.full_redraw = true;
+            self.presentation.full_redraw = true;
         } else if rebuilt_inactive > 0 {
-            self.dirty_inactive_panes
+            self.panes
+                .dirty_inactive_panes
                 .extend(inactive.dirty_frames.iter().copied());
         } else if inactive.changed {
             // Rare inactive metadata changes do not identify a terminal frame
             // region, so retain the conservative whole-window fallback.
-            self.full_redraw = true;
+            self.presentation.full_redraw = true;
         }
-        if self.pane.search.pending_reveal.is_some() {
+        if self.panes.pane.search.pending_reveal.is_some() {
             self.reveal_pending_search_match();
             visual_changed = true;
             focused_visual_changed = true;
         }
-        if self.background_effect_reconcile_schedule.queue_update(
-            effect_desired_changed,
-            visual_changed,
-            self.configured,
-        ) {
+        if self
+            .surface
+            .background_effect_reconcile_schedule
+            .queue_update(
+                effect_desired_changed,
+                visual_changed,
+                self.surface.configured,
+            )
+        {
             self.reconcile_background_effect(queue_handle, BackgroundEffectCommitMode::Immediate)?;
         }
         if restart_cursor_blink(
             focused_visual_changed,
-            &mut self.cursor_blink_visible,
-            &mut self.last_cursor_blink,
+            &mut self.input.cursor_blink_visible,
+            &mut self.input.last_cursor_blink,
         ) {
             let prepare_started = perf_trace_enabled().then(Instant::now);
             let trace_dirty_rows = self
+                .panes
                 .pane
                 .prepare_dirty_rows
                 .iter()
                 .filter(|dirty| **dirty)
                 .count();
-            let live_viewport = self.pane.scrollback_viewport.is_live();
+            let live_viewport = self.panes.pane.scrollback_viewport.is_live();
             let display_owned = if live_viewport {
                 None
             } else {
-                Some(self.display_snapshot().context("updated snapshot exists")?)
+                Some(
+                    self.panes
+                        .display_snapshot()
+                        .context("updated snapshot exists")?,
+                )
             };
             let display = display_owned
                 .as_ref()
-                .or(self.pane.snapshot.as_ref())
+                .or(self.panes.pane.snapshot.as_ref())
                 .context("updated snapshot exists")?;
-            if full_frame_reload || self.pane.snapshot_frame.is_none() || !live_viewport {
-                self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+            if full_frame_reload || self.panes.pane.snapshot_frame.is_none() || !live_viewport {
+                self.panes.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
                     display,
-                    self.scale_120,
-                    Some(&self.pane.image_sources),
+                    self.surface.scale_120,
+                    Some(&self.panes.pane.image_sources),
                 )?);
-            } else if let Some(frame) = &mut self.pane.snapshot_frame {
-                frame.refresh_rows(display, &self.pane.prepare_dirty_rows)?;
-                frame.refresh_images(display, &self.pane.image_sources)?;
+            } else if let Some(frame) = &mut self.panes.pane.snapshot_frame {
+                frame.refresh_rows(display, &self.panes.pane.prepare_dirty_rows)?;
+                frame.refresh_images(display, &self.panes.pane.image_sources)?;
                 frame.refresh_cursor(display);
             }
-            self.pane.rendered_viewport_offset = self.pane.scrollback_viewport.offset_from_bottom();
-            self.pane.viewport_dirty = false;
-            self.pane.prepare_dirty_rows.fill(false);
+            self.panes.pane.rendered_viewport_offset =
+                self.panes.pane.scrollback_viewport.offset_from_bottom();
+            self.panes.pane.viewport_dirty = false;
+            self.panes.pane.prepare_dirty_rows.fill(false);
             if let Some(started) = prepare_started {
                 emit_perf_trace(
                     "splinterm",
@@ -5671,72 +5919,69 @@ impl App {
             }
             self.refresh_ime_preedit()?;
             self.update_ime_cursor_rectangle();
-            if !self.inline_picker_open()
-                && !self.session_picker_reconcile_pending
+            if !self.modal.inline_picker_open()
+                && !self.modal.session_picker_reconcile_pending
                 && terminal_resize_allowed(
                     TerminalResizeCause::SnapshotAvailable,
-                    self.pane.last_resize.is_some(),
+                    self.panes.pane.last_resize.is_some(),
                 )
             {
                 self.emit_resize()?;
             }
         }
-        if visual_changed && self.configured && !self.session_picker_reconcile_pending {
+        if visual_changed && self.surface.configured && !self.modal.session_picker_reconcile_pending
+        {
             self.schedule_terminal_draw(queue_handle)?;
         }
-        if title_changed && !self.inline_picker_open() && !self.session_picker_reconcile_pending {
+        if title_changed
+            && !self.modal.inline_picker_open()
+            && !self.modal.session_picker_reconcile_pending
+        {
             let snapshot = self
+                .panes
                 .pane
                 .snapshot
                 .as_ref()
                 .context("updated snapshot exists")?;
-            self.window.set_title(window_title(
-                self.title_override.as_deref().or(Some(&snapshot.title)),
-                self.pane.controller_active,
-                &self.pane.authority,
-                self.pane.pending_control_transfer.is_some(),
-                Some(&self.pane.search),
+            self.surface.window.set_title(window_title(
+                self.presentation
+                    .title_override
+                    .as_deref()
+                    .or(Some(&snapshot.title)),
+                self.panes.pane.controller_active,
+                &self.panes.pane.authority,
+                self.panes.pane.pending_control_transfer.is_some(),
+                Some(&self.panes.pane.search),
             ));
         }
         if picker_reconcile_pending {
-            self.session_picker_reconcile_pending = false;
+            self.modal.session_picker_reconcile_pending = false;
             if final_resize_reconciliation {
                 self.emit_resize()?;
                 self.update_ime_cursor_rectangle();
             }
             self.update_window_title();
             match picker_ime_reconcile(
-                self.ime_modal_barrier,
-                self.keyboard_focused,
-                self.ime.entered,
+                self.input.ime_modal_barrier,
+                self.input.keyboard_focused,
+                self.input.ime.entered,
             ) {
                 PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
                 PickerImeReconcile::Enable => self.enable_text_input(),
                 PickerImeReconcile::None => {}
             }
             let modal_focus_changed = self
+                .modal
                 .session_picker_open_focus
                 .take()
-                .is_some_and(|focused| focused != self.keyboard_focused);
+                .is_some_and(|focused| focused != self.input.keyboard_focused);
             self.reconcile_terminal_focus_report(modal_focus_changed);
-            self.full_redraw = true;
-            if self.configured {
+            self.presentation.full_redraw = true;
+            if self.surface.configured {
                 self.schedule_draw(queue_handle)?;
             }
         }
         Ok(())
-    }
-
-    fn output_dpi_observation(&self, output: &wl_output::WlOutput) -> OutputDpiObservation {
-        let Some(info) = self.output_state.info(output) else {
-            return OutputDpiObservation::unavailable("output-info-pending");
-        };
-        let current_mode = info
-            .modes
-            .iter()
-            .find(|mode| mode.current)
-            .map(|mode| mode.dimensions);
-        OutputDpiObservation::from_wayland(info.id, info.name, current_mode, info.physical_size)
     }
 
     fn refresh_output_dpi(
@@ -5744,35 +5989,36 @@ impl App {
         output: &wl_output::WlOutput,
         queue_handle: &QueueHandle<Self>,
     ) -> Result<()> {
-        let observation = self.output_dpi_observation(output);
-        let raster_changed = update_output_dpi(observation, self.scale_120)?;
-        self.renderer_generation = self.renderer_generation.saturating_add(1);
-        self.session_picker_text_cache.clear();
-        self.tab_label_cache.clear();
-        self.tab_close_text = None;
-        self.tab_new_text = None;
-        self.session_picker_layout = None;
+        let observation = self.platform.output_dpi_observation(output);
+        let raster_changed = update_output_dpi(observation, self.surface.scale_120)?;
+        self.presentation.renderer_generation =
+            self.presentation.renderer_generation.saturating_add(1);
+        self.modal.session_picker_text_cache.clear();
+        self.tab_state.tab_label_cache.clear();
+        self.tab_state.tab_close_text = None;
+        self.tab_state.tab_new_text = None;
+        self.modal.session_picker_layout = None;
         if !raster_changed {
-            if self.inline_picker_open() && self.configured {
-                self.session_picker_redraw = true;
+            if self.modal.inline_picker_open() && self.surface.configured {
+                self.modal.session_picker_redraw = true;
                 self.schedule_draw(queue_handle)?;
             }
             return Ok(());
         }
-        if self.inline_picker_open() {
-            self.restored_frontend_needs_resize = true;
+        if self.modal.inline_picker_open() {
+            self.panes.restored_frontend_needs_resize = true;
         }
-        self.rebuild_scaled_pane_frames(self.scale_120)?;
-        self.buffers.clear();
-        self.backing.clear();
-        self.full_redraw = true;
+        self.rebuild_scaled_pane_frames(self.surface.scale_120)?;
+        self.surface.buffers.clear();
+        self.surface.backing.clear();
+        self.presentation.full_redraw = true;
         self.refresh_ime_preedit()?;
         debug_assert!(!terminal_resize_allowed(
             TerminalResizeCause::OutputDpiChanged,
-            self.pane.last_resize.is_some(),
+            self.panes.pane.last_resize.is_some(),
         ));
         self.update_ime_cursor_rectangle();
-        if self.configured {
+        if self.surface.configured {
             self.schedule_draw(queue_handle)?;
         }
         Ok(())
@@ -5784,56 +6030,62 @@ impl App {
         queue_handle: &QueueHandle<Self>,
     ) -> Result<()> {
         let scale_120 = requested_scale_120;
-        if !(MIN_SCALE_120..=MAX_SCALE_120).contains(&scale_120) || scale_120 == self.scale_120 {
+        if !(MIN_SCALE_120..=MAX_SCALE_120).contains(&scale_120)
+            || scale_120 == self.surface.scale_120
+        {
             return Ok(());
         }
-        if self.viewport.is_none() && scale_120 % SCALE_DENOMINATOR != 0 {
+        if self.surface.viewport.is_none() && scale_120 % SCALE_DENOMINATOR != 0 {
             return Ok(());
         }
-        if self.viewport.is_none() {
-            self.window
+        if self.surface.viewport.is_none() {
+            self.surface
+                .window
                 .set_buffer_scale(scale_120 / SCALE_DENOMINATOR)
                 .map_err(|_| anyhow::anyhow!("compositor rejected integer buffer scale"))?;
         } else {
-            self.window
+            self.surface
+                .window
                 .set_buffer_scale(1)
                 .map_err(|_| anyhow::anyhow!("compositor rejected unit buffer scale"))?;
         }
         if !self.rebuild_scaled_pane_frames(scale_120)? {
-            self.text_row = Some(TextRow::load(scale_120.div_ceil(SCALE_DENOMINATOR))?);
+            self.presentation.text_row =
+                Some(TextRow::load(scale_120.div_ceil(SCALE_DENOMINATOR))?);
         }
-        self.scale_120 = scale_120;
-        self.renderer_generation = self.renderer_generation.saturating_add(1);
-        self.session_picker_text_cache.clear();
-        self.tab_label_cache.clear();
-        self.tab_close_text = None;
-        self.tab_new_text = None;
-        self.session_picker_layout = None;
-        if self.inline_picker_open() {
-            self.restored_frontend_needs_resize = true;
+        self.surface.scale_120 = scale_120;
+        self.presentation.renderer_generation =
+            self.presentation.renderer_generation.saturating_add(1);
+        self.modal.session_picker_text_cache.clear();
+        self.tab_state.tab_label_cache.clear();
+        self.tab_state.tab_close_text = None;
+        self.tab_state.tab_new_text = None;
+        self.modal.session_picker_layout = None;
+        if self.modal.inline_picker_open() {
+            self.panes.restored_frontend_needs_resize = true;
         }
-        self.buffers.clear();
-        self.backing.clear();
-        self.full_redraw = true;
+        self.surface.buffers.clear();
+        self.surface.backing.clear();
+        self.presentation.full_redraw = true;
         self.refresh_ime_preedit()?;
         debug_assert!(!terminal_resize_allowed(
             TerminalResizeCause::CompositorScaleChanged,
-            self.pane.last_resize.is_some(),
+            self.panes.pane.last_resize.is_some(),
         ));
         self.update_ime_cursor_rectangle();
-        if self.configured {
+        if self.surface.configured {
             self.schedule_draw(queue_handle)?;
         }
         Ok(())
     }
 
     fn cursor_is_blinking(&self) -> bool {
-        !self.inline_picker_open()
-            && self.cursor_blink
-            && self.pane.snapshot.as_ref().is_some_and(|snapshot| {
+        !self.modal.inline_picker_open()
+            && self.presentation.cursor_blink
+            && self.panes.pane.snapshot.as_ref().is_some_and(|snapshot| {
                 cursor_blink_enabled(
-                    self.reduced_motion,
-                    self.keyboard_focused,
+                    self.input.reduced_motion,
+                    self.input.keyboard_focused,
                     snapshot.input_modes,
                 )
             })
@@ -5841,44 +6093,56 @@ impl App {
 
     fn event_loop_dispatch_timeout(&self) -> Option<Duration> {
         event_loop_timeout(
-            self.exit,
-            self.signoff.is_some(),
+            self.scheduling.exit,
+            self.scheduling.signoff.is_some(),
             self.cursor_is_blinking()
-                .then(|| self.last_cursor_blink.elapsed()),
+                .then(|| self.input.last_cursor_blink.elapsed()),
         )
     }
 
     fn tick_cursor_blink(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         let blinking = self.cursor_is_blinking();
-        if blinking && self.last_cursor_blink.elapsed() >= CURSOR_BLINK_INTERVAL {
-            self.cursor_blink_visible = !self.cursor_blink_visible;
-            self.last_cursor_blink = Instant::now();
-            if let Some(snapshot) = &self.pane.snapshot {
+        if blinking && self.input.last_cursor_blink.elapsed() >= CURSOR_BLINK_INTERVAL {
+            self.input.cursor_blink_visible = !self.input.cursor_blink_visible;
+            self.input.last_cursor_blink = Instant::now();
+            if let Some(snapshot) = &self.panes.pane.snapshot {
                 if let Ok(row) = usize::try_from(snapshot.cursor_row) {
                     if row < snapshot.rows {
-                        self.pane.raster_dirty_rows.resize(snapshot.rows, false);
-                        self.pane.surface_dirty_rows.resize(snapshot.rows, false);
-                        self.pane.raster_dirty_rows[row] = true;
-                        self.pane.surface_dirty_rows[row] = true;
+                        self.panes
+                            .pane
+                            .raster_dirty_rows
+                            .resize(snapshot.rows, false);
+                        self.panes
+                            .pane
+                            .surface_dirty_rows
+                            .resize(snapshot.rows, false);
+                        self.panes.pane.raster_dirty_rows[row] = true;
+                        self.panes.pane.surface_dirty_rows[row] = true;
                     }
                 }
             }
-            if self.configured {
+            if self.surface.configured {
                 self.schedule_draw(queue_handle)?;
             }
-        } else if !blinking && !self.cursor_blink_visible {
-            self.cursor_blink_visible = true;
-            if let Some(snapshot) = &self.pane.snapshot {
+        } else if !blinking && !self.input.cursor_blink_visible {
+            self.input.cursor_blink_visible = true;
+            if let Some(snapshot) = &self.panes.pane.snapshot {
                 if let Ok(row) = usize::try_from(snapshot.cursor_row) {
                     if row < snapshot.rows {
-                        self.pane.raster_dirty_rows.resize(snapshot.rows, false);
-                        self.pane.surface_dirty_rows.resize(snapshot.rows, false);
-                        self.pane.raster_dirty_rows[row] = true;
-                        self.pane.surface_dirty_rows[row] = true;
+                        self.panes
+                            .pane
+                            .raster_dirty_rows
+                            .resize(snapshot.rows, false);
+                        self.panes
+                            .pane
+                            .surface_dirty_rows
+                            .resize(snapshot.rows, false);
+                        self.panes.pane.raster_dirty_rows[row] = true;
+                        self.panes.pane.surface_dirty_rows[row] = true;
                     }
                 }
             }
-            if self.configured {
+            if self.surface.configured {
                 self.schedule_draw(queue_handle)?;
             }
         }
@@ -5886,8 +6150,8 @@ impl App {
     }
 
     fn schedule_draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        if self.frame_pending {
-            self.redraw_pending = true;
+        if self.scheduling.frame_pending {
+            self.scheduling.redraw_pending = true;
             Ok(())
         } else {
             self.draw(queue_handle)
@@ -5895,14 +6159,15 @@ impl App {
     }
 
     fn schedule_terminal_draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        self.terminal_redraw_pending = true;
-        let draw_capacity_available = self.buffers.len() < MAX_SHM_BUFFERS
+        self.scheduling.terminal_redraw_pending = true;
+        let draw_capacity_available = self.surface.buffers.len() < MAX_SHM_BUFFERS
             || self
+                .surface
                 .buffers
                 .iter()
-                .any(|buffer| self.pool.canvas(&buffer.buffer).is_some());
-        if terminal_draw_waits_for_frame(self.frame_pending, draw_capacity_available) {
-            self.redraw_pending = true;
+                .any(|buffer| self.surface.pool.canvas(&buffer.buffer).is_some());
+        if terminal_draw_waits_for_frame(self.scheduling.frame_pending, draw_capacity_available) {
+            self.scheduling.redraw_pending = true;
             Ok(())
         } else {
             // A released buffer may be committed again even when its earlier frame
@@ -5917,23 +6182,26 @@ impl App {
         reason = "SHM acquisition, persistent backing updates, damage submission, and commit form one transaction"
     )]
     fn draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        self.redraw_pending = false;
-        let terminal_priority = std::mem::take(&mut self.terminal_redraw_pending);
+        self.scheduling.redraw_pending = false;
+        let terminal_priority = std::mem::take(&mut self.scheduling.terminal_redraw_pending);
         let draw_started = Instant::now();
-        let scroll_started = self.pane.scroll_started_at.take();
-        if self.pane.viewport_dirty {
-            let display = self.display_snapshot().context("scroll display snapshot")?;
-            let current_offset = self.pane.scrollback_viewport.offset_from_bottom();
+        let scroll_started = self.panes.pane.scroll_started_at.take();
+        if self.panes.pane.viewport_dirty {
+            let display = self
+                .panes
+                .display_snapshot()
+                .context("scroll display snapshot")?;
+            let current_offset = self.panes.pane.scrollback_viewport.offset_from_bottom();
             let delta = isize::try_from(current_offset)
                 .ok()
-                .zip(isize::try_from(self.pane.rendered_viewport_offset).ok())
+                .zip(isize::try_from(self.panes.pane.rendered_viewport_offset).ok())
                 .map(|(current, rendered)| current - rendered);
-            self.pane.prepare_dirty_rows.fill(false);
-            self.pane.raster_dirty_rows.fill(false);
-            self.pane.surface_dirty_rows.fill(false);
-            self.pane.pending_scrolls.clear();
+            self.panes.pane.prepare_dirty_rows.fill(false);
+            self.panes.pane.raster_dirty_rows.fill(false);
+            self.panes.pane.surface_dirty_rows.fill(false);
+            self.panes.pane.pending_scrolls.clear();
             let incremental = if display.images.is_none() {
-                if let (Some(frame), Some(delta)) = (&mut self.pane.snapshot_frame, delta) {
+                if let (Some(frame), Some(delta)) = (&mut self.panes.pane.snapshot_frame, delta) {
                     let scroll = frame.scroll_viewport_rows(&display, delta)?;
                     frame.refresh_cursor(&display);
                     scroll
@@ -5951,55 +6219,66 @@ impl App {
                     }
                     splinterm_protocol::ScrollDirection::Reverse => 0..count,
                 };
-                self.pane.raster_dirty_rows.resize(display.rows, false);
-                self.pane.surface_dirty_rows.resize(display.rows, false);
+                self.panes
+                    .pane
+                    .raster_dirty_rows
+                    .resize(display.rows, false);
+                self.panes
+                    .pane
+                    .surface_dirty_rows
+                    .resize(display.rows, false);
                 for row in exposed {
-                    self.pane.raster_dirty_rows[row] = true;
+                    self.panes.pane.raster_dirty_rows[row] = true;
                 }
-                self.pane.surface_dirty_rows.fill(true);
-                self.pane.pending_scrolls.push(scroll);
+                self.panes.pane.surface_dirty_rows.fill(true);
+                self.panes.pane.pending_scrolls.push(scroll);
             } else {
-                self.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
+                self.panes.pane.snapshot_frame = Some(SnapshotFrame::load_scaled_with_sources(
                     &display,
-                    self.scale_120,
-                    Some(&self.pane.image_sources),
+                    self.surface.scale_120,
+                    Some(&self.panes.pane.image_sources),
                 )?);
-                self.full_redraw = true;
+                self.presentation.full_redraw = true;
             }
-            self.pane.rendered_viewport_offset = current_offset;
-            self.pane.viewport_dirty = false;
+            self.panes.pane.rendered_viewport_offset = current_offset;
+            self.panes.pane.viewport_dirty = false;
         }
-        for pane in &mut self.inactive_panes {
-            if rebuild_dirty_pane_viewport_frame(pane, self.scale_120)? {
-                self.full_redraw = true;
+        for pane in &mut self.panes.inactive_panes {
+            if rebuild_dirty_pane_viewport_frame(pane, self.surface.scale_120)? {
+                self.presentation.full_redraw = true;
             }
         }
         let pane_layout = self.computed_pane_layout()?;
         let pane_cell_width = self
+            .panes
             .pane
             .snapshot_frame
             .as_ref()
             .map_or(1, SnapshotFrame::cell_width);
         self.prepare_frame_titles(pane_layout.as_ref(), pane_cell_width)?;
-        let active_splint = self.focused_splint();
+        let active_splint = self.panes.focused_splint();
         let active_rect = active_splint.and_then(|splint_id| {
             pane_layout
                 .as_ref()
                 .and_then(|layout| layout.rect(splint_id))
         });
         let window_geometry = if let Some(rect) = active_rect {
-            Self::pane_geometry(&self.pane, rect, self.scale_120)
+            Self::pane_geometry(&self.panes.pane, rect, self.surface.scale_120)
         } else {
             let content = self.content_rect();
-            self.pane.snapshot_frame.as_ref().map_or(Ok(None), |frame| {
-                frame
-                    .window_geometry(content.width, content.height, self.scale_120)?
-                    .translated(
-                        logical_extent_to_buffer(content.x, self.scale_120)?,
-                        logical_extent_to_buffer(content.y, self.scale_120)?,
-                    )
-                    .map(Some)
-            })
+            self.panes
+                .pane
+                .snapshot_frame
+                .as_ref()
+                .map_or(Ok(None), |frame| {
+                    frame
+                        .window_geometry(content.width, content.height, self.surface.scale_120)?
+                        .translated(
+                            logical_extent_to_buffer(content.x, self.surface.scale_120)?,
+                            logical_extent_to_buffer(content.y, self.surface.scale_120)?,
+                        )
+                        .map(Some)
+                })
         }
         .or_else(|error| {
             if error.to_string().contains("SurfaceTooSmall") {
@@ -6008,33 +6287,34 @@ impl App {
                 Err(error)
             }
         })?;
-        let (width, height, stride) = if pane_layout.is_some() || self.managed_tabs {
+        let (width, height, stride) = if pane_layout.is_some() || self.tab_state.managed_tabs {
             buffer_dimensions(
-                self.logical_width.max(1),
-                self.logical_height.max(1),
-                self.scale_120,
+                self.surface.logical_width.max(1),
+                self.surface.logical_height.max(1),
+                self.surface.scale_120,
             )?
         } else if let Some(geometry) = window_geometry {
             geometry.buffer_layout()?
         } else {
             buffer_dimensions(
-                self.logical_width.max(1),
-                self.logical_height.max(1),
-                self.scale_120,
+                self.surface.logical_width.max(1),
+                self.surface.logical_height.max(1),
+                self.surface.scale_120,
             )?
         };
         let width_i32 = i32::try_from(width).context("buffer width fits i32")?;
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
-        let resolved_selection = self.pane.selection.and_then(|selection| {
-            let snapshot = self.pane.snapshot.as_ref()?;
-            let display = self.display_snapshot_cow()?;
+        let resolved_selection = self.panes.pane.selection.and_then(|selection| {
+            let snapshot = self.panes.pane.snapshot.as_ref()?;
+            let display = self.panes.display_snapshot_cow()?;
             selection_display_bounds(snapshot, &display, selection)
                 .map(|(start, end)| ((start.row, start.column), (end.row, end.column)))
         });
-        let inline_picker_open = self.inline_picker_open();
+        let inline_picker_open = self.modal.inline_picker_open();
         let picker_layout = if inline_picker_open {
             let content = self.content_rect();
             let picker = self
+                .modal
                 .session_picker
                 .as_mut()
                 .context("inline picker exists")?;
@@ -6042,7 +6322,7 @@ impl App {
             let layout = session_picker_overlay_layout(
                 content.width,
                 content.height,
-                self.scale_120,
+                self.surface.scale_120,
                 item_count,
                 selected,
                 visible_start,
@@ -6056,43 +6336,45 @@ impl App {
             None
         };
         let tab_layout = self.current_tab_strip_layout();
-        let content_buffer_rect = Self::buffer_rect(self.content_rect(), self.scale_120)?;
-        let active_dojo = self.active_dojo_id();
+        let content_buffer_rect = Self::buffer_rect(self.content_rect(), self.surface.scale_120)?;
+        let active_dojo = self.tab_state.active_dojo_id();
         if let Some(layout) = &tab_layout {
             self.prepare_tab_strip_text(layout)?;
         }
-        self.tab_strip_layout.clone_from(&tab_layout);
+        self.tab_state.tab_strip_layout.clone_from(&tab_layout);
         let terminal_cursor_blink =
-            presented_cursor_visible(inline_picker_open, self.cursor_blink_visible);
-        let terminal_keyboard_focused = self.keyboard_focused && !inline_picker_open;
+            presented_cursor_visible(inline_picker_open, self.input.cursor_blink_visible);
+        let terminal_keyboard_focused = self.input.keyboard_focused && !inline_picker_open;
         let mut buffer_index = None;
-        for (index, buffer) in self.buffers.iter().enumerate() {
-            if self.pool.canvas(&buffer.buffer).is_some() {
+        for (index, buffer) in self.surface.buffers.iter().enumerate() {
+            if self.surface.pool.canvas(&buffer.buffer).is_some() {
                 buffer_index = Some(index);
                 break;
             }
         }
         let buffer_index = if let Some(index) = buffer_index {
             index
-        } else if self.buffers.len() < MAX_SHM_BUFFERS {
+        } else if self.surface.buffers.len() < MAX_SHM_BUFFERS {
             let buffer = self
+                .surface
                 .pool
                 .create_buffer(width_i32, height_i32, stride, wl_shm::Format::Argb8888)
                 .context("create bounded SHM buffer")?
                 .0;
-            self.buffers.push(ShmFrameBuffer {
+            self.surface.buffers.push(ShmFrameBuffer {
                 buffer,
                 stale: BackingDamage::Full,
             });
-            self.buffers.len() - 1
+            self.surface.buffers.len() - 1
         } else {
-            self.redraw_pending = true;
-            self.terminal_redraw_pending = terminal_priority;
+            self.scheduling.redraw_pending = true;
+            self.scheduling.terminal_redraw_pending = terminal_priority;
             return Ok(());
         };
         let canvas = self
+            .surface
             .pool
-            .canvas(&self.buffers[buffer_index].buffer)
+            .canvas(&self.surface.buffers[buffer_index].buffer)
             .context("selected SHM buffer became unavailable")?;
 
         let backing_len = usize::try_from(
@@ -6102,25 +6384,27 @@ impl App {
                 .context("backing dimensions overflow")?,
         )
         .context("backing size fits usize")?;
-        let resized_backing = self.backing.len() != backing_len;
+        let resized_backing = self.surface.backing.len() != backing_len;
         if resized_backing {
-            self.backing.resize(backing_len, 0);
-            self.full_redraw = true;
-            for buffer in &mut self.buffers {
+            self.surface.backing.resize(backing_len, 0);
+            self.presentation.full_redraw = true;
+            for buffer in &mut self.surface.buffers {
                 buffer.stale.mark_full();
             }
         }
         let mut copied_backing_bytes = 0;
         let mut inactive_damage_regions = Vec::new();
-        let backing_scroll_changed = !self.pane.pending_scrolls.is_empty();
+        let backing_scroll_changed = !self.panes.pane.pending_scrolls.is_empty();
         let capture_minimum_images = capture_minimum_images()?;
         let capture_image_count = self
+            .panes
             .pane
             .snapshot_frame
             .as_ref()
             .map_or(0, SnapshotFrame::image_count)
             .saturating_add(
-                self.inactive_panes
+                self.panes
+                    .inactive_panes
                     .iter()
                     .filter_map(|pane| pane.snapshot_frame.as_ref())
                     .map(SnapshotFrame::image_count)
@@ -6129,21 +6413,21 @@ impl App {
         let image_composition_started = (std::env::var_os("SPLINTERM_IMAGE_TRACE").is_some()
             && capture_image_count > 0)
             .then(Instant::now);
-        if let (Some(frame), Some(geometry)) = (&self.pane.snapshot_frame, &window_geometry) {
-            if self.capture.is_some()
+        if let (Some(frame), Some(geometry)) = (&self.panes.pane.snapshot_frame, &window_geometry) {
+            if self.presentation.capture.is_some()
                 && capture_minimum_images > 0
                 && capture_image_count >= capture_minimum_images
             {
-                self.full_redraw = true;
+                self.presentation.full_redraw = true;
             }
-            if self.full_redraw {
+            if self.presentation.full_redraw {
                 if let Some(layout) = pane_layout.as_ref() {
-                    let [_, red, green, blue] = self.theme.background.to_be_bytes();
+                    let [_, red, green, blue] = self.presentation.theme.background.to_be_bytes();
                     let background = configured_background_bgra([red, green, blue]);
-                    for pixel in self.backing.chunks_exact_mut(4) {
+                    for pixel in self.surface.backing.chunks_exact_mut(4) {
                         pixel.copy_from_slice(&background);
                     }
-                    for pane in &self.inactive_panes {
+                    for pane in &self.panes.inactive_panes {
                         let Some(splint_id) =
                             pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id)
                         else {
@@ -6154,70 +6438,78 @@ impl App {
                         };
                         let (Some(frame), Some(geometry)) = (
                             &pane.snapshot_frame,
-                            Self::pane_geometry(pane, rect, self.scale_120)?,
+                            Self::pane_geometry(pane, rect, self.surface.scale_120)?,
                         ) else {
                             continue;
                         };
                         paint_snapshot_region_presented(
-                            &mut self.backing,
+                            &mut self.surface.backing,
                             width,
                             height,
                             frame,
                             &geometry,
-                            Self::buffer_rect(rect, self.scale_120)?,
+                            Self::buffer_rect(rect, self.surface.scale_120)?,
                             terminal_cursor_blink,
-                            self.cursor_style,
+                            self.presentation.cursor_style,
                             CursorPresentation::INACTIVE_PANE,
                         );
                     }
                     paint_snapshot_region_presented(
-                        &mut self.backing,
+                        &mut self.surface.backing,
                         width,
                         height,
                         frame,
                         geometry,
                         Self::buffer_rect(
                             active_rect.context("active pane rectangle")?,
-                            self.scale_120,
+                            self.surface.scale_120,
                         )?,
                         terminal_cursor_blink,
-                        self.cursor_style,
+                        self.presentation.cursor_style,
                         CursorPresentation::for_keyboard_focus(terminal_keyboard_focused),
                     );
                 } else {
                     paint_snapshot_presented(
-                        &mut self.backing,
+                        &mut self.surface.backing,
                         width,
                         height,
                         frame,
                         geometry,
                         terminal_cursor_blink,
-                        self.cursor_style,
+                        self.presentation.cursor_style,
                         CursorPresentation::for_keyboard_focus(terminal_keyboard_focused),
                     );
                 }
             } else {
-                for scroll in self.pane.pending_scrolls.drain(..) {
-                    scroll_snapshot_pixels(&mut self.backing, width, frame, geometry, scroll);
+                for scroll in self.panes.pane.pending_scrolls.drain(..) {
+                    scroll_snapshot_pixels(
+                        &mut self.surface.backing,
+                        width,
+                        frame,
+                        geometry,
+                        scroll,
+                    );
                 }
                 paint_snapshot_rows_presented(
-                    &mut self.backing,
+                    &mut self.surface.backing,
                     width,
                     height,
                     frame,
                     geometry,
-                    &self.pane.raster_dirty_rows,
+                    &self.panes.pane.raster_dirty_rows,
                     terminal_cursor_blink,
-                    self.cursor_style,
+                    self.presentation.cursor_style,
                     CursorPresentation::for_keyboard_focus(terminal_keyboard_focused),
                 );
                 if let Some(layout) = pane_layout.as_ref() {
-                    for pane in &self.inactive_panes {
+                    for pane in &self.panes.inactive_panes {
                         let Some(splint_id) = pane
                             .snapshot
                             .as_ref()
                             .map(|snapshot| snapshot.splint_id)
-                            .filter(|splint_id| self.dirty_inactive_panes.contains(splint_id))
+                            .filter(|splint_id| {
+                                self.panes.dirty_inactive_panes.contains(splint_id)
+                            })
                         else {
                             continue;
                         };
@@ -6226,20 +6518,20 @@ impl App {
                         };
                         let (Some(frame), Some(geometry)) = (
                             &pane.snapshot_frame,
-                            Self::pane_geometry(pane, rect, self.scale_120)?,
+                            Self::pane_geometry(pane, rect, self.surface.scale_120)?,
                         ) else {
                             continue;
                         };
-                        let region = Self::buffer_rect(rect, self.scale_120)?;
+                        let region = Self::buffer_rect(rect, self.surface.scale_120)?;
                         paint_snapshot_region_presented(
-                            &mut self.backing,
+                            &mut self.surface.backing,
                             width,
                             height,
                             frame,
                             &geometry,
                             region,
                             terminal_cursor_blink,
-                            self.cursor_style,
+                            self.presentation.cursor_style,
                             CursorPresentation::INACTIVE_PANE,
                         );
                         inactive_damage_regions.push(region);
@@ -6248,39 +6540,46 @@ impl App {
             }
             let selection = resolved_selection;
             let hovered_url = self
+                .panes
                 .pane
                 .hovered_url
                 .as_ref()
                 .map(|(start, end, _)| ((start.row, start.column), (end.row, end.column)));
-            let history_status =
-                history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref());
+            let history_status = history_overlay_status(
+                &self.panes.pane.scrollback_viewport,
+                self.panes.pane.snapshot.as_ref(),
+            );
             // Pane chrome is deterministically repainted after synchronization, so
             // row scanline copies may overwrite it without contaminating reuse.
             let overlay_rows = transient_overlay_rows(
-                self.pane
+                self.panes
+                    .pane
                     .snapshot
                     .as_ref()
                     .map_or(0, |snapshot| snapshot.rows),
                 selection,
                 hovered_url,
             );
-            let full_transient_canvas_content =
-                history_status.is_some() || self.trusted_consent.is_some() || inline_picker_open;
+            let full_transient_canvas_content = history_status.is_some()
+                || self.modal.trusted_consent.is_some()
+                || inline_picker_open;
             let full_backing_sync =
-                self.full_redraw || capture_image_count > 0 || backing_scroll_changed;
-            for buffer in &mut self.buffers {
+                self.presentation.full_redraw || capture_image_count > 0 || backing_scroll_changed;
+            for buffer in &mut self.surface.buffers {
                 if full_backing_sync {
                     buffer.stale.mark_full();
                 } else {
-                    buffer.stale.mark_rows(&self.pane.raster_dirty_rows);
+                    buffer.stale.mark_rows(&self.panes.pane.raster_dirty_rows);
                     buffer.stale.mark_regions(&inactive_damage_regions);
                 }
             }
-            let stale =
-                std::mem::replace(&mut self.buffers[buffer_index].stale, BackingDamage::Clean);
+            let stale = std::mem::replace(
+                &mut self.surface.buffers[buffer_index].stale,
+                BackingDamage::Clean,
+            );
             copied_backing_bytes = sync_backing_damage(
                 canvas,
-                &self.backing,
+                &self.surface.backing,
                 width,
                 height,
                 window_geometry.as_ref(),
@@ -6297,9 +6596,9 @@ impl App {
                     hovered_url,
                     dirty_rows: None,
                     focused: terminal_keyboard_focused,
-                    selection_color: self.theme.selection,
-                    url_color: self.theme.url,
-                    accent_color: self.theme.ui_accent,
+                    selection_color: self.presentation.theme.selection,
+                    url_color: self.presentation.theme.url,
+                    accent_color: self.presentation.theme.ui_accent,
                 },
             );
             if let Some(layout) = pane_layout.as_ref() {
@@ -6309,51 +6608,56 @@ impl App {
                     height,
                     layout,
                     active_splint,
-                    self.theme,
+                    self.presentation.theme,
                     frame.cell_width(),
                     frame.cell_height(),
-                    self.scale_120,
-                    &self.frame_titles,
+                    self.surface.scale_120,
+                    &self.presentation.frame_titles,
                 )?;
             }
-            if let Some(status) =
-                history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref())
-            {
+            if let Some(status) = history_overlay_status(
+                &self.panes.pane.scrollback_viewport,
+                self.panes.pane.snapshot.as_ref(),
+            ) {
                 paint_history_overlay(
                     canvas,
                     width,
                     height,
                     content_buffer_rect,
-                    self.scale_120,
+                    self.surface.scale_120,
                     status,
-                    self.theme.background,
-                    self.theme.ui_accent,
+                    self.presentation.theme.background,
+                    self.presentation.theme.ui_accent,
                 );
             }
-            if self.trusted_consent.is_some() {
+            if self.modal.trusted_consent.is_some() {
                 paint_trusted_consent_chrome(canvas, width, height);
             }
             if full_transient_canvas_content {
-                self.buffers[buffer_index].stale.mark_full();
+                self.surface.buffers[buffer_index].stale.mark_full();
             } else {
-                self.buffers[buffer_index].stale.mark_rows(&overlay_rows);
+                self.surface.buffers[buffer_index]
+                    .stale
+                    .mark_rows(&overlay_rows);
             }
-        } else if self.pane.snapshot_frame.is_some() {
-            let [_, red, green, blue] = self.theme.background.to_be_bytes();
+        } else if self.panes.pane.snapshot_frame.is_some() {
+            let [_, red, green, blue] = self.presentation.theme.background.to_be_bytes();
             let background = configured_background_bgra([red, green, blue]);
-            for pixel in self.backing.chunks_exact_mut(4) {
+            for pixel in self.surface.backing.chunks_exact_mut(4) {
                 pixel.copy_from_slice(&background);
             }
-            for buffer in &mut self.buffers {
+            for buffer in &mut self.surface.buffers {
                 buffer.stale.mark_full();
             }
-            let stale =
-                std::mem::replace(&mut self.buffers[buffer_index].stale, BackingDamage::Clean);
+            let stale = std::mem::replace(
+                &mut self.surface.buffers[buffer_index].stale,
+                BackingDamage::Clean,
+            );
             copied_backing_bytes =
-                sync_backing_damage(canvas, &self.backing, width, height, None, &stale);
-        } else if let Some(row) = &self.text_row {
+                sync_backing_damage(canvas, &self.surface.backing, width, height, None, &stale);
+        } else if let Some(row) = &self.presentation.text_row {
             paint(canvas, width, height, row);
-            self.buffers[buffer_index].stale.mark_full();
+            self.surface.buffers[buffer_index].stale.mark_full();
         } else {
             anyhow::bail!("window has no prepared renderer content");
         }
@@ -6363,16 +6667,17 @@ impl App {
                 width,
                 height,
                 layout,
-                self.scale_120,
-                self.theme,
+                self.surface.scale_120,
+                self.presentation.theme,
                 active_dojo,
-                &self.tab_label_cache,
-                self.tab_close_text.as_ref().map(|(_, text)| text),
-                self.tab_new_text.as_ref().map(|(_, text)| text),
+                &self.tab_state.tab_label_cache,
+                self.tab_state.tab_close_text.as_ref().map(|(_, text)| text),
+                self.tab_state.tab_new_text.as_ref().map(|(_, text)| text),
             )?;
-            self.buffers[buffer_index].stale.mark_full();
+            self.surface.buffers[buffer_index].stale.mark_full();
         }
-        if let (Some(layout), Some(picker)) = (picker_layout.as_ref(), self.session_picker.as_ref())
+        if let (Some(layout), Some(picker)) =
+            (picker_layout.as_ref(), self.modal.session_picker.as_ref())
         {
             let items = picker
                 .items()
@@ -6385,22 +6690,22 @@ impl App {
                 })
                 .collect::<Vec<_>>();
             paint_session_picker_overlay(
-                &mut self.session_picker_text_cache,
+                &mut self.modal.session_picker_text_cache,
                 canvas,
                 width,
                 height,
                 content_buffer_rect,
-                self.scale_120,
-                self.renderer_generation,
+                self.surface.scale_120,
+                self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.theme),
+                session_picker_palette(self.presentation.theme),
                 &items,
                 picker.selected_target(),
                 picker.hovered(),
-                self.session_picker_pressed,
-                self.keyboard_focused,
+                self.modal.session_picker_pressed,
+                self.input.keyboard_focused,
             )?;
-            self.buffers[buffer_index].stale.mark_full();
+            self.surface.buffers[buffer_index].stale.mark_full();
         }
         if let Some(started) = image_composition_started {
             eprintln!(
@@ -6409,46 +6714,61 @@ impl App {
             );
         }
         let capture_scale_ready = self
+            .presentation
             .capture_scale
-            .is_none_or(|expected| expected.saturating_mul(120) == self.scale_120);
+            .is_none_or(|expected| expected.saturating_mul(120) == self.surface.scale_120);
         if deterministic_capture_ready(
             capture_scale_ready,
             capture_minimum_images,
             capture_image_count,
-        ) && let Some(path) = self.capture.take()
+        ) && let Some(path) = self.presentation.capture.take()
         {
             write_ppm(&path, canvas, width, height)
                 .with_context(|| format!("write {}", path.display()))?;
             eprintln!(
                 "Wrote deterministic row capture at {}x scale to {}",
-                f64::from(self.scale_120) / 120.0,
+                f64::from(self.surface.scale_120) / 120.0,
                 path.display()
             );
         }
-        let history_status =
-            history_overlay_status(&self.pane.scrollback_viewport, self.pane.snapshot.as_ref());
-        let picker_damage_full_surface = std::mem::take(&mut self.session_picker_redraw);
+        let history_status = history_overlay_status(
+            &self.panes.pane.scrollback_viewport,
+            self.panes.pane.snapshot.as_ref(),
+        );
+        let picker_damage_full_surface = std::mem::take(&mut self.modal.session_picker_redraw);
         let damage_full_surface = picker_damage_full_surface
-            || take_full_surface_damage(&mut self.full_redraw, self.pane.snapshot_frame.is_some());
+            || take_full_surface_damage(
+                &mut self.presentation.full_redraw,
+                self.panes.pane.snapshot_frame.is_some(),
+            );
         if damage_full_surface {
-            self.window
+            self.surface
+                .window
                 .wl_surface()
                 .damage_buffer(0, 0, width_i32, height_i32);
         } else {
             if let Some(geometry) = &window_geometry {
-                for (row, dirty) in self.pane.surface_dirty_rows.iter().copied().enumerate() {
+                for (row, dirty) in self
+                    .panes
+                    .pane
+                    .surface_dirty_rows
+                    .iter()
+                    .copied()
+                    .enumerate()
+                {
                     if !dirty {
                         continue;
                     }
                     if let Some((x, y, row_width, row_height)) = snapshot_row_rect(geometry, row) {
-                        self.window
+                        self.surface
+                            .window
                             .wl_surface()
                             .damage_buffer(x, y, row_width, row_height);
                     }
                 }
             }
             for region in &inactive_damage_regions {
-                self.window.wl_surface().damage_buffer(
+                self.surface.window.wl_surface().damage_buffer(
                     i32::try_from(region.x).unwrap_or(i32::MAX),
                     i32::try_from(region.y).unwrap_or(i32::MAX),
                     i32::try_from(region.width).unwrap_or(i32::MAX),
@@ -6456,13 +6776,13 @@ impl App {
                 );
             }
         }
-        if history_status != self.pane.painted_history_status {
-            let content = Self::buffer_rect(self.content_rect(), self.scale_120)?;
+        if history_status != self.panes.pane.painted_history_status {
+            let content = Self::buffer_rect(self.content_rect(), self.surface.scale_120)?;
             if let Some(layout) =
-                history_overlay_layout(content.width, content.height, self.scale_120)
+                history_overlay_layout(content.width, content.height, self.surface.scale_120)
             {
                 let (x, y, overlay_width, overlay_height) = layout.panel;
-                self.window.wl_surface().damage_buffer(
+                self.surface.window.wl_surface().damage_buffer(
                     x.saturating_add(i32::try_from(content.x).unwrap_or(i32::MAX)),
                     y.saturating_add(i32::try_from(content.y).unwrap_or(i32::MAX)),
                     i32::try_from(overlay_width).unwrap_or(i32::MAX),
@@ -6470,37 +6790,43 @@ impl App {
                 );
             }
         }
-        self.pane.painted_history_status = history_status;
-        self.pane.raster_dirty_rows.fill(false);
-        self.pane.surface_dirty_rows.fill(false);
-        self.pane.pending_scrolls.clear();
-        if self.background_effect_reconcile_schedule.take_for_draw() {
+        self.panes.pane.painted_history_status = history_status;
+        self.panes.pane.raster_dirty_rows.fill(false);
+        self.panes.pane.surface_dirty_rows.fill(false);
+        self.panes.pane.pending_scrolls.clear();
+        if self
+            .surface
+            .background_effect_reconcile_schedule
+            .take_for_draw()
+        {
             self.reconcile_background_effect(
                 queue_handle,
                 BackgroundEffectCommitMode::DeferToDraw,
             )?;
         }
-        if !self.frame_pending {
-            self.window
+        if !self.scheduling.frame_pending {
+            self.surface
+                .window
                 .wl_surface()
-                .frame(queue_handle, self.window.wl_surface().clone());
-            self.frame_pending = true;
+                .frame(queue_handle, self.surface.window.wl_surface().clone());
+            self.scheduling.frame_pending = true;
         }
-        self.buffers[buffer_index]
+        self.surface.buffers[buffer_index]
             .buffer
-            .attach_to(self.window.wl_surface())
+            .attach_to(self.surface.window.wl_surface())
             .context("attach SHM buffer")?;
-        self.window.commit();
-        self.dirty_inactive_panes.clear();
-        self.session_picker_layout = picker_layout;
+        self.surface.window.commit();
+        self.panes.dirty_inactive_panes.clear();
+        self.modal.session_picker_layout = picker_layout;
         self.complete_background_effect_draw_commit()?;
         let committed_identity = self
+            .panes
             .pane
             .snapshot
             .as_ref()
             .map(|snapshot| (snapshot.splint_id, snapshot.incarnation, snapshot.revision));
         if perf_trace_enabled() {
-            let snapshot = self.pane.snapshot.as_ref();
+            let snapshot = self.panes.pane.snapshot.as_ref();
             emit_perf_trace(
                 "splinterm",
                 "draw_commit",
@@ -6519,11 +6845,12 @@ impl App {
             );
         }
         let inject_graphical_input = self
+            .scheduling
             .graphical_input_probe
             .as_mut()
             .is_some_and(|probe| probe.observe_commit(committed_identity));
         if inject_graphical_input {
-            self.graphical_input_probe = None;
+            self.scheduling.graphical_input_probe = None;
             self.send_input(vec![b'q'])?;
             if perf_trace_enabled() {
                 emit_perf_trace(
@@ -6540,938 +6867,23 @@ impl App {
                 );
             }
         }
-        if self.scroll_trace {
+        if self.scheduling.scroll_trace {
             if let Some(scroll_started) = scroll_started {
                 eprintln!(
                     "scroll-trace input_to_commit_us={} draw_us={} viewport_offset={} cached_rows={} page_pending={}",
                     scroll_started.elapsed().as_micros(),
                     draw_started.elapsed().as_micros(),
-                    self.pane.scrollback_viewport.offset_from_bottom(),
-                    self.pane
+                    self.panes.pane.scrollback_viewport.offset_from_bottom(),
+                    self.panes
+                        .pane
                         .snapshot
                         .as_ref()
                         .map_or(0, |snapshot| snapshot.scrollback_rows.len()),
-                    self.pane.history_page_pending,
+                    self.panes.pane.history_page_pending,
                 );
             }
         }
         Ok(())
-    }
-}
-
-impl CompositorHandler for App {
-    fn scale_factor_changed(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        factor: i32,
-    ) {
-        if surface != self.window.wl_surface() || factor <= 0 {
-            return;
-        }
-        let Ok(integer_scale) = u32::try_from(factor) else {
-            self.fail(anyhow::anyhow!(
-                "integer output scale does not fit u32: {factor}"
-            ));
-            return;
-        };
-        self.integer_fallback_scale = integer_scale;
-        if self.fractional_scale.is_none() {
-            let scale_120 = integer_scale.saturating_mul(SCALE_DENOMINATOR);
-            if let Err(error) = self.apply_scale(scale_120, queue_handle) {
-                self.fail(error);
-            }
-        }
-    }
-
-    fn transform_changed(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _transform: wl_output::Transform,
-    ) {
-    }
-
-    fn frame(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        _time: u32,
-    ) {
-        if surface == self.window.wl_surface() {
-            self.frame_pending = false;
-            if self.redraw_pending {
-                if let Err(error) = self.draw(queue_handle) {
-                    self.fail(error);
-                }
-            }
-        }
-    }
-
-    fn surface_enter(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        output: &wl_output::WlOutput,
-    ) {
-        if surface != self.window.wl_surface() {
-            return;
-        }
-        note_output_enter(&mut self.entered_outputs, output);
-        self.output_count = self.entered_outputs.len();
-        if let Err(error) = self.refresh_output_dpi(output, queue_handle) {
-            self.fail(error);
-        }
-    }
-
-    fn surface_leave(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        output: &wl_output::WlOutput,
-    ) {
-        if surface != self.window.wl_surface() {
-            return;
-        }
-        let was_most_recent = note_output_leave(&mut self.entered_outputs, output);
-        self.output_count = self.entered_outputs.len();
-        if was_most_recent {
-            // With no entered output, retain the last observation as Foot does
-            // while temporarily unmapped. Otherwise promote the previous output.
-            if let Some(current) = self.entered_outputs.last().cloned() {
-                if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
-                    self.fail(error);
-                }
-            }
-        }
-    }
-}
-
-impl WindowHandler for App {
-    fn request_close(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _window: &Window,
-    ) {
-        if self.trusted_consent.is_some() {
-            self.decide_consent(false);
-        } else {
-            self.exit = true;
-        }
-    }
-
-    fn configure(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        _window: &Window,
-        configure: WindowConfigure,
-        _serial: u32,
-    ) {
-        let width = configure
-            .new_size
-            .0
-            .map_or(self.logical_width, std::num::NonZeroU32::get);
-        let height = configure
-            .new_size
-            .1
-            .map_or(self.logical_height, std::num::NonZeroU32::get);
-        let resized = (width, height) != (self.logical_width, self.logical_height);
-        if resized {
-            self.logical_width = width;
-            self.logical_height = height;
-            self.session_picker_layout = None;
-            if let Some(viewport) = &self.viewport {
-                match viewport_destination(width, height) {
-                    Ok((width, height)) => viewport.set_destination(width, height),
-                    Err(error) => {
-                        self.fail(error);
-                        return;
-                    }
-                }
-            }
-            self.buffers.clear();
-            self.full_redraw = true;
-            self.update_ime_cursor_rectangle();
-        }
-        let initial_configure = !self.configured;
-        self.configured = true;
-        if initial_configure || resized {
-            debug_assert!(terminal_resize_allowed(
-                TerminalResizeCause::SurfaceConfigure,
-                self.pane.last_resize.is_some(),
-            ));
-            let resize = if self.inline_picker_open() {
-                self.restored_frontend_needs_resize = true;
-                Ok(())
-            } else {
-                self.emit_resize()
-            };
-            if let Err(error) = self
-                .queue_background_effect_geometry_for_draw()
-                .and(resize)
-                .and_then(|()| self.schedule_draw(queue_handle))
-            {
-                self.fail(error);
-            }
-        }
-    }
-}
-
-impl SeatHandler for App {
-    fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat_state
-    }
-
-    fn new_seat(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _seat: wl_seat::WlSeat,
-    ) {
-        self.seat_count += 1;
-    }
-
-    fn new_capability(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        seat: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        if self.data_device.is_none() {
-            self.data_device = Some(
-                self.data_device_manager
-                    .get_data_device(queue_handle, &seat),
-            );
-            self.primary_device = self
-                .primary_selection_manager
-                .as_ref()
-                .map(|manager| manager.get_selection_device(queue_handle, &seat));
-        }
-        if capability == Capability::Keyboard && self.keyboard.is_none() {
-            match self.seat_state.get_keyboard_with_repeat(
-                queue_handle,
-                &seat,
-                None,
-                self.loop_handle.clone(),
-                Box::new(|_, _, _| {}),
-            ) {
-                Ok(keyboard) => {
-                    self.keyboard = Some(keyboard);
-                    self.keyboard_seat = Some(seat.clone());
-                    if self.text_input.is_none() {
-                        if let Some(manager) = &self.text_input_manager {
-                            self.text_input = Some(manager.get_text_input(
-                                &seat,
-                                queue_handle,
-                                self.ime_generation,
-                            ));
-                            self.text_input_seat = Some(seat.clone());
-                        }
-                    }
-                }
-                Err(error) => self.fail(anyhow::anyhow!("create keyboard: {error}")),
-            }
-        }
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            match self.seat_state.get_pointer(queue_handle, &seat) {
-                Ok(pointer) => {
-                    self.pointer = Some(pointer);
-                    self.pointer_seat = Some(seat);
-                }
-                Err(error) => self.fail(anyhow::anyhow!("create pointer: {error}")),
-            }
-        }
-    }
-
-    fn remove_capability(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        seat: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        if capability == Capability::Keyboard && self.keyboard_seat.as_ref() == Some(&seat) {
-            if let Some(keyboard) = self.keyboard.take() {
-                keyboard.release();
-            }
-            self.keyboard_seat = None;
-            if self.text_input_seat.as_ref() == Some(&seat) {
-                self.ime.entered = false;
-                self.ime_generation = self.ime_generation.saturating_add(1);
-                self.ime_modal_barrier = false;
-                self.clear_ime_preedit();
-                if let Some(text_input) = self.text_input.take() {
-                    text_input.disable();
-                    text_input.commit();
-                    text_input.destroy();
-                }
-                self.text_input_seat = None;
-            }
-        }
-        if capability == Capability::Pointer && self.pointer_seat.as_ref() == Some(&seat) {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
-            }
-            self.pointer_seat = None;
-            self.pane.pointer_cell = None;
-        }
-    }
-
-    fn remove_seat(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        seat: wl_seat::WlSeat,
-    ) {
-        if self.keyboard_seat.as_ref() == Some(&seat) {
-            if let Some(keyboard) = self.keyboard.take() {
-                keyboard.release();
-            }
-            self.keyboard_seat = None;
-            if self.text_input_seat.as_ref() == Some(&seat) {
-                self.ime.entered = false;
-                self.ime_generation = self.ime_generation.saturating_add(1);
-                self.ime_modal_barrier = false;
-                self.clear_ime_preedit();
-                if let Some(text_input) = self.text_input.take() {
-                    text_input.disable();
-                    text_input.commit();
-                    text_input.destroy();
-                }
-                self.text_input_seat = None;
-            }
-        }
-        if self.pointer_seat.as_ref() == Some(&seat) {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
-            }
-            self.pointer_seat = None;
-        }
-        self.data_device = None;
-        self.primary_device = None;
-        self.seat_count = self.seat_count.saturating_sub(1);
-    }
-}
-
-impl KeyboardHandler for App {
-    fn enter(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        surface: &wl_surface::WlSurface,
-        _serial: u32,
-        _raw: &[u32],
-        _keysyms: &[Keysym],
-    ) {
-        if surface == self.window.wl_surface() {
-            self.set_ime_focus(true);
-            self.full_redraw = true;
-            if self.input_modes().focus_reporting && !self.inline_picker_open() {
-                self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
-                self.terminal_focus_reported = true;
-            }
-            if let Err(error) = self.schedule_draw(queue_handle) {
-                self.fail(error);
-            }
-        }
-    }
-
-    fn leave(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        surface: &wl_surface::WlSurface,
-        _serial: u32,
-    ) {
-        if surface == self.window.wl_surface() {
-            self.set_ime_focus(false);
-            self.full_redraw = true;
-            if self.input_modes().focus_reporting && !self.inline_picker_open() {
-                self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
-                self.terminal_focus_reported = false;
-            }
-            if let Err(error) = self.schedule_draw(queue_handle) {
-                self.fail(error);
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn press_key(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        serial: u32,
-        event: KeyEvent,
-    ) {
-        if self.session_picker.is_some() {
-            self.session_picker_consumed_keys.insert(event.raw_code);
-        }
-        if let Some(action) =
-            tab_shortcut_action(event.keysym, self.modifiers, false, self.managed_tabs)
-        {
-            self.session_picker_consumed_keys.insert(event.raw_code);
-            if !tab_action_dispatch_allowed([
-                self.session_picker.is_some(),
-                self.trusted_consent.is_some(),
-                self.session_picker_requested,
-                self.session_switch_pending,
-                self.session_picker_reconcile_pending,
-            ]) {
-                return;
-            }
-            let target = match action {
-                TabShortcutAction::Next => self
-                    .tabs
-                    .next()
-                    .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
-                TabShortcutAction::Previous => self
-                    .tabs
-                    .previous()
-                    .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
-                TabShortcutAction::NewDojo => Some(WindowTopologyCommand::NewDojo {
-                    lair_id: self.active_identity.lair_id,
-                }),
-                TabShortcutAction::Close => Some(WindowTopologyCommand::CloseTab {
-                    dojo_id: self.active_dojo_id(),
-                }),
-                TabShortcutAction::Consume => None,
-            };
-            if let Some(target) = target
-                && let Err(error) = self.send_topology_command(target)
-            {
-                self.fail(error);
-            }
-            return;
-        }
-        if let Some(action) = session_picker_shortcut_action(
-            event.keysym,
-            self.modifiers,
-            false,
-            self.session_picker.is_some()
-                || self.trusted_consent.is_some()
-                || self.session_picker_requested
-                || self.session_switch_pending
-                || self.session_picker_reconcile_pending,
-        ) {
-            if action == SessionPickerShortcutAction::Request {
-                if self.topology_commands.is_some() {
-                    self.session_picker_requested = true;
-                    if let Err(error) =
-                        self.send_topology_command(WindowTopologyCommand::RequestSessionPicker)
-                    {
-                        self.session_picker_requested = false;
-                        eprintln!("splinterm session picker request: {error:#}");
-                    }
-                } else {
-                    eprintln!("splinterm session picker is unavailable for this attachment");
-                }
-            }
-            return;
-        }
-        if self.session_picker.is_some() || self.trusted_consent.is_some() {
-            self.handle_key(&event);
-            if (self.full_redraw || self.session_picker_redraw)
-                && let Err(error) = self.schedule_draw(queue_handle)
-            {
-                self.fail(error);
-            }
-            return;
-        }
-        if self.topology_commands.is_some()
-            && let Some(action) = pane_topology_action(event.keysym, self.modifiers)
-        {
-            if let Some(target) = self.focused_splint() {
-                let dojo_id = self.active_dojo_id();
-                let command = match action {
-                    PaneTopologyAction::Split(axis) => WindowTopologyCommand::Split {
-                        dojo_id,
-                        target,
-                        axis,
-                    },
-                    PaneTopologyAction::Close => WindowTopologyCommand::Close { dojo_id, target },
-                    PaneTopologyAction::AdjustRatio(delta) => WindowTopologyCommand::AdjustRatio {
-                        dojo_id,
-                        target,
-                        delta,
-                    },
-                };
-                if let Err(error) = self.send_topology_command(command) {
-                    self.fail(error);
-                }
-            }
-            return;
-        }
-        if let Some(action) = pane_focus_action(event.keysym, self.modifiers) {
-            let changed = match action {
-                PaneFocusAction::Direction(direction) => self.focus_direction(direction),
-            };
-            if changed {
-                self.update_ime_cursor_rectangle();
-                if let Err(error) = self.schedule_draw(queue_handle) {
-                    self.fail(error);
-                }
-            }
-            return;
-        }
-        if let Some(action) = font_zoom_action(event.keysym, self.modifiers) {
-            if let Err(error) = self.apply_font_zoom(action, queue_handle) {
-                self.fail(error);
-            }
-            return;
-        }
-        if self.modifiers.ctrl
-            && self.modifiers.shift
-            && matches!(event.keysym, Keysym::c | Keysym::C)
-        {
-            self.publish_clipboard(queue_handle, serial, false);
-        } else if self.modifiers.ctrl
-            && self.modifiers.shift
-            && matches!(event.keysym, Keysym::v | Keysym::V)
-        {
-            self.begin_clipboard_read(PasteTarget::Clipboard);
-        } else {
-            match self.handle_history_key(&event, queue_handle) {
-                Ok(true) => {}
-                Ok(false) => {
-                    self.handle_key(&event);
-                    if self.full_redraw {
-                        if let Err(error) = self.schedule_draw(queue_handle) {
-                            self.fail(error);
-                        }
-                    }
-                }
-                Err(error) => self.fail(error),
-            }
-        }
-    }
-
-    fn repeat_key(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        event: KeyEvent,
-    ) {
-        if self.session_picker.is_some() {
-            self.handle_key(&event);
-            if (self.full_redraw || self.session_picker_redraw)
-                && let Err(error) = self.schedule_draw(queue_handle)
-            {
-                self.fail(error);
-            }
-            return;
-        }
-        if self.session_picker_consumed_keys.contains(&event.raw_code) {
-            return;
-        }
-        if tab_shortcut_action(event.keysym, self.modifiers, true, self.managed_tabs).is_some() {
-            self.session_picker_consumed_keys.insert(event.raw_code);
-            return;
-        }
-        if session_picker_shortcut_action(
-            event.keysym,
-            self.modifiers,
-            true,
-            self.session_picker.is_some()
-                || self.trusted_consent.is_some()
-                || self.session_picker_requested
-                || self.session_switch_pending
-                || self.session_picker_reconcile_pending,
-        )
-        .is_some()
-        {
-            return;
-        }
-        if self.trusted_consent.is_some() {
-            self.handle_key(&event);
-            return;
-        }
-        if let Some(action) = font_zoom_action(event.keysym, self.modifiers) {
-            if let Err(error) = self.apply_font_zoom(action, queue_handle) {
-                self.fail(error);
-            }
-            return;
-        }
-        match self.handle_history_key(&event, queue_handle) {
-            Ok(true) => {}
-            Ok(false) => self.handle_key(&event),
-            Err(error) => self.fail(error),
-        }
-    }
-
-    fn release_key(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        event: KeyEvent,
-    ) {
-        self.session_picker_consumed_keys.remove(&event.raw_code);
-    }
-
-    fn update_modifiers(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        modifiers: Modifiers,
-        _raw_modifiers: RawModifiers,
-        _layout: u32,
-    ) {
-        self.modifiers = modifiers;
-    }
-}
-
-impl PointerHandler for App {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one Wayland pointer frame preserves event order across selection, mouse reporting, paste, and URL gestures"
-    )]
-    fn pointer_frame(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        _pointer: &wl_pointer::WlPointer,
-        events: &[PointerEvent],
-    ) {
-        let modal_frame = self.inline_picker_open();
-        let mut picker_changed = false;
-        let mut pane_focus_changed = false;
-        for event in events {
-            if &event.surface != self.window.wl_surface() {
-                continue;
-            }
-            if modal_frame {
-                picker_changed |= self.handle_session_picker_pointer(event);
-                continue;
-            }
-            match self.handle_tab_strip_pointer(event) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(error) => {
-                    self.fail(error);
-                    return;
-                }
-            }
-            let previous_hover = self.pane.hovered_url.clone();
-            let mut cell = self.pointer_cell_at(event.position);
-            match event.kind {
-                PointerEventKind::Enter { serial } => {
-                    self.last_pointer_serial = Some(serial);
-                    self.pane.pointer_cell = cell;
-                }
-                PointerEventKind::Leave { .. } => {
-                    self.pane.pointer_cell = None;
-                    self.pane.hovered_url = None;
-                }
-                PointerEventKind::Motion { .. } => {
-                    self.pane.pointer_cell = cell;
-                    self.pane.hovered_url = if self.pane.selecting {
-                        None
-                    } else {
-                        cell.and_then(|position| {
-                            let display = self.display_snapshot_cow()?;
-                            url_at(&display, position)
-                        })
-                    };
-                    if self.pane.selecting {
-                        if let Some(position) = cell {
-                            self.extend_selection(position);
-                        }
-                    } else if let Some(position) = cell {
-                        let active_press =
-                            self.pressed_buttons.values().find_map(application_motion);
-                        let report = if let Some((code, sgr, modifiers)) = active_press {
-                            mouse_report(MouseAction::Motion(code), position, modifiers, sgr)
-                        } else {
-                            let modes = self.input_modes();
-                            (modes.mouse_tracking == MouseTracking::Any)
-                                .then(|| {
-                                    mouse_report(
-                                        MouseAction::Motion(3),
-                                        position,
-                                        self.modifiers,
-                                        modes.sgr_mouse,
-                                    )
-                                })
-                                .flatten()
-                        };
-                        if let Some(report) = report {
-                            self.send_coalescible_input(report);
-                        }
-                    }
-                }
-                PointerEventKind::Press { button, serial, .. } => {
-                    self.last_pointer_serial = Some(serial);
-                    if button == BTN_LEFT
-                        && self
-                            .session_picker
-                            .as_ref()
-                            .is_some_and(|picker| !picker.is_inline())
-                    {
-                        let decision = cell.and_then(|position| {
-                            self.session_picker
-                                .as_mut()
-                                .and_then(|picker| picker.select_row(position.row))
-                        });
-                        if let Some(decision) = decision {
-                            self.decide_session_picker(decision);
-                        }
-                        continue;
-                    }
-                    if let Some(splint_id) = self.splint_at_point(event.position) {
-                        if self.focus_splint(splint_id) {
-                            cell = self.pointer_cell_at(event.position);
-                            self.pane.pointer_cell = cell;
-                            self.update_ime_cursor_rectangle();
-                            if let Err(error) = self.schedule_draw(queue_handle) {
-                                self.fail(error);
-                                return;
-                            }
-                        }
-                    }
-                    if button == BTN_LEFT
-                        && history_return_to_live_hit(
-                            event.position,
-                            self.content_rect(),
-                            !self.pane.scrollback_viewport.is_live(),
-                        )
-                    {
-                        if let Err(error) = self
-                            .scroll_history(MouseAction::WheelDown, usize::MAX)
-                            .and_then(|moved| {
-                                if moved && self.configured {
-                                    self.schedule_draw(queue_handle)?;
-                                }
-                                Ok(())
-                            })
-                        {
-                            self.fail(error);
-                        }
-                        continue;
-                    }
-                    if self.trusted_consent.is_some() && button == BTN_LEFT {
-                        let (x, y) = event.position;
-                        if y >= f64::from(self.logical_height) * 0.78 {
-                            self.decide_consent(x >= f64::from(self.logical_width) / 2.0);
-                        }
-                        continue;
-                    }
-                    self.pane.pointer_cell = cell;
-                    self.recompute_hovered_url();
-                    let owner = classify_press(
-                        button,
-                        cell.is_some(),
-                        self.modifiers,
-                        self.input_modes(),
-                        self.pane.hovered_url.is_some(),
-                    );
-                    self.pressed_buttons.insert(button, owner);
-                    match owner {
-                        PressOwner::Application {
-                            code,
-                            tracking: _,
-                            sgr,
-                            modifiers,
-                        } => {
-                            if let Some(position) = cell {
-                                if let Some(report) =
-                                    mouse_report(MouseAction::Press(code), position, modifiers, sgr)
-                                {
-                                    self.send_command(WindowCommand::Input(report));
-                                }
-                            }
-                        }
-                        PressOwner::Selection => {
-                            if let Some(position) = cell {
-                                self.begin_selection(position);
-                            }
-                        }
-                        PressOwner::PrimaryPaste => {
-                            self.begin_clipboard_read(PasteTarget::Primary);
-                        }
-                        PressOwner::Url => self.open_hovered_url(),
-                        PressOwner::Ignored => {}
-                    }
-                }
-                PointerEventKind::Release { button, serial, .. } => {
-                    self.last_pointer_serial = Some(serial);
-                    match take_press_owner(&mut self.pressed_buttons, button) {
-                        PressOwner::Application {
-                            code,
-                            tracking: _,
-                            sgr,
-                            modifiers,
-                        } => {
-                            if let Some(position) = cell.or(self.pane.pointer_cell) {
-                                if let Some(report) = mouse_report(
-                                    MouseAction::Release(code),
-                                    position,
-                                    modifiers,
-                                    sgr,
-                                ) {
-                                    self.send_command(WindowCommand::Input(report));
-                                }
-                            }
-                        }
-                        PressOwner::Selection => {
-                            self.finish_selection();
-                            self.publish_clipboard(queue_handle, serial, true);
-                        }
-                        PressOwner::PrimaryPaste | PressOwner::Url | PressOwner::Ignored => {}
-                    }
-                }
-                PointerEventKind::Axis {
-                    horizontal: _,
-                    vertical,
-                    ..
-                } => {
-                    // Xterm's mouse protocol has only vertical wheel button codes 4/5;
-                    // Foot does not synthesize horizontal wheel reports into unrelated buttons.
-                    if vertical.is_none() {
-                        continue;
-                    }
-                    if let Some(splint_id) = pointer_axis_focus_target(
-                        true,
-                        !self.pressed_buttons.is_empty(),
-                        self.splint_at_point(event.position),
-                        self.focused_splint(),
-                    ) && self.focus_splint(splint_id)
-                    {
-                        cell = self.pointer_cell_at(event.position);
-                        self.pane.pointer_cell = cell;
-                        self.update_ime_cursor_rectangle();
-                        pane_focus_changed = true;
-                    }
-                    if let Err(error) = self.handle_vertical_wheel(
-                        cell,
-                        vertical.absolute,
-                        vertical.discrete,
-                        vertical.value120,
-                    ) {
-                        self.fail(error);
-                    }
-                }
-            }
-            if previous_hover != self.pane.hovered_url {
-                if let Some((start, _, _)) = previous_hover {
-                    self.dirty_row(start.row);
-                }
-                if let Some((start, _, _)) = &self.pane.hovered_url {
-                    self.dirty_row(start.row);
-                }
-            }
-        }
-        if self.configured
-            && !self.session_picker_reconcile_pending
-            && (picker_changed && self.inline_picker_open()
-                || pane_focus_changed
-                || self.pane.viewport_dirty
-                || self.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
-                || self.pane.surface_dirty_rows.iter().any(|dirty| *dirty))
-        {
-            if let Err(error) = self.schedule_draw(queue_handle) {
-                self.fail(error);
-            }
-        }
-    }
-}
-
-impl DataDeviceHandler for App {
-    fn enter(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        data_device: &wl_data_device::WlDataDevice,
-        _x: f64,
-        _y: f64,
-        _surface: &wl_surface::WlSurface,
-    ) {
-        if let Some(offer) = self
-            .data_device
-            .as_ref()
-            .filter(|device| device.inner() == data_device)
-            .and_then(|device| device.data().drag_offer())
-        {
-            offer.accept_mime_type(0, None);
-            offer.set_actions(DndAction::empty(), DndAction::empty());
-        }
-    }
-
-    fn leave(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _data_device: &wl_data_device::WlDataDevice,
-    ) {
-    }
-
-    fn motion(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _data_device: &wl_data_device::WlDataDevice,
-        _x: f64,
-        _y: f64,
-    ) {
-    }
-
-    fn selection(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        data_device: &wl_data_device::WlDataDevice,
-    ) {
-        self.clipboard_offer = self
-            .data_device
-            .as_ref()
-            .filter(|device| device.inner() == data_device)
-            .and_then(|device| device.data().selection_offer())
-            .filter(|offer| offer.with_mime_types(accepted_text_mime).is_some());
-    }
-
-    fn drop_performed(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _data_device: &wl_data_device::WlDataDevice,
-    ) {
-    }
-}
-
-impl DataOfferHandler for App {
-    fn source_actions(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        offer: &mut DragOffer,
-        _actions: DndAction,
-    ) {
-        offer.set_actions(DndAction::empty(), DndAction::empty());
-    }
-
-    fn selected_action(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _offer: &mut DragOffer,
-        _actions: DndAction,
-    ) {
     }
 }
 
@@ -7484,346 +6896,6 @@ fn write_selection_payload(write_pipe: WritePipe, payload: Arc<[u8]>) {
         let fd = OwnedFd::from(write_pipe);
         let _ = write_clipboard_with_deadline(&fd, &payload, CLIPBOARD_IO_TIMEOUT);
     });
-}
-
-impl DataSourceHandler for App {
-    fn accept_mime(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _source: &wl_data_source::WlDataSource,
-        _mime: Option<String>,
-    ) {
-    }
-
-    fn send_request(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        source: &wl_data_source::WlDataSource,
-        mime: String,
-        write_pipe: WritePipe,
-    ) {
-        if accepted_text_mime(std::slice::from_ref(&mime)).is_none() {
-            return;
-        }
-        if let Some((_, payload)) = self
-            .clipboard_sources
-            .iter()
-            .find(|(candidate, _)| candidate.inner() == source)
-        {
-            write_selection_payload(write_pipe, Arc::clone(payload));
-        }
-    }
-
-    fn cancelled(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        source: &wl_data_source::WlDataSource,
-    ) {
-        self.clipboard_sources
-            .retain(|(candidate, _)| candidate.inner() != source);
-    }
-
-    fn dnd_dropped(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _source: &wl_data_source::WlDataSource,
-    ) {
-    }
-
-    fn dnd_finished(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _source: &wl_data_source::WlDataSource,
-    ) {
-    }
-
-    fn action(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _source: &wl_data_source::WlDataSource,
-        _action: DndAction,
-    ) {
-    }
-}
-
-impl PrimarySelectionDeviceHandler for App {
-    fn selection(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        device: &ZwpPrimarySelectionDeviceV1,
-    ) {
-        self.primary_offer = self
-            .primary_device
-            .as_ref()
-            .filter(|candidate| candidate.inner() == device)
-            .and_then(|candidate| candidate.data().selection_offer())
-            .filter(|offer| offer.with_mime_types(accepted_text_mime).is_some());
-    }
-}
-
-impl PrimarySelectionSourceHandler for App {
-    fn send_request(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        source: &ZwpPrimarySelectionSourceV1,
-        mime: String,
-        write_pipe: WritePipe,
-    ) {
-        if accepted_text_mime(std::slice::from_ref(&mime)).is_none() {
-            return;
-        }
-        if let Some((_, payload)) = self
-            .primary_sources
-            .iter()
-            .find(|(candidate, _)| candidate.inner() == source)
-        {
-            write_selection_payload(write_pipe, Arc::clone(payload));
-        }
-    }
-
-    fn cancelled(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        source: &ZwpPrimarySelectionSourceV1,
-    ) {
-        self.primary_sources
-            .retain(|(candidate, _)| candidate.inner() != source);
-    }
-}
-
-impl OutputHandler for App {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-
-    fn new_output(
-        &mut self,
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-    }
-    fn update_output(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
-    ) {
-        if self.entered_outputs.last() == Some(&output) {
-            if let Err(error) = self.refresh_output_dpi(&output, queue_handle) {
-                self.fail(error);
-            }
-        }
-    }
-    fn output_destroyed(
-        &mut self,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
-    ) {
-        let was_most_recent = note_output_leave(&mut self.entered_outputs, &output);
-        self.output_count = self.entered_outputs.len();
-        if was_most_recent {
-            if let Some(current) = self.entered_outputs.last().cloned() {
-                if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
-                    self.fail(error);
-                }
-            }
-        }
-    }
-}
-
-impl ShmHandler for App {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
-    }
-}
-
-impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &ExtBackgroundEffectManagerV1,
-        event: BackgroundManagerEvent,
-        _data: &(),
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-    ) {
-        if let BackgroundManagerEvent::Capabilities { flags } = event {
-            let flags = background_effect_capability_bits(flags);
-            state.background_effect_capabilities_received = true;
-            state.background_effect_state.set_capability_flags(flags);
-            if state.background_effect_trace {
-                eprintln!(
-                    "splinterm background-effect capabilities={flags:#x} blur={}",
-                    flags & BackgroundCapability::Blur.bits() != 0
-                );
-            }
-            if state
-                .background_effect_reconcile_schedule
-                .capability_reconciles_immediately()
-                && let Err(error) = state.execute_background_effect_actions(
-                    queue_handle,
-                    BackgroundEffectCommitMode::Immediate,
-                )
-            {
-                state.fail(error);
-            }
-        }
-    }
-}
-
-impl Dispatch<ExtBackgroundEffectSurfaceV1, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ExtBackgroundEffectSurfaceV1,
-        _event: ext_background_effect_surface_v1::Event,
-        _data: &(),
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WpFractionalScaleManagerV1, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WpFractionalScaleManagerV1,
-        _event: <WpFractionalScaleManagerV1 as Proxy>::Event,
-        _data: &(),
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WpViewporter, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WpViewporter,
-        _event: <WpViewporter as Proxy>::Event,
-        _data: &(),
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WpViewport, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WpViewport,
-        _event: <WpViewport as Proxy>::Event,
-        _data: &(),
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<ZwpTextInputManagerV3, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwpTextInputManagerV3,
-        _event: <ZwpTextInputManagerV3 as Proxy>::Event,
-        _data: &(),
-        _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WpFractionalScaleV1, ()> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &WpFractionalScaleV1,
-        event: wp_fractional_scale_v1::Event,
-        _data: &(),
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-    ) {
-        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            if let Err(error) = state.apply_scale(scale, queue_handle) {
-                state.fail(error);
-            }
-        }
-    }
-}
-
-impl Dispatch<ZwpTextInputV3, u64> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &ZwpTextInputV3,
-        event: zwp_text_input_v3::Event,
-        generation: &u64,
-        _connection: &Connection,
-        queue_handle: &QueueHandle<Self>,
-    ) {
-        if *generation != state.ime_generation {
-            return;
-        }
-        let ime_batch_event = matches!(
-            &event,
-            zwp_text_input_v3::Event::PreeditString { .. }
-                | zwp_text_input_v3::Event::CommitString { .. }
-                | zwp_text_input_v3::Event::Done { .. }
-        );
-        if ime_batch_event && (state.inline_picker_open() || state.ime_modal_barrier) {
-            state.ime.clear_composition();
-            return;
-        }
-        match event {
-            zwp_text_input_v3::Event::Enter { surface } => {
-                if surface == *state.window.wl_surface() {
-                    state.ime.entered = true;
-                    if state.keyboard_focused && !state.inline_picker_open() {
-                        state.enable_text_input();
-                    }
-                }
-            }
-            zwp_text_input_v3::Event::Leave { surface } => {
-                if surface == *state.window.wl_surface() {
-                    state.ime.entered = false;
-                    state.clear_ime_preedit();
-                    if state.configured {
-                        if let Err(error) = state.schedule_draw(queue_handle) {
-                            state.fail(error);
-                        }
-                    }
-                }
-            }
-            zwp_text_input_v3::Event::PreeditString { text, .. } => {
-                state.ime.set_preedit(text);
-            }
-            zwp_text_input_v3::Event::CommitString { text } => {
-                state.ime.set_commit(text);
-            }
-            zwp_text_input_v3::Event::Done { serial } => {
-                let (_serial_matches, _, commit) = state.ime.finish(serial);
-                if let Some(commit) = commit {
-                    state.send_command(WindowCommand::Input(commit.into_bytes()));
-                }
-                if let Err(error) = state.refresh_ime_preedit() {
-                    state.fail(error);
-                    return;
-                }
-                if state.configured {
-                    if let Err(error) = state.schedule_draw(queue_handle) {
-                        state.fail(error);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 #[cfg(test)]
@@ -9908,24 +8980,4 @@ mod tests {
         assert!(buffer_dimensions(1, u32::MAX, 240).is_err());
         assert!(buffer_dimensions(i32::MAX as u32 / 4 + 1, 1, 120).is_err());
     }
-}
-
-delegate_compositor!(App);
-delegate_output!(App);
-delegate_shm!(App);
-delegate_seat!(App);
-delegate_keyboard!(App);
-delegate_pointer!(App);
-delegate_data_device!(App);
-delegate_primary_selection!(App);
-delegate_xdg_shell!(App);
-delegate_xdg_window!(App);
-delegate_registry!(App);
-
-impl ProvidesRegistryState for App {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-
-    registry_handlers![OutputState, SeatState];
 }
