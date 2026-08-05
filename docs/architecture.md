@@ -112,6 +112,66 @@ native `Window`. Mapping, focusing, moving, resizing, or assigning a Window to a
 compositor workspace requires a separate trusted graphical broker and is not
 implied by topology mutation or the persisted default-focus hint.
 
+## Client module boundaries
+
+The `splinterm` binary entry point performs only Tokio runtime setup and calls
+one private application entry point. Binary-owned orchestration lives under
+`app/`:
+
+| Area | Ownership |
+| --- | --- |
+| `app/commands.rs` | Leaf-only Clap grammar and value conversions |
+| `app/cli.rs` | Output-mode selection and human command routing |
+| `app/machine/` | Stable JSON/NDJSON requests, envelopes, deadlines, and subscriptions |
+| `app/local_service.rs`, `consent.rs`, `sessions.rs` | Local policy/reset/relay services, trusted consent, session selection, and picker presentation |
+| `app/session_catalog.rs` | Neutral launch requests, recent-session state, and picker projections |
+| `app/window.rs` | Graphical task startup, renderer configuration, image-cache setup, and single-/multi-pane lifecycle coordination |
+| `app/pane_bridge.rs` | Bounded daemon-to-frontend pane subscriptions, control, resize, image leases, and resynchronization |
+| `app/topology_manager.rs` | Per-Dojo async task ownership and topology reconciliation |
+| `app/theme_watch.rs` | Bounded theme observation and publication |
+
+Application services do not own Smithay objects, Wayland proxies, SHM buffers,
+or renderer frames. As the terminal-window composition boundary, `app/window.rs`
+configures the public renderer facade, creates the bounded shared image-content
+cache, and maps `WindowOptions` through `run_window`. The session-picker path in
+`sessions.rs` also configures the renderer and calls the same public window
+facade for its transient trusted UI. The async pane and topology services
+exchange frontend contracts, image leases, and protocol data without depending
+on Wayland or renderer frames. Command grammar and session-catalog
+helpers are neutral leaves, so machine/local-service dispatch and topology/window
+orchestration have no reverse dependency on their callers.
+
+Library-owned graphical code has one-way internal dependencies:
+
+```text
+frontend contracts ───────────────┐
+                                  ▼
+renderer ← geometry/config    wayland facade
+   ▲                              │
+   └──────── explicit frames ─────┘
+
+app/cli → commands + machine/local/session/window services
+app/window + sessions picker → renderer configuration + public wayland facade
+app/pane_bridge + topology_manager → frontend contracts + daemon protocol
+sessions + topology_manager → neutral session_catalog
+```
+
+`frontend/` owns platform-neutral window messages, options, picker state, and
+topology contracts. `renderer/` owns immutable process resources, explicit
+per-window render contexts, prepared frames, text/raster/image composition,
+overlays, and deterministic capture. `wayland/` owns compositor state, SHM,
+input/IME/clipboard, damage scheduling, graphical tabs and chrome, and thin
+protocol dispatch. Its `App` composes cohesive platform, surface, presentation,
+input, clipboard, panes, tabs, modal, and scheduling state rather than exposing
+one flat mutable object. Generic tab policy remains in `tab.rs`; graphical tab
+presentation remains in `wayland/tabs.rs`; daemon task ownership remains in
+`app/topology_manager.rs`.
+
+Only the established library facades are public. Reducers and dispatch seams use
+private, `pub(super)`, or `pub(in crate::wayland)` visibility. Binary application
+internals use `pub(in crate::app)`; only the single application entry point is
+visible to the crate-root binary.
+
 ## Automation and coding-agent boundary
 
 The supported path for a coding agent is a least-privileged automation client:

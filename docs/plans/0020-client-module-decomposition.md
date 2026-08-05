@@ -370,6 +370,53 @@ Update architecture documentation, remove obsolete compatibility shims, inspect
 module visibility, and record final review and validation evidence. Do not claim
 completion until both validation evidence and recorded review exist.
 
+#### Closure record — 2026-08-05
+
+Plan 0020 is complete through Milestone 12. The accepted closure reduces
+`main.rs` to a six-line Tokio composition root; separates leaf command grammar,
+CLI dispatch, machine clients, neutral session-catalog helpers, session UI,
+graphical window lifecycle, pane protocol bridging, topology task ownership,
+and theme observation; extracts private Wayland chrome painting; and documents
+the final frontend, renderer-context, Wayland, and application boundaries.
+Application internals are limited to `pub(in crate::app)` or narrower except for
+the single crate-root `app::run` entry point. The Wayland public facade remains
+`run` plus the existing bracketed-paste export.
+
+Recorded non-graphical validation:
+
+- normalized source equivalence passed for all 18 mechanically moved command,
+  window-lifecycle, session-catalog, and chrome functions;
+- `cargo test -p splinterm` passed 237 library tests, 35 binary tests, 15
+  automation CLI integration tests, and 7 policy CLI integration tests;
+- `cargo check -p splinterm --all-targets` passed;
+- strict all-target Clippy passed with `-D warnings`, wildcard-import checks, and
+  only the recorded baseline allowances for `collapsible-if`,
+  `manual-is-multiple-of`, and `useless-vec`;
+- `cargo fmt --all -- --check` and `git diff --check` passed; and
+- dependency and visibility audits found no reverse imports from machine/local
+  services into CLI dispatch, no session/topology/window cycle, no graphical
+  dependencies in the async pane or topology services, and no new public
+  Wayland or crate export.
+
+Two fresh final reviews were recorded. The behavior/lifecycle review accepted
+CLI and machine contracts, bounded queues, pane resynchronization, controller
+and image cleanup, topology/theme task shutdown, renderer behavior, chrome
+painting, public exports, and Wayland teardown with no blockers. The initial
+architecture review identified command/session dependency cycles and incomplete
+window dependency documentation; after neutral `commands` and
+`session_catalog` leaves and corrected documentation were added, a fresh
+second-round architecture review accepted ownership, dependency direction,
+visibility, documentation, and every Plan 0020 completion criterion with no
+blockers.
+
+A full-workspace attempt during Milestone 11 retained two unrelated timing
+failures in unchanged `splinterd` end-to-end tests
+(`parent_policy_snapshot_excludes_new_splint_until_reload` and
+`phase8_detach_reattach_overflow_resync_and_cleanup`). Daemon unit tests and the
+bounded workspace excluding `splinterd` passed; no daemon or protocol files were
+changed by Milestones 11–12. No graphical validation was authorized or required
+for these behavior-preserving architecture changes.
+
 ## Test strategy
 
 Move unit tests with implementation by default. This preserves private testing

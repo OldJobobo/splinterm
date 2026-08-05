@@ -116,6 +116,17 @@ Scale, face identity, raster size, theme, and output-DPI changes use explicit
 cache keys or invalidation; cold/warm and full/damage/scroll-copy paths must
 produce identical pixels.
 
+Renderer ownership is explicit. `RendererResources` holds immutable
+process-wide renderer options and font configuration. Every graphical Window
+owns one mutable `RenderContext` containing its output DPI, font zoom, and
+background alpha. Prepared frames capture their context-dependent metrics and
+alpha, so composition and deterministic capture do not consult ambient mutable
+state. Existing public configuration and capture signatures retain a separate
+compatibility context, but production Wayland rendering uses explicit context
+paths. Immutable resolved font faces remain process-wide; bounded glyph and
+raster-face caches remain renderer-thread-local so native FreeType handles are
+not made `Send` or `Sync`.
+
 Release budgets are enforced by `tools/performance/phase9-thresholds.json`.
 Notable limits are 10/300 ms full-paint p95 at 80×24/240×80, 1/10 ms one-row
 paint p95, 128/256 MiB renderer RSS, 256 MiB graphical RSS, 128 MiB SHM, five
