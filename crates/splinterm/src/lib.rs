@@ -11,6 +11,7 @@ pub mod automation;
 pub mod background_effect;
 mod box_drawing;
 pub mod config;
+pub mod frontend;
 pub mod geometry;
 pub mod pane;
 pub mod renderer;
@@ -20,8 +21,9 @@ pub mod tab;
 pub mod viewport;
 pub mod wayland;
 
-pub use wayland::{
+pub use frontend::{
     AuthorityStatus, SessionPickerDecision, SessionPickerItem, SessionPickerUi, ThemeUpdate,
     TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
-    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, run as run_window,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
 };
+pub use wayland::run as run_window;
