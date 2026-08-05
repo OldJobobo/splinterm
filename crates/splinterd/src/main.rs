@@ -2105,6 +2105,7 @@ fn observe_process_exit(state: &Arc<DaemonState>, handle: LiveSplintHandle) {
 #[derive(Debug, Default)]
 struct RequestAuthorizationContext {
     policy_match: Option<policy::PolicyMatch>,
+    trusted_ui_bypass: bool,
 }
 
 impl RequestAuthorizationContext {
@@ -2112,6 +2113,10 @@ impl RequestAuthorizationContext {
         self.policy_match
             .as_ref()
             .is_some_and(|matched| !matched.rule_id.is_empty())
+    }
+
+    fn requires_terminate_scope_authorization(&self) -> bool {
+        !self.trusted_ui_bypass && !self.policy_authorized()
     }
 
     fn maximum_returned_bytes(&self) -> Option<usize> {
@@ -2176,6 +2181,34 @@ fn trusted_ui_bypass(
     request: &Request,
 ) -> bool {
     trusted_ui_client && matching_splinterm_executable && trusted_ui_request(request)
+}
+
+fn intrinsically_authorized(
+    plan: &authorization::RequestAuthorization,
+    development_terminal_access: bool,
+) -> bool {
+    use authorization::RequestAuthorization;
+
+    development_terminal_access
+        || matches!(
+            plan,
+            RequestAuthorization::Authenticated
+                | RequestAuthorization::Owned(_)
+                | RequestAuthorization::TrustedUiConsent
+        )
+}
+
+fn trusted_ui_authorization_context(
+    trusted_ui_client: bool,
+    peer: &PeerIdentity,
+    request: &Request,
+) -> Option<RequestAuthorizationContext> {
+    trusted_ui_bypass(trusted_ui_client, peer.is_matching_splinterm(), request).then(|| {
+        RequestAuthorizationContext {
+            trusted_ui_bypass: true,
+            ..RequestAuthorizationContext::default()
+        }
+    })
 }
 
 const fn include_image_metadata(
@@ -2815,15 +2848,12 @@ async fn authorize_request(
     use authorization::RequestAuthorization;
 
     let plan = authorization::for_request(request);
-    if matches!(
-        plan,
-        RequestAuthorization::Authenticated
-            | RequestAuthorization::Owned(_)
-            | RequestAuthorization::TrustedUiConsent
-    ) || state.development_terminal_access
-        || trusted_ui_bypass(trusted_ui_client, peer.is_matching_splinterm(), request)
-    {
+    if intrinsically_authorized(&plan, state.development_terminal_access) {
         return Ok(RequestAuthorizationContext::default());
+    }
+    if let Some(authorization) = trusted_ui_authorization_context(trusted_ui_client, peer, request)
+    {
+        return Ok(authorization);
     }
 
     let Some(required_scopes) = requested_operation_scopes(request) else {
@@ -2899,6 +2929,7 @@ async fn authorize_request(
     if let Some(policy_match) = matched {
         return Ok(RequestAuthorizationContext {
             policy_match: Some(policy_match),
+            ..RequestAuthorizationContext::default()
         });
     }
     if consent_capable_request(request) {
@@ -4739,7 +4770,7 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
         } => {
-            if !authorization.policy_authorized() {
+            if authorization.requires_terminate_scope_authorization() {
                 let _ = authorize_scope(
                     state,
                     peer,
@@ -6525,6 +6556,17 @@ mod tests {
         ));
         let peer = PeerIdentity::for_test();
         assert!(!trusted_first_party_ui(false, &peer, &[AccessScope::Input]));
+    }
+
+    #[test]
+    fn trusted_ui_bypass_skips_redundant_terminate_scope_authorization() {
+        let untrusted = RequestAuthorizationContext::default();
+        assert!(untrusted.requires_terminate_scope_authorization());
+        let trusted = RequestAuthorizationContext {
+            trusted_ui_bypass: true,
+            ..RequestAuthorizationContext::default()
+        };
+        assert!(!trusted.requires_terminate_scope_authorization());
     }
 
     #[tokio::test]
