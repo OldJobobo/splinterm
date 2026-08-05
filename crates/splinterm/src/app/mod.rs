@@ -7,6 +7,7 @@ mod machine;
 mod pane_bridge;
 mod sessions;
 mod theme_watch;
+mod topology_manager;
 
 pub(super) use consent::run_consent_client;
 pub(super) use human_output::{print_lairs, print_response};
@@ -34,4 +35,8 @@ pub(super) use pane_bridge::{
 pub(super) use machine::{
     machine_exit_code, require_expected_incarnation, require_incarnation, run_machine_command,
     run_machine_subscription,
+};
+
+pub(super) use topology_manager::{
+    initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke,
 };
