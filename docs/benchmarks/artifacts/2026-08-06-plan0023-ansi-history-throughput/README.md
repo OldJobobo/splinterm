@@ -24,6 +24,27 @@ byte-overflow, newest-retained, and oldest-retained cases.
 All small-update candidate p95 values remain below 0.344 ms. Relative changes at
 that microsecond boundary are not treated as performance claims.
 
+## Focused graphical confirmation
+
+A separately approved four-pane ANSI sequence used one warmup and five measured
+samples against release client SHA-256
+`43cb01bdabb7a3de9ecdad2d20d6773bfaf6ad23fe608a91d2dab22820f2048c`.
+
+| Boundary | Plan 0022 control | Plan 0023 candidate | Improvement |
+| --- | ---: | ---: | ---: |
+| Receive→commit median | 293.804 ms | 97.150 ms | 66.9% |
+| Receive→commit p95 | 379.673 ms | 129.504 ms | 65.9% |
+
+The p95 improvement has a one-sided 95% bootstrap lower bound of 60.9%. All five
+measured reports and the renewed warmup passed strict plan/report validation and
+verified cleanup. The initial smoke safety-aborted before preload or measurement
+when the isolated window unexpectedly focused workspace 8; that invalid report
+is retained under `graphical/reports/invalid-focus-abort.json`.
+
+The candidate has five measured samples versus ten in the Plan 0022 diagnostic
+control. Screenshot observation includes the deliberately paced child workload
+and remains unsuitable as presentation timing.
+
 ## Interpretation
 
 This proves removal of reducer-level scrollback amplification. It does not claim
@@ -37,5 +58,7 @@ therefore improves less than live operation.
 - `candidate-report.json` / `candidate-summary.json`: optimized 5/30 release run.
 - `comparison.json`: 20,000-resample deterministic bootstrap comparison.
 - `implementation/terminal_state.rs`: exact measured reducer source.
+- `graphical/`: exact focused plan, six valid reports/summaries, retained safety
+  abort, and machine-readable aggregate.
 - `PROVENANCE.json`: commands, hashes, host/toolchain, and source identities.
 - `SHA256SUMS`: checksum coverage for every publication file except itself.

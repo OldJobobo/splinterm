@@ -1,0 +1,43 @@
+{
+  "schema": "splinterm.benchmark.focused-ansi-graphical-summary.v1",
+  "plan_sha256": "c8594cb30d4a58b08c5c9af1562d9f9af9dacc87e228ade16fd4853a6efa4393",
+  "seed": 230023,
+  "cell": "ansi-stress",
+  "warmups": 1,
+  "measured_samples": 5,
+  "valid_measured_samples": 5,
+  "retained_safety_aborts": 1,
+  "client_receive_to_pane_commit": {
+    "median_ns": 97149568,
+    "p95_ns": 129503960,
+    "min_ns": 94224964,
+    "max_ns": 129503960
+  },
+  "commit_to_callback": {
+    "median_ns": 13587621,
+    "p95_ns": 48228127,
+    "min_ns": 3676375,
+    "max_ns": 48228127
+  },
+  "plan0022_control": {
+    "samples": 10,
+    "median_ns": 293804310,
+    "p95_ns": 379672975
+  },
+  "comparison": {
+    "candidate_control_p95_ratio": 0.34109343705592954,
+    "candidate_control_p95_ratio_one_sided_95_upper": 0.391054218894261,
+    "improvement": 0.6589065629440705,
+    "improvement_one_sided_95_lower": 0.608945781105739,
+    "bootstrap_seed": 230023,
+    "bootstrap_resamples": 20000,
+    "p95": "nearest-rank"
+  },
+  "cleanup": {
+    "all_valid_reports_verified": true
+  },
+  "limitations": [
+    "candidate has five measured samples versus ten in the Plan 0022 diagnostic control",
+    "screenshot observation includes deliberately paced child output and is not presentation timing"
+  ]
+}

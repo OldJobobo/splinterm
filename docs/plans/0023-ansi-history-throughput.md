@@ -57,6 +57,19 @@ ratios are noise-dominated at microsecond scale; the largest absolute candidate
 increase is 0.053 ms in the intentionally detached case and does not execute the
 optimized scrollback reducer for a small update.
 
+A separately approved focused graphical check then ran one warmup and five
+measured four-pane ANSI cases against client binary
+`43cb01bdabb7a3de9ecdad2d20d6773bfaf6ad23fe608a91d2dab22820f2048c`.
+Receive-to-commit measured 97.150 ms median and 129.504 ms nearest-rank p95,
+versus Plan 0022's 293.804 / 379.673 ms diagnostic control. The p95 improvement
+is 65.9%, with a 60.9% one-sided 95% bootstrap lower bound. All five measured
+reports and the renewed smoke passed strict validation and cleanup.
+
+The initial graphical smoke safety-aborted before preload or measurement when
+the isolated window unexpectedly focused reserved workspace 8 despite no-focus
+rules. Its report is retained. After explicit renewed authorization, the retry
+passed; no unrelated window received input or focus restoration.
+
 ## Acceptance gates
 
 - The new bounding algorithm is byte-for-byte equivalent to the previous
@@ -67,11 +80,12 @@ optimized scrollback reducer for a small update.
   95% lower improvement bound above 40%.
 - Four-pane all-active ANSI p95 improves by at least 50%, with the same bound.
 - No history, memory, queue, cache, SHM, thread, or protocol bound increases.
-- No graphical claim is made from the non-graphical reducer harness.
+- Any graphical follow-up is limited to the predeclared focused ANSI cell and
+  must retain strict isolation, evidence, and cleanup checks.
 
 The candidate passes every applicable gate. Graphical Plan 0022 evidence remains
-immutable. A future end-to-end ANSI claim may use one newly planned focused cell;
-it does not justify repeating the 130-case diagnostic matrix.
+immutable. The focused one-warmup/five-measured follow-up confirms a bounded
+end-to-end receive-to-commit improvement without repeating the 130-case matrix.
 
 ## Validation
 

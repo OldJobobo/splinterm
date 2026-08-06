@@ -32,11 +32,23 @@
     "resamples": 20000,
     "decision": "one-sided 95% upper bound on candidate/control nearest-rank p95 ratio"
   },
+  "graphical": {
+    "source_commit": "c8c6cb59aa7102a116f846ab305ad3b57d957788",
+    "source_run": "benchmark-results/20260806T045015Z-plan0023-focused-ansi-graphical",
+    "plan_sha256": "c8594cb30d4a58b08c5c9af1562d9f9af9dacc87e228ade16fd4853a6efa4393",
+    "seed": 230023,
+    "warmup_runs": 1,
+    "measured_runs": 5,
+    "splinterm_sha256": "43cb01bdabb7a3de9ecdad2d20d6773bfaf6ad23fe608a91d2dab22820f2048c",
+    "splinterd_sha256": "d73a7a5bc80d29cecf696fde621cbc3c30f0d4c6c23fbcecc3c9a376203557c3",
+    "raw_manifest": "RAW-GRAPHICAL-SHA256SUMS",
+    "retained_safety_aborts": 1
+  },
   "environment": {
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
     "kernel": "Linux 7.1.5-arch1-2",
     "architecture": "x86_64"
   },
-  "graphical_execution": false
+  "graphical_execution": true
 }

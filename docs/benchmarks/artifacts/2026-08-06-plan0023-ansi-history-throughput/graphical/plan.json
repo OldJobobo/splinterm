@@ -1,0 +1,515 @@
+{
+  "ansi_operation_lines": 2000,
+  "cells": [
+    {
+      "activity": "focused-only",
+      "cached_rows_per_pane": 0,
+      "name": "zero-history",
+      "operation": "small-marker",
+      "pane_count": 1,
+      "viewport": "live"
+    },
+    {
+      "activity": "focused-only",
+      "cached_rows_per_pane": 1000,
+      "name": "history-1000",
+      "operation": "small-marker",
+      "pane_count": 1,
+      "viewport": "live"
+    },
+    {
+      "activity": "focused-only",
+      "cached_rows_per_pane": 4096,
+      "name": "history-4096",
+      "operation": "small-marker",
+      "pane_count": 1,
+      "viewport": "live"
+    },
+    {
+      "activity": "focused-only",
+      "cached_rows_per_pane": 4096,
+      "name": "detached-history",
+      "operation": "continuing-small-output",
+      "pane_count": 1,
+      "viewport": "detached"
+    },
+    {
+      "activity": "focused-only",
+      "cached_rows_per_pane": 4096,
+      "name": "inactive-scaling-2",
+      "operation": "small-marker",
+      "pane_count": 2,
+      "viewport": "live"
+    },
+    {
+      "activity": "focused-only",
+      "cached_rows_per_pane": 4096,
+      "name": "inactive-scaling-4",
+      "operation": "small-marker",
+      "pane_count": 4,
+      "viewport": "live"
+    },
+    {
+      "activity": "all-panes",
+      "cached_rows_per_pane": 4096,
+      "name": "all-pane-scaling",
+      "operation": "small-marker",
+      "pane_count": 4,
+      "viewport": "live"
+    },
+    {
+      "activity": "idle",
+      "cached_rows_per_pane": 4096,
+      "name": "static-movement",
+      "operation": "same-output-position-movement",
+      "pane_count": 4,
+      "viewport": "live"
+    },
+    {
+      "activity": "idle-then-focused",
+      "cached_rows_per_pane": 4096,
+      "name": "outer-resize",
+      "operation": "twelve-step-outer-resize",
+      "pane_count": 4,
+      "viewport": "live"
+    },
+    {
+      "activity": "all-panes",
+      "cached_rows_per_pane": 4096,
+      "name": "ansi-stress",
+      "operation": "ansi-2000-lines",
+      "pane_count": 4,
+      "viewport": "live"
+    }
+  ],
+  "history_capacity_rows": 4096,
+  "monitor": "DP-2",
+  "plan_sha256": "c8594cb30d4a58b08c5c9af1562d9f9af9dacc87e228ade16fd4853a6efa4393",
+  "sample_runs": 5,
+  "schedule": [
+    {
+      "case_id": "warmup-00-0000-history-4096",
+      "cell": "history-4096",
+      "execution_index": 0,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0001-inactive-scaling-4",
+      "cell": "inactive-scaling-4",
+      "execution_index": 1,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0002-outer-resize",
+      "cell": "outer-resize",
+      "execution_index": 2,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0003-detached-history",
+      "cell": "detached-history",
+      "execution_index": 3,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0004-history-1000",
+      "cell": "history-1000",
+      "execution_index": 4,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0005-all-pane-scaling",
+      "cell": "all-pane-scaling",
+      "execution_index": 5,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0006-zero-history",
+      "cell": "zero-history",
+      "execution_index": 6,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0007-ansi-stress",
+      "cell": "ansi-stress",
+      "execution_index": 7,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0008-inactive-scaling-2",
+      "cell": "inactive-scaling-2",
+      "execution_index": 8,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "warmup-00-0009-static-movement",
+      "cell": "static-movement",
+      "execution_index": 9,
+      "iteration": 0,
+      "phase": "warmup"
+    },
+    {
+      "case_id": "measured-00-0010-static-movement",
+      "cell": "static-movement",
+      "execution_index": 10,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0011-ansi-stress",
+      "cell": "ansi-stress",
+      "execution_index": 11,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0012-detached-history",
+      "cell": "detached-history",
+      "execution_index": 12,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0013-all-pane-scaling",
+      "cell": "all-pane-scaling",
+      "execution_index": 13,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0014-outer-resize",
+      "cell": "outer-resize",
+      "execution_index": 14,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0015-history-4096",
+      "cell": "history-4096",
+      "execution_index": 15,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0016-inactive-scaling-2",
+      "cell": "inactive-scaling-2",
+      "execution_index": 16,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0017-history-1000",
+      "cell": "history-1000",
+      "execution_index": 17,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0018-inactive-scaling-4",
+      "cell": "inactive-scaling-4",
+      "execution_index": 18,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-00-0019-zero-history",
+      "cell": "zero-history",
+      "execution_index": 19,
+      "iteration": 0,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0020-outer-resize",
+      "cell": "outer-resize",
+      "execution_index": 20,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0021-inactive-scaling-4",
+      "cell": "inactive-scaling-4",
+      "execution_index": 21,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0022-ansi-stress",
+      "cell": "ansi-stress",
+      "execution_index": 22,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0023-history-4096",
+      "cell": "history-4096",
+      "execution_index": 23,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0024-history-1000",
+      "cell": "history-1000",
+      "execution_index": 24,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0025-all-pane-scaling",
+      "cell": "all-pane-scaling",
+      "execution_index": 25,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0026-static-movement",
+      "cell": "static-movement",
+      "execution_index": 26,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0027-inactive-scaling-2",
+      "cell": "inactive-scaling-2",
+      "execution_index": 27,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0028-zero-history",
+      "cell": "zero-history",
+      "execution_index": 28,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-01-0029-detached-history",
+      "cell": "detached-history",
+      "execution_index": 29,
+      "iteration": 1,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0030-outer-resize",
+      "cell": "outer-resize",
+      "execution_index": 30,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0031-zero-history",
+      "cell": "zero-history",
+      "execution_index": 31,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0032-history-1000",
+      "cell": "history-1000",
+      "execution_index": 32,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0033-static-movement",
+      "cell": "static-movement",
+      "execution_index": 33,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0034-inactive-scaling-4",
+      "cell": "inactive-scaling-4",
+      "execution_index": 34,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0035-inactive-scaling-2",
+      "cell": "inactive-scaling-2",
+      "execution_index": 35,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0036-history-4096",
+      "cell": "history-4096",
+      "execution_index": 36,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0037-detached-history",
+      "cell": "detached-history",
+      "execution_index": 37,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0038-ansi-stress",
+      "cell": "ansi-stress",
+      "execution_index": 38,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-02-0039-all-pane-scaling",
+      "cell": "all-pane-scaling",
+      "execution_index": 39,
+      "iteration": 2,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0040-static-movement",
+      "cell": "static-movement",
+      "execution_index": 40,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0041-detached-history",
+      "cell": "detached-history",
+      "execution_index": 41,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0042-all-pane-scaling",
+      "cell": "all-pane-scaling",
+      "execution_index": 42,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0043-zero-history",
+      "cell": "zero-history",
+      "execution_index": 43,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0044-history-1000",
+      "cell": "history-1000",
+      "execution_index": 44,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0045-history-4096",
+      "cell": "history-4096",
+      "execution_index": 45,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0046-inactive-scaling-2",
+      "cell": "inactive-scaling-2",
+      "execution_index": 46,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0047-outer-resize",
+      "cell": "outer-resize",
+      "execution_index": 47,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0048-ansi-stress",
+      "cell": "ansi-stress",
+      "execution_index": 48,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-03-0049-inactive-scaling-4",
+      "cell": "inactive-scaling-4",
+      "execution_index": 49,
+      "iteration": 3,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0050-detached-history",
+      "cell": "detached-history",
+      "execution_index": 50,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0051-all-pane-scaling",
+      "cell": "all-pane-scaling",
+      "execution_index": 51,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0052-static-movement",
+      "cell": "static-movement",
+      "execution_index": 52,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0053-inactive-scaling-2",
+      "cell": "inactive-scaling-2",
+      "execution_index": 53,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0054-zero-history",
+      "cell": "zero-history",
+      "execution_index": 54,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0055-history-4096",
+      "cell": "history-4096",
+      "execution_index": 55,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0056-ansi-stress",
+      "cell": "ansi-stress",
+      "execution_index": 56,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0057-history-1000",
+      "cell": "history-1000",
+      "execution_index": 57,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0058-outer-resize",
+      "cell": "outer-resize",
+      "execution_index": 58,
+      "iteration": 4,
+      "phase": "measured"
+    },
+    {
+      "case_id": "measured-04-0059-inactive-scaling-4",
+      "cell": "inactive-scaling-4",
+      "execution_index": 59,
+      "iteration": 4,
+      "phase": "measured"
+    }
+  ],
+  "schema": "splinterm.benchmark.graphical-catchup-plan.v1",
+  "seed": 230023,
+  "warmup_runs": 1,
+  "workspace": 8
+}

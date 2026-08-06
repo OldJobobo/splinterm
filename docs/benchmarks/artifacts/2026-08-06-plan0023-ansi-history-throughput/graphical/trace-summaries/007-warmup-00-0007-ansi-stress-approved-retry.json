@@ -1,0 +1,2963 @@
+{
+  "schema": "splinterm.performance.stage-summary.v2",
+  "valid": true,
+  "run_id": "gc-7-2343475",
+  "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+  "files": [
+    "/home/oldjobobo/Projects/splinterm/benchmark-results/20260806T045015Z-plan0023-focused-ansi-graphical/cases/007-warmup-00-0007-ansi-stress-approved-retry/trace/gc-7-2343475-2343497.jsonl",
+    "/home/oldjobobo/Projects/splinterm/benchmark-results/20260806T045015Z-plan0023-focused-ansi-graphical/cases/007-warmup-00-0007-ansi-stress-approved-retry/trace/gc-7-2343475-2343584.jsonl"
+  ],
+  "record_count": 19268,
+  "processes": [
+    [
+      "splinterd",
+      2343497
+    ],
+    [
+      "splinterm",
+      2343584
+    ]
+  ],
+  "stage_order": [
+    "terminal_mutation",
+    "owned_snapshot",
+    "daemon_publication",
+    "wire_materialize",
+    "frame_encode",
+    "socket_write",
+    "client_receive",
+    "client_enqueue",
+    "client_apply",
+    "frame_prepare",
+    "pane_commit",
+    "draw_commit",
+    "frame_callback",
+    "window_event",
+    "graphical_input",
+    "tab_switch"
+  ],
+  "interval_ownership": {
+    "terminal_mutation": "terminal parser/state active work only",
+    "owned_snapshot": "borrowed terminal state to owned LiveSnapshot",
+    "daemon_publication": "subscriber history lookup, snapshot, and queue admission",
+    "wire_materialize": "LiveSnapshot/update batch to one bounded protocol event",
+    "frame_encode": "protocol event JSON/frame encoding",
+    "socket_write": "awaited local-socket write including backpressure",
+    "client_receive": "timestamp after complete frame decode/classification",
+    "client_enqueue": "awaited bounded Wayland update-queue admission",
+    "client_apply": "protocol update validation and snapshot mutation",
+    "frame_prepare": "display snapshot plus full/incremental SnapshotFrame preparation",
+    "draw_commit": "SHM acquisition, composition/copy, damage, attach, and wl_surface.commit",
+    "graphical_input": "development-only graphical client input queued after committed revisions",
+    "pane_commit": "one body-free pane transaction associated with the surface commit boundary",
+    "frame_callback": "commit-to-compositor callback wait; not presentation latency",
+    "tab_switch": "client-local tab activation and bounded state replacement",
+    "window_event": "transaction-free Wayland configure or surface output-enter/output-leave callback count"
+  },
+  "stages": {
+    "terminal_mutation": {
+      "records": 1535,
+      "duration": {
+        "count": 1535,
+        "total_ns": 214728476,
+        "median_ns": 26540,
+        "p95_ns": 451606,
+        "max_ns": 1878215
+      },
+      "bytes": 817874,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 53631161,
+        "bytes": 817874,
+        "count": 4042,
+        "duration_ns": 214728476,
+        "incarnation": 3840,
+        "revision": 54336871
+      }
+    },
+    "owned_snapshot": {
+      "records": 4181,
+      "duration": {
+        "count": 4181,
+        "total_ns": 124266267,
+        "median_ns": 26261,
+        "p95_ns": 52033,
+        "max_ns": 1918934
+      },
+      "bytes": 0,
+      "rows": 107715,
+      "cells": 6140891,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "cells": 6140891,
+        "duration_ns": 124266267,
+        "incarnation": 10452,
+        "revision": 298334363,
+        "rows": 107715
+      }
+    },
+    "daemon_publication": {
+      "records": 1535,
+      "duration": {
+        "count": 1535,
+        "total_ns": 401512689,
+        "median_ns": 93240,
+        "p95_ns": 748505,
+        "max_ns": 4081761
+      },
+      "bytes": 817874,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 53631161,
+        "bytes": 817874,
+        "count": 4042,
+        "duration_ns": 401512689,
+        "incarnation": 3840,
+        "revision": 54336871
+      }
+    },
+    "wire_materialize": {
+      "records": 1541,
+      "duration": {
+        "count": 1541,
+        "total_ns": 140184406,
+        "median_ns": 67608,
+        "p95_ns": 217072,
+        "max_ns": 3708100
+      },
+      "bytes": 0,
+      "rows": 19257,
+      "cells": 1096285,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 53498108,
+        "cells": 1096285,
+        "count": 705718,
+        "duration_ns": 140184406,
+        "incarnation": 3855,
+        "revision": 54203826,
+        "rows": 19257,
+        "subscription_id": 6171,
+        "transaction_sequence": 297608
+      }
+    },
+    "frame_encode": {
+      "records": 1541,
+      "duration": {
+        "count": 1541,
+        "total_ns": 174614694,
+        "median_ns": 23956,
+        "p95_ns": 380434,
+        "max_ns": 1929201
+      },
+      "bytes": 94833644,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 53498108,
+        "bytes": 94833644,
+        "duration_ns": 174614694,
+        "revision": 54203826,
+        "subscription_id": 6171,
+        "transaction_sequence": 297608
+      }
+    },
+    "socket_write": {
+      "records": 1541,
+      "duration": {
+        "count": 1541,
+        "total_ns": 41066041,
+        "median_ns": 11035,
+        "p95_ns": 58389,
+        "max_ns": 2343579
+      },
+      "bytes": 94833644,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 53498108,
+        "bytes": 94833644,
+        "duration_ns": 41066041,
+        "revision": 54203826,
+        "subscription_id": 6171,
+        "transaction_sequence": 297608
+      }
+    },
+    "client_receive": {
+      "records": 1541,
+      "duration": null,
+      "bytes": 0,
+      "rows": 19257,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 53498108,
+        "count": 1541,
+        "incarnation": 3855,
+        "revision": 54203826,
+        "rows": 19257,
+        "subscription_id": 6171,
+        "transaction_sequence": 297608
+      }
+    },
+    "client_enqueue": {
+      "records": 1541,
+      "duration": {
+        "count": 1541,
+        "total_ns": 8575673,
+        "median_ns": 3352,
+        "p95_ns": 7194,
+        "max_ns": 2502123
+      },
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 4,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 53498108,
+        "duration_ns": 8575673,
+        "incarnation": 3855,
+        "queue_depth": 308,
+        "revision": 54203826,
+        "subscription_id": 6171,
+        "transaction_sequence": 297608
+      }
+    },
+    "client_apply": {
+      "records": 1541,
+      "duration": {
+        "count": 1541,
+        "total_ns": 894674245,
+        "median_ns": 533949,
+        "p95_ns": 1291605,
+        "max_ns": 3240711
+      },
+      "bytes": 0,
+      "rows": 19257,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 2,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 53498108,
+        "cached_history_bytes": 15396535458,
+        "cached_history_rows": 4177320,
+        "copied_history_bytes": 0,
+        "copied_history_rows": 0,
+        "count": 6,
+        "duration_ns": 894674245,
+        "incarnation": 3855,
+        "pane_count": 1540,
+        "receiver_batch_size": 539,
+        "revision": 54203826,
+        "rows": 19257,
+        "subscription_id": 6171,
+        "transaction_sequence": 297608
+      }
+    },
+    "frame_prepare": {
+      "records": 324,
+      "duration": {
+        "count": 324,
+        "total_ns": 637383371,
+        "median_ns": 297740,
+        "p95_ns": 10322296,
+        "max_ns": 15420481
+      },
+      "bytes": 0,
+      "rows": 3899,
+      "cells": 222454,
+      "max_queue_depth": 0,
+      "full_reloads": 2,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 7408825,
+        "cached_history_rows": 785664,
+        "cells": 222454,
+        "columns": 18460,
+        "count": 3840,
+        "dirty_rows": 3840,
+        "duration_ns": 637383371,
+        "incarnation": 324,
+        "pane_count": 1296,
+        "prepared_cells": 222454,
+        "prepared_rows": 3899,
+        "revision": 7502601,
+        "rows": 3899,
+        "subscription_id": 322,
+        "superseded_revisions": 63,
+        "transaction_sequence": 53942
+      }
+    },
+    "pane_commit": {
+      "records": 1288,
+      "duration": null,
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 29506641,
+        "commit_sequence": 404861,
+        "incarnation": 3220,
+        "revision": 29882803,
+        "subscription_id": 5152,
+        "superseded_revisions": 253,
+        "transaction_sequence": 215703
+      }
+    },
+    "draw_commit": {
+      "records": 578,
+      "duration": {
+        "count": 578,
+        "total_ns": 354498191,
+        "median_ns": 379247,
+        "p95_ns": 2151232,
+        "max_ns": 8490805
+      },
+      "bytes": 1331347328,
+      "rows": 6933,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 4,
+      "resyncs": 0,
+      "totals": {
+        "backing_copy_bytes": 1331347328,
+        "bytes": 1331347328,
+        "commit_sequence": 166753,
+        "duration_ns": 354498191,
+        "pane_count": 2312,
+        "rows": 6933
+      }
+    },
+    "frame_callback": {
+      "records": 578,
+      "duration": {
+        "count": 578,
+        "total_ns": 11391747991,
+        "median_ns": 14604369,
+        "p95_ns": 76001978,
+        "max_ns": 145528691
+      },
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "commit_sequence": 166753,
+        "duration_ns": 11391747991
+      }
+    },
+    "window_event": {
+      "records": 3,
+      "duration": null,
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "configure_count": 2,
+        "final_height": 1139,
+        "final_width": 1432,
+        "old_height": 1076,
+        "old_width": 944,
+        "output_enter_events": 1
+      }
+    }
+  },
+  "correlated_wire_to_commit": {
+    "count": 1288,
+    "duration": {
+      "count": 1288,
+      "total_ns": 40782472186,
+      "median_ns": 17387929,
+      "p95_ns": 108761379,
+      "max_ns": 189556773
+    }
+  },
+  "trace_schema": "splinterm.performance.stage.v2",
+  "correlated_client_receive_to_commit": {
+    "count": 1288,
+    "duration": {
+      "count": 1288,
+      "total_ns": 39863267855,
+      "median_ns": 17047069,
+      "p95_ns": 106091347,
+      "max_ns": 185105230
+    }
+  },
+  "correlated_commit_to_callback": {
+    "count": 578,
+    "duration": {
+      "count": 578,
+      "total_ns": 11391747991,
+      "median_ns": 14604369,
+      "p95_ns": 76001978,
+      "max_ns": 145528691
+    }
+  },
+  "transactions": {
+    "committed": 1288,
+    "uncommitted": 253,
+    "uncommitted_records": [
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          263,
+          16265
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          262,
+          16262
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          262,
+          16265
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          262,
+          16262
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          266,
+          20201
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          265,
+          20198
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          265,
+          20201
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          265,
+          20198
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          268,
+          22825
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          267,
+          22822
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          267,
+          22825
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          267,
+          22822
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          271,
+          26761
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          270,
+          26758
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          270,
+          26761
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          270,
+          26758
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          273,
+          29385
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          273,
+          30694
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          273,
+          30697
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          273,
+          30694
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          276,
+          33321
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          275,
+          33318
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          275,
+          33321
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          275,
+          33318
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          278,
+          34797
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          278,
+          37254
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          278,
+          37257
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          278,
+          37254
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          280,
+          37257
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          280,
+          39878
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          280,
+          39881
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          280,
+          39878
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          282,
+          39881
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          282,
+          42502
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          282,
+          42505
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          282,
+          42502
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          284,
+          42505
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          287,
+          46441
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          285,
+          46438
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          285,
+          46441
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          285,
+          46438
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          289,
+          49065
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          287,
+          49065
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          287,
+          49062
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          287,
+          49062
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          292,
+          53001
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          290,
+          52998
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          290,
+          52998
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          290,
+          53001
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          294,
+          55625
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          292,
+          55625
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          292,
+          55622
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          292,
+          55622
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          295,
+          56937
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          293,
+          56937
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          293,
+          56934
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          293,
+          56934
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          296,
+          58249
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          295,
+          59558
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          295,
+          59558
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          295,
+          59561
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          298,
+          60873
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          296,
+          60870
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          296,
+          60873
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          296,
+          60870
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          299,
+          60955
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          297,
+          62180
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          297,
+          62182
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          298,
+          63497
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          301,
+          63497
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          299,
+          63494
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          299,
+          64809
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          299,
+          64806
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          302,
+          64809
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          300,
+          64806
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          300,
+          66121
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          300,
+          66118
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          303,
+          66121
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          301,
+          66118
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          302,
+          68742
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          302,
+          68745
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          305,
+          68745
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          303,
+          68742
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          303,
+          70057
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          303,
+          70054
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          306,
+          70057
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          304,
+          70054
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          307,
+          71369
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          305,
+          72681
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          305,
+          72678
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          306,
+          72678
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          309,
+          73993
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          306,
+          73993
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          306,
+          73990
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          307,
+          73990
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          310,
+          75305
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          308,
+          76617
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          308,
+          76614
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          309,
+          76614
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          312,
+          77929
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          309,
+          77926
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          310,
+          77926
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          309,
+          77929
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          313,
+          79241
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          310,
+          79238
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          311,
+          80553
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          312,
+          80550
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          315,
+          81865
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          312,
+          81862
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          312,
+          81865
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          313,
+          81862
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          317,
+          84489
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          314,
+          84486
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          314,
+          84489
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          315,
+          84486
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          319,
+          87113
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          316,
+          87110
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          316,
+          87113
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          317,
+          87110
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          321,
+          89737
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          318,
+          89734
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          318,
+          89737
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          319,
+          89734
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          323,
+          92361
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          320,
+          92358
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          320,
+          92361
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          321,
+          92358
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          325,
+          94985
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          322,
+          94982
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          322,
+          94985
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          323,
+          94982
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          327,
+          97609
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          324,
+          97606
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          324,
+          97609
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          325,
+          97606
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          329,
+          100233
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          326,
+          100230
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          327,
+          101545
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          328,
+          101542
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          331,
+          102857
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          329,
+          104166
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          329,
+          104169
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          330,
+          104166
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          333,
+          105481
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          331,
+          106790
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          331,
+          106793
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          332,
+          106790
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          335,
+          108105
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          333,
+          109414
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          333,
+          109417
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          334,
+          109414
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          337,
+          110729
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          334,
+          110726
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          335,
+          112041
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          336,
+          112038
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          339,
+          113353
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          336,
+          113350
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          337,
+          114665
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          338,
+          114662
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          341,
+          115977
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          338,
+          115974
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          338,
+          115977
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          339,
+          115974
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          343,
+          118601
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          340,
+          118598
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          340,
+          118601
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          342,
+          119910
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          345,
+          121225
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          342,
+          121222
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          343,
+          122537
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          344,
+          122534
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          347,
+          123849
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          344,
+          123846
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          344,
+          123849
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          345,
+          123846
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          349,
+          126473
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          346,
+          126470
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          346,
+          126473
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          347,
+          126470
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          351,
+          129097
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          348,
+          129094
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          348,
+          129097
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          349,
+          129094
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          353,
+          131721
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          350,
+          131718
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          350,
+          131721
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          351,
+          131718
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          355,
+          134345
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          352,
+          134342
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          352,
+          134345
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          353,
+          134342
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          356,
+          135657
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          354,
+          136966
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          354,
+          136969
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          355,
+          136966
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          358,
+          138281
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          355,
+          138278
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          356,
+          139593
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          357,
+          139590
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          360,
+          140905
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          357,
+          140902
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          357,
+          140905
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          358,
+          140902
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          362,
+          143529
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          359,
+          143526
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          359,
+          143529
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          360,
+          143526
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          364,
+          146153
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          361,
+          146150
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          361,
+          146153
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          362,
+          146150
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          366,
+          148777
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          363,
+          148774
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          363,
+          148777
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          364,
+          148774
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          368,
+          151401
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          365,
+          151398
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          365,
+          151401
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          366,
+          151398
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          370,
+          154025
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          367,
+          154022
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          367,
+          154025
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          368,
+          154022
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          372,
+          156649
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          369,
+          156646
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          369,
+          156649
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          370,
+          156646
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          374,
+          159273
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          371,
+          159270
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          371,
+          159273
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          372,
+          159270
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          376,
+          161897
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          373,
+          161894
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          373,
+          161897
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          374,
+          161894
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          378,
+          164521
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          375,
+          164518
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          375,
+          164521
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          376,
+          164518
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          380,
+          167145
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          377,
+          167142
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          377,
+          167145
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          378,
+          167142
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          382,
+          169769
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          379,
+          169766
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          379,
+          169769
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          381,
+          171078
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          384,
+          172393
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          381,
+          172390
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ef680138-51f7-4121-b319-c82f6ad4fe16",
+          3,
+          3,
+          382,
+          173705
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "9a90eeb4-2803-4cd0-af74-d28f3da66fb8",
+          1,
+          1,
+          383,
+          173702
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "83c9bf5f-4488-4cba-afb9-89061bcad008",
+          4,
+          7,
+          386,
+          175017
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "ad3996f9-c7c8-44f9-aba6-e0f90f16eda1",
+          2,
+          5,
+          384,
+          176326
+        ],
+        "last_stage": "client_apply"
+      }
+    ]
+  }
+}
