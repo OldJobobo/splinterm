@@ -1,0 +1,42 @@
+{
+  "schema": "splinterm.benchmark.publication-provenance.v1",
+  "plan": "docs/plans/0023-ansi-history-throughput.md",
+  "parent_commit": "456a65de80ba2af18294f355fd311395193e57e8",
+  "control": {
+    "source": "benchmark-results/20260806T010105Z-plan0022-live-history-fast-path-candidate/history-catchup-report.json",
+    "sha256": "d14682b43e025406f4a60d7330d63eabb3af8aab4be184e03a99ca01ad1f37ec"
+  },
+  "candidate": {
+    "source": "benchmark-results/20260806T041530Z-ansi-history-in-place-candidate/history-catchup-report.json",
+    "sha256": "02eb90e4e500c7e0b53198cac61125895e738b779d9500346d8e03c6a25ef512"
+  },
+  "measured_source": {
+    "path": "crates/splinterm/src/wayland/terminal_state.rs",
+    "sha256": "62e485aaf017fad2b43f909e1d84c7f7a95088b1376969a7d7959008dfcd9793"
+  },
+  "release_executable": {
+    "path": "target/release/examples/history-catchup-benchmark",
+    "sha256": "6d1adda1853858266ae3b4144c6b39b9b56d621a3688c66f02138cf267936fe4"
+  },
+  "tools": {
+    "compare_sha256": "6f6f1623e417f77b78fca2857263e8e434da4c7cb3edf49e0675b29e8caaaf60",
+    "summarize_sha256": "44e78bef459815e447a914aed923767de920768a94d709b0a55cbc84b97c9b5b"
+  },
+  "commands": [
+    "cargo run --release -p splinterm --example history-catchup-benchmark > history-catchup-report.json",
+    "python tools/performance/summarize-history-catchup.py history-catchup-report.json history-catchup-summary.json",
+    "python tools/performance/compare-history-catchup.py control-report.json candidate-report.json comparison.json"
+  ],
+  "bootstrap": {
+    "seed": 220022,
+    "resamples": 20000,
+    "decision": "one-sided 95% upper bound on candidate/control nearest-rank p95 ratio"
+  },
+  "environment": {
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "kernel": "Linux 7.1.5-arch1-2",
+    "architecture": "x86_64"
+  },
+  "graphical_execution": false
+}
