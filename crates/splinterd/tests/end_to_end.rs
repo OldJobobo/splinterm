@@ -2104,7 +2104,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
-    time::timeout(TEST_TIMEOUT, async {
+    time::timeout(Duration::from_secs(60), async {
         let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
         let mut bootstrap = daemon.connect().await;
         let revision = bootstrap.topology_revision().await;
