@@ -33,6 +33,32 @@ def plain(lines: int, columns: int) -> bytes:
     ).encode()
 
 
+def compact_history(lines: int) -> bytes:
+    return b"h\n" * lines
+
+
+def compact_history_chunks(lines: int, batch_lines: int) -> tuple[bytes, ...]:
+    if lines <= 0 or not 1 <= batch_lines <= 16:
+        raise ValueError("invalid compact history chunk dimensions")
+    payload = compact_history(lines)
+    stride = 2 * batch_lines
+    return tuple(
+        payload[offset : offset + stride] for offset in range(0, len(payload), stride)
+    )
+
+
+def line_chunks(payload: bytes, batch_lines: int) -> tuple[bytes, ...]:
+    if not 1 <= batch_lines <= 16:
+        raise ValueError("invalid line chunk bound")
+    rows = payload.splitlines(keepends=True)
+    if not rows or b"".join(rows) != payload:
+        raise ValueError("payload is not a complete line sequence")
+    return tuple(
+        b"".join(rows[offset : offset + batch_lines])
+        for offset in range(0, len(rows), batch_lines)
+    )
+
+
 def ansi(lines: int, columns: int) -> bytes:
     rendered = []
     for index in range(lines):
@@ -118,20 +144,157 @@ def run_controlled(
         action = command.get("action")
         result_path = control_dir / f"result-{sequence:03d}.json"
         started_ns = time.monotonic_ns()
-        if action == "output":
+        if action == "marker":
+            columns = int(command.get("columns", default_columns))
+            if columns < 20:
+                print("invalid controlled marker width", file=sys.stderr)
+                return 1
+            marker = f"\x1b[0m{MARKER}\n".encode() + visible_marker(columns)
+            sys.stdout.buffer.write(marker)
+            sys.stdout.buffer.flush()
+            completed_ns = time.monotonic_ns()
+            write_record(
+                result_path,
+                {
+                    "schema": "splinterm.benchmark.child-result.v1",
+                    "event": "marker_complete",
+                    "sequence": sequence,
+                    "monotonic_ns": completed_ns,
+                    "received_monotonic_ns": started_ns,
+                    "pid": os.getpid(),
+                    "lines": 0,
+                    "completed_units": 1,
+                    "payload_bytes": 0,
+                    "marker_bytes": len(marker),
+                    "control_bytes": 0,
+                    "total_bytes": len(marker),
+                },
+            )
+        elif action == "continue-output":
+            lines = int(command.get("lines", 0))
+            columns = int(command.get("columns", default_columns))
+            if lines <= 0 or columns < 20:
+                print(
+                    "invalid controlled continuing output dimensions", file=sys.stderr
+                )
+                return 1
+            payload = plain(lines, columns)
+            sys.stdout.buffer.write(payload)
+            sys.stdout.buffer.flush()
+            completed_ns = time.monotonic_ns()
+            write_record(
+                result_path,
+                {
+                    "schema": "splinterm.benchmark.child-result.v1",
+                    "event": "output_complete",
+                    "sequence": sequence,
+                    "workload": "plain",
+                    "lines": lines,
+                    "completed_units": lines,
+                    "received_monotonic_ns": started_ns,
+                    "monotonic_ns": completed_ns,
+                    "pid": os.getpid(),
+                    "payload_bytes": len(payload),
+                    "marker_bytes": 0,
+                    "control_bytes": 0,
+                    "total_bytes": len(payload),
+                },
+            )
+        elif action == "history-marker":
+            lines = int(command.get("lines", 0))
+            columns = int(command.get("columns", default_columns))
+            if lines <= 0 or columns < 20:
+                print("invalid controlled history marker dimensions", file=sys.stderr)
+                return 1
+            marker = visible_marker(columns)
+            payload = marker + compact_history(lines)
+            sys.stdout.buffer.write(payload)
+            sys.stdout.buffer.flush()
+            completed_ns = time.monotonic_ns()
+            write_record(
+                result_path,
+                {
+                    "schema": "splinterm.benchmark.child-result.v1",
+                    "event": "history_marker_complete",
+                    "sequence": sequence,
+                    "monotonic_ns": completed_ns,
+                    "received_monotonic_ns": started_ns,
+                    "pid": os.getpid(),
+                    "completed_units": lines,
+                    "payload_bytes": len(payload),
+                    "marker_bytes": len(marker),
+                    "control_bytes": 0,
+                },
+            )
+        elif action == "preload":
+            lines = int(command.get("lines", 0))
+            columns = int(command.get("columns", default_columns))
+            batch_lines = int(command.get("batch_lines", 16))
+            pace_milliseconds = int(command.get("pace_milliseconds", 40))
+            if (
+                lines <= 0
+                or columns < 20
+                or not 1 <= batch_lines <= 16
+                or not 33 <= pace_milliseconds <= 100
+            ):
+                print("invalid controlled preload dimensions", file=sys.stderr)
+                return 1
+            payload = compact_history(lines)
+            chunks = compact_history_chunks(lines, batch_lines)
+            output = sys.stdout.buffer
+            output.write(b"\x1b[3J\x1b[2J\x1b[H")
+            output.flush()
+            for index, chunk in enumerate(chunks):
+                output.write(chunk)
+                output.flush()
+                if index + 1 < len(chunks):
+                    time.sleep(pace_milliseconds / 1000)
+            completed_ns = time.monotonic_ns()
+            write_record(
+                result_path,
+                {
+                    "schema": "splinterm.benchmark.child-result.v1",
+                    "event": "preload_complete",
+                    "sequence": sequence,
+                    "monotonic_ns": completed_ns,
+                    "pid": os.getpid(),
+                    "duration_ns": completed_ns - started_ns,
+                    "payload_bytes": len(payload),
+                    "total_bytes": len(payload) + len(b"\x1b[3J\x1b[2J\x1b[H"),
+                    "lines": lines,
+                    "batch_lines": batch_lines,
+                    "pace_milliseconds": pace_milliseconds,
+                },
+            )
+        elif action == "output":
             workload = str(command.get("workload"))
             if workload not in WORKLOADS:
                 print("unsupported controlled output workload", file=sys.stderr)
                 return 1
             lines = int(command.get("lines", 0))
             columns = int(command.get("columns", default_columns))
-            if lines <= 0 or columns < 20:
+            batch_lines = int(command.get("batch_lines", 16))
+            pace_milliseconds = int(command.get("pace_milliseconds", 0))
+            if (
+                lines <= 0
+                or columns < 20
+                or not 1 <= batch_lines <= 16
+                or (pace_milliseconds != 0 and not 33 <= pace_milliseconds <= 100)
+            ):
                 print("invalid controlled output dimensions", file=sys.stderr)
                 return 1
             payload = WORKLOADS[workload](lines, columns)
+            chunks = (
+                line_chunks(payload, batch_lines) if pace_milliseconds else (payload,)
+            )
             output = sys.stdout.buffer
             output.write(b"\x1b[2J\x1b[H")
-            output.write(payload)
+            output.flush()
+            for index, chunk in enumerate(chunks):
+                output.write(chunk)
+                output.flush()
+                if index + 1 < len(chunks):
+                    time.sleep(pace_milliseconds / 1000)
             output.write(f"\x1b[0m{MARKER}\n".encode())
             output.write(visible_marker(columns))
             output.flush()
@@ -143,13 +306,22 @@ def run_controlled(
                     "event": "write_complete",
                     "sequence": sequence,
                     "workload": workload,
+                    "received_monotonic_ns": started_ns,
                     "monotonic_ns": completed_ns,
                     "pid": os.getpid(),
                     "duration_ns": completed_ns - started_ns,
+                    "lines": lines,
+                    "completed_units": lines,
                     "payload_bytes": len(payload),
+                    "marker_bytes": len(f"\x1b[0m{MARKER}\n".encode())
+                    + len(visible_marker(columns)),
+                    "control_bytes": len(b"\x1b[2J\x1b[H"),
                     "total_bytes": len(payload)
                     + len(f"\x1b[0m{MARKER}\n".encode())
-                    + len(visible_marker(columns)),
+                    + len(visible_marker(columns))
+                    + len(b"\x1b[2J\x1b[H"),
+                    "batch_lines": batch_lines,
+                    "pace_milliseconds": pace_milliseconds,
                 },
             )
         elif action == "clear":

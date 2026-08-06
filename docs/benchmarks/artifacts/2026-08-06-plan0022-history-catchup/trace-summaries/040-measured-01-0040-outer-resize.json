@@ -1,0 +1,463 @@
+{
+  "schema": "splinterm.performance.stage-summary.v2",
+  "valid": true,
+  "run_id": "gc-40-1488195",
+  "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+  "files": [
+    "/home/oldjobobo/Projects/splinterm/benchmark-results/20260806T030231Z-plan0022-graphical-catchup-matrix-final/matrix/040-measured-01-0040-outer-resize/trace/gc-40-1488195-1488216.jsonl",
+    "/home/oldjobobo/Projects/splinterm/benchmark-results/20260806T030231Z-plan0022-graphical-catchup-matrix-final/matrix/040-measured-01-0040-outer-resize/trace/gc-40-1488195-1488423.jsonl"
+  ],
+  "record_count": 12646,
+  "processes": [
+    [
+      "splinterd",
+      1488216
+    ],
+    [
+      "splinterm",
+      1488423
+    ]
+  ],
+  "stage_order": [
+    "terminal_mutation",
+    "owned_snapshot",
+    "daemon_publication",
+    "wire_materialize",
+    "frame_encode",
+    "socket_write",
+    "client_receive",
+    "client_enqueue",
+    "client_apply",
+    "frame_prepare",
+    "pane_commit",
+    "draw_commit",
+    "frame_callback",
+    "window_event",
+    "graphical_input",
+    "tab_switch"
+  ],
+  "interval_ownership": {
+    "terminal_mutation": "terminal parser/state active work only",
+    "owned_snapshot": "borrowed terminal state to owned LiveSnapshot",
+    "daemon_publication": "subscriber history lookup, snapshot, and queue admission",
+    "wire_materialize": "LiveSnapshot/update batch to one bounded protocol event",
+    "frame_encode": "protocol event JSON/frame encoding",
+    "socket_write": "awaited local-socket write including backpressure",
+    "client_receive": "timestamp after complete frame decode/classification",
+    "client_enqueue": "awaited bounded Wayland update-queue admission",
+    "client_apply": "protocol update validation and snapshot mutation",
+    "frame_prepare": "display snapshot plus full/incremental SnapshotFrame preparation",
+    "draw_commit": "SHM acquisition, composition/copy, damage, attach, and wl_surface.commit",
+    "graphical_input": "development-only graphical client input queued after committed revisions",
+    "pane_commit": "one body-free pane transaction associated with the surface commit boundary",
+    "frame_callback": "commit-to-compositor callback wait; not presentation latency",
+    "tab_switch": "client-local tab activation and bounded state replacement",
+    "window_event": "transaction-free Wayland configure or surface output-enter/output-leave callback count"
+  },
+  "stages": {
+    "terminal_mutation": {
+      "records": 1037,
+      "duration": {
+        "count": 1037,
+        "total_ns": 28013925,
+        "median_ns": 25284,
+        "p95_ns": 43304,
+        "max_ns": 234681
+      },
+      "bytes": 49462,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6371070,
+        "bytes": 49462,
+        "count": 1037,
+        "duration_ns": 28013925,
+        "incarnation": 2584,
+        "revision": 6420466
+      }
+    },
+    "owned_snapshot": {
+      "records": 1527,
+      "duration": {
+        "count": 1527,
+        "total_ns": 80487948,
+        "median_ns": 23748,
+        "p95_ns": 54829,
+        "max_ns": 2804088
+      },
+      "bytes": 0,
+      "rows": 83867,
+      "cells": 4518915,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "cells": 4518915,
+        "duration_ns": 80487948,
+        "incarnation": 3777,
+        "revision": 11786648,
+        "rows": 83867
+      }
+    },
+    "daemon_publication": {
+      "records": 1037,
+      "duration": {
+        "count": 1037,
+        "total_ns": 84145092,
+        "median_ns": 75852,
+        "p95_ns": 130611,
+        "max_ns": 512107
+      },
+      "bytes": 49462,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6371070,
+        "bytes": 49462,
+        "count": 1037,
+        "duration_ns": 84145092,
+        "incarnation": 2584,
+        "revision": 6420466
+      }
+    },
+    "wire_materialize": {
+      "records": 1089,
+      "duration": {
+        "count": 1089,
+        "total_ns": 59351343,
+        "median_ns": 44981,
+        "p95_ns": 102114,
+        "max_ns": 1736640
+      },
+      "bytes": 0,
+      "rows": 13546,
+      "cells": 768358,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6950637,
+        "cells": 768358,
+        "count": 49452,
+        "duration_ns": 59351343,
+        "incarnation": 2720,
+        "revision": 7000089,
+        "rows": 13546,
+        "subscription_id": 4349,
+        "transaction_sequence": 148787
+      }
+    },
+    "frame_encode": {
+      "records": 1089,
+      "duration": {
+        "count": 1089,
+        "total_ns": 24491421,
+        "median_ns": 21653,
+        "p95_ns": 31920,
+        "max_ns": 107213
+      },
+      "bytes": 8884587,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6950637,
+        "bytes": 8884587,
+        "duration_ns": 24491421,
+        "revision": 7000089,
+        "subscription_id": 4349,
+        "transaction_sequence": 148787
+      }
+    },
+    "socket_write": {
+      "records": 1089,
+      "duration": {
+        "count": 1089,
+        "total_ns": 15620147,
+        "median_ns": 11315,
+        "p95_ns": 18509,
+        "max_ns": 1853073
+      },
+      "bytes": 8884587,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6950637,
+        "bytes": 8884587,
+        "duration_ns": 15620147,
+        "revision": 7000089,
+        "subscription_id": 4349,
+        "transaction_sequence": 148787
+      }
+    },
+    "client_receive": {
+      "records": 1089,
+      "duration": null,
+      "bytes": 0,
+      "rows": 13546,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6950637,
+        "count": 1089,
+        "incarnation": 2720,
+        "revision": 7000089,
+        "rows": 13546,
+        "subscription_id": 4349,
+        "transaction_sequence": 148787
+      }
+    },
+    "client_enqueue": {
+      "records": 1089,
+      "duration": {
+        "count": 1089,
+        "total_ns": 5793566,
+        "median_ns": 4191,
+        "p95_ns": 7544,
+        "max_ns": 871463
+      },
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 1,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6950637,
+        "duration_ns": 5793566,
+        "incarnation": 2720,
+        "queue_depth": 3,
+        "revision": 7000089,
+        "subscription_id": 4349,
+        "transaction_sequence": 148787
+      }
+    },
+    "client_apply": {
+      "records": 1089,
+      "duration": {
+        "count": 1089,
+        "total_ns": 1962951610,
+        "median_ns": 1701438,
+        "p95_ns": 3881734,
+        "max_ns": 14354800
+      },
+      "bytes": 0,
+      "rows": 13546,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 14,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6950637,
+        "cached_history_bytes": 7802690187,
+        "cached_history_rows": 2119787,
+        "copied_history_bytes": 0,
+        "copied_history_rows": 0,
+        "count": 42,
+        "duration_ns": 1962951610,
+        "incarnation": 2720,
+        "pane_count": 1096,
+        "receiver_batch_size": 278,
+        "revision": 7000089,
+        "rows": 13546,
+        "subscription_id": 4349,
+        "transaction_sequence": 148787
+      }
+    },
+    "frame_prepare": {
+      "records": 286,
+      "duration": {
+        "count": 286,
+        "total_ns": 126974847,
+        "median_ns": 316155,
+        "p95_ns": 2072458,
+        "max_ns": 3758666
+      },
+      "bytes": 0,
+      "rows": 3419,
+      "cells": 193894,
+      "max_queue_depth": 0,
+      "full_reloads": 14,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 1740076,
+        "cached_history_rows": 528004,
+        "cells": 193894,
+        "columns": 16174,
+        "count": 3096,
+        "dirty_rows": 3096,
+        "duration_ns": 126974847,
+        "incarnation": 286,
+        "pane_count": 1144,
+        "prepared_cells": 193894,
+        "prepared_rows": 3419,
+        "revision": 1900430,
+        "rows": 3419,
+        "subscription_id": 272,
+        "superseded_revisions": 2,
+        "transaction_sequence": 37383
+      }
+    },
+    "pane_commit": {
+      "records": 1086,
+      "duration": null,
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6933969,
+        "commit_sequence": 293676,
+        "incarnation": 2714,
+        "revision": 6983362,
+        "subscription_id": 4340,
+        "superseded_revisions": 3,
+        "transaction_sequence": 148429
+      }
+    },
+    "draw_commit": {
+      "records": 562,
+      "duration": {
+        "count": 562,
+        "total_ns": 252336586,
+        "median_ns": 401716,
+        "p95_ns": 631124,
+        "max_ns": 9532664
+      },
+      "bytes": 1278919808,
+      "rows": 6699,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 40,
+      "resyncs": 0,
+      "totals": {
+        "backing_copy_bytes": 1278919808,
+        "bytes": 1278919808,
+        "commit_sequence": 157641,
+        "duration_ns": 252336586,
+        "pane_count": 2248,
+        "rows": 6699
+      }
+    },
+    "frame_callback": {
+      "records": 562,
+      "duration": {
+        "count": 562,
+        "total_ns": 7683850381,
+        "median_ns": 14564002,
+        "p95_ns": 17146662,
+        "max_ns": 66545818
+      },
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "commit_sequence": 157641,
+        "duration_ns": 7683850381
+      }
+    },
+    "window_event": {
+      "records": 15,
+      "duration": null,
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "configure_count": 14,
+        "final_height": 7751,
+        "final_width": 11992,
+        "old_height": 7688,
+        "old_width": 11504,
+        "output_enter_events": 1
+      }
+    }
+  },
+  "correlated_wire_to_commit": {
+    "count": 1086,
+    "duration": {
+      "count": 1086,
+      "total_ns": 22743749526,
+      "median_ns": 20024996,
+      "p95_ns": 37557148,
+      "max_ns": 86858735
+    }
+  },
+  "trace_schema": "splinterm.performance.stage.v2",
+  "correlated_client_receive_to_commit": {
+    "count": 1086,
+    "duration": {
+      "count": 1086,
+      "total_ns": 22431698666,
+      "median_ns": 19781599,
+      "p95_ns": 37252500,
+      "max_ns": 78950327
+    }
+  },
+  "correlated_commit_to_callback": {
+    "count": 562,
+    "duration": {
+      "count": 562,
+      "total_ns": 7683850381,
+      "median_ns": 14564002,
+      "p95_ns": 17146662,
+      "max_ns": 66545818
+    }
+  },
+  "transactions": {
+    "committed": 1086,
+    "uncommitted": 3,
+    "uncommitted_records": [
+      {
+        "key": [
+          "4c10f085-ba67-4205-b2c7-a695dbeca4cc",
+          4,
+          7,
+          66,
+          3034
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da833b92-5252-48eb-90d4-0f29f307635f",
+          1,
+          1,
+          67,
+          3075
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da833b92-5252-48eb-90d4-0f29f307635f",
+          1,
+          1,
+          225,
+          10618
+        ],
+        "last_stage": "client_apply"
+      }
+    ]
+  }
+}

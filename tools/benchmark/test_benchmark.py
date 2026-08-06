@@ -1390,6 +1390,9 @@ def test_stage_trace_summary_correlates_body_free_revision_records(
     assert summary["record_count"] == 2
     assert summary["correlated_wire_to_commit"]["count"] == 1
     assert summary["correlated_wire_to_commit"]["duration"]["median_ns"] == 60
+    assert "trace_schema" not in summary
+    assert "totals" not in summary["stages"]["wire_materialize"]
+    assert "correlated_client_receive_to_commit" not in summary
 
     with trace.open("a", encoding="utf-8") as stream:
         stream.write(
@@ -1450,6 +1453,604 @@ def test_stage_trace_summary_correlates_body_free_revision_records(
     )
     assert saturated.returncode != 0
     assert "trace event bound was exhausted" in saturated.stderr
+
+
+def test_stage_trace_v2_correlates_receive_commit_and_callback(
+    tmp_path: pathlib.Path,
+) -> None:
+    run_id = "test-v2"
+    trace = tmp_path / f"{run_id}-10.jsonl"
+    common = {
+        "schema": "splinterm.performance.stage.v2",
+        "run_id": run_id,
+        "process": "splinterm",
+        "pid": 10,
+        "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+        "splint_id": "00000000-0000-0000-0000-000000000001",
+        "incarnation": 2,
+        "subscription_id": 3,
+        "transaction_sequence": 7,
+        "revision": 4,
+    }
+    records = [
+        {**common, "sequence": 0, "monotonic_raw_ns": 100, "stage": "client_receive"},
+        {
+            **common,
+            "sequence": 1,
+            "monotonic_raw_ns": 120,
+            "stage": "client_apply",
+            "duration_ns": 5,
+            "copied_history_rows": 4096,
+        },
+        {
+            **common,
+            "sequence": 2,
+            "monotonic_raw_ns": 140,
+            "stage": "frame_prepare",
+            "duration_ns": 10,
+        },
+        {
+            **common,
+            "sequence": 3,
+            "monotonic_raw_ns": 160,
+            "stage": "pane_commit",
+            "commit_sequence": 0,
+            "pane_role": "focused",
+        },
+        {
+            "schema": common["schema"],
+            "run_id": run_id,
+            "process": "splinterm",
+            "pid": 10,
+            "clock": common["clock"],
+            "sequence": 4,
+            "monotonic_raw_ns": 160,
+            "stage": "draw_commit",
+            "commit_sequence": 0,
+            "duration_ns": 20,
+        },
+        {
+            "schema": common["schema"],
+            "run_id": run_id,
+            "process": "splinterm",
+            "pid": 10,
+            "clock": common["clock"],
+            "sequence": 5,
+            "monotonic_raw_ns": 190,
+            "stage": "frame_callback",
+            "commit_sequence": 0,
+            "duration_ns": 30,
+        },
+    ]
+    trace.write_text(
+        "\n".join(
+            json.dumps(record) for record in [records[1], records[0], *records[2:]]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "summary.json"
+    command = [
+        sys.executable,
+        str(ROOT / "tools/performance/summarize-stage-trace.py"),
+        str(tmp_path),
+        str(output),
+        "--run-id",
+        run_id,
+    ]
+    result = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(output.read_text(encoding="utf-8"))
+    assert summary["schema"] == "splinterm.performance.stage-summary.v2"
+    assert summary["correlated_client_receive_to_commit"]["duration"]["median_ns"] == 60
+    assert summary["correlated_commit_to_callback"]["duration"]["median_ns"] == 30
+    assert summary["stages"]["client_apply"]["totals"]["copied_history_rows"] == 4096
+    assert summary["transactions"] == {
+        "committed": 1,
+        "uncommitted": 0,
+        "uncommitted_records": [],
+    }
+
+    records.append(
+        {
+            **common,
+            "sequence": 6,
+            "monotonic_raw_ns": 150,
+            "stage": "frame_prepare",
+            "duration_ns": 4,
+        }
+    )
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    repeated_prepare = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert repeated_prepare.returncode == 0, repeated_prepare.stderr
+    assert (
+        json.loads(output.read_text(encoding="utf-8"))["stages"]["frame_prepare"][
+            "records"
+        ]
+        == 2
+    )
+
+    records[-1]["monotonic_raw_ns"] = 170
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    late_prepare = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert late_prepare.returncode != 0
+    assert "impossible transaction stage order" in late_prepare.stderr
+    records.pop()
+
+    records.append(
+        {
+            "schema": common["schema"],
+            "run_id": run_id,
+            "process": "splinterm",
+            "pid": 10,
+            "clock": common["clock"],
+            "sequence": 6,
+            "monotonic_raw_ns": 191,
+            "stage": "frame_callback",
+            "commit_sequence": 0,
+            "duration_ns": 31,
+        }
+    )
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    ambiguous = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert ambiguous.returncode != 0
+    assert "ambiguous frame callbacks" in ambiguous.stderr
+
+    records[-1] = {
+        **common,
+        "sequence": 6,
+        "monotonic_raw_ns": 191,
+        "stage": "client_apply",
+        "terminal_body": "forbidden",
+    }
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    unknown = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert unknown.returncode != 0
+    assert "unknown/body field" in unknown.stderr
+
+    records[-1] = {
+        "schema": common["schema"],
+        "run_id": run_id,
+        "process": "splinterm",
+        "pid": 10,
+        "clock": common["clock"],
+        "sequence": 6,
+        "monotonic_raw_ns": 191,
+        "stage": "draw_commit",
+    }
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    missing_commit = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert missing_commit.returncode != 0
+    assert "missing commit_sequence" in missing_commit.stderr
+
+    uncommitted_records = records[:2]
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in uncommitted_records) + "\n",
+        encoding="utf-8",
+    )
+    uncommitted = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert uncommitted.returncode == 0, uncommitted.stderr
+    uncommitted_summary = json.loads(output.read_text(encoding="utf-8"))
+    assert uncommitted_summary["transactions"]["committed"] == 0
+    assert uncommitted_summary["transactions"]["uncommitted"] == 1
+    assert (
+        uncommitted_summary["transactions"]["uncommitted_records"][0]["last_stage"]
+        == "client_apply"
+    )
+
+
+def test_stage_trace_v2_window_events_are_transaction_free_and_exact(
+    tmp_path: pathlib.Path,
+) -> None:
+    run_id = "window-events-v2"
+    common = {
+        "schema": "splinterm.performance.stage.v2",
+        "run_id": run_id,
+        "process": "splinterm",
+        "pid": 10,
+        "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+        "stage": "window_event",
+    }
+    records = [
+        {
+            **common,
+            "sequence": 0,
+            "monotonic_raw_ns": 100,
+            "configure_count": 1,
+            "old_width": 960,
+            "old_height": 600,
+            "final_width": 960,
+            "final_height": 600,
+        },
+        {
+            **common,
+            "sequence": 1,
+            "monotonic_raw_ns": 110,
+            "output_enter_events": 1,
+        },
+        {
+            **common,
+            "sequence": 2,
+            "monotonic_raw_ns": 120,
+            "output_leave_events": 1,
+        },
+    ]
+    trace = tmp_path / f"{run_id}-10.jsonl"
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "summary.json"
+    command = [
+        sys.executable,
+        str(ROOT / "tools/performance/summarize-stage-trace.py"),
+        str(tmp_path),
+        str(output),
+        "--run-id",
+        run_id,
+    ]
+    valid = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert valid.returncode == 0, valid.stderr
+    totals = json.loads(output.read_text(encoding="utf-8"))["stages"]["window_event"][
+        "totals"
+    ]
+    assert totals["configure_count"] == 1
+    assert totals["output_enter_events"] == 1
+    assert totals["output_leave_events"] == 1
+
+    del records[0]["final_height"]
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    invalid = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert invalid.returncode != 0
+    assert "configure window_event lacks exact geometry" in invalid.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("process", "", "invalid process"),
+        ("pid", True, "invalid pid"),
+        ("pid", 1 << 32, "invalid pid"),
+        ("splint_id", 42, "invalid splint_id"),
+        ("splint_id", "NOT-A-UUID", "invalid splint_id"),
+    ],
+)
+def test_stage_trace_v2_rejects_invalid_metadata(
+    tmp_path: pathlib.Path, field: str, value: object, message: str
+) -> None:
+    run_id = "invalid-v2"
+    record = {
+        "schema": "splinterm.performance.stage.v2",
+        "run_id": run_id,
+        "process": "splinterm",
+        "pid": 10,
+        "sequence": 0,
+        "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+        "monotonic_raw_ns": 100,
+        "stage": "client_receive",
+        "splint_id": "00000000-0000-0000-0000-000000000001",
+        "incarnation": 2,
+        "subscription_id": 3,
+        "transaction_sequence": 7,
+        "revision": 4,
+        field: value,
+    }
+    (tmp_path / f"{run_id}-10.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools/performance/summarize-stage-trace.py"),
+            str(tmp_path),
+            str(tmp_path / "summary.json"),
+            "--run-id",
+            run_id,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+def test_stage_trace_v2_rejects_mixed_schema_and_empty_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    run_id = "mixed-v2"
+    trace = tmp_path / f"{run_id}-10.jsonl"
+    common = {
+        "run_id": run_id,
+        "process": "splinterm",
+        "pid": 10,
+        "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+        "stage": "client_receive",
+        "splint_id": "00000000-0000-0000-0000-000000000001",
+        "incarnation": 2,
+        "subscription_id": 3,
+        "transaction_sequence": 7,
+        "revision": 4,
+    }
+    trace.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        **common,
+                        "schema": "splinterm.performance.stage.v2",
+                        "sequence": 0,
+                        "monotonic_raw_ns": 100,
+                    }
+                ),
+                json.dumps(
+                    {
+                        **common,
+                        "schema": "splinterm.performance.stage.v1",
+                        "sequence": 1,
+                        "monotonic_raw_ns": 101,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        str(ROOT / "tools/performance/summarize-stage-trace.py"),
+        str(tmp_path),
+        str(tmp_path / "summary.json"),
+        "--run-id",
+        run_id,
+    ]
+    mixed = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert mixed.returncode != 0
+    assert "mixed or wrong schema" in mixed.stderr
+
+    trace.write_text("", encoding="utf-8")
+    empty = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert empty.returncode != 0
+    assert "contained no records" in empty.stderr
+
+    trace.write_text(
+        json.dumps(
+            {
+                "schema": "splinterm.performance.stage.v2",
+                "run_id": run_id,
+                "process": "splinterm",
+                "pid": 10,
+                "sequence": 0,
+                "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+                "monotonic_raw_ns": 100,
+                "stage": "client_receive",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    identity_free = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert identity_free.returncode != 0
+    assert "incomplete transaction correlation identity" in identity_free.stderr
+
+
+def test_stage_trace_v2_rejects_callback_inversion_and_sequence_gaps(
+    tmp_path: pathlib.Path,
+) -> None:
+    run_id = "invalid-order-v2"
+    trace = tmp_path / f"{run_id}-10.jsonl"
+    common = {
+        "schema": "splinterm.performance.stage.v2",
+        "run_id": run_id,
+        "process": "splinterm",
+        "pid": 10,
+        "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+    }
+    records = [
+        {
+            **common,
+            "sequence": 0,
+            "monotonic_raw_ns": 200,
+            "stage": "draw_commit",
+            "commit_sequence": 0,
+        },
+        {
+            **common,
+            "sequence": 1,
+            "monotonic_raw_ns": 190,
+            "stage": "frame_callback",
+            "commit_sequence": 0,
+            "duration_ns": 0,
+        },
+    ]
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        str(ROOT / "tools/performance/summarize-stage-trace.py"),
+        str(tmp_path),
+        str(tmp_path / "summary.json"),
+        "--run-id",
+        run_id,
+    ]
+    inversion = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert inversion.returncode != 0
+    assert "callback precedes draw" in inversion.stderr
+
+    records[1]["sequence"] = 2
+    records[1]["monotonic_raw_ns"] = 210
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    gap = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    assert gap.returncode != 0
+    assert "non-contiguous or reused trace sequence" in gap.stderr
+
+
+def test_stage_trace_v2_requires_exact_surface_commit_boundaries(
+    tmp_path: pathlib.Path,
+) -> None:
+    run_id = "commit-boundary-v2"
+    trace = tmp_path / f"{run_id}-10.jsonl"
+    common = {
+        "schema": "splinterm.performance.stage.v2",
+        "run_id": run_id,
+        "process": "splinterm",
+        "pid": 10,
+        "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+    }
+    correlation = {
+        "splint_id": "00000000-0000-0000-0000-000000000001",
+        "incarnation": 2,
+        "subscription_id": 3,
+        "transaction_sequence": 7,
+        "revision": 4,
+    }
+    records = [
+        {
+            **common,
+            **correlation,
+            "sequence": 0,
+            "monotonic_raw_ns": 100,
+            "stage": "client_receive",
+        },
+        {
+            **common,
+            **correlation,
+            "sequence": 1,
+            "monotonic_raw_ns": 150,
+            "stage": "pane_commit",
+            "commit_sequence": 0,
+        },
+        {
+            **common,
+            "sequence": 2,
+            "monotonic_raw_ns": 160,
+            "stage": "draw_commit",
+            "commit_sequence": 0,
+        },
+        {
+            **common,
+            "sequence": 3,
+            "monotonic_raw_ns": 190,
+            "stage": "frame_callback",
+            "commit_sequence": 0,
+            "duration_ns": 30,
+        },
+    ]
+    command = [
+        sys.executable,
+        str(ROOT / "tools/performance/summarize-stage-trace.py"),
+        str(tmp_path),
+        str(tmp_path / "summary.json"),
+        "--run-id",
+        run_id,
+    ]
+
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    mismatched_pane = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert mismatched_pane.returncode != 0
+    assert "pane_commit timestamp differs from draw" in mismatched_pane.stderr
+
+    records[1]["monotonic_raw_ns"] = 160
+    records[3]["duration_ns"] = 29
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    mismatched_callback = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert mismatched_callback.returncode != 0
+    assert (
+        "callback duration differs from timestamp delta" in mismatched_callback.stderr
+    )
+
+    records[3]["duration_ns"] = 30
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    valid = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    records[2]["pane_role"] = "focused"
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    pane_identity = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert pane_identity.returncode != 0
+    assert "surface stage carries pane correlation identity" in pane_identity.stderr
+
+    del records[2]["pane_role"]
+    del records[3]["duration_ns"]
+    trace.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    missing_duration = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert missing_duration.returncode != 0
+    assert "frame_callback missing duration_ns" in missing_duration.stderr
 
 
 def test_graphical_cava_progress_counts_distinct_body_free_revisions(

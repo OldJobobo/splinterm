@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.local/schema/graphical-catchup-report.json",
+  "title": "Plan 0022 graphical catch-up measured-cell report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "case_id", "plan_sha256", "phase", "iteration", "execution_index", "cell", "precondition", "operation_evidence", "trace", "capture", "movement", "isolation", "cleanup", "failure", "valid", "notes"],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.graphical-catchup-report.v1" },
+    "case_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "plan_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "phase": { "enum": ["warmup", "measured"] },
+    "iteration": { "type": "integer", "minimum": 0 },
+    "execution_index": { "type": "integer", "minimum": 0 },
+    "cell": { "$ref": "#/$defs/cell" },
+    "precondition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["panes", "viewport", "activity"],
+      "properties": {
+        "panes": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/panePrecondition" } },
+        "viewport": {
+          "type": "object", "additionalProperties": false,
+          "required": ["initial", "steps", "final", "proven"],
+          "properties": {
+            "initial": { "const": "live" },
+            "steps": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "enum": ["assert-live", "scroll-back-one-page", "assert-detached"] } },
+            "final": { "enum": ["live", "detached"] },
+            "proven": { "type": "boolean" }
+          }
+        },
+        "activity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["mode", "target_panes", "observed_panes", "proven"],
+          "properties": {
+            "mode": { "enum": ["focused-only", "all-panes", "idle", "idle-then-focused"] },
+            "target_panes": { "$ref": "#/$defs/paneIndexes" },
+            "observed_panes": { "$ref": "#/$defs/paneIndexes" },
+            "proven": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "operation_evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unit", "requested_units", "completed_units", "completed", "panes"],
+      "properties": {
+        "unit": { "enum": ["marker", "output-lines", "position-moves", "resize-steps"] },
+        "requested_units": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "completed_units": { "type": "integer", "minimum": 0, "maximum": 2000 },
+        "completed": { "type": "boolean" },
+        "panes": { "type": "array", "minItems": 0, "maxItems": 4, "items": { "$ref": "#/$defs/operationPane" } }
+      }
+    },
+    "trace": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "records", "saturated", "ambiguous", "client_receive_to_pane_commit_ns", "commit_to_callback_ns", "uncommitted_transactions"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "records": { "type": "integer", "minimum": 0, "maximum": 65536 },
+        "saturated": { "type": "boolean" },
+        "ambiguous": { "type": "boolean" },
+        "client_receive_to_pane_commit_ns": { "type": ["integer", "null"], "minimum": 0 },
+        "commit_to_callback_ns": { "type": ["integer", "null"], "minimum": 0 },
+        "uncommitted_transactions": { "type": "integer", "minimum": 0, "maximum": 65536 }
+      }
+    },
+    "capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["marker_trigger_ns", "child_receipt_ns", "attempts", "found_sequence", "quantization_ns"],
+      "properties": {
+        "marker_trigger_ns": { "$ref": "#/$defs/ns" },
+        "child_receipt_ns": { "$ref": "#/$defs/ns" },
+        "attempts": {
+          "type": "array", "minItems": 1, "maxItems": 10000,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["sequence", "capture_start_ns", "capture_end_ns", "decode_scan_complete_ns", "marker_found", "pane_marker_pixels"],
+            "properties": {
+              "sequence": { "type": "integer", "minimum": 0, "maximum": 9999 },
+              "capture_start_ns": { "$ref": "#/$defs/ns" },
+              "capture_end_ns": { "$ref": "#/$defs/ns" },
+              "decode_scan_complete_ns": { "$ref": "#/$defs/ns" },
+              "marker_found": { "type": "boolean" },
+              "pane_marker_pixels": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/paneMarkerPixels" } }
+            }
+          }
+        },
+        "found_sequence": { "type": "integer", "minimum": 0, "maximum": 9999 },
+        "quantization_ns": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "movement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["position_changes", "configure_events", "output_enter_events", "output_leave_events", "semantic_applies", "history_clones", "pane_frame_rebuilds"],
+      "properties": {
+        "position_changes": { "type": "integer", "minimum": 0 },
+        "configure_events": { "type": "integer", "minimum": 0 },
+        "output_enter_events": { "type": "integer", "minimum": 0 },
+        "output_leave_events": { "type": "integer", "minimum": 0 },
+        "semantic_applies": { "type": "integer", "minimum": 0 },
+        "history_clones": { "type": "integer", "minimum": 0 },
+        "pane_frame_rebuilds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "isolation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace", "monitor", "target_owned", "placement_preserved", "focus_preserved", "unrelated_activity_untouched"],
+      "properties": {
+        "workspace": { "const": 8 },
+        "monitor": { "const": "DP-2" },
+        "target_owned": { "type": "boolean" },
+        "placement_preserved": { "type": "boolean" },
+        "focus_preserved": { "type": "boolean" },
+        "unrelated_activity_untouched": { "type": "boolean" }
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["windows_absent", "processes_absent", "namespace_absent", "trace_closed", "verified", "failure"],
+      "properties": {
+        "windows_absent": { "type": "boolean" },
+        "processes_absent": { "type": "boolean" },
+        "namespace_absent": { "type": "boolean" },
+        "trace_closed": { "type": "boolean" },
+        "verified": { "type": "boolean" },
+        "failure": { "type": ["string", "null"] }
+      }
+    },
+    "failure": { "type": ["string", "null"] },
+    "valid": { "type": "boolean" },
+    "notes": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 512 } }
+  },
+  "allOf": [{
+    "if": { "properties": { "valid": { "const": true } }, "required": ["valid"] },
+    "then": { "properties": {
+      "failure": { "type": "null" },
+      "cleanup": { "properties": { "windows_absent": { "const": true }, "processes_absent": { "const": true }, "namespace_absent": { "const": true }, "trace_closed": { "const": true }, "verified": { "const": true }, "failure": { "type": "null" } } },
+      "isolation": { "properties": { "target_owned": { "const": true }, "placement_preserved": { "const": true }, "focus_preserved": { "const": true }, "unrelated_activity_untouched": { "const": true } } },
+      "trace": { "properties": { "saturated": { "const": false }, "ambiguous": { "const": false } } }
+    } }
+  }],
+  "$defs": {
+    "ns": { "type": "integer", "minimum": 0 },
+    "paneIndexes": { "type": "array", "minItems": 0, "maxItems": 4, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 3 } },
+    "paneMarkerPixels": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pane_index", "pixels"],
+      "properties": {
+        "pane_index": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "pixels": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "operationPane": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pane_index", "event", "workload", "completed_units", "payload_bytes", "marker_bytes", "control_bytes", "raw_result"],
+      "properties": {
+        "pane_index": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "event": { "enum": ["marker_complete", "output_complete", "movement_complete", "resize_complete"] },
+        "workload": { "enum": ["marker", "plain", "ansi", "movement", "resize"] },
+        "completed_units": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "payload_bytes": { "type": "integer", "minimum": 0 },
+        "marker_bytes": { "type": "integer", "minimum": 0 },
+        "control_bytes": { "type": "integer", "minimum": 0 },
+        "raw_result": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/rawChildResult" }
+          ]
+        }
+      }
+    },
+    "rawChildResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "event", "sequence", "pid", "received_monotonic_ns", "completed_monotonic_ns", "workload", "lines", "completed_units", "payload_bytes", "marker_bytes", "control_bytes", "total_bytes"],
+      "properties": {
+        "schema": { "const": "splinterm.benchmark.child-result.v1" },
+        "event": { "enum": ["marker_complete", "output_complete", "write_complete"] },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "pid": { "type": "integer", "minimum": 1 },
+        "received_monotonic_ns": { "$ref": "#/$defs/ns" },
+        "completed_monotonic_ns": { "$ref": "#/$defs/ns" },
+        "workload": { "type": ["string", "null"], "enum": [null, "plain", "ansi"] },
+        "lines": { "type": "integer", "minimum": 0, "maximum": 2000 },
+        "completed_units": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "payload_bytes": { "type": "integer", "minimum": 0 },
+        "marker_bytes": { "type": "integer", "minimum": 0 },
+        "control_bytes": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "panePrecondition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pane_index", "target_cached_rows", "actual_cached_rows", "cached_bytes", "verified"],
+      "properties": {
+        "pane_index": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "target_cached_rows": { "enum": [0, 1000, 4096] },
+        "actual_cached_rows": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "cached_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "verified": { "type": "boolean" }
+      }
+    },
+    "cell": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "pane_count", "cached_rows_per_pane", "viewport", "activity", "operation"],
+      "properties": {
+        "name": { "enum": ["zero-history", "history-1000", "history-4096", "detached-history", "inactive-scaling-2", "inactive-scaling-4", "all-pane-scaling", "static-movement", "outer-resize", "ansi-stress"] },
+        "pane_count": { "enum": [1, 2, 4] },
+        "cached_rows_per_pane": { "enum": [0, 1000, 4096] },
+        "viewport": { "enum": ["live", "detached"] },
+        "activity": { "enum": ["focused-only", "all-panes", "idle", "idle-then-focused"] },
+        "operation": { "enum": ["small-marker", "continuing-small-output", "same-output-position-movement", "twelve-step-outer-resize", "ansi-2000-lines"] }
+      }
+    }
+  }
+}

@@ -5,7 +5,9 @@ mod options;
 mod picker;
 mod topology;
 
-pub use message::{AuthorityStatus, ThemeUpdate, WindowCommand, WindowUpdate};
+pub use message::{
+    AuthorityStatus, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,
+};
 pub use options::{TrustedConsentUi, WindowOptions, WindowPaneOptions};
 pub(crate) use picker::PickerHitTarget;
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};

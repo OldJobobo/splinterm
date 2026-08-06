@@ -41,6 +41,7 @@ pub struct PerfTraceEvent {
     pub revision: Option<u64>,
     pub subscription_id: Option<u64>,
     pub transaction_sequence: Option<u64>,
+    pub commit_sequence: Option<u64>,
     pub duration_ns: Option<u64>,
     pub queue_wait_ns: Option<u64>,
     pub bytes: Option<u64>,
@@ -48,8 +49,49 @@ pub struct PerfTraceEvent {
     pub cells: Option<u64>,
     pub count: Option<u64>,
     pub queue_depth: Option<u64>,
+    pub pane_role: Option<&'static str>,
+    pub pane_count: Option<u64>,
+    pub active_pane_count: Option<u64>,
+    pub columns: Option<u64>,
+    pub cached_history_rows: Option<u64>,
+    pub cached_history_bytes: Option<u64>,
+    pub copied_history_rows: Option<u64>,
+    pub copied_history_bytes: Option<u64>,
+    pub history_scan_rows: Option<u64>,
+    pub history_trim_rows: Option<u64>,
+    pub receiver_batch_size: Option<u64>,
+    pub contiguous_updates: Option<u64>,
+    pub superseded_revisions: Option<u64>,
+    pub dirty_rows: Option<u64>,
+    pub prepared_rows: Option<u64>,
+    pub prepared_cells: Option<u64>,
+    pub inactive_panes_dirty: Option<u64>,
+    pub inactive_panes_prepared: Option<u64>,
+    pub inactive_panes_skipped: Option<u64>,
+    pub inactive_panes_superseded: Option<u64>,
+    pub configure_count: Option<u64>,
+    pub output_enter_events: Option<u64>,
+    pub output_leave_events: Option<u64>,
+    pub old_width: Option<u64>,
+    pub old_height: Option<u64>,
+    pub final_width: Option<u64>,
+    pub final_height: Option<u64>,
+    pub scale_120: Option<u64>,
+    pub glyph_cache_hits: Option<u64>,
+    pub glyph_cache_misses: Option<u64>,
+    pub image_generation: Option<u64>,
+    pub backing_clear_bytes: Option<u64>,
+    pub backing_copy_bytes: Option<u64>,
+    pub damage_regions: Option<u64>,
+    pub damage_area: Option<u64>,
+    pub shm_acquire_ns: Option<u64>,
+    pub buffers_available: Option<u64>,
+    pub buffers_total: Option<u64>,
+    pub callbacks_coalesced: Option<u64>,
+    pub event_loop_active_ns: Option<u64>,
     pub full_reload: Option<bool>,
     pub resync: Option<bool>,
+    pub scale_changed: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -81,6 +123,8 @@ struct TraceRecordEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     transaction_sequence: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    commit_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     duration_ns: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     queue_wait_ns: Option<u64>,
@@ -95,9 +139,91 @@ struct TraceRecordEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     queue_depth: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pane_role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pane_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_pane_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    columns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_history_rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_history_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copied_history_rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copied_history_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_scan_rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_trim_rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receiver_batch_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contiguous_updates: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_revisions: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dirty_rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prepared_rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prepared_cells: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inactive_panes_dirty: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inactive_panes_prepared: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inactive_panes_skipped: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inactive_panes_superseded: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    configure_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_enter_events: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_leave_events: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_width: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_height: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_width: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_height: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scale_120: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    glyph_cache_hits: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    glyph_cache_misses: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backing_clear_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backing_copy_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    damage_regions: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    damage_area: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shm_acquire_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buffers_available: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buffers_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callbacks_coalesced: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_loop_active_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     full_reload: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resync: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scale_changed: Option<bool>,
 }
 
 impl From<PerfTraceEvent> for TraceRecordEvent {
@@ -109,6 +235,7 @@ impl From<PerfTraceEvent> for TraceRecordEvent {
             revision: event.revision,
             subscription_id: event.subscription_id,
             transaction_sequence: event.transaction_sequence,
+            commit_sequence: event.commit_sequence,
             duration_ns: event.duration_ns,
             queue_wait_ns: event.queue_wait_ns,
             bytes: event.bytes,
@@ -116,8 +243,49 @@ impl From<PerfTraceEvent> for TraceRecordEvent {
             cells: event.cells,
             count: event.count,
             queue_depth: event.queue_depth,
+            pane_role: event.pane_role,
+            pane_count: event.pane_count,
+            active_pane_count: event.active_pane_count,
+            columns: event.columns,
+            cached_history_rows: event.cached_history_rows,
+            cached_history_bytes: event.cached_history_bytes,
+            copied_history_rows: event.copied_history_rows,
+            copied_history_bytes: event.copied_history_bytes,
+            history_scan_rows: event.history_scan_rows,
+            history_trim_rows: event.history_trim_rows,
+            receiver_batch_size: event.receiver_batch_size,
+            contiguous_updates: event.contiguous_updates,
+            superseded_revisions: event.superseded_revisions,
+            dirty_rows: event.dirty_rows,
+            prepared_rows: event.prepared_rows,
+            prepared_cells: event.prepared_cells,
+            inactive_panes_dirty: event.inactive_panes_dirty,
+            inactive_panes_prepared: event.inactive_panes_prepared,
+            inactive_panes_skipped: event.inactive_panes_skipped,
+            inactive_panes_superseded: event.inactive_panes_superseded,
+            configure_count: event.configure_count,
+            output_enter_events: event.output_enter_events,
+            output_leave_events: event.output_leave_events,
+            old_width: event.old_width,
+            old_height: event.old_height,
+            final_width: event.final_width,
+            final_height: event.final_height,
+            scale_120: event.scale_120,
+            glyph_cache_hits: event.glyph_cache_hits,
+            glyph_cache_misses: event.glyph_cache_misses,
+            image_generation: event.image_generation,
+            backing_clear_bytes: event.backing_clear_bytes,
+            backing_copy_bytes: event.backing_copy_bytes,
+            damage_regions: event.damage_regions,
+            damage_area: event.damage_area,
+            shm_acquire_ns: event.shm_acquire_ns,
+            buffers_available: event.buffers_available,
+            buffers_total: event.buffers_total,
+            callbacks_coalesced: event.callbacks_coalesced,
+            event_loop_active_ns: event.event_loop_active_ns,
             full_reload: event.full_reload,
             resync: event.resync,
+            scale_changed: event.scale_changed,
         }
     }
 }
@@ -130,6 +298,16 @@ pub fn perf_trace_enabled() -> bool {
 
 /// Writes one bounded, body-free stage record when tracing is active.
 pub fn emit_perf_trace(process: &str, stage: &str, event: PerfTraceEvent) {
+    emit_perf_trace_at(process, stage, event, monotonic_raw_ns());
+}
+
+/// Writes one bounded stage record using a timestamp captured at the named boundary.
+pub fn emit_perf_trace_at(
+    process: &str,
+    stage: &str,
+    event: PerfTraceEvent,
+    monotonic_raw_ns: u64,
+) {
     let Some(trace) = trace() else { return };
     let sequence = trace.sequence.fetch_add(1, Ordering::Relaxed);
     if sequence > trace.max_events {
@@ -141,13 +319,13 @@ pub fn emit_perf_trace(process: &str, stage: &str, event: PerfTraceEvent) {
         (stage, event)
     };
     let record = TraceRecord {
-        schema: "splinterm.performance.stage.v1",
+        schema: "splinterm.performance.stage.v2",
         run_id: &trace.run_id,
         process,
         pid: std::process::id(),
         sequence,
         clock: "CLOCK_MONOTONIC_RAW shared host namespace",
-        monotonic_raw_ns: monotonic_raw_ns(),
+        monotonic_raw_ns,
         stage,
         event: event.into(),
     };
@@ -229,5 +407,56 @@ mod tests {
         let second = monotonic_raw_ns();
         assert!(first > 0);
         assert!(second >= first);
+    }
+
+    #[test]
+    fn v2_record_keeps_body_free_graphical_correlation() {
+        let record = TraceRecord {
+            schema: "splinterm.performance.stage.v2",
+            run_id: "test",
+            process: "splinterm",
+            pid: 7,
+            sequence: 3,
+            clock: "CLOCK_MONOTONIC_RAW shared host namespace",
+            monotonic_raw_ns: 11,
+            stage: "pane_commit",
+            event: PerfTraceEvent {
+                splint_id: Some(SplintId::new()),
+                incarnation: Some(2),
+                revision: Some(4),
+                subscription_id: Some(5),
+                transaction_sequence: Some(6),
+                commit_sequence: Some(8),
+                pane_role: Some("focused"),
+                copied_history_rows: Some(4_096),
+                ..PerfTraceEvent::default()
+            }
+            .into(),
+        };
+        let value = serde_json::to_value(record).unwrap();
+        assert_eq!(value["schema"], "splinterm.performance.stage.v2");
+        assert_eq!(value["commit_sequence"], 8);
+        assert_eq!(value["pane_role"], "focused");
+        assert_eq!(value["copied_history_rows"], 4_096);
+        assert!(value.get("terminal_body").is_none());
+
+        let window_event = TraceRecord {
+            schema: "splinterm.performance.stage.v2",
+            run_id: "test",
+            process: "splinterm",
+            pid: 7,
+            sequence: 4,
+            clock: "CLOCK_MONOTONIC_RAW shared host namespace",
+            monotonic_raw_ns: 12,
+            stage: "window_event",
+            event: PerfTraceEvent {
+                output_enter_events: Some(1),
+                ..PerfTraceEvent::default()
+            }
+            .into(),
+        };
+        let value = serde_json::to_value(window_event).unwrap();
+        assert_eq!(value["output_enter_events"], 1);
+        assert!(value.get("splint_id").is_none());
     }
 }

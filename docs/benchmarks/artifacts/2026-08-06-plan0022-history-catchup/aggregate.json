@@ -1,0 +1,489 @@
+{
+  "schema": "splinterm.benchmark.graphical-catchup-summary.v1",
+  "plan_sha256": "091cc4d798e0ed460f421902713d1bd17efc2f1e68379f1859da372739d87869",
+  "seed": 220022,
+  "bootstrap": {
+    "resamples": 20000,
+    "seed": 220022,
+    "interval": "one-sided 95% upper bound",
+    "p95": "nearest-rank"
+  },
+  "reports": {
+    "warmup": 30,
+    "measured": 100,
+    "valid": 130,
+    "invalid_retained": 1
+  },
+  "cells": {
+    "all-pane-scaling": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 37562037,
+        "median_ns": 49077676,
+        "p95_ns": 65172459,
+        "max_ns": 65172459
+      },
+      "receive_to_commit_p95_ucb_ns": 65172459,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 15409221,
+        "median_ns": 30606438,
+        "p95_ns": 36332620,
+        "max_ns": 36332620
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 546919685,
+        "median_ns": 564710615,
+        "p95_ns": 584482822,
+        "max_ns": 584482822
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 274543860,
+        "median_ns": 283850832,
+        "p95_ns": 294240022,
+        "max_ns": 294240022
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 10,
+        "position_changes": 0,
+        "semantic_applies": 40
+      }
+    },
+    "ansi-stress": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 188655053,
+        "median_ns": 293804310,
+        "p95_ns": 379672975,
+        "max_ns": 379672975
+      },
+      "receive_to_commit_p95_ucb_ns": 379672975,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 4820026,
+        "median_ns": 15276593,
+        "p95_ns": 82747318,
+        "max_ns": 82747318
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 5532410761,
+        "median_ns": 5559527243,
+        "p95_ns": 5848460803,
+        "max_ns": 5848460803
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 277022157,
+        "median_ns": 291527487,
+        "p95_ns": 329756945,
+        "max_ns": 329756945
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 408,
+        "position_changes": 0,
+        "semantic_applies": 5021
+      }
+    },
+    "detached-history": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 18658307,
+        "median_ns": 19404386,
+        "p95_ns": 21696263,
+        "max_ns": 21696263
+      },
+      "receive_to_commit_p95_ucb_ns": 21696263,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 9233716,
+        "median_ns": 13595722,
+        "p95_ns": 17398510,
+        "max_ns": 17398510
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 144158891,
+        "median_ns": 153926212,
+        "p95_ns": 160123472,
+        "max_ns": 160123472
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 141784140,
+        "median_ns": 151543139,
+        "p95_ns": 157747013,
+        "max_ns": 157747013
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 40960,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 10,
+        "position_changes": 0,
+        "semantic_applies": 10
+      }
+    },
+    "history-1000": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 2130997,
+        "median_ns": 2300677,
+        "p95_ns": 3099835,
+        "max_ns": 3099835
+      },
+      "receive_to_commit_p95_ucb_ns": 3099835,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 1553689,
+        "median_ns": 28551184,
+        "p95_ns": 32581306,
+        "max_ns": 32581306
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 160937220,
+        "median_ns": 169110241,
+        "p95_ns": 206598653,
+        "max_ns": 206598653
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 156492819,
+        "median_ns": 166733024,
+        "p95_ns": 204201804,
+        "max_ns": 204201804
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 10,
+        "position_changes": 0,
+        "semantic_applies": 10
+      }
+    },
+    "history-4096": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 7688268,
+        "median_ns": 8028848,
+        "p95_ns": 10024808,
+        "max_ns": 10024808
+      },
+      "receive_to_commit_p95_ucb_ns": 10024808,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 1925035,
+        "median_ns": 13190992,
+        "p95_ns": 34561376,
+        "max_ns": 34561376
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 166202743,
+        "median_ns": 174758629,
+        "p95_ns": 183203783,
+        "max_ns": 183203783
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 163782939,
+        "median_ns": 172354523,
+        "p95_ns": 180827770,
+        "max_ns": 180827770
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 10,
+        "position_changes": 0,
+        "semantic_applies": 10
+      }
+    },
+    "inactive-scaling-2": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 7953455,
+        "median_ns": 8782645,
+        "p95_ns": 10112948,
+        "max_ns": 10112948
+      },
+      "receive_to_commit_p95_ucb_ns": 10112948,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 2124013,
+        "median_ns": 24190051,
+        "p95_ns": 32037801,
+        "max_ns": 32037801
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 287711482,
+        "median_ns": 293157984,
+        "p95_ns": 305731289,
+        "max_ns": 305731289
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 285350358,
+        "median_ns": 290661857,
+        "p95_ns": 303275232,
+        "max_ns": 303275232
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 10,
+        "position_changes": 0,
+        "semantic_applies": 10
+      }
+    },
+    "inactive-scaling-4": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 8341632,
+        "median_ns": 8859960,
+        "p95_ns": 10423462,
+        "max_ns": 10423462
+      },
+      "receive_to_commit_p95_ucb_ns": 10423462,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 2154533,
+        "median_ns": 22674809,
+        "p95_ns": 28855483,
+        "max_ns": 28855483
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 277259260,
+        "median_ns": 288029399,
+        "p95_ns": 299325033,
+        "max_ns": 299325033
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 274862419,
+        "median_ns": 284512710,
+        "p95_ns": 296917174,
+        "max_ns": 296917174
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 10,
+        "position_changes": 0,
+        "semantic_applies": 10
+      }
+    },
+    "outer-resize": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 1080584,
+        "median_ns": 1205984,
+        "p95_ns": 3056115,
+        "max_ns": 3056115
+      },
+      "receive_to_commit_p95_ucb_ns": 3056115,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 1119905,
+        "median_ns": 7566429,
+        "p95_ns": 34664531,
+        "max_ns": 34664531
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 4994389549,
+        "median_ns": 5265514068,
+        "p95_ns": 5390073364,
+        "max_ns": 5390073364
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 269122857,
+        "median_ns": 286559396,
+        "p95_ns": 392844942,
+        "max_ns": 392844942
+      },
+      "movement_totals": {
+        "configure_events": 120,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 251,
+        "position_changes": 0,
+        "semantic_applies": 490
+      }
+    },
+    "static-movement": {
+      "samples": 10,
+      "receive_to_commit": null,
+      "receive_to_commit_p95_ucb_ns": null,
+      "commit_to_callback": null,
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 255539847,
+        "median_ns": 271852920,
+        "p95_ns": 389262962,
+        "max_ns": 389262962
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 246148874,
+        "median_ns": 261669272,
+        "p95_ns": 361875081,
+        "max_ns": 361875081
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 0,
+        "position_changes": 10,
+        "semantic_applies": 0
+      }
+    },
+    "zero-history": {
+      "samples": 10,
+      "receive_to_commit": {
+        "count": 10,
+        "min_ns": 1105098,
+        "median_ns": 1231651,
+        "p95_ns": 1562978,
+        "max_ns": 1562978
+      },
+      "receive_to_commit_p95_ucb_ns": 1562978,
+      "commit_to_callback": {
+        "count": 10,
+        "min_ns": 3869137,
+        "median_ns": 28532607,
+        "p95_ns": 31008830,
+        "max_ns": 31008830
+      },
+      "screenshot_observation": {
+        "count": 10,
+        "min_ns": 163477978,
+        "median_ns": 175194830,
+        "p95_ns": 185165711,
+        "max_ns": 185165711
+      },
+      "capture_quantization": {
+        "count": 10,
+        "min_ns": 161018860,
+        "median_ns": 172799858,
+        "p95_ns": 182754922,
+        "max_ns": 182754922
+      },
+      "movement_totals": {
+        "configure_events": 0,
+        "history_clones": 0,
+        "output_enter_events": 0,
+        "output_leave_events": 0,
+        "pane_frame_rebuilds": 10,
+        "position_changes": 0,
+        "semantic_applies": 10
+      }
+    }
+  },
+  "derived": {
+    "inactive_four_to_one_p95_ratio": 1.0397667466548985,
+    "inactive_four_to_one_p95_ratio_ucb": 1.1652300827765207,
+    "history_4096_to_zero_p95_ratio": 6.413914975130808,
+    "history_4096_to_zero_p95_ratio_ucb": 7.257406497113995,
+    "measured_trace_resyncs": 0,
+    "stage_maxima": {
+      "terminal_mutation": {
+        "max_ns": 4048915,
+        "cell": "ansi-stress",
+        "case_id": "measured-05-0086-ansi-stress"
+      },
+      "owned_snapshot": {
+        "max_ns": 3405584,
+        "cell": "static-movement",
+        "case_id": "measured-05-0087-static-movement"
+      },
+      "daemon_publication": {
+        "max_ns": 3906435,
+        "cell": "static-movement",
+        "case_id": "measured-05-0087-static-movement"
+      },
+      "wire_materialize": {
+        "max_ns": 6042450,
+        "cell": "ansi-stress",
+        "case_id": "measured-07-0106-ansi-stress"
+      },
+      "frame_encode": {
+        "max_ns": 2614636,
+        "cell": "ansi-stress",
+        "case_id": "measured-02-0055-ansi-stress"
+      },
+      "socket_write": {
+        "max_ns": 171243939,
+        "cell": "ansi-stress",
+        "case_id": "measured-05-0086-ansi-stress"
+      },
+      "client_enqueue": {
+        "max_ns": 192690190,
+        "cell": "ansi-stress",
+        "case_id": "measured-05-0086-ansi-stress"
+      },
+      "client_apply": {
+        "max_ns": 29001494,
+        "cell": "detached-history",
+        "case_id": "measured-06-0092-detached-history"
+      },
+      "frame_prepare": {
+        "max_ns": 12869580,
+        "cell": "ansi-stress",
+        "case_id": "measured-02-0055-ansi-stress"
+      },
+      "draw_commit": {
+        "max_ns": 14573178,
+        "cell": "detached-history",
+        "case_id": "measured-06-0092-detached-history"
+      },
+      "frame_callback": {
+        "max_ns": 261325392,
+        "cell": "ansi-stress",
+        "case_id": "measured-05-0086-ansi-stress"
+      }
+    }
+  },
+  "decisions": {
+    "ordinary_focused_small_update_under_50ms": true,
+    "inactive_scaling_ratio_at_most_1_25": true,
+    "static_movement_zero_semantic_history_frame_or_configure_work": true,
+    "no_resyncs": true,
+    "comparative_zero_history_regression_gate": "unresolved-no-graphical-control",
+    "history_amplification_reduction_gate": "unresolved-no-graphical-control"
+  }
+}

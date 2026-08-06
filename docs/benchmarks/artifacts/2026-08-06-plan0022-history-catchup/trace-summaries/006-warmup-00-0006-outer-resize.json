@@ -1,0 +1,973 @@
+{
+  "schema": "splinterm.performance.stage-summary.v2",
+  "valid": true,
+  "run_id": "gc-6-1353975",
+  "clock": "CLOCK_MONOTONIC_RAW shared host namespace",
+  "files": [
+    "/home/oldjobobo/Projects/splinterm/benchmark-results/20260806T030231Z-plan0022-graphical-catchup-matrix-final/matrix/006-warmup-00-0006-outer-resize/trace/gc-6-1353975-1354020.jsonl",
+    "/home/oldjobobo/Projects/splinterm/benchmark-results/20260806T030231Z-plan0022-graphical-catchup-matrix-final/matrix/006-warmup-00-0006-outer-resize/trace/gc-6-1353975-1354229.jsonl"
+  ],
+  "record_count": 12692,
+  "processes": [
+    [
+      "splinterd",
+      1354020
+    ],
+    [
+      "splinterm",
+      1354229
+    ]
+  ],
+  "stage_order": [
+    "terminal_mutation",
+    "owned_snapshot",
+    "daemon_publication",
+    "wire_materialize",
+    "frame_encode",
+    "socket_write",
+    "client_receive",
+    "client_enqueue",
+    "client_apply",
+    "frame_prepare",
+    "pane_commit",
+    "draw_commit",
+    "frame_callback",
+    "window_event",
+    "graphical_input",
+    "tab_switch"
+  ],
+  "interval_ownership": {
+    "terminal_mutation": "terminal parser/state active work only",
+    "owned_snapshot": "borrowed terminal state to owned LiveSnapshot",
+    "daemon_publication": "subscriber history lookup, snapshot, and queue admission",
+    "wire_materialize": "LiveSnapshot/update batch to one bounded protocol event",
+    "frame_encode": "protocol event JSON/frame encoding",
+    "socket_write": "awaited local-socket write including backpressure",
+    "client_receive": "timestamp after complete frame decode/classification",
+    "client_enqueue": "awaited bounded Wayland update-queue admission",
+    "client_apply": "protocol update validation and snapshot mutation",
+    "frame_prepare": "display snapshot plus full/incremental SnapshotFrame preparation",
+    "draw_commit": "SHM acquisition, composition/copy, damage, attach, and wl_surface.commit",
+    "graphical_input": "development-only graphical client input queued after committed revisions",
+    "pane_commit": "one body-free pane transaction associated with the surface commit boundary",
+    "frame_callback": "commit-to-compositor callback wait; not presentation latency",
+    "tab_switch": "client-local tab activation and bounded state replacement",
+    "window_event": "transaction-free Wayland configure or surface output-enter/output-leave callback count"
+  },
+  "stages": {
+    "terminal_mutation": {
+      "records": 1060,
+      "duration": {
+        "count": 1060,
+        "total_ns": 27958116,
+        "median_ns": 24445,
+        "p95_ns": 44421,
+        "max_ns": 145693
+      },
+      "bytes": 49462,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6659164,
+        "bytes": 49462,
+        "count": 1060,
+        "duration_ns": 27958116,
+        "incarnation": 2649,
+        "revision": 6708560
+      }
+    },
+    "owned_snapshot": {
+      "records": 1530,
+      "duration": {
+        "count": 1530,
+        "total_ns": 87906665,
+        "median_ns": 25877,
+        "p95_ns": 68167,
+        "max_ns": 8077161
+      },
+      "bytes": 0,
+      "rows": 83949,
+      "cells": 4524789,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "cells": 4524789,
+        "duration_ns": 87906665,
+        "incarnation": 3792,
+        "revision": 11828220,
+        "rows": 83949
+      }
+    },
+    "daemon_publication": {
+      "records": 1060,
+      "duration": {
+        "count": 1060,
+        "total_ns": 94242156,
+        "median_ns": 77910,
+        "p95_ns": 163923,
+        "max_ns": 988491
+      },
+      "bytes": 49462,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6659164,
+        "bytes": 49462,
+        "count": 1060,
+        "duration_ns": 94242156,
+        "incarnation": 2649,
+        "revision": 6708560
+      }
+    },
+    "wire_materialize": {
+      "records": 1107,
+      "duration": {
+        "count": 1107,
+        "total_ns": 59380947,
+        "median_ns": 43861,
+        "p95_ns": 110492,
+        "max_ns": 810810
+      },
+      "bytes": 0,
+      "rows": 13770,
+      "cells": 781126,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 7153188,
+        "cells": 781126,
+        "count": 49452,
+        "duration_ns": 59380947,
+        "incarnation": 2764,
+        "revision": 7202640,
+        "rows": 13770,
+        "subscription_id": 4423,
+        "transaction_sequence": 153736
+      }
+    },
+    "frame_encode": {
+      "records": 1107,
+      "duration": {
+        "count": 1107,
+        "total_ns": 26017099,
+        "median_ns": 21931,
+        "p95_ns": 35690,
+        "max_ns": 95405
+      },
+      "bytes": 8949216,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 7153188,
+        "bytes": 8949216,
+        "duration_ns": 26017099,
+        "revision": 7202640,
+        "subscription_id": 4423,
+        "transaction_sequence": 153736
+      }
+    },
+    "socket_write": {
+      "records": 1107,
+      "duration": {
+        "count": 1107,
+        "total_ns": 23683757,
+        "median_ns": 10896,
+        "p95_ns": 22350,
+        "max_ns": 3842985
+      },
+      "bytes": 8949216,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 7153188,
+        "bytes": 8949216,
+        "duration_ns": 23683757,
+        "revision": 7202640,
+        "subscription_id": 4423,
+        "transaction_sequence": 153736
+      }
+    },
+    "client_receive": {
+      "records": 1107,
+      "duration": null,
+      "bytes": 0,
+      "rows": 13770,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 7153188,
+        "count": 1107,
+        "incarnation": 2764,
+        "revision": 7202640,
+        "rows": 13770,
+        "subscription_id": 4423,
+        "transaction_sequence": 153736
+      }
+    },
+    "client_enqueue": {
+      "records": 1107,
+      "duration": {
+        "count": 1107,
+        "total_ns": 7369196,
+        "median_ns": 3772,
+        "p95_ns": 8591,
+        "max_ns": 1444149
+      },
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 3,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 7153188,
+        "duration_ns": 7369196,
+        "incarnation": 2764,
+        "queue_depth": 74,
+        "revision": 7202640,
+        "subscription_id": 4423,
+        "transaction_sequence": 153736
+      }
+    },
+    "client_apply": {
+      "records": 1107,
+      "duration": {
+        "count": 1107,
+        "total_ns": 2518592868,
+        "median_ns": 1790641,
+        "p95_ns": 6487879,
+        "max_ns": 27507691
+      },
+      "bytes": 0,
+      "rows": 13770,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 14,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 7153188,
+        "cached_history_bytes": 8050380996,
+        "cached_history_rows": 2187076,
+        "copied_history_bytes": 0,
+        "copied_history_rows": 0,
+        "count": 42,
+        "duration_ns": 2518592868,
+        "incarnation": 2764,
+        "pane_count": 1112,
+        "receiver_batch_size": 320,
+        "revision": 7202640,
+        "rows": 13770,
+        "subscription_id": 4423,
+        "transaction_sequence": 153736
+      }
+    },
+    "frame_prepare": {
+      "records": 280,
+      "duration": {
+        "count": 280,
+        "total_ns": 130743407,
+        "median_ns": 281678,
+        "p95_ns": 1033540,
+        "max_ns": 6587475
+      },
+      "bytes": 0,
+      "rows": 3347,
+      "cells": 189790,
+      "max_queue_depth": 0,
+      "full_reloads": 14,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 1659893,
+        "cached_history_rows": 501218,
+        "cells": 189790,
+        "columns": 15832,
+        "count": 3012,
+        "dirty_rows": 3012,
+        "duration_ns": 130743407,
+        "incarnation": 280,
+        "pane_count": 1120,
+        "prepared_cells": 189790,
+        "prepared_rows": 3347,
+        "revision": 1832101,
+        "rows": 3347,
+        "subscription_id": 265,
+        "superseded_revisions": 15,
+        "transaction_sequence": 35702
+      }
+    },
+    "pane_commit": {
+      "records": 1053,
+      "duration": null,
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "base_revision": 6578278,
+        "commit_sequence": 273734,
+        "incarnation": 2631,
+        "revision": 6625507,
+        "subscription_id": 4215,
+        "superseded_revisions": 54,
+        "transaction_sequence": 141412
+      }
+    },
+    "draw_commit": {
+      "records": 526,
+      "duration": {
+        "count": 526,
+        "total_ns": 272037274,
+        "median_ns": 406837,
+        "p95_ns": 797261,
+        "max_ns": 11914140
+      },
+      "bytes": 1195837568,
+      "rows": 6263,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 41,
+      "resyncs": 0,
+      "totals": {
+        "backing_copy_bytes": 1195837568,
+        "bytes": 1195837568,
+        "commit_sequence": 138075,
+        "duration_ns": 272037274,
+        "pane_count": 2104,
+        "rows": 6263
+      }
+    },
+    "frame_callback": {
+      "records": 526,
+      "duration": {
+        "count": 526,
+        "total_ns": 8701893115,
+        "median_ns": 13724125,
+        "p95_ns": 36184557,
+        "max_ns": 177392168
+      },
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "commit_sequence": 138075,
+        "duration_ns": 8701893115
+      }
+    },
+    "window_event": {
+      "records": 15,
+      "duration": null,
+      "bytes": 0,
+      "rows": 0,
+      "cells": 0,
+      "max_queue_depth": 0,
+      "full_reloads": 0,
+      "resyncs": 0,
+      "totals": {
+        "configure_count": 14,
+        "final_height": 7751,
+        "final_width": 11992,
+        "old_height": 7688,
+        "old_width": 11504,
+        "output_enter_events": 1
+      }
+    }
+  },
+  "correlated_wire_to_commit": {
+    "count": 1053,
+    "duration": {
+      "count": 1053,
+      "total_ns": 25954665047,
+      "median_ns": 17150713,
+      "p95_ns": 64355107,
+      "max_ns": 209552052
+    }
+  },
+  "trace_schema": "splinterm.performance.stage.v2",
+  "correlated_client_receive_to_commit": {
+    "count": 1053,
+    "duration": {
+      "count": 1053,
+      "total_ns": 25608509602,
+      "median_ns": 16915627,
+      "p95_ns": 64014701,
+      "max_ns": 209195163
+    }
+  },
+  "correlated_commit_to_callback": {
+    "count": 526,
+    "duration": {
+      "count": 526,
+      "total_ns": 8701893115,
+      "median_ns": 13724125,
+      "p95_ns": 36184557,
+      "max_ns": 177392168
+    }
+  },
+  "transactions": {
+    "committed": 1053,
+    "uncommitted": 54,
+    "uncommitted_records": [
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          175,
+          8307
+        ],
+        "last_stage": "frame_prepare"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          175,
+          8307
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          178,
+          8451
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          179,
+          8499
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          179,
+          8499
+        ],
+        "last_stage": "frame_prepare"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          179,
+          8457
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          179,
+          8499
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          180,
+          8499
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          204,
+          9651
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          223,
+          10515
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          230,
+          10803
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          230,
+          10803
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          232,
+          10851
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          230,
+          10851
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          232,
+          10851
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          232,
+          10899
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          233,
+          10899
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          234,
+          10947
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          232,
+          10947
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          233,
+          10947
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          234,
+          10947
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          233,
+          10953
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          235,
+          10995
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          236,
+          11043
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          236,
+          10999
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          236,
+          11043
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          235,
+          11043
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          237,
+          11043
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          237,
+          11068
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          236,
+          11052
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          237,
+          11091
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          238,
+          11139
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          239,
+          11139
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          239,
+          11139
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          240,
+          11187
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          239,
+          11187
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          240,
+          11187
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          239,
+          11187
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          241,
+          11235
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          240,
+          11235
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          241,
+          11283
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          242,
+          11283
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          242,
+          11283
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          243,
+          11287
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          242,
+          11293
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          243,
+          11326
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          243,
+          11331
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          244,
+          11331
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          243,
+          11331
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          244,
+          11331
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "442b8f75-a31d-4c1a-9aed-5439379e06e8",
+          4,
+          7,
+          244,
+          11379
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "106242ca-ba78-4de5-91dd-75458af98a35",
+          2,
+          5,
+          246,
+          11427
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "fbf37481-1e0b-4a82-88e7-4415d52d3b65",
+          3,
+          3,
+          245,
+          11427
+        ],
+        "last_stage": "client_apply"
+      },
+      {
+        "key": [
+          "da50eb69-db30-4ca9-8804-01f9834be70d",
+          1,
+          1,
+          246,
+          11427
+        ],
+        "last_stage": "client_apply"
+      }
+    ]
+  }
+}

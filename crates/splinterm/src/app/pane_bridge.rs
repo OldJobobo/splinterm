@@ -7,7 +7,9 @@ use splinterm::automation::{
     Connection, ImageContentLeaseSet, SharedImageContentCache, protocol_error,
 };
 use splinterm::config::AppConfig;
-use splinterm::{AuthorityStatus, WindowCommand, WindowPaneOptions, WindowUpdate};
+use splinterm::{
+    AuthorityStatus, PerfTraceCorrelation, WindowCommand, WindowPaneOptions, WindowUpdate,
+};
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{
     AccessGrant, AccessScope, ControlMode, ControlTransferOutcome, ErrorCode, Request, Response,
@@ -1193,7 +1195,20 @@ pub(in crate::app) async fn run_pane_subscription(
                         let revision = update.revision;
                         let queue_depth = updates.max_capacity().saturating_sub(updates.capacity());
                         let enqueue_started = perf_trace_enabled().then(Instant::now);
-                        if updates.send(WindowUpdate::Update { update, image_sources }).await.is_err() {
+                        if updates
+                            .send(WindowUpdate::Update {
+                                update,
+                                image_sources,
+                                trace: perf_trace_enabled().then_some(PerfTraceCorrelation {
+                                    base_revision,
+                                    revision,
+                                    subscription_id: attachment.subscription_id,
+                                    transaction_sequence: sequence,
+                                }),
+                            })
+                            .await
+                            .is_err()
+                        {
                             return finish_pane_controller(&mut controller, controller_completed).await;
                         }
                         if let Some(started) = enqueue_started {

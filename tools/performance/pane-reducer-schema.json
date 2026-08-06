@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.local/schema/pane-reducer.json",
+  "title": "Plan 0022 bounded PaneView reducer timing report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "clock", "build_profile", "warmup_runs", "sample_runs", "history_capacity_rows", "smoke", "focused_role_scope", "cases"],
+  "properties": {
+    "schema": { "const": "splinterm.performance.pane-reducer.v1" },
+    "clock": { "const": "std::time::Instant monotonic process clock" },
+    "build_profile": { "enum": ["debug", "release"] },
+    "warmup_runs": { "type": "integer", "minimum": 0 },
+    "sample_runs": { "type": "integer", "minimum": 1 },
+    "history_capacity_rows": { "const": 4096 },
+    "smoke": { "type": "boolean" },
+    "focused_role_scope": { "const": "PaneView semantic reducer only; not the full App::apply_updates active path" },
+    "cases": {
+      "type": "array", "minItems": 8, "maxItems": 24,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "mode", "history_rows", "viewport", "batch_size", "duration_ns"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^(focused-role|inactive-batch)-h(0|1000|4096)-(live|detached)-b(1|16|64)$" },
+          "mode": { "enum": ["focused-role", "inactive-batch"] },
+          "history_rows": { "enum": [0, 1000, 4096] },
+          "viewport": { "enum": ["live", "detached"] },
+          "batch_size": { "enum": [1, 16, 64] },
+          "duration_ns": { "type": "array", "minItems": 1, "items": { "type": "integer", "minimum": 0 } }
+        }
+      }
+    }
+  }
+}

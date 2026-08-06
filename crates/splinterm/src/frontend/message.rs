@@ -14,6 +14,15 @@ pub struct AuthorityStatus {
     pub development_bypass: bool,
 }
 
+/// Body-free identity that correlates one protocol update with graphical work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerfTraceCorrelation {
+    pub base_revision: u64,
+    pub revision: u64,
+    pub subscription_id: u64,
+    pub transaction_sequence: u64,
+}
+
 /// Bounded protocol-to-Wayland messages for the live snapshot viewer.
 #[allow(
     clippy::large_enum_variant,
@@ -29,6 +38,7 @@ pub enum WindowUpdate {
     Update {
         update: TerminalUpdate,
         image_sources: Option<ImageContentLeaseSet>,
+        trace: Option<PerfTraceCorrelation>,
     },
     ScrollbackPages(Vec<splinterm_protocol::ScrollbackPage>),
     ScrollbackResyncRequired,

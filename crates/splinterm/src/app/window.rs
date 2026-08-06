@@ -4,14 +4,17 @@ use std::{collections::HashMap, env, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    WindowOptions, WindowUpdate,
+    PerfTraceCorrelation, WindowOptions, WindowUpdate,
     automation::{Connection, MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
     config::AppConfig,
     renderer::{self, RendererOptions},
     run_window,
 };
 use splinterm_core::SplintId;
-use splinterm_protocol::{AccessScope, ControlMode, Request, Response, ServerFrame};
+use splinterm_protocol::{
+    AccessScope, ControlMode, Request, Response, ServerFrame,
+    perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
+};
 use tokio::sync::mpsc;
 
 use super::{
@@ -312,6 +315,25 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                         }
                         EventAction::Update { sequence, update }
                             if update_advances_from(&update, last_revision) => {
+                            if perf_trace_enabled() {
+                                emit_perf_trace(
+                                    "splinterm",
+                                    "client_receive",
+                                    PerfTraceEvent {
+                                        splint_id: Some(splint_id),
+                                        incarnation: Some(incarnation),
+                                        base_revision: Some(update.base_revision),
+                                        revision: Some(update.revision),
+                                        subscription_id: Some(attachment.subscription_id),
+                                        transaction_sequence: Some(sequence),
+                                        rows: Some(
+                                            u64::try_from(update.rows.len()).unwrap_or(u64::MAX),
+                                        ),
+                                        count: Some(1),
+                                        ..PerfTraceEvent::default()
+                                    },
+                                );
+                            }
                             last_revision = update.revision;
                             resolve_update_images(
                                 &mut connection,
@@ -321,8 +343,24 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                                 &image_cache,
                             ).await?;
                             let image_sources = lease_update_images(&image_cache, &update)?;
-                            if updates.send(WindowUpdate::Update { update, image_sources }).await.is_err() {
-                                let window_result = window.await.context("Wayland window task failed")?;
+                            let base_revision = update.base_revision;
+                            let revision = update.revision;
+                            if updates
+                                .send(WindowUpdate::Update {
+                                    update,
+                                    image_sources,
+                                    trace: perf_trace_enabled().then_some(PerfTraceCorrelation {
+                                        base_revision,
+                                        revision,
+                                        subscription_id: attachment.subscription_id,
+                                        transaction_sequence: sequence,
+                                    }),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                let window_result =
+                                    window.await.context("Wayland window task failed")?;
                                 controller.await.context("window controller task failed")??;
                                 return window_result;
                             }

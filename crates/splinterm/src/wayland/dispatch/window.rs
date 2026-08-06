@@ -1,3 +1,7 @@
+use splinterm_protocol::perf_trace::{
+    PerfTraceEvent, emit_perf_trace, emit_perf_trace_at, monotonic_raw_ns,
+};
+
 use super::super::{
     App, CompositorHandler, Connection, QueueHandle, SCALE_DENOMINATOR, TerminalResizeCause,
     WaylandSurface, Window, WindowConfigure, WindowHandler, note_output_enter, note_output_leave,
@@ -48,6 +52,22 @@ impl CompositorHandler for App {
     ) {
         if surface == self.surface.window.wl_surface() {
             self.scheduling.frame_pending = false;
+            if let Some(trace) = self.scheduling.pending_frame_trace.take() {
+                let callback_monotonic_raw_ns = monotonic_raw_ns();
+                emit_perf_trace_at(
+                    "splinterm",
+                    "frame_callback",
+                    PerfTraceEvent {
+                        commit_sequence: Some(trace.commit_sequence),
+                        duration_ns: Some(
+                            callback_monotonic_raw_ns
+                                .saturating_sub(trace.committed_monotonic_raw_ns),
+                        ),
+                        ..PerfTraceEvent::default()
+                    },
+                    callback_monotonic_raw_ns,
+                );
+            }
             if self.scheduling.redraw_pending {
                 if let Err(error) = self.draw(queue_handle) {
                     self.scheduling.fail(error);
@@ -68,6 +88,14 @@ impl CompositorHandler for App {
         }
         note_output_enter(&mut self.platform.entered_outputs, output);
         self.platform.output_count = self.platform.entered_outputs.len();
+        emit_perf_trace(
+            "splinterm",
+            "window_event",
+            PerfTraceEvent {
+                output_enter_events: Some(1),
+                ..PerfTraceEvent::default()
+            },
+        );
         if let Err(error) = self.refresh_output_dpi(output, queue_handle) {
             self.scheduling.fail(error);
         }
@@ -85,6 +113,14 @@ impl CompositorHandler for App {
         }
         let was_most_recent = note_output_leave(&mut self.platform.entered_outputs, output);
         self.platform.output_count = self.platform.entered_outputs.len();
+        emit_perf_trace(
+            "splinterm",
+            "window_event",
+            PerfTraceEvent {
+                output_leave_events: Some(1),
+                ..PerfTraceEvent::default()
+            },
+        );
         if was_most_recent {
             // With no entered output, retain the last observation as Foot does
             // while temporarily unmapped. Otherwise promote the previous output.
@@ -119,15 +155,29 @@ impl WindowHandler for App {
         configure: WindowConfigure,
         _serial: u32,
     ) {
+        let old_width = self.surface.logical_width;
+        let old_height = self.surface.logical_height;
         let width = configure
             .new_size
             .0
-            .map_or(self.surface.logical_width, std::num::NonZeroU32::get);
+            .map_or(old_width, std::num::NonZeroU32::get);
         let height = configure
             .new_size
             .1
-            .map_or(self.surface.logical_height, std::num::NonZeroU32::get);
-        let resized = (width, height) != (self.surface.logical_width, self.surface.logical_height);
+            .map_or(old_height, std::num::NonZeroU32::get);
+        emit_perf_trace(
+            "splinterm",
+            "window_event",
+            PerfTraceEvent {
+                configure_count: Some(1),
+                old_width: Some(u64::from(old_width)),
+                old_height: Some(u64::from(old_height)),
+                final_width: Some(u64::from(width)),
+                final_height: Some(u64::from(height)),
+                ..PerfTraceEvent::default()
+            },
+        );
+        let resized = (width, height) != (old_width, old_height);
         if resized {
             self.surface.logical_width = width;
             self.surface.logical_height = height;

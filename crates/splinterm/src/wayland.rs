@@ -88,11 +88,13 @@ use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::{DojoId, LairId, LayoutNode, SplintId};
 use splinterm_protocol::{
     ActiveScreen, ControlTransferDecision, MouseTracking, SearchMatch, TerminalInputModes,
-    TerminalSnapshot,
-    perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
+    TerminalRow, TerminalSnapshot,
+    perf_trace::{
+        PerfTraceEvent, emit_perf_trace, emit_perf_trace_at, monotonic_raw_ns, perf_trace_enabled,
+    },
 };
 #[cfg(test)]
-use splinterm_protocol::{HistoryTransition, TerminalCell, TerminalRow, TerminalUpdate};
+use splinterm_protocol::{HistoryTransition, TerminalCell, TerminalUpdate};
 
 use smithay_client_toolkit::reexports::protocols::wp::{
     fractional_scale::v1::client::{
@@ -115,9 +117,9 @@ use crate::background_effect::{
 };
 use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
 use crate::frontend::{
-    AuthorityStatus, SessionPickerDecision, SessionPickerItem, SessionPickerUi, ThemeUpdate,
-    TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
-    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    AuthorityStatus, PerfTraceCorrelation, SessionPickerDecision, SessionPickerItem,
+    SessionPickerUi, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
+    WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -812,6 +814,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
                 raster_dirty_rows: Vec::new(),
                 surface_dirty_rows: Vec::new(),
                 pending_scrolls: Vec::new(),
+                trace_correlation: None,
+                trace_pane_role: "focused",
+                trace_superseded_revisions: 0,
                 selected_text: None,
                 selection: None,
                 selecting: false,
@@ -862,6 +867,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             frame_pending: false,
             redraw_pending: false,
             terminal_redraw_pending: false,
+            next_commit_sequence: 0,
+            pending_frame_trace: None,
         },
     };
 
@@ -977,6 +984,9 @@ struct PaneView {
     raster_dirty_rows: Vec<bool>,
     surface_dirty_rows: Vec<bool>,
     pending_scrolls: Vec<splinterm_protocol::TerminalScroll>,
+    trace_correlation: Option<PerfTraceCorrelation>,
+    trace_pane_role: &'static str,
+    trace_superseded_revisions: u64,
     selected_text: Option<Vec<u8>>,
     selection: Option<Selection>,
     selecting: bool,
@@ -1067,6 +1077,56 @@ impl BackgroundUpdateImpact {
 }
 
 impl PaneView {
+    fn retain_trace_correlation(
+        &mut self,
+        trace: Option<PerfTraceCorrelation>,
+        pane_role: &'static str,
+    ) {
+        let Some(trace) = trace else { return };
+        if self
+            .trace_correlation
+            .is_some_and(|current| current != trace)
+        {
+            self.trace_superseded_revisions = self.trace_superseded_revisions.saturating_add(1);
+        }
+        self.trace_correlation = Some(trace);
+        self.trace_pane_role = pane_role;
+    }
+
+    fn clear_trace_correlation(&mut self) {
+        self.trace_correlation = None;
+        self.trace_superseded_revisions = 0;
+    }
+
+    fn history_rows_needed_for_viewport_transition(&self) -> Vec<TerminalRow> {
+        if self.scrollback_viewport.is_live() {
+            Vec::new()
+        } else {
+            self.snapshot
+                .as_ref()
+                .map_or_else(Vec::new, |snapshot| snapshot.scrollback_rows.clone())
+        }
+    }
+
+    fn trace_pane_role(&self, live_role: &'static str) -> &'static str {
+        if self.scrollback_viewport.is_live() {
+            live_role
+        } else {
+            "detached-viewport"
+        }
+    }
+
+    fn pending_commit_trace(&self) -> Option<PaneCommitTrace> {
+        let snapshot = self.snapshot.as_ref()?;
+        Some(PaneCommitTrace {
+            splint_id: snapshot.splint_id,
+            incarnation: snapshot.incarnation,
+            correlation: self.trace_correlation?,
+            pane_role: self.trace_pane_role,
+            superseded_revisions: self.trace_superseded_revisions,
+        })
+    }
+
     #[cfg(test)]
     fn from_inactive_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
         let mut pane = Self::from_options(options, scale_120)?;
@@ -1135,6 +1195,9 @@ impl PaneView {
             raster_dirty_rows: Vec::new(),
             surface_dirty_rows: Vec::new(),
             pending_scrolls: Vec::new(),
+            trace_correlation: None,
+            trace_pane_role: "visible-inactive",
+            trace_superseded_revisions: 0,
             selected_text: None,
             selection: None,
             selecting: false,
@@ -1277,6 +1340,7 @@ impl PaneView {
         &mut self,
         update: WindowUpdate,
         theme: ResolvedTheme,
+        pane_role: &'static str,
     ) -> Result<BackgroundUpdateImpact> {
         match update {
             WindowUpdate::Snapshot {
@@ -1299,10 +1363,7 @@ impl PaneView {
                     .map_or(snapshot.history_generation, |current| {
                         current.history_generation
                     });
-                let previous_rows = self
-                    .snapshot
-                    .as_ref()
-                    .map_or_else(Vec::new, |current| current.scrollback_rows.clone());
+                let previous_rows = self.history_rows_needed_for_viewport_transition();
                 self.scrollback_viewport.observe_history_change(
                     previous_generation,
                     &previous_rows,
@@ -1311,12 +1372,18 @@ impl PaneView {
                 self.clear_local_content_state();
                 self.snapshot = Some(snapshot);
                 self.image_sources = image_sources;
+                self.clear_trace_correlation();
                 Ok(BackgroundUpdateImpact::FRAME)
             }
             WindowUpdate::Update {
                 update,
                 image_sources,
+                trace,
             } => {
+                let apply_started = trace.map(|_| Instant::now());
+                let trace_base_revision = update.base_revision;
+                let trace_revision = update.revision;
+                let trace_rows = update.rows.len();
                 let content_changed = terminal_update_changes_visible_content(&update);
                 let frame_dirty = content_changed
                     || update.cursor.is_some()
@@ -1326,10 +1393,9 @@ impl PaneView {
                     .snapshot
                     .as_ref()
                     .map_or(1, |snapshot| snapshot.history_generation);
-                let previous_rows = self
-                    .snapshot
-                    .as_ref()
-                    .map_or_else(Vec::new, |snapshot| snapshot.scrollback_rows.clone());
+                let previous_rows = self.history_rows_needed_for_viewport_transition();
+                let trace_copied_history_bytes =
+                    apply_started.map(|_| history_cache_bytes(&previous_rows));
                 {
                     let snapshot = self
                         .snapshot
@@ -1346,8 +1412,46 @@ impl PaneView {
                 if let Some(image_sources) = image_sources {
                     self.image_sources = image_sources;
                 }
+                let trace_pane_role = self.trace_pane_role(pane_role);
+                if frame_dirty {
+                    self.retain_trace_correlation(trace, trace_pane_role);
+                }
                 if content_changed {
                     self.clear_local_content_state();
+                }
+                if let (Some(started), Some(trace), Some(snapshot)) =
+                    (apply_started, trace, self.snapshot.as_ref())
+                {
+                    emit_perf_trace(
+                        "splinterm",
+                        "client_apply",
+                        PerfTraceEvent {
+                            splint_id: Some(snapshot.splint_id),
+                            incarnation: Some(snapshot.incarnation),
+                            base_revision: Some(trace_base_revision),
+                            revision: Some(trace_revision),
+                            subscription_id: Some(trace.subscription_id),
+                            transaction_sequence: Some(trace.transaction_sequence),
+                            duration_ns: Some(
+                                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                            ),
+                            rows: Some(u64::try_from(trace_rows).unwrap_or(u64::MAX)),
+                            pane_role: Some(trace_pane_role),
+                            cached_history_rows: Some(
+                                u64::try_from(snapshot.scrollback_rows.len()).unwrap_or(u64::MAX),
+                            ),
+                            cached_history_bytes: Some(
+                                u64::try_from(history_cache_bytes(&snapshot.scrollback_rows))
+                                    .unwrap_or(u64::MAX),
+                            ),
+                            copied_history_rows: Some(
+                                u64::try_from(previous_rows.len()).unwrap_or(u64::MAX),
+                            ),
+                            copied_history_bytes: trace_copied_history_bytes
+                                .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+                            ..PerfTraceEvent::default()
+                        },
+                    );
                 }
                 Ok(if frame_dirty {
                     BackgroundUpdateImpact::FRAME
@@ -1419,7 +1523,7 @@ fn apply_inactive_update_batch(
 ) -> Result<BackgroundUpdateImpact> {
     let mut batch = BackgroundUpdateImpact::NONE;
     for update in updates {
-        let impact = pane.apply_background_update(update, theme)?;
+        let impact = pane.apply_background_update(update, theme, "visible-inactive")?;
         batch.visual_changed |= impact.visual_changed;
         batch.frame_dirty |= impact.frame_dirty;
     }
@@ -1605,6 +1709,43 @@ struct ModalState {
     deferred_picker_theme: Option<ThemeUpdate>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PaneCommitTrace {
+    splint_id: SplintId,
+    incarnation: u64,
+    correlation: PerfTraceCorrelation,
+    pane_role: &'static str,
+    superseded_revisions: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingFrameTrace {
+    commit_sequence: u64,
+    committed_monotonic_raw_ns: u64,
+}
+
+fn pending_pane_commit_traces(focused: &PaneView, inactive: &[PaneView]) -> Vec<PaneCommitTrace> {
+    let mut traces = Vec::with_capacity(inactive.len().saturating_add(1));
+    traces.extend(focused.pending_commit_trace());
+    traces.extend(inactive.iter().filter_map(PaneView::pending_commit_trace));
+    traces
+}
+
+fn pane_commit_event(trace: PaneCommitTrace, commit_sequence: u64) -> PerfTraceEvent {
+    PerfTraceEvent {
+        splint_id: Some(trace.splint_id),
+        incarnation: Some(trace.incarnation),
+        base_revision: Some(trace.correlation.base_revision),
+        revision: Some(trace.correlation.revision),
+        subscription_id: Some(trace.correlation.subscription_id),
+        transaction_sequence: Some(trace.correlation.transaction_sequence),
+        commit_sequence: Some(commit_sequence),
+        pane_role: Some(trace.pane_role),
+        superseded_revisions: Some(trace.superseded_revisions),
+        ..PerfTraceEvent::default()
+    }
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent lifecycle, frame-callback, redraw-priority, and trace flags"
@@ -1618,6 +1759,8 @@ struct SchedulingState {
     frame_pending: bool,
     redraw_pending: bool,
     terminal_redraw_pending: bool,
+    next_commit_sequence: u64,
+    pending_frame_trace: Option<PendingFrameTrace>,
 }
 
 struct App {
@@ -4644,6 +4787,7 @@ impl App {
             self.scheduling.exit = true;
             return Ok(());
         }
+        let receiver_batch_size = pending.len();
         let inactive = self.apply_inactive_updates()?;
         self.panes.pending_exited_splints.extend(inactive.exited);
         if let Some(update) = inactive.theme {
@@ -4695,9 +4839,7 @@ impl App {
                         let previous_rows = self
                             .panes
                             .pane
-                            .snapshot
-                            .as_ref()
-                            .map_or_else(Vec::new, |current| current.scrollback_rows.clone());
+                            .history_rows_needed_for_viewport_transition();
                         self.panes.pane.scrollback_viewport.observe_history_change(
                             previous_generation,
                             &previous_rows,
@@ -4706,6 +4848,7 @@ impl App {
                         self.invalidate_local_content_state();
                         self.panes.pane.snapshot = Some(snapshot);
                         self.panes.pane.image_sources = image_sources;
+                        self.panes.pane.clear_trace_correlation();
                         self.presentation.full_redraw = true;
                         full_frame_reload = true;
                         visual_changed = true;
@@ -4716,11 +4859,13 @@ impl App {
                 WindowUpdate::Update {
                     update,
                     image_sources,
+                    trace,
                 } => {
                     let apply_started = perf_trace_enabled().then(Instant::now);
                     let trace_base_revision = update.base_revision;
                     let trace_revision = update.revision;
                     let trace_rows = update.rows.len();
+                    let trace_image_changed = image_sources.is_some();
                     let old_cursor_row = self.panes.pane.snapshot.as_ref().and_then(|snapshot| {
                         usize::try_from(snapshot.cursor_row)
                             .ok()
@@ -4752,9 +4897,9 @@ impl App {
                     let previous_rows = self
                         .panes
                         .pane
-                        .snapshot
-                        .as_ref()
-                        .map_or_else(Vec::new, |snapshot| snapshot.scrollback_rows.clone());
+                        .history_rows_needed_for_viewport_transition();
+                    let trace_copied_history_bytes =
+                        apply_started.map(|_| history_cache_bytes(&previous_rows));
                     let snapshot = self
                         .panes
                         .pane
@@ -4771,6 +4916,7 @@ impl App {
                     if history_changed && !self.panes.pane.scrollback_viewport.is_live() {
                         full = true;
                     }
+                    let trace_pane_role = self.panes.pane.trace_pane_role("focused");
                     if content_changed {
                         self.reconcile_selection_after_content_change();
                     }
@@ -4840,6 +4986,7 @@ impl App {
                     );
                     visual_changed |= update_visual_changed;
                     focused_visual_changed |= update_visual_changed;
+                    let trace_draw_expected = full || update_visual_changed || trace_image_changed;
                     if let Some(started) = apply_started {
                         emit_perf_trace(
                             "splinterm",
@@ -4849,10 +4996,35 @@ impl App {
                                 incarnation: Some(snapshot.incarnation),
                                 base_revision: Some(trace_base_revision),
                                 revision: Some(trace_revision),
+                                subscription_id: trace.map(|value| value.subscription_id),
+                                transaction_sequence: trace.map(|value| value.transaction_sequence),
                                 duration_ns: Some(
                                     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                                 ),
                                 rows: Some(u64::try_from(trace_rows).unwrap_or(u64::MAX)),
+                                pane_role: Some(trace_pane_role),
+                                pane_count: Some(
+                                    u64::try_from(
+                                        self.panes.inactive_panes.len().saturating_add(1),
+                                    )
+                                    .unwrap_or(u64::MAX),
+                                ),
+                                cached_history_rows: Some(
+                                    u64::try_from(snapshot.scrollback_rows.len())
+                                        .unwrap_or(u64::MAX),
+                                ),
+                                cached_history_bytes: Some(
+                                    u64::try_from(history_cache_bytes(&snapshot.scrollback_rows))
+                                        .unwrap_or(u64::MAX),
+                                ),
+                                copied_history_rows: Some(
+                                    u64::try_from(previous_rows.len()).unwrap_or(u64::MAX),
+                                ),
+                                copied_history_bytes: trace_copied_history_bytes
+                                    .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+                                receiver_batch_size: Some(
+                                    u64::try_from(receiver_batch_size).unwrap_or(u64::MAX),
+                                ),
                                 // Bitset: columns, rows, palette, defaults, screen, images,
                                 // or an image-bearing scroll in ascending bit order.
                                 count: Some(full_frame_reasons),
@@ -4860,6 +5032,11 @@ impl App {
                                 ..PerfTraceEvent::default()
                             },
                         );
+                    }
+                    if trace_draw_expected {
+                        self.panes
+                            .pane
+                            .retain_trace_correlation(trace, trace_pane_role);
                     }
                 }
                 WindowUpdate::ScrollbackPages(pages) => {
@@ -5049,13 +5226,14 @@ impl App {
             &self.presentation.render_context,
         )?;
         visual_changed |= rebuilt_inactive > 0;
-        if rebuild_all_inactive {
-            self.presentation.full_redraw = true;
-        } else if rebuilt_inactive > 0 {
+        if rebuilt_inactive > 0 {
             self.panes
                 .dirty_inactive_panes
                 .extend(inactive.dirty_frames.iter().copied());
-        } else if inactive.changed {
+        }
+        if rebuild_all_inactive {
+            self.presentation.full_redraw = true;
+        } else if rebuilt_inactive == 0 && inactive.changed {
             // Rare inactive metadata changes do not identify a terminal frame
             // region, so retain the conservative whole-window fallback.
             self.presentation.full_redraw = true;
@@ -5131,7 +5309,27 @@ impl App {
                     PerfTraceEvent {
                         splint_id: Some(display.splint_id),
                         incarnation: Some(display.incarnation),
-                        revision: Some(display.revision),
+                        base_revision: self
+                            .panes
+                            .pane
+                            .trace_correlation
+                            .map(|value| value.base_revision),
+                        revision: Some(
+                            self.panes
+                                .pane
+                                .trace_correlation
+                                .map_or(display.revision, |value| value.revision),
+                        ),
+                        subscription_id: self
+                            .panes
+                            .pane
+                            .trace_correlation
+                            .map(|value| value.subscription_id),
+                        transaction_sequence: self
+                            .panes
+                            .pane
+                            .trace_correlation
+                            .map(|value| value.transaction_sequence),
                         duration_ns: Some(
                             u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                         ),
@@ -5141,6 +5339,22 @@ impl App {
                                 .unwrap_or(u64::MAX),
                         ),
                         count: Some(u64::try_from(trace_dirty_rows).unwrap_or(u64::MAX)),
+                        pane_role: Some(self.panes.pane.trace_pane_role),
+                        pane_count: Some(
+                            u64::try_from(self.panes.inactive_panes.len().saturating_add(1))
+                                .unwrap_or(u64::MAX),
+                        ),
+                        columns: Some(u64::try_from(display.columns).unwrap_or(u64::MAX)),
+                        cached_history_rows: Some(
+                            u64::try_from(display.scrollback_rows.len()).unwrap_or(u64::MAX),
+                        ),
+                        dirty_rows: Some(u64::try_from(trace_dirty_rows).unwrap_or(u64::MAX)),
+                        prepared_rows: Some(u64::try_from(display.rows).unwrap_or(u64::MAX)),
+                        prepared_cells: Some(
+                            u64::try_from(display.rows.saturating_mul(display.columns))
+                                .unwrap_or(u64::MAX),
+                        ),
+                        superseded_revisions: Some(self.panes.pane.trace_superseded_revisions),
                         full_reload: Some(full_frame_reload),
                         ..PerfTraceEvent::default()
                     },
@@ -6053,7 +6267,24 @@ impl App {
                 BackgroundEffectCommitMode::DeferToDraw,
             )?;
         }
-        if !self.scheduling.frame_pending {
+        let committed_identity = self
+            .panes
+            .pane
+            .snapshot
+            .as_ref()
+            .map(|snapshot| (snapshot.splint_id, snapshot.incarnation, snapshot.revision));
+        let pane_commit_traces = if perf_trace_enabled() {
+            pending_pane_commit_traces(&self.panes.pane, &self.panes.inactive_panes)
+        } else {
+            Vec::new()
+        };
+        let commit_sequence = perf_trace_enabled().then(|| {
+            let sequence = self.scheduling.next_commit_sequence;
+            self.scheduling.next_commit_sequence = sequence.saturating_add(1);
+            sequence
+        });
+        let requests_frame_callback = !self.scheduling.frame_pending;
+        if requests_frame_callback {
             self.surface
                 .window
                 .wl_surface()
@@ -6065,34 +6296,58 @@ impl App {
             .attach_to(self.surface.window.wl_surface())
             .context("attach SHM buffer")?;
         self.surface.window.commit();
-        self.panes.dirty_inactive_panes.clear();
-        self.modal.session_picker_layout = picker_layout;
-        self.complete_background_effect_draw_commit()?;
-        let committed_identity = self
-            .panes
-            .pane
-            .snapshot
-            .as_ref()
-            .map(|snapshot| (snapshot.splint_id, snapshot.incarnation, snapshot.revision));
-        if perf_trace_enabled() {
+        let draw_duration_ns = u64::try_from(draw_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let committed_monotonic_raw_ns = commit_sequence.map(|_| monotonic_raw_ns());
+        if let (Some(commit_sequence), Some(committed_monotonic_raw_ns)) =
+            (commit_sequence, committed_monotonic_raw_ns)
+        {
             let snapshot = self.panes.pane.snapshot.as_ref();
-            emit_perf_trace(
+            emit_perf_trace_at(
                 "splinterm",
                 "draw_commit",
                 PerfTraceEvent {
-                    splint_id: snapshot.map(|snapshot| snapshot.splint_id),
-                    incarnation: snapshot.map(|snapshot| snapshot.incarnation),
-                    revision: snapshot.map(|snapshot| snapshot.revision),
-                    duration_ns: Some(
-                        u64::try_from(draw_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                    ),
+                    commit_sequence: Some(commit_sequence),
+                    duration_ns: Some(draw_duration_ns),
                     bytes: Some(u64::try_from(copied_backing_bytes).unwrap_or(u64::MAX)),
                     rows: snapshot.map(|snapshot| u64::try_from(snapshot.rows).unwrap_or(u64::MAX)),
+                    pane_count: Some(
+                        u64::try_from(self.panes.inactive_panes.len().saturating_add(1))
+                            .unwrap_or(u64::MAX),
+                    ),
+                    backing_copy_bytes: Some(
+                        u64::try_from(copied_backing_bytes).unwrap_or(u64::MAX),
+                    ),
                     full_reload: Some(damage_full_surface),
                     ..PerfTraceEvent::default()
                 },
+                committed_monotonic_raw_ns,
             );
+            for trace in &pane_commit_traces {
+                emit_perf_trace_at(
+                    "splinterm",
+                    "pane_commit",
+                    pane_commit_event(*trace, commit_sequence),
+                    committed_monotonic_raw_ns,
+                );
+            }
+            if requests_frame_callback {
+                self.scheduling.pending_frame_trace = Some(PendingFrameTrace {
+                    commit_sequence,
+                    committed_monotonic_raw_ns,
+                });
+            }
         }
+        if self.panes.pane.trace_correlation.is_some() {
+            self.panes.pane.clear_trace_correlation();
+        }
+        for pane in &mut self.panes.inactive_panes {
+            if pane.trace_correlation.is_some() {
+                pane.clear_trace_correlation();
+            }
+        }
+        self.panes.dirty_inactive_panes.clear();
+        self.modal.session_picker_layout = picker_layout;
+        self.complete_background_effect_draw_commit()?;
         let inject_graphical_input = self
             .scheduling
             .graphical_input_probe
@@ -6149,7 +6404,7 @@ fn write_selection_payload(write_pipe: WritePipe, payload: Arc<[u8]>) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{env, fs, path::PathBuf};
 
     use super::*;
     use splinterm_core::{Axis, Splint, SplitRatio};
@@ -6819,6 +7074,121 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ReducerBenchMode {
+        FocusedRole,
+        InactiveBatch,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ReducerBenchCase {
+        history_rows: usize,
+        detached: bool,
+        batch_size: usize,
+        mode: ReducerBenchMode,
+    }
+
+    fn reducer_bench_cases(smoke: bool) -> Vec<ReducerBenchCase> {
+        let history = if smoke {
+            vec![(0, false), (MAX_CACHED_HISTORY_ROWS, false)]
+        } else {
+            vec![
+                (0, false),
+                (1_000, false),
+                (MAX_CACHED_HISTORY_ROWS, false),
+                (MAX_CACHED_HISTORY_ROWS, true),
+            ]
+        };
+        let batches = if smoke { vec![1, 16] } else { vec![1, 16, 64] };
+        history
+            .into_iter()
+            .flat_map(|(history_rows, detached)| {
+                batches.iter().copied().flat_map(move |batch_size| {
+                    [
+                        ReducerBenchMode::FocusedRole,
+                        ReducerBenchMode::InactiveBatch,
+                    ]
+                    .into_iter()
+                    .map(move |mode| ReducerBenchCase {
+                        history_rows,
+                        detached,
+                        batch_size,
+                        mode,
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn reducer_bench_pane(case: ReducerBenchCase) -> PaneView {
+        let splint_id = SplintId::new();
+        let mut options = pane_options(splint_id);
+        options.snapshot.scrollback_rows = (1..=u64::try_from(case.history_rows).unwrap())
+            .map(|row_id| {
+                let mut row = blank_row(1);
+                row.row_id = Some(row_id);
+                row
+            })
+            .collect();
+        options.snapshot.available_scrollback_rows = case.history_rows;
+        options.snapshot.oldest_available_scrollback_row_id = (case.history_rows > 0).then_some(1);
+        options.snapshot.newest_available_scrollback_row_id =
+            (case.history_rows > 0).then_some(u64::try_from(case.history_rows).unwrap());
+        options.snapshot.visible_rows[0].row_id = Some(10_000_000);
+        let mut pane = PaneView::from_options(options, SCALE_DENOMINATOR).unwrap();
+        if case.detached {
+            pane.scrollback_viewport
+                .scroll_up(1, pane.snapshot.as_ref().unwrap());
+            assert!(!pane.scrollback_viewport.is_live());
+        }
+        pane
+    }
+
+    fn reducer_bench_updates(snapshot: &TerminalSnapshot, batch_size: usize) -> Vec<WindowUpdate> {
+        let mut projected = snapshot.clone();
+        (0..batch_size)
+            .map(|index| {
+                let mut update = empty_update();
+                update.base_revision = projected.revision;
+                update.revision = projected.revision.saturating_add(1);
+                let mut row = projected.visible_rows[0].clone();
+                row.cells[0].content = format!("{index:02x}");
+                update
+                    .rows
+                    .push(splinterm_protocol::TerminalRowPatch { index: 0, row });
+                apply_terminal_update(&mut projected, update.clone()).unwrap();
+                WindowUpdate::Update {
+                    update,
+                    image_sources: None,
+                    trace: None,
+                }
+            })
+            .collect()
+    }
+
+    fn measure_reducer_bench_case(case: ReducerBenchCase) -> u64 {
+        let mut pane = reducer_bench_pane(case);
+        let updates = reducer_bench_updates(pane.snapshot.as_ref().unwrap(), case.batch_size);
+        let started = Instant::now();
+        match case.mode {
+            ReducerBenchMode::FocusedRole => {
+                for update in updates {
+                    pane.apply_background_update(update, ResolvedTheme::default(), "focused")
+                        .unwrap();
+                }
+            }
+            ReducerBenchMode::InactiveBatch => {
+                apply_inactive_update_batch(&mut pane, updates, ResolvedTheme::default()).unwrap();
+            }
+        }
+        let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        std::hint::black_box((
+            pane.snapshot.as_ref().unwrap().revision,
+            pane.scrollback_viewport.offset_from_bottom(),
+        ));
+        elapsed
+    }
+
     #[test]
     fn frame_corner_cells_contain_only_corner_masks() {
         let splint = Splint::shell(PathBuf::from("/tmp"));
@@ -6990,6 +7360,128 @@ mod tests {
     }
 
     #[test]
+    fn live_viewport_skips_previous_history_but_detached_retains_transition_rows() {
+        let live_case = ReducerBenchCase {
+            history_rows: MAX_CACHED_HISTORY_ROWS,
+            detached: false,
+            batch_size: 1,
+            mode: ReducerBenchMode::FocusedRole,
+        };
+        let live = reducer_bench_pane(live_case);
+        assert!(
+            live.history_rows_needed_for_viewport_transition()
+                .is_empty()
+        );
+
+        let detached = reducer_bench_pane(ReducerBenchCase {
+            detached: true,
+            ..live_case
+        });
+        let rows = detached.history_rows_needed_for_viewport_transition();
+        assert_eq!(rows.len(), MAX_CACHED_HISTORY_ROWS);
+        assert_eq!(rows.first().and_then(|row| row.row_id), Some(1));
+        assert_eq!(
+            rows.last().and_then(|row| row.row_id),
+            Some(u64::try_from(MAX_CACHED_HISTORY_ROWS).unwrap())
+        );
+        assert_eq!(live.trace_pane_role("focused"), "focused");
+        assert_eq!(detached.trace_pane_role("focused"), "detached-viewport");
+    }
+
+    #[test]
+    fn pane_reducer_benchmark_contract_is_bounded_and_role_explicit() {
+        let smoke = reducer_bench_cases(true);
+        let full = reducer_bench_cases(false);
+        assert_eq!(smoke.len(), 8);
+        assert_eq!(full.len(), 24);
+        assert!(full.iter().all(|case| {
+            [0, 1_000, MAX_CACHED_HISTORY_ROWS].contains(&case.history_rows)
+                && [1, 16, 64].contains(&case.batch_size)
+        }));
+        assert!(full.iter().any(|case| case.detached));
+        assert!(
+            full.iter()
+                .any(|case| { matches!(case.mode, ReducerBenchMode::FocusedRole) })
+        );
+        assert!(
+            full.iter()
+                .any(|case| { matches!(case.mode, ReducerBenchMode::InactiveBatch) })
+        );
+        for case in smoke {
+            assert!(measure_reducer_bench_case(case) > 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release timing harness; writes the requested JSON report"]
+    fn pane_reducer_timing_harness() {
+        let smoke = env::var_os("SPLINTERM_PANE_REDUCER_SMOKE").is_some();
+        let warmup_runs = if smoke { 0 } else { 5 };
+        let sample_runs = if smoke { 1 } else { 30 };
+        let cases = reducer_bench_cases(smoke);
+        let mut durations = vec![Vec::with_capacity(sample_runs); cases.len()];
+        for round in 0..warmup_runs + sample_runs {
+            let rotation = if cases.is_empty() {
+                0
+            } else {
+                (round * 7) % cases.len()
+            };
+            for offset in 0..cases.len() {
+                let index = (rotation + offset) % cases.len();
+                let duration = measure_reducer_bench_case(cases[index]);
+                if round >= warmup_runs {
+                    durations[index].push(duration);
+                }
+            }
+        }
+        let records = cases
+            .iter()
+            .enumerate()
+            .map(|(index, case)| {
+                let mode = match case.mode {
+                    ReducerBenchMode::FocusedRole => "focused-role",
+                    ReducerBenchMode::InactiveBatch => "inactive-batch",
+                };
+                serde_json::json!({
+                    "name": format!(
+                        "{}-h{}-{}-b{}",
+                        mode,
+                        case.history_rows,
+                        if case.detached { "detached" } else { "live" },
+                        case.batch_size,
+                    ),
+                    "mode": mode,
+                    "history_rows": case.history_rows,
+                    "viewport": if case.detached { "detached" } else { "live" },
+                    "batch_size": case.batch_size,
+                    "duration_ns": durations[index],
+                })
+            })
+            .collect::<Vec<_>>();
+        let report = serde_json::json!({
+            "schema": "splinterm.performance.pane-reducer.v1",
+            "clock": "std::time::Instant monotonic process clock",
+            "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+            "warmup_runs": warmup_runs,
+            "sample_runs": sample_runs,
+            "history_capacity_rows": MAX_CACHED_HISTORY_ROWS,
+            "smoke": smoke,
+            "focused_role_scope": "PaneView semantic reducer only; not the full App::apply_updates active path",
+            "cases": records,
+        });
+        let path = env::var_os("SPLINTERM_PANE_REDUCER_REPORT").map_or_else(
+            || PathBuf::from("/tmp/splinterm-pane-reducer-report.json"),
+            PathBuf::from,
+        );
+        let temporary = path.with_file_name(format!(
+            ".{}.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        fs::write(&temporary, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        fs::rename(temporary, path).unwrap();
+    }
+
+    #[test]
     fn inactive_pane_reducer_applies_only_contiguous_matching_updates() {
         let splint_id = SplintId::new();
         let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
@@ -7000,8 +7492,10 @@ mod tests {
                 WindowUpdate::Update {
                     update,
                     image_sources: None,
+                    trace: None,
                 },
                 ResolvedTheme::default(),
+                "visible-inactive",
             )
             .unwrap()
             .visual_changed
@@ -7017,8 +7511,10 @@ mod tests {
                 WindowUpdate::Update {
                     update: stale,
                     image_sources: None,
+                    trace: None,
                 },
                 ResolvedTheme::default(),
+                "visible-inactive",
             )
             .is_err()
         );
@@ -7091,17 +7587,68 @@ mod tests {
                 WindowUpdate::Update {
                     update: first,
                     image_sources: None,
+                    trace: Some(PerfTraceCorrelation {
+                        base_revision: 1,
+                        revision: 2,
+                        subscription_id: 9,
+                        transaction_sequence: 1,
+                    }),
                 },
                 WindowUpdate::Update {
                     update: second,
                     image_sources: None,
+                    trace: Some(PerfTraceCorrelation {
+                        base_revision: 2,
+                        revision: 3,
+                        subscription_id: 9,
+                        transaction_sequence: 2,
+                    }),
                 },
             ],
             ResolvedTheme::default(),
         )
         .unwrap();
+        let mut metadata_only = empty_update();
+        metadata_only.base_revision = 3;
+        metadata_only.revision = 4;
+        metadata_only.title = Some("metadata-only".into());
+        assert_eq!(
+            pane.apply_background_update(
+                WindowUpdate::Update {
+                    update: metadata_only,
+                    image_sources: None,
+                    trace: Some(PerfTraceCorrelation {
+                        base_revision: 3,
+                        revision: 4,
+                        subscription_id: 9,
+                        transaction_sequence: 3,
+                    }),
+                },
+                ResolvedTheme::default(),
+                "visible-inactive",
+            )
+            .unwrap(),
+            BackgroundUpdateImpact::VISUAL
+        );
         assert_eq!(impact, BackgroundUpdateImpact::FRAME);
         assert!(pane.snapshot_frame.is_none());
+        assert_eq!(
+            pane.trace_correlation,
+            Some(PerfTraceCorrelation {
+                base_revision: 2,
+                revision: 3,
+                subscription_id: 9,
+                transaction_sequence: 2,
+            })
+        );
+        assert_eq!(pane.trace_superseded_revisions, 1);
+        let pending_commit = pane.pending_commit_trace().unwrap();
+        assert_eq!(pending_commit.correlation.revision, 3);
+        assert_eq!(pending_commit.pane_role, "visible-inactive");
+        let commit_event = pane_commit_event(pending_commit, 7);
+        assert_eq!(commit_event.revision, Some(3));
+        assert_eq!(commit_event.transaction_sequence, Some(2));
+        assert_eq!(commit_event.commit_sequence, Some(7));
         assert_eq!(
             rebuild_inactive_frames(
                 std::slice::from_mut(&mut pane),
@@ -7113,8 +7660,34 @@ mod tests {
             1
         );
         let snapshot = pane.snapshot.as_ref().unwrap();
-        assert_eq!(snapshot.revision, 3);
+        assert_eq!(snapshot.revision, 4);
         assert_eq!(snapshot.visible_rows[0].cells[0].content, "second");
+
+        let other_id = SplintId::new();
+        let mut newly_focused =
+            PaneView::from_options(pane_options(other_id), SCALE_DENOMINATOR).unwrap();
+        newly_focused.retain_trace_correlation(
+            Some(PerfTraceCorrelation {
+                base_revision: 1,
+                revision: 2,
+                subscription_id: 10,
+                transaction_sequence: 99,
+            }),
+            "hidden",
+        );
+        std::mem::swap(&mut pane, &mut newly_focused);
+        let traces = pending_pane_commit_traces(&pane, &[newly_focused]);
+        assert_eq!(traces.len(), 2);
+        assert!(
+            traces
+                .iter()
+                .any(|trace| trace.correlation.transaction_sequence == 2)
+        );
+        assert!(
+            traces
+                .iter()
+                .any(|trace| trace.correlation.transaction_sequence == 99)
+        );
     }
 
     #[test]

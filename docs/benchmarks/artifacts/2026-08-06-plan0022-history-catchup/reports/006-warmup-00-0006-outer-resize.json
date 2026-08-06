@@ -1,0 +1,170 @@
+{
+  "capture": {
+    "attempts": [
+      {
+        "capture_end_ns": 161148975388863,
+        "capture_start_ns": 161148682495512,
+        "decode_scan_complete_ns": 161148975390749,
+        "marker_found": true,
+        "pane_marker_pixels": [
+          {
+            "pane_index": 0,
+            "pixels": 18240
+          },
+          {
+            "pane_index": 1,
+            "pixels": 0
+          },
+          {
+            "pane_index": 2,
+            "pixels": 0
+          },
+          {
+            "pane_index": 3,
+            "pixels": 0
+          }
+        ],
+        "sequence": 0
+      }
+    ],
+    "child_receipt_ns": 161148681170655,
+    "found_sequence": 0,
+    "marker_trigger_ns": 161143990909533,
+    "quantization_ns": 292895237
+  },
+  "case_id": "warmup-00-0006-outer-resize",
+  "cell": {
+    "activity": "idle-then-focused",
+    "cached_rows_per_pane": 4096,
+    "name": "outer-resize",
+    "operation": "twelve-step-outer-resize",
+    "pane_count": 4,
+    "viewport": "live"
+  },
+  "cleanup": {
+    "failure": null,
+    "namespace_absent": true,
+    "processes_absent": true,
+    "trace_closed": true,
+    "verified": true,
+    "windows_absent": true
+  },
+  "execution_index": 6,
+  "failure": null,
+  "isolation": {
+    "focus_preserved": true,
+    "monitor": "DP-2",
+    "placement_preserved": true,
+    "target_owned": true,
+    "unrelated_activity_untouched": true,
+    "workspace": 8
+  },
+  "iteration": 0,
+  "movement": {
+    "configure_events": 12,
+    "history_clones": 0,
+    "output_enter_events": 0,
+    "output_leave_events": 0,
+    "pane_frame_rebuilds": 26,
+    "position_changes": 0,
+    "semantic_applies": 49
+  },
+  "notes": [
+    "native exact-plan collector; screenshot timing is coarse observation, not presentation"
+  ],
+  "operation_evidence": {
+    "completed": true,
+    "completed_units": 12,
+    "panes": [
+      {
+        "completed_units": 12,
+        "control_bytes": 0,
+        "event": "resize_complete",
+        "marker_bytes": 126,
+        "pane_index": 0,
+        "payload_bytes": 0,
+        "raw_result": {
+          "completed_monotonic_ns": 161148681191818,
+          "completed_units": 1,
+          "control_bytes": 0,
+          "event": "marker_complete",
+          "lines": 0,
+          "marker_bytes": 126,
+          "payload_bytes": 0,
+          "pid": 1354037,
+          "received_monotonic_ns": 161148681170655,
+          "schema": "splinterm.benchmark.child-result.v1",
+          "sequence": 1,
+          "total_bytes": 126,
+          "workload": null
+        },
+        "workload": "resize"
+      }
+    ],
+    "requested_units": 12,
+    "unit": "resize-steps"
+  },
+  "phase": "warmup",
+  "plan_sha256": "091cc4d798e0ed460f421902713d1bd17efc2f1e68379f1859da372739d87869",
+  "precondition": {
+    "activity": {
+      "mode": "idle-then-focused",
+      "observed_panes": [
+        0
+      ],
+      "proven": true,
+      "target_panes": [
+        0
+      ]
+    },
+    "panes": [
+      {
+        "actual_cached_rows": 4096,
+        "cached_bytes": 15077376,
+        "pane_index": 0,
+        "target_cached_rows": 4096,
+        "verified": true
+      },
+      {
+        "actual_cached_rows": 4096,
+        "cached_bytes": 15077376,
+        "pane_index": 1,
+        "target_cached_rows": 4096,
+        "verified": true
+      },
+      {
+        "actual_cached_rows": 4096,
+        "cached_bytes": 15077376,
+        "pane_index": 2,
+        "target_cached_rows": 4096,
+        "verified": true
+      },
+      {
+        "actual_cached_rows": 4096,
+        "cached_bytes": 15077376,
+        "pane_index": 3,
+        "target_cached_rows": 4096,
+        "verified": true
+      }
+    ],
+    "viewport": {
+      "final": "live",
+      "initial": "live",
+      "proven": true,
+      "steps": [
+        "assert-live"
+      ]
+    }
+  },
+  "schema": "splinterm.benchmark.graphical-catchup-report.v1",
+  "trace": {
+    "ambiguous": false,
+    "client_receive_to_pane_commit_ns": 1307848,
+    "commit_to_callback_ns": 7287728,
+    "records": 12692,
+    "run_id": "gc-6-1353975",
+    "saturated": false,
+    "uncommitted_transactions": 54
+  },
+  "valid": true
+}

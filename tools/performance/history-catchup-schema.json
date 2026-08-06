@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.local/schema/history-catchup.json",
+  "title": "Plan 0022 non-graphical terminal-state timing report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "clock", "build_profile", "warmup_runs", "sample_runs", "history_capacity_rows", "ansi_operation_lines", "smoke", "cases"],
+  "properties": {
+    "schema": { "const": "splinterm.performance.history-catchup.v1" },
+    "clock": { "const": "std::time::Instant monotonic process clock" },
+    "build_profile": { "enum": ["debug", "release"] },
+    "warmup_runs": { "type": "integer", "minimum": 0 },
+    "sample_runs": { "type": "integer", "minimum": 1 },
+    "history_capacity_rows": { "const": 4096 },
+    "ansi_operation_lines": { "const": 2000 },
+    "smoke": { "type": "boolean" },
+    "cases": {
+      "type": "array", "minItems": 8, "maxItems": 14,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "history_rows", "viewport", "pane_count", "activity", "update_shape", "operation_updates", "duration_ns"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^(small|ansi)-h(0|1000|4096)-(live|detached)-p(1|2|4)-(focused|all|inactive)$" },
+          "history_rows": { "enum": [0, 1000, 4096] },
+          "viewport": { "enum": ["live", "detached"] },
+          "pane_count": { "enum": [1, 2, 4] },
+          "activity": { "enum": ["focused-only", "all-panes", "inactive-only"] },
+          "update_shape": { "enum": ["small", "ansi-2000-lines"] },
+          "operation_updates": { "enum": [1, 2000] },
+          "duration_ns": {
+            "type": "array", "minItems": 1,
+            "items": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

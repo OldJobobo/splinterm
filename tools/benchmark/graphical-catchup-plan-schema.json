@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.local/schema/graphical-catchup-plan.json",
+  "title": "Plan 0022 finite graphical catch-up plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "seed", "warmup_runs", "sample_runs", "history_capacity_rows", "ansi_operation_lines", "workspace", "monitor", "cells", "schedule", "plan_sha256"],
+  "properties": {
+    "schema": { "const": "splinterm.benchmark.graphical-catchup-plan.v1" },
+    "seed": { "type": "integer" },
+    "warmup_runs": { "type": "integer", "minimum": 0 },
+    "sample_runs": { "type": "integer", "minimum": 1 },
+    "history_capacity_rows": { "const": 4096 },
+    "ansi_operation_lines": { "const": 2000 },
+    "workspace": { "const": 8 },
+    "monitor": { "const": "DP-2" },
+    "cells": {
+      "type": "array", "minItems": 10, "maxItems": 10,
+      "items": { "$ref": "#/$defs/cell" }
+    },
+    "schedule": {
+      "type": "array", "minItems": 10,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["phase", "iteration", "execution_index", "case_id", "cell"],
+        "properties": {
+          "phase": { "enum": ["warmup", "measured"] },
+          "iteration": { "type": "integer", "minimum": 0 },
+          "execution_index": { "type": "integer", "minimum": 0 },
+          "case_id": { "type": "string", "pattern": "^(warmup|measured)-[0-9]{2}-[0-9]{4}-[a-z0-9-]+$" },
+          "cell": { "$ref": "#/$defs/cellName" }
+        }
+      }
+    },
+    "plan_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "$defs": {
+    "cellName": { "enum": ["zero-history", "history-1000", "history-4096", "detached-history", "inactive-scaling-2", "inactive-scaling-4", "all-pane-scaling", "static-movement", "outer-resize", "ansi-stress"] },
+    "cell": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "pane_count", "cached_rows_per_pane", "viewport", "activity", "operation"],
+      "properties": {
+        "name": { "$ref": "#/$defs/cellName" },
+        "pane_count": { "enum": [1, 2, 4] },
+        "cached_rows_per_pane": { "enum": [0, 1000, 4096] },
+        "viewport": { "enum": ["live", "detached"] },
+        "activity": { "enum": ["focused-only", "all-panes", "idle", "idle-then-focused"] },
+        "operation": { "enum": ["small-marker", "continuing-small-output", "same-output-position-movement", "twelve-step-outer-resize", "ansi-2000-lines"] }
+      }
+    }
+  }
+}

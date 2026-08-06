@@ -233,8 +233,11 @@ impl DojoTabView {
             for update in pending {
                 if let WindowUpdate::Exited { splint_id } = update {
                     self.pending_exited_splints.insert(splint_id);
-                    let impact =
-                        pane.apply_background_update(WindowUpdate::Exited { splint_id }, theme)?;
+                    let impact = pane.apply_background_update(
+                        WindowUpdate::Exited { splint_id },
+                        theme,
+                        "hidden",
+                    )?;
                     if impact.frame_dirty {
                         self.dirty_inactive_panes.insert(splint_id);
                     }
@@ -244,7 +247,7 @@ impl DojoTabView {
                     continue;
                 }
                 let splint_id = pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id);
-                let impact = pane.apply_background_update(update, theme)?;
+                let impact = pane.apply_background_update(update, theme, "hidden")?;
                 if impact.frame_dirty
                     && let Some(splint_id) = splint_id
                 {
