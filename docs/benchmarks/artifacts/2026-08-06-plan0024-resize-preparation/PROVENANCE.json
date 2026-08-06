@@ -1,0 +1,15 @@
+{
+  "schema": "splinterm.benchmark.publication-provenance.v1",
+  "plan": "docs/plans/0024-resize-preparation.md",
+  "source_commit": "ec4d8e0aec378128df4f1d729631120a306fae6d",
+  "source_run": "benchmark-results/20260806T030231Z-plan0022-graphical-catchup-matrix-final",
+  "source_publication": "docs/benchmarks/artifacts/2026-08-06-plan0022-history-catchup",
+  "plan0022_raw_manifest": "docs/benchmarks/artifacts/2026-08-06-plan0022-history-catchup/RAW-SHA256SUMS",
+  "measured_cell": "outer-resize",
+  "measured_cases": 10,
+  "operation_units_per_case": 12,
+  "interval_end": "unique CLOCK_MONOTONIC_RAW pane_commit matching the report final-marker client_receive_to_pane_commit duration",
+  "analysis_command": "python docs/benchmarks/artifacts/2026-08-06-plan0024-resize-preparation/analyze.py benchmark-results/20260806T030231Z-plan0022-graphical-catchup-matrix-final/matrix docs/benchmarks/artifacts/2026-08-06-plan0024-resize-preparation/aggregate.json",
+  "graphical_execution": false,
+  "decision": "no production change; zero duplicate content preparations"
+}

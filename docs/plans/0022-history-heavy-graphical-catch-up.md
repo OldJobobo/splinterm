@@ -1,6 +1,6 @@
 # Plan 0022: history-heavy graphical catch-up
 
-- **Status:** In progress
+- **Status:** Complete
 - **Date:** 2026-08-05
 - **Parent performance plan:** [Plan 0010](0010-full-performance-optimization-pass.md)
 - **Benchmark baseline:** [Plan 0016 publication](../benchmarks/artifacts/2026-08-05-plan0016-publication/README.md)
@@ -64,12 +64,18 @@ be measured before attributing the gap.
   1.165, passing the 1.25 gate. Static movement causes zero semantic applies,
   history clones, pane-frame rebuilds, or configure events.
 - Four-pane all-active updates remain above the ordinary focused target at
-  49.078 ms median / 65.172 ms p95. The paced 2,000-line ANSI stress case remains
-  slow at 293.804 / 379.673 ms receive-to-commit. No measured trace resynced,
-  saturated, became ambiguous, or failed cleanup.
-- No sampled profile was added: the complete body-free stage traces already name
-  the remaining bounded slow paths, and no further optimization candidate is
-  being implemented in this slice. The graphical matrix is candidate-only, so
+  49.078 ms median / 65.172 ms p95. The paced 2,000-line ANSI stress case measured
+  293.804 / 379.673 ms receive-to-commit in this matrix. No measured trace
+  resynced, saturated, became ambiguous, or failed cleanup.
+- [Plan 0023](0023-ansi-history-throughput.md) subsequently removed repeated
+  history scans/front shifts and confirmed a focused four-pane ANSI p95 of
+  129.504 ms, a 65.9% improvement over this diagnostic result.
+- [Plan 0024](0024-resize-preparation.md) reconciled all ten measured resize
+  traces. Each twelve-step sequence has 13 content preparations for 13 distinct
+  required revisions and twelve configure-only refreshes totaling 0.064–0.092
+  ms. There is no duplicate expensive resize preparation to remove.
+- No sampled profile was added: the complete body-free stage traces name and
+  bound the relevant work. The graphical matrix is candidate-only, so
   graphical control-relative history amplification and zero-history regression
   remain explicitly unresolved. The matched non-graphical control/candidate
   evidence and its zero-history confidence uncertainty remain authoritative.
@@ -467,28 +473,35 @@ reruns occur only at coherent milestone boundaries.
 
 ## Current closure decision
 
-This slice stops after Milestone 1 and the diagnostic matrix. It does not claim
-Milestones 2–4 were implemented. The focused live-history fast path is supported
-by matched non-graphical control/candidate evidence and candidate graphical
-attribution. Ordinary focused graphical updates, inactive scaling, movement,
-trace integrity, and cleanup pass their applicable gates.
+Milestone 1 is implemented and published. The later conditional milestones are
+resolved by measured stop gates rather than speculative production changes:
 
-The following are recorded residuals rather than hidden passes:
+- Milestone 2 is not triggered: four-pane/one-pane focused-only p95 is 1.040
+  with one-sided 95% UCB 1.165, passing the 1.25 gate. No inactive-pane
+  coalescing complexity is justified.
+- Milestone 3's movement gate passes with zero semantic applies or pane-frame
+  rebuilds. Plan 0024 proves that resize performs one content preparation per
+  distinct required revision; the additional configure-only refresh work is at
+  most 0.092 ms per complete sequence. Delaying configure settlement is not
+  justified.
+- Milestone 4 is not triggered: retained traces do not leave row preparation,
+  rasterization, or backing composition as a dominant unresolved event-loop
+  stage after the bounded history fixes. Worker architecture is neither needed
+  nor approved.
+
+The following remain explicit limitations rather than hidden passes:
 
 - the non-graphical zero-history candidate/control ratio upper bound remains
   above the 1.10 regression limit at a microsecond-scale boundary;
 - no graphical control binary was run, so graphical control-relative history
   amplification and zero-history regression are not claimed;
-- all-pane and ANSI-stress receive-to-commit remain above 50 ms p95;
-- resize still performs multiple pane preparations across its twelve paced
-  configure steps; and
-- sampled profiling and further Milestone 2–4 implementation are deferred
-  because the retained stage traces already bound the current slow paths and no
-  additional candidate is part of this slice.
+- Plan 0022's original all-pane and ANSI diagnostic cells exceed 50 ms p95,
+  though Plan 0023 separately resolves and republishes the ANSI path; and
+- screenshot observation remains coarse and is not presentation timing.
 
-No additional broad graphical matrix is required to publish these bounded
-results. Any future optimization must start from a new focused plan and reuse
-this artifact as immutable evidence.
+No additional graphical matrix or production resize change is required for
+closure. Any future optimization must begin from new correlated evidence and a
+new focused plan.
 
 ## Stop gates
 
