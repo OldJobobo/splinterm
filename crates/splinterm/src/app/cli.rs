@@ -275,6 +275,7 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
                     .request(Request::SetSplitRatio {
                         expected_topology_revision,
                         target_splint_id,
+                        ancestor: 0,
                         ratio,
                     })
                     .await?,

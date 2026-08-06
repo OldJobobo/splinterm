@@ -916,6 +916,7 @@ async fn mutation_preflight_preserves_exact_scope_cas_and_descendant_denial() {
                 .request_result(Request::SetSplitRatio {
                     expected_topology_revision: preparation.topology_revision,
                     target_splint_id: splint_id,
+                    ancestor: 0,
                     ratio: SplitRatio::new(400).unwrap(),
                 })
                 .await
@@ -2691,6 +2692,7 @@ async fn topology_cas_stream_and_complete_edits() {
                 .request(Request::SetSplitRatio {
                     expected_topology_revision: topology_revision,
                     target_splint_id: sibling_id,
+                    ancestor: 0,
                     ratio: SplitRatio::new(650).unwrap(),
                 })
                 .await,

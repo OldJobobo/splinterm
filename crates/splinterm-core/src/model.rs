@@ -301,6 +301,7 @@ impl Topology {
         &mut self,
         expected: TopologyRevision,
         target: SplintId,
+        ancestor: u16,
         ratio: SplitRatio,
     ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
@@ -310,7 +311,7 @@ impl Topology {
             .flat_map(|lair| &mut lair.dojos)
             .find(|dojo| dojo.root.find_splint(target).is_some())
             .ok_or(TopologyError::SplintNotFound(target))?;
-        if !dojo.root.set_parent_ratio(target, ratio) {
+        if !dojo.root.set_ancestor_ratio(target, ancestor, ratio) {
             return Err(TopologyError::SplintHasNoParent(target));
         }
         self.advance_revision();
@@ -804,6 +805,7 @@ mod tests {
             .set_split_ratio_at(
                 topology.revision(),
                 second_id,
+                0,
                 SplitRatio::new(650).unwrap(),
             )
             .unwrap();

@@ -232,27 +232,53 @@ impl LayoutNode {
         }
     }
 
-    pub(crate) fn set_parent_ratio(&mut self, target: SplintId, ratio: SplitRatio) -> bool {
-        match self {
-            Self::Leaf(_) => false,
-            Self::Branch {
-                ratio: current,
-                first,
-                second,
-                ..
-            } => {
-                let direct_child = matches!(&**first, Self::Leaf(splint) if splint.id == target)
-                    || matches!(&**second, Self::Leaf(splint) if splint.id == target);
-                if direct_child {
-                    *current = ratio;
-                    true
-                } else if first.find_splint(target).is_some() {
-                    first.set_parent_ratio(target, ratio)
-                } else {
-                    second.set_parent_ratio(target, ratio)
+    pub(crate) fn set_ancestor_ratio(
+        &mut self,
+        target: SplintId,
+        ancestor: u16,
+        ratio: SplitRatio,
+    ) -> bool {
+        fn path_to_target(node: &LayoutNode, target: SplintId, path: &mut Vec<bool>) -> bool {
+            match node {
+                LayoutNode::Leaf(splint) => splint.id == target,
+                LayoutNode::Branch { first, second, .. } => {
+                    path.push(false);
+                    if path_to_target(first, target, path) {
+                        return true;
+                    }
+                    path.pop();
+                    path.push(true);
+                    if path_to_target(second, target, path) {
+                        return true;
+                    }
+                    path.pop();
+                    false
                 }
             }
         }
+
+        let mut path = Vec::new();
+        if !path_to_target(self, target, &mut path) || usize::from(ancestor) >= path.len() {
+            return false;
+        }
+        let branch_depth = path.len() - 1 - usize::from(ancestor);
+        let mut node = self;
+        for second in path.into_iter().take(branch_depth) {
+            let LayoutNode::Branch {
+                first,
+                second: second_node,
+                ..
+            } = node
+            else {
+                return false;
+            };
+            node = if second { second_node } else { first };
+        }
+        let LayoutNode::Branch { ratio: current, .. } = node else {
+            return false;
+        };
+        *current = ratio;
+        true
     }
 
     #[must_use]
@@ -319,6 +345,33 @@ mod tests {
         };
 
         assert_eq!(layout.splint_count(), 3);
+    }
+
+    #[test]
+    fn ancestor_ratio_selects_the_requested_nested_branch() {
+        let first = Splint::shell(PathBuf::from("/tmp"));
+        let target = first.id;
+        let mut layout = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Branch {
+                axis: Axis::Vertical,
+                ratio: SplitRatio::new(400).unwrap(),
+                first: Box::new(LayoutNode::Leaf(first)),
+                second: Box::new(LayoutNode::Leaf(Splint::shell(PathBuf::from("/tmp")))),
+            }),
+            second: Box::new(LayoutNode::Leaf(Splint::shell(PathBuf::from("/tmp")))),
+        };
+
+        assert!(layout.set_ancestor_ratio(target, 1, SplitRatio::new(700).unwrap()));
+        let LayoutNode::Branch { ratio, first, .. } = layout else {
+            panic!("expected outer branch");
+        };
+        assert_eq!(ratio.get(), 700);
+        let LayoutNode::Branch { ratio, .. } = *first else {
+            panic!("expected inner branch");
+        };
+        assert_eq!(ratio.get(), 400);
     }
 
     #[test]

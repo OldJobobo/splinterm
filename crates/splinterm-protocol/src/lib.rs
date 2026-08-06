@@ -12,7 +12,7 @@ use splinterm_core::{
     Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 26;
+pub const PROTOCOL_VERSION: u16 = 27;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -336,6 +336,9 @@ pub enum Request {
     SetSplitRatio {
         expected_topology_revision: TopologyRevision,
         target_splint_id: SplintId,
+        /// Zero selects the immediate parent; larger values select successively
+        /// older ancestors of the target leaf.
+        ancestor: u16,
         ratio: SplitRatio,
     },
     NewDojo {
@@ -2214,7 +2217,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 26);
+        assert_eq!(PROTOCOL_VERSION, 27);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

@@ -1709,6 +1709,7 @@ async fn dispatch_mutation_to(
                 .request(Request::SetSplitRatio {
                     expected_topology_revision: preparation.topology_revision,
                     target_splint_id: splint_id,
+                    ancestor: 0,
                     ratio,
                 })
                 .await?

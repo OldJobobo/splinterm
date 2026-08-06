@@ -1,6 +1,6 @@
 //! Window-local topology commands and updates shared across runtime boundaries.
 
-use splinterm_core::{DojoId, LairId, LayoutNode, SplintId};
+use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplitRatio};
 
 use super::{SessionPickerItem, ThemeUpdate, WindowPaneOptions};
 
@@ -27,6 +27,12 @@ pub enum WindowTopologyCommand {
         dojo_id: DojoId,
         target: SplintId,
         delta: i16,
+    },
+    SetRatio {
+        dojo_id: DojoId,
+        target: SplintId,
+        ancestor: u16,
+        ratio: SplitRatio,
     },
     RequestSessionPicker,
     OpenDojo {

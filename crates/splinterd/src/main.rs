@@ -4092,6 +4092,7 @@ async fn handle_authorized_request(
         Request::SetSplitRatio {
             expected_topology_revision,
             target_splint_id,
+            ancestor,
             ratio,
         } => {
             let _transaction = state
@@ -4100,7 +4101,12 @@ async fn handle_authorized_request(
                 .await
                 .map_err(|_| internal())?;
             let (candidate, topology_revision) = durable_topology_candidate(state, |lair| {
-                lair.set_split_ratio_at(expected_topology_revision, target_splint_id, ratio)
+                lair.set_split_ratio_at(
+                    expected_topology_revision,
+                    target_splint_id,
+                    ancestor,
+                    ratio,
+                )
             })
             .await?;
             install_topology(state, candidate).await;

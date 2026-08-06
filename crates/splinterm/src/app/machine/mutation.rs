@@ -297,6 +297,7 @@ fn machine_mutation_request(
             Request::SetSplitRatio {
                 expected_topology_revision,
                 target_splint_id: *splint_id,
+                ancestor: 0,
                 ratio: *ratio,
             }
         }

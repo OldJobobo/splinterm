@@ -5,7 +5,7 @@
 //! daemon topology or another client's focus.
 
 use anyhow::{Result, bail};
-use splinterm_core::{Axis, LayoutNode, SplintId};
+use splinterm_core::{Axis, LayoutNode, SplintId, SplitRatio};
 
 use crate::geometry::Rect;
 
@@ -22,6 +22,17 @@ pub struct PaneGeometry {
 pub struct PaneDivider {
     pub axis: Axis,
     pub rect: Rect,
+}
+
+/// Stable identity and geometry for one draggable branch boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneSplit {
+    pub axis: Axis,
+    pub area: Rect,
+    pub boundary: u32,
+    pub separator: u32,
+    pub target: SplintId,
+    pub ancestor: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +52,7 @@ pub enum PaneChrome {
 pub struct PaneLayout {
     pub panes: Vec<PaneGeometry>,
     pub separators: Vec<PaneDivider>,
+    pub splits: Vec<PaneSplit>,
     pub chrome: PaneChrome,
 }
 
@@ -104,6 +116,7 @@ impl PaneLayout {
         let mut layout = Self {
             panes: Vec::with_capacity(root.splint_count()),
             separators: Vec::with_capacity(root.splint_count().saturating_sub(1)),
+            splits: Vec::with_capacity(root.splint_count().saturating_sub(1)),
             chrome,
         };
         layout.visit(root, area, minimum_width, minimum_height)?;
@@ -238,6 +251,20 @@ impl PaneLayout {
                         rect: separator_rect,
                     });
                 }
+                let target = first.first_splint_id();
+                let ancestor = ancestor_distance(first, target)
+                    .ok_or_else(|| anyhow::anyhow!("split target is absent"))?;
+                self.splits.push(PaneSplit {
+                    axis: *axis,
+                    area,
+                    boundary: match axis {
+                        Axis::Horizontal => separator_rect.x,
+                        Axis::Vertical => separator_rect.y,
+                    },
+                    separator,
+                    target,
+                    ancestor,
+                });
                 self.visit(first, first_rect, minimum_width, minimum_height)?;
                 self.visit(second, second_rect, minimum_width, minimum_height)?;
             }
@@ -272,6 +299,129 @@ impl PaneLayout {
             })
             .min_by_key(|(score, index, _)| (*score, *index))
             .map(|(_, _, id)| id)
+    }
+
+    /// Finds the closest branch boundary under a pointer-sized hit lane.
+    #[must_use]
+    pub fn split_at(&self, position: (f64, f64), hit_slop: u32) -> Option<PaneSplit> {
+        if !position.0.is_finite() || !position.1.is_finite() {
+            return None;
+        }
+        self.splits
+            .iter()
+            .filter_map(|split| {
+                let (primary, orthogonal, orthogonal_start, orthogonal_extent) = match split.axis {
+                    Axis::Horizontal => (position.0, position.1, split.area.y, split.area.height),
+                    Axis::Vertical => (position.1, position.0, split.area.x, split.area.width),
+                };
+                let orthogonal_start = f64::from(orthogonal_start);
+                if orthogonal < orthogonal_start
+                    || orthogonal >= orthogonal_start + f64::from(orthogonal_extent)
+                {
+                    return None;
+                }
+                let center = f64::from(split.boundary) + f64::from(split.separator) / 2.0;
+                let distance = (primary - center).abs();
+                (distance <= f64::from(hit_slop.max(split.separator.div_ceil(2)))).then_some((
+                    distance,
+                    u64::from(orthogonal_extent),
+                    *split,
+                ))
+            })
+            .min_by(|left, right| {
+                left.0
+                    .total_cmp(&right.0)
+                    .then_with(|| left.1.cmp(&right.1))
+            })
+            .map(|(_, _, split)| split)
+    }
+}
+
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the finite pointer coordinate is rounded and clamped to bounded nonnegative extents"
+)]
+pub fn split_ratio_at(
+    split: PaneSplit,
+    position: (f64, f64),
+    minimum_extent: u32,
+) -> Option<SplitRatio> {
+    let (coordinate, start, extent) = match split.axis {
+        Axis::Horizontal => (position.0, split.area.x, split.area.width),
+        Axis::Vertical => (position.1, split.area.y, split.area.height),
+    };
+    if !coordinate.is_finite() {
+        return None;
+    }
+    let available = extent.checked_sub(split.separator)?;
+    let maximum_first = available.checked_sub(minimum_extent)?;
+    if minimum_extent > maximum_first {
+        return None;
+    }
+    let desired = (coordinate - f64::from(start) - f64::from(split.separator) / 2.0)
+        .round()
+        .clamp(f64::from(minimum_extent), f64::from(maximum_first));
+    let ratio = (desired as u64 * 1000 / u64::from(available)).clamp(1, 999);
+    SplitRatio::new(u16::try_from(ratio).ok()?).ok()
+}
+
+pub fn apply_preview_ratio(
+    root: &mut LayoutNode,
+    target: SplintId,
+    ancestor: u16,
+    ratio: SplitRatio,
+) -> bool {
+    fn path_to_target(node: &LayoutNode, target: SplintId, path: &mut Vec<bool>) -> bool {
+        match node {
+            LayoutNode::Leaf(splint) => splint.id == target,
+            LayoutNode::Branch { first, second, .. } => {
+                path.push(false);
+                if path_to_target(first, target, path) {
+                    return true;
+                }
+                path.pop();
+                path.push(true);
+                if path_to_target(second, target, path) {
+                    return true;
+                }
+                path.pop();
+                false
+            }
+        }
+    }
+
+    let mut path = Vec::new();
+    if !path_to_target(root, target, &mut path) || usize::from(ancestor) >= path.len() {
+        return false;
+    }
+    let branch_depth = path.len() - 1 - usize::from(ancestor);
+    let mut node = root;
+    for second in path.into_iter().take(branch_depth) {
+        let LayoutNode::Branch {
+            first,
+            second: second_node,
+            ..
+        } = node
+        else {
+            return false;
+        };
+        node = if second { second_node } else { first };
+    }
+    let LayoutNode::Branch { ratio: current, .. } = node else {
+        return false;
+    };
+    *current = ratio;
+    true
+}
+
+fn ancestor_distance(node: &LayoutNode, target: SplintId) -> Option<u16> {
+    match node {
+        LayoutNode::Leaf(splint) => (splint.id == target).then_some(0),
+        LayoutNode::Branch { first, second, .. } => ancestor_distance(first, target)
+            .or_else(|| ancestor_distance(second, target))
+            .and_then(|distance| distance.checked_add(1)),
     }
 }
 
@@ -477,6 +627,69 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn nested_branch_dividers_hit_and_resize_the_exact_ancestor() {
+        let (first, first_id) = leaf();
+        let (second, _) = leaf();
+        let (third, _) = leaf();
+        let (fourth, _) = leaf();
+        let mut root = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Branch {
+                axis: Axis::Vertical,
+                ratio: SplitRatio::new(400).unwrap(),
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+            second: Box::new(LayoutNode::Branch {
+                axis: Axis::Vertical,
+                ratio: SplitRatio::new(600).unwrap(),
+                first: Box::new(third),
+                second: Box::new(fourth),
+            }),
+        };
+        let layout = PaneLayout::compute(
+            &root,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 101,
+                height: 101,
+            },
+            1,
+            2,
+            2,
+        )
+        .unwrap();
+
+        let split = layout.split_at((50.5, 10.0), 6).unwrap();
+        assert_eq!(split.axis, Axis::Horizontal);
+        assert_eq!(split.target, first_id);
+        assert_eq!(split.ancestor, 1);
+        let ratio = split_ratio_at(split, (70.0, 10.0), 2).unwrap();
+        assert_eq!(ratio.get(), 700);
+        assert!(apply_preview_ratio(
+            &mut root,
+            split.target,
+            split.ancestor,
+            ratio
+        ));
+        let LayoutNode::Branch {
+            ratio: outer,
+            first,
+            ..
+        } = root
+        else {
+            panic!("expected outer branch");
+        };
+        assert_eq!(outer, ratio);
+        let LayoutNode::Branch { ratio: inner, .. } = *first else {
+            panic!("expected nested branch");
+        };
+        assert_eq!(inner.get(), 400);
     }
 
     #[test]

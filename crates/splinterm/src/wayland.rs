@@ -85,7 +85,7 @@ use wayland_protocols::ext::background_effect::v1::client::{
 };
 
 use splinterm_automation_client::ImageContentLeaseSet;
-use splinterm_core::{DojoId, LairId, LayoutNode, SplintId};
+use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplitRatio};
 use splinterm_protocol::{
     ActiveScreen, ControlTransferDecision, MouseTracking, SearchMatch, TerminalInputModes,
     TerminalRow, TerminalSnapshot,
@@ -127,7 +127,9 @@ use crate::geometry::{
 };
 #[cfg(test)]
 use crate::pane::PaneDivider;
-use crate::pane::{FocusDirection, PaneChrome, PaneLayout};
+use crate::pane::{
+    FocusDirection, PaneChrome, PaneLayout, PaneSplit, apply_preview_ratio, split_ratio_at,
+};
 #[cfg(test)]
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
@@ -776,6 +778,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pointer_seat: None,
             last_pointer_serial: None,
             pressed_buttons: HashMap::new(),
+            divider_drag: None,
             vertical_wheel: WheelAccumulator::default(),
             scrollback_wheel: WheelAccumulator::default(),
             cursor_blink_visible: true,
@@ -1647,6 +1650,12 @@ struct PresentationState {
     full_redraw: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DividerDrag {
+    split: PaneSplit,
+    ratio: Option<SplitRatio>,
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent keyboard, IME, focus-reporting, and cursor-blink protocol flags"
@@ -1669,6 +1678,7 @@ struct InputState {
     pointer_seat: Option<wl_seat::WlSeat>,
     last_pointer_serial: Option<u32>,
     pressed_buttons: HashMap<u32, PressOwner>,
+    divider_drag: Option<DividerDrag>,
     vertical_wheel: WheelAccumulator,
     scrollback_wheel: WheelAccumulator,
     cursor_blink_visible: bool,
@@ -3787,6 +3797,80 @@ impl App {
         }
         if let Err(error) = self.refresh_session_picker() {
             self.scheduling.fail(error);
+        }
+    }
+
+    fn handle_pane_divider_pointer(&mut self, event: &PointerEvent) -> Result<bool> {
+        if let Some(mut drag) = self.input.divider_drag {
+            match event.kind {
+                PointerEventKind::Motion { .. } | PointerEventKind::Enter { .. } => {
+                    let Some(ratio) = split_ratio_at(drag.split, event.position, 1) else {
+                        return Ok(true);
+                    };
+                    if drag.ratio == Some(ratio) {
+                        return Ok(true);
+                    }
+                    let Some(mut candidate) = self.panes.layout.clone() else {
+                        self.input.divider_drag = None;
+                        return Ok(false);
+                    };
+                    if !apply_preview_ratio(
+                        &mut candidate,
+                        drag.split.target,
+                        drag.split.ancestor,
+                        ratio,
+                    ) {
+                        self.input.divider_drag = None;
+                        return Ok(false);
+                    }
+                    let previous = self.panes.layout.replace(candidate);
+                    if self.computed_pane_layout().is_err() {
+                        self.panes.layout = previous;
+                        return Ok(true);
+                    }
+                    drag.ratio = Some(ratio);
+                    self.input.divider_drag = Some(drag);
+                    self.panes.pane.pointer_cell = None;
+                    self.panes.pane.hovered_url = None;
+                    self.presentation.full_redraw = true;
+                    Ok(true)
+                }
+                PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                    self.input.divider_drag = None;
+                    if let Some(ratio) = drag.ratio {
+                        self.send_topology_command(WindowTopologyCommand::SetRatio {
+                            dojo_id: self.tab_state.active_identity.dojo_id,
+                            target: drag.split.target,
+                            ancestor: drag.split.ancestor,
+                            ratio,
+                        })?;
+                    }
+                    Ok(true)
+                }
+                PointerEventKind::Leave { .. }
+                | PointerEventKind::Press { .. }
+                | PointerEventKind::Axis { .. }
+                | PointerEventKind::Release { .. } => Ok(true),
+            }
+        } else if matches!(
+            event.kind,
+            PointerEventKind::Press {
+                button: BTN_LEFT,
+                ..
+            }
+        ) {
+            let split = self
+                .computed_pane_layout()?
+                .and_then(|layout| layout.split_at(event.position, 6));
+            if let Some(split) = split {
+                self.input.divider_drag = Some(DividerDrag { split, ratio: None });
+                self.panes.pane.pointer_cell = None;
+                self.panes.pane.hovered_url = None;
+                return Ok(true);
+            }
+            Ok(false)
+        } else {
+            Ok(false)
         }
     }
 

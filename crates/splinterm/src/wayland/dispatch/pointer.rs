@@ -20,6 +20,7 @@ impl PointerHandler for App {
         let modal_frame = self.modal.inline_picker_open();
         let mut picker_changed = false;
         let mut pane_focus_changed = false;
+        let mut pane_divider_changed = false;
         for event in events {
             if &event.surface != self.surface.window.wl_surface() {
                 continue;
@@ -27,6 +28,17 @@ impl PointerHandler for App {
             if modal_frame {
                 picker_changed |= self.handle_session_picker_pointer(event);
                 continue;
+            }
+            match self.handle_pane_divider_pointer(event) {
+                Ok(true) => {
+                    pane_divider_changed = true;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.scheduling.fail(error);
+                    return;
+                }
             }
             match self.handle_tab_strip_pointer(event) {
                 Ok(true) => continue,
@@ -254,6 +266,7 @@ impl PointerHandler for App {
             && !self.modal.session_picker_reconcile_pending
             && (picker_changed && self.modal.inline_picker_open()
                 || pane_focus_changed
+                || pane_divider_changed
                 || self.panes.pane.viewport_dirty
                 || self.panes.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
                 || self

@@ -300,7 +300,22 @@ async fn apply_topology_command(
             Request::SetSplitRatio {
                 expected_topology_revision,
                 target_splint_id: target,
+                ancestor: 0,
                 ratio: SplitRatio::new(next).map_err(|_| anyhow::anyhow!("invalid ratio"))?,
+            }
+        }
+        WindowTopologyCommand::SetRatio {
+            dojo_id: target_dojo,
+            target,
+            ancestor,
+            ratio,
+        } => {
+            anyhow::ensure!(target_dojo == dojo_id, "ratio edit targeted another Dojo");
+            Request::SetSplitRatio {
+                expected_topology_revision,
+                target_splint_id: target,
+                ancestor,
+                ratio,
             }
         }
         WindowTopologyCommand::Close { .. } => unreachable!("close handled above"),
@@ -986,7 +1001,8 @@ pub(in crate::app) async fn run_topology_manager(
         };
         let (WindowTopologyCommand::Split { dojo_id, .. }
         | WindowTopologyCommand::Close { dojo_id, .. }
-        | WindowTopologyCommand::AdjustRatio { dojo_id, .. }) = command
+        | WindowTopologyCommand::AdjustRatio { dojo_id, .. }
+        | WindowTopologyCommand::SetRatio { dojo_id, .. }) = command
         else {
             unreachable!("session command escaped manager dispatch");
         };
