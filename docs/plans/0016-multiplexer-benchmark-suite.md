@@ -1,8 +1,9 @@
 # Plan 0016: multiplexer benchmark suite
 
-- **Status:** In progress
+- **Status:** Complete
 - **Date:** 2026-08-04
 - **Benchmark foundation:** [Terminal benchmark suite](../benchmarks/terminal-benchmark-plan.md)
+- **Publication artifact:** [2026-08-05 Plan 0016 publication](../benchmarks/artifacts/2026-08-05-plan0016-publication/README.md)
 - **Lifecycle contract:** [ADR 0006](../adr/0006-multiplexing-lifecycle.md)
 
 ## Goal
@@ -184,20 +185,42 @@ materialization, final resync-plus-exit bypasses impossible post-exit resync,
 and controller completion no longer races terminal lifecycle observation.
 Repeated native single/two-column regressions and exact cleanup pass.
 
-The required Milestone 3 evidence run remains pending. The latest fresh 3+10
-attempt passed 18 cells, including all native ANSI and lifecycle cases reached,
-then stopped when a Foot/Zellij divider operation activated reserved workspace
-8. Owned windows, processes, and namespace were removed, but the host-state
-cleanup assertion correctly remained invalid because focus entered the test
-workspace. Do not retry the graphical matrix without a fresh approved guarded
-sequence.
+Milestone 3 completed 2026-08-05 with the required three warmups and ten
+measured samples for all 12 stack/topology cells. The immutable seed-`13372075`
+plan records 36 valid warmup cells and 120/120 valid measured cells, with no
+timeouts or cleanup failures. After a guarded focus stop, the final execution
+reused 40 valid same-plan cells and completed the remaining schedule under the
+same execution identity. All 183 retained checksums and all 156 strict cell
+schemas validate. The compact tracked publication retains the aggregate and
+source identities; the 21 MiB raw matrix remains local immutable evidence rather
+than Git history. Evidence: [Plan 0016 publication summary](../benchmarks/artifacts/2026-08-05-plan0016-publication/summary.md).
 
-### Milestone 4 — current baseline and publication review
+### Milestone 4 — current baseline and publication review (complete 2026-08-05)
 
-Rerun the current bare five-terminal baseline before interpreting the new
-matrix. Existing July development artifacts predate later Splinterm performance
-and resize work. Record independent review and bounded graphical evidence before
-claiming the multiplexer lane complete.
+The current bare five-terminal startup/idle baseline reran with three warmups,
+ten measured samples per terminal, and seed `20260723`. All 50 measured cases
+passed with guarded cleanup. Splinterm's prestarted-daemon launch boundary
+remains distinct from the standalone peer launches. Its aggregate is retained in
+the [Plan 0016 publication summary](../benchmarks/artifacts/2026-08-05-plan0016-publication/summary.md).
+
+The publication bundle recomputes every multiplexer timing boundary from
+immutable raw reports using checksum-covered corrected aggregation source. It
+retains the five-terminal aggregate from that run's canonical `matrix.json`;
+independent review reproduced it from all measured baseline reports. The tracked
+curation binds complete source manifests for both raw evidence directories, the
+historical generation working directory, aggregation source and test hashes,
+complete-stack accounting, explicit independent-Foot N/A semantics, and
+host/build and visible-marker limitations. Evidence: [tracked publication
+artifact](../benchmarks/artifacts/2026-08-05-plan0016-publication/README.md).
+
+Initial independent publication review accepted the underlying Milestone 3 and
+Milestone 4 evidence and rejected only stale plan text, incomplete
+post-processing provenance, and a missing launch-model qualification. Those
+bounded publication blockers were corrected without rerunning graphical or raw
+evidence. A second fresh independent review verified the corrected checksums,
+provenance, aggregation source and test identity, launch qualification, and plan
+facts, then approved Plan 0016 for publication with no blockers. Decision:
+[final independent publication review](../benchmarks/artifacts/2026-08-05-plan0016-publication/review.md).
 
 ## Stop gates
 

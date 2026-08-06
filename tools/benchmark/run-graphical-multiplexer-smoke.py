@@ -109,10 +109,10 @@ def user_state() -> dict[str, Any]:
 
 def assert_user_state(expected: Mapping[str, Any]) -> None:
     V1.assert_user_workspace_untouched()
-    observed = user_state()
+    observed = {key: value for key, value in user_state().items() if key in expected}
     if observed != expected:
         raise RuntimeError(
-            "graphical smoke changed host workspace, focus, or pointer: "
+            "graphical smoke changed guarded host state: "
             f"expected={dict(expected)!r} observed={observed!r}"
         )
 

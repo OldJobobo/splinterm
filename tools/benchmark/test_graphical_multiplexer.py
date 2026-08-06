@@ -35,6 +35,33 @@ def identity(pid: int) -> dict[str, int]:
     return {"pid": pid, "start_ticks": pid * 10}
 
 
+def test_user_state_guard_can_observe_cursor_without_freezing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(RUN.V1, "assert_user_workspace_untouched", lambda: None)
+    monkeypatch.setattr(
+        RUN,
+        "user_state",
+        lambda: {
+            "workspace": {"id": 1, "monitor": "DP-1"},
+            "focus_address": "0x1",
+            "cursor": {"x": 99, "y": 101},
+        },
+    )
+    RUN.assert_user_state(
+        {"workspace": {"id": 1, "monitor": "DP-1"}, "focus_address": "0x1"}
+    )
+    RUN.assert_user_state({})
+    with pytest.raises(RuntimeError, match="guarded host state"):
+        RUN.assert_user_state(
+            {
+                "workspace": {"id": 1, "monitor": "DP-1"},
+                "focus_address": "0x1",
+                "cursor": {"x": 1, "y": 2},
+            }
+        )
+
+
 def valid_report() -> dict[str, object]:
     panes = [
         {"name": "pane-0", "runtime_id": "a", "columns": 59, "rows": 30},
