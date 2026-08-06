@@ -51,6 +51,8 @@ MCP_REQUIRED = {
     "usr/share/licenses/splinterm-mcp/LICENSE",
     "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
 }
+PRIVATE_PROTOCOL_VERSION = 26
+
 EXECUTABLES = {
     "usr/bin/generate-omarchy-theme.py",
     "usr/bin/splinterd",
@@ -635,13 +637,16 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 25,
-                "maximum_version": 25,
+                "minimum_version": PRIVATE_PROTOCOL_VERSION,
+                "maximum_version": PRIVATE_PROTOCOL_VERSION,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
             hello = read_private_frame(relay_process.stdout)
-            assert hello["type"] == "hello" and hello["version"] == 25
+            assert (
+                hello["type"] == "hello"
+                and hello["version"] == PRIVATE_PROTOCOL_VERSION
+            )
             inherited_path = Path(f"/proc/{relay_process.pid}/fd/{inherited_fd}")
             assert not inherited_path.exists() or os.readlink(inherited_path) != inherited_target
 
@@ -700,8 +705,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert relay_process.stdout is not None
             relay_process.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 25,
-                "maximum_version": 25,
+                "minimum_version": PRIVATE_PROTOCOL_VERSION,
+                "maximum_version": PRIVATE_PROTOCOL_VERSION,
                 "role": "automation",
             }))
             relay_process.stdin.flush()
@@ -758,8 +763,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert restarted_relay.stdout is not None
             restarted_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 25,
-                "maximum_version": 25,
+                "minimum_version": PRIVATE_PROTOCOL_VERSION,
+                "maximum_version": PRIVATE_PROTOCOL_VERSION,
                 "role": "automation",
             }))
             restarted_relay.stdin.flush()
@@ -795,8 +800,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
             assert broken_output_relay.stdout is not None
             broken_output_relay.stdin.write(encode_private_frame({
                 "type": "hello",
-                "minimum_version": 25,
-                "maximum_version": 25,
+                "minimum_version": PRIVATE_PROTOCOL_VERSION,
+                "maximum_version": PRIVATE_PROTOCOL_VERSION,
                 "role": "automation",
             }))
             broken_output_relay.stdin.flush()
