@@ -74,6 +74,8 @@ pub(in crate::app) enum Command {
         dojo_id: Option<DojoId>,
     },
     Ping,
+    /// Read only the keyboard-focused graphical Splint ID and current working directory.
+    Focus,
     /// Stop the daemon, back up and clear every session, then restart cleanly.
     Reset {
         /// Confirm termination of every daemon-owned shell without prompting.

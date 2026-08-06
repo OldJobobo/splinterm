@@ -2,7 +2,10 @@
 
 use std::{path::PathBuf, sync::mpsc::Sender as StdSender};
 
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    watch::Sender as WatchSender,
+};
 
 use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::{LayoutNode, SplintId};
@@ -69,6 +72,8 @@ pub struct WindowOptions {
     pub active_splint: Option<SplintId>,
     pub topology_updates: Option<Receiver<WindowTopologyUpdate>>,
     pub topology_commands: Option<Sender<WindowTopologyCommand>>,
+    /// Coalesced ephemeral keyboard/pane focus publication for the supported adapter API.
+    pub graphical_focus: Option<WatchSender<Option<SplintId>>>,
     /// Stable identity for the initial managed Dojo; absent for legacy/evidence windows.
     pub initial_dojo: Option<WindowDojoIdentity>,
 }
@@ -100,6 +105,7 @@ impl Default for WindowOptions {
             active_splint: None,
             topology_updates: None,
             topology_commands: None,
+            graphical_focus: None,
             initial_dojo: None,
         }
     }

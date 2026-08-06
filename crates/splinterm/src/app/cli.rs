@@ -75,7 +75,11 @@ pub(crate) async fn run() -> Result<()> {
     if matches!(command, Command::Subscribe { .. }) && output != Some(OutputMode::Ndjson) {
         usage_error("subscriptions require --output ndjson");
     }
+    if matches!(command, Command::Focus) && output != Some(OutputMode::Json) {
+        usage_error("focus requires --output json");
+    }
     if output == Some(OutputMode::Json) {
+        let focus_command = matches!(&command, Command::Focus);
         match run_machine_command(
             command,
             schema_major.unwrap_or(2),
@@ -85,7 +89,11 @@ pub(crate) async fn run() -> Result<()> {
         {
             Ok(()) => return Ok(()),
             Err(error) => {
-                eprintln!("{error:#}");
+                if focus_command {
+                    eprintln!("focus request failed");
+                } else {
+                    eprintln!("{error:#}");
+                }
                 std::process::exit(machine_exit_code(&error));
             }
         }
@@ -175,6 +183,7 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
         | Command::Reset { .. } => {
             unreachable!("graphical, policy, or relay command returned before daemon connection")
         }
+        Command::Focus => bail!("focus requires --output json"),
         Command::Ping => print_response(connection.request(Request::Ping).await?),
         Command::List { all } => {
             let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await?

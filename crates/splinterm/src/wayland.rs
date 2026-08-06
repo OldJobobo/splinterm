@@ -764,6 +764,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             ime: ImeState::default(),
             reduced_motion: reduced_motion_requested(),
             keyboard_focused: false,
+            graphical_focus: options.graphical_focus,
             input_generation: 0,
             terminal_focus_reported: false,
             ime_generation: 0,
@@ -1656,6 +1657,7 @@ struct InputState {
     ime: ImeState,
     reduced_motion: bool,
     keyboard_focused: bool,
+    graphical_focus: Option<tokio::sync::watch::Sender<Option<SplintId>>>,
     input_generation: u64,
     terminal_focus_reported: bool,
     ime_generation: u64,
@@ -2149,6 +2151,35 @@ impl BackgroundEffectReconcileSchedule {
     }
 }
 
+const fn reported_graphical_focus(
+    keyboard_focused: bool,
+    focused_splint_id: Option<SplintId>,
+) -> Option<SplintId> {
+    if keyboard_focused {
+        focused_splint_id
+    } else {
+        None
+    }
+}
+
+fn update_graphical_focus_watch(
+    sender: Option<&tokio::sync::watch::Sender<Option<SplintId>>>,
+    keyboard_focused: bool,
+    focused_splint_id: Option<SplintId>,
+) {
+    let focused = reported_graphical_focus(keyboard_focused, focused_splint_id);
+    if let Some(sender) = sender {
+        sender.send_if_modified(|current| {
+            if *current == focused {
+                false
+            } else {
+                *current = focused;
+                true
+            }
+        });
+    }
+}
+
 fn retain_newest_theme(slot: &mut Option<ThemeUpdate>, update: ThemeUpdate) {
     if slot
         .as_ref()
@@ -2288,6 +2319,7 @@ impl App {
             self.tab_state.tabs.activate(dojo_id),
             "activated Dojo tab is absent"
         );
+        self.sync_graphical_focus();
         rebuild_pane_scaled_frame_with_context(
             &mut self.panes.pane,
             self.surface.scale_120,
@@ -2487,6 +2519,7 @@ impl App {
         self.panes.pane.pointer_cell = None;
         self.panes.pane.hovered_url = None;
         self.presentation.full_redraw = true;
+        self.sync_graphical_focus();
         true
     }
 
@@ -3546,9 +3579,18 @@ impl App {
         }
     }
 
+    fn sync_graphical_focus(&self) {
+        update_graphical_focus_watch(
+            self.input.graphical_focus.as_ref(),
+            self.input.keyboard_focused,
+            self.panes.focused_splint(),
+        );
+    }
+
     fn set_ime_focus(&mut self, focused: bool) {
         self.input.keyboard_focused = focused;
         self.input.ime.focused = focused;
+        self.sync_graphical_focus();
         if !focused && self.input.ime.entered {
             if let Some(text_input) = &self.input.text_input {
                 text_input.disable();
@@ -4652,6 +4694,7 @@ impl App {
                 }
             }
         }
+        self.sync_graphical_focus();
         Ok((changed, next_theme))
     }
 
@@ -7361,6 +7404,22 @@ mod tests {
         };
         assert_eq!(divider_junction(horizontal, from_bottom).unwrap().0, '┬');
         assert_eq!(divider_junction(horizontal, from_top).unwrap().0, '┴');
+    }
+
+    #[test]
+    fn graphical_focus_watch_tracks_keyboard_and_selected_pane() {
+        let first = SplintId::new();
+        let second = SplintId::new();
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+
+        update_graphical_focus_watch(Some(&sender), true, Some(first));
+        assert_eq!(*receiver.borrow(), Some(first));
+        update_graphical_focus_watch(Some(&sender), true, Some(second));
+        assert_eq!(*receiver.borrow(), Some(second));
+        update_graphical_focus_watch(Some(&sender), false, Some(second));
+        assert_eq!(*receiver.borrow(), None);
+        update_graphical_focus_watch(Some(&sender), true, None);
+        assert_eq!(*receiver.borrow(), None);
     }
 
     #[test]

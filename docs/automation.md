@@ -84,9 +84,10 @@ cannot contain `data`, and always set `truncated: false` because errors have no
 continuation mechanism. The optional `operation` discriminator preserves the
 operation-less draft v2 fixtures byte-for-byte. Production output always includes
 it; whenever it is present, the schema applies a closed operation-specific
-`data`, `resource`, and error payload. Both successful and failed `ping` records,
-and `audit_inspect` records, omit `resource`; failed `ping` records also omit
-resource-revision hints because the operation exposes no resource data.
+`data`, `resource`, and error payload. Both successful and failed `ping` and
+`focus` records, and `audit_inspect` records, omit `resource`; failed `ping` and
+`focus` records also omit
+resource-revision hints because those operations expose no resource data.
 
 ### One-shot command and operation inventory
 
@@ -97,6 +98,7 @@ outside this inventory.
 | Command | `operation` |
 | --- | --- |
 | `ping` | `ping` |
+| `focus` | `focus` |
 | `list` | `list_lairs` |
 | `topology` | `inspect_topology` |
 | `inspect SPLINT_ID` | `inspect_splint` |
@@ -131,6 +133,25 @@ The NDJSON subscription commands are:
 - `subscribe control SPLINT_ID --output ndjson`.
 
 JSON is rejected for subscriptions, and NDJSON is rejected for one-shot commands.
+The `focus` command is machine-only and must be invoked as
+`splinterm --output json focus`.
+
+### Focus adapter projection
+
+`focus` is the supported narrow adapter for integrations that need to associate
+an external tool with the active Splinterm pane. A successful response contains
+exactly nullable `data.splint_id` and nullable `data.cwd`. No keyboard-focused
+Splinterm window returns both fields as `null`. A live focus whose working
+directory cannot be read safely returns the stable Splint ID and a null `cwd`.
+The daemon derives `cwd` from the live shell process, accepts only absolute UTF-8
+paths within the protocol bound, and suppresses deleted-path markers.
+
+Any authenticated local client may read this projection without topology or
+terminal-content authority. Only the installed trusted graphical client may
+publish focus. Publication is ephemeral and connection-owned, so disconnecting
+the publishing window clears its claim. The projection never contains topology,
+titles, commands, process IDs, incarnations, terminal content, or private-state
+paths, and focus-specific public errors do not echo filesystem paths.
 
 Terminal, scrollback, and search responses always carry the exact Lair, Dojo,
 Splint, incarnation, terminal revision, and history generation. Bounded pages

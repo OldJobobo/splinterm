@@ -29,7 +29,7 @@ use splinterm_filemap::ReadOnlyFileMap;
 use splinterm_protocol::{
     AccessGrant, AccessScope, AuditDecision, AuditOperation, AuditOutcome, AuditPage,
     AutomationScope, ClientFrame, ClientRole, ControlStatus, ControlTransferOutcome, ErrorCode,
-    ImageContentMetadata, ImageContentRequest, ImageTransferMode, MAX_FRAME_BYTES,
+    ImageContentMetadata, ImageContentRequest, ImageTransferMode, MAX_CWD_BYTES, MAX_FRAME_BYTES,
     MAX_IMAGE_CHUNK_BYTES, MAX_IMAGE_CHUNK_WINDOW, PROTOCOL_VERSION, PersistentAuthorizationStatus,
     Request, Response, RestoreLeafResult, ScrollbackPage, SearchPage, ServerFrame, ServerLimits,
     SplintLifecycle, SplintRuntimeSummary, TerminalRow, TerminalSnapshot, TerminalUpdate,
@@ -933,6 +933,41 @@ fn topology_projection(snapshot: &TopologySnapshot) -> Result<InspectTopologyDat
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct GraphicalFocusDataV2 {
+    splint_id: Option<String>,
+    cwd: Option<String>,
+}
+
+/// Converts the narrow graphical-focus projection to the reviewed public envelope.
+pub fn graphical_focus_envelope(
+    focused_splint_id: Option<SplintId>,
+    cwd: Option<&Path>,
+) -> Result<CliEnvelopeV2> {
+    if focused_splint_id.is_none() && cwd.is_some() {
+        bail!("graphical focus CWD requires a focused Splint");
+    }
+    let cwd = cwd
+        .map(|path| {
+            if !path.is_absolute() || path.as_os_str().as_encoded_bytes().len() > MAX_CWD_BYTES {
+                bail!("graphical focus CWD is outside public bounds");
+            }
+            path.to_str()
+                .map(str::to_owned)
+                .context("graphical focus CWD is not UTF-8")
+        })
+        .transpose()?;
+    CliEnvelopeV2::success(
+        "focus",
+        None,
+        serde_json::to_value(GraphicalFocusDataV2 {
+            splint_id: focused_splint_id.map(|id| id.to_string()),
+            cwd,
+        })?,
+        false,
+    )
+}
+
 /// Converts a validated private topology snapshot to the reviewed `list_lairs` envelope.
 pub fn list_lairs_envelope(snapshot: &TopologySnapshot) -> Result<CliEnvelopeV2> {
     let projection = topology_projection(snapshot)?;
@@ -1350,6 +1385,8 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
         AuditOperation::InspectTopology => "inspect_topology",
         AuditOperation::SubscribeTopology => "subscribe_topology",
         AuditOperation::InspectSplint => "inspect_splint",
+        AuditOperation::ReadGraphicalFocus => "read_graphical_focus",
+        AuditOperation::PublishGraphicalFocus => "publish_graphical_focus",
         AuditOperation::CreateLair => "create_lair",
         AuditOperation::SplitSplint => "split_splint",
         AuditOperation::RelaunchSplint => "relaunch_splint",
@@ -3983,6 +4020,30 @@ mod tests {
                 exit_status: None,
             }],
         }
+    }
+
+    #[test]
+    fn public_v2_graphical_focus_is_narrow_and_matches_golden_fixture() {
+        let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
+        let expected = fixture_document(include_str!(
+            "../../../tests/automation/fixtures/valid/cli-focus.json"
+        ));
+        assert_eq!(
+            serialized(
+                &graphical_focus_envelope(
+                    Some(splint_id),
+                    Some(Path::new("/home/example/project")),
+                )
+                .unwrap()
+            ),
+            expected
+        );
+
+        let empty = serialized(&graphical_focus_envelope(None, None).unwrap());
+        assert_eq!(empty["data"]["splint_id"], Value::Null);
+        assert_eq!(empty["data"]["cwd"], Value::Null);
+        assert!(graphical_focus_envelope(None, Some(Path::new("/tmp"))).is_err());
+        assert!(graphical_focus_envelope(Some(splint_id), Some(Path::new("relative"))).is_err());
     }
 
     #[test]

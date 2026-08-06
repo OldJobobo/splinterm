@@ -11,11 +11,12 @@ use splinterm::automation::{
     CliEnvelopeV2, CliErrorCodeV2, CliEventV2, Connection, MutationIdentityV2, PingEnvelopeV2,
     ReadResyncReasonV2, ResyncReasonV2, TerminalContinuationV2, TerminalReadProvenanceV2,
     audit_page_envelope, authorization_status_envelope, committed_mutation_envelope,
-    created_mutation_envelope, decode_terminal_cursor, inspect_splint_envelope,
-    inspect_topology_envelope, kill_envelope, list_lairs_envelope, process_started_envelope,
-    protocol_error, public_error_code, read_resync_envelope, response_protocol_error,
-    restore_many_envelope, revoke_envelope, scrollback_page_envelope, search_page_envelope,
-    terminal_action_envelope, terminal_snapshot_envelope, write_json_document,
+    created_mutation_envelope, decode_terminal_cursor, graphical_focus_envelope,
+    inspect_splint_envelope, inspect_topology_envelope, kill_envelope, list_lairs_envelope,
+    process_started_envelope, protocol_error, public_error_code, read_resync_envelope,
+    response_protocol_error, restore_many_envelope, revoke_envelope, scrollback_page_envelope,
+    search_page_envelope, terminal_action_envelope, terminal_snapshot_envelope,
+    write_json_document,
 };
 use splinterm::config::load_default;
 use splinterm_core::{
@@ -91,6 +92,7 @@ pub(in crate::app) async fn run_machine_command(
     };
     match command {
         Command::Ping => run_machine_ping(schema_major, timeout_ms).await,
+        Command::Focus => run_machine_read(MachineRead::Focus, schema_major, timeout_ms).await,
         Command::List { .. } => run_machine_read(MachineRead::List, schema_major, timeout_ms).await,
         Command::Topology => {
             run_machine_read(MachineRead::Topology, schema_major, timeout_ms).await

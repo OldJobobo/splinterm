@@ -187,6 +187,17 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
             snapshot.topology.lairs().count(),
             snapshot.runtimes.len()
         ),
+        Response::GraphicalFocus {
+            focused_splint_id,
+            cwd,
+        } => println!(
+            "Focused Splint: {}; cwd: {}",
+            focused_splint_id.map_or_else(|| "none".to_owned(), |id| id.to_string()),
+            cwd.map_or_else(
+                || "unavailable".to_owned(),
+                |path| path.display().to_string()
+            )
+        ),
         Response::TopologySubscribed {
             subscription_id,
             snapshot,

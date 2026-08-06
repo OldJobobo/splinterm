@@ -12,7 +12,7 @@ use splinterm_core::{
     Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 25;
+pub const PROTOCOL_VERSION: u16 = 26;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -255,6 +255,10 @@ pub enum Request {
     SubscribeTopology,
     InspectSplint {
         splint_id: SplintId,
+    },
+    ReadGraphicalFocus,
+    PublishGraphicalFocus {
+        focused_splint_id: Option<SplintId>,
     },
     RequestAccess {
         splint_id: SplintId,
@@ -505,6 +509,10 @@ pub enum Response {
         title: String,
         topology_revision: TopologyRevision,
         runtime: SplintRuntimeSummary,
+    },
+    GraphicalFocus {
+        focused_splint_id: Option<SplintId>,
+        cwd: Option<PathBuf>,
     },
     AccessGranted {
         lair_id: LairId,
@@ -963,6 +971,8 @@ pub enum AuditOperation {
     InspectTopology,
     SubscribeTopology,
     InspectSplint,
+    ReadGraphicalFocus,
+    PublishGraphicalFocus,
     CreateLair,
     SplitSplint,
     RelaunchSplint,
@@ -2204,7 +2214,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 25);
+        assert_eq!(PROTOCOL_VERSION, 26);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -2241,6 +2251,32 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Request>(&search_json).unwrap(),
             search
+        );
+    }
+
+    #[test]
+    fn graphical_focus_messages_are_explicit_protocol_v26_shapes() {
+        let splint_id = SplintId::new();
+        let read = Request::ReadGraphicalFocus;
+        let publish = Request::PublishGraphicalFocus {
+            focused_splint_id: Some(splint_id),
+        };
+        let response = Response::GraphicalFocus {
+            focused_splint_id: Some(splint_id),
+            cwd: Some(PathBuf::from("/tmp/project")),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            serde_json::json!({"type": "read_graphical_focus"})
+        );
+        assert_eq!(
+            serde_json::from_value::<Request>(serde_json::to_value(&publish).unwrap()).unwrap(),
+            publish
+        );
+        assert_eq!(
+            serde_json::from_value::<Response>(serde_json::to_value(&response).unwrap()).unwrap(),
+            response
         );
     }
 

@@ -1703,6 +1703,7 @@ impl RuntimeMetrics {
 pub struct LiveSplintHandle {
     pub splint_id: SplintId,
     pub incarnation: ProcessIncarnation,
+    child_pid: u32,
     commands: mpsc::Sender<Command>,
     default_snapshot_rows: usize,
     default_subscriber_capacity: usize,
@@ -1716,6 +1717,11 @@ pub struct LiveSplintHandle {
     reason = "all handle operations share the closed actor and operation-specific LiveError cases"
 )]
 impl LiveSplintHandle {
+    #[must_use]
+    pub const fn child_pid(&self) -> u32 {
+        self.child_pid
+    }
+
     pub async fn input(&self, bytes: Vec<u8>) -> Result<(), LiveError> {
         if bytes.len() > self.max_input_message_bytes {
             return Err(LiveError::InputQueueFull);
@@ -2000,9 +2006,11 @@ impl LiveSplintRuntime {
         let (sender, receiver) = mpsc::channel(config.command_capacity.max(1));
         let (exit_sender, exit) = watch::channel(None);
         let metrics = Arc::new(RuntimeMetrics::default());
+        let child_pid = session.child_id();
         let handle = LiveSplintHandle {
             splint_id,
             incarnation,
+            child_pid,
             commands: sender,
             default_snapshot_rows: config.max_scrollback_snapshot_rows,
             default_subscriber_capacity: config.subscriber_capacity,

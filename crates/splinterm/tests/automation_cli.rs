@@ -793,6 +793,89 @@ fn output_json_reads_use_reviewed_shapes_and_global_flag_placement() {
 }
 
 #[test]
+fn output_json_focus_uses_only_the_narrow_projection() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_client(&listener);
+        assert!(matches!(
+            read_client_frame(&mut stream),
+            ClientFrame::Request {
+                request_id: 1,
+                request: splinterm_protocol::Request::ReadGraphicalFocus,
+            }
+        ));
+        stream
+            .write_all(
+                &encode_frame(&ServerFrame::Response {
+                    request_id: 1,
+                    result: Response::GraphicalFocus {
+                        focused_splint_id: Some(splint_id),
+                        cwd: Some(PathBuf::from("/home/example/project")),
+                    },
+                })
+                .unwrap(),
+            )
+            .unwrap();
+    });
+
+    let output = run_json_ping(&["--output", "json", "focus"], &socket);
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["operation"], "focus");
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["data"]["splint_id"], splint_id.to_string());
+    assert_eq!(document["data"]["cwd"], "/home/example/project");
+    assert!(document.get("resource").is_none());
+    assert_eq!(document["data"].as_object().unwrap().len(), 2);
+}
+
+#[test]
+fn output_json_focus_rejects_invalid_daemon_projection_with_stable_error() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_client(&listener);
+        assert!(matches!(
+            read_client_frame(&mut stream),
+            ClientFrame::Request {
+                request_id: 1,
+                request: splinterm_protocol::Request::ReadGraphicalFocus,
+            }
+        ));
+        stream
+            .write_all(
+                &encode_frame(&ServerFrame::Response {
+                    request_id: 1,
+                    result: Response::GraphicalFocus {
+                        focused_splint_id: None,
+                        cwd: Some(PathBuf::from("/private/path")),
+                    },
+                })
+                .unwrap(),
+            )
+            .unwrap();
+    });
+
+    let output = run_json_ping(&["--output", "json", "focus"], &socket);
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert_eq!(output.status.code(), Some(70));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["error"]["message"], "focus response was invalid");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("/private/path"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("/private/path"));
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "one subprocess fixture proves exact terminal provenance and detach cleanup"
@@ -1460,6 +1543,18 @@ fn output_json_ping_serializes_pre_request_failures() {
 }
 
 #[test]
+fn output_json_focus_errors_do_not_expose_socket_paths() {
+    let socket = socket_path();
+    let output = run_json_ping(&["--output", "json", "focus"], &socket);
+    assert_eq!(output.status.code(), Some(4));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["operation"], "focus");
+    assert_eq!(document["error"]["message"], "focus service unavailable");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(socket.to_str().unwrap()));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(socket.to_str().unwrap()));
+}
+
+#[test]
 fn malformed_machine_invocation_has_empty_stdout() {
     for arguments in [
         vec!["--output", "wat", "ping"],
@@ -1468,6 +1563,7 @@ fn malformed_machine_invocation_has_empty_stdout() {
         vec!["--output", "json", "consent"],
         vec!["--output", "human", "--schema-major", "1", "ping"],
         vec!["--output", "json", "audit", "--max-records", "129"],
+        vec!["focus"],
     ] {
         let output = binary().args(arguments).output().unwrap();
         assert_eq!(output.status.code(), Some(2));

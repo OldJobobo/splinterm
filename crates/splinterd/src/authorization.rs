@@ -26,6 +26,7 @@ pub enum ConditionalRequirement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestAuthorization {
     Authenticated,
+    TrustedUi,
     Policy {
         required: &'static [OperationScope],
         any_of: &'static [OperationScope],
@@ -102,7 +103,8 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
     use OperationScope as Scope;
 
     match request {
-        Request::Ping => RequestAuthorization::Authenticated,
+        Request::Ping | Request::ReadGraphicalFocus => RequestAuthorization::Authenticated,
+        Request::PublishGraphicalFocus { .. } => RequestAuthorization::TrustedUi,
         Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }
@@ -232,6 +234,16 @@ mod tests {
     #[test]
     fn sensitive_matrix_keeps_policy_ownership_and_trusted_ui_distinct() {
         let splint_id = SplintId::new();
+        assert_eq!(
+            for_request(&Request::ReadGraphicalFocus),
+            RequestAuthorization::Authenticated
+        );
+        assert_eq!(
+            for_request(&Request::PublishGraphicalFocus {
+                focused_splint_id: Some(splint_id),
+            }),
+            RequestAuthorization::TrustedUi
+        );
         assert_eq!(
             for_request(&Request::StartSearchScrollback {
                 splint_id,

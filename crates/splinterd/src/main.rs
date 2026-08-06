@@ -38,7 +38,7 @@ use splinterm_core::{
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
     ClientRole, ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome,
-    ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_FRAME_BYTES,
+    ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES, MAX_FRAME_BYTES,
     MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS,
     MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
     MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MAX_UPDATE_SCROLLS,
@@ -508,6 +508,12 @@ struct Revocation {
     grant_id: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GraphicalFocusClaim {
+    owner_connection_id: u64,
+    splint_id: SplintId,
+}
+
 #[derive(Default)]
 struct RuntimeRegistry {
     entries: HashMap<SplintId, LiveSplintRuntime>,
@@ -597,6 +603,7 @@ impl TopologyHub {
 struct DaemonState {
     topology: RwLock<Topology>,
     runtimes: Mutex<RuntimeRegistry>,
+    graphical_focus: Mutex<Option<GraphicalFocusClaim>>,
     topology_hub: Mutex<TopologyHub>,
     topology_transactions: Semaphore,
     exit_observers: TaskTracker,
@@ -715,6 +722,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(DaemonState {
         topology: RwLock::new(lair),
         runtimes: Mutex::new(RuntimeRegistry::default()),
+        graphical_focus: Mutex::new(None),
         topology_hub: Mutex::new(TopologyHub::default()),
         topology_transactions: Semaphore::new(1),
         exit_observers: TaskTracker::new(),
@@ -1177,6 +1185,15 @@ async fn append_daemon_splint_audit(
 }
 
 async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
+    {
+        let mut focus = state.graphical_focus.lock().await;
+        if focus
+            .as_ref()
+            .is_some_and(|claim| claim.owner_connection_id == connection_id)
+        {
+            *focus = None;
+        }
+    }
     let (released, cancelled) = {
         let mut controllers = state.controller.lock().await;
         (
@@ -2132,6 +2149,7 @@ fn trusted_ui_request(request: &Request) -> bool {
     matches!(
         request,
         Request::Ping
+            | Request::PublishGraphicalFocus { .. }
             | Request::ListLairs
             | Request::InspectTopology
             | Request::SubscribeTopology
@@ -2191,13 +2209,14 @@ fn intrinsically_authorized(
 ) -> bool {
     use authorization::RequestAuthorization;
 
-    development_terminal_access
-        || matches!(
-            plan,
-            RequestAuthorization::Authenticated
-                | RequestAuthorization::Owned(_)
-                | RequestAuthorization::TrustedUiConsent
-        )
+    !matches!(plan, RequestAuthorization::TrustedUi)
+        && (development_terminal_access
+            || matches!(
+                plan,
+                RequestAuthorization::Authenticated
+                    | RequestAuthorization::Owned(_)
+                    | RequestAuthorization::TrustedUiConsent
+            ))
 }
 
 fn trusted_ui_authorization_context(
@@ -2242,6 +2261,7 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
     let plan = authorization::for_request(request);
     let mut scopes = match plan {
         RequestAuthorization::Authenticated
+        | RequestAuthorization::TrustedUi
         | RequestAuthorization::Owned(_)
         | RequestAuthorization::TrustedUiConsent => return Some(Vec::new()),
         RequestAuthorization::Policy { required, .. }
@@ -2689,6 +2709,8 @@ async fn request_policy_resources(
 
     Some(match request {
         Request::Ping
+        | Request::ReadGraphicalFocus
+        | Request::PublishGraphicalFocus { .. }
         | Request::DecideControlTransfer { .. }
         | Request::ReleaseControl { .. }
         | Request::Detach { .. }
@@ -2856,6 +2878,12 @@ async fn authorize_request(
     if let Some(authorization) = trusted_ui_authorization_context(trusted_ui_client, peer, request)
     {
         return Ok(authorization);
+    }
+    if matches!(plan, RequestAuthorization::TrustedUi) {
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "request requires the installed trusted graphical client",
+        ));
     }
 
     let Some(required_scopes) = requested_operation_scopes(request) else {
@@ -3505,6 +3533,17 @@ async fn handle_authorized_request(
     let request = resolve_automation_mutation(request, state).await?;
     let response = match request {
         Request::Ping => Response::Pong,
+        Request::ReadGraphicalFocus => {
+            let (focused_splint_id, cwd) = read_graphical_focus(state).await;
+            Response::GraphicalFocus {
+                focused_splint_id,
+                cwd,
+            }
+        }
+        Request::PublishGraphicalFocus { focused_splint_id } => {
+            publish_graphical_focus(state, connection_id, focused_splint_id).await?;
+            Response::Acknowledged
+        }
         Request::RequestImageContent { request } => {
             request.validate()?;
             if !trusted_ui_client || !peer.is_matching_splinterm() {
@@ -4962,6 +5001,94 @@ fn collect_runtime_summaries(
             collect_runtime_summaries(second, live, summaries);
         }
     }
+}
+
+fn validated_graphical_cwd(path: PathBuf) -> Option<PathBuf> {
+    path.is_absolute()
+        .then_some(path)
+        .filter(|path| path.to_str().is_some())
+        .filter(|path| path.as_os_str().as_encoded_bytes().len() <= MAX_CWD_BYTES)
+        .filter(|path| !path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)"))
+}
+
+async fn read_graphical_focus(state: &DaemonState) -> (Option<SplintId>, Option<PathBuf>) {
+    let claim = {
+        let focus = state.graphical_focus.lock().await;
+        let Some(claim) = *focus else {
+            return (None, None);
+        };
+        claim
+    };
+    let runtime = state
+        .runtimes
+        .lock()
+        .await
+        .handle(claim.splint_id)
+        .map(|handle| (handle.incarnation, handle.child_pid()));
+    let cwd = if let Some((_, child_pid)) = runtime {
+        fs::read_link(format!("/proc/{child_pid}/cwd"))
+            .await
+            .ok()
+            .and_then(validated_graphical_cwd)
+    } else {
+        None
+    };
+    if *state.graphical_focus.lock().await != Some(claim)
+        || state
+            .topology
+            .read()
+            .await
+            .find_splint(claim.splint_id)
+            .is_none()
+    {
+        return (None, None);
+    }
+    let runtime_still_current = if let Some((incarnation, child_pid)) = runtime {
+        state
+            .runtimes
+            .lock()
+            .await
+            .handle(claim.splint_id)
+            .is_some_and(|handle| {
+                handle.incarnation == incarnation && handle.child_pid() == child_pid
+            })
+    } else {
+        false
+    };
+    if *state.graphical_focus.lock().await != Some(claim) {
+        return (None, None);
+    }
+    (
+        Some(claim.splint_id),
+        runtime_still_current.then_some(cwd).flatten(),
+    )
+}
+
+async fn publish_graphical_focus(
+    state: &DaemonState,
+    owner_connection_id: u64,
+    focused_splint_id: Option<SplintId>,
+) -> Result<(), ProtocolError> {
+    let exists = if let Some(splint_id) = focused_splint_id {
+        state.topology.read().await.find_splint(splint_id).is_some()
+    } else {
+        false
+    };
+    let mut focus = state.graphical_focus.lock().await;
+    let Some(splint_id) = focused_splint_id.filter(|_| exists) else {
+        if focus
+            .as_ref()
+            .is_some_and(|claim| claim.owner_connection_id == owner_connection_id)
+        {
+            *focus = None;
+        }
+        return Ok(());
+    };
+    *focus = Some(GraphicalFocusClaim {
+        owner_connection_id,
+        splint_id,
+    });
+    Ok(())
 }
 
 async fn current_handle(
@@ -6742,6 +6869,7 @@ mod tests {
         Arc::new(DaemonState {
             topology: RwLock::new(Topology::new()),
             runtimes: Mutex::new(RuntimeRegistry::default()),
+            graphical_focus: Mutex::new(None),
             topology_hub: Mutex::new(TopologyHub::default()),
             topology_transactions: Semaphore::new(1),
             exit_observers: TaskTracker::new(),
@@ -6793,6 +6921,17 @@ mod tests {
                 max_records: 1,
             }
         ));
+        assert!(trusted_ui_bypass(
+            true,
+            true,
+            &Request::PublishGraphicalFocus {
+                focused_splint_id: None,
+            }
+        ));
+        assert!(!intrinsically_authorized(
+            &authorization::RequestAuthorization::TrustedUi,
+            true,
+        ));
         let peer = PeerIdentity::for_test();
         assert!(!trusted_first_party_ui(false, &peer, &[AccessScope::Input]));
     }
@@ -6806,6 +6945,72 @@ mod tests {
             ..RequestAuthorizationContext::default()
         };
         assert!(!trusted.requires_terminate_scope_authorization());
+    }
+
+    #[test]
+    fn graphical_focus_cwd_validation_rejects_unsafe_paths() {
+        assert_eq!(
+            validated_graphical_cwd(PathBuf::from("/home/example/project")),
+            Some(PathBuf::from("/home/example/project"))
+        );
+        assert!(validated_graphical_cwd(PathBuf::from("relative")).is_none());
+        assert!(validated_graphical_cwd(PathBuf::from("/tmp/gone (deleted)")).is_none());
+        assert!(
+            validated_graphical_cwd(PathBuf::from(format!("/{}", "x".repeat(MAX_CWD_BYTES))))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn graphical_focus_read_is_authenticated_but_publication_requires_trusted_ui() {
+        let state = test_state(true);
+        let peer = PeerIdentity::for_test();
+        authorize_request(&Request::ReadGraphicalFocus, &state, &peer, 0, false)
+            .await
+            .unwrap();
+        let error = authorize_request(
+            &Request::PublishGraphicalFocus {
+                focused_splint_id: None,
+            },
+            &state,
+            &peer,
+            0,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn graphical_focus_claims_are_connection_owned_and_clear_ephemerally() {
+        let state = test_state(false);
+        let splint_id = state
+            .topology
+            .write()
+            .await
+            .create_lair("focus", PathBuf::from("/tmp"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        publish_graphical_focus(&state, 41, Some(splint_id))
+            .await
+            .unwrap();
+        assert_eq!(read_graphical_focus(&state).await, (Some(splint_id), None));
+
+        publish_graphical_focus(&state, 42, None).await.unwrap();
+        assert_eq!(
+            *state.graphical_focus.lock().await,
+            Some(GraphicalFocusClaim {
+                owner_connection_id: 41,
+                splint_id,
+            })
+        );
+        cleanup_connection(&state, 42).await;
+        assert!(state.graphical_focus.lock().await.is_some());
+        cleanup_connection(&state, 41).await;
+        assert!(state.graphical_focus.lock().await.is_none());
+        assert_eq!(read_graphical_focus(&state).await, (None, None));
     }
 
     #[tokio::test]

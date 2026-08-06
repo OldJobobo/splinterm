@@ -161,6 +161,8 @@ checked in addition to every listed scope.
 | v18 request | Required policy scope or authority |
 | --- | --- |
 | `Ping` | authenticated local peer; no resource data |
+| `ReadGraphicalFocus` | authenticated local peer; narrow nullable Splint ID/CWD projection only |
+| `PublishGraphicalFocus` | matching installed trusted graphical client only; no persistent policy scope |
 | `ListDojos` | `topology_metadata_read` |
 | `InspectTopology` | `topology_metadata_read` |
 | `SubscribeTopology` | `topology_subscribe` plus `topology_metadata_read` |

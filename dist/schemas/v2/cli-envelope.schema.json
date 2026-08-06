@@ -21,6 +21,7 @@
       "type": "string",
       "enum": [
         "ping",
+        "focus",
         "list_lairs",
         "inspect_topology",
         "inspect_splint",
@@ -131,6 +132,56 @@
               "properties": {
                 "data": {
                   "$ref": "#/$defs/ping_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/ping_error"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "required": [
+            "resource"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "focus"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/focus_success"
                 },
                 "truncated": {
                   "const": false
@@ -1900,6 +1951,51 @@
       "properties": {
         "status": {
           "const": "awake"
+        }
+      }
+    },
+    "focus_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splint_id",
+        "cwd"
+      ],
+      "properties": {
+        "splint_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^/",
+          "maxLength": 4096
+        }
+      },
+      "if": {
+        "properties": {
+          "splint_id": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "splint_id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cwd": {
+            "type": "null"
+          }
         }
       }
     },

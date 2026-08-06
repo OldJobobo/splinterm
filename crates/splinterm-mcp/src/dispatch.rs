@@ -1878,6 +1878,8 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
         AuditOperation::InspectTopology => "inspect_topology",
         AuditOperation::SubscribeTopology => "subscribe_topology",
         AuditOperation::InspectSplint => "inspect_splint",
+        AuditOperation::ReadGraphicalFocus => "read_graphical_focus",
+        AuditOperation::PublishGraphicalFocus => "publish_graphical_focus",
         AuditOperation::CreateLair => "create_lair",
         AuditOperation::SplitSplint => "split_splint",
         AuditOperation::RelaunchSplint => "relaunch_splint",

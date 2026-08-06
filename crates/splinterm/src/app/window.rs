@@ -15,7 +15,7 @@ use splinterm_protocol::{
     AccessScope, ControlMode, Request, Response, ServerFrame,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::{
     pane_bridge::{
@@ -28,6 +28,35 @@ use super::{
     theme_watch::{ThemeUpdateSink, load_startup_theme, watch_theme},
     topology_manager::{initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke},
 };
+
+async fn run_graphical_focus_reporter(
+    mut updates: watch::Receiver<Option<SplintId>>,
+) -> Result<()> {
+    let mut connection = Connection::connect().await?;
+    loop {
+        let focused_splint_id = *updates.borrow_and_update();
+        let response = connection
+            .request(Request::PublishGraphicalFocus { focused_splint_id })
+            .await?;
+        anyhow::ensure!(
+            matches!(response, Response::Acknowledged),
+            "splinterd rejected graphical focus publication"
+        );
+        if updates.changed().await.is_err() {
+            return Ok(());
+        }
+    }
+}
+
+fn spawn_graphical_focus_reporter(
+    updates: watch::Receiver<Option<SplintId>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(error) = run_graphical_focus_reporter(updates).await {
+            eprintln!("splinterm graphical focus reporter: {error:#}");
+        }
+    })
+}
 
 fn pane_chrome_capture() -> Result<Option<PathBuf>> {
     let Some(path) = env::var_os("SPLINTERM_PANE_CHROME_CAPTURE") else {
@@ -72,6 +101,8 @@ pub(super) async fn run_live_multipane_window(
     }
     let (topology_commands, topology_command_receiver) = mpsc::channel(8);
     let (topology_update_sender, topology_updates) = mpsc::channel(4);
+    let (graphical_focus, graphical_focus_updates) = watch::channel(None);
+    let _graphical_focus_reporter = spawn_graphical_focus_reporter(graphical_focus_updates);
     let theme_task = tokio::spawn(watch_theme(
         config.theme_source(),
         config.background_alpha,
@@ -112,6 +143,7 @@ pub(super) async fn run_live_multipane_window(
             active_splint: Some(active_splint),
             topology_updates: Some(topology_updates),
             topology_commands: Some(topology_commands),
+            graphical_focus: Some(graphical_focus),
             initial_dojo: Some(initial_identity),
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
@@ -216,6 +248,8 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
     let mut last_revision = attachment.snapshot.revision;
     let initial_snapshot = attachment.snapshot;
     let window_config = config.clone();
+    let (graphical_focus, graphical_focus_updates) = watch::channel(None);
+    let _graphical_focus_reporter = spawn_graphical_focus_reporter(graphical_focus_updates);
     let mut window = tokio::task::spawn_blocking(move || {
         run_window(WindowOptions {
             snapshot: Some(initial_snapshot),
@@ -223,6 +257,7 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
             updates: Some(receiver),
             commands: Some(command_sender),
             authority,
+            graphical_focus: Some(graphical_focus),
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
             cursor_style: window_config.cursor_style,
