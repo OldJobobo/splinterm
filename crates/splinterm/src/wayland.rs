@@ -1856,6 +1856,33 @@ fn terminal_update_has_visual_damage(
         || surface_dirty_rows.iter().any(|dirty| *dirty)
 }
 
+fn propagate_raster_damage_through_scroll(
+    dirty_rows: &mut [bool],
+    scroll: &splinterm_protocol::TerminalScroll,
+) {
+    let end = scroll.end_row.min(dirty_rows.len());
+    let count = scroll.rows.min(end.saturating_sub(scroll.start_row));
+    if count == 0 || scroll.start_row >= end || count >= end - scroll.start_row {
+        return;
+    }
+    match scroll.direction {
+        splinterm_protocol::ScrollDirection::Forward => {
+            for row in scroll.start_row + count..end {
+                if dirty_rows[row] {
+                    dirty_rows[row - count] = true;
+                }
+            }
+        }
+        splinterm_protocol::ScrollDirection::Reverse => {
+            for row in (scroll.start_row..end - count).rev() {
+                if dirty_rows[row] {
+                    dirty_rows[row + count] = true;
+                }
+            }
+        }
+    }
+}
+
 fn request_return_live_resync(
     commands: Option<&Sender<WindowCommand>>,
     previous_offset: usize,
@@ -4937,7 +4964,18 @@ impl App {
                         self.presentation.full_redraw = true;
                         full_frame_reload = true;
                     } else {
+                        if !scrolls.is_empty()
+                            && let Some(row) = old_cursor_row
+                        {
+                            // The cursor is part of the persistent backing pixels. Seed its old
+                            // row as dirty so scroll-copy damage follows the copied cursor block.
+                            self.panes.pane.raster_dirty_rows[row] = true;
+                        }
                         for scroll in &scrolls {
+                            propagate_raster_damage_through_scroll(
+                                &mut self.panes.pane.raster_dirty_rows,
+                                scroll,
+                            );
                             for row in scroll.start_row..scroll.end_row.min(rows) {
                                 // Rebuilding the bounded semantic scroll region keeps prepared
                                 // row geometry correct while pixel movement still uses scroll-copy.
@@ -8724,6 +8762,34 @@ mod tests {
             &[false, false],
             &[false, false]
         ));
+    }
+
+    #[test]
+    fn raster_damage_follows_pixels_copied_by_queued_scrolls() {
+        let forward = splinterm_protocol::TerminalScroll {
+            direction: splinterm_protocol::ScrollDirection::Forward,
+            start_row: 0,
+            end_row: 6,
+            rows: 1,
+        };
+        let mut dirty = [false; 6];
+        dirty[5] = true;
+        propagate_raster_damage_through_scroll(&mut dirty, &forward);
+        assert_eq!(dirty, [false, false, false, false, true, true]);
+
+        // A second coalesced scroll moves the still-unpainted backing pixels again.
+        propagate_raster_damage_through_scroll(&mut dirty, &forward);
+        assert_eq!(dirty, [false, false, false, true, true, true]);
+
+        let reverse = splinterm_protocol::TerminalScroll {
+            direction: splinterm_protocol::ScrollDirection::Reverse,
+            start_row: 0,
+            end_row: 6,
+            rows: 2,
+        };
+        let mut dirty = [true, false, false, false, false, false];
+        propagate_raster_damage_through_scroll(&mut dirty, &reverse);
+        assert_eq!(dirty, [true, false, true, false, false, false]);
     }
 
     #[test]
