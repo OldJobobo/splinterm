@@ -1,8 +1,8 @@
 # Plan 0010: full terminal performance optimization pass
 
-- **Status:** In progress — Slice 0 recorded; partial Slice 1 instrumentation and measured Slice 3 development candidates retained provisionally
+- **Status:** Complete — bounded release closure published 2026-08-06
 - **Roadmap:** post-Phase 5 performance stabilization
-- **Primary evidence:** [five-terminal benchmark suite](../benchmarks/terminal-benchmark-plan.md), [output-throughput closure](../spikes/artifacts/0024-output-throughput-graphical/README.md), [targeted-input matrix](../benchmarks/artifacts/2026-07-24-five-terminal-latency/README.md), and [image closure](../spikes/artifacts/0025-terminal-images/slice8-graphical-final/README.md)
+- **Primary evidence:** [release closure](../benchmarks/artifacts/2026-08-06-plan0010-release-closure/README.md), [Plan 0016 publication](../benchmarks/artifacts/2026-08-05-plan0016-publication/README.md), [Plan 0022 history catch-up](../benchmarks/artifacts/2026-08-06-plan0022-history-catchup/README.md), [Plan 0023 ANSI throughput](../benchmarks/artifacts/2026-08-06-plan0023-ansi-history-throughput/README.md), and [image closure](../spikes/artifacts/0025-terminal-images/slice8-graphical-final/README.md)
 - **Foundation:** [Plan 0008](0008-terminal-image-protocols.md) and [Plan 0009](0009-output-throughput-optimization.md)
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Plan review:** two fresh read-only reviews completed; evidence/methodology and architecture/correctness findings incorporated
@@ -36,7 +36,32 @@ All numbers are retained development evidence from one host, not measurements of
 | Correctness | Foot-derived semantic fixtures and final-buffer suites exact | Foot oracle pinned | Performance closure must retain this evidence. The checked report did not itself run the fuzz target. |
 | Images | static Kitty/Sixel composition closure passed; no-image idle gate passed | no comparable streamed matrix | Tiny one-batch fixture timings are boundary probes, not general image-throughput evidence. |
 
-## Current execution note (2026-07-26)
+## Final closure (2026-08-06)
+
+The plan closes at committed source `34f2839e74f991abc1ea5b60298f33fb94d57280`.
+Plan 0016 supplies guarded multiplexer/five-terminal evidence; Plan 0022 supplies
+body-free receive-to-commit correlation and the live-history fast path; Plan
+0023 removes repeated ANSI history scans/front shifts and confirms a focused
+four-pane graphical p95 reduction from 379.673 ms to 129.504 ms; and Plan 0024
+proves resize contains zero duplicate expensive content preparations.
+
+Clean package-source validation passed 750 Rust tests, one intentional ignored
+manual benchmark, 14 Python validator tests, core package extraction, and MCP
+runtime extraction. A current 60-second `terminal-advance` fuzz run completed
+102,081 executions without crash, timeout, or sanitizer finding. The validated
+core and already-installed MCP packages were installed through Pacman after
+saving rollback copies. The restarted daemon matches installed
+`/usr/bin/splinterd` by device, inode, and SHA-256; human-mode `splinterm list`,
+desktop validation, and Pacman integrity checks pass.
+
+The original broad provisional table predates the descendant focused plans. No
+new all-lane 5-warmup/30-sample matrix or graphical control binary is invented
+for closure. The zero-history microsecond confidence bound, Plan 0022's original
+all-pane diagnostic, coarse screenshot observation, and repository-wide Rust
+1.97 Clippy style debt remain explicit limitations. Future claims require new
+focused evidence rather than reopening this integrated pass.
+
+## Historical execution note (2026-07-26)
 
 A partial Slice 1 implementation now has opt-in, body-free
 `CLOCK_MONOTONIC_RAW` stage tracing from terminal mutation through Wayland
@@ -134,9 +159,17 @@ Every new diagnostic counter or timestamp must be body-free, bounded, and cheap.
 
 **Gate:** the point estimate and one-sided 95% upper confidence bound show no more than 2% regression in output completion or high-resolution CPU time, and no more than 5% small-write regression. Expensive profiling belongs behind an explicit diagnostic flag and must not ship enabled by default.
 
-## Provisional closure gates
+## Historical provisional closure gates — superseded
 
-Slice 0 may tighten these gates from clean current evidence, but it may not loosen them merely to declare closure.
+The following gates were the original July provisional contract. They are
+retained for audit history but are **not claimed as passed** by the bounded 2026-08-06
+closure. Plans 0016 and 0022–0024 replaced the proposed monolithic matrix with
+reviewed finite plans, exact correlated boundaries, focused controls, explicit
+stop decisions, and separately published residuals. The Final closure section
+and linked release artifact are authoritative for completion status.
+
+Slice 0 was originally allowed to tighten these gates from clean current
+evidence, but not loosen them merely to declare closure.
 
 ### Correctness and bounds
 
@@ -177,7 +210,10 @@ At 240x80, require at least a 25% candidate/control improvement in the stage pro
 - Image-free text gates remain identical whether image support is compiled/configured but unused.
 - Representative static-image throughput and two-pane composition remain bounded, exact, and free of idle work after completion; absolute image targets are set only after Slice 0 records a representative baseline.
 
-## Dependency-ordered execution
+## Historical dependency-ordered execution
+
+This sequence records the original investigation design. Descendant plans
+superseded its unexecuted broad-matrix portions as described in Final closure.
 
 ### Slice 0 — clean baseline and benchmark calibration
 
@@ -315,7 +351,7 @@ Investigate decoder allocation, source transfer, lease-set churn, prepared image
 
 **Gate:** exact image captures and protocol fixtures pass; when Slice 0/1 proves an image stage dominant and large enough, representative cases improve it by at least 25%, otherwise require a statistically supported improvement proportional to the measured opportunity; image-free paths do not regress; cache, canonical-content, transfer, SHM, and idle bounds remain unchanged.
 
-### Slice 8 — integrated closure
+### Historical Slice 8 — integrated closure (superseded)
 
 Run the complete non-graphical validation ladder. Then, only with explicit approval, execute the guarded graphical sequence:
 
@@ -327,7 +363,11 @@ Run the complete non-graphical validation ladder. Then, only with explicit appro
 
 Publish separate internal, Splinterm end-to-end, comparative, and graphical-approximation reports. Include candidate/control deltas, confidence intervals, quantile/bootstrap definitions, raw and invalid runs, predeclared invalidation/preflight rules, source/binary/config/font hashes, normalized peer configurations and fairness exceptions, host state, exact commands, and integrity hashes.
 
-**Gate:** all provisional closure gates pass, recorded review finds no correctness or evidence blocker, package-source builds and extracted runtime validation pass, and the worktree is clean before final evidence is described as release-grade.
+**Historical gate (not claimed):** all provisional closure gates pass, recorded
+review finds no correctness or evidence blocker, package-source builds and
+extracted runtime validation pass, and the worktree is clean before final
+evidence is described as release-grade. The bounded final closure instead uses
+the descendant-plan evidence and explicit limitations recorded above.
 
 ## Validation ladder
 
@@ -377,15 +417,11 @@ Stop and reassess when:
   regressing experiments, complete sequential workspace validation, two review
   rounds, and remaining Foot gaps. This is development evidence, not closure.
 
-## Expected completion record
+## Completion record
 
-At closure, append:
-
-- clean baseline commit and binary identities;
-- final commit and binary identities;
-- per-stage before/after budgets;
-- accepted and rejected hypotheses;
-- comparative and Splinterm-only result tables;
-- correctness, fuzz, package, and review evidence;
-- remaining gaps and deliberately deferred architectural work; and
-- links to immutable raw artifacts and checksums.
+The final source, package, installed-binary, fuzz, integrity, and review
+identities are published in the [Plan 0010 release closure](../benchmarks/artifacts/2026-08-06-plan0010-release-closure/README.md).
+Accepted and rejected hypotheses, stage budgets, comparative limitations, raw
+evidence locations, and checksums remain owned by the linked immutable Plan
+0016, Plan 0022, Plan 0023, and Plan 0024 artifacts. No worker renderer, bound
+increase, broad tolerance change, or regenerated peer reference was accepted.

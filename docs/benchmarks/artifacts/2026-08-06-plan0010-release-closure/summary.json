@@ -1,0 +1,39 @@
+{
+  "schema": "splinterm.plan0010.release-closure.v1",
+  "source_commit": "34f2839e74f991abc1ea5b60298f33fb94d57280",
+  "package_version": "0.1.0.pre-1",
+  "package_checks": {
+    "rust_tests_passed": 750,
+    "rust_tests_failed": 0,
+    "intentional_ignored_benchmarks": 1,
+    "python_validator_tests_passed": 14,
+    "package_validation": true,
+    "mcp_extracted_runtime_validation": true
+  },
+  "fuzz": {
+    "target": "terminal-advance",
+    "max_total_time_seconds": 60,
+    "executions": 102081,
+    "coverage": 2717,
+    "features": 14865,
+    "crashes": 0,
+    "timeouts": 0,
+    "sanitizer_findings": 0
+  },
+  "packages": {
+    "splinterm_sha256": "55e77f20bdd83977f89abda054e8fb3c17b925dfb760e7bd92a114143da8a5d0",
+    "splinterm_mcp_sha256": "ed94c8c1cfaa46e0a6680d6ca90b235398a0ae4f794a915231c356a5c29af5d9"
+  },
+  "installed": {
+    "splinterm_path": "/usr/bin/splinterm",
+    "splinterm_sha256": "5e6b8dd25eb10ecb1bcb40c3a22e374cebca877d71b997663ef9b5a1fd226898",
+    "splinterd_path": "/usr/bin/splinterd",
+    "splinterd_sha256": "64bd8ff7cb5d7e03ec466ecf62d37e92f45aa6aff94afdb1b15b85707da1bf21",
+    "running_daemon_matches_installed_inode": true,
+    "pacman_altered_files": 0,
+    "human_list_passed": true,
+    "desktop_file_valid": true
+  },
+  "graphical_rerun": false,
+  "decision": "bounded release closure approved"
+}

@@ -1,0 +1,21 @@
+{
+  "schema": "splinterm.benchmark.publication-provenance.v1",
+  "plan": "docs/plans/0010-full-performance-optimization-pass.md",
+  "source_commit": "34f2839e74f991abc1ea5b60298f33fb94d57280",
+  "package_command": "./tools/package/build-local-package.sh",
+  "package_log": "/tmp/splinterm-plan0010-package-build-final-34f2839.log",
+  "fuzz_command": "cargo +nightly fuzz run terminal-advance -- -max_total_time=60",
+  "fuzz_log": "/tmp/splinterm-plan0010-fuzz-final.log",
+  "installation_raw": "benchmark-results/20260806T070336Z-plan0010-installed-release",
+  "installation_method": "rollback copy; independent user service; pkexec pacman -U; daemon restart; non-graphical validation",
+  "package_sha256": "55e77f20bdd83977f89abda054e8fb3c17b925dfb760e7bd92a114143da8a5d0",
+  "mcp_package_sha256": "ed94c8c1cfaa46e0a6680d6ca90b235398a0ae4f794a915231c356a5c29af5d9",
+  "installed_splinterm_sha256": "5e6b8dd25eb10ecb1bcb40c3a22e374cebca877d71b997663ef9b5a1fd226898",
+  "installed_splinterd_sha256": "64bd8ff7cb5d7e03ec466ecf62d37e92f45aa6aff94afdb1b15b85707da1bf21",
+  "graphical_execution": false,
+  "retained_graphical_evidence": [
+    "docs/benchmarks/artifacts/2026-08-05-plan0016-publication",
+    "docs/benchmarks/artifacts/2026-08-06-plan0022-history-catchup",
+    "docs/benchmarks/artifacts/2026-08-06-plan0023-ansi-history-throughput"
+  ]
+}
