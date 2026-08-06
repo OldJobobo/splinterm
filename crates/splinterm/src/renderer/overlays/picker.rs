@@ -23,6 +23,7 @@ pub(crate) enum SessionPickerPresentationMode {
 pub(crate) struct SessionPickerRowLayout {
     pub(crate) target: PickerHitTarget,
     pub(crate) rect: Rect,
+    pub(crate) surface: Rect,
     pub(crate) title_clip: Rect,
     pub(crate) metadata_clip: Rect,
 }
@@ -41,35 +42,56 @@ pub(crate) struct SessionPickerOverlayLayout {
     pub(crate) cache_key: (u32, u32, u32),
 }
 
+fn picker_item_rect(slot: Rect, mode: SessionPickerPresentationMode) -> Rect {
+    let (horizontal_margin, vertical_margin) = match mode {
+        SessionPickerPresentationMode::Normal => (8_u32, 3_u32),
+        SessionPickerPresentationMode::Compact => (6_u32, 3_u32),
+        SessionPickerPresentationMode::Minimal => (0_u32, 0_u32),
+    };
+    Rect {
+        x: slot.x.saturating_add(horizontal_margin.min(slot.width / 2)),
+        y: slot.y.saturating_add(vertical_margin.min(slot.height / 2)),
+        width: slot
+            .width
+            .saturating_sub(horizontal_margin.saturating_mul(2)),
+        height: slot
+            .height
+            .saturating_sub(vertical_margin.saturating_mul(2)),
+    }
+}
+
 fn picker_row_layout(
     target: PickerHitTarget,
-    rect: Rect,
+    slot: Rect,
     two_lines: bool,
+    mode: SessionPickerPresentationMode,
 ) -> SessionPickerRowLayout {
-    let horizontal_inset = 12_u32.min(rect.width / 4);
-    let content_x = rect.x.saturating_add(horizontal_inset);
-    let content_width = rect
+    let surface = picker_item_rect(slot, mode);
+    let horizontal_inset = 12_u32.min(surface.width / 4);
+    let content_x = surface.x.saturating_add(horizontal_inset);
+    let content_width = surface
         .width
         .saturating_sub(horizontal_inset.saturating_mul(2));
     let title_height = if two_lines {
-        rect.height / 2
+        surface.height / 2
     } else {
-        rect.height
+        surface.height
     };
     SessionPickerRowLayout {
         target,
-        rect,
+        rect: slot,
+        surface,
         title_clip: Rect {
             x: content_x,
-            y: rect.y,
+            y: surface.y,
             width: content_width,
             height: title_height,
         },
         metadata_clip: Rect {
             x: content_x,
-            y: rect.y.saturating_add(title_height),
+            y: surface.y.saturating_add(title_height),
             width: content_width,
-            height: rect.height.saturating_sub(title_height),
+            height: surface.height.saturating_sub(title_height),
         },
     }
 }
@@ -197,7 +219,7 @@ pub(crate) fn session_picker_overlay_layout(
             action,
             list: action,
             footer,
-            rows: vec![picker_row_layout(target, action, false)],
+            rows: vec![picker_row_layout(target, action, false, mode)],
             visible_range,
             visible_capacity: usize::from(item_count > 0),
             mode,
@@ -243,7 +265,7 @@ pub(crate) fn session_picker_overlay_layout(
     let start = picker_visible_start(item_count, selected_action, requested_start, visible_count);
     let visible_range = start..start.saturating_add(visible_count);
     let mut rows = Vec::with_capacity(visible_count.saturating_add(1));
-    rows.push(picker_row_layout(PickerHitTarget::New, action, false));
+    rows.push(picker_row_layout(PickerHitTarget::New, action, false, mode));
     for (slot, index) in visible_range.clone().enumerate() {
         rows.push(picker_row_layout(
             PickerHitTarget::Open(index),
@@ -256,6 +278,7 @@ pub(crate) fn session_picker_overlay_layout(
                 height: row_height,
             },
             mode == SessionPickerPresentationMode::Normal,
+            mode,
         ));
     }
     Some(SessionPickerOverlayLayout {
@@ -794,7 +817,7 @@ pub(crate) fn paint_session_picker_overlay(
     }
 
     for row in &layout.rows {
-        let row_buffer = picker_buffer_rect(row.rect, scale_120);
+        let row_buffer = picker_buffer_rect(row.surface, scale_120);
         let is_selected = row.target == selected;
         if is_selected {
             fill_rect(
@@ -1081,12 +1104,34 @@ mod tests {
                         && row.rect.y >= layout.panel.y
                         && row.rect.x + row.rect.width <= layout.panel.x + layout.panel.width
                         && row.rect.y + row.rect.height <= layout.panel.y + layout.panel.height
+                        && row.surface.x >= row.rect.x
+                        && row.surface.y >= row.rect.y
+                        && row.surface.x + row.surface.width <= row.rect.x + row.rect.width
+                        && row.surface.y + row.surface.height <= row.rect.y + row.rect.height
                 }));
                 for pair in layout.rows.windows(2) {
-                    assert!(pair[0].rect.y + pair[0].rect.height <= pair[1].rect.y);
-                    let first = picker_buffer_rect(pair[0].rect, scale);
-                    let second = picker_buffer_rect(pair[1].rect, scale);
-                    assert_eq!(first.y + first.height, second.y);
+                    assert_eq!(pair[0].rect.y + pair[0].rect.height, pair[1].rect.y);
+                    let first = picker_buffer_rect(pair[0].surface, scale);
+                    let second = picker_buffer_rect(pair[1].surface, scale);
+                    assert!(first.y + first.height < second.y);
+                }
+                let first = &layout.rows[0].surface;
+                match expected_mode {
+                    SessionPickerPresentationMode::Normal => {
+                        assert_eq!(first.x, layout.action.x + 8);
+                        assert_eq!(first.y, layout.action.y + 3);
+                        assert_eq!(first.width, layout.action.width - 16);
+                        assert_eq!(first.height, layout.action.height - 6);
+                    }
+                    SessionPickerPresentationMode::Compact => {
+                        assert_eq!(first.x, layout.action.x + 6);
+                        assert_eq!(first.y, layout.action.y + 3);
+                        assert_eq!(first.width, layout.action.width - 12);
+                        assert_eq!(first.height, layout.action.height - 6);
+                    }
+                    SessionPickerPresentationMode::Minimal => {
+                        assert_eq!(*first, layout.action);
+                    }
                 }
                 let header = picker_buffer_rect(layout.header, scale);
                 let action = picker_buffer_rect(layout.action, scale);
@@ -1142,6 +1187,17 @@ mod tests {
                 )
             ),
             Some(PickerHitTarget::New)
+        );
+        assert_eq!(
+            session_picker_hit_test(
+                &layout,
+                (
+                    f64::from(layout.action.x + 1),
+                    f64::from(layout.action.y + 1)
+                )
+            ),
+            Some(PickerHitTarget::New),
+            "visual menu padding must preserve the full pointer target"
         );
     }
 
@@ -1262,8 +1318,8 @@ mod tests {
         let rail = pixel_index(
             960,
             600,
-            i32::try_from(layout.action.x).unwrap(),
-            i32::try_from(layout.action.y + layout.action.height / 2).unwrap(),
+            i32::try_from(layout.rows[0].surface.x).unwrap(),
+            i32::try_from(layout.rows[0].surface.y + layout.rows[0].surface.height / 2).unwrap(),
         )
         .unwrap();
         let [_, accent_red, accent_green, accent_blue] = theme.ui_accent.to_be_bytes();
