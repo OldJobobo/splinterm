@@ -229,6 +229,7 @@ fn translate_picker_layout(
     layout.footer = translated_rect(layout.footer, origin);
     for row in &mut layout.rows {
         row.rect = translated_rect(row.rect, origin);
+        row.surface = translated_rect(row.surface, origin);
         row.title_clip = translated_rect(row.title_clip, origin);
         row.metadata_clip = translated_rect(row.metadata_clip, origin);
     }
@@ -6599,6 +6600,27 @@ mod tests {
             ),
             Some((107, 211, 8, 16))
         );
+    }
+
+    #[test]
+    fn picker_translation_moves_visual_surfaces_with_hit_slots_and_text() {
+        let layout = session_picker_overlay_layout(960, 600, 120, 3, 1, 0).unwrap();
+        let origin = Rect {
+            x: 7,
+            y: TAB_STRIP_LOGICAL_HEIGHT,
+            width: 960,
+            height: 600,
+        };
+        let translated = translate_picker_layout(layout.clone(), origin);
+        for (source, moved) in layout.rows.iter().zip(&translated.rows) {
+            assert_eq!(moved.rect, translated_rect(source.rect, origin));
+            assert_eq!(moved.surface, translated_rect(source.surface, origin));
+            assert_eq!(moved.title_clip, translated_rect(source.title_clip, origin));
+            assert_eq!(
+                moved.metadata_clip,
+                translated_rect(source.metadata_clip, origin)
+            );
+        }
     }
 
     #[test]
