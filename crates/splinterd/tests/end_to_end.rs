@@ -16,7 +16,7 @@ use splinterm_protocol::{
     ControlTransferDecision, ControlTransferOutcome, ErrorCode, LaunchParameters, MAX_FRAME_BYTES,
     MAX_SUBSCRIPTIONS, MutationPreflight, PROTOCOL_VERSION, ProtocolError, Request, Response,
     ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalProvenance, TerminalSnapshot,
-    TopologyChangeKind, encode_frame,
+    TerminalUpdate, TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -449,6 +449,22 @@ fn snapshot_text(snapshot: &TerminalSnapshot) -> String {
         .scrollback_rows
         .iter()
         .chain(&snapshot.visible_rows)
+        .flat_map(|row| row.cells.iter())
+        .map(|cell| cell.content.as_str())
+        .collect()
+}
+
+fn update_text(update: &TerminalUpdate) -> String {
+    update
+        .rows
+        .iter()
+        .map(|patch| &patch.row)
+        .chain(
+            update
+                .scrollback
+                .iter()
+                .flat_map(|scrollback| scrollback.rows.iter()),
+        )
         .flat_map(|row| row.cells.iter())
         .map(|cell| cell.content.as_str())
         .collect()
@@ -3378,16 +3394,43 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             } if response_id == splint_id && response_incarnation == incarnation
         ));
         reattached.release_control().await;
+        let mut fast = daemon.connect().await;
+        let (fast_subscription, _) = fast.attach(splint_id, incarnation).await;
+        let fast_drain = tokio::spawn(async move {
+            loop {
+                match fast.next_event(fast_subscription).await.1 {
+                    SubscriptionEvent::Update { update }
+                        if update_text(&update).contains("overflow-finished") =>
+                    {
+                        break;
+                    }
+                    SubscriptionEvent::Snapshot { snapshot }
+                        if snapshot_text(&snapshot).contains("overflow-finished") =>
+                    {
+                        break;
+                    }
+                    SubscriptionEvent::ResyncRequired { .. } => {
+                        panic!("drained subscriber required resynchronization")
+                    }
+                    SubscriptionEvent::Exited { .. } => {
+                        panic!("terminal exited before the overflow marker")
+                    }
+                    _ => {}
+                }
+            }
+        });
         let mut slow = daemon.connect().await;
         for _ in 0..MAX_SUBSCRIPTIONS {
             let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
         }
         let mut producer = daemon.connect().await;
+        // Keep each paced publication below MAX_UPDATE_SCROLLS while emitting
+        // enough bounded frames to fill an unread connection's outbound path.
         producer
             .input(
                 splint_id,
                 incarnation,
-                b"i=0; while [ $i -lt 1000 ]; do printf 'overflow-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); sleep 0.001; done; printf 'overflow-finished\\n'\n",
+                b"i=0; while [ $i -lt 3000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'overflow-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.05; done; printf 'overflow-finished\\n'\n",
             )
             .await;
         let _completion_snapshot = snapshot_until(
@@ -3397,6 +3440,10 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             "overflow-finished",
         )
         .await;
+        time::timeout(Duration::from_secs(10), fast_drain)
+            .await
+            .expect("drained subscriber did not observe the overflow marker")
+            .expect("drained subscriber task failed");
 
         let mut saw_resync = false;
         let mut disconnected = false;
