@@ -1,47 +1,57 @@
 ---
-title: Splinterm documentation
-description: Start using and understanding Splinterm's persistent terminal environment.
+title: Documentation
+description: Start using and understanding Splinterm.
 template: splash
 hero:
-  tagline: Keep the shell. Replace the window.
+  tagline: A practical guide to installing, using, and understanding Splinterm.
   actions:
-    - text: Start the quickstart
+    - text: Begin with the quickstart
       link: /docs/quickstart/
       icon: right-arrow
       variant: primary
-    - text: Check current status
+    - text: See current status
       link: /docs/status/
-      icon: information
-      variant: secondary
+      variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+<div class="docs-home-intro">
+  <p class="docs-home-kicker">Choose your route</p>
+  <h2>Start with the job in front of you.</h2>
+  <p class="docs-home-lede">The shortest path is the right one. Begin with a working terminal, learn the model when you need it, and keep implementation detail out of the way until it becomes useful.</p>
+</div>
 
-Splinterm is a native Wayland terminal backed by a headless daemon. This documentation begins with ordinary human workflows and keeps implementation history in a separate development section.
+<nav class="docs-route-list" aria-label="Documentation routes">
+  <a href="/docs/quickstart/">
+    <span class="route-index">01</span>
+    <span class="route-copy"><strong>Use Splinterm</strong><small>Install it, open a terminal, detach, and return to running work.</small></span>
+    <span class="route-meta">Quickstart</span>
+    <span class="route-arrow" aria-hidden="true">↗</span>
+  </a>
+  <a href="/docs/concepts/">
+    <span class="route-index">02</span>
+    <span class="route-copy"><strong>Understand the model</strong><small>Learn how Lairs, Dojos, Splints, tabs, and windows relate.</small></span>
+    <span class="route-meta">Core concepts</span>
+    <span class="route-arrow" aria-hidden="true">↗</span>
+  </a>
+  <a href="/docs/configure/configuration/">
+    <span class="route-index">03</span>
+    <span class="route-copy"><strong>Make it yours</strong><small>Configure fonts, sizing, shell behavior, themes, and pane chrome.</small></span>
+    <span class="route-meta">Configuration</span>
+    <span class="route-arrow" aria-hidden="true">↗</span>
+  </a>
+  <a href="/docs/development/">
+    <span class="route-index">04</span>
+    <span class="route-copy"><strong>Work on the system</strong><small>Find architecture, contributor checks, and integration contracts.</small></span>
+    <span class="route-meta">Development</span>
+    <span class="route-arrow" aria-hidden="true">↗</span>
+  </a>
+</nav>
 
-<CardGrid>
-  <Card title="Install and begin" icon="rocket">
-    Check the validated environment, install the private prerelease, and open your first terminal.
-
-    [Read the quickstart →](/docs/quickstart/)
-  </Card>
-  <Card title="Understand persistence" icon="seti:folder">
-    Learn how Lairs, Dojos, Splints, tabs, and windows fit together.
-
-    [Explore the concepts →](/docs/concepts/)
-  </Card>
-  <Card title="Configure Splinterm" icon="setting">
-    Set fonts, sizing, shell behavior, scrollback, pane chrome, and theme overrides.
-
-    [Open configuration →](/docs/configure/configuration/)
-  </Card>
-  <Card title="Develop and integrate" icon="puzzle">
-    Find contributor checks, architecture, automation contracts, and specialist references.
-
-    [Enter development docs →](/docs/development/)
-  </Card>
-</CardGrid>
-
-:::caution[Private prerelease]
-Splinterm is not a supported public release. The current environment and installation path are intentionally narrow. Read [current status](/docs/status/) before relying on it.
-:::
+<div class="docs-home-footer">
+  <p><span>Private prerelease</span> The current environment and installation path are intentionally narrow.</p>
+  <div>
+    <a href="/docs/status/">Read current status</a>
+    <a href="/docs/troubleshooting/">Troubleshooting</a>
+    <a href="/docs/sessions/">Sessions and persistence</a>
+  </div>
+</div>

@@ -17,47 +17,48 @@ const capabilities = [
 >
   <section class="hero shell-section">
     <div class="hero-copy">
-      <p class="eyebrow"><span>Advanced private prerelease</span> · Omarchy / Arch Linux</p>
-      <h1>Your terminal should outlive its <em>window.</em></h1>
+      <img class="hero-mark" src="/favicon.svg" alt="" width="112" height="112" />
+      <p class="eyebrow"><span>Advanced private prerelease</span> · Enter the Lair</p>
+      <h1>Your shell should outlive its <em>window.</em></h1>
       <p class="hero-lede">
-        Splinterm combines a native Wayland terminal with a headless daemon that keeps shells,
-        layouts, and scrollback alive when graphical clients disconnect.
+        Splinterm keeps your work below the surface: Lairs hold projects, Dojos hold working
+        sessions, and Splints keep their shells alive when graphical clients disappear.
       </p>
       <div class="hero-actions">
         <a class="button primary" href="/docs/quickstart/">Read the quickstart <span aria-hidden="true">↗</span></a>
         <a class="button secondary" href="/docs/status/">See what works today</a>
       </div>
-      <p class="hero-note">Built in Rust from Foot’s terminal behavior. Designed first for Omarchy.</p>
+      <p class="hero-note">Built in Rust from Foot’s terminal behavior. Quietly disciplined for Omarchy.</p>
     </div>
     <TopologyScene />
   </section>
 
   <section class="manifesto shell-section" aria-labelledby="persistence-title">
-    <div class="section-index" aria-hidden="true">01 / Persistence</div>
+    <div class="section-index" aria-hidden="true">01 / Below the surface</div>
     <div class="manifesto-copy">
-      <h2 id="persistence-title">Sessions belong to the daemon.<br />Windows come and go.</h2>
+      <h2 id="persistence-title">The work lives in the Lair.<br />Windows only visit.</h2>
       <p>
-        <code>splinterd</code> owns terminal processes and state. A Splinterm window is a disposable,
-        native view into that topology—not the thing keeping your shell alive.
+        <code>splinterd</code> keeps the topology underground. A Lair gathers the work, each Dojo
+        holds a focused session, and every Splint carries a running shell. Windows are temporary views in.
       </p>
     </div>
     <ol class="sequence" aria-label="Persistent session workflow">
-      <li><span>01</span><strong>Work</strong><small>Open a Lair with the panes you need.</small></li>
-      <li><span>02</span><strong>Detach</strong><small>Close the view without ending the work.</small></li>
-      <li><span>03</span><strong>Return</strong><small>Reopen the same running Dojo later.</small></li>
+      <li><span>01</span><strong>Enter</strong><small>Open a Lair and gather the work.</small></li>
+      <li><span>02</span><strong>Train</strong><small>Shape a Dojo from tabs, panes, and Splints.</small></li>
+      <li><span>03</span><strong>Return</strong><small>Leave the window; find the same Dojo later.</small></li>
     </ol>
   </section>
 
   <section class="control-section shell-section" aria-labelledby="control-title">
     <div class="section-index" aria-hidden="true">02 / Shared substrate</div>
     <div class="control-heading">
-      <h2 id="control-title">One topology.<br />Two deliberate ways in.</h2>
-      <p>Human interaction and automation share the same persistent state without sharing authority.</p>
+      <h2 id="control-title">One Lair.<br />Two deliberate ways in.</h2>
+      <p>Human hands and bounded automation can enter the same topology without inheriting the same authority.</p>
     </div>
     <div class="control-grid">
       <article class="control-card human-card">
         <div class="card-label"><span>Human</span><i>native client</i></div>
-        <h3>Direct, graphical control</h3>
+        <h3>Hands on the Dojo</h3>
         <p>Wayland windows, tabs, panes, search, clipboard, and explicit control transfer.</p>
         <ul>
           <li>Trusted application chrome</li>
@@ -67,7 +68,7 @@ const capabilities = [
       </article>
       <article class="control-card automation-card">
         <div class="card-label"><span>Automation</span><i>bounded client</i></div>
-        <h3>Structured, scoped access</h3>
+        <h3>Allowed in, never unleashed</h3>
         <p>JSON/NDJSON, an SSH stdio relay, and MCP—always subject to explicit policy.</p>
         <ul>
           <li>Exact executable identity</li>
@@ -76,13 +77,13 @@ const capabilities = [
         </ul>
       </article>
     </div>
-    <p class="boundary-note"><span aria-hidden="true">◆</span> Terminal output is data. It never becomes authority or automatic instruction.</p>
+    <p class="boundary-note"><span aria-hidden="true">◆</span> Discipline is structural: terminal output remains data, never authority or automatic instruction.</p>
   </section>
 
   <section class="status-section shell-section" aria-labelledby="status-title">
     <div class="section-index" aria-hidden="true">03 / Current state</div>
     <div class="status-intro">
-      <h2 id="status-title">Substantial, validated,<br />and not public yet.</h2>
+      <h2 id="status-title">Forged in private.<br />Not ready for daylight.</h2>
       <p>
         Splinterm is an advanced private prerelease. Core terminal, persistence, multiplexing,
         graphical, packaging, and automation paths exist; public support guarantees do not.
@@ -102,9 +103,9 @@ const capabilities = [
 
   <section class="first-workflow shell-section" aria-labelledby="workflow-title">
     <div>
-      <p class="eyebrow">Start with the ordinary path</p>
-      <h2 id="workflow-title">New terminal. Same work tomorrow.</h2>
-      <p>Install the current private package, open a terminal, then use the session picker when you want the running work back.</p>
+      <p class="eyebrow">The ordinary path into the Lair</p>
+      <h2 id="workflow-title">Leave the window.<br />Return to the Dojo.</h2>
+      <p>Install the current private package, open a Splint, then use the session picker whenever you want the running work back.</p>
       <a class="button primary" href="/docs/quickstart/">Follow the local quickstart</a>
     </div>
     <div class="command-stack" aria-label="Example Splinterm commands">
@@ -116,8 +117,8 @@ const capabilities = [
 
   <section class="docs-gateway shell-section" aria-labelledby="docs-title">
     <div>
-      <p class="eyebrow">Documentation</p>
-      <h2 id="docs-title">Go as deep as the job requires.</h2>
+      <p class="eyebrow">Know the passages</p>
+      <h2 id="docs-title">Go as deep as the work requires.</h2>
     </div>
     <div class="gateway-links">
       <a href="/docs/quickstart/"><span>Start using Splinterm</span><small>Install, launch, detach, and return.</small><i>↗</i></a>
