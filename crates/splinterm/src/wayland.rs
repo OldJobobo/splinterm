@@ -53,7 +53,9 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-        pointer::{BTN_LEFT, BTN_MIDDLE, PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{
+            BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, PointerEvent, PointerEventKind, PointerHandler,
+        },
     },
     shell::{
         WaylandSurface,
@@ -117,9 +119,12 @@ use crate::background_effect::{
 };
 use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
 use crate::frontend::{
-    AuthorityStatus, PerfTraceCorrelation, SessionPickerDecision, SessionPickerItem,
-    SessionPickerUi, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
-    WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    AuthorityStatus, BuiltInCommandId, CommandPaletteContext, CommandPaletteUi,
+    PerfTraceCorrelation, SessionPickerDecision, SessionPickerItem, SessionPickerUi,
+    TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuRightPress, ThemeUpdate,
+    TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, command_topology_command,
+    tab_menu_right_press, tab_menu_topology_command,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -133,13 +138,16 @@ use crate::pane::{
 #[cfg(test)]
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
-    ChromeText, ChromeTextStyle, CursorPresentation, HistoryOverlayStatus, PickerHitTarget,
-    RenderContext, SessionPickerOverlayLayout, SessionPickerTextCache, SessionPickerTextItem,
-    SnapshotFrame, SnapshotOverlays, TextRow, background_bgra, fill_rect, history_overlay_layout,
-    paint, paint_history_overlay, paint_session_picker_overlay, paint_snapshot_overlays,
+    ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache, CursorPresentation,
+    HistoryOverlayStatus, PickerHitTarget, RenderContext, SessionPickerOverlayLayout,
+    SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame, SnapshotOverlays,
+    TabContextMenuLayout, TextRow, background_bgra, command_palette_hit_test,
+    command_palette_layout, fill_rect, history_overlay_layout, paint, paint_command_palette,
+    paint_history_overlay, paint_session_picker_overlay, paint_snapshot_overlays,
     paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
-    scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
-    session_picker_palette, snapshot_row_rect, write_ppm,
+    paint_tab_context_menu, scroll_snapshot_pixels, session_picker_hit_test,
+    session_picker_overlay_layout, session_picker_palette, snapshot_row_rect,
+    tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     tab::{DojoTab, WindowTabSet, sanitized_tab_label},
@@ -168,11 +176,12 @@ use damage::{
     terminal_draw_waits_for_frame,
 };
 use input::{
-    FontZoomAction, HistoryNavigation, MouseAction, PaneFocusAction, PaneTopologyAction,
-    PickerImeReconcile, PressOwner, SessionPickerShortcutAction, TabShortcutAction,
-    WheelAccumulator, WheelOutcome, application_motion, classify_press, clipboard_read_is_current,
-    font_zoom_action, history_navigation, history_overlay_status, history_return_to_live_hit,
-    key_input, mouse_report, pane_focus_action, pane_topology_action, picker_ime_reconcile,
+    CommandPaletteShortcutAction, FontZoomAction, HistoryNavigation, MouseAction, PaneFocusAction,
+    PaneTopologyAction, PickerImeReconcile, PressOwner, SessionPickerShortcutAction,
+    TabShortcutAction, WheelAccumulator, WheelOutcome, application_motion, classify_press,
+    clipboard_read_is_current, command_palette_shortcut_action, font_zoom_action,
+    history_navigation, history_overlay_status, history_return_to_live_hit, key_input,
+    mouse_report, pane_focus_action, pane_topology_action, picker_ime_reconcile,
     picker_release_activation, pointer_axis_focus_target, reconciled_focus_report,
     session_picker_shortcut_action, tab_action_dispatch_allowed, tab_shortcut_action,
     take_press_owner,
@@ -181,7 +190,10 @@ use selection::{
     CellPosition, Selection, SelectionEndpoint, selection_display_bounds, selection_endpoint,
     selection_is_retained, selection_text, transient_overlay_rows, url_at,
 };
-use tabs::{DojoTabView, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, TabsState, tab_strip_hit_test};
+use tabs::{
+    DojoTabView, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, TabsState, tab_context_target,
+    tab_strip_hit_test,
+};
 #[cfg(test)]
 use terminal_state::snapshot_is_newer;
 use terminal_state::{
@@ -850,6 +862,18 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         },
         modal: ModalState {
             trusted_consent,
+            command_palette: None,
+            command_palette_layout: None,
+            command_palette_pressed: None,
+            command_palette_text_cache: CommandPaletteTextCache::default(),
+            command_palette_open_focus: None,
+            command_palette_reconcile_pending: false,
+            tab_context_menu: None,
+            tab_context_menu_anchor: (0, 0),
+            tab_context_menu_layout: None,
+            tab_context_menu_pressed: None,
+            tab_context_menu_retarget: None,
+            tab_context_menu_text_cache: CommandPaletteTextCache::default(),
             session_picker,
             session_picker_targets: Vec::new(),
             session_picker_layout: None,
@@ -1708,6 +1732,18 @@ struct PanesState {
 
 struct ModalState {
     trusted_consent: Option<TrustedConsentUi>,
+    command_palette: Option<CommandPaletteUi>,
+    command_palette_layout: Option<CommandPaletteLayout>,
+    command_palette_pressed: Option<BuiltInCommandId>,
+    command_palette_text_cache: CommandPaletteTextCache,
+    command_palette_open_focus: Option<bool>,
+    command_palette_reconcile_pending: bool,
+    tab_context_menu: Option<TabContextMenuUi>,
+    tab_context_menu_anchor: (u32, u32),
+    tab_context_menu_layout: Option<TabContextMenuLayout>,
+    tab_context_menu_pressed: Option<TabMenuActionId>,
+    tab_context_menu_retarget: Option<DojoId>,
+    tab_context_menu_text_cache: CommandPaletteTextCache,
     session_picker: Option<SessionPickerUi>,
     session_picker_targets: Vec<(LairId, DojoId)>,
     session_picker_layout: Option<SessionPickerOverlayLayout>,
@@ -1840,6 +1876,12 @@ impl ModalState {
         self.session_picker
             .as_ref()
             .is_some_and(SessionPickerUi::is_inline)
+    }
+
+    fn input_modal_open(&self) -> bool {
+        self.inline_picker_open()
+            || self.command_palette.is_some()
+            || self.tab_context_menu.is_some()
     }
 }
 
@@ -3084,7 +3126,7 @@ impl App {
     }
 
     fn send_input(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if self.modal.inline_picker_open() {
+        if self.modal.input_modal_open() {
             return Ok(());
         }
         if let Some(commands) = &self.panes.pane.commands {
@@ -3322,7 +3364,7 @@ impl App {
     }
 
     fn begin_clipboard_read(&mut self, target: PasteTarget) {
-        if self.modal.inline_picker_open() {
+        if self.modal.input_modal_open() {
             return;
         }
         let tx = self.clipboard.clipboard_tx.clone();
@@ -3355,7 +3397,7 @@ impl App {
     fn apply_clipboard_reads(&mut self) -> Result<()> {
         while let Ok(read) = self.clipboard.clipboard_rx.try_recv() {
             if !clipboard_read_is_current(
-                self.modal.inline_picker_open(),
+                self.modal.input_modal_open(),
                 self.input.input_generation,
                 read.input_generation,
             ) {
@@ -3458,6 +3500,211 @@ impl App {
         self.input.terminal_focus_reported = self.input.keyboard_focused;
     }
 
+    fn command_palette_available(&self) -> bool {
+        self.tab_state.managed_tabs
+            && self.tab_state.topology_commands.is_some()
+            && self.modal.command_palette.is_none()
+            && self.modal.tab_context_menu.is_none()
+            && self.modal.session_picker.is_none()
+            && self.modal.trusted_consent.is_none()
+            && !self.modal.session_picker_requested
+            && !self.modal.session_picker_reconcile_pending
+            && !self.modal.command_palette_reconcile_pending
+            && !self.tab_state.session_switch_pending
+            && self.panes.pane.search.input.is_none()
+            && self.panes.pane.pending_control_transfer.is_none()
+            && self.input.divider_drag.is_none()
+    }
+
+    fn show_command_palette(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.command_palette_available(),
+            "command palette is unavailable"
+        );
+        let splint_id = self
+            .panes
+            .focused_splint()
+            .context("command palette requires a focused Splint")?;
+        self.settle_terminal_presses_for_picker();
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
+        self.input.ime_modal_barrier = self.input.ime.entered && self.input.text_input.is_some();
+        if self.input.ime_modal_barrier {
+            if let Some(text_input) = &self.input.text_input {
+                text_input.disable();
+            }
+            self.commit_text_input();
+        }
+        self.clear_ime_preedit();
+        self.modal.session_picker_wheel = WheelAccumulator::default();
+        self.modal.command_palette = Some(CommandPaletteUi::new(CommandPaletteContext {
+            lair_id: self.tab_state.active_identity.lair_id,
+            dojo_id: self.tab_state.active_dojo_id(),
+            splint_id,
+        }));
+        self.modal.command_palette_layout = None;
+        self.modal.command_palette_pressed = None;
+        self.modal.command_palette_text_cache.clear();
+        self.modal.command_palette_open_focus = Some(self.input.keyboard_focused);
+        self.modal.command_palette_reconcile_pending = false;
+        self.surface.window.set_title("Splinterm — Commands");
+        self.presentation.full_redraw = true;
+        Ok(())
+    }
+
+    fn close_command_palette(&mut self) -> bool {
+        if self.modal.command_palette.take().is_none() {
+            return false;
+        }
+        self.modal.command_palette_layout = None;
+        self.modal.command_palette_pressed = None;
+        self.modal.command_palette_text_cache.clear();
+        self.modal.command_palette_reconcile_pending = true;
+        self.presentation.full_redraw = true;
+        true
+    }
+
+    fn reconcile_command_palette_close(&mut self, queue_handle: &QueueHandle<Self>) {
+        if !std::mem::take(&mut self.modal.command_palette_reconcile_pending) {
+            return;
+        }
+        self.update_window_title();
+        match picker_ime_reconcile(
+            self.input.ime_modal_barrier,
+            self.input.keyboard_focused,
+            self.input.ime.entered,
+        ) {
+            PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
+            PickerImeReconcile::Enable => self.enable_text_input(),
+            PickerImeReconcile::None => {}
+        }
+        let modal_focus_changed = self
+            .modal
+            .command_palette_open_focus
+            .take()
+            .is_some_and(|focused| focused != self.input.keyboard_focused);
+        self.reconcile_terminal_focus_report(modal_focus_changed);
+    }
+
+    fn execute_command_palette(&mut self, command: BuiltInCommandId) {
+        let Some(context) = self
+            .modal
+            .command_palette
+            .as_ref()
+            .map(CommandPaletteUi::context)
+        else {
+            return;
+        };
+        let topology = command_topology_command(command, context);
+        self.close_command_palette();
+        if let Err(error) = self.send_topology_command(topology) {
+            eprintln!("splinterm command palette: {error:#}");
+        }
+    }
+
+    fn refresh_command_palette(&mut self) {
+        self.modal.command_palette_layout = None;
+        self.presentation.full_redraw = true;
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "finite pointer coordinates are clamped to the logical surface"
+    )]
+    fn show_tab_context_menu(&mut self, dojo_id: DojoId, anchor: (f64, f64)) -> Result<()> {
+        anyhow::ensure!(
+            self.tab_state.managed_tabs,
+            "tab menu requires managed tabs"
+        );
+        anyhow::ensure!(
+            self.tab_state.topology_commands.is_some(),
+            "tab menu topology commands are unavailable"
+        );
+        anyhow::ensure!(
+            self.modal.command_palette.is_none()
+                && self.modal.session_picker.is_none()
+                && self.modal.trusted_consent.is_none()
+                && !self.modal.session_picker_requested
+                && !self.modal.session_picker_reconcile_pending
+                && !self.modal.command_palette_reconcile_pending
+                && !self.tab_state.session_switch_pending
+                && self.panes.pane.search.input.is_none()
+                && self.panes.pane.pending_control_transfer.is_none()
+                && self.input.divider_drag.is_none(),
+            "tab menu is unavailable"
+        );
+        let lair_id = self
+            .tab_state
+            .tab_identity(dojo_id)
+            .map(|identity| identity.lair_id)
+            .context("tab menu target is unavailable")?;
+        self.settle_terminal_presses_for_picker();
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
+        self.input.ime_modal_barrier = self.input.ime.entered && self.input.text_input.is_some();
+        if self.input.ime_modal_barrier {
+            if let Some(text_input) = &self.input.text_input {
+                text_input.disable();
+            }
+            self.commit_text_input();
+        }
+        self.clear_ime_preedit();
+        let logical = |value: f64, maximum: u32| {
+            if value.is_finite() && value > 0.0 {
+                value.floor().min(f64::from(maximum)) as u32
+            } else {
+                0
+            }
+        };
+        self.modal.tab_context_menu =
+            Some(TabContextMenuUi::new(TabMenuContext { lair_id, dojo_id }));
+        self.modal.tab_context_menu_anchor = (
+            logical(anchor.0, self.surface.logical_width),
+            logical(anchor.1, self.surface.logical_height),
+        );
+        self.modal.tab_context_menu_layout = None;
+        self.modal.tab_context_menu_pressed = None;
+        self.modal.tab_context_menu_retarget = None;
+        self.modal.tab_context_menu_text_cache.clear();
+        self.modal.command_palette_open_focus = Some(self.input.keyboard_focused);
+        self.modal.command_palette_reconcile_pending = false;
+        self.presentation.full_redraw = true;
+        Ok(())
+    }
+
+    fn close_tab_context_menu(&mut self) -> bool {
+        if self.modal.tab_context_menu.take().is_none() {
+            return false;
+        }
+        self.modal.tab_context_menu_layout = None;
+        self.modal.tab_context_menu_pressed = None;
+        self.modal.tab_context_menu_retarget = None;
+        self.modal.tab_context_menu_text_cache.clear();
+        self.modal.command_palette_reconcile_pending = true;
+        self.presentation.full_redraw = true;
+        true
+    }
+
+    fn execute_tab_context_menu(&mut self, action: TabMenuActionId) {
+        let Some(context) = self
+            .modal
+            .tab_context_menu
+            .as_ref()
+            .map(TabContextMenuUi::context)
+        else {
+            return;
+        };
+        let topology = tab_menu_topology_command(action, context);
+        self.close_tab_context_menu();
+        if let Err(error) = self.send_topology_command(topology) {
+            eprintln!("splinterm tab menu: {error:#}");
+        }
+    }
+
+    fn refresh_tab_context_menu(&mut self) {
+        self.modal.tab_context_menu_layout = None;
+        self.presentation.full_redraw = true;
+    }
+
     fn show_embedded_session_picker(
         &mut self,
         items: Vec<SessionPickerItem>,
@@ -3522,7 +3769,7 @@ impl App {
     }
 
     fn send_command(&mut self, command: WindowCommand) {
-        if self.modal.inline_picker_open() && matches!(command, WindowCommand::Input(_)) {
+        if self.modal.input_modal_open() && matches!(command, WindowCommand::Input(_)) {
             return;
         }
         let Some(commands) = &self.panes.pane.commands else {
@@ -3534,7 +3781,7 @@ impl App {
     }
 
     fn send_coalescible_input(&mut self, bytes: Vec<u8>) {
-        if self.modal.inline_picker_open() {
+        if self.modal.input_modal_open() {
             return;
         }
         let Some(commands) = &self.panes.pane.commands else {
@@ -3608,7 +3855,7 @@ impl App {
             }
             self.commit_text_input();
             self.clear_ime_preedit();
-        } else if focused && self.input.ime.entered && !self.modal.inline_picker_open() {
+        } else if focused && self.input.ime.entered && !self.modal.input_modal_open() {
             self.enable_text_input();
         }
     }
@@ -3883,8 +4130,15 @@ impl App {
         let in_strip = rect_contains(layout.rect, event.position);
         match event.kind {
             PointerEventKind::Press { button, .. }
-                if in_strip && matches!(button, BTN_LEFT | BTN_MIDDLE) =>
+                if in_strip && matches!(button, BTN_LEFT | BTN_MIDDLE | BTN_RIGHT) =>
             {
+                let target = if button == BTN_RIGHT {
+                    target
+                        .and_then(tab_context_target)
+                        .map(TabHitTarget::Activate)
+                } else {
+                    target
+                };
                 if let Some(target) = target {
                     self.tab_state.tab_strip_pressed = Some((button, target));
                 }
@@ -3904,7 +4158,18 @@ impl App {
                     .tab_strip_pressed
                     .take()
                     .expect("matching chrome press remains present");
-                if Some(pressed_target) == target {
+                let release_target = if button == BTN_RIGHT {
+                    target
+                        .and_then(tab_context_target)
+                        .map(TabHitTarget::Activate)
+                } else {
+                    target
+                };
+                if Some(pressed_target) == release_target {
+                    if let (BTN_RIGHT, TabHitTarget::Activate(dojo_id)) = (button, pressed_target) {
+                        self.show_tab_context_menu(dojo_id, event.position)?;
+                        return Ok(true);
+                    }
                     let command = match (button, pressed_target) {
                         (BTN_LEFT, TabHitTarget::Activate(dojo_id)) => {
                             Some(WindowTopologyCommand::ActivateTab { dojo_id })
@@ -3930,6 +4195,159 @@ impl App {
             }
             _ => Ok(in_strip || self.tab_state.tab_strip_pressed.is_some()),
         }
+    }
+
+    fn handle_command_palette_pointer(&mut self, event: &PointerEvent) -> bool {
+        let Some(committed_layout) = self.modal.command_palette_layout.as_ref() else {
+            return false;
+        };
+        let target = command_palette_hit_test(committed_layout, event.position);
+        let inside_panel = rect_contains(committed_layout.panel, event.position);
+        let mut changed = false;
+        let mut execute = None;
+        match event.kind {
+            PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                if let Some(palette) = self.modal.command_palette.as_mut() {
+                    changed |= palette.update_hovered(target);
+                }
+            }
+            PointerEventKind::Leave { .. } => {
+                if let Some(palette) = self.modal.command_palette.as_mut() {
+                    changed |= palette.update_hovered(None);
+                }
+            }
+            PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                if inside_panel {
+                    let next = target;
+                    if self.modal.command_palette_pressed != next {
+                        self.modal.command_palette_pressed = next;
+                        changed = true;
+                    }
+                } else {
+                    changed |= self.close_command_palette();
+                }
+            }
+            PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                let pressed = self.modal.command_palette_pressed.take();
+                changed |= pressed.is_some();
+                if pressed.is_some() && pressed == target {
+                    execute = target;
+                }
+            }
+            PointerEventKind::Axis { vertical, .. } if !vertical.is_none() => {
+                if let Some((direction, count)) = self.modal.session_picker_wheel.push(
+                    vertical.absolute,
+                    vertical.discrete,
+                    vertical.value120,
+                    44,
+                ) && let Some(palette) = self.modal.command_palette.as_mut()
+                {
+                    let count = isize::try_from(count).unwrap_or(isize::MAX);
+                    changed |= palette.move_selection(match direction {
+                        MouseAction::WheelUp => -count,
+                        MouseAction::WheelDown => count,
+                        _ => 0,
+                    });
+                    palette.update_hovered(None);
+                }
+            }
+            _ => {}
+        }
+        if let Some(command) = execute {
+            self.execute_command_palette(command);
+            changed = true;
+        }
+        if changed {
+            self.refresh_command_palette();
+        }
+        changed
+    }
+
+    fn handle_tab_context_menu_pointer(&mut self, event: &PointerEvent) -> bool {
+        let Some(committed_layout) = self.modal.tab_context_menu_layout.as_ref() else {
+            return false;
+        };
+        let target = tab_context_menu_hit_test(committed_layout, event.position);
+        let inside_panel = rect_contains(committed_layout.panel, event.position);
+        let tab_target = self
+            .tab_state
+            .tab_strip_layout
+            .as_ref()
+            .and_then(|layout| tab_strip_hit_test(layout, event.position))
+            .and_then(tab_context_target);
+        let mut changed = false;
+        let mut execute = None;
+        let mut retarget = None;
+        match event.kind {
+            PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                if let Some(menu) = self.modal.tab_context_menu.as_mut() {
+                    changed |= menu.update_hovered(target);
+                }
+            }
+            PointerEventKind::Leave { .. } => {
+                if let Some(menu) = self.modal.tab_context_menu.as_mut() {
+                    changed |= menu.update_hovered(None);
+                }
+            }
+            PointerEventKind::Press {
+                button: BTN_RIGHT, ..
+            } => match tab_menu_right_press(tab_target) {
+                TabMenuRightPress::Retarget(dojo_id) => {
+                    if self.modal.tab_context_menu_retarget != Some(dojo_id) {
+                        self.modal.tab_context_menu_retarget = Some(dojo_id);
+                        changed = true;
+                    }
+                }
+                TabMenuRightPress::Dismiss => {
+                    self.modal.tab_context_menu_retarget = None;
+                    changed |= self.close_tab_context_menu();
+                }
+            },
+            PointerEventKind::Release {
+                button: BTN_RIGHT, ..
+            } => {
+                let pressed = self.modal.tab_context_menu_retarget.take();
+                changed |= pressed.is_some();
+                if pressed.is_some() && pressed == tab_target {
+                    retarget = pressed;
+                }
+            }
+            PointerEventKind::Press {
+                button: BTN_LEFT, ..
+            } => {
+                if inside_panel {
+                    if self.modal.tab_context_menu_pressed != target {
+                        self.modal.tab_context_menu_pressed = target;
+                        changed = true;
+                    }
+                } else {
+                    changed |= self.close_tab_context_menu();
+                }
+            }
+            PointerEventKind::Release {
+                button: BTN_LEFT, ..
+            } => {
+                let pressed = self.modal.tab_context_menu_pressed.take();
+                changed |= pressed.is_some();
+                if pressed.is_some() && pressed == target {
+                    execute = pressed;
+                }
+            }
+            _ => {}
+        }
+        if let Some(dojo_id) = retarget {
+            if let Err(error) = self.show_tab_context_menu(dojo_id, event.position) {
+                eprintln!("splinterm tab menu retarget: {error:#}");
+            }
+            changed = true;
+        } else if let Some(action) = execute {
+            self.execute_tab_context_menu(action);
+            changed = true;
+        }
+        if changed {
+            self.refresh_tab_context_menu();
+        }
+        changed
     }
 
     fn handle_session_picker_pointer(&mut self, event: &PointerEvent) -> bool {
@@ -4132,6 +4550,60 @@ impl App {
         reason = "trusted local shortcuts and search editing share one ordered keyboard boundary"
     )]
     fn handle_key(&mut self, event: &KeyEvent) {
+        if self.modal.tab_context_menu.is_some() {
+            let mut execute = None;
+            let mut close = false;
+            let mut changed = false;
+            if let Some(menu) = self.modal.tab_context_menu.as_mut() {
+                match event.keysym {
+                    Keysym::Up => changed = menu.move_selection(-1),
+                    Keysym::Down => changed = menu.move_selection(1),
+                    Keysym::Return | Keysym::KP_Enter => execute = Some(menu.selected_action()),
+                    Keysym::Escape => close = true,
+                    _ => {}
+                }
+            }
+            if let Some(action) = execute {
+                self.execute_tab_context_menu(action);
+            } else if close {
+                self.close_tab_context_menu();
+            } else if changed {
+                self.refresh_tab_context_menu();
+            }
+            return;
+        }
+        if self.modal.command_palette.is_some() {
+            let mut execute = None;
+            let mut close = false;
+            let mut changed = false;
+            if let Some(palette) = self.modal.command_palette.as_mut() {
+                match event.keysym {
+                    Keysym::Up => changed = palette.move_selection(-1),
+                    Keysym::Down => changed = palette.move_selection(1),
+                    Keysym::Home => changed = palette.select_first(),
+                    Keysym::End => changed = palette.select_last(),
+                    Keysym::Return | Keysym::KP_Enter => {
+                        execute = palette.selected_command();
+                    }
+                    Keysym::Escape => close = true,
+                    Keysym::BackSpace => changed = palette.backspace(),
+                    _ if !self.input.modifiers.ctrl && !self.input.modifiers.alt => {
+                        if let Some(text) = event.utf8.as_deref() {
+                            changed = palette.append_text(text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(command) = execute {
+                self.execute_command_palette(command);
+            } else if close {
+                self.close_command_palette();
+            } else if changed {
+                self.refresh_command_palette();
+            }
+            return;
+        }
         if self.modal.session_picker.is_some() {
             match event.keysym {
                 Keysym::Up | Keysym::k | Keysym::K => self.move_session_picker(-1),
@@ -4755,6 +5227,7 @@ impl App {
                         && self.modal.session_picker.is_none()
                         && !self.tab_state.session_switch_pending
                         && !self.modal.session_picker_reconcile_pending
+                        && !self.modal.command_palette_reconcile_pending
                     {
                         self.show_embedded_session_picker(items, targets)?;
                         changed = true;
@@ -5543,7 +6016,7 @@ impl App {
             self.schedule_terminal_draw(queue_handle)?;
         }
         if title_changed
-            && !self.modal.inline_picker_open()
+            && !self.modal.input_modal_open()
             && !self.modal.session_picker_reconcile_pending
         {
             let snapshot = self
@@ -5795,6 +6268,7 @@ impl App {
     )]
     fn draw(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         self.scheduling.redraw_pending = false;
+        self.reconcile_command_palette_close(queue_handle);
         let terminal_priority = std::mem::take(&mut self.scheduling.terminal_redraw_pending);
         let draw_started = Instant::now();
         let scroll_started = self.panes.pane.scroll_started_at.take();
@@ -5933,6 +6407,8 @@ impl App {
                 .map(|(start, end)| ((start.row, start.column), (end.row, end.column)))
         });
         let inline_picker_open = self.modal.inline_picker_open();
+        let command_palette_open = self.modal.command_palette.is_some();
+        let tab_context_menu_open = self.modal.tab_context_menu.is_some();
         let picker_layout = if inline_picker_open {
             let content = self.content_rect();
             let picker = self
@@ -5957,16 +6433,41 @@ impl App {
         } else {
             None
         };
+        let command_palette_layout = self.modal.command_palette.as_ref().and_then(|palette| {
+            command_palette_layout(
+                self.content_rect(),
+                palette.filtered(),
+                palette.selected_index(),
+                palette.visible_start(),
+            )
+        });
+        let tab_context_menu_layout = self.modal.tab_context_menu.as_ref().and_then(|_| {
+            tab_context_menu_layout(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: self.surface.logical_width,
+                    height: self.surface.logical_height,
+                },
+                self.modal.tab_context_menu_anchor,
+            )
+        });
         let tab_layout = self.current_tab_strip_layout();
-        let content_buffer_rect = Self::buffer_rect(self.content_rect(), self.surface.scale_120)?;
+        let content_rect = self.content_rect();
+        let content_buffer_rect = Self::buffer_rect(content_rect, self.surface.scale_120)?;
         let active_dojo = self.tab_state.active_dojo_id();
         if let Some(layout) = &tab_layout {
             self.prepare_tab_strip_text(layout)?;
         }
         self.tab_state.tab_strip_layout.clone_from(&tab_layout);
-        let terminal_cursor_blink =
-            presented_cursor_visible(inline_picker_open, self.input.cursor_blink_visible);
-        let terminal_keyboard_focused = self.input.keyboard_focused && !inline_picker_open;
+        let terminal_cursor_blink = presented_cursor_visible(
+            inline_picker_open || command_palette_open || tab_context_menu_open,
+            self.input.cursor_blink_visible,
+        );
+        let terminal_keyboard_focused = self.input.keyboard_focused
+            && !inline_picker_open
+            && !command_palette_open
+            && !tab_context_menu_open;
         let mut buffer_index = None;
         for (index, buffer) in self.surface.buffers.iter().enumerate() {
             if self.surface.pool.canvas(&buffer.buffer).is_some() {
@@ -6187,7 +6688,9 @@ impl App {
             );
             let full_transient_canvas_content = history_status.is_some()
                 || self.modal.trusted_consent.is_some()
-                || inline_picker_open;
+                || inline_picker_open
+                || command_palette_open
+                || tab_context_menu_open;
             let full_backing_sync =
                 self.presentation.full_redraw || capture_image_count > 0 || backing_scroll_changed;
             for buffer in &mut self.surface.buffers {
@@ -6336,6 +6839,49 @@ impl App {
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
+        if let (Some(layout), Some(palette)) = (
+            command_palette_layout.as_ref(),
+            self.modal.command_palette.as_ref(),
+        ) {
+            paint_command_palette(
+                &mut self.modal.command_palette_text_cache,
+                &self.presentation.render_context,
+                canvas,
+                width,
+                height,
+                content_rect,
+                self.surface.scale_120,
+                self.presentation.renderer_generation,
+                layout,
+                session_picker_palette(self.presentation.theme),
+                palette,
+                self.modal.command_palette_pressed,
+                self.input.keyboard_focused,
+            )?;
+            self.surface.buffers[buffer_index].stale.mark_full();
+        }
+        self.modal.command_palette_layout = command_palette_layout;
+        if let (Some(layout), Some(menu)) = (
+            tab_context_menu_layout.as_ref(),
+            self.modal.tab_context_menu.as_ref(),
+        ) {
+            paint_tab_context_menu(
+                &mut self.modal.tab_context_menu_text_cache,
+                &self.presentation.render_context,
+                canvas,
+                width,
+                height,
+                self.surface.scale_120,
+                self.presentation.renderer_generation,
+                layout,
+                session_picker_palette(self.presentation.theme),
+                menu,
+                self.modal.tab_context_menu_pressed,
+                self.input.keyboard_focused,
+            )?;
+            self.surface.buffers[buffer_index].stale.mark_full();
+        }
+        self.modal.tab_context_menu_layout = tab_context_menu_layout;
         if let Some(started) = image_composition_started {
             eprintln!(
                 "phase5-image-trace composition_ns={} image_count={capture_image_count}",

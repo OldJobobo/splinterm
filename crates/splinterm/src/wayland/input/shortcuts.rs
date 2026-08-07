@@ -11,6 +11,35 @@ pub(in crate::wayland) enum PaneTopologyAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::wayland) enum CommandPaletteShortcutAction {
+    Open,
+    Consume,
+}
+
+pub(in crate::wayland) fn command_palette_shortcut_action(
+    keysym: Keysym,
+    modifiers: Modifiers,
+    repeat: bool,
+    managed_tabs: bool,
+    blocked: bool,
+) -> Option<CommandPaletteShortcutAction> {
+    if !managed_tabs
+        || !modifiers.ctrl
+        || !modifiers.shift
+        || modifiers.alt
+        || modifiers.logo
+        || !matches!(keysym, Keysym::p | Keysym::P)
+    {
+        return None;
+    }
+    Some(if repeat || blocked {
+        CommandPaletteShortcutAction::Consume
+    } else {
+        CommandPaletteShortcutAction::Open
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::wayland) enum SessionPickerShortcutAction {
     Request,
     Consume,
@@ -144,6 +173,35 @@ pub(in crate::wayland) fn font_zoom_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_palette_shortcut_is_exact_managed_and_blocked_safely() {
+        let modifiers = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            command_palette_shortcut_action(Keysym::p, modifiers, false, true, false),
+            Some(CommandPaletteShortcutAction::Open)
+        );
+        assert_eq!(
+            command_palette_shortcut_action(Keysym::P, modifiers, true, true, false),
+            Some(CommandPaletteShortcutAction::Consume)
+        );
+        assert_eq!(
+            command_palette_shortcut_action(Keysym::p, modifiers, false, true, true),
+            Some(CommandPaletteShortcutAction::Consume)
+        );
+        assert_eq!(
+            command_palette_shortcut_action(Keysym::p, modifiers, false, false, false),
+            None
+        );
+        assert_eq!(
+            command_palette_shortcut_action(Keysym::p, Modifiers::default(), false, true, false),
+            None
+        );
+    }
 
     #[test]
     fn session_picker_shortcut_is_exact_and_application_owned() {

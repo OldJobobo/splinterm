@@ -100,6 +100,13 @@ pub(super) fn tab_strip_layout(
     })
 }
 
+pub(super) const fn tab_context_target(target: TabHitTarget) -> Option<DojoId> {
+    match target {
+        TabHitTarget::Activate(dojo_id) | TabHitTarget::Close(dojo_id) => Some(dojo_id),
+        TabHitTarget::New => None,
+    }
+}
+
 pub(super) fn tab_strip_hit_test(
     layout: &TabStripLayout,
     position: (f64, f64),
@@ -554,7 +561,21 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{DojoId, TabHitTarget, tab_strip_hit_test, tab_strip_layout};
+    use super::{DojoId, TabHitTarget, tab_context_target, tab_strip_hit_test, tab_strip_layout};
+
+    #[test]
+    fn right_click_target_covers_the_tab_body_and_close_affordance_only() {
+        let dojo_id = DojoId::new();
+        assert_eq!(
+            tab_context_target(TabHitTarget::Activate(dojo_id)),
+            Some(dojo_id)
+        );
+        assert_eq!(
+            tab_context_target(TabHitTarget::Close(dojo_id)),
+            Some(dojo_id)
+        );
+        assert_eq!(tab_context_target(TabHitTarget::New), None);
+    }
 
     #[test]
     fn tab_strip_layout_keeps_active_visible_with_bounded_non_overlapping_targets() {

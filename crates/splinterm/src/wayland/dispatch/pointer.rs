@@ -17,7 +17,7 @@ impl PointerHandler for App {
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
-        let modal_frame = self.modal.inline_picker_open();
+        let modal_frame = self.modal.input_modal_open();
         let mut picker_changed = false;
         let mut pane_focus_changed = false;
         let mut pane_divider_changed = false;
@@ -25,8 +25,14 @@ impl PointerHandler for App {
             if &event.surface != self.surface.window.wl_surface() {
                 continue;
             }
-            if modal_frame {
-                picker_changed |= self.handle_session_picker_pointer(event);
+            if modal_frame || self.modal.input_modal_open() {
+                picker_changed |= if self.modal.command_palette.is_some() {
+                    self.handle_command_palette_pointer(event)
+                } else if self.modal.tab_context_menu.is_some() {
+                    self.handle_tab_context_menu_pointer(event)
+                } else {
+                    self.handle_session_picker_pointer(event)
+                };
                 continue;
             }
             match self.handle_pane_divider_pointer(event) {
@@ -41,7 +47,10 @@ impl PointerHandler for App {
                 }
             }
             match self.handle_tab_strip_pointer(event) {
-                Ok(true) => continue,
+                Ok(true) => {
+                    picker_changed |= self.modal.input_modal_open();
+                    continue;
+                }
                 Ok(false) => {}
                 Err(error) => {
                     self.scheduling.fail(error);
@@ -263,22 +272,24 @@ impl PointerHandler for App {
             }
         }
         if self.surface.configured
-            && !self.modal.session_picker_reconcile_pending
-            && (picker_changed && self.modal.inline_picker_open()
-                || pane_focus_changed
-                || pane_divider_changed
-                || self.panes.pane.viewport_dirty
-                || self.panes.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
-                || self
-                    .panes
-                    .pane
-                    .surface_dirty_rows
-                    .iter()
-                    .any(|dirty| *dirty))
+            && (picker_changed
+                && (self.modal.input_modal_open()
+                    || self.modal.session_picker_reconcile_pending
+                    || self.modal.command_palette_reconcile_pending)
+                || !self.modal.session_picker_reconcile_pending
+                    && (pane_focus_changed
+                        || pane_divider_changed
+                        || self.panes.pane.viewport_dirty
+                        || self.panes.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
+                        || self
+                            .panes
+                            .pane
+                            .surface_dirty_rows
+                            .iter()
+                            .any(|dirty| *dirty)))
+            && let Err(error) = self.schedule_draw(queue_handle)
         {
-            if let Err(error) = self.schedule_draw(queue_handle) {
-                self.scheduling.fail(error);
-            }
+            self.scheduling.fail(error);
         }
     }
 }

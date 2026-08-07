@@ -138,7 +138,7 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
                 | zwp_text_input_v3::Event::CommitString { .. }
                 | zwp_text_input_v3::Event::Done { .. }
         );
-        if ime_batch_event && (state.modal.inline_picker_open() || state.input.ime_modal_barrier) {
+        if ime_batch_event && (state.modal.input_modal_open() || state.input.ime_modal_barrier) {
             state.input.ime.clear_composition();
             return;
         }
@@ -146,7 +146,7 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
             zwp_text_input_v3::Event::Enter { surface } => {
                 if surface == *state.surface.window.wl_surface() {
                     state.input.ime.entered = true;
-                    if state.input.keyboard_focused && !state.modal.inline_picker_open() {
+                    if state.input.keyboard_focused && !state.modal.input_modal_open() {
                         state.enable_text_input();
                     }
                 }

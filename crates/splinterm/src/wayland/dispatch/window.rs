@@ -182,6 +182,8 @@ impl WindowHandler for App {
             self.surface.logical_width = width;
             self.surface.logical_height = height;
             self.modal.session_picker_layout = None;
+            self.modal.command_palette_layout = None;
+            self.modal.tab_context_menu_layout = None;
             if let Some(viewport) = &self.surface.viewport {
                 match viewport_destination(width, height) {
                     Ok((width, height)) => viewport.set_destination(width, height),

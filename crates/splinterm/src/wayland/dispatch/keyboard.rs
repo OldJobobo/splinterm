@@ -1,9 +1,10 @@
 use super::super::{
-    App, Connection, KeyEvent, KeyboardHandler, Keysym, Modifiers, PaneFocusAction,
-    PaneTopologyAction, PasteTarget, QueueHandle, RawModifiers, SessionPickerShortcutAction,
-    TabShortcutAction, WaylandSurface, WindowCommand, WindowTopologyCommand, font_zoom_action,
-    pane_focus_action, pane_topology_action, session_picker_shortcut_action,
-    tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
+    App, CommandPaletteShortcutAction, Connection, KeyEvent, KeyboardHandler, Keysym, Modifiers,
+    PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle, RawModifiers,
+    SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
+    WindowTopologyCommand, command_palette_shortcut_action, font_zoom_action, pane_focus_action,
+    pane_topology_action, session_picker_shortcut_action, tab_action_dispatch_allowed,
+    tab_shortcut_action, wl_keyboard, wl_surface,
 };
 
 impl KeyboardHandler for App {
@@ -20,7 +21,7 @@ impl KeyboardHandler for App {
         if surface == self.surface.window.wl_surface() {
             self.set_ime_focus(true);
             self.presentation.full_redraw = true;
-            if self.panes.input_modes().focus_reporting && !self.modal.inline_picker_open() {
+            if self.panes.input_modes().focus_reporting && !self.modal.input_modal_open() {
                 self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
                 self.input.terminal_focus_reported = true;
             }
@@ -41,7 +42,7 @@ impl KeyboardHandler for App {
         if surface == self.surface.window.wl_surface() {
             self.set_ime_focus(false);
             self.presentation.full_redraw = true;
-            if self.panes.input_modes().focus_reporting && !self.modal.inline_picker_open() {
+            if self.panes.input_modes().focus_reporting && !self.modal.input_modal_open() {
                 self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
                 self.input.terminal_focus_reported = false;
             }
@@ -60,10 +61,41 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
+        if self.modal.command_palette.is_some() || self.modal.tab_context_menu.is_some() {
+            self.modal
+                .session_picker_consumed_keys
+                .insert(event.raw_code);
+            self.handle_key(&event);
+            if self.presentation.full_redraw
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.scheduling.fail(error);
+            }
+            return;
+        }
         if self.modal.session_picker.is_some() {
             self.modal
                 .session_picker_consumed_keys
                 .insert(event.raw_code);
+        }
+        if let Some(action) = command_palette_shortcut_action(
+            event.keysym,
+            self.input.modifiers,
+            false,
+            self.tab_state.managed_tabs,
+            !self.command_palette_available(),
+        ) {
+            self.modal
+                .session_picker_consumed_keys
+                .insert(event.raw_code);
+            if action == CommandPaletteShortcutAction::Open {
+                if let Err(error) = self.show_command_palette() {
+                    eprintln!("splinterm command palette: {error:#}");
+                } else if let Err(error) = self.schedule_draw(queue_handle) {
+                    self.scheduling.fail(error);
+                }
+            }
+            return;
         }
         if let Some(action) = tab_shortcut_action(
             event.keysym,
@@ -117,7 +149,8 @@ impl KeyboardHandler for App {
                 || self.modal.trusted_consent.is_some()
                 || self.modal.session_picker_requested
                 || self.tab_state.session_switch_pending
-                || self.modal.session_picker_reconcile_pending,
+                || self.modal.session_picker_reconcile_pending
+                || self.modal.command_palette_reconcile_pending,
         ) {
             if action == SessionPickerShortcutAction::Request {
                 if self.tab_state.topology_commands.is_some() {
@@ -219,6 +252,15 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
+        if self.modal.command_palette.is_some() || self.modal.tab_context_menu.is_some() {
+            self.handle_key(&event);
+            if self.presentation.full_redraw
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.scheduling.fail(error);
+            }
+            return;
+        }
         if self.modal.session_picker.is_some() {
             self.handle_key(&event);
             if (self.presentation.full_redraw || self.modal.session_picker_redraw)
@@ -233,6 +275,20 @@ impl KeyboardHandler for App {
             .session_picker_consumed_keys
             .contains(&event.raw_code)
         {
+            return;
+        }
+        if command_palette_shortcut_action(
+            event.keysym,
+            self.input.modifiers,
+            true,
+            self.tab_state.managed_tabs,
+            !self.command_palette_available(),
+        )
+        .is_some()
+        {
+            self.modal
+                .session_picker_consumed_keys
+                .insert(event.raw_code);
             return;
         }
         if tab_shortcut_action(
@@ -256,7 +312,8 @@ impl KeyboardHandler for App {
                 || self.modal.trusted_consent.is_some()
                 || self.modal.session_picker_requested
                 || self.tab_state.session_switch_pending
-                || self.modal.session_picker_reconcile_pending,
+                || self.modal.session_picker_reconcile_pending
+                || self.modal.command_palette_reconcile_pending,
         )
         .is_some()
         {

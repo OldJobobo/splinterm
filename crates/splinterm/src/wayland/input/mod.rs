@@ -13,7 +13,8 @@ pub(in crate::wayland) use pointer::{
     take_press_owner,
 };
 pub(in crate::wayland) use shortcuts::{
-    FontZoomAction, PaneFocusAction, PaneTopologyAction, SessionPickerShortcutAction,
-    TabShortcutAction, font_zoom_action, pane_focus_action, pane_topology_action,
-    session_picker_shortcut_action, tab_action_dispatch_allowed, tab_shortcut_action,
+    CommandPaletteShortcutAction, FontZoomAction, PaneFocusAction, PaneTopologyAction,
+    SessionPickerShortcutAction, TabShortcutAction, command_palette_shortcut_action,
+    font_zoom_action, pane_focus_action, pane_topology_action, session_picker_shortcut_action,
+    tab_action_dispatch_allowed, tab_shortcut_action,
 };
