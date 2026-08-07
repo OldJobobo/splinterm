@@ -89,10 +89,14 @@ splinterm reopen    # reopen the last locally remembered running Dojo
 From any focused managed Splinterm terminal, **Ctrl+Shift+S** opens Recent
 Sessions as trusted application chrome over dimmed live panes in the current
 Window. Escape removes the overlay without replacing the terminal frontend.
-**Ctrl+Shift+P** opens a searchable command palette with the initial New Dojo,
-horizontal split, and vertical split actions. Right-clicking any visible Dojo
-tab opens a compact trusted menu with New Dojo and detach-only Close Tab
-actions targeted to that exact tab. Choosing a running session opens
+**Ctrl+Shift+P** opens a searchable command palette for daily session, tab,
+pane, and view actions. It can open Recent Sessions, create/switch/close Dojos,
+split/focus/close panes, and adjust font zoom. Unavailable directional or tab
+navigation stays visible but disabled, and every targeted action uses identities
+captured when the palette opened. Right-clicking any visible Dojo tab opens a
+compact trusted menu with Activate Tab, New Dojo, horizontal/vertical split,
+detach-only Close Tab, and detach-only Close Other Tabs actions targeted to the
+exact clicked tab. Choosing a running session opens
 it as a Window-local Dojo tab, or activates its
 existing tab; **New Terminal** creates a fresh Lair and opens its initial Dojo as
 a tab. These application-owned actions are not forwarded to terminal processes.

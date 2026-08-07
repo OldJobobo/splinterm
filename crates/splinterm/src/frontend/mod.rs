@@ -7,10 +7,10 @@ mod picker;
 mod topology;
 
 pub(crate) use action_menu::{
-    BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteContext, CommandPaletteUi,
-    TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuRightPress,
-    command_descriptor, command_topology_command, tab_menu_descriptor, tab_menu_right_press,
-    tab_menu_topology_command,
+    BuiltInCommandDispatch, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteContext,
+    CommandPaletteUi, CommandZoomAction, TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId,
+    TabMenuContext, TabMenuDispatch, TabMenuRightPress, command_descriptor, command_dispatch,
+    tab_menu_descriptor, tab_menu_dispatch, tab_menu_right_press,
 };
 pub use message::{
     AuthorityStatus, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,

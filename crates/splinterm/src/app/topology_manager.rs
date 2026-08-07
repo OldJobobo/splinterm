@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -247,10 +247,10 @@ async fn apply_topology_command(
     if let WindowTopologyCommand::Close {
         dojo_id: target_dojo,
         target,
-    } = command
+    } = &command
     {
         anyhow::ensure!(
-            target_dojo == dojo_id,
+            *target_dojo == dojo_id,
             "topology close targeted another Dojo"
         );
         return close_focused_splint(
@@ -258,7 +258,7 @@ async fn apply_topology_command(
             dojo_id,
             root,
             expected_topology_revision,
-            target,
+            *target,
         )
         .await;
     }
@@ -324,7 +324,8 @@ async fn apply_topology_command(
         | WindowTopologyCommand::NewLair
         | WindowTopologyCommand::NewDojo { .. }
         | WindowTopologyCommand::ActivateTab { .. }
-        | WindowTopologyCommand::CloseTab { .. } => {
+        | WindowTopologyCommand::CloseTab { .. }
+        | WindowTopologyCommand::CloseTabs { .. } => {
             unreachable!("session commands are handled by the topology manager")
         }
     };
@@ -732,6 +733,23 @@ async fn remove_frontend_tab(
     acknowledgement.await.is_ok()
 }
 
+fn close_other_tab_targets(
+    retain_dojo_id: DojoId,
+    retain_present: bool,
+    dojo_ids: Vec<DojoId>,
+) -> Option<Vec<DojoId>> {
+    if !retain_present || dojo_ids.len() > splinterm::tab::MAX_WINDOW_TABS {
+        return None;
+    }
+    let mut unique = HashSet::new();
+    Some(
+        dojo_ids
+            .into_iter()
+            .filter(|dojo_id| *dojo_id != retain_dojo_id && unique.insert(*dojo_id))
+            .collect(),
+    )
+}
+
 async fn handle_session_manager_command(
     command: WindowTopologyCommand,
     connection: &mut Connection,
@@ -822,6 +840,32 @@ async fn handle_session_manager_command(
                 if state.tabs.is_empty() {
                     let _ = updates.send(WindowTopologyUpdate::Closed).await;
                     return TopologyManagerCommandOutcome::Stop;
+                }
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::CloseTabs {
+            retain_dojo_id,
+            dojo_ids,
+        } => {
+            let Some(dojo_ids) = close_other_tab_targets(
+                retain_dojo_id,
+                state.tabs.get(retain_dojo_id).is_some(),
+                dojo_ids,
+            ) else {
+                return TopologyManagerCommandOutcome::Continue;
+            };
+            for dojo_id in dojo_ids {
+                if let Some(removed) = state.tabs.close(dojo_id) {
+                    let acknowledged = remove_frontend_tab(updates, dojo_id).await;
+                    cancel_pane_tasks(removed.value.pane_tasks).await;
+                    if !acknowledged {
+                        return TopologyManagerCommandOutcome::Stop;
+                    }
+                    if state.tabs.is_empty() {
+                        let _ = updates.send(WindowTopologyUpdate::Closed).await;
+                        return TopologyManagerCommandOutcome::Stop;
+                    }
                 }
             }
             TopologyManagerCommandOutcome::Continue
@@ -999,12 +1043,12 @@ pub(in crate::app) async fn run_topology_manager(
             }
             continue;
         };
-        let (WindowTopologyCommand::Split { dojo_id, .. }
-        | WindowTopologyCommand::Close { dojo_id, .. }
-        | WindowTopologyCommand::AdjustRatio { dojo_id, .. }
-        | WindowTopologyCommand::SetRatio { dojo_id, .. }) = command
-        else {
-            unreachable!("session command escaped manager dispatch");
+        let dojo_id = match &command {
+            WindowTopologyCommand::Split { dojo_id, .. }
+            | WindowTopologyCommand::Close { dojo_id, .. }
+            | WindowTopologyCommand::AdjustRatio { dojo_id, .. }
+            | WindowTopologyCommand::SetRatio { dojo_id, .. } => *dojo_id,
+            _ => unreachable!("session command escaped manager dispatch"),
         };
         let managed = &mut state
             .tabs
@@ -1102,11 +1146,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        Axis, CloseAction, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
+        Axis, CloseAction, DojoId, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
         SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyRevision, close_action,
-        parent_ratio, pending_focus_for_observation, refreshed_close_state,
-        topology_command_outcome, topology_identity_diff, validate_exited_close_target,
-        window_has_tab_capacity,
+        close_other_tab_targets, parent_ratio, pending_focus_for_observation,
+        refreshed_close_state, topology_command_outcome, topology_identity_diff,
+        validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::pane_claims_initial_control;
 
@@ -1165,6 +1209,30 @@ mod tests {
         assert!(window_has_tab_capacity(0));
         assert!(window_has_tab_capacity(splinterm::tab::MAX_WINDOW_TABS - 1));
         assert!(!window_has_tab_capacity(splinterm::tab::MAX_WINDOW_TABS));
+    }
+
+    #[test]
+    fn close_other_tabs_is_bounded_deduplicated_and_retains_exact_target() {
+        let retained = DojoId::new();
+        let first = DojoId::new();
+        let second = DojoId::new();
+        assert_eq!(
+            close_other_tab_targets(
+                retained,
+                true,
+                vec![first, retained, second, first, retained]
+            ),
+            Some(vec![first, second])
+        );
+        assert_eq!(close_other_tab_targets(retained, false, vec![first]), None);
+        assert_eq!(
+            close_other_tab_targets(
+                retained,
+                true,
+                vec![first; splinterm::tab::MAX_WINDOW_TABS + 1]
+            ),
+            None
+        );
     }
 
     #[test]

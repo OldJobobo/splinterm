@@ -52,12 +52,18 @@ avoids claiming arbitrary `foot.ini` compatibility.
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste, Ctrl+Shift+S
 to open the native Recent Sessions picker, and Ctrl+Shift+P to open the
 searchable command palette inside any focused managed terminal Window. The
-initial palette exposes New Dojo plus horizontal and vertical pane splits;
-typing filters the list, arrows navigate, Enter runs, and Escape closes.
-Right-clicking a visible Dojo tab opens a two-action trusted menu targeted to
-that tab without activating it first. New Dojo uses the captured Lair and Close
-Tab detaches only that Window-local tab reference; arrows navigate, Enter runs,
-and Escape or an outside click closes the menu.
+palette groups daily actions across sessions, tabs, panes, and view: Recent
+Sessions; New, Previous, Next, and Close Current Dojo; horizontal and vertical
+splits; directional pane focus; Close Focused Pane; and font zoom in, out, and
+reset. Typing filters titles, categories, and keywords; arrows skip unavailable
+commands, Enter runs, and Escape closes. Tab and directional focus actions that
+have no captured destination remain visible but disabled. Right-clicking a
+visible Dojo tab opens a compact trusted menu targeted to that tab without
+activating it first. The menu can explicitly activate the tab, create a Dojo in
+its captured Lair, split its captured focused pane horizontally or vertically,
+detach that tab, or detach every other captured tab. Unavailable activation,
+split, or close-others actions remain visible but disabled; arrows navigate,
+Enter runs, and Escape or an outside click closes the menu.
 Ctrl+Tab and Ctrl+Shift+Tab cycle Window-local Dojo tabs;
 Ctrl+Shift+D creates and opens a Dojo in the active tab's Lair; Ctrl+Shift+Q
 detaches the active tab and closes the Window when it was the final tab. These

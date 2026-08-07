@@ -65,7 +65,7 @@ impl KeyboardHandler for App {
             self.modal
                 .session_picker_consumed_keys
                 .insert(event.raw_code);
-            self.handle_key(&event);
+            self.handle_key(&event, queue_handle);
             if self.presentation.full_redraw
                 && let Err(error) = self.schedule_draw(queue_handle)
             {
@@ -168,7 +168,7 @@ impl KeyboardHandler for App {
             return;
         }
         if self.modal.session_picker.is_some() || self.modal.trusted_consent.is_some() {
-            self.handle_key(&event);
+            self.handle_key(&event, queue_handle);
             if (self.presentation.full_redraw || self.modal.session_picker_redraw)
                 && let Err(error) = self.schedule_draw(queue_handle)
             {
@@ -232,7 +232,7 @@ impl KeyboardHandler for App {
             match self.handle_history_key(&event, queue_handle) {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.handle_key(&event);
+                    self.handle_key(&event, queue_handle);
                     if self.presentation.full_redraw {
                         if let Err(error) = self.schedule_draw(queue_handle) {
                             self.scheduling.fail(error);
@@ -253,7 +253,7 @@ impl KeyboardHandler for App {
         event: KeyEvent,
     ) {
         if self.modal.command_palette.is_some() || self.modal.tab_context_menu.is_some() {
-            self.handle_key(&event);
+            self.handle_key(&event, queue_handle);
             if self.presentation.full_redraw
                 && let Err(error) = self.schedule_draw(queue_handle)
             {
@@ -262,7 +262,7 @@ impl KeyboardHandler for App {
             return;
         }
         if self.modal.session_picker.is_some() {
-            self.handle_key(&event);
+            self.handle_key(&event, queue_handle);
             if (self.presentation.full_redraw || self.modal.session_picker_redraw)
                 && let Err(error) = self.schedule_draw(queue_handle)
             {
@@ -320,7 +320,7 @@ impl KeyboardHandler for App {
             return;
         }
         if self.modal.trusted_consent.is_some() {
-            self.handle_key(&event);
+            self.handle_key(&event, queue_handle);
             return;
         }
         if let Some(action) = font_zoom_action(event.keysym, self.input.modifiers) {
@@ -331,7 +331,7 @@ impl KeyboardHandler for App {
         }
         match self.handle_history_key(&event, queue_handle) {
             Ok(true) => {}
-            Ok(false) => self.handle_key(&event),
+            Ok(false) => self.handle_key(&event, queue_handle),
             Err(error) => self.scheduling.fail(error),
         }
     }

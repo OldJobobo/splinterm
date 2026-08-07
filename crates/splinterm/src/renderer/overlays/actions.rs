@@ -39,6 +39,7 @@ const TAB_MENU_ANCHOR_GAP: u32 = 4;
 pub(crate) struct CommandPaletteRowLayout {
     pub(crate) command: BuiltInCommandId,
     pub(crate) rect: Rect,
+    pub(crate) category: Rect,
     pub(crate) title: Rect,
     pub(crate) shortcut: Rect,
 }
@@ -159,10 +160,21 @@ pub(crate) fn command_palette_layout(
             };
             let inset = CONTENT_INSET.min(rect.width / 6);
             let shortcut_width = if compact { 0 } else { rect.width.min(180) / 3 };
-            let title_x = rect.x.saturating_add(inset).saturating_add(20);
+            let content_x = rect.x.saturating_add(inset).saturating_add(20);
+            let category_width = if compact { 0 } else { 72.min(rect.width / 5) };
+            let category_gap = if category_width == 0 { 0 } else { 12 };
+            let title_x = content_x
+                .saturating_add(category_width)
+                .saturating_add(category_gap);
             CommandPaletteRowLayout {
                 command,
                 rect,
+                category: Rect {
+                    x: content_x,
+                    y: rect.y,
+                    width: category_width,
+                    height: rect.height,
+                },
                 title: Rect {
                     x: title_x,
                     y: rect.y,
@@ -496,7 +508,8 @@ pub(crate) fn paint_command_palette(
     let selected = state.selected_command();
     for row in &layout.rows {
         let rect = buffer_rect(row.rect, scale_120);
-        let is_selected = selected == Some(row.command);
+        let enabled = state.command_enabled(row.command);
+        let is_selected = enabled && selected == Some(row.command);
         if is_selected {
             fill_rect(
                 canvas,
@@ -517,7 +530,7 @@ pub(crate) fn paint_command_palette(
                 ),
                 rgba(palette.selected_rail),
             );
-        } else if state.hovered() == Some(row.command) {
+        } else if enabled && state.hovered() == Some(row.command) {
             blend_rect(
                 canvas,
                 width,
@@ -531,7 +544,7 @@ pub(crate) fn paint_command_palette(
                 ],
             );
         }
-        if pressed == Some(row.command) {
+        if enabled && pressed == Some(row.command) {
             blend_rect(
                 canvas,
                 width,
@@ -545,7 +558,9 @@ pub(crate) fn paint_command_palette(
                 ],
             );
         }
-        let primary = if is_selected {
+        let primary = if !enabled {
+            palette.secondary
+        } else if is_selected {
             palette.selected_primary
         } else {
             palette.primary
@@ -572,6 +587,26 @@ pub(crate) fn paint_command_palette(
             )?;
         }
         let descriptor = command_descriptor(row.command);
+        if row.category.width > 0 {
+            paint_text(
+                cache,
+                context,
+                canvas,
+                width,
+                height,
+                descriptor.category.label(),
+                ChromeTextStyle::Regular,
+                scale_120,
+                renderer_generation,
+                buffer_rect(row.category, scale_120),
+                if is_selected {
+                    palette.selected_secondary
+                } else {
+                    palette.secondary
+                },
+                false,
+            )?;
+        }
         paint_text(
             cache,
             context,
@@ -806,7 +841,8 @@ pub(crate) fn paint_tab_context_menu(
     }
     for row in &layout.rows {
         let rect = buffer_rect(row.rect, scale_120);
-        let selected = state.selected_action() == row.action;
+        let enabled = state.action_enabled(row.action);
+        let selected = enabled && state.selected_action() == row.action;
         if selected {
             fill_rect(
                 canvas,
@@ -827,7 +863,7 @@ pub(crate) fn paint_tab_context_menu(
                 ),
                 rgba(palette.selected_rail),
             );
-        } else if state.hovered() == Some(row.action) {
+        } else if enabled && state.hovered() == Some(row.action) {
             blend_rect(
                 canvas,
                 width,
@@ -841,7 +877,7 @@ pub(crate) fn paint_tab_context_menu(
                 ],
             );
         }
-        if pressed == Some(row.action) {
+        if enabled && pressed == Some(row.action) {
             blend_rect(
                 canvas,
                 width,
@@ -855,7 +891,9 @@ pub(crate) fn paint_tab_context_menu(
                 ],
             );
         }
-        let primary = if selected {
+        let primary = if !enabled {
+            palette.secondary
+        } else if selected {
             palette.selected_primary
         } else {
             palette.primary
@@ -960,6 +998,10 @@ mod tests {
                 assert!(row.rect.x > layout.panel.x);
                 assert!(row.rect.x + row.rect.width < layout.panel.x + layout.panel.width);
                 assert!(row.title.x >= row.rect.x + CONTENT_INSET);
+                assert_eq!(row.category.width == 0, layout.compact);
+                if !layout.compact {
+                    assert!(row.title.x > row.category.x + row.category.width);
+                }
                 assert_eq!(
                     command_palette_hit_test(
                         &layout,
@@ -1028,7 +1070,8 @@ mod tests {
             assert_eq!(layout.panel.width, TAB_MENU_WIDTH);
             assert_eq!(
                 layout.panel.height,
-                TAB_MENU_ROW_HEIGHT * 2 + TAB_MENU_PADDING * 2
+                TAB_MENU_ROW_HEIGHT * u32::try_from(TAB_MENU_ACTIONS.len()).unwrap()
+                    + TAB_MENU_PADDING * 2
             );
             assert!(layout.panel.x >= bounds.x && layout.panel.y >= bounds.y);
             assert!(
@@ -1037,7 +1080,7 @@ mod tests {
             assert!(
                 layout.panel.y + layout.panel.height + TAB_MENU_SHADOW <= bounds.y + bounds.height
             );
-            assert_eq!(layout.rows.len(), 2);
+            assert_eq!(layout.rows.len(), TAB_MENU_ACTIONS.len());
             for row in &layout.rows {
                 assert_eq!(row.rect.height, TAB_MENU_ROW_HEIGHT);
                 assert_eq!(
@@ -1078,18 +1121,26 @@ mod tests {
         let mut state = TabContextMenuUi::new(crate::frontend::TabMenuContext {
             lair_id: LairId::new(),
             dojo_id: DojoId::new(),
+            focused_splint_id: Some(SplintId::new()),
+            active: false,
+            other_dojo_ids: vec![DojoId::new()],
         });
         let mut canvas = vec![0_u8; 640 * 400 * 4];
         let mut cache = CommandPaletteTextCache::default();
         let right_x = layout.panel.x + layout.panel.width - 1;
         let top_edge = usize::try_from((layout.panel.y * 640 + right_x) * 4).unwrap();
+        let close_row = layout
+            .rows
+            .iter()
+            .position(|row| row.action == TabMenuActionId::CloseTab)
+            .unwrap();
         for (hovered, pressed, row) in [
             (None, None, 0),
-            (Some(TabMenuActionId::CloseTab), None, 1),
+            (Some(TabMenuActionId::CloseTab), None, close_row),
             (
                 Some(TabMenuActionId::CloseTab),
                 Some(TabMenuActionId::CloseTab),
-                1,
+                close_row,
             ),
         ] {
             state.update_hovered(hovered);
@@ -1135,6 +1186,12 @@ mod tests {
             lair_id: LairId::new(),
             dojo_id: DojoId::new(),
             splint_id: SplintId::new(),
+            previous_dojo_id: None,
+            next_dojo_id: None,
+            focus_left: None,
+            focus_right: None,
+            focus_up: None,
+            focus_down: None,
         });
         let layout = command_palette_layout(
             content,

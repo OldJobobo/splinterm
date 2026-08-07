@@ -119,12 +119,12 @@ use crate::background_effect::{
 };
 use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
 use crate::frontend::{
-    AuthorityStatus, BuiltInCommandId, CommandPaletteContext, CommandPaletteUi,
-    PerfTraceCorrelation, SessionPickerDecision, SessionPickerItem, SessionPickerUi,
-    TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuRightPress, ThemeUpdate,
-    TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
-    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, command_topology_command,
-    tab_menu_right_press, tab_menu_topology_command,
+    AuthorityStatus, BuiltInCommandDispatch, BuiltInCommandId, CommandPaletteContext,
+    CommandPaletteUi, CommandZoomAction, PerfTraceCorrelation, SessionPickerDecision,
+    SessionPickerItem, SessionPickerUi, TabContextMenuUi, TabMenuActionId, TabMenuContext,
+    TabMenuDispatch, TabMenuRightPress, ThemeUpdate, TrustedConsentUi, WindowCommand,
+    WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    WindowTopologyUpdate, WindowUpdate, command_dispatch, tab_menu_dispatch, tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -2569,12 +2569,12 @@ impl App {
         true
     }
 
-    fn focus_direction(&mut self, direction: FocusDirection) -> bool {
+    fn directional_splint(&self, direction: FocusDirection) -> Option<SplintId> {
         let (Some(layout), Some(current)) = (&self.panes.layout, self.panes.focused_splint())
         else {
-            return false;
+            return None;
         };
-        let Ok(layout) = PaneLayout::compute(
+        PaneLayout::compute(
             layout,
             Rect {
                 x: 0,
@@ -2585,11 +2585,13 @@ impl App {
             1,
             1,
             1,
-        ) else {
-            return false;
-        };
-        layout
-            .directional(current, direction)
+        )
+        .ok()?
+        .directional(current, direction)
+    }
+
+    fn focus_direction(&mut self, direction: FocusDirection) -> bool {
+        self.directional_splint(direction)
             .is_some_and(|next| self.focus_splint(next))
     }
 
@@ -3529,10 +3531,19 @@ impl App {
         }
         self.clear_ime_preedit();
         self.modal.session_picker_wheel = WheelAccumulator::default();
+        let multiple_tabs = self.tab_state.tabs.len() > 1;
         self.modal.command_palette = Some(CommandPaletteUi::new(CommandPaletteContext {
             lair_id: self.tab_state.active_identity.lair_id,
             dojo_id: self.tab_state.active_dojo_id(),
             splint_id,
+            previous_dojo_id: multiple_tabs
+                .then(|| self.tab_state.tabs.previous())
+                .flatten(),
+            next_dojo_id: multiple_tabs.then(|| self.tab_state.tabs.next()).flatten(),
+            focus_left: self.directional_splint(FocusDirection::Left),
+            focus_right: self.directional_splint(FocusDirection::Right),
+            focus_up: self.directional_splint(FocusDirection::Up),
+            focus_down: self.directional_splint(FocusDirection::Down),
         }));
         self.modal.command_palette_layout = None;
         self.modal.command_palette_pressed = None;
@@ -3578,18 +3589,46 @@ impl App {
         self.reconcile_terminal_focus_report(modal_focus_changed);
     }
 
-    fn execute_command_palette(&mut self, command: BuiltInCommandId) {
-        let Some(context) = self
+    fn execute_command_palette(
+        &mut self,
+        command: BuiltInCommandId,
+        queue_handle: &QueueHandle<Self>,
+    ) {
+        let Some(dispatch) = self
             .modal
             .command_palette
             .as_ref()
-            .map(CommandPaletteUi::context)
+            .and_then(|palette| command_dispatch(command, palette.context()))
         else {
             return;
         };
-        let topology = command_topology_command(command, context);
         self.close_command_palette();
-        if let Err(error) = self.send_topology_command(topology) {
+        self.reconcile_command_palette_close(queue_handle);
+        let result = match dispatch {
+            BuiltInCommandDispatch::Topology(command) => self.send_topology_command(command),
+            BuiltInCommandDispatch::Focus(splint_id) => {
+                if self.focus_splint(splint_id) {
+                    self.update_ime_cursor_rectangle();
+                }
+                Ok(())
+            }
+            BuiltInCommandDispatch::Zoom(action) => self
+                .apply_font_zoom(
+                    match action {
+                        CommandZoomAction::Increase => FontZoomAction::Increase,
+                        CommandZoomAction::Decrease => FontZoomAction::Decrease,
+                        CommandZoomAction::Reset => FontZoomAction::Reset,
+                    },
+                    queue_handle,
+                )
+                .map(|_| ()),
+            BuiltInCommandDispatch::RecentSessions => {
+                self.modal.session_picker_requested = true;
+                self.send_topology_command(WindowTopologyCommand::RequestSessionPicker)
+                    .inspect_err(|_| self.modal.session_picker_requested = false)
+            }
+        };
+        if let Err(error) = result {
             eprintln!("splinterm command palette: {error:#}");
         }
     }
@@ -3631,6 +3670,22 @@ impl App {
             .tab_identity(dojo_id)
             .map(|identity| identity.lair_id)
             .context("tab menu target is unavailable")?;
+        let active = self.tab_state.active_dojo_id() == dojo_id;
+        let focused_splint_id = if active {
+            self.panes.focused_splint()
+        } else {
+            self.tab_state
+                .tabs
+                .get(dojo_id)
+                .and_then(|tab| tab.value.as_ref())
+                .and_then(DojoTabView::focused_splint)
+        };
+        let other_dojo_ids = self
+            .tab_state
+            .tabs
+            .iter()
+            .filter_map(|tab| (tab.dojo_id != dojo_id).then_some(tab.dojo_id))
+            .collect();
         self.settle_terminal_presses_for_picker();
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         self.input.ime_modal_barrier = self.input.ime.entered && self.input.text_input.is_some();
@@ -3648,8 +3703,13 @@ impl App {
                 0
             }
         };
-        self.modal.tab_context_menu =
-            Some(TabContextMenuUi::new(TabMenuContext { lair_id, dojo_id }));
+        self.modal.tab_context_menu = Some(TabContextMenuUi::new(TabMenuContext {
+            lair_id,
+            dojo_id,
+            focused_splint_id,
+            active,
+            other_dojo_ids,
+        }));
         self.modal.tab_context_menu_anchor = (
             logical(anchor.0, self.surface.logical_width),
             logical(anchor.1, self.surface.logical_height),
@@ -3678,17 +3738,19 @@ impl App {
     }
 
     fn execute_tab_context_menu(&mut self, action: TabMenuActionId) {
-        let Some(context) = self
+        let Some(dispatch) = self
             .modal
             .tab_context_menu
             .as_ref()
-            .map(TabContextMenuUi::context)
+            .and_then(|menu| tab_menu_dispatch(action, &menu.context()))
         else {
             return;
         };
-        let topology = tab_menu_topology_command(action, context);
         self.close_tab_context_menu();
-        if let Err(error) = self.send_topology_command(topology) {
+        let result = match dispatch {
+            TabMenuDispatch::Topology(command) => self.send_topology_command(command),
+        };
+        if let Err(error) = result {
             eprintln!("splinterm tab menu: {error:#}");
         }
     }
@@ -4190,7 +4252,11 @@ impl App {
         }
     }
 
-    fn handle_command_palette_pointer(&mut self, event: &PointerEvent) -> bool {
+    fn handle_command_palette_pointer(
+        &mut self,
+        event: &PointerEvent,
+        queue_handle: &QueueHandle<Self>,
+    ) -> bool {
         let Some(committed_layout) = self.modal.command_palette_layout.as_ref() else {
             return false;
         };
@@ -4211,7 +4277,12 @@ impl App {
             }
             PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
                 if inside_panel {
-                    let next = target;
+                    let next = target.filter(|command| {
+                        self.modal
+                            .command_palette
+                            .as_ref()
+                            .is_some_and(|palette| palette.command_enabled(*command))
+                    });
                     if self.modal.command_palette_pressed != next {
                         self.modal.command_palette_pressed = next;
                         changed = true;
@@ -4247,7 +4318,7 @@ impl App {
             _ => {}
         }
         if let Some(command) = execute {
-            self.execute_command_palette(command);
+            self.execute_command_palette(command, queue_handle);
             changed = true;
         }
         if changed {
@@ -4309,6 +4380,12 @@ impl App {
                 button: BTN_LEFT, ..
             } => {
                 if inside_panel {
+                    let target = target.filter(|action| {
+                        self.modal
+                            .tab_context_menu
+                            .as_ref()
+                            .is_some_and(|menu| menu.action_enabled(*action))
+                    });
                     if self.modal.tab_context_menu_pressed != target {
                         self.modal.tab_context_menu_pressed = target;
                         changed = true;
@@ -4542,7 +4619,7 @@ impl App {
         clippy::too_many_lines,
         reason = "trusted local shortcuts and search editing share one ordered keyboard boundary"
     )]
-    fn handle_key(&mut self, event: &KeyEvent) {
+    fn handle_key(&mut self, event: &KeyEvent, queue_handle: &QueueHandle<Self>) {
         if self.modal.tab_context_menu.is_some() {
             let mut execute = None;
             let mut close = false;
@@ -4576,7 +4653,7 @@ impl App {
                     Keysym::Home => changed = palette.select_first(),
                     Keysym::End => changed = palette.select_last(),
                     Keysym::Return | Keysym::KP_Enter => {
-                        execute = palette.selected_command();
+                        execute = palette.selected_enabled_command();
                     }
                     Keysym::Escape => close = true,
                     Keysym::BackSpace => changed = palette.backspace(),
@@ -4589,7 +4666,7 @@ impl App {
                 }
             }
             if let Some(command) = execute {
-                self.execute_command_palette(command);
+                self.execute_command_palette(command, queue_handle);
             } else if close {
                 self.close_command_palette();
             } else if changed {

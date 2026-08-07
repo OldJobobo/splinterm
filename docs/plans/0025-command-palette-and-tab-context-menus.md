@@ -1,6 +1,6 @@
 # Plan 0025: Command palette and tab context menus
 
-- **Status:** Milestones 0–3 implemented; palette and tab-menu visual direction user-approved; final acceptance validation pending
+- **Status:** Milestones 0–3 accepted and installed; first post-approval palette and balanced context-menu expansions implemented; expanded validation pending
 - **Date:** 2026-08-06
 - **Depends on:** [Plan 0017](0017-inline-session-picker-overlay.md), [Plan 0019](0019-dojo-tabs.md)
 
@@ -73,6 +73,32 @@ state changed behind the overlay. If the target disappears, the existing
 explicitly targeted operation may reject cleanly; the palette must not guess a
 replacement.
 
+### First post-approval palette expansion
+
+The user approved the initial visual direction and explicitly opened the deferred
+expansion gate. The first expanded inventory remains closed and application-owned:
+
+| Category | Commands | Target behavior |
+| --- | --- | --- |
+| Session | Open recent sessions | Closes and reconciles the palette before requesting the existing trusted picker |
+| Tab | New Dojo; Previous Dojo; Next Dojo; Close current tab | Captures exact Lair/current/neighbor Dojo identities; close remains detach-only |
+| Pane | Horizontal/vertical split; focus left/right/up/down; close focused pane | Captures the focused Splint and exact directional destinations; close retains existing shell-termination semantics |
+| View | Zoom in; zoom out; reset zoom | Reuses the existing client-local Foot-compatible zoom path |
+
+Stable category labels join titles and keywords in case-insensitive filtering.
+Unavailable previous/next or directional-focus destinations remain visible but
+disabled; keyboard navigation skips them and pointer activation cannot run them.
+The initial seven-row viewport, approved geometry, modal isolation, and exact
+captured-authority rule remain unchanged.
+
+The balanced post-approval context menu adds `Activate Tab`, horizontal and
+vertical split against the clicked tab's captured focused Splint, and detach-only
+`Close Other Tabs`. `Activate Tab` is disabled for the active tab; split actions
+are disabled when no focused Splint was captured; close-others is disabled when
+no other tab was captured. Batch detach carries both the exact retained Dojo and
+the exact bounded set of other Dojos, and rejects cleanly if the retained target
+disappears before execution.
+
 ### Tab context menu
 
 - Open with right-click on a committed visible tab rectangle.
@@ -96,15 +122,15 @@ replacement.
 - Arrow keys navigate; Enter executes; Escape closes. No typeahead is required
   for the two-item MVP.
 
-### Explicitly deferred expansion
+### Remaining deferred expansion
 
-Do not add these until the first visual and interaction pass has been reviewed:
+The approved first palette expansion does not authorize these broader surfaces:
 
-- close-other-tabs, close-tabs-to-the-right, duplicate, rename, restore, kill,
-  detach-to-window, or tab reordering commands;
-- every existing keyboard shortcut as a palette command;
-- nested menus, subcommands, command categories, recent-command ranking, fuzzy
-  scoring, aliases editable by users, or configurable bindings;
+- close-tabs-to-the-right, duplicate, rename, detach-to-window, or tab reordering
+  commands;
+- indiscriminately exposing every existing keyboard shortcut;
+- nested menus, subcommands, recent-command ranking, fuzzy scoring, aliases
+  editable by users, or configurable bindings;
 - command extension APIs, plugins, shell commands, terminal-content-provided
   actions, or automation-provided actions;
 - persistent palette history;
@@ -539,12 +565,13 @@ Stop for user input before:
 
 ## Acceptance criteria
 
-The initial feature slice is accepted when:
+The initial feature slice was accepted when:
 
 1. `Ctrl+Shift+P` opens a polished searchable palette below the trusted tab
    strip in a managed terminal Window.
-2. The palette exposes exactly the three approved commands and dispatches them
-   to captured stable identities through existing topology commands.
+2. The palette initially exposed exactly the three approved commands and
+   dispatched them to captured stable identities through existing topology
+   commands; the later approved expansion preserves that targeting rule.
 3. Right-clicking a visible tab opens a clamped trusted menu targeting that tab,
    with exactly `New Dojo` and `Close Tab`.
 4. Context actions never activate or retarget a different tab implicitly.

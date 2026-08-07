@@ -12,7 +12,7 @@ pub struct WindowDojoIdentity {
     pub dojo_name: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WindowTopologyCommand {
     Split {
         dojo_id: DojoId,
@@ -48,6 +48,10 @@ pub enum WindowTopologyCommand {
     },
     CloseTab {
         dojo_id: DojoId,
+    },
+    CloseTabs {
+        retain_dojo_id: DojoId,
+        dojo_ids: Vec<DojoId>,
     },
 }
 
