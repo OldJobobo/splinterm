@@ -1,6 +1,6 @@
 # Plan 0025: Command palette and tab context menus
 
-- **Status:** Milestones 0–3 accepted and installed; first post-approval palette and balanced context-menu expansions implemented; expanded validation pending
+- **Status:** Milestones 0–3 accepted and installed; first post-approval palette and balanced context-menu expansions implemented and validated; publication and installation pending
 - **Date:** 2026-08-06
 - **Depends on:** [Plan 0017](0017-inline-session-picker-overlay.md), [Plan 0019](0019-dojo-tabs.md)
 
@@ -545,6 +545,40 @@ After Milestone 3, a separately approved context-menu smoke should test:
 Only after both smokes pass should an approved matrix cover compact/normal
 sizes, scales 120/150/240, dark/light/translucent themes, edge clamping, multiple
 tabs, keyboard-only operation, and pointer press/release cancellation.
+
+## Expanded-slice closure evidence
+
+The post-approval palette and balanced context-menu expansions were validated on
+2026-08-06 from commit `61827ff`. Durable screenshots and the bounded validation
+report are stored under
+[`artifacts/0025-action-menus/`](artifacts/0025-action-menus/README.md).
+
+Non-graphical closure passed `cargo test --workspace`,
+`cargo fmt --all --check`, and `git diff --check`. Strict Rust 1.97
+`cargo clippy --workspace --all-targets -- -D warnings` remains blocked by the
+recorded pre-existing workspace warning set; the run found no action-menu-specific
+correctness failure.
+
+The authorized isolated release-profile sequence on workspace 8 / `DP-2`
+recorded:
+
+1. bounded `split` search, Escape dismissal, and a horizontal split that changed
+   isolated topology from one running Splint to two;
+2. inactive- and active-tab six-action menus, including disabled `Activate Tab`
+   selection skipping on the active tab;
+3. outside-click dismissal without topology mutation;
+4. horizontal split against the inactive tab's captured Splint while the second
+   tab remained active; and
+5. `Close Other Tabs` settling to one retained client tab while the isolated
+   daemon retained all three captured Dojos and four running Splints.
+
+The last result records detach-only semantics rather than a daemon kill. The
+isolated daemon, client, socket, and virtual pointer were removed, and the
+pre-test Foot focus and cursor position were restored. A fresh read-only source
+review reported no source defect or fix worth doing now; its formal attestation
+was rejected only because its sandbox could not read the supplied `/tmp`
+manifest/diff artifacts, and that evidence-delivery limitation remains explicit
+in the durable report.
 
 ## Stop gates
 
