@@ -176,17 +176,16 @@ pub(crate) struct ChangeSet {
 }
 
 impl ChangeSet {
+    fn is_full(&self) -> bool {
+        matches!(self.damage.as_slice(), [TerminalDamage::FullSnapshot])
+    }
+
     pub(crate) fn row(&mut self, row: usize) {
         self.rows(row, row + 1);
     }
 
     pub(crate) fn rows(&mut self, start: usize, end: usize) {
-        if start >= end
-            || self
-                .damage
-                .iter()
-                .any(|item| matches!(item, TerminalDamage::FullSnapshot))
-        {
+        if start >= end || self.is_full() {
             return;
         }
         if let Some(TerminalDamage::Rows {
@@ -212,28 +211,17 @@ impl ChangeSet {
     }
 
     pub(crate) fn push(&mut self, damage: TerminalDamage) {
-        if !self.damage.contains(&damage)
-            && !self
-                .damage
-                .iter()
-                .any(|item| matches!(item, TerminalDamage::FullSnapshot))
-        {
+        if matches!(damage, TerminalDamage::FullSnapshot) {
+            self.full();
+        } else if !self.is_full() && !self.damage.contains(&damage) {
             self.damage.push(damage);
         }
     }
 
     pub(crate) fn merge(&mut self, mut other: Self, event_limit: usize) {
-        let self_is_full = self
-            .damage
-            .iter()
-            .any(|damage| matches!(damage, TerminalDamage::FullSnapshot));
-        let other_is_full = other
-            .damage
-            .iter()
-            .any(|damage| matches!(damage, TerminalDamage::FullSnapshot));
-        if other_is_full {
+        if other.is_full() {
             self.full();
-        } else if !self_is_full {
+        } else if !self.is_full() {
             // Preserve parser order, particularly for repeated scroll operations.
             // Wire publication coalesces row/metadata flags against the final snapshot.
             self.damage.append(&mut other.damage);
@@ -244,5 +232,68 @@ impl ChangeSet {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.damage.is_empty() && self.events.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scroll_damage() -> TerminalDamage {
+        TerminalDamage::Scroll {
+            direction: ScrollDirection::Forward,
+            region: ScrollRegion::new(0, 4),
+            rows: 1,
+        }
+    }
+
+    #[test]
+    fn full_snapshot_damage_is_canonical_and_terminal() {
+        let mut change = ChangeSet::default();
+        change.push(TerminalDamage::Modes);
+        change.push(TerminalDamage::FullSnapshot);
+        change.push(TerminalDamage::Title);
+        change.rows(0, 2);
+
+        assert!(change.is_full());
+        assert_eq!(change.damage, vec![TerminalDamage::FullSnapshot]);
+    }
+
+    #[test]
+    fn merging_full_snapshot_replaces_damage_but_preserves_bounded_events() {
+        let mut accumulated = ChangeSet {
+            damage: vec![TerminalDamage::Modes, TerminalDamage::Title],
+            events: vec![TerminalEvent::Bell],
+        };
+        let full = ChangeSet {
+            damage: vec![TerminalDamage::FullSnapshot],
+            events: vec![TerminalEvent::TitleChanged("frame".to_owned())],
+        };
+
+        accumulated.merge(full, 1);
+
+        assert!(accumulated.is_full());
+        assert_eq!(accumulated.damage, vec![TerminalDamage::FullSnapshot]);
+        assert_eq!(accumulated.events, vec![TerminalEvent::Bell]);
+    }
+
+    #[test]
+    fn many_ordered_merges_remain_append_only() {
+        const MERGES: usize = 20_000;
+        let mut accumulated = ChangeSet::default();
+
+        for _ in 0..MERGES {
+            let mut next = ChangeSet::default();
+            next.push(scroll_damage());
+            accumulated.merge(next, 0);
+        }
+
+        assert_eq!(accumulated.damage.len(), MERGES);
+        assert!(
+            accumulated
+                .damage
+                .iter()
+                .all(|damage| damage == &scroll_damage())
+        );
     }
 }

@@ -3968,6 +3968,39 @@ mod tests {
     }
 
     #[test]
+    fn large_synchronized_redraw_commits_one_ordered_update() {
+        const LINES: usize = 2_000;
+        let mut terminal = Terminal::new(16, 4, TerminalConfig::default());
+        let base_revision = terminal.revision();
+        let mut frame = Vec::with_capacity(LINES * 6 + 20);
+        frame.extend_from_slice(b"\x1b[?2026h");
+        for _ in 0..LINES {
+            frame.extend_from_slice(b"line\r\n");
+        }
+        frame.extend_from_slice(b"\x1b[?2026l");
+
+        terminal.advance(&frame);
+
+        let updates = terminal
+            .updates_since(base_revision)
+            .expect("large synchronized redraw update");
+        assert_eq!(updates.updates().len(), 1);
+        let update = updates.updates().next().expect("synchronized update");
+        assert!(update.damage().count() > LINES);
+        assert!(
+            update
+                .damage()
+                .any(|damage| matches!(damage, TerminalDamage::Scroll { .. }))
+        );
+        assert!(
+            update
+                .damage()
+                .all(|damage| !matches!(damage, TerminalDamage::FullSnapshot))
+        );
+        assert!((0..4).any(|row| row_text(&terminal, row).contains("line")));
+    }
+
+    #[test]
     fn synchronized_boundary_advance_stops_before_the_next_cava_frame() {
         let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
         let base_revision = terminal.revision();
