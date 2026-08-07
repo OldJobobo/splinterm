@@ -19,7 +19,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::geometry::{FontSize, FontSizingPolicy, TerminalPadding};
+use crate::{
+    geometry::{FontSize, FontSizingPolicy, TerminalPadding},
+    keymap::{KeymapProfile, ResolvedKeymap, resolve_keymap},
+};
 
 pub const APP_ID: &str = "com.oldjobobo.splinterm";
 pub const DEFAULT_FONT: &str = "JetBrains Mono Nerd Font:style=Regular";
@@ -50,6 +53,11 @@ pub struct AppConfig {
     pub theme_path: Option<PathBuf>,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
+    /// Effective, fully validated client-local keymap.
+    pub keymap: ResolvedKeymap,
+    pub keymap_profile: KeymapProfile,
+    pub keymap_path: Option<PathBuf>,
+    pub prefix_timeout_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -96,6 +104,10 @@ impl Default for AppConfig {
             theme_path: None,
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
+            keymap: ResolvedKeymap::default(),
+            keymap_profile: KeymapProfile::Splinterm,
+            keymap_path: None,
+            prefix_timeout_ms: 1_000,
         }
     }
 }
@@ -161,7 +173,8 @@ pub fn load_default() -> Result<ConfigLoad> {
             diagnostics: Vec::new(),
         });
     }
-    parse(&fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?)
+    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    parse_with_base(&text, path.parent().unwrap_or_else(|| Path::new(".")))
         .with_context(|| format!("parse {}", path.display()))
 }
 
@@ -170,6 +183,10 @@ pub fn load_default() -> Result<ConfigLoad> {
 /// # Errors
 /// Returns an error for malformed syntax or invalid supported values.
 pub fn parse(text: &str) -> Result<ConfigLoad> {
+    parse_with_base(text, &default_config_dir())
+}
+
+fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
     let mut config = AppConfig::default();
     let mut diagnostics = Vec::new();
     let mut explicit_font_policy_line = None;
@@ -374,16 +391,23 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
                 config.cursor_blink = parse_bool(value, index)?;
                 false
             }
+            "key-bindings.profile" => {
+                config.keymap_profile = KeymapProfile::parse(value)
+                    .with_context(|| format!("line {}: invalid keymap profile", index + 1))?;
+                false
+            }
+            "key-bindings.file" => {
+                let value = nonempty(value, index)?;
+                config.keymap_path = Some(expand_relative_path(&value, config_dir));
+                false
+            }
+            "key-bindings.prefix-timeout-ms" => {
+                config.prefix_timeout_ms = parse_range(value, 250, 5_000, index)?;
+                false
+            }
             key if key.starts_with("colors.") => {
                 diagnostics.push(format!(
                     "line {}: colors come from the active Omarchy theme or explicit main.theme JSON; {key} ignored",
-                    index + 1
-                ));
-                false
-            }
-            key if key.starts_with("key-bindings.") => {
-                diagnostics.push(format!(
-                    "line {}: built-in MVP key binding {key} is documented but not remappable",
                     index + 1
                 ));
                 false
@@ -399,6 +423,9 @@ pub fn parse(text: &str) -> Result<ConfigLoad> {
             "line {legacy}: legacy dpi-aware conflicts with font-sizing-policy on line {explicit}; remove the legacy key"
         );
     }
+    let keymap = resolve_keymap(config.keymap_profile, config.keymap_path.as_deref())?;
+    config.keymap = keymap.keymap;
+    diagnostics.extend(keymap.diagnostics);
     Ok(ConfigLoad {
         config,
         diagnostics,
@@ -449,6 +476,15 @@ fn expand_path(value: &str) -> PathBuf {
             .join(rest)
     } else {
         PathBuf::from(value)
+    }
+}
+
+fn expand_relative_path(value: &str, base: &Path) -> PathBuf {
+    let expanded = expand_path(value);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(expanded)
     }
 }
 
@@ -873,6 +909,9 @@ mod tests {
         let defaults = AppConfig::default();
         assert_eq!(defaults.font_size, FontSize::Pixels(14.0));
         assert_eq!(defaults.resize_delay_ms, 100);
+        assert_eq!(defaults.keymap_profile, KeymapProfile::Splinterm);
+        assert_eq!(defaults.keymap.bindings().len(), 31);
+        assert_eq!(defaults.prefix_timeout_ms, 1_000);
     }
 
     #[test]
@@ -983,6 +1022,21 @@ mod tests {
         assert!(parse("font-size=2").is_err());
         assert!(parse("[cursor]\nstyle=round").is_err());
         assert!(parse("login-shell=perhaps").is_err());
+    }
+
+    #[test]
+    fn keymap_selection_is_strict_and_resolves_the_builtin_profile() {
+        let loaded =
+            parse("[key-bindings]\nprofile=splinterm\nprefix-timeout-ms=750\nunknown=value\n")
+                .unwrap();
+        assert_eq!(loaded.config.keymap.profile(), KeymapProfile::Splinterm);
+        assert_eq!(loaded.config.keymap.bindings().len(), 31);
+        assert_eq!(loaded.config.prefix_timeout_ms, 750);
+        assert_eq!(loaded.diagnostics.len(), 1);
+        assert!(loaded.diagnostics[0].contains("key-bindings.unknown"));
+        assert!(parse("[key-bindings]\nprofile=missing\n").is_err());
+        assert!(parse("[key-bindings]\nprefix-timeout-ms=249\n").is_err());
+        assert!(parse("[key-bindings]\nprefix-timeout-ms=5001\n").is_err());
     }
     #[test]
     fn pane_divider_configuration_is_explicit_and_bounded() {

@@ -1,10 +1,10 @@
 use super::super::{
-    App, CommandPaletteShortcutAction, Connection, KeyEvent, KeyboardHandler, Keysym, Modifiers,
-    PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle, RawModifiers,
+    ActionId, App, CommandPaletteShortcutAction, Connection, KeyEvent, KeyboardHandler, Keysym,
+    Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle, RawModifiers,
     SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
     WindowTopologyCommand, command_palette_shortcut_action, font_zoom_action, pane_focus_action,
-    pane_topology_action, session_picker_shortcut_action, tab_action_dispatch_allowed,
-    tab_shortcut_action, wl_keyboard, wl_surface,
+    pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
+    tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
 };
 
 impl KeyboardHandler for App {
@@ -81,9 +81,9 @@ impl KeyboardHandler for App {
                 .session_picker_consumed_keys
                 .insert(event.raw_code);
         }
+        let shortcut = shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers);
         if let Some(action) = command_palette_shortcut_action(
-            event.keysym,
-            self.input.modifiers,
+            shortcut,
             false,
             self.tab_state.managed_tabs,
             !self.command_palette_available(),
@@ -100,12 +100,7 @@ impl KeyboardHandler for App {
             }
             return;
         }
-        if let Some(action) = tab_shortcut_action(
-            event.keysym,
-            self.input.modifiers,
-            false,
-            self.tab_state.managed_tabs,
-        ) {
+        if let Some(action) = tab_shortcut_action(shortcut, false, self.tab_state.managed_tabs) {
             self.modal
                 .session_picker_consumed_keys
                 .insert(event.raw_code);
@@ -145,8 +140,7 @@ impl KeyboardHandler for App {
             return;
         }
         if let Some(action) = session_picker_shortcut_action(
-            event.keysym,
-            self.input.modifiers,
+            shortcut,
             false,
             self.modal.session_picker.is_some()
                 || self.modal.trusted_consent.is_some()
@@ -180,7 +174,7 @@ impl KeyboardHandler for App {
             return;
         }
         if self.tab_state.topology_commands.is_some()
-            && let Some(action) = pane_topology_action(event.keysym, self.input.modifiers)
+            && let Some(action) = pane_topology_action(shortcut)
         {
             if let Some(target) = self.panes.focused_splint() {
                 let dojo_id = self.tab_state.active_dojo_id();
@@ -203,7 +197,7 @@ impl KeyboardHandler for App {
             }
             return;
         }
-        if let Some(action) = pane_focus_action(event.keysym, self.input.modifiers) {
+        if let Some(action) = pane_focus_action(shortcut) {
             let changed = match action {
                 PaneFocusAction::Direction(direction) => self.focus_direction(direction),
             };
@@ -215,21 +209,15 @@ impl KeyboardHandler for App {
             }
             return;
         }
-        if let Some(action) = font_zoom_action(event.keysym, self.input.modifiers) {
+        if let Some(action) = font_zoom_action(shortcut) {
             if let Err(error) = self.apply_font_zoom(action, queue_handle) {
                 self.scheduling.fail(error);
             }
             return;
         }
-        if self.input.modifiers.ctrl
-            && self.input.modifiers.shift
-            && matches!(event.keysym, Keysym::c | Keysym::C)
-        {
+        if shortcut == Some(ActionId::ClipboardCopy) {
             self.publish_clipboard(queue_handle, serial, false);
-        } else if self.input.modifiers.ctrl
-            && self.input.modifiers.shift
-            && matches!(event.keysym, Keysym::v | Keysym::V)
-        {
+        } else if shortcut == Some(ActionId::ClipboardPaste) {
             self.begin_clipboard_read(PasteTarget::Clipboard);
         } else {
             match self.handle_history_key(&event, queue_handle) {
@@ -283,9 +271,9 @@ impl KeyboardHandler for App {
         {
             return;
         }
+        let shortcut = shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers);
         if command_palette_shortcut_action(
-            event.keysym,
-            self.input.modifiers,
+            shortcut,
             true,
             self.tab_state.managed_tabs,
             !self.command_palette_available(),
@@ -297,22 +285,14 @@ impl KeyboardHandler for App {
                 .insert(event.raw_code);
             return;
         }
-        if tab_shortcut_action(
-            event.keysym,
-            self.input.modifiers,
-            true,
-            self.tab_state.managed_tabs,
-        )
-        .is_some()
-        {
+        if tab_shortcut_action(shortcut, true, self.tab_state.managed_tabs).is_some() {
             self.modal
                 .session_picker_consumed_keys
                 .insert(event.raw_code);
             return;
         }
         if session_picker_shortcut_action(
-            event.keysym,
-            self.input.modifiers,
+            shortcut,
             true,
             self.modal.session_picker.is_some()
                 || self.modal.trusted_consent.is_some()
@@ -329,7 +309,7 @@ impl KeyboardHandler for App {
             self.handle_key(&event, queue_handle);
             return;
         }
-        if let Some(action) = font_zoom_action(event.keysym, self.input.modifiers) {
+        if let Some(action) = font_zoom_action(shortcut) {
             if let Err(error) = self.apply_font_zoom(action, queue_handle) {
                 self.scheduling.fail(error);
             }

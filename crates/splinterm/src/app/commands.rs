@@ -99,6 +99,16 @@ pub(in crate::app) enum Command {
         #[arg(long, required = true)]
         stdio: bool,
     },
+    /// Validate local client configuration without contacting the daemon.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Inspect built-in or effective client keymaps.
+    Keymap {
+        #[command(subcommand)]
+        command: KeymapCommand,
+    },
     /// Validate, inspect, or reload the local persistent policy.
     Policy {
         #[command(subcommand)]
@@ -285,6 +295,22 @@ pub(in crate::app) enum Command {
     /// Private daemon-launched trusted consent surface.
     #[command(hide = true)]
     Consent,
+}
+
+#[derive(Clone, Copy, Debug, Subcommand)]
+pub(in crate::app) enum ConfigCommand {
+    /// Parse and resolve config.ini plus its selected keymap.
+    Check,
+}
+
+#[derive(Debug, Subcommand)]
+pub(in crate::app) enum KeymapCommand {
+    /// List packaged keymap profiles.
+    List,
+    /// Show the effective keymap, or one named built-in profile.
+    Show { profile: Option<String> },
+    /// Validate that the effective keymap has no overlapping chords.
+    Conflicts,
 }
 
 #[derive(Debug, Subcommand)]

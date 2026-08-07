@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use smithay_client_toolkit::seat::{
-    keyboard::{Keysym, Modifiers},
+    keyboard::Modifiers,
     pointer::{BTN_LEFT, BTN_MIDDLE},
 };
 use splinterm_core::SplintId;
@@ -69,22 +69,6 @@ pub(in crate::wayland) enum HistoryNavigation {
     PageUp,
     PageDown,
     ReturnToLive,
-}
-
-pub(in crate::wayland) fn history_navigation(
-    keysym: Keysym,
-    shift: bool,
-    detached: bool,
-) -> Option<HistoryNavigation> {
-    if !shift {
-        return None;
-    }
-    match keysym {
-        Keysym::Page_Up => Some(HistoryNavigation::PageUp),
-        Keysym::Page_Down => Some(HistoryNavigation::PageDown),
-        Keysym::End if detached => Some(HistoryNavigation::ReturnToLive),
-        _ => None,
-    }
 }
 
 pub(in crate::wayland) fn history_overlay_status(
@@ -420,24 +404,6 @@ mod tests {
         assert_eq!(
             pointer_axis_focus_target(true, false, None, Some(left)),
             None
-        );
-    }
-
-    #[test]
-    fn history_navigation_requires_shift_and_detached_end() {
-        assert_eq!(
-            history_navigation(Keysym::Page_Up, true, false),
-            Some(HistoryNavigation::PageUp)
-        );
-        assert_eq!(
-            history_navigation(Keysym::Page_Down, true, true),
-            Some(HistoryNavigation::PageDown)
-        );
-        assert_eq!(history_navigation(Keysym::Page_Up, false, true), None);
-        assert_eq!(history_navigation(Keysym::End, true, false), None);
-        assert_eq!(
-            history_navigation(Keysym::End, true, true),
-            Some(HistoryNavigation::ReturnToLive)
         );
     }
 

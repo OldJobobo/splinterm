@@ -153,6 +153,7 @@ pub(super) async fn run_live_multipane_window(
             theme,
             pane_divider_style: window_config.pane_divider_style,
             frame_title_mode: window_config.frame_title_mode,
+            keymap: window_config.keymap,
             ..WindowOptions::default()
         })
     })
@@ -266,6 +267,7 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
             theme,
             pane_divider_style: window_config.pane_divider_style,
             frame_title_mode: window_config.frame_title_mode,
+            keymap: window_config.keymap,
             ..WindowOptions::default()
         })
     });

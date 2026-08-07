@@ -11,7 +11,10 @@ use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::TerminalSnapshot;
 
-use crate::config::{CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
+use crate::{
+    config::{CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme},
+    keymap::ResolvedKeymap,
+};
 
 use super::{
     AuthorityStatus, SessionPickerUi, WindowCommand, WindowDojoIdentity, WindowTopologyCommand,
@@ -65,6 +68,8 @@ pub struct WindowOptions {
     pub theme: ResolvedTheme,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
+    /// Fully validated client-local keymap for this Window.
+    pub keymap: ResolvedKeymap,
     /// Multi-pane input. Empty retains the legacy one-pane fields above.
     pub panes: Vec<WindowPaneOptions>,
     pub layout: Option<LayoutNode>,
@@ -100,6 +105,7 @@ impl Default for WindowOptions {
             theme: ResolvedTheme::default(),
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
+            keymap: ResolvedKeymap::default(),
             panes: Vec::new(),
             layout: None,
             active_splint: None,

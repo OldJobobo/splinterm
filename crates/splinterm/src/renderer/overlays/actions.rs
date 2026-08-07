@@ -11,6 +11,7 @@ use crate::{
         command_descriptor, tab_menu_descriptor,
     },
     geometry::Rect,
+    keymap::ResolvedKeymap,
 };
 
 use super::{
@@ -354,6 +355,7 @@ pub(crate) fn paint_command_palette(
     layout: &CommandPaletteLayout,
     palette: SessionPickerPalette,
     state: &CommandPaletteUi,
+    keymap: &ResolvedKeymap,
     pressed: Option<BuiltInCommandId>,
     keyboard_focused: bool,
 ) -> Result<()> {
@@ -641,7 +643,7 @@ pub(crate) fn paint_command_palette(
                 canvas,
                 width,
                 height,
-                descriptor.shortcut,
+                descriptor.shortcut(keymap),
                 ChromeTextStyle::Regular,
                 scale_120,
                 renderer_generation,
@@ -1612,6 +1614,7 @@ mod tests {
         let mut canvas = vec![0_u8; 640 * 400 * 4];
         let before = canvas.clone();
         let mut cache = CommandPaletteTextCache::default();
+        let keymap = ResolvedKeymap::default();
         paint_command_palette(
             &mut cache,
             &RenderContext::new(u16::MAX),
@@ -1624,6 +1627,7 @@ mod tests {
             &layout,
             session_picker_palette(theme),
             &state,
+            &keymap,
             None,
             true,
         )
@@ -1643,6 +1647,7 @@ mod tests {
             &layout,
             session_picker_palette(theme),
             &state,
+            &keymap,
             None,
             true,
         )

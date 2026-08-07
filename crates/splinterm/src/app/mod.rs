@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod consent;
 mod human_output;
+mod keymap_cli;
 mod local_service;
 mod machine;
 mod pane_bridge;

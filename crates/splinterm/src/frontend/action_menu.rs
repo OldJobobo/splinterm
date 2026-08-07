@@ -2,6 +2,8 @@
 
 use splinterm_core::{Axis, DojoId, LairId, SplintId};
 
+use crate::keymap::{ActionId, ResolvedKeymap};
+
 use super::WindowTopologyCommand;
 
 const MAX_QUERY_BYTES: usize = 256;
@@ -536,7 +538,14 @@ pub(crate) struct BuiltInCommandDescriptor {
     pub(crate) category: CommandCategory,
     pub(crate) title: &'static str,
     pub(crate) keywords: &'static [&'static str],
-    pub(crate) shortcut: &'static str,
+    shortcut_action: Option<ActionId>,
+}
+
+impl BuiltInCommandDescriptor {
+    pub(crate) fn shortcut(self, keymap: &ResolvedKeymap) -> &str {
+        self.shortcut_action
+            .map_or("", |action| keymap.primary_shortcut(action))
+    }
 }
 
 pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 31] = [
@@ -545,217 +554,217 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 31] = [
         category: CommandCategory::Sessions,
         title: "Open recent sessions",
         keywords: &["open", "recent", "session", "lair", "dojo", "reopen"],
-        shortcut: "Ctrl+Shift+S",
+        shortcut_action: Some(ActionId::RecentSessions),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::NewSession,
         category: CommandCategory::Sessions,
         title: "New session",
         keywords: &["new", "session", "lair", "window"],
-        shortcut: "",
+        shortcut_action: Some(ActionId::NewSession),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::RenameCurrentTab,
         category: CommandCategory::Tabs,
         title: "Rename current tab",
         keywords: &["rename", "name", "current", "dojo", "tab"],
-        shortcut: "",
+        shortcut_action: Some(ActionId::RenameCurrentTab),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::NewDojo,
         category: CommandCategory::Tabs,
         title: "New Dojo",
         keywords: &["new", "dojo", "tab"],
-        shortcut: "Ctrl+Shift+D",
+        shortcut_action: Some(ActionId::NewDojo),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::PreviousDojo,
         category: CommandCategory::Tabs,
         title: "Previous Dojo",
         keywords: &["previous", "dojo", "tab", "left"],
-        shortcut: "Ctrl+Shift+Tab",
+        shortcut_action: Some(ActionId::PreviousDojo),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::NextDojo,
         category: CommandCategory::Tabs,
         title: "Next Dojo",
         keywords: &["next", "dojo", "tab", "right"],
-        shortcut: "Ctrl+Tab",
+        shortcut_action: Some(ActionId::NextDojo),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::CloseCurrentTab,
         category: CommandCategory::Tabs,
         title: "Close current tab",
         keywords: &["close", "detach", "current", "dojo", "tab"],
-        shortcut: "Ctrl+Shift+Q",
+        shortcut_action: Some(ActionId::CloseCurrentTab),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::CloseOtherTabs,
         category: CommandCategory::Tabs,
         title: "Close other tabs",
         keywords: &["close", "detach", "other", "dojo", "tabs"],
-        shortcut: "",
+        shortcut_action: Some(ActionId::CloseOtherTabs),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::TerminateCurrentDojo,
         category: CommandCategory::Tabs,
         title: "Terminate current Dojo…",
         keywords: &["terminate", "kill", "close", "current", "dojo", "panes"],
-        shortcut: "",
+        shortcut_action: Some(ActionId::TerminateCurrentDojo),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::SplitHorizontal,
         category: CommandCategory::Panes,
         title: "Split pane horizontally",
         keywords: &["split", "pane", "horizontal", "down"],
-        shortcut: "Ctrl+Shift+Enter",
+        shortcut_action: Some(ActionId::SplitHorizontal),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::SplitVertical,
         category: CommandCategory::Panes,
         title: "Split pane vertically",
         keywords: &["split", "pane", "vertical", "right"],
-        shortcut: "Ctrl+Shift+\\",
+        shortcut_action: Some(ActionId::SplitVertical),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::FocusLeft,
         category: CommandCategory::Panes,
         title: "Focus pane left",
         keywords: &["focus", "pane", "move", "left"],
-        shortcut: "Ctrl+Shift+Left",
+        shortcut_action: Some(ActionId::FocusLeft),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::FocusRight,
         category: CommandCategory::Panes,
         title: "Focus pane right",
         keywords: &["focus", "pane", "move", "right"],
-        shortcut: "Ctrl+Shift+Right",
+        shortcut_action: Some(ActionId::FocusRight),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::FocusUp,
         category: CommandCategory::Panes,
         title: "Focus pane up",
         keywords: &["focus", "pane", "move", "up"],
-        shortcut: "Ctrl+Shift+Up",
+        shortcut_action: Some(ActionId::FocusUp),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::FocusDown,
         category: CommandCategory::Panes,
         title: "Focus pane down",
         keywords: &["focus", "pane", "move", "down"],
-        shortcut: "Ctrl+Shift+Down",
+        shortcut_action: Some(ActionId::FocusDown),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::CloseFocusedPane,
         category: CommandCategory::Panes,
         title: "Close focused pane",
         keywords: &["close", "kill", "focused", "pane", "shell"],
-        shortcut: "Ctrl+Shift+W",
+        shortcut_action: Some(ActionId::CloseFocusedPane),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ResizePaneSmaller,
         category: CommandCategory::Panes,
         title: "Resize pane smaller",
         keywords: &["resize", "pane", "ratio", "smaller", "decrease"],
-        shortcut: "Ctrl+Shift+[",
+        shortcut_action: Some(ActionId::ResizePaneSmaller),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ResizePaneLarger,
         category: CommandCategory::Panes,
         title: "Resize pane larger",
         keywords: &["resize", "pane", "ratio", "larger", "increase"],
-        shortcut: "Ctrl+Shift+]",
+        shortcut_action: Some(ActionId::ResizePaneLarger),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::SearchScrollback,
         category: CommandCategory::History,
         title: "Search scrollback",
         keywords: &["search", "find", "history", "scrollback"],
-        shortcut: "Ctrl+Shift+F",
+        shortcut_action: Some(ActionId::SearchScrollback),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::PageUp,
         category: CommandCategory::History,
         title: "Page up",
         keywords: &["history", "scrollback", "page", "up", "older"],
-        shortcut: "Shift+PageUp",
+        shortcut_action: Some(ActionId::PageUp),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::PageDown,
         category: CommandCategory::History,
         title: "Page down",
         keywords: &["history", "scrollback", "page", "down", "newer"],
-        shortcut: "Shift+PageDown",
+        shortcut_action: Some(ActionId::PageDown),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ReturnToLive,
         category: CommandCategory::History,
         title: "Return to live output",
         keywords: &["history", "scrollback", "return", "live", "bottom"],
-        shortcut: "Shift+End",
+        shortcut_action: Some(ActionId::ReturnToLive),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ZoomIn,
         category: CommandCategory::View,
         title: "Zoom in",
         keywords: &["zoom", "font", "increase", "larger", "view"],
-        shortcut: "Ctrl++",
+        shortcut_action: Some(ActionId::ZoomIn),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ZoomOut,
         category: CommandCategory::View,
         title: "Zoom out",
         keywords: &["zoom", "font", "decrease", "smaller", "view"],
-        shortcut: "Ctrl+-",
+        shortcut_action: Some(ActionId::ZoomOut),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ResetZoom,
         category: CommandCategory::View,
         title: "Reset zoom",
         keywords: &["zoom", "font", "reset", "default", "view"],
-        shortcut: "Ctrl+0",
+        shortcut_action: Some(ActionId::ResetZoom),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::RequestControl,
         category: CommandCategory::Control,
         title: "Request control",
         keywords: &["request", "control", "transfer", "input"],
-        shortcut: "Ctrl+Shift+T",
+        shortcut_action: Some(ActionId::RequestControl),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ReleaseControl,
         category: CommandCategory::Control,
         title: "Release control",
         keywords: &["release", "control", "transfer", "input"],
-        shortcut: "Ctrl+Shift+L",
+        shortcut_action: Some(ActionId::ReleaseControl),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ForceControl,
         category: CommandCategory::Control,
         title: "Force control transfer",
         keywords: &["force", "control", "transfer", "input"],
-        shortcut: "Ctrl+Shift+U",
+        shortcut_action: Some(ActionId::ForceControl),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::RevokeAllAccess,
         category: CommandCategory::Control,
         title: "Revoke all access",
         keywords: &["revoke", "all", "access", "grants", "clients"],
-        shortcut: "Ctrl+Shift+R",
+        shortcut_action: Some(ActionId::RevokeAllAccess),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::AcceptControlTransfer,
         category: CommandCategory::Control,
         title: "Accept pending control transfer",
         keywords: &["accept", "pending", "control", "transfer", "yes"],
-        shortcut: "Ctrl+Shift+Y",
+        shortcut_action: Some(ActionId::AcceptControlTransfer),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::DenyControlTransfer,
         category: CommandCategory::Control,
         title: "Deny pending control transfer",
         keywords: &["deny", "pending", "control", "transfer", "no"],
-        shortcut: "Ctrl+Shift+N",
+        shortcut_action: Some(ActionId::DenyControlTransfer),
     },
 ];
 
@@ -1397,6 +1406,38 @@ mod tests {
         palette.append_text("split");
         palette.move_selection(1);
         assert_eq!(palette.context(), context);
+    }
+
+    #[test]
+    fn shortcut_labels_project_from_the_resolved_keymap() {
+        let keymap = ResolvedKeymap::default();
+        assert_eq!(
+            command_descriptor(BuiltInCommandId::RecentSessions).shortcut(&keymap),
+            "Ctrl+Shift+S"
+        );
+        assert_eq!(
+            command_descriptor(BuiltInCommandId::SplitVertical).shortcut(&keymap),
+            "Ctrl+Shift+\\"
+        );
+        assert_eq!(
+            command_descriptor(BuiltInCommandId::NewSession).shortcut(&keymap),
+            ""
+        );
+        let custom = crate::keymap::resolve_keymap_text(
+            crate::keymap::KeymapProfile::Splinterm,
+            "version = 1\n[[unbind]]\nsequence = [\"Ctrl+Shift+S\"]\n[[binding]]\nsequence = [\"Ctrl+Alt+S\"]\naction = \"session.recent\"",
+            std::path::Path::new("keybindings.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            command_descriptor(BuiltInCommandId::RecentSessions).shortcut(&custom.keymap),
+            "Ctrl+Alt+S"
+        );
+        assert!(
+            BUILT_IN_COMMANDS
+                .iter()
+                .all(|descriptor| descriptor.shortcut_action.is_some())
+        );
     }
 
     #[test]

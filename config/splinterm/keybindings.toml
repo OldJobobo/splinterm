@@ -1,0 +1,10 @@
+version = 1
+inherits = "splinterm"
+
+# Remove an inherited chord before assigning it elsewhere:
+# [[unbind]]
+# sequence = ["Ctrl+Shift+P"]
+#
+# [[binding]]
+# sequence = ["Ctrl+Alt+P"]
+# action = "app.command-palette"

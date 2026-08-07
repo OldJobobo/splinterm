@@ -13,6 +13,7 @@ mod box_drawing;
 pub mod config;
 pub mod frontend;
 pub mod geometry;
+pub mod keymap;
 pub mod pane;
 pub mod renderer;
 pub mod session_picker;

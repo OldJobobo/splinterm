@@ -45,9 +45,10 @@ opaque alpha and `blur=no` own no effect object. The protocol is still staging;
 the validated initial target is Hyprland 0.56.1 or newer, while other
 compositors require compatible version-1 blur capability. `alpha-mode=matching/all`
 remains unsupported. Other `[colors]` options direct users to the active
-Omarchy palette or an explicit `main.theme` JSON override, and `[key-bindings]`
-options explain that MVP bindings are not remappable. This
-avoids claiming arbitrary `foot.ini` compatibility.
+Omarchy palette or an explicit `main.theme` JSON override. `[key-bindings]`
+selects the typed built-in `splinterm` profile and an optional strict TOML
+overlay, so keyboard dispatch and command-palette shortcut labels share one
+action registry. This avoids claiming arbitrary `foot.ini` compatibility.
 
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste, Ctrl+Shift+S
 to open the native Recent Sessions picker, and Ctrl+Shift+P to open the
@@ -80,10 +81,87 @@ Ctrl+Shift+T requests transfer from the current controller; its trusted UI uses
 Ctrl+Shift+Y/N to accept/deny, while Ctrl+Shift+U opens separate trusted
 confirmation for forced takeover. Ctrl+Shift+F opens local literal scrollback
 search; Enter submits, Ctrl+N/P navigates, and Escape closes the trusted search
-surface. These control/search bindings are not terminal-controlled and are not
-currently remappable. Foot-compatible runtime zoom uses Ctrl+plus/equal/KP_Add and
-Ctrl+minus/KP_Subtract in 0.5-point steps; Ctrl+0/KP_0 resets the configured
-size. Terminal key mappings otherwise follow the implemented Foot/xterm behavior.
+surface. These control/search bindings are trusted application actions rather
+than terminal-controlled callbacks. Foot-compatible runtime zoom uses
+Ctrl+plus/equal/KP_Add and Ctrl+minus/KP_Subtract in 0.5-point steps; Ctrl+0/KP_0
+resets the configured size. Terminal key mappings otherwise follow the
+implemented Foot/xterm behavior.
+
+## Keymap configuration
+
+The top-level INI selects a built-in profile and optional overlay:
+
+```ini
+[key-bindings]
+profile=splinterm
+file=keybindings.toml
+prefix-timeout-ms=1000
+```
+
+`file` is optional. Relative paths resolve beside the selected `config.ini`;
+`~/` paths resolve through `HOME`. The timeout accepts 250–5000 milliseconds and
+is reserved for the prefix state machine implemented in the next milestone.
+Only `splinterm` is packaged in this milestone; selecting an unknown profile is
+a startup error that lists available names.
+
+The overlay is versioned TOML and inherits one built-in profile:
+
+```toml
+version = 1
+inherits = "splinterm"
+
+[[unbind]]
+sequence = ["Ctrl+Shift+P"]
+
+[[binding]]
+sequence = ["Ctrl+Alt+P"]
+action = "app.command-palette"
+```
+
+Every table rejects unknown fields. A sequence currently contains exactly one
+direct chord; prefix sequences fail explicitly until the prefix-key milestone.
+Modifier names are `Ctrl`, `Shift`, `Alt`, and `Super` (`Control` and `Logo` are
+accepted aliases). Letter case never implies Shift. Supported keys are letters,
+Tab, Enter/KP_Enter, arrows, PageUp/PageDown, End, backslash, brackets,
+Plus/Equal/Minus, zero, and KP_0. Empty or duplicate modifiers and unsupported
+keys fail with source context.
+
+An overlay applies unbinds before bindings. An unmatched unbind is a diagnostic;
+duplicate or semantically overlapping chords are errors naming both sources.
+Only closed application actions can be selected—configuration cannot register
+shell commands or callbacks. Bindable action IDs are:
+
+```text
+app.command-palette       session.recent
+clipboard.copy            clipboard.paste
+dojo.new                  dojo.previous
+dojo.next                 dojo.close-tab
+pane.split-below          pane.split-right
+pane.focus-left           pane.focus-right
+pane.focus-up             pane.focus-down
+pane.close                pane.resize-smaller
+pane.resize-larger        history.search
+history.page-up            history.page-down
+history.return-live       view.zoom-in
+view.zoom-out              view.zoom-reset
+control.request           control.release
+control.force             control.accept-transfer
+control.deny-transfer     access.revoke-all
+```
+
+Local inspection never contacts `splinterd`:
+
+```text
+splinterm config check
+splinterm keymap list
+splinterm keymap show [splinterm]
+splinterm keymap conflicts
+```
+
+`config check` parses the INI and selected overlay together. `keymap show` without
+a name displays the effective keymap with source locations; with a name it shows
+the packaged profile. Invalid configuration is never partially applied: Window
+startup fails before mapping rather than falling back to a half-resolved keymap.
 
 ## Daily launch and session reopening
 

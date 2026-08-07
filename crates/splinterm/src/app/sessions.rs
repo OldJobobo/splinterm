@@ -154,6 +154,7 @@ fn choose_recent_session(
         cursor_style: config.cursor_style,
         cursor_blink: false,
         theme,
+        keymap: config.keymap.clone(),
         ..WindowOptions::default()
     })?;
     Ok(receiver.try_recv().ok())

@@ -38,6 +38,7 @@ use super::pane_bridge::{
 use super::{
     consent::run_consent_client,
     human_output::{print_lairs, print_response},
+    keymap_cli::{run_config_command, run_keymap_command},
     local_service::{
         confirm_kill, run_policy_command, run_relay_command, run_reset_command, usage_error,
     },
@@ -63,6 +64,8 @@ pub(crate) async fn run() -> Result<()> {
             | Command::Window { .. }
             | Command::Launch { .. }
             | Command::Consent
+            | Command::Config { .. }
+            | Command::Keymap { .. }
             | Command::Policy { .. }
             | Command::Relay { .. }
             | Command::Reset { .. }
@@ -118,6 +121,12 @@ pub(crate) async fn run() -> Result<()> {
     }
     if schema_major.is_some() || timeout_ms.is_some() {
         usage_error("--schema-major and --timeout-ms require --output json or ndjson");
+    }
+    if let Command::Config { command } = command {
+        return run_config_command(command);
+    }
+    if let Command::Keymap { command } = command {
+        return run_keymap_command(command);
     }
     if let Command::Policy { command } = command {
         return run_policy_command(command);
@@ -178,6 +187,8 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
         | Command::Window { .. }
         | Command::Launch { .. }
         | Command::Consent
+        | Command::Config { .. }
+        | Command::Keymap { .. }
         | Command::Policy { .. }
         | Command::Relay { .. }
         | Command::Reset { .. } => {

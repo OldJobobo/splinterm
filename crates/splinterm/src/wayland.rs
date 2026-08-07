@@ -152,6 +152,7 @@ use crate::renderer::{
     write_ppm,
 };
 use crate::{
+    keymap::{ActionId, ResolvedKeymap},
     tab::{DojoTab, WindowTabSet, sanitized_tab_label},
     viewport::ScrollbackViewport,
 };
@@ -182,11 +183,10 @@ use input::{
     MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile, PressOwner,
     SessionPickerShortcutAction, TabShortcutAction, WheelAccumulator, WheelOutcome,
     application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
-    font_zoom_action, history_navigation, history_overlay_status, history_return_to_live_hit,
-    key_input, mouse_report, pane_focus_action, pane_topology_action, picker_ime_reconcile,
-    picker_release_activation, pointer_axis_focus_target, reconciled_focus_report,
-    session_picker_shortcut_action, tab_action_dispatch_allowed, tab_shortcut_action,
-    take_press_owner,
+    font_zoom_action, history_overlay_status, history_return_to_live_hit, key_input, mouse_report,
+    pane_focus_action, pane_topology_action, picker_ime_reconcile, picker_release_activation,
+    pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
+    shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
 };
 use selection::{
     CellPosition, Selection, SelectionEndpoint, selection_display_bounds, selection_endpoint,
@@ -776,6 +776,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             full_redraw: true,
         },
         input: InputState {
+            keymap: options.keymap,
             text_input: None,
             text_input_seat: None,
             ime: ImeState::default(),
@@ -1685,6 +1686,7 @@ struct DividerDrag {
     reason = "independent keyboard, IME, focus-reporting, and cursor-blink protocol flags"
 )]
 struct InputState {
+    keymap: ResolvedKeymap,
     text_input: Option<ZwpTextInputV3>,
     text_input_seat: Option<wl_seat::WlSeat>,
     ime: ImeState,
@@ -3096,13 +3098,15 @@ impl App {
         event: &KeyEvent,
         queue_handle: &QueueHandle<Self>,
     ) -> Result<bool> {
-        let Some(navigation) = history_navigation(
-            event.keysym,
-            self.input.modifiers.shift,
-            !self.panes.pane.scrollback_viewport.is_live(),
-        ) else {
-            return Ok(false);
-        };
+        let navigation =
+            match shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers) {
+                Some(ActionId::PageUp) => HistoryNavigation::PageUp,
+                Some(ActionId::PageDown) => HistoryNavigation::PageDown,
+                Some(ActionId::ReturnToLive) if !self.panes.pane.scrollback_viewport.is_live() => {
+                    HistoryNavigation::ReturnToLive
+                }
+                _ => return Ok(false),
+            };
         let page = self
             .panes
             .pane
@@ -5117,93 +5121,85 @@ impl App {
             self.update_window_title();
             return;
         }
-        if self.input.modifiers.ctrl
-            && self.input.modifiers.shift
-            && matches!(event.keysym, Keysym::r | Keysym::R)
-        {
-            let ids: Vec<_> = self
-                .panes
-                .pane
-                .authority
-                .grants
-                .iter()
-                .map(|(id, _)| *id)
-                .collect();
-            for id in ids {
-                self.send_command(WindowCommand::RevokeAccess(id));
+        match shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers) {
+            Some(ActionId::RevokeAllAccess) => {
+                let ids: Vec<_> = self
+                    .panes
+                    .pane
+                    .authority
+                    .grants
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in ids {
+                    self.send_command(WindowCommand::RevokeAccess(id));
+                }
+                self.panes.pane.authority.grants.clear();
+                if let Some(snapshot) = &self.panes.pane.snapshot {
+                    self.surface.window.set_title(window_title(
+                        self.presentation
+                            .title_override
+                            .as_deref()
+                            .or(Some(&snapshot.title)),
+                        self.panes.pane.controller_active,
+                        &self.panes.pane.authority,
+                        self.panes.pane.pending_control_transfer.is_some(),
+                        Some(&self.panes.pane.search),
+                    ));
+                }
+                return;
             }
-            self.panes.pane.authority.grants.clear();
-            if let Some(snapshot) = &self.panes.pane.snapshot {
-                self.surface.window.set_title(window_title(
-                    self.presentation
-                        .title_override
-                        .as_deref()
-                        .or(Some(&snapshot.title)),
-                    self.panes.pane.controller_active,
-                    &self.panes.pane.authority,
-                    self.panes.pane.pending_control_transfer.is_some(),
-                    Some(&self.panes.pane.search),
-                ));
+            Some(ActionId::RequestControl) => {
+                self.send_command(WindowCommand::RequestControlTransfer);
+                return;
             }
-            return;
-        }
-        if self.input.modifiers.ctrl && self.input.modifiers.shift {
-            match event.keysym {
-                Keysym::t | Keysym::T => {
-                    self.send_command(WindowCommand::RequestControlTransfer);
-                    return;
-                }
-                Keysym::f | Keysym::F => {
-                    self.panes.pane.search.input = Some(String::new());
-                    self.panes.pane.search.matches.clear();
-                    self.panes.pane.search.next_cursor = None;
-                    self.update_window_title();
-                    return;
-                }
-                Keysym::u | Keysym::U => {
-                    self.send_command(WindowCommand::ForceControlTransfer);
-                    return;
-                }
-                Keysym::y | Keysym::Y => {
-                    if let Some(transfer_id) = self.panes.pane.pending_control_transfer.take() {
-                        self.send_command(WindowCommand::DecideControlTransfer {
-                            transfer_id,
-                            decision: ControlTransferDecision::Accept,
-                        });
-                    }
-                    return;
-                }
-                Keysym::n | Keysym::N => {
-                    if let Some(transfer_id) = self.panes.pane.pending_control_transfer.take() {
-                        self.send_command(WindowCommand::DecideControlTransfer {
-                            transfer_id,
-                            decision: ControlTransferDecision::Deny,
-                        });
-                    }
-                    return;
-                }
-                _ => {}
+            Some(ActionId::SearchScrollback) => {
+                self.panes.pane.search.input = Some(String::new());
+                self.panes.pane.search.matches.clear();
+                self.panes.pane.search.next_cursor = None;
+                self.update_window_title();
+                return;
             }
-        }
-        if self.input.modifiers.ctrl
-            && self.input.modifiers.shift
-            && matches!(event.keysym, Keysym::l | Keysym::L)
-        {
-            self.send_command(WindowCommand::ReleaseControl);
-            self.panes.pane.controller_active = false;
-            if let Some(snapshot) = &self.panes.pane.snapshot {
-                self.surface.window.set_title(window_title(
-                    self.presentation
-                        .title_override
-                        .as_deref()
-                        .or(Some(&snapshot.title)),
-                    self.panes.pane.controller_active,
-                    &self.panes.pane.authority,
-                    self.panes.pane.pending_control_transfer.is_some(),
-                    Some(&self.panes.pane.search),
-                ));
+            Some(ActionId::ForceControl) => {
+                self.send_command(WindowCommand::ForceControlTransfer);
+                return;
             }
-            return;
+            Some(ActionId::AcceptControlTransfer) => {
+                if let Some(transfer_id) = self.panes.pane.pending_control_transfer.take() {
+                    self.send_command(WindowCommand::DecideControlTransfer {
+                        transfer_id,
+                        decision: ControlTransferDecision::Accept,
+                    });
+                }
+                return;
+            }
+            Some(ActionId::DenyControlTransfer) => {
+                if let Some(transfer_id) = self.panes.pane.pending_control_transfer.take() {
+                    self.send_command(WindowCommand::DecideControlTransfer {
+                        transfer_id,
+                        decision: ControlTransferDecision::Deny,
+                    });
+                }
+                return;
+            }
+            Some(ActionId::ReleaseControl) => {
+                self.send_command(WindowCommand::ReleaseControl);
+                self.panes.pane.controller_active = false;
+                if let Some(snapshot) = &self.panes.pane.snapshot {
+                    self.surface.window.set_title(window_title(
+                        self.presentation
+                            .title_override
+                            .as_deref()
+                            .or(Some(&snapshot.title)),
+                        self.panes.pane.controller_active,
+                        &self.panes.pane.authority,
+                        self.panes.pane.pending_control_transfer.is_some(),
+                        Some(&self.panes.pane.search),
+                    ));
+                }
+                return;
+            }
+            _ => {}
         }
         if self.presentation.evidence_close_shortcuts
             && matches!(event.keysym, Keysym::Escape | Keysym::q | Keysym::Q)
@@ -7243,6 +7239,7 @@ impl App {
                 layout,
                 session_picker_palette(self.presentation.theme),
                 palette,
+                &self.input.keymap,
                 self.modal.command_palette_pressed,
                 self.input.keyboard_focused,
             )?;
