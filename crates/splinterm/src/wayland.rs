@@ -826,7 +826,6 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
                 search: SearchUiState::default(),
                 authority: options.authority,
                 last_resize: None,
-                initial_resize_requires_control: false,
                 prepare_dirty_rows: Vec::new(),
                 raster_dirty_rows: Vec::new(),
                 surface_dirty_rows: Vec::new(),
@@ -1008,7 +1007,6 @@ struct PaneView {
     search: SearchUiState,
     authority: AuthorityStatus,
     last_resize: Option<(u16, u16, u16, u16)>,
-    initial_resize_requires_control: bool,
     prepare_dirty_rows: Vec<bool>,
     raster_dirty_rows: Vec<bool>,
     surface_dirty_rows: Vec<bool>,
@@ -1158,9 +1156,7 @@ impl PaneView {
 
     #[cfg(test)]
     fn from_inactive_options(options: WindowPaneOptions, scale_120: u32) -> Result<Self> {
-        let mut pane = Self::from_options(options, scale_120)?;
-        pane.initial_resize_requires_control = !pane.controller_active;
-        Ok(pane)
+        Self::from_options(options, scale_120)
     }
 
     fn from_inactive_options_with_context(
@@ -1168,9 +1164,7 @@ impl PaneView {
         scale_120: u32,
         context: &RenderContext,
     ) -> Result<Self> {
-        let mut pane = Self::from_options_with_context(options, scale_120, context)?;
-        pane.initial_resize_requires_control = !pane.controller_active;
-        Ok(pane)
+        Self::from_options_with_context(options, scale_120, context)
     }
 
     #[cfg(test)]
@@ -1219,7 +1213,6 @@ impl PaneView {
             search: SearchUiState::default(),
             authority: options.authority,
             last_resize: None,
-            initial_resize_requires_control: false,
             prepare_dirty_rows: Vec::new(),
             raster_dirty_rows: Vec::new(),
             surface_dirty_rows: Vec::new(),
@@ -4869,17 +4862,7 @@ impl App {
         logical_height: u32,
         scale_120: u32,
     ) -> Result<()> {
-        Self::emit_pane_resize(
-            pane,
-            logical_width,
-            logical_height,
-            scale_120,
-            pane.controller_active || pane.initial_resize_requires_control,
-        )?;
-        if pane.last_resize.is_some() {
-            pane.initial_resize_requires_control = false;
-        }
-        Ok(())
+        Self::emit_pane_resize(pane, logical_width, logical_height, scale_120, true)
     }
 
     fn emit_inactive_pane_resize(
@@ -4888,17 +4871,9 @@ impl App {
         logical_height: u32,
         scale_120: u32,
     ) -> Result<()> {
-        Self::emit_pane_resize(
-            pane,
-            logical_width,
-            logical_height,
-            scale_120,
-            pane.controller_active || pane.initial_resize_requires_control,
-        )?;
-        if pane.last_resize.is_some() {
-            pane.initial_resize_requires_control = false;
-        }
-        Ok(())
+        // Every visible pane must resize immediately. Deferring an uncontrolled
+        // pane leaves its reflowed history stale until later input claims control.
+        Self::emit_pane_resize(pane, logical_width, logical_height, scale_120, true)
     }
 
     fn emit_pane_resize(
@@ -8661,7 +8636,7 @@ mod tests {
     }
 
     #[test]
-    fn uncontrolled_opened_tab_claims_control_for_its_first_active_resize() {
+    fn uncontrolled_opened_tab_claims_control_for_every_active_resize() {
         let splint = Splint::shell(PathBuf::from("/tmp"));
         let splint_id = splint.id;
         let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
@@ -8689,19 +8664,17 @@ mod tests {
         )
         .unwrap();
         let mut pane = view.pane;
-        assert!(pane.initial_resize_requires_control);
 
         App::emit_active_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR).unwrap();
         assert!(matches!(
             command_receiver.try_recv().unwrap(),
             WindowCommand::Resize { .. }
         ));
-        assert!(!pane.initial_resize_requires_control);
 
         App::emit_active_pane_resize(&mut pane, 640, 480, SCALE_DENOMINATOR).unwrap();
         assert!(matches!(
             command_receiver.try_recv().unwrap(),
-            WindowCommand::PrepareResize { .. }
+            WindowCommand::Resize { .. }
         ));
     }
 
@@ -8731,7 +8704,7 @@ mod tests {
     }
 
     #[test]
-    fn uncontrolled_inactive_pane_claims_control_for_its_first_resize() {
+    fn uncontrolled_visible_inactive_pane_claims_control_for_every_resize() {
         let splint_id = SplintId::new();
         let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
         let (commands, mut command_receiver) = tokio::sync::mpsc::channel(2);
@@ -8753,12 +8726,11 @@ mod tests {
             command_receiver.try_recv().unwrap(),
             WindowCommand::Resize { .. }
         ));
-        assert!(!pane.initial_resize_requires_control);
 
         App::emit_inactive_pane_resize(&mut pane, 640, 480, SCALE_DENOMINATOR).unwrap();
         assert!(matches!(
             command_receiver.try_recv().unwrap(),
-            WindowCommand::PrepareResize { .. }
+            WindowCommand::Resize { .. }
         ));
     }
 

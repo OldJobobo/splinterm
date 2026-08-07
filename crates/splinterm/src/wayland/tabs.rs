@@ -286,8 +286,7 @@ impl DojoTabView {
             .position(|pane| pane.snapshot.splint_id == focused)
             .context("opened tab focus is absent from its panes")?;
         let active = panes.remove(active_index);
-        let mut pane = PaneView::from_options_with_context(active, scale_120, context)?;
-        pane.initial_resize_requires_control = !pane.controller_active;
+        let pane = PaneView::from_options_with_context(active, scale_120, context)?;
         let inactive_panes = panes
             .into_iter()
             .map(|pane| PaneView::from_inactive_options_with_context(pane, scale_120, context))
