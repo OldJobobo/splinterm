@@ -1,0 +1,10 @@
+Active Lair (1)
+
+terminal-1786078694-4117631
+  Lair    99afd1a9-97de-4806-b2a5-8df6902053d5
+  Dojo    terminal-1786078716  d0446db7-163e-4f4f-8bc0-9912f981a41c
+    running  shell  534ff23e-54c7-45c4-bece-8d92a8deb28e
+
+Stop one running Splint with: splinterm kill <SPLINT_ID>
+12 inactive Lairs hidden.
+Show complete history with: splinterm list --all

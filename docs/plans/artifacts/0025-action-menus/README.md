@@ -44,3 +44,11 @@ expanded implementation. Its formal attestation remained rejected because the
 reviewer's sandbox could not read the supplied `/tmp` manifest/diff artifacts;
 that evidence-delivery limitation is recorded rather than represented as a
 source acceptance.
+
+## Second approved expansion
+
+The later tab-focused six-row menu, trusted rename/termination prompts, closed
+31-command palette, exact multi-pane termination, and frontend reconciliation
+were validated on 2026-08-07. The report, before/after topology, full workspace
+output, and guarded screenshots are under
+[`second-expansion/`](second-expansion/README.md).

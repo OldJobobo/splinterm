@@ -1,6 +1,6 @@
 # Plan 0025: Command palette and tab context menus
 
-- **Status:** Milestones 0–3 and the first post-approval palette and balanced context-menu expansions are implemented, validated, published, and installed
+- **Status:** First expansion published and installed; second approved 31-command/tab-action expansion implemented, reviewed, and validated; awaiting publication, packaging, and installation decisions
 - **Date:** 2026-08-06
 - **Depends on:** [Plan 0017](0017-inline-session-picker-overlay.md), [Plan 0019](0019-dojo-tabs.md)
 
@@ -122,9 +122,66 @@ disappears before execution.
 - Arrow keys navigate; Enter executes; Escape closes. No typeahead is required
   for the two-item MVP.
 
+### Second post-approval tab and palette expansion
+
+The user approved a second bounded expansion after the first expanded slice was
+installed. The tab context menu becomes explicitly Dojo/tab-oriented and keeps
+six compact rows in this order:
+
+1. `Rename Tab`;
+2. `Activate Tab`;
+3. `New Dojo`;
+4. detach-only `Close Tab`;
+5. detach-only `Close Other Tabs`; and
+6. destructive `Terminate Dojo…`.
+
+Horizontal and vertical split leave the tab menu and remain discoverable in the
+command palette. `Rename Tab` is the primary first row in both surfaces.
+Rename opens a trusted Window-local bounded editor prefilled from the exact
+captured Dojo identity. The first printable edit replaces the prefilled value;
+Backspace edits at Unicode scalar boundaries; Enter submits a nonempty name of
+at most 128 UTF-8 bytes; Escape cancels. Controls and bidi-formatting characters
+are rejected. Submission carries the captured `DojoId` and never resolves the
+currently active tab again.
+
+`Terminate Dojo…` never dispatches directly. It opens a second trusted popup
+that names the captured Dojo and its captured pane count. `Cancel` is selected
+by default. Arrow/Tab changes the decision, Enter activates the selected button,
+and Escape always cancels. Confirmation retains the exact captured
+`(SplintId, incarnation)` set, rejects pane-set or incarnation drift, sends
+`Request::KillSplint` for each captured live runtime, then sends
+`Request::CloseDojo` for the exact captured `DojoId` at the refreshed topology
+revision. A disappeared target settles cleanly and must not retarget or expand
+to a newly added pane. The popup owns keyboard, pointer, paste, IME, focus-report, selection,
+URL, tab, divider, and terminal-mouse input just like the existing action
+surfaces.
+
+The command palette expands from 15 to this closed 31-command catalog:
+
+| Category | Added commands |
+| --- | --- |
+| Session | New session |
+| Tab | Rename current tab; Close other tabs; Terminate current Dojo… |
+| Pane | Resize pane smaller; Resize pane larger |
+| History | Search scrollback; Page up; Page down; Return to live |
+| Control | Request control; Release control; Force control transfer; Revoke all access; Accept pending transfer; Deny pending transfer |
+
+The existing 15 Session/Tab/Pane/View commands remain. Availability is captured
+when the palette opens: close-others requires captured other tabs; history return
+requires a detached viewport; control commands reflect captured controller,
+grant, and pending-transfer state; directional and adjacent-tab actions retain
+their existing exact destinations. Execution revalidates only the captured
+identity or token and never substitutes a newer active target.
+
+Clipboard copy/paste remain outside this catalog because palette activation does
+not own the fresh Wayland keyboard serial needed for correct clipboard
+ownership. Restore/relaunch/kill-arbitrary-session actions remain deferred until
+a separate exact-target picker exists. Shell, plugin, terminal-content, and
+automation-provided actions remain prohibited.
+
 ### Remaining deferred expansion
 
-The approved first palette expansion does not authorize these broader surfaces:
+The approved expansions do not authorize these broader surfaces:
 
 - close-tabs-to-the-right, duplicate, rename, detach-to-window, or tab reordering
   commands;
@@ -497,6 +554,34 @@ cargo test --workspace
 git diff --check
 ```
 
+### Milestone 5 — rename and destructive-confirmation contracts
+
+1. Add exact captured Dojo name/id/count prompt state with bounded rename editing.
+2. Add `WindowTopologyCommand::RenameDojo` and `TerminateDojo` manager paths
+   backed by existing `Request::RenameDojo`, `Request::KillSplint`, and
+   `Request::CloseDojo` messages.
+3. Add deterministic rename and confirmation layouts, CPU painting, hit testing,
+   default-cancel selection, and destructive-state styling.
+4. Prove stale/disappeared targets reject without fallback and termination never
+   runs before affirmative popup activation.
+
+### Milestone 6 — tab-focused menu and 31-command palette
+
+1. Replace tab-menu split rows with primary rename and confirmed termination.
+2. Add the 16 approved palette commands and exact captured availability state.
+3. Reuse existing local search/history/control/ratio behavior rather than
+   synthesizing terminal key input.
+4. Preserve committed geometry, same-target pointer activation, modal isolation,
+   IME/focus reconciliation, and bounded text caches across nested prompts.
+
+### Milestone 7 — expanded closure
+
+Run focused action/prompt/renderer/topology tests, the full workspace validation
+ladder, fresh read-only review, and separately approved isolated graphical smoke.
+Do not install or advertise this expansion until confirmation default-cancel,
+rename bounds, inactive-tab exact targeting, and daemon termination semantics
+all have recorded evidence.
+
 ## Non-graphical test contract
 
 Focused tests must cover:
@@ -603,15 +688,56 @@ Pacman. Post-install verification recorded:
 The pre-install rollback is
 `~/.local/state/splinterm/rollback/20260806-194513-pre-b515caa`.
 
+## Second-expansion implementation record
+
+The second approved tab-focused/31-command expansion was implemented on
+2026-08-07 without touching the unrelated image-spike benchmarking work.
+Non-graphical validation recorded:
+
+- `cargo check -p splinterm --all-targets` passed;
+- `cargo test -p splinterm --lib`: 268 passed, 1 ignored;
+- `cargo clippy -p splinterm --all-targets` passed with the existing warning
+  baseline and no newly reported warning in the changed action paths;
+- `cargo test --workspace -- --test-threads=1` passed;
+- `cargo fmt --all --check` and `git diff --check` passed; and
+- two fresh read-only reviews (protocol/topology and modal/UI lifecycle) reported
+  no blocker or fix worth doing now.
+
+A parallel workspace run first exposed one timing-sensitive unchanged MCP stdio
+assertion; the exact test passed immediately in serialized isolation, and the
+subsequent serialized full workspace run passed.
+
+Separately authorized isolated graphical validation on workspace 8 / `DP-2`
+recorded the searchable 31-command catalog, prefilled rename, the exact six-row
+inactive-tab menu, default-cancel termination, and inactive-tab targeting without
+activation. The first affirmative attempt exposed that `Request::CloseDojo`
+rejects a Dojo containing live Splints. The corrected command therefore captures
+exact `(SplintId, incarnation)` pairs, revalidates the complete set before every
+serial kill, kills only captured live runtimes, refreshes topology, and closes the
+exact Dojo with bounded stale/not-found reconciliation. A later pass exposed
+stale tab-strip pixels after successful inactive-tab removal; explicit tab-label
+cache invalidation and a full redraw fixed the final frontend reconciliation.
+
+The final guarded case removed the exact inactive two-pane Dojo and both captured
+Splints, retained the active Dojo and running Splint, and repainted to exactly one
+visible tab. Durable evidence is stored under
+[`artifacts/0025-action-menus/second-expansion/`](artifacts/0025-action-menus/second-expansion/README.md).
+A fresh read-only review found no captured-identity or default-cancel blocker and
+requested bounded drift/race hardening; those findings were applied before the
+final full workspace and graphical passes. Every isolated process was removed,
+production daemon PID `3194395` remained active, and the original Foot focus and
+cursor were restored. Publication, packaging, and installation have not been
+authorized or performed for this second expansion.
+
 ## Stop gates
 
 Stop for user input before:
 
 - changing the opening binding or making bindings configurable;
-- adding more than the locked MVP actions;
+- adding actions beyond the closed 31-command palette and six-row tab menu;
 - exposing shell, plugin, terminal-content, automation, or requester-provided
   commands;
-- adding destructive Dojo/Splint lifecycle operations to either surface;
+- adding further destructive Dojo/Splint lifecycle operations to either surface;
 - changing tab close from detach-only behavior;
 - enabling IME composition inside palette search rather than the bounded direct
   UTF-8 MVP path;
@@ -645,3 +771,15 @@ The initial feature slice was accepted when:
 11. The two explicit design-review stops occur before command/menu expansion.
 12. Independent review reports no blocker or fix worth doing now, with recorded
     validation and review evidence as required by `AGENTS.md`.
+13. The second approved expansion exposes exactly the documented 31-command
+    catalog and six-row tab-focused context menu.
+14. Rename is prefilled, UTF-8 bounded, control/bidi sanitized, nonempty, and
+    dispatches only the captured `DojoId`.
+15. Termination always opens a named confirmation with captured pane count and
+    Cancel selected by default; only affirmative activation kills the exact
+    captured Splint incarnations and then sends `Request::CloseDojo`.
+16. Detach-only close actions remain distinct from daemon-side Dojo termination.
+17. History and control actions reject a changed focused `SplintId`; pending
+    transfer decisions retain the captured transfer token and access revocation
+    retains the captured grant set.
+18. Clipboard and arbitrary saved-session actions remain excluded.
