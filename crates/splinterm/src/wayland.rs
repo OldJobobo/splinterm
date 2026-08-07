@@ -176,12 +176,12 @@ use damage::{
     terminal_draw_waits_for_frame,
 };
 use input::{
-    CommandPaletteShortcutAction, FontZoomAction, HistoryNavigation, MouseAction, PaneFocusAction,
-    PaneTopologyAction, PickerImeReconcile, PressOwner, SessionPickerShortcutAction,
-    TabShortcutAction, WheelAccumulator, WheelOutcome, application_motion, classify_press,
-    clipboard_read_is_current, command_palette_shortcut_action, font_zoom_action,
-    history_navigation, history_overlay_status, history_return_to_live_hit, key_input,
-    mouse_report, pane_focus_action, pane_topology_action, picker_ime_reconcile,
+    CommandPaletteShortcutAction, FontZoomAction, HistoryNavigation, ModalPointerFrame,
+    MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile, PressOwner,
+    SessionPickerShortcutAction, TabShortcutAction, WheelAccumulator, WheelOutcome,
+    application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
+    font_zoom_action, history_navigation, history_overlay_status, history_return_to_live_hit,
+    key_input, mouse_report, pane_focus_action, pane_topology_action, picker_ime_reconcile,
     picker_release_activation, pointer_axis_focus_target, reconciled_focus_report,
     session_picker_shortcut_action, tab_action_dispatch_allowed, tab_shortcut_action,
     take_press_owner,

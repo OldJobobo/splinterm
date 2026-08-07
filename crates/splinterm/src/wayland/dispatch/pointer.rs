@@ -1,7 +1,7 @@
 use super::super::{
-    App, BTN_LEFT, Connection, MouseAction, MouseTracking, PasteTarget, PointerEvent,
-    PointerEventKind, PointerHandler, PressOwner, QueueHandle, WaylandSurface, WindowCommand,
-    application_motion, classify_press, history_return_to_live_hit, mouse_report,
+    App, BTN_LEFT, Connection, ModalPointerFrame, MouseAction, MouseTracking, PasteTarget,
+    PointerEvent, PointerEventKind, PointerHandler, PressOwner, QueueHandle, WaylandSurface,
+    WindowCommand, application_motion, classify_press, history_return_to_live_hit, mouse_report,
     pointer_axis_focus_target, take_press_owner, url_at, wl_pointer,
 };
 
@@ -17,7 +17,7 @@ impl PointerHandler for App {
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
-        let modal_frame = self.modal.input_modal_open();
+        let modal_frame = ModalPointerFrame::new(self.modal.input_modal_open());
         let mut picker_changed = false;
         let mut pane_focus_changed = false;
         let mut pane_divider_changed = false;
@@ -25,7 +25,7 @@ impl PointerHandler for App {
             if &event.surface != self.surface.window.wl_surface() {
                 continue;
             }
-            if modal_frame || self.modal.input_modal_open() {
+            if modal_frame.owns_event(self.modal.input_modal_open()) {
                 picker_changed |= if self.modal.command_palette.is_some() {
                     self.handle_command_palette_pointer(event)
                 } else if self.modal.tab_context_menu.is_some() {

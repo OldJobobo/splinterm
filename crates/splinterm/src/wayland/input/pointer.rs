@@ -193,6 +193,21 @@ pub(in crate::wayland) const fn clipboard_read_is_current(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::wayland) struct ModalPointerFrame {
+    owned_at_start: bool,
+}
+
+impl ModalPointerFrame {
+    pub(in crate::wayland) const fn new(owned_at_start: bool) -> Self {
+        Self { owned_at_start }
+    }
+
+    pub(in crate::wayland) const fn owns_event(self, action_surface_open: bool) -> bool {
+        self.owned_at_start || action_surface_open
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::wayland) enum PickerImeReconcile {
     None,
     Renew,
@@ -514,6 +529,17 @@ mod tests {
             take_press_owner(&mut pressed, BTN_RIGHT),
             PressOwner::Ignored
         ));
+    }
+
+    #[test]
+    fn modal_pointer_frame_keeps_paired_release_owned_after_dismissal() {
+        let frame = ModalPointerFrame::new(true);
+        assert!(frame.owns_event(true));
+        assert!(frame.owns_event(false));
+
+        let normal_frame = ModalPointerFrame::new(false);
+        assert!(!normal_frame.owns_event(false));
+        assert!(normal_frame.owns_event(true));
     }
 
     #[test]

@@ -1075,38 +1075,51 @@ mod tests {
             height: 400,
         };
         let layout = tab_context_menu_layout(bounds, (240, 40)).unwrap();
-        let state = TabContextMenuUi::new(crate::frontend::TabMenuContext {
+        let mut state = TabContextMenuUi::new(crate::frontend::TabMenuContext {
             lair_id: LairId::new(),
             dojo_id: DojoId::new(),
         });
         let mut canvas = vec![0_u8; 640 * 400 * 4];
         let mut cache = CommandPaletteTextCache::default();
-        paint_tab_context_menu(
-            &mut cache,
-            &RenderContext::new(u16::MAX),
-            &mut canvas,
-            640,
-            400,
-            120,
-            1,
-            &layout,
-            session_picker_palette(ResolvedTheme::default()),
-            &state,
-            None,
-            true,
-        )
-        .unwrap();
-        assert_eq!(&canvas[..4], &[0, 0, 0, 0]);
-        let panel_offset = usize::try_from((layout.panel.y * 640 + layout.panel.x) * 4).unwrap();
-        assert_ne!(&canvas[panel_offset..panel_offset + 4], &[0, 0, 0, 0]);
         let right_x = layout.panel.x + layout.panel.width - 1;
-        let selected_y = layout.rows[0].rect.y + layout.rows[0].rect.height / 2;
         let top_edge = usize::try_from((layout.panel.y * 640 + right_x) * 4).unwrap();
-        let selected_edge = usize::try_from((selected_y * 640 + right_x) * 4).unwrap();
-        assert_eq!(
-            &canvas[selected_edge..selected_edge + 4],
-            &canvas[top_edge..top_edge + 4]
-        );
+        for (hovered, pressed, row) in [
+            (None, None, 0),
+            (Some(TabMenuActionId::CloseTab), None, 1),
+            (
+                Some(TabMenuActionId::CloseTab),
+                Some(TabMenuActionId::CloseTab),
+                1,
+            ),
+        ] {
+            state.update_hovered(hovered);
+            canvas.fill(0);
+            paint_tab_context_menu(
+                &mut cache,
+                &RenderContext::new(u16::MAX),
+                &mut canvas,
+                640,
+                400,
+                120,
+                1,
+                &layout,
+                session_picker_palette(ResolvedTheme::default()),
+                &state,
+                pressed,
+                true,
+            )
+            .unwrap();
+            assert_eq!(&canvas[..4], &[0, 0, 0, 0]);
+            let panel_offset =
+                usize::try_from((layout.panel.y * 640 + layout.panel.x) * 4).unwrap();
+            assert_ne!(&canvas[panel_offset..panel_offset + 4], &[0, 0, 0, 0]);
+            let row_y = layout.rows[row].rect.y + layout.rows[row].rect.height / 2;
+            let row_edge = usize::try_from((row_y * 640 + right_x) * 4).unwrap();
+            assert_eq!(
+                &canvas[row_edge..row_edge + 4],
+                &canvas[top_edge..top_edge + 4]
+            );
+        }
         assert!(cache.len() <= TAB_MENU_ACTIONS.len() + 1);
     }
 
