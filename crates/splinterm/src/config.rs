@@ -459,6 +459,8 @@ pub struct ThemePalette {
     pub foreground: String,
     pub cursor: String,
     pub selection: String,
+    #[serde(default)]
+    pub selection_foreground: Option<String>,
     pub url: String,
     pub ui_accent: String,
     #[serde(default = "opaque_alpha")]
@@ -478,6 +480,7 @@ pub struct ResolvedTheme {
     pub foreground: u32,
     pub cursor: u32,
     pub selection: u32,
+    pub selection_foreground: u32,
     pub url: u32,
     pub ui_accent: u32,
     pub pane_border: u32,
@@ -494,6 +497,7 @@ impl Default for ResolvedTheme {
             foreground: 0xebebeb,
             cursor: 0xebebeb,
             selection: 0x354a60,
+            selection_foreground: 0xebebeb,
             url: 0x78beff,
             ui_accent: 0x78d2ff,
             pane_border: 0x7c7e80,
@@ -546,6 +550,12 @@ impl ThemePalette {
             foreground,
             cursor: parse_color(&self.cursor)?,
             selection: parse_color(&self.selection)?,
+            selection_foreground: self
+                .selection_foreground
+                .as_deref()
+                .map(parse_color)
+                .transpose()?
+                .unwrap_or(foreground),
             url: parse_color(&self.url)?,
             ui_accent,
             pane_border: self
@@ -656,6 +666,12 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         .transpose()
         .context("active Omarchy foot.ini has invalid selection-background")?
         .unwrap_or(ansi[8]);
+    let selection_foreground = foot
+        .get("selection-foreground")
+        .map(|value| parse_color(value))
+        .transpose()
+        .context("active Omarchy foot.ini has invalid selection-foreground")?
+        .unwrap_or(foreground);
     let cursor = foot
         .get("cursor")
         .and_then(|value| value.split_whitespace().last())
@@ -691,6 +707,7 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         foreground,
         cursor,
         selection,
+        selection_foreground,
         url: ansi[4],
         ui_accent,
         pane_border: ansi[8],
@@ -1009,12 +1026,13 @@ mod tests {
     #[test]
     fn native_omarchy_theme_uses_effective_foot_palette_and_semantic_accent() {
         let colors = "accent = \"0x010203\" # inline comment\n";
-        let foot = "[colors]\nforeground=000003\nbackground=000001\nselection-background=000004\ncursor=000001 000006\nalpha=0.75\nblur=yes\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n";
+        let foot = "[colors]\nforeground=000003\nbackground=000001\nselection-foreground=000002\nselection-background=000004\ncursor=000001 000006\nalpha=0.75\nblur=yes\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n";
         let theme = resolve_omarchy_theme(colors, foot).unwrap();
         assert_eq!(theme.background, 1);
         assert_eq!(theme.foreground, 3);
         assert_eq!(theme.cursor, 6);
         assert_eq!(theme.selection, 4);
+        assert_eq!(theme.selection_foreground, 2);
         assert_eq!(theme.url, 4);
         assert_eq!(theme.ui_accent, 0x01_02_03);
         assert_eq!(theme.pane_border, 8);
@@ -1039,12 +1057,9 @@ mod tests {
             complete("000001"),
             complete("000002")
         );
-        assert_eq!(
-            resolve_omarchy_theme("cursor=\"#000006\"", &foot)
-                .unwrap()
-                .background,
-            2
-        );
+        let resolved = resolve_omarchy_theme("cursor=\"#000006\"", &foot).unwrap();
+        assert_eq!(resolved.background, 2);
+        assert_eq!(resolved.selection_foreground, resolved.foreground);
         assert!(
             resolve_omarchy_theme("accent=\"#000006\"", "[colors-dark]\nbackground=000001")
                 .unwrap_err()
@@ -1133,6 +1148,7 @@ mod tests {
         let theme: ThemePalette = serde_json::from_str(json).unwrap();
         let resolved = theme.resolve().unwrap();
         assert_eq!(resolved.background, 1);
+        assert_eq!(resolved.selection_foreground, 3);
         assert_eq!(resolved.ui_accent, 6);
         assert_eq!(resolved.pane_border, 2);
         assert_eq!(resolved.pane_border_active, 6);
@@ -1142,12 +1158,13 @@ mod tests {
 
         let explicit = json.replace(
             "\"ansi\"",
-            "\"pane_border\":\"#000007\",\"pane_border_active\":\"#000008\",\"ansi\"",
+            "\"selection_foreground\":\"#000002\",\"pane_border\":\"#000007\",\"pane_border_active\":\"#000008\",\"ansi\"",
         );
         let resolved = serde_json::from_str::<ThemePalette>(&explicit)
             .unwrap()
             .resolve()
             .unwrap();
+        assert_eq!(resolved.selection_foreground, 2);
         assert_eq!(resolved.pane_border, 7);
         assert_eq!(resolved.pane_border_active, 8);
 

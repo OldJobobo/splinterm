@@ -157,10 +157,12 @@ this MVP and produce diagnostics when represented as unknown keys.
 With `main.theme` unset, Splinterm reads the active Quattro theme directly from
 `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective
 `foot.ini` supplies the terminal foreground/background, ANSI 16, cursor,
-selection, alpha, and blur; `colors.toml` supplies the Omarchy UI accent used by
-trusted surfaces and active pane chrome. `[colors-dark]` takes precedence over
-legacy `[colors]`, while absent alpha defaults opaque and absent blur defaults
-off.
+selection background and foreground, alpha, and blur; `colors.toml` supplies the
+Omarchy UI accent used by trusted surfaces and active pane chrome. Active tab
+labels and close affordances use `selection-foreground`, falling back to the
+terminal foreground when that Foot role is absent. `[colors-dark]` takes
+precedence over legacy `[colors]`, while absent alpha defaults opaque and absent
+blur defaults off.
 
 Splinterm fingerprints the active directory plus both source files every 500 ms.
 This detects Omarchy's atomic current-theme directory replacement and applies a
@@ -172,6 +174,8 @@ safe fallback.
 
 No theme hook, generated file, or manual integration step is required. Setting
 `main.theme=/path/to/theme.json` explicitly opts out of Omarchy discovery for
-portable or isolated use. The strict JSON schema retains `pane_border` and
-`pane_border_active` overrides; `tools/generate-omarchy-theme.py` remains only
-an optional exporter for that override format.
+portable or isolated use. The strict JSON schema retains optional
+`selection_foreground`, `pane_border`, and `pane_border_active` overrides;
+`selection_foreground` falls back to the normal foreground for older JSON
+themes. `tools/generate-omarchy-theme.py`
+remains only an optional exporter for that override format.

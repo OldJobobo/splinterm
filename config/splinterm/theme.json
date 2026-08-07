@@ -4,6 +4,7 @@
   "foreground": "#ebebeb",
   "cursor": "#78d2ff",
   "selection": "#354a60",
+  "selection_foreground": "#ebebeb",
   "url": "#78beff",
   "ui_accent": "#78d2ff",
   "pane_border": "#928374",

@@ -107,6 +107,14 @@ pub(super) const fn tab_context_target(target: TabHitTarget) -> Option<DojoId> {
     }
 }
 
+const fn tab_foreground(theme: ResolvedTheme, active: bool) -> u32 {
+    if active {
+        theme.selection_foreground
+    } else {
+        theme.foreground
+    }
+}
+
 pub(super) fn tab_strip_hit_test(
     layout: &TabStripLayout,
     position: (f64, f64),
@@ -481,7 +489,9 @@ impl App {
         );
         for tab in &layout.tabs {
             let rect = Self::buffer_rect(tab.rect, scale_120)?;
-            if tab.dojo_id == active_dojo {
+            let active = tab.dojo_id == active_dojo;
+            let foreground = tab_foreground(theme, active);
+            if active {
                 fill_rect(
                     canvas,
                     width,
@@ -514,7 +524,7 @@ impl App {
                     height,
                     (label_rect.x, y),
                     label_rect,
-                    theme.foreground,
+                    foreground,
                 );
             }
             let close = Self::buffer_rect(tab.close_rect, scale_120)?;
@@ -532,7 +542,7 @@ impl App {
                             .saturating_add(close.height.saturating_sub(text.pixel_height()) / 2),
                     ),
                     close,
-                    theme.foreground,
+                    foreground,
                 );
             }
         }
@@ -560,7 +570,21 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{DojoId, TabHitTarget, tab_context_target, tab_strip_hit_test, tab_strip_layout};
+    use super::{
+        DojoId, ResolvedTheme, TabHitTarget, tab_context_target, tab_foreground,
+        tab_strip_hit_test, tab_strip_layout,
+    };
+
+    #[test]
+    fn active_tab_uses_selection_foreground() {
+        let theme = ResolvedTheme {
+            foreground: 0xaa_bb_cc,
+            selection_foreground: 0x11_22_33,
+            ..ResolvedTheme::default()
+        };
+        assert_eq!(tab_foreground(theme, false), 0xaa_bb_cc);
+        assert_eq!(tab_foreground(theme, true), 0x11_22_33);
+    }
 
     #[test]
     fn right_click_target_covers_the_tab_body_and_close_affordance_only() {

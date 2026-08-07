@@ -1289,6 +1289,7 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
     assert generated["alpha"] == 0.85
     assert generated["blur"] is True
     assert generated["background"] == legacy["background"]
+    assert generated["selection_foreground"] == legacy["foreground"]
     assert generated["ansi"][0] == legacy["color0"]
     assert generated["ansi"][15] == legacy["color15"]
 

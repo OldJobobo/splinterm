@@ -86,6 +86,9 @@ def generate(
         role: next((colors[key] for key in aliases if key in colors), None)
         for role, aliases in ROLE_ALIASES.items()
     }
+    roles["selection_foreground"] = colors.get(
+        "selection_foreground", roles["fg"]
+    )
     missing = [name for name, value in roles.items() if value is None]
     if missing:
         raise ValueError("missing Omarchy roles: " + ", ".join(missing))
@@ -104,6 +107,7 @@ def generate(
         "foreground": roles["fg"],
         "cursor": roles["accent"],
         "selection": roles["selection"],
+        "selection_foreground": roles["selection_foreground"],
         "url": roles["blue"],
         "ui_accent": roles["accent"],
         "pane_border": roles["muted"],
