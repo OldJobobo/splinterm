@@ -62,18 +62,27 @@ Dojos, and clipped multi-pane composition in one Wayland Window are implemented.
 
 ## Install on Arch/Omarchy
 
-From a clean clone or pull, build and install the current committed version with:
+On an x86_64 Omarchy system, a clone can install or update to the newest
+successfully built `main` package without compiling locally:
 
 ```bash
 ./install.sh
 ```
 
-The script installs missing package dependencies, builds and validates the Arch
-package, and asks before installing it. It does **not** change the default
-terminal or edit Omarchy configuration. It never opts a fresh installation into
-the optional MCP package; when MCP is already installed, it is upgraded to keep
-the package versions matched. Use `./install.sh --check` to include the full
-package test suite, or `--yes` for an already-approved unattended installation.
+Private-repository collaborators must authenticate GitHub CLI once with
+`gh auth login`; public release downloads use `curl` automatically. Every
+successful `main` package workflow publishes an immutable commit release and
+atomically advances the `edge-channel` manifest Git ref. The installer verifies
+that manifest, preserves an emergency copy of the replaced binaries, warns
+before stopping a running daemon, installs through Pacman, and verifies
+trusted-client identity after restart.
+
+The script does **not** change the default terminal or edit Omarchy
+configuration. It never opts a fresh installation into the optional MCP package;
+when MCP is already installed, it is upgraded to the exact matching version.
+Use `./install.sh --source` to compile the current committed checkout locally,
+`./install.sh --check` to include its full package test suite, or `--yes` only
+for an already-approved unattended installation.
 
 ## Daily use
 

@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches-ignore: [edge-channel]
   pull_request:
 
 permissions:
@@ -20,6 +21,8 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
       - run: cargo fmt --all --check
+      - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh
+      - run: python -m unittest tools/package/test_edge_manifest.py tools/package/test_edge_workflow.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: python tools/foot-oracle/check-provenance.py --portable

@@ -1,26 +1,60 @@
 # Private Arch prerelease packaging
 
-Splinterm's `packaging/PKGBUILD` is a local validation artifact for the private
-`0.1.0.pre` release. It is not an AUR publication recipe and does not upload
-source or packages.
+Splinterm's `packaging/PKGBUILD` produces the private `0.1.0.pre` split package.
+It is not an AUR publication recipe. Immutable GitHub commit releases plus the
+rolling `edge-channel` Git ref publish CI-built packages for trusted testers;
+local source packaging remains available separately.
 
-## One-command local installation
+## One-command prebuilt installation
 
-On an x86_64 Arch/Omarchy machine, a clean clone or pull can build and install
-Splinterm with:
+On an x86_64 Arch/Omarchy machine, a clone installs or updates to the newest
+successfully built `main` commit without compiling locally:
 
 ```bash
 ./install.sh
 ```
 
+`.github/workflows/edge-release.yml` builds and validates both packages in an
+Arch container. Package assets include the full Git commit in their names and
+are published under the immutable `edge-<commit>` release. Only after that
+release is complete does the workflow atomically force-update the
+`edge-channel` Git ref to a one-file commit containing `edge-manifest.json`.
+That manifest binds the repository, architecture, release, commit, exact asset
+names, and SHA-256 digests. An interrupted publication therefore leaves either
+the prior channel commit or the complete new one rather than exposing a mixed
+package set.
+
+The installer prefers an authenticated GitHub CLI session and falls back to
+public `curl` downloads. A collaborator on a private repository must first run:
+
+```bash
+gh auth login
+```
+
+Before Pacman installation, the script validates the closed manifest shape,
+commit-bound release and asset names, checksums, architecture, and matching
+split-package versions. It rejects a shadowing user-local client, preserves an
+emergency snapshot of replaced binaries for diagnosis or manual recovery, warns
+before stopping daemon-owned shells, restores the daemon after failure, and
+checks Pacman integrity, the desktop entry, and trusted-client sibling identity
+after restart. The snapshot is not presented as a Pacman package rollback;
+reinstall a previously retained package for a package-consistent downgrade. It deliberately does not change the default terminal or
+edit Omarchy configuration. A fresh installation does not install the optional
+MCP package; an existing MCP installation is upgraded to preserve its
+exact-version dependency. Pass `--yes` only for an already-approved unattended
+installation.
+
+## One-command source installation
+
+To compile and install the current committed checkout instead, use:
+
+```bash
+./install.sh --source
+```
+
 This installs missing build/runtime dependencies, builds the committed checkout,
-validates the package contents, and asks before installation. It deliberately
-does not change the default terminal or edit Omarchy configuration. It never
-opts a fresh installation into the optional MCP package; when MCP is already
-installed, the matching split package is upgraded to preserve its exact-version
-dependency. Package tests are omitted from this installation path; pass
-`--check` to run the complete `PKGBUILD` `check()` function. Pass `--yes` only
-for an already-approved unattended installation.
+validates package contents, and asks before installation. Pass `--check` (which
+implies `--source`) to run the complete `PKGBUILD` `check()` function.
 
 ## Build without installing
 
@@ -32,8 +66,8 @@ tools/package/build-local-package.sh
 ```
 
 Pass `--no-check` to build and validate package contents without running the
-complete package test suite. This is the mode used by `./install.sh` unless its
-`--check` option is supplied.
+complete package test suite. This is the mode used by `./install.sh --source`;
+`./install.sh --check` retains the complete package test suite.
 
 Its equivalent manual build from a clean checkout is:
 

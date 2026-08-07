@@ -4,14 +4,16 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 package_dir="$root/packaging"
 run_checks=true
+check_system_dependencies=true
 
 usage() {
   cat <<'EOF'
-Usage: tools/package/build-local-package.sh [--no-check]
+Usage: tools/package/build-local-package.sh [--no-check] [--skip-system-dependency-check]
 
 Build and validate local Splinterm Arch packages.
 
-  --no-check   Skip the PKGBUILD check() function
+  --no-check                      Skip the PKGBUILD check() function
+  --skip-system-dependency-check  CI only: let makepkg skip host package checks
   -h, --help   Show this help
 EOF
 }
@@ -19,6 +21,7 @@ EOF
 while (($#)); do
   case $1 in
     --no-check) run_checks=false ;;
+    --skip-system-dependency-check) check_system_dependencies=false ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -33,13 +36,15 @@ if [[ -n $(git -C "$root" status --porcelain --untracked-files=no -- . ':(exclud
   exit 1
 fi
 
-required=(appstream cargo desktop-file-utils fontconfig freetype2 gcc-libs glibc
-  hicolor-icon-theme libxkbcommon noto-fonts-cjk noto-fonts-emoji pixman pkgconf
-  python rust ttf-jetbrains-mono-nerd-basic wayland xdg-terminal-exec)
-missing=$(pacman -T "${required[@]}" || true)
-if [[ -n "$missing" ]]; then
-  printf 'missing package dependencies:\n%s\n' "$missing" >&2
-  exit 1
+if [[ $check_system_dependencies == true ]]; then
+  required=(appstream cargo desktop-file-utils fontconfig freetype2 gcc-libs glibc
+    hicolor-icon-theme libxkbcommon noto-fonts-cjk noto-fonts-emoji pixman pkgconf
+    python rust ttf-jetbrains-mono-nerd-basic wayland xdg-terminal-exec)
+  missing=$(pacman -T "${required[@]}" || true)
+  if [[ -n "$missing" ]]; then
+    printf 'missing package dependencies:\n%s\n' "$missing" >&2
+    exit 1
+  fi
 fi
 
 rm -rf "$package_dir/src" "$package_dir/pkg" "$archive"
@@ -47,6 +52,7 @@ rm -f "$package_dir"/splinterm-*.pkg.tar.*
 git -C "$root" archive --format=tar.gz --prefix="splinterm-$pkgver/" -o "$archive" HEAD
 makepkg_args=(--cleanbuild --clean --noconfirm --noprogressbar)
 [[ $run_checks == false ]] && makepkg_args+=(--nocheck)
+[[ $check_system_dependencies == false ]] && makepkg_args+=(--nodeps)
 (
   cd "$package_dir"
   makepkg "${makepkg_args[@]}"
