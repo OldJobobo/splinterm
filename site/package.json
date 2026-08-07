@@ -10,7 +10,9 @@
     "build": "astro check && astro build",
     "check:links": "node scripts/check-links.mjs",
     "validate": "npm run build && npm run check:links",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "deploy:coming-soon": "npx wrangler pages deploy coming-soon --project-name splinterm-coming-soon --branch main",
+    "deploy:preview": "npm run validate && npx wrangler pages deploy dist --project-name splinterm-preview --branch main"
   },
   "dependencies": {
     "@astrojs/starlight": "0.41.7",
