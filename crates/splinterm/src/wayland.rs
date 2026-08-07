@@ -826,6 +826,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
                 updates: options.updates,
                 commands: options.commands,
                 controller_active,
+                control_release_pending: false,
+                pending_focus_report: None,
                 pending_control_transfer: None,
                 search: SearchUiState::default(),
                 authority: options.authority,
@@ -1011,6 +1013,8 @@ struct PaneView {
     updates: Option<Receiver<WindowUpdate>>,
     commands: Option<Sender<WindowCommand>>,
     controller_active: bool,
+    control_release_pending: bool,
+    pending_focus_report: Option<bool>,
     pending_control_transfer: Option<u64>,
     search: SearchUiState,
     authority: AuthorityStatus,
@@ -1217,6 +1221,8 @@ impl PaneView {
             updates: Some(options.updates),
             commands: Some(options.commands),
             controller_active: options.controlled,
+            control_release_pending: false,
+            pending_focus_report: None,
             pending_control_transfer: None,
             search: SearchUiState::default(),
             authority: options.authority,
@@ -1907,6 +1913,33 @@ fn try_window_command(commands: &Sender<WindowCommand>, command: WindowCommand) 
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlReleaseOutcome {
+    Queued,
+    Retry,
+    Disconnected,
+}
+
+fn try_queue_control_release(commands: &Sender<WindowCommand>) -> ControlReleaseOutcome {
+    match commands.try_send(WindowCommand::ReleaseControl) {
+        Ok(()) => ControlReleaseOutcome::Queued,
+        Err(TrySendError::Full(_)) => ControlReleaseOutcome::Retry,
+        Err(TrySendError::Closed(_)) => ControlReleaseOutcome::Disconnected,
+    }
+}
+
+fn try_queue_focus_report(
+    commands: &Sender<WindowCommand>,
+    focused: bool,
+) -> ControlReleaseOutcome {
+    let report = if focused { b"\x1b[I" } else { b"\x1b[O" };
+    match commands.try_send(WindowCommand::Input(report.to_vec())) {
+        Ok(()) => ControlReleaseOutcome::Queued,
+        Err(TrySendError::Full(_)) => ControlReleaseOutcome::Retry,
+        Err(TrySendError::Closed(_)) => ControlReleaseOutcome::Disconnected,
+    }
+}
+
 fn terminal_update_has_visual_damage(
     full: bool,
     cursor_changed: bool,
@@ -2311,18 +2344,62 @@ impl App {
         }
     }
 
-    fn release_tab_controllers(view: &mut DojoTabView) -> Result<()> {
-        for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
-            if pane.controller_active {
-                let commands = pane
-                    .commands
-                    .as_ref()
-                    .context("controlled pane has no command channel")?;
-                try_window_command(commands, WindowCommand::ReleaseControl)?;
+    fn request_pane_control_release(pane: &mut PaneView) {
+        if !pane.controller_active {
+            return;
+        }
+        let outcome = pane.commands.as_ref().map_or(
+            ControlReleaseOutcome::Disconnected,
+            try_queue_control_release,
+        );
+        match outcome {
+            ControlReleaseOutcome::Queued => {
                 pane.controller_active = false;
+                pane.control_release_pending = false;
+            }
+            ControlReleaseOutcome::Retry => pane.control_release_pending = true,
+            ControlReleaseOutcome::Disconnected => {
+                pane.controller_active = false;
+                pane.control_release_pending = false;
+                pane.commands = None;
             }
         }
-        Ok(())
+    }
+
+    fn retry_pane_control_release(pane: &mut PaneView) {
+        if pane.control_release_pending {
+            Self::request_pane_control_release(pane);
+        }
+    }
+
+    fn release_tab_controllers(view: &mut DojoTabView) {
+        for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
+            Self::request_pane_control_release(pane);
+        }
+    }
+
+    fn request_pane_focus_report(pane: &mut PaneView, focused: bool) {
+        let outcome = pane
+            .commands
+            .as_ref()
+            .map_or(ControlReleaseOutcome::Disconnected, |commands| {
+                try_queue_focus_report(commands, focused)
+            });
+        match outcome {
+            ControlReleaseOutcome::Queued => pane.pending_focus_report = None,
+            ControlReleaseOutcome::Retry => pane.pending_focus_report = Some(focused),
+            ControlReleaseOutcome::Disconnected => {
+                pane.controller_active = false;
+                pane.pending_focus_report = None;
+                pane.commands = None;
+            }
+        }
+    }
+
+    fn retry_pane_focus_report(pane: &mut PaneView) {
+        if let Some(focused) = pane.pending_focus_report {
+            Self::request_pane_focus_report(pane, focused);
+        }
     }
 
     fn activate_tab(&mut self, dojo_id: DojoId) -> Result<bool> {
@@ -2331,30 +2408,30 @@ impl App {
         if previous_id == dojo_id {
             return Ok(false);
         }
-        let next = self
-            .tab_state
-            .tabs
-            .get_mut(dojo_id)
-            .and_then(|tab| tab.value.take())
-            .context("activated Dojo tab has no hidden frontend")?;
+        anyhow::ensure!(
+            self.tab_state
+                .tabs
+                .get(dojo_id)
+                .is_some_and(|tab| tab.value.is_some()),
+            "activated Dojo tab has no hidden frontend"
+        );
         self.settle_terminal_presses_for_picker();
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         if self.input.terminal_focus_reported {
-            self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
+            Self::request_pane_focus_report(&mut self.panes.pane, false);
             self.input.terminal_focus_reported = false;
         }
         for pane in
             std::iter::once(&mut self.panes.pane).chain(self.panes.inactive_panes.iter_mut())
         {
-            if pane.controller_active {
-                let commands = pane
-                    .commands
-                    .as_ref()
-                    .context("controlled pane has no command channel")?;
-                try_window_command(commands, WindowCommand::ReleaseControl)?;
-                pane.controller_active = false;
-            }
+            Self::request_pane_control_release(pane);
         }
+        let next = self
+            .tab_state
+            .tabs
+            .get_mut(dojo_id)
+            .and_then(|tab| tab.value.take())
+            .context("validated Dojo tab frontend disappeared")?;
         let previous = DojoTabView {
             identity: std::mem::replace(&mut self.tab_state.active_identity, next.identity),
             pane: std::mem::replace(&mut self.panes.pane, next.pane),
@@ -2401,7 +2478,7 @@ impl App {
         self.clear_ime_preedit();
         self.update_ime_cursor_rectangle();
         if self.input.keyboard_focused && self.panes.input_modes().focus_reporting {
-            self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
+            Self::request_pane_focus_report(&mut self.panes.pane, true);
             self.input.terminal_focus_reported = true;
         }
         if perf_trace_enabled() {
@@ -3508,14 +3585,14 @@ impl App {
         if !modal_focus_changed {
             return;
         }
-        let Some(report) = reconciled_focus_report(
+        let Some(_) = reconciled_focus_report(
             self.panes.input_modes().focus_reporting,
             self.input.terminal_focus_reported,
             self.input.keyboard_focused,
         ) else {
             return;
         };
-        self.send_command(WindowCommand::Input(report));
+        Self::request_pane_focus_report(&mut self.panes.pane, self.input.keyboard_focused);
         self.input.terminal_focus_reported = self.input.keyboard_focused;
     }
 
@@ -3732,8 +3809,7 @@ impl App {
                         self.send_command(WindowCommand::RequestControlTransfer);
                     }
                     CommandControlAction::Release => {
-                        self.send_command(WindowCommand::ReleaseControl);
-                        self.panes.pane.controller_active = false;
+                        Self::request_pane_control_release(&mut self.panes.pane);
                     }
                     CommandControlAction::Force => {
                         self.send_command(WindowCommand::ForceControlTransfer);
@@ -5192,8 +5268,7 @@ impl App {
                 return;
             }
             Some(ActionId::ReleaseControl) => {
-                self.send_command(WindowCommand::ReleaseControl);
-                self.panes.pane.controller_active = false;
+                Self::request_pane_control_release(&mut self.panes.pane);
                 if let Some(snapshot) = &self.panes.pane.snapshot {
                     self.surface.window.set_title(window_title(
                         self.presentation
@@ -5558,20 +5633,13 @@ impl App {
                             for pane in std::iter::once(&mut self.panes.pane)
                                 .chain(self.panes.inactive_panes.iter_mut())
                             {
-                                if pane.controller_active {
-                                    let commands = pane
-                                        .commands
-                                        .as_ref()
-                                        .context("controlled pane has no command channel")?;
-                                    try_window_command(commands, WindowCommand::ReleaseControl)?;
-                                    pane.controller_active = false;
-                                }
+                                Self::request_pane_control_release(pane);
                             }
                         }
                     }
                     if let Some(mut removed) = self.tab_state.tabs.close(dojo_id) {
                         if let Some(view) = removed.value.as_mut() {
-                            Self::release_tab_controllers(view)?;
+                            Self::release_tab_controllers(view);
                         }
                         self.tab_state.tab_label_cache.clear();
                         self.presentation.full_redraw = true;
@@ -5756,6 +5824,10 @@ impl App {
         for tab in self.tab_state.tabs.iter_mut() {
             if let Some(view) = tab.value.as_mut() {
                 view.drain_hidden_updates(&waker, theme)?;
+                for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
+                    Self::retry_pane_focus_report(pane);
+                }
+                Self::release_tab_controllers(view);
                 if let Some(commands) = &topology_commands {
                     enqueue_pending_exited_splints(
                         tab.dojo_id,
@@ -5768,6 +5840,8 @@ impl App {
         if self.scheduling.exit {
             return Ok(());
         }
+        Self::retry_pane_focus_report(&mut self.panes.pane);
+        Self::retry_pane_control_release(&mut self.panes.pane);
         let inline_picker_open = self.modal.inline_picker_open();
         let picker_reconcile_pending = self.modal.session_picker_reconcile_pending;
         let mut next_theme = (!inline_picker_open)
@@ -10024,11 +10098,40 @@ mod tests {
         let error = try_window_command(&sender, WindowCommand::Input(vec![2]))
             .expect_err("bounded overflow");
         assert!(error.to_string().contains("overflow"));
+        assert_eq!(
+            try_queue_control_release(&sender),
+            ControlReleaseOutcome::Retry
+        );
+        assert_eq!(
+            try_queue_focus_report(&sender, false),
+            ControlReleaseOutcome::Retry
+        );
         assert!(receiver.try_recv().is_ok());
+        assert_eq!(
+            try_queue_focus_report(&sender, false),
+            ControlReleaseOutcome::Queued
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            WindowCommand::Input(b"\x1b[O".to_vec())
+        );
+        assert_eq!(
+            try_queue_control_release(&sender),
+            ControlReleaseOutcome::Queued
+        );
+        assert_eq!(receiver.try_recv().unwrap(), WindowCommand::ReleaseControl);
         drop(receiver);
         let error = try_window_command(&sender, WindowCommand::Input(vec![3]))
             .expect_err("disconnected receiver");
         assert!(error.to_string().contains("disconnected"));
+        assert_eq!(
+            try_queue_control_release(&sender),
+            ControlReleaseOutcome::Disconnected
+        );
+        assert_eq!(
+            try_queue_focus_report(&sender, true),
+            ControlReleaseOutcome::Disconnected
+        );
 
         let (topology_sender, mut topology_receiver) = tokio::sync::mpsc::channel(1);
         try_topology_command(
