@@ -54,3 +54,15 @@ Every graphical attempt used a freshly selected exact development PID/address
 and verified workspace 8 / `DP-2` immediately before generated input. Cleanup
 removed the isolated client, daemon, and socket; production PID `3194395`
 remained active. Foot `0x55a31a544060` and cursor `(853,764)` were restored.
+
+## Publication and installation
+
+Commits `e51ebe2` and `94f5686` were pushed to `origin/main`. A temporary clean
+worktree at committed `94f5686` produced and validated matched split packages
+with the full PKGBUILD test suite. With explicit authorization, production
+`splinterd` was stopped while it reported no active Lairs, both Pacman packages
+were reinstalled through `pkexec`, and the service restarted as PID `86563`.
+Package/installed hashes match, Pacman reports zero altered files, the running
+daemon's sibling trusted client matches `/usr/bin/splinterm`, desktop validation
+passes, and human-mode `splinterm list` still reports no active Lairs. The
+rollback and exact hashes are in `installation-summary.txt`.

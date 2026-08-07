@@ -1,6 +1,6 @@
 # Plan 0025: Command palette and tab context menus
 
-- **Status:** First expansion published and installed; second approved 31-command/tab-action expansion implemented, reviewed, and validated; awaiting publication, packaging, and installation decisions
+- **Status:** Complete — both approved expansions published, packaged, installed, reviewed, and validated
 - **Date:** 2026-08-06
 - **Depends on:** [Plan 0017](0017-inline-session-picker-overlay.md), [Plan 0019](0019-dojo-tabs.md)
 
@@ -726,8 +726,20 @@ A fresh read-only review found no captured-identity or default-cancel blocker an
 requested bounded drift/race hardening; those findings were applied before the
 final full workspace and graphical passes. Every isolated process was removed,
 production daemon PID `3194395` remained active, and the original Foot focus and
-cursor were restored. Publication, packaging, and installation have not been
-authorized or performed for this second expansion.
+cursor were restored.
+
+Publication and installation completed on 2026-08-07. Commits `e51ebe2` and
+`94f5686` were pushed to `origin/main`; clean committed `94f5686` produced the
+validated matched package set. With explicit authorization, production
+`splinterd` was stopped while no active Lairs were present, both Pacman packages
+were reinstalled through `pkexec`, and the service restarted as PID `86563`.
+Package/installed hashes are `993b7bd0…e000` for `splinterm`,
+`994681a5…ff60` for `splinterd`, and `d747bd61…8119` for `splinterm-mcp`.
+Pacman reports zero altered files, trusted-client sibling identity matches,
+desktop validation passes, and human-mode `splinterm list` reports no active
+Lairs. The rollback is
+`~/.local/state/splinterm/rollback/20260806-221823-pre-94f5686`; exact evidence is
+recorded in the second-expansion artifact report.
 
 ## Stop gates
 

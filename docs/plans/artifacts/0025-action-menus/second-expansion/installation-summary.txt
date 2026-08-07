@@ -1,0 +1,23 @@
+Plan 0025 second-expansion installation — 2026-08-07
+Committed package source: 94f5686
+Package version: 0.1.0.pre-1
+Production daemon before install: PID 3194395, no active Lairs
+Production daemon after install: PID 86563, active, /usr/bin/splinterd
+Rollback: /home/oldjobobo/.local/state/splinterm/rollback/20260806-221823-pre-94f5686
+
+Installed/package SHA-256:
+993b7bd0dd42c855da19d7298285ca2973ca04e60ce6153d1edf6314abf6e000  /usr/bin/splinterm
+994681a520a0c922faa13d2803a5f8b0b5538105e0d55fc65dd5cf085212ff60  /usr/bin/splinterd
+d747bd615731d2d68d00608fccc2200094ee60b2e2f4c1823f69b6de2d5c0819  /usr/bin/splinterm-mcp
+
+Checks:
+- clean committed split-package build with full PKGBUILD check(): passed
+- package validator and extracted MCP runtime validation: passed
+- command -v splinterm/splinterd/splinterm-mcp: /usr/bin
+- running daemon sibling /usr/bin/splinterm device/inode matches installed trusted client: passed
+- pacman -Qkk splinterm splinterm-mcp: 0 altered files
+- desktop-file-validate: passed
+- human-mode /usr/bin/splinterm list: no active Lairs
+
+Probe disposition:
+`/usr/bin/splinterm-mcp --version` is not a supported CLI mode; splinterm-mcp is a bounded stdio service and exited after receiving no MCP initialization. This was not used as the installation check. Package extraction/runtime validation, executable hash, ownership, and Pacman integrity are authoritative here.
