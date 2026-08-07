@@ -1,8 +1,9 @@
 use super::super::{
     App, BTN_LEFT, Connection, ModalPointerFrame, MouseAction, MouseTracking, PasteTarget,
     PointerEvent, PointerEventKind, PointerHandler, PressOwner, QueueHandle, WaylandSurface,
-    WindowCommand, application_motion, classify_press, history_return_to_live_hit, mouse_report,
-    pointer_axis_focus_target, take_press_owner, url_at, wl_pointer,
+    WindowCommand, application_motion, classify_press, history_return_to_live_hit,
+    local_selection_owner, mouse_report, pending_selection_drag_anchor, pointer_axis_focus_target,
+    take_press_owner, url_at, wl_pointer,
 };
 
 impl PointerHandler for App {
@@ -72,6 +73,18 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Motion { .. } => {
                     self.panes.pane.pointer_cell = cell;
+                    if let Some(position) = cell
+                        && let Some(anchor) = self
+                            .input
+                            .pressed_buttons
+                            .get(&BTN_LEFT)
+                            .and_then(|owner| pending_selection_drag_anchor(owner, position))
+                    {
+                        self.input
+                            .pressed_buttons
+                            .insert(BTN_LEFT, PressOwner::Selection);
+                        self.begin_selection(anchor);
+                    }
                     self.panes.pane.hovered_url = if self.panes.pane.selecting {
                         None
                     } else {
@@ -170,14 +183,13 @@ impl PointerHandler for App {
                     }
                     self.panes.pane.pointer_cell = cell;
                     self.recompute_hovered_url();
-                    let owner = classify_press(
+                    let mut owner = classify_press(
                         button,
                         cell.is_some(),
                         self.input.modifiers,
                         self.panes.input_modes(),
                         self.panes.pane.hovered_url.is_some(),
                     );
-                    self.input.pressed_buttons.insert(button, owner);
                     match owner {
                         PressOwner::Application {
                             code,
@@ -195,15 +207,24 @@ impl PointerHandler for App {
                         }
                         PressOwner::Selection => {
                             if let Some(position) = cell {
-                                self.begin_selection(position);
+                                owner = local_selection_owner(
+                                    self.panes.pane.selection.is_some(),
+                                    position,
+                                );
+                                if matches!(owner, PressOwner::SelectionPending { .. }) {
+                                    self.clear_selection();
+                                } else {
+                                    self.begin_selection(position);
+                                }
                             }
                         }
                         PressOwner::PrimaryPaste => {
                             self.begin_clipboard_read(PasteTarget::Primary);
                         }
                         PressOwner::Url => self.open_hovered_url(),
-                        PressOwner::Ignored => {}
+                        PressOwner::SelectionPending { .. } | PressOwner::Ignored => {}
                     }
+                    self.input.pressed_buttons.insert(button, owner);
                 }
                 PointerEventKind::Release { button, serial, .. } => {
                     self.input.last_pointer_serial = Some(serial);
@@ -229,7 +250,10 @@ impl PointerHandler for App {
                             self.finish_selection();
                             self.publish_clipboard(queue_handle, serial, true);
                         }
-                        PressOwner::PrimaryPaste | PressOwner::Url | PressOwner::Ignored => {}
+                        PressOwner::SelectionPending { .. }
+                        | PressOwner::PrimaryPaste
+                        | PressOwner::Url
+                        | PressOwner::Ignored => {}
                     }
                 }
                 PointerEventKind::Axis {

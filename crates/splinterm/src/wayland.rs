@@ -183,8 +183,9 @@ use input::{
     MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile, PressOwner,
     SessionPickerShortcutAction, TabShortcutAction, WheelAccumulator, WheelOutcome,
     application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
-    font_zoom_action, history_overlay_status, history_return_to_live_hit, key_input, mouse_report,
-    pane_focus_action, pane_topology_action, picker_ime_reconcile, picker_release_activation,
+    font_zoom_action, history_overlay_status, history_return_to_live_hit, key_input,
+    local_selection_owner, mouse_report, pane_focus_action, pane_topology_action,
+    pending_selection_drag_anchor, picker_ime_reconcile, picker_release_activation,
     pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
     shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
 };
@@ -3200,6 +3201,14 @@ impl App {
             reports: count,
             bytes,
         })
+    }
+
+    fn clear_selection(&mut self) {
+        let selection = self.panes.pane.selection.take();
+        self.dirty_selection(selection);
+        self.panes.pane.selected_text = None;
+        self.panes.pane.selecting = false;
+        self.panes.pane.history_selection_pin_blocked = false;
     }
 
     fn begin_selection(&mut self, position: CellPosition) -> bool {

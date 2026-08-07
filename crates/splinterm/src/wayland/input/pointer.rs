@@ -30,6 +30,9 @@ pub(in crate::wayland) enum PressOwner {
         modifiers: Modifiers,
     },
     Selection,
+    SelectionPending {
+        anchor: CellPosition,
+    },
     PrimaryPaste,
     Url,
     Ignored,
@@ -151,6 +154,27 @@ pub(in crate::wayland) fn classify_press(
         PressOwner::Selection
     } else {
         PressOwner::Ignored
+    }
+}
+
+pub(in crate::wayland) const fn local_selection_owner(
+    has_selection: bool,
+    anchor: CellPosition,
+) -> PressOwner {
+    if has_selection {
+        PressOwner::SelectionPending { anchor }
+    } else {
+        PressOwner::Selection
+    }
+}
+
+pub(in crate::wayland) fn pending_selection_drag_anchor(
+    owner: &PressOwner,
+    position: CellPosition,
+) -> Option<CellPosition> {
+    match owner {
+        PressOwner::SelectionPending { anchor } if *anchor != position => Some(*anchor),
+        _ => None,
     }
 }
 
@@ -495,6 +519,24 @@ mod tests {
             take_press_owner(&mut pressed, BTN_RIGHT),
             PressOwner::Ignored
         ));
+    }
+
+    #[test]
+    fn existing_selection_click_clears_until_the_pointer_drags_to_another_cell() {
+        let anchor = CellPosition { row: 3, column: 4 };
+        let other = CellPosition { row: 3, column: 5 };
+
+        assert!(matches!(
+            local_selection_owner(false, anchor),
+            PressOwner::Selection
+        ));
+        let pending = local_selection_owner(true, anchor);
+        assert!(matches!(
+            pending,
+            PressOwner::SelectionPending { anchor: saved } if saved == anchor
+        ));
+        assert_eq!(pending_selection_drag_anchor(&pending, anchor), None);
+        assert_eq!(pending_selection_drag_anchor(&pending, other), Some(anchor));
     }
 
     #[test]
