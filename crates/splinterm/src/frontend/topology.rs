@@ -43,6 +43,14 @@ pub enum WindowTopologyCommand {
     NewDojo {
         lair_id: LairId,
     },
+    RenameDojo {
+        dojo_id: DojoId,
+        name: String,
+    },
+    TerminateDojo {
+        dojo_id: DojoId,
+        splints: Vec<(SplintId, u64)>,
+    },
     ActivateTab {
         dojo_id: DojoId,
     },

@@ -158,6 +158,109 @@ fn refreshed_close_state(
     Ok(RefreshedCloseState::Retry)
 }
 
+fn captured_dojo_kill_targets(
+    root: &LayoutNode,
+    captured: &[(SplintId, u64)],
+) -> Result<Vec<(SplintId, u64)>> {
+    anyhow::ensure!(
+        !captured.is_empty() && captured.len() == root.splint_count(),
+        "captured Dojo pane set changed before termination"
+    );
+    let mut unique = HashSet::with_capacity(captured.len());
+    let mut live = Vec::with_capacity(captured.len());
+    for &(splint_id, incarnation) in captured {
+        anyhow::ensure!(
+            unique.insert(splint_id),
+            "captured Dojo pane set contains a duplicate"
+        );
+        let splint = root
+            .find_splint(splint_id)
+            .context("captured Dojo pane disappeared before termination")?;
+        anyhow::ensure!(
+            splint.last_incarnation == Some(incarnation),
+            "captured Dojo pane incarnation changed before termination"
+        );
+        if !matches!(splint.state, SplintState::Exited(_)) {
+            live.push((splint_id, incarnation));
+        }
+    }
+    Ok(live)
+}
+
+async fn terminate_dojo(
+    connection: &mut Connection,
+    dojo_id: DojoId,
+    captured: &[(SplintId, u64)],
+) -> Result<()> {
+    for &(splint_id, incarnation) in captured {
+        let (_, Some(root)) = inspect_optional_dojo_state(connection, dojo_id).await? else {
+            return Ok(());
+        };
+        let live = captured_dojo_kill_targets(&root, captured)?;
+        if !live.contains(&(splint_id, incarnation)) {
+            continue;
+        }
+        match connection
+            .request(Request::KillSplint {
+                splint_id,
+                incarnation,
+            })
+            .await?
+        {
+            Response::SplintKilled {
+                splint_id: killed_id,
+                incarnation: killed_incarnation,
+                ..
+            } if killed_id == splint_id && killed_incarnation == incarnation => {}
+            response => bail!("splinterd returned unexpected Dojo kill response: {response:?}"),
+        }
+    }
+
+    let (mut revision, root) = inspect_optional_dojo_state(connection, dojo_id).await?;
+    let Some(root) = root else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        captured_dojo_kill_targets(&root, captured)?.is_empty(),
+        "captured Dojo retained a live pane after termination"
+    );
+    for attempt in 0..=MAX_CLOSE_TOPOLOGY_RETRIES {
+        match connection
+            .request(Request::CloseDojo {
+                expected_topology_revision: revision,
+                dojo_id,
+            })
+            .await
+        {
+            Ok(Response::TopologyCommitted { .. }) => return Ok(()),
+            Ok(response) => {
+                bail!("splinterd returned unexpected Dojo close response: {response:?}");
+            }
+            Err(error)
+                if protocol_error(&error).is_some_and(|failure| {
+                    matches!(failure.code, ErrorCode::NotFound | ErrorCode::StaleTopology)
+                }) =>
+            {
+                let (refreshed_revision, refreshed_root) =
+                    inspect_optional_dojo_state(connection, dojo_id).await?;
+                let Some(refreshed_root) = refreshed_root else {
+                    return Ok(());
+                };
+                anyhow::ensure!(
+                    captured_dojo_kill_targets(&refreshed_root, captured)?.is_empty(),
+                    "captured Dojo changed during closure"
+                );
+                if attempt == MAX_CLOSE_TOPOLOGY_RETRIES {
+                    return Err(error).context("bounded Dojo close retries exhausted");
+                }
+                revision = refreshed_revision;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded Dojo close retry loop returns on its final attempt")
+}
+
 async fn close_focused_splint(
     connection: &mut Connection,
     dojo_id: DojoId,
@@ -323,6 +426,8 @@ async fn apply_topology_command(
         | WindowTopologyCommand::OpenDojo { .. }
         | WindowTopologyCommand::NewLair
         | WindowTopologyCommand::NewDojo { .. }
+        | WindowTopologyCommand::RenameDojo { .. }
+        | WindowTopologyCommand::TerminateDojo { .. }
         | WindowTopologyCommand::ActivateTab { .. }
         | WindowTopologyCommand::CloseTab { .. }
         | WindowTopologyCommand::CloseTabs { .. } => {
@@ -750,6 +855,10 @@ fn close_other_tab_targets(
     )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "session-level topology commands share one serialized daemon and frontend reconciliation boundary"
+)]
 async fn handle_session_manager_command(
     command: WindowTopologyCommand,
     connection: &mut Connection,
@@ -818,6 +927,71 @@ async fn handle_session_manager_command(
             }
             let target = create_dojo_in_lair(connection, config, lair_id).await;
             finish_managed_window_open(target, state, config, image_cache, updates).await
+        }
+        WindowTopologyCommand::RenameDojo { dojo_id, name } => {
+            let result = async {
+                anyhow::ensure!(
+                    state.tabs.get(dojo_id).is_some(),
+                    "rename targeted a closed Dojo tab"
+                );
+                let expected_topology_revision = connection.topology_revision().await?;
+                let response = connection
+                    .request(Request::RenameDojo {
+                        expected_topology_revision,
+                        dojo_id,
+                        name,
+                    })
+                    .await?;
+                anyhow::ensure!(
+                    matches!(response, Response::TopologyCommitted { .. }),
+                    "splinterd did not acknowledge Dojo rename"
+                );
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: Some(dojo_id),
+                        message: format!("{error:#}"),
+                    })
+                    .await;
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::TerminateDojo { dojo_id, splints } => {
+            let result = async {
+                anyhow::ensure!(
+                    state.tabs.get(dojo_id).is_some(),
+                    "termination targeted a closed Dojo tab"
+                );
+                terminate_dojo(connection, dojo_id, &splints).await
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    if let Some(removed) = state.tabs.close(dojo_id) {
+                        let acknowledged = remove_frontend_tab(updates, dojo_id).await;
+                        cancel_pane_tasks(removed.value.pane_tasks).await;
+                        if !acknowledged {
+                            return TopologyManagerCommandOutcome::Stop;
+                        }
+                        if state.tabs.is_empty() {
+                            let _ = updates.send(WindowTopologyUpdate::Closed).await;
+                            return TopologyManagerCommandOutcome::Stop;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::TabFailed {
+                            dojo_id: Some(dojo_id),
+                            message: format!("{error:#}"),
+                        })
+                        .await;
+                }
+            }
+            TopologyManagerCommandOutcome::Continue
         }
         WindowTopologyCommand::ActivateTab { dojo_id } => {
             if state.tabs.activate(dojo_id)
@@ -1147,12 +1321,37 @@ mod tests {
 
     use super::{
         Axis, CloseAction, DojoId, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
-        SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyRevision, close_action,
-        close_other_tab_targets, parent_ratio, pending_focus_for_observation,
-        refreshed_close_state, topology_command_outcome, topology_identity_diff,
-        validate_exited_close_target, window_has_tab_capacity,
+        SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyRevision,
+        captured_dojo_kill_targets, close_action, close_other_tab_targets, parent_ratio,
+        pending_focus_for_observation, refreshed_close_state, topology_command_outcome,
+        topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::pane_claims_initial_control;
+
+    #[test]
+    fn termination_targets_exact_captured_incarnations_without_expanding_scope() {
+        let mut live = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let live_id = live.id;
+        live.state = SplintState::Running;
+        live.last_incarnation = Some(7);
+        let mut exited = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let exited_id = exited.id;
+        exited.state = SplintState::Exited(0);
+        exited.last_incarnation = Some(8);
+        let root = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Leaf(live)),
+            second: Box::new(LayoutNode::Leaf(exited)),
+        };
+        assert_eq!(
+            captured_dojo_kill_targets(&root, &[(live_id, 7), (exited_id, 8)]).unwrap(),
+            vec![(live_id, 7)]
+        );
+        assert!(captured_dojo_kill_targets(&root, &[(live_id, 7)]).is_err());
+        assert!(captured_dojo_kill_targets(&root, &[(live_id, 9), (exited_id, 8)]).is_err());
+        assert!(captured_dojo_kill_targets(&root, &[(live_id, 7), (live_id, 7)]).is_err());
+    }
 
     #[test]
     fn close_action_kills_live_panes_and_removes_exited_panes() {

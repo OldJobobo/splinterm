@@ -61,7 +61,10 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
-        if self.modal.command_palette.is_some() || self.modal.tab_context_menu.is_some() {
+        if self.modal.command_palette.is_some()
+            || self.modal.dojo_prompt.is_some()
+            || self.modal.tab_context_menu.is_some()
+        {
             self.modal
                 .session_picker_consumed_keys
                 .insert(event.raw_code);
@@ -252,7 +255,10 @@ impl KeyboardHandler for App {
         _serial: u32,
         event: KeyEvent,
     ) {
-        if self.modal.command_palette.is_some() || self.modal.tab_context_menu.is_some() {
+        if self.modal.command_palette.is_some()
+            || self.modal.dojo_prompt.is_some()
+            || self.modal.tab_context_menu.is_some()
+        {
             self.handle_key(&event, queue_handle);
             if self.presentation.full_redraw
                 && let Err(error) = self.schedule_draw(queue_handle)

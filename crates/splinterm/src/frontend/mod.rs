@@ -7,9 +7,10 @@ mod picker;
 mod topology;
 
 pub(crate) use action_menu::{
-    BuiltInCommandDispatch, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteContext,
-    CommandPaletteUi, CommandZoomAction, TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId,
-    TabMenuContext, TabMenuDispatch, TabMenuRightPress, command_descriptor, command_dispatch,
+    BuiltInCommandDispatch, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandControlAction,
+    CommandHistoryAction, CommandPaletteContext, CommandPaletteUi, CommandZoomAction, DojoPromptUi,
+    TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch,
+    TabMenuRightPress, TerminationDecision, command_descriptor, command_dispatch,
     tab_menu_descriptor, tab_menu_dispatch, tab_menu_right_press,
 };
 pub use message::{

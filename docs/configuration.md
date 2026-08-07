@@ -52,18 +52,21 @@ avoids claiming arbitrary `foot.ini` compatibility.
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste, Ctrl+Shift+S
 to open the native Recent Sessions picker, and Ctrl+Shift+P to open the
 searchable command palette inside any focused managed terminal Window. The
-palette groups daily actions across sessions, tabs, panes, and view: Recent
-Sessions; New, Previous, Next, and Close Current Dojo; horizontal and vertical
-splits; directional pane focus; Close Focused Pane; and font zoom in, out, and
-reset. Typing filters titles, categories, and keywords; arrows skip unavailable
-commands, Enter runs, and Escape closes. Tab and directional focus actions that
-have no captured destination remain visible but disabled. Right-clicking a
-visible Dojo tab opens a compact trusted menu targeted to that tab without
-activating it first. The menu can explicitly activate the tab, create a Dojo in
-its captured Lair, split its captured focused pane horizontally or vertically,
-detach that tab, or detach every other captured tab. Unavailable activation,
-split, or close-others actions remain visible but disabled; arrows navigate,
-Enter runs, and Escape or an outside click closes the menu.
+palette groups 31 built-ins across sessions, tabs, panes, history, view, and
+control. In addition to recent sessions, tab navigation, splits, pane focus,
+closing, and font zoom, it can create a session, rename the current tab, detach
+other tabs, open confirmed Dojo termination, resize a pane, search/page
+scrollback, return to live output, request/release/force control, revoke captured
+access grants, and accept or deny a captured pending transfer. Typing filters
+titles, categories, and keywords; arrows skip unavailable commands, Enter runs,
+and Escape closes. Actions without an available captured target remain visible
+but disabled. Right-clicking a visible Dojo tab opens a compact trusted menu
+targeted to that tab without activating it first. Its six rows are Rename Tab,
+Activate Tab, New Dojo, detach-only Close Tab, detach-only Close Other Tabs, and
+Terminate Dojo. Rename opens a bounded prefilled editor. Termination opens a
+named confirmation showing the captured pane count with Cancel selected by
+default. Arrows navigate, Enter runs, and Escape or an outside click closes the
+active surface.
 Ctrl+Tab and Ctrl+Shift+Tab cycle Window-local Dojo tabs;
 Ctrl+Shift+D creates and opens a Dojo in the active tab's Lair; Ctrl+Shift+Q
 detaches the active tab and closes the Window when it was the final tab. These
