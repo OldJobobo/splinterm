@@ -1,6 +1,6 @@
 # Plan 0025: Command palette and tab context menus
 
-- **Status:** Milestones 0–3 accepted and installed; first post-approval palette and balanced context-menu expansions implemented and validated; publication and installation pending
+- **Status:** Milestones 0–3 and the first post-approval palette and balanced context-menu expansions are implemented, validated, published, and installed
 - **Date:** 2026-08-06
 - **Depends on:** [Plan 0017](0017-inline-session-picker-overlay.md), [Plan 0019](0019-dojo-tabs.md)
 
@@ -579,6 +579,29 @@ review reported no source defect or fix worth doing now; its formal attestation
 was rejected only because its sandbox could not read the supplied `/tmp`
 manifest/diff artifacts, and that evidence-delivery limitation remains explicit
 in the durable report.
+
+Publication and installation completed later on 2026-08-06. Commits `61827ff`
+and `b515caa` were pushed to `origin/main`; clean committed `b515caa` produced the
+validated split package set. With explicit authorization, the running production
+daemon was stopped, terminating its 14 running Splints across two active Lairs,
+and matched `splinterm` and `splinterm-mcp` packages were installed through
+Pacman. Post-install verification recorded:
+
+- package/installed `splinterm` SHA-256
+  `78ad6e24171b713946f6f154cc93bd51d845c883cd68eb180c776f9e580a51e7`;
+- package/installed `splinterd` SHA-256
+  `994681a520a0c922faa13d2803a5f8b0b5538105e0d55fc65dd5cf085212ff60`;
+- package/installed `splinterm-mcp` SHA-256
+  `d747bd615731d2d68d00608fccc2200094ee60b2e2f4c1823f69b6de2d5c0819`;
+- active `splinterd.service`, with the running executable device/inode matching
+  `/usr/bin/splinterd`;
+- `/usr/bin/splinterm` and `/usr/bin/splinterm-mcp` command resolution;
+- `pacman -Qkk splinterm splinterm-mcp`: zero altered files;
+- valid `com.oldjobobo.splinterm.desktop`; and
+- normal human-mode `/usr/bin/splinterm list`: no active Lairs.
+
+The pre-install rollback is
+`~/.local/state/splinterm/rollback/20260806-194513-pre-b515caa`.
 
 ## Stop gates
 
