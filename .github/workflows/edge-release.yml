@@ -45,7 +45,9 @@ jobs:
         run: |
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          su builder -c "cd '$GITHUB_WORKSPACE' && tools/package/build-local-package.sh --skip-system-dependency-check"
+          # Full source tests remain in CI; edge publication performs a clean
+          # release build plus extracted package/runtime validation.
+          su builder -c "cd '$GITHUB_WORKSPACE' && tools/package/build-local-package.sh --no-check --skip-system-dependency-check"
 
       - name: Prepare commit-bound release assets
         run: |

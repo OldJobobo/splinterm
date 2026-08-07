@@ -14,8 +14,10 @@ successfully built `main` commit without compiling locally:
 ./install.sh
 ```
 
-`.github/workflows/edge-release.yml` builds and validates both packages in an
-Arch container. Package assets include the full Git commit in their names and
+`.github/workflows/edge-release.yml` performs a clean release build and validates
+both extracted packages in an Arch container; the separate CI workflow retains
+the full workspace source-test suite. Package assets include the full Git commit
+in their names and
 are published under the immutable `edge-<commit>` release. Only after that
 release is complete does the workflow atomically force-update the
 `edge-channel` Git ref to a one-file commit containing `edge-manifest.json`.

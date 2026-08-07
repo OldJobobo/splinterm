@@ -21,6 +21,7 @@ class EdgeWorkflowTests(unittest.TestCase):
         self.assertIn("git commit-tree", workflow[advance:])
         self.assertIn("refs/heads/edge-channel", workflow[advance:])
         self.assertNotIn("cancel-in-progress: true", workflow)
+        self.assertIn("build-local-package.sh --no-check --skip-system-dependency-check", workflow)
 
     def test_channel_branch_does_not_trigger_source_ci(self) -> None:
         ci_workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
