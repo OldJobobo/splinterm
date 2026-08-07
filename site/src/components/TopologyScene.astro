@@ -1,0 +1,42 @@
+<figure class="topology-scene" aria-labelledby="topology-title topology-caption">
+  <div class="topology-toolbar" aria-hidden="true">
+    <span></span><span></span><span></span>
+    <code>splinterm / topology</code>
+  </div>
+  <div class="topology-canvas">
+    <div class="daemon-node">
+      <span class="node-kicker">always on</span>
+      <strong>splinterd</strong>
+      <small>owns processes + state</small>
+    </div>
+    <div class="trunk" aria-hidden="true"></div>
+    <div class="lair-node">
+      <span>Lair</span>
+      <strong>project atlas</strong>
+    </div>
+    <div class="branch branch-one" aria-hidden="true"></div>
+    <div class="branch branch-two" aria-hidden="true"></div>
+    <div class="dojo-node dojo-one">
+      <span>Dojo 01</span>
+      <strong>editor</strong>
+      <div class="splints"><i></i><i></i><i></i></div>
+    </div>
+    <div class="dojo-node dojo-two">
+      <span>Dojo 02</span>
+      <strong>services</strong>
+      <div class="splints"><i></i><i></i></div>
+    </div>
+    <div class="window window-one" aria-hidden="true">
+      <span>Window A</span>
+      <div><i></i><i></i></div>
+    </div>
+    <div class="window window-two" aria-hidden="true">
+      <span>Window B</span>
+      <div><i></i></div>
+    </div>
+  </div>
+  <figcaption id="topology-caption">
+    <strong id="topology-title">The window is a view, not the session.</strong>
+    Close a client and the daemon-owned topology keeps running.
+  </figcaption>
+</figure>

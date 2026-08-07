@@ -1,0 +1,101 @@
+:root {
+  --sl-font: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --sl-font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
+  --sl-color-accent-low: #0f3142;
+  --sl-color-accent: #78d2ff;
+  --sl-color-accent-high: #d5f1ff;
+  --sl-color-white: #f1eee7;
+  --sl-color-gray-1: #dddcd7;
+  --sl-color-gray-2: #b8b7b2;
+  --sl-color-gray-3: #888b89;
+  --sl-color-gray-4: #4b555c;
+  --sl-color-gray-5: #29333b;
+  --sl-color-gray-6: #182027;
+  --sl-color-black: #0e1216;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #d5f1ff;
+  --sl-color-accent: #146f99;
+  --sl-color-accent-high: #0c3548;
+  --sl-color-white: #151a1d;
+  --sl-color-gray-1: #272e32;
+  --sl-color-gray-2: #454d51;
+  --sl-color-gray-3: #646d71;
+  --sl-color-gray-4: #a8afb0;
+  --sl-color-gray-5: #d8dbda;
+  --sl-color-gray-6: #ebedeb;
+  --sl-color-gray-7: #f5f5f1;
+  --sl-color-black: #fafaf7;
+}
+
+.site-title {
+  font-family: var(--sl-font-mono);
+  letter-spacing: -0.04em;
+}
+
+.site-title img {
+  border-radius: 5px;
+}
+
+header.header {
+  border-bottom-color: var(--sl-color-gray-5);
+  background: color-mix(in srgb, var(--sl-color-black) 94%, transparent);
+}
+
+.sidebar-pane {
+  border-inline-end-color: var(--sl-color-gray-5);
+}
+
+.sidebar-content a[aria-current='page'] {
+  border-inline-start: 2px solid var(--sl-color-accent);
+  font-weight: 600;
+}
+
+.content-panel + .content-panel {
+  border-top-color: var(--sl-color-gray-5);
+}
+
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3 {
+  letter-spacing: -0.035em;
+}
+
+.sl-markdown-content h1 {
+  font-size: clamp(2.4rem, 5vw, 4.4rem);
+  line-height: 1;
+}
+
+.sl-markdown-content code:not(:where(.not-content *)) {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 2px;
+}
+
+.expressive-code {
+  --ec-brdRad: 2px;
+  --ec-frm-edTabBarBrdCol: var(--sl-color-gray-5);
+}
+
+.hero .tagline {
+  max-width: 50rem;
+}
+
+.card {
+  border-radius: 2px;
+}
+
+.sl-link-button {
+  border-radius: 2px;
+  font-family: var(--sl-font-mono);
+  font-size: .8rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

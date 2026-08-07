@@ -9,6 +9,9 @@ __pycache__/
 .env
 /graphify-out/
 /.pi-subagents/
+/site/node_modules/
+/site/dist/
+/site/.astro/
 /packaging/pkg/
 /packaging/src/
 /packaging/*.pkg.tar.*

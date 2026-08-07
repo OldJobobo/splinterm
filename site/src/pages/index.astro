@@ -1,0 +1,129 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro';
+import TopologyScene from '../components/TopologyScene.astro';
+
+const capabilities = [
+  ['Native Wayland terminal', 'Implemented'],
+  ['Persistent sessions', 'Validated'],
+  ['Panes, tabs, and restore', 'Validated'],
+  ['Bounded automation', 'Validated'],
+  ['Public distribution', 'Not released'],
+];
+---
+
+<SiteLayout
+  title="Splinterm — persistent terminal sessions, bounded automation"
+  description="Splinterm is a persistent, security-conscious terminal substrate for humans and bounded automation."
+>
+  <section class="hero shell-section">
+    <div class="hero-copy">
+      <p class="eyebrow"><span>Advanced private prerelease</span> · Omarchy / Arch Linux</p>
+      <h1>Your terminal should outlive its <em>window.</em></h1>
+      <p class="hero-lede">
+        Splinterm combines a native Wayland terminal with a headless daemon that keeps shells,
+        layouts, and scrollback alive when graphical clients disconnect.
+      </p>
+      <div class="hero-actions">
+        <a class="button primary" href="/docs/quickstart/">Read the quickstart <span aria-hidden="true">↗</span></a>
+        <a class="button secondary" href="/docs/status/">See what works today</a>
+      </div>
+      <p class="hero-note">Built in Rust from Foot’s terminal behavior. Designed first for Omarchy.</p>
+    </div>
+    <TopologyScene />
+  </section>
+
+  <section class="manifesto shell-section" aria-labelledby="persistence-title">
+    <div class="section-index" aria-hidden="true">01 / Persistence</div>
+    <div class="manifesto-copy">
+      <h2 id="persistence-title">Sessions belong to the daemon.<br />Windows come and go.</h2>
+      <p>
+        <code>splinterd</code> owns terminal processes and state. A Splinterm window is a disposable,
+        native view into that topology—not the thing keeping your shell alive.
+      </p>
+    </div>
+    <ol class="sequence" aria-label="Persistent session workflow">
+      <li><span>01</span><strong>Work</strong><small>Open a Lair with the panes you need.</small></li>
+      <li><span>02</span><strong>Detach</strong><small>Close the view without ending the work.</small></li>
+      <li><span>03</span><strong>Return</strong><small>Reopen the same running Dojo later.</small></li>
+    </ol>
+  </section>
+
+  <section class="control-section shell-section" aria-labelledby="control-title">
+    <div class="section-index" aria-hidden="true">02 / Shared substrate</div>
+    <div class="control-heading">
+      <h2 id="control-title">One topology.<br />Two deliberate ways in.</h2>
+      <p>Human interaction and automation share the same persistent state without sharing authority.</p>
+    </div>
+    <div class="control-grid">
+      <article class="control-card human-card">
+        <div class="card-label"><span>Human</span><i>native client</i></div>
+        <h3>Direct, graphical control</h3>
+        <p>Wayland windows, tabs, panes, search, clipboard, and explicit control transfer.</p>
+        <ul>
+          <li>Trusted application chrome</li>
+          <li>Native session picker</li>
+          <li>Visible authority state</li>
+        </ul>
+      </article>
+      <article class="control-card automation-card">
+        <div class="card-label"><span>Automation</span><i>bounded client</i></div>
+        <h3>Structured, scoped access</h3>
+        <p>JSON/NDJSON, an SSH stdio relay, and MCP—always subject to explicit policy.</p>
+        <ul>
+          <li>Exact executable identity</li>
+          <li>Resource and scope limits</li>
+          <li>Revocable controller leases</li>
+        </ul>
+      </article>
+    </div>
+    <p class="boundary-note"><span aria-hidden="true">◆</span> Terminal output is data. It never becomes authority or automatic instruction.</p>
+  </section>
+
+  <section class="status-section shell-section" aria-labelledby="status-title">
+    <div class="section-index" aria-hidden="true">03 / Current state</div>
+    <div class="status-intro">
+      <h2 id="status-title">Substantial, validated,<br />and not public yet.</h2>
+      <p>
+        Splinterm is an advanced private prerelease. Core terminal, persistence, multiplexing,
+        graphical, packaging, and automation paths exist; public support guarantees do not.
+      </p>
+      <a class="text-link" href="/docs/status/">Read the complete status and limits <span aria-hidden="true">→</span></a>
+    </div>
+    <div class="capability-list">
+      {capabilities.map(([name, status], index) => (
+        <div class="capability-row">
+          <span>{String(index + 1).padStart(2, '0')}</span>
+          <strong>{name}</strong>
+          <i class:list={{ pending: status === 'Not released' }}>{status}</i>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <section class="first-workflow shell-section" aria-labelledby="workflow-title">
+    <div>
+      <p class="eyebrow">Start with the ordinary path</p>
+      <h2 id="workflow-title">New terminal. Same work tomorrow.</h2>
+      <p>Install the current private package, open a terminal, then use the session picker when you want the running work back.</p>
+      <a class="button primary" href="/docs/quickstart/">Follow the local quickstart</a>
+    </div>
+    <div class="command-stack" aria-label="Example Splinterm commands">
+      <div><span>$</span><code>./install.sh</code></div>
+      <div><span>$</span><code>splinterm sessions</code><small>choose a running Dojo</small></div>
+      <div><span>$</span><code>splinterm reopen</code><small>return to the last one</small></div>
+    </div>
+  </section>
+
+  <section class="docs-gateway shell-section" aria-labelledby="docs-title">
+    <div>
+      <p class="eyebrow">Documentation</p>
+      <h2 id="docs-title">Go as deep as the job requires.</h2>
+    </div>
+    <div class="gateway-links">
+      <a href="/docs/quickstart/"><span>Start using Splinterm</span><small>Install, launch, detach, and return.</small><i>↗</i></a>
+      <a href="/docs/configure/configuration/"><span>Configure the terminal</span><small>Fonts, sizing, theme, panes, and migration.</small><i>↗</i></a>
+      <a href="/docs/sessions/"><span>Understand persistence</span><small>Lairs, Dojos, Splints, windows, and lifecycle.</small><i>↗</i></a>
+      <a href="/docs/development/"><span>Develop and contribute</span><small>Workspace structure, checks, and architecture.</small><i>↗</i></a>
+    </div>
+  </section>
+</SiteLayout>

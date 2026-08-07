@@ -1,0 +1,54 @@
+---
+import '../styles/site.css';
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#0e1216" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Splinterm home">
+        <img src="/favicon.svg" alt="" width="34" height="34" />
+        <span>splinterm</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a aria-current="page" href="/">Product</a>
+        <a href="/docs/">Docs</a>
+        <a href="/docs/status/">Status</a>
+        <a href="/docs/development/">Development</a>
+      </nav>
+    </header>
+    <main id="main">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div>
+        <a class="brand footer-brand" href="/">
+          <img src="/favicon.svg" alt="" width="28" height="28" />
+          <span>splinterm</span>
+        </a>
+        <p>A persistent terminal substrate for humans and bounded automation.</p>
+      </div>
+      <div class="footer-links">
+        <a href="/docs/">Documentation</a>
+        <a href="/docs/status/">Current status</a>
+        <span>MIT licensed</span>
+      </div>
+    </footer>
+  </body>
+</html>
