@@ -2278,6 +2278,17 @@ impl RequestAuthorizationContext {
         !self.interactive_bypass && !self.policy_authorized()
     }
 
+    fn may_manage_authorization(
+        &self,
+        development_terminal_access: bool,
+        matching_splinterm_executable: bool,
+    ) -> bool {
+        self.interactive_bypass
+            || self.policy_authorized()
+            || development_terminal_access
+            || matching_splinterm_executable
+    }
+
     fn maximum_returned_bytes(&self) -> Option<usize> {
         self.policy_match
             .as_ref()
@@ -3865,10 +3876,10 @@ async fn handle_authorized_request(
                     "requested incarnation is not current",
                 ));
             }
-            if !authorization.policy_authorized()
-                && !state.development_terminal_access
-                && !peer.is_matching_splinterm()
-            {
+            if !authorization.may_manage_authorization(
+                state.development_terminal_access,
+                peer.is_matching_splinterm(),
+            ) {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
                     "authorization status requires trusted UI or exact policy",
@@ -3914,10 +3925,10 @@ async fn handle_authorized_request(
             }
         }
         Request::RevokeAccess { grant_id } => {
-            if !authorization.policy_authorized()
-                && !state.development_terminal_access
-                && !peer.is_matching_splinterm()
-            {
+            if !authorization.may_manage_authorization(
+                state.development_terminal_access,
+                peer.is_matching_splinterm(),
+            ) {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
                     "revocation requires trusted UI or exact policy",
@@ -7168,14 +7179,16 @@ mod tests {
     }
 
     #[test]
-    fn interactive_bypass_skips_redundant_terminate_scope_authorization() {
+    fn interactive_bypass_skips_redundant_policy_and_handler_authorization() {
         let untrusted = RequestAuthorizationContext::default();
         assert!(untrusted.requires_terminate_scope_authorization());
+        assert!(!untrusted.may_manage_authorization(false, false));
         let interactive = RequestAuthorizationContext {
             interactive_bypass: true,
             ..RequestAuthorizationContext::default()
         };
         assert!(!interactive.requires_terminate_scope_authorization());
+        assert!(interactive.may_manage_authorization(false, false));
     }
 
     #[test]
@@ -7223,6 +7236,11 @@ mod tests {
             Request::ListLairs,
             Request::InspectTopology,
             Request::SubscribeTopology,
+            Request::AuthorizationStatus {
+                splint_id,
+                incarnation: Some(1),
+            },
+            Request::RevokeAccess { grant_id: 1 },
             Request::CreateLairAutomation {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "remote".to_owned(),
