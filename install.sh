@@ -103,7 +103,7 @@ source_install() {
 
   install_dependencies appstream base-devel desktop-file-utils fontconfig \
     freetype2 gcc-libs glibc hicolor-icon-theme libxkbcommon noto-fonts-cjk \
-    noto-fonts-emoji pixman pkgconf python rust ttf-jetbrains-mono-nerd-basic \
+    noto-fonts-emoji pixman pkgconf python rust ttf-jetbrains-mono-nerd \
     wayland xdg-terminal-exec
 
   local -a build_args=()
@@ -145,7 +145,7 @@ download_asset() {
 prebuilt_install() {
   install_dependencies curl desktop-file-utils fontconfig freetype2 gcc-libs glibc \
     hicolor-icon-theme libarchive libxkbcommon noto-fonts-cjk noto-fonts-emoji \
-    pixman python ttf-jetbrains-mono-nerd-basic wayland xdg-terminal-exec
+    pixman python ttf-jetbrains-mono-nerd wayland xdg-terminal-exec
 
   local resolved
   resolved=$(command -v splinterm 2>/dev/null || true)
