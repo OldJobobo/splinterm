@@ -135,7 +135,6 @@ pub(super) async fn run_live_multipane_window(
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
-    let graphical_topology_creation = factory.capabilities().graphical_topology_creation;
     let theme_task = tokio::spawn(watch_theme(
         config.theme_source(),
         config.background_alpha,
@@ -179,7 +178,6 @@ pub(super) async fn run_live_multipane_window(
             topology_commands: Some(topology_commands),
             graphical_focus,
             forced_control_transfer,
-            graphical_topology_creation,
             initial_dojo: Some(initial_identity),
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,

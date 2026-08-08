@@ -122,14 +122,42 @@ impl PeerIdentity {
     }
 
     pub fn is_matching_splinterm(&self) -> bool {
-        let Ok(expected) = std::env::current_exe().map(|path| path.with_file_name("splinterm"))
-        else {
+        self.matches_adjacent_executable("splinterm")
+    }
+
+    pub fn is_matching_graphical_relay(&self) -> bool {
+        let executable_matches = self.matches_adjacent_executable("splinterm-relay");
+        let command_line = fs::read(format!("/proc/{}/cmdline", self.pid));
+        let (argument_count, graphical_mode) = command_line.as_ref().map_or((0, false), |value| {
+            let arguments = value
+                .split(|byte| *byte == 0)
+                .filter(|argument| !argument.is_empty())
+                .collect::<Vec<_>>();
+            (arguments.len(), graphical_relay_arguments(&arguments))
+        });
+        tracing::debug!(
+            peer_pid = self.pid,
+            executable_matches,
+            command_line_available = command_line.is_ok(),
+            argument_count,
+            graphical_mode,
+            "graphical relay identity evaluated"
+        );
+        executable_matches && graphical_mode
+    }
+
+    fn matches_adjacent_executable(&self, name: &str) -> bool {
+        let Ok(expected) = std::env::current_exe().map(|path| path.with_file_name(name)) else {
             return false;
         };
         fs::metadata(expected).is_ok_and(|metadata| {
             metadata.dev() == self.executable_device && metadata.ino() == self.executable_inode
         })
     }
+}
+
+fn graphical_relay_arguments(arguments: &[&[u8]]) -> bool {
+    arguments.len() == 2 && arguments[1] == b"--graphical-stdio"
 }
 
 #[derive(Debug)]
@@ -592,6 +620,23 @@ mod tests {
         assert_eq!(pid, std::process::id());
         assert!(executable.path.is_absolute());
         assert_eq!(executable.sha256.len(), 64);
+    }
+
+    #[test]
+    fn only_exact_graphical_relay_mode_can_carry_the_human_role() {
+        assert!(graphical_relay_arguments(&[
+            b"/usr/bin/splinterm-relay",
+            b"--graphical-stdio",
+        ]));
+        assert!(!graphical_relay_arguments(&[
+            b"/usr/bin/splinterm-relay",
+            b"--stdio",
+        ]));
+        assert!(!graphical_relay_arguments(&[
+            b"/usr/bin/splinterm-relay",
+            b"--graphical-stdio",
+            b"extra",
+        ]));
     }
 
     #[test]

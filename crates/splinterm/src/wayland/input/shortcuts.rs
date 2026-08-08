@@ -112,13 +112,6 @@ pub(in crate::wayland) const fn tab_action_dispatch_allowed(blocking_states: [bo
         || blocking_states[4])
 }
 
-pub(in crate::wayland) const fn tab_shortcut_creation_allowed(
-    action: TabShortcutAction,
-    graphical_topology_creation: bool,
-) -> bool {
-    !matches!(action, TabShortcutAction::NewDojo) || graphical_topology_creation
-}
-
 pub(in crate::wayland) fn pane_topology_action(
     action: Option<ActionId>,
 ) -> Option<PaneTopologyAction> {
@@ -137,13 +130,6 @@ pub(in crate::wayland) fn pane_topology_action(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::wayland) enum PaneFocusAction {
     Direction(FocusDirection),
-}
-
-pub(in crate::wayland) const fn pane_topology_creation_allowed(
-    action: PaneTopologyAction,
-    graphical_topology_creation: bool,
-) -> bool {
-    !matches!(action, PaneTopologyAction::Split(_)) || graphical_topology_creation
 }
 
 pub(in crate::wayland) fn pane_focus_action(action: Option<ActionId>) -> Option<PaneFocusAction> {
@@ -328,18 +314,6 @@ mod tests {
             states[blocked] = true;
             assert!(!tab_action_dispatch_allowed(states));
         }
-        assert!(!tab_shortcut_creation_allowed(
-            TabShortcutAction::NewDojo,
-            false
-        ));
-        assert!(tab_shortcut_creation_allowed(
-            TabShortcutAction::NewDojo,
-            true
-        ));
-        assert!(tab_shortcut_creation_allowed(
-            TabShortcutAction::Close,
-            false
-        ));
     }
 
     #[test]
@@ -368,18 +342,6 @@ mod tests {
             pane_topology_action(shortcut_action(Keysym::braceleft, ctrl_shift())),
             Some(PaneTopologyAction::AdjustRatio(-50))
         );
-        assert!(!pane_topology_creation_allowed(
-            PaneTopologyAction::Split(splinterm_core::Axis::Horizontal),
-            false
-        ));
-        assert!(pane_topology_creation_allowed(
-            PaneTopologyAction::Split(splinterm_core::Axis::Vertical),
-            true
-        ));
-        assert!(pane_topology_creation_allowed(
-            PaneTopologyAction::Close,
-            false
-        ));
     }
 
     #[test]

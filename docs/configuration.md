@@ -88,13 +88,6 @@ Ctrl+plus/equal/KP_Add and Ctrl+minus/KP_Subtract in 0.5-point steps; Ctrl+0/KP_
 resets the configured size. Terminal key mappings otherwise follow the
 implemented Foot/xterm behavior.
 
-In a native remote Window, New Session, New Dojo, and both Split actions remain
-visible but disabled; their direct shortcuts and the tab-strip New button are
-consumed without mutation. Persistent Lair/Dojo selectors snapshot only current
-descendants. Close the Window, create topology with an explicit `--remote` CLI
-command, republish the exact policy, and reopen. Policy reload disconnects live
-clients rather than refreshing them in place.
-
 ## Keymap configuration
 
 The top-level INI selects a built-in profile and optional overlay:
@@ -207,8 +200,8 @@ bounded non-mutating relay/daemon reachability probes. `splinterm --remote
 PROFILE` authenticates once and opens that profile's native Recent Sessions
 picker; explicit `sessions`, `reopen`, `window`, and `launch` forms are also
 available. Recency is namespaced by validated local profile identity. See
-[remote.md](remote.md) for authentication, host-key, policy, remote-path,
-no-image, and disconnect behavior.
+[remote.md](remote.md) for authentication, host-key, human authority,
+remote-path, no-image, and disconnect behavior.
 
 ## Daily launch and session reopening
 

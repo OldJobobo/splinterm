@@ -103,7 +103,7 @@ fn remote_check_uses_one_fixed_fake_ssh_and_only_read_only_probes() {
     assert!(checked.status.success(), "{:?}", checked.stderr);
     assert_eq!(
         String::from_utf8(checked.stdout).unwrap(),
-        "Remote test is reachable (0 Lairs); this check does not enumerate all authority.\n"
+        "Remote test is reachable (0 Lairs).\n"
     );
     assert_eq!(fs::read_to_string(home.join("count")).unwrap(), "1");
     let arguments: Vec<String> =
@@ -116,7 +116,7 @@ fn remote_check_uses_one_fixed_fake_ssh_and_only_read_only_probes() {
 }
 
 #[test]
-fn global_remote_routes_authenticated_read_only_and_denied_human_flows() {
+fn global_remote_routes_authenticated_reads_and_surfaces_daemon_denials() {
     for (label, command, mode, succeeds) in [
         ("authenticated", "ping", "read-only", true),
         ("read-only", "list", "read-only", true),
@@ -151,7 +151,7 @@ fn global_remote_routes_authenticated_read_only_and_denied_human_flows() {
             assert!(
                 String::from_utf8(result.stderr)
                     .unwrap()
-                    .contains("fixture policy denied topology read")
+                    .contains("fixture daemon denied topology read")
             );
         }
         fs::remove_dir_all(home).unwrap();

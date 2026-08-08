@@ -72,16 +72,20 @@ Consequences:
 - one native Window is bound to exactly one endpoint in the first release. A
   Window cannot mix local Dojos and Dojos from different remote profiles.
 
-### The automation role is an authorization boundary, not an automation UX
+### Native remote Windows are human-interactive, not automation
 
-Every remote protocol channel negotiates `ClientRole::Automation`. This prevents
-an SSH-arriving process from claiming the installed local graphical client's
-trusted-UI bypass. It does not make the user experience headless.
+Every graphical remote protocol channel negotiates
+`ClientRole::RemoteInteractive`. OpenSSH authenticates the human account; the
+installed adjacent relay running `--graphical-stdio` then receives ordinary
+terminal-multiplexer authority from that account's daemon. Persistent automation
+policy is not consulted for this role.
 
-With persistent policy granting the required scopes, the native remote Window
-may observe terminal state, subscribe to updates, acquire ordinary controller
-ownership, send input and resize, search scrollback, and perform approved
-remote topology mutations. Trusted-local-only operations remain unavailable.
+The native remote Window may observe terminal state, subscribe to updates,
+create Lairs, Dojos, and Splints, attach newly created resources immediately,
+acquire ordinary controller ownership, send input and resize, search scrollback,
+and perform normal topology mutations. It does not receive trusted-local
+compositor focus, image-content, or forced-control privileges. Raw `--stdio`,
+JSON/NDJSON, and MCP clients remain `Automation` and policy-scoped.
 
 ### OpenSSH owns host and user authentication
 
@@ -156,8 +160,9 @@ multiplexer bytes as daemon protocol frames.
 - Reimplement SSH, SSH agent, known-hosts, or private-key storage.
 - Automatically create keys, copy keys, accept host fingerprints, edit
   `authorized_keys`, change sshd configuration, or enable service lingering.
-- Treat successful SSH login as Splinterm terminal authorization.
-- Grant the remote graphical client trusted local UI identity.
+- Treat a remote graphical client as automation after OpenSSH authenticates the
+  human account.
+- Grant the remote graphical client trusted local compositor or image identity.
 - Transport image pixel bodies in the first release.
 - Forward terminal-provided file paths, Kitty file/SHM sources, local sockets,
   arbitrary commands, or arbitrary SSH options.
@@ -196,7 +201,7 @@ Required change:
 - abstract protocol reading and writing from the concrete Unix stream;
 - accept split async reader/writer transports;
 - retain the local `Connection::connect()` constructor and behavior;
-- add an automation constructor over one logical graphical-relay channel;
+- add a remote-interactive constructor over one logical graphical-relay channel;
 - carry explicit endpoint capabilities rather than inferring every behavior
   from socket presence; and
 - retain current frame bounds, request IDs, queued-event bounds, cancellation,
@@ -216,15 +221,15 @@ Required change:
 - pass a clonable endpoint connection factory through every graphical service;
 - suppress trusted-only focus publication for remote endpoints;
 - namespace recent-session state by endpoint identity;
-- compile remote process creation through existing `AutomationLaunch` request
-  variants; and
+- compile remote process creation through the remote-safe launch request
+  variants without changing the connection's human-interactive role; and
 - preserve the local path exactly when no remote profile is selected.
 
 ### Images
 
 The daemon already includes image metadata only for the exact matching trusted
-local UI. An automation-role relay client receives text state without image
-metadata, and image body retrieval rejects non-trusted connections.
+local UI. A remote-interactive relay client receives text state without image
+metadata, and image body retrieval rejects non-local-trusted connections.
 
 Required change:
 
@@ -253,11 +258,11 @@ ClientEndpoint
     recency namespace: local
 
   Remote(RemoteProfile, RemoteSession)
-    protocol role: Automation
+    protocol role: RemoteInteractive
     transport: logical channel over one SSH graphical relay
     graphical focus publication: disabled
     image content: unavailable
-    launch semantics: AutomationLaunch interpreted by remote daemon
+    launch semantics: remote-safe defaults interpreted by remote daemon
     recency namespace: stable profile identity
 ```
 
@@ -418,10 +423,9 @@ splinterm remote check wintermute
 ```
 
 `check` validates configuration, invokes the fixed relay, negotiates the
-multiplexer and automation handshake, performs bounded non-mutating reachability
-and topology-read probes, reports any policy denial encountered, and exits
-without mapping a Window or mutating topology. It must not claim to enumerate
-all resource-dependent authority from a single probe.
+multiplexer and remote-interactive handshake, performs bounded non-mutating
+reachability and topology-read probes, and exits without mapping a Window or
+mutating topology.
 
 ## Authentication behavior
 
@@ -482,7 +486,8 @@ Required errors distinguish at least:
 - relay executable/daemon identity validation failure;
 - graphical multiplexer version mismatch;
 - private daemon protocol version mismatch; and
-- Splinterm policy denial or insufficient scope.
+- rejection of the remote-interactive role because the fixed graphical relay
+  identity or mode is not present.
 
 ## Remote-safe graphical behavior
 
@@ -501,7 +506,7 @@ existing picker sanitization and bounds.
 Remote graphical creation must not send local `AppConfig.shell`, local process
 CWD, or other local host paths through trusted-local `LaunchParameters`.
 
-Use the existing automation variants for explicit remote CLI mutations:
+Use the existing automation variants:
 
 - `CreateLairAutomation`;
 - `SplitSplintAutomation`;
@@ -509,55 +514,40 @@ Use the existing automation variants for explicit remote CLI mutations:
 - `NewDojoAutomation`.
 
 Default remote creation uses `AutomationLaunch { cwd: None, argv: [] }`, causing
-the remote daemon to select its configured/default shell. An inherited CWD must
+the remote daemon to select its configured/default shell.
+
+For pane and Dojo creation from an existing remote view, an inherited CWD must
 come from an exact captured remote Splint identity and its remote CWD. An
 explicit `--cwd` under `--remote` is documented as a path on the remote host.
 It is not canonicalized or existence-checked locally. Direct command argv is
 transported as structured argv and never rebuilt as a shell string.
 
-Persistent parent selectors snapshot only descendants present at policy
-publication; future-descendant authority remains outside policy v2. Native
-remote Windows therefore disable New Lair, New Dojo, and Split actions. The
-operator closes the Window, performs an explicit remote CLI mutation, reviews
-the resulting IDs, republishes the exact policy snapshot, and reopens the Dojo.
-Policy reload deliberately disconnects clients and is not an in-place refresh.
-Local trusted graphical creation remains unchanged.
+Every normal creation surface remains available remotely. Each implementation
+must use remote-safe launch semantics and must never silently fall back to local
+shell or CWD state.
 
 ### Focus, control, and consent
 
 Do not send `PublishGraphicalFocus` over a remote endpoint. It is trusted-local
 state and does not describe compositor focus on the remote host.
 
-Ordinary policy-authorized controller acquisition, transfer requests, input,
-resize, release, and control-status subscriptions remain available. Forced
-trusted-UI transfer and remote trusted consent are not implied. If another
-client owns a controller, the remote Window follows the existing ordinary
-request/deny/accept workflow within granted policy.
+Ordinary controller acquisition, transfer requests, input, resize, release, and
+control-status subscriptions remain available as human terminal operations.
+Forced trusted-local UI transfer and remote Wayland consent are not implied. If
+another client owns a controller, the remote Window follows the existing
+ordinary request/deny/accept workflow.
 
-Remote operation requires persistent policy. It must not depend on a remote
-Wayland consent prompt or silently enable development terminal access.
+### Human authority versus automation policy
 
-### Policy recipe
+Remote graphical operation does not require persistent policy. OpenSSH owns
+human authentication, and `splinterd` accepts `RemoteInteractive` only from the
+adjacent installed relay running the fixed graphical mode. New descendants are
+usable immediately and policy reload does not disconnect human graphical
+connections.
 
-Documentation must provide a reviewed policy template for the exact installed
-`/usr/bin/splinterm-relay` digest. The complete interactive workflow may require:
-
-- topology metadata read and subscribe;
-- terminal visible read and subscribe;
-- scrollback read and search;
-- controller acquire and transfer;
-- input and resize;
-- authorization inspect;
-- topology layout and name mutation; and
-- process spawn, restore, or terminate only when the operator deliberately
-  enables the corresponding UI actions.
-
-Provide a read-only profile first and a full interactive profile second. Do not
-use wildcard resources or silently broaden scopes to make tests pass. State
-clearly that every SSH caller able to execute the relay under that Unix account
-receives the relay executable's configured Splinterm authority. Recommend a
-dedicated account or administrator-owned forced-command/restricted-key setup
-when that delegation is too broad.
+Persistent exact-resource policy remains unchanged for raw `relay --stdio`,
+JSON/NDJSON, MCP, and other automation clients. Its publication-snapshot
+semantics are intentionally irrelevant to the native remote Window.
 
 ### Images
 
@@ -657,21 +647,20 @@ Deliver as one product phase:
    transport explicitly unavailable.
 6. Implement ordinary controller acquisition/status/transfer, input, resize,
    release, pane focus, tabs, and hidden-tab synchronization.
-7. Convert explicit remote CLI New, launch, split, new Dojo, and relaunch
-   behavior to the automation request variants and remote-safe
-   `AutomationLaunch`; keep in-Window creation disabled because policy snapshots
-   exclude future descendants.
+7. Convert remote New, launch, split, new Dojo, and relaunch behavior to the
+   existing automation request variants and remote-safe `AutomationLaunch`.
 8. Inherit CWD only from exact captured remote state; treat explicit remote
    `--cwd` as a remote path and never send local shell/CWD defaults.
-9. Make rename, ratio, close, restore, and termination actions endpoint- and
-   policy-aware; trusted-only actions remain visibly unavailable.
-10. Package both relay modes and update profiles, authentication, policy,
-    disconnect, troubleshooting, image, README, CLI, architecture, PRD, and
-    roadmap documentation.
+9. Keep every normal creation and lifecycle action available under the
+   remote-interactive role; only trusted-local compositor/image/forced-transfer
+   actions remain unavailable.
+10. Package both relay modes and update profiles, human authentication and
+    authority, automation policy separation, disconnect, troubleshooting, image,
+    README, CLI, architecture, PRD, and roadmap documentation.
 
 Internal acceptance checks:
 
-- fake remote sessions cover read-only, interactive, and denied policy profiles;
+- fake remote sessions cover remote-interactive negotiation and daemon denials;
 - exact Splint/incarnation/controller identities bind input and resize;
 - channel loss cannot retarget another pane;
 - disconnect releases subscriptions/controllers while remote Splints remain
@@ -717,9 +706,18 @@ closure review found no behavioral blocker. Its two local lint-allow reason
 findings were applied and revalidated. No real SSH host or graphical Window was
 used.
 
+Remote-interactive correction evidence (2026-08-08): protocol, automation-client,
+raw relay, graphical relay, Splinterm library/binary/remote-session/remote-CLI,
+daemon library/binary, and strict workspace Clippy suites passed. All 18
+serialized daemon end-to-end tests passed. An isolated real debug `splinterd`
+and adjacent `splinterm-relay --graphical-stdio`, with no policy configured,
+negotiated `RemoteInteractive`, created a Lair, relaunched its retained Splint,
+and immediately split it. Persisted topology advanced to revision 2 with two
+Splints. No graphical Window was mapped for this evidence.
+
 Retain evidence for exact fake SSH argv, key/agent behavior, one password or
 askpass interaction per session, host-key/authentication failures, multiplexer
-bounds/fairness, logical-channel concurrency, policy denials, protocol mismatch,
+bounds/fairness, logical-channel concurrency, daemon denials, protocol mismatch,
 child/task/channel reaping, remote no-image behavior, unchanged local trusted
 behavior, and unchanged raw automation relay behavior.
 
@@ -745,8 +743,7 @@ without asking again if the smoke succeeds:
 6. remote session picker and existing Dojo open;
 7. multi-pane text output and ordered updates;
 8. input, resize, scrollback, search, and normal controller transfer;
-9. explicit remote CLI split/new Dojo/new Lair using remote shell and CWD
-   semantics, followed by exact policy republish and Window reopen;
+9. remote split/new Dojo/new Lair using remote shell and CWD semantics;
 10. local Window close followed by proof that remote Splints remain running;
 11. reconnect and reopen;
 12. SSH kill, relay kill, and daemon loss behavior;
@@ -759,6 +756,11 @@ repetition, remote process loss, or cleanup failure. Completion requires
 recorded evidence and independent review, not additional progress approvals.
 
 #### Phase 4 Holodeck attempt — 2026-08-07
+
+> **Historical note:** the policy binding and policy-denial details below record
+> the original automation-role implementation and remain useful failure evidence,
+> but that authorization design is superseded. The supported graphical path now
+> uses `RemoteInteractive` after SSH authentication and does not require policy.
 
 The approved guarded sequence used `oldjobobo@holodeck` and isolated workspace 8
 on DP-2. Commit `3475725` supplied the feature, followed by packaging
@@ -930,24 +932,6 @@ focus, and left Holodeck with an active empty daemon and only the exact-digest
 and clean-close acceptance boundary; Phase 4 items not exercised by this bounded
 smoke remain subject to their recorded matrix requirements.
 
-A later approved interaction matrix mapped a remote Window, accepted bounded
-input, verified `/home/oldjobobo` and `/usr/bin/bash`, rendered 200 ordered rows,
-and showed a local search result at `P4_ORDER_150`. Invoking Split created one
-Running remote sibling, but the published exact-Lair selector correctly denied
-attachment because new descendants are excluded from that generation. Reloading
-the policy then intentionally disconnected every client; the Window reported
-`topology manager stopped` with `splinterd closed a partial frame`. Both Splints
-remained Running. Cleanup removed temporary authority and topology and restored
-the original focus, empty workspace 8, healthy daemon, and one bootstrap rule.
-
-The resulting product/security decision preserves publication-snapshotted
-resource authority. Remote graphical creation controls are disabled instead of
-creating inaccessible descendants. Creation remains an explicit CLI workflow:
-close the Window, mutate, review IDs, republish policy, and reopen. The daemon
-now sends `persistent policy reloaded; reconnect required` as one complete frame
-before a reload disconnect, and clients preserve that diagnostic in request and
-subscription paths. Seamless future-descendant authority remains deferred.
-
 ## Stop gates
 
 Stop and request a product/security decision if implementation would require:
@@ -958,8 +942,8 @@ Stop and request a product/security decision if implementation would require:
 - adding a daemon network listener;
 - weakening exact relay/daemon executable identity;
 - exposing image bodies or trusted image metadata remotely;
-- granting trusted-UI role over SSH;
-- silently broadening persistent policy;
+- granting trusted-local compositor/image authority over SSH;
+- applying automation policy to the human graphical workflow;
 - invoking a remote shell to rebuild command argv;
 - sending local shell paths or CWD as default remote launch state;
 - changing raw `relay --stdio` compatibility;
@@ -984,24 +968,24 @@ The feature is complete only when all of the following are demonstrated:
    authentication failure.
 5. One SSH child carries the independent daemon connections required by a
    supported multi-pane/tab Window without depending on OpenSSH `MaxSessions`.
-6. Remote connections negotiate automation role and never receive trusted local
-   UI bypass.
-7. Policy-authorized text output, panes, tabs, input, resize, scrollback, search,
-   and ordinary controller ownership work against exact remote identities.
-8. Explicit CLI-created remote terminals use remote daemon defaults; local shell
-   and CWD do not leak, and native Windows require policy republish plus reopen
-   before attaching newly created descendants.
+6. Remote graphical connections negotiate `RemoteInteractive`, never consult
+   automation policy, and never receive trusted-local compositor/image authority.
+7. Text output, panes, tabs, input, resize, scrollback, search, ordinary
+   controller ownership, and lifecycle operations work against exact remote
+   identities.
+8. New remote Lairs, Dojos, and Splints attach and render immediately; remote
+   daemon defaults are used and local shell/CWD do not leak.
 9. Closing or crashing the local client, SSH, or relay leaves remote Splints
    running while releasing connection-owned subscriptions and controllers.
-10. SSH failure, relay failure, daemon loss, policy denial, channel failure,
+10. SSH failure, relay failure, daemon loss, role rejection, channel failure,
     multiplexer mismatch, and daemon protocol mismatch fail clearly without
     corrupting local or remote state.
 11. Remote endpoints never request image bodies or open a local image-content
     socket.
 12. Raw SSH automation relay behavior and all local trusted graphical behavior
     remain unchanged.
-13. Profiles, authentication, policy delegation, host-key setup, disconnect
-    semantics, and image limitations are documented accurately.
+13. Profiles, human SSH authority, automation-policy separation, host-key setup,
+    disconnect semantics, and image limitations are documented accurately.
 14. Non-graphical evidence, operator-gated graphical evidence, and independent
     review are recorded before the feature is described as implemented or
     validated.
@@ -1013,10 +997,10 @@ At implementation milestones, update:
 - `docs/PRD.md` — add a P0 native remote graphical requirement distinct from
   remote automation and mark its state honestly;
 - `docs/architecture.md` — show local Unix, remote SSH, graphical relay
-  multiplexer, automation role, and remote daemon channels;
+  multiplexer, remote-interactive role, and remote daemon channels;
 - `docs/remote.md` — cover profiles, authentication, fixed graphical command,
-  policy, failure, disconnect, and image behavior while retaining raw automation
-  relay documentation;
+  human authority, failure, disconnect, and image behavior while retaining raw
+  automation relay policy documentation;
 - `docs/configuration.md` — document `remotes.toml` and strict validation;
 - `docs/automation.md` — preserve the distinction between public automation and
   native remote graphical use;

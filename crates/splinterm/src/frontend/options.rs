@@ -13,7 +13,6 @@ use splinterm_protocol::TerminalSnapshot;
 
 use crate::{
     config::{CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme},
-    endpoint::GraphicalTopologyCreation,
     keymap::ResolvedKeymap,
 };
 
@@ -86,8 +85,6 @@ pub struct WindowOptions {
     pub graphical_focus: Option<WatchSender<Option<SplintId>>>,
     /// Whether trusted graphical force-transfer actions may be offered or dispatched.
     pub forced_control_transfer: bool,
-    /// Whether this Window may create new Lairs, Dojos, or Splints in-place.
-    pub graphical_topology_creation: GraphicalTopologyCreation,
     /// Stable identity for the initial managed Dojo; absent for legacy/evidence windows.
     pub initial_dojo: Option<WindowDojoIdentity>,
 }
@@ -122,7 +119,6 @@ impl Default for WindowOptions {
             topology_commands: None,
             graphical_focus: None,
             forced_control_transfer: true,
-            graphical_topology_creation: GraphicalTopologyCreation::Enabled,
             initial_dojo: None,
         }
     }

@@ -125,14 +125,16 @@ daemon Unix connections. One local OpenSSH child therefore carries topology,
 observation, control, and pane-task connections after one authentication. It
 does not depend on OpenSSH ControlMaster or server `MaxSessions`.
 
-Every logical daemon connection negotiates `ClientRole::Automation`. The relay
-cannot claim trusted local UI identity, publish compositor focus on its own, or
-retrieve image bodies. Persistent policy for the exact installed
-`/usr/bin/splinterm-relay` digest remains required. Closing SSH or the local
-session releases connection-owned subscriptions and controllers but sends no
-Splint termination request. Fake-relay coverage exercises interactive identity,
-policy denial, deliberate acknowledgement mismatch, and channel-local loss with
-an owned control subscription and controller while another channel stays live.
+Every logical daemon connection negotiates `ClientRole::RemoteInteractive`.
+OpenSSH authenticates the human user and starts the installed graphical relay
+under that remote Unix account; native remote Windows do not use automation
+policy. The daemon accepts this role only from the adjacent
+`splinterm-relay --graphical-stdio` process. It grants ordinary human terminal
+and topology authority while withholding trusted-local compositor focus, image
+content, and forced-control privileges. Closing SSH or the local session
+releases connection-owned subscriptions and controllers but sends no Splint
+termination request. Raw `relay --stdio` automation remains byte-compatible and
+continues to negotiate `ClientRole::Automation` under persistent policy.
 
 Select one profile globally to bind the complete native client lifetime to it:
 
@@ -147,28 +149,21 @@ splinterm --remote PROFILE launch [--working-directory REMOTE_PATH] [-- ARGV...]
 Omitting the subcommand after `--remote PROFILE` opens that endpoint's Recent
 Sessions picker. Session discovery, tabs, pane snapshots and ordered updates,
 resynchronization, scrollback/search, ordinary requested control/input/resize,
-and policy-authorized operations on already published resources all use logical
-channels on the same SSH child. Trusted forced control transfer remains visibly
-unavailable and is rejected before request construction. Creating a Lair, Dojo,
-or Splint inside a remote Window is also visibly disabled: persistent parent
-selectors exclude future descendants by design. A Window remains bound to
-exactly one endpoint. Local and remote recency files are distinct, and profile
-names—not remote titles or CWDs—select the namespace.
+and ordinary lifecycle actions all use logical channels on the same SSH child.
+New Lairs, Dojos, and Splints may be created, attached, controlled, and rendered
+immediately without policy publication or Window restart. Trusted forced control
+transfer remains visibly unavailable and is rejected before request construction.
+A Window remains bound to exactly one endpoint. Local and remote recency files
+are distinct, and profile names—not remote titles or CWDs—select the namespace.
 
-Explicit remote CLI creation sends `AutomationLaunch { cwd: None, argv: [] }`;
-the remote daemon selects its own home, shell, and defaults. Split/relaunch
-inheritance is resolved by the remote daemon from the exact target Splint. An
-explicit `--cwd`/`--working-directory` is an absolute remote path and structured
-argv is never rebuilt as a shell string. Local shell settings and local CWD are
-never default remote launch state.
-
-Policy v2 does not grant future-descendant authority. To create remote topology,
-close the native Window, use an explicit `--remote` lifecycle command, review the
-new IDs, republish the exact policy snapshot, and reopen the selected Dojo. A
-policy reload deliberately disconnects existing clients, so reloading underneath
-a live Window is not a refresh mechanism. Updated clients receive
-`persistent policy reloaded; reconnect required` before the connection closes.
-Do not add wildcard resources to avoid this workflow.
+Remote creation uses the existing remote-safe launch envelope: absent CWD and
+argv cause the remote daemon to select its own home, shell, and defaults.
+Split/relaunch inheritance is resolved by the remote daemon from the exact target
+Splint. An explicit `--cwd`/`--working-directory` is an absolute remote path and
+structured argv is never rebuilt as a shell string. Local shell settings and
+local CWD are never default remote launch state. The envelope's historical Rust
+type name is not an authorization role; remote graphical connections remain
+human-interactive.
 
 Profile inspection and reachability commands remain non-graphical:
 
@@ -178,10 +173,10 @@ splinterm remote inspect PROFILE
 splinterm remote check PROFILE
 ```
 
-`check` starts the fixed graphical relay, negotiates one automation channel,
-sends `Ping` and `ListLairs`, and exits without mapping a Window or mutating
-topology. A successful check proves reachability and the tested read scope only;
-it does not enumerate every resource-dependent permission.
+`check` starts the fixed graphical relay, negotiates one remote-interactive
+channel, sends `Ping` and `ListLairs`, and exits without mapping a Window or
+mutating topology. A successful check proves SSH, relay, daemon, and human-role
+reachability.
 
 ## Remote profiles
 
@@ -241,92 +236,23 @@ behavior.
 Bounded errors distinguish host-key changes/unknown keys, routing or timeout,
 authentication failure, unavailable terminal/askpass interaction, missing remote
 command, unavailable daemon, relay/daemon identity rejection, outer protocol
-mismatch, private protocol mismatch, policy denial, and generic transport loss.
-SSH configuration can still affect routing and authentication, so inspect it
-with standard OpenSSH tools when diagnosing aliases or proxies.
+mismatch, private protocol mismatch, and generic transport loss. SSH
+configuration can still affect routing and authentication, so inspect it with
+standard OpenSSH tools when diagnosing aliases or proxies.
 
-## Graphical relay policy templates
+## Human authority and automation policy
 
-A read-only native Window requires daemon topology plus exact retained
-Lair/Splint resources. Pane attachment requests only observe and scrollback
-access; denied initial controller acquisition falls back to an observer Window
-rather than blocking attachment. Review every UUID and replace the executable digest; do
-not copy wildcard resources merely to make a test pass. A Lair selector snapshots
-only its descendants that exist when that policy generation is published. New
-children require explicit policy republish and Window reopen; they never become
-attachable through an in-place refresh:
+The native graphical workflow is a human SSH session. After OpenSSH authenticates
+the account, the graphical relay receives normal terminal-multiplexer authority
+from that account's `splinterd`: session discovery, attachment, input, resize,
+creation, splitting, naming, closing, restoration, and reconnection do not
+require policy rules. Newly created topology is usable immediately.
 
-```json
-{
-  "schema": "splinterm.policy.v2",
-  "rules": [{
-    "id": "ssh-graphical-read-only",
-    "executable": {
-      "path": "/usr/bin/splinterm-relay",
-      "sha256": "REPLACE_WITH_REVIEWED_SHA256"
-    },
-    "scopes": [
-      "topology_metadata_read", "topology_subscribe",
-      "terminal_visible_read", "terminal_subscribe",
-      "scrollback_read", "scrollback_search",
-      "authorization_inspect"
-    ],
-    "resources": [
-      {"kind": "daemon"},
-      {"kind": "lair", "lair_id": "REPLACE_WITH_REVIEWED_UUID"}
-    ],
-    "limits": {
-      "max_returned_rows": 64, "max_results": 64,
-      "max_returned_bytes": 1048576, "max_live_subscriptions": 4,
-      "deadline_ms": 5000
-    }
-  }]
-}
-```
-
-A reviewed interactive profile can add control and lifecycle authority without
-wildcards:
-
-```json
-{
-  "schema": "splinterm.policy.v2",
-  "rules": [{
-    "id": "ssh-graphical-interactive-reviewed",
-    "executable": {
-      "path": "/usr/bin/splinterm-relay",
-      "sha256": "REPLACE_WITH_REVIEWED_SHA256"
-    },
-    "scopes": [
-      "topology_metadata_read", "topology_subscribe",
-      "terminal_visible_read", "terminal_subscribe",
-      "scrollback_read", "scrollback_search",
-      "controller_acquire", "controller_transfer", "input", "resize",
-      "process_spawn", "process_restore", "process_terminate",
-      "topology_layout_mutate", "topology_name_mutate",
-      "authorization_inspect"
-    ],
-    "resources": [
-      {"kind": "daemon"},
-      {"kind": "lair", "lair_id": "REPLACE_WITH_REVIEWED_UUID"}
-    ],
-    "limits": {
-      "max_returned_rows": 64, "max_results": 64,
-      "max_returned_bytes": 1048576, "max_live_subscriptions": 4,
-      "max_spawn_count": 4, "deadline_ms": 10000
-    }
-  }]
-}
-```
-
-Remove restore, terminate, spawn, layout, or naming scopes when those CLI
-actions should stay unavailable; never add them to a read-only profile. Native
-remote Windows disable new-Lair, new-Dojo, and split actions even when these
-scopes exist because the resulting descendants are outside the published
-resource snapshot. Policy denial is
-surfaced rather than converted to trusted local consent. Every SSH caller able
-to execute this relay under the account receives the relay executable's
-configured Splinterm authority; use a dedicated account or
-administrator-owned forced-command/restricted-key setup when that is too broad.
+Persistent exact-resource policy remains exclusively for machine clients using
+`relay --stdio`, JSON/NDJSON, or MCP. Its snapshot behavior does not constrain a
+native remote Window. Policy reload disconnects automation-role connections so
+they re-evaluate the new generation; it does not disconnect local or remote
+human graphical clients.
 
 Remote snapshots must omit image metadata. The client never opens a `.content`
 socket for a remote endpoint; unexpected remote image metadata fails the pane

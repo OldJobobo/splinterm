@@ -333,7 +333,7 @@ async fn run_headless(
                         config,
                     ),
                 },
-                LaunchSemantics::RemoteAutomation => Request::SplitSplintAutomation {
+                LaunchSemantics::RemoteInteractive => Request::SplitSplintAutomation {
                     expected_topology_revision,
                     target_splint_id,
                     axis: axis.into(),
@@ -392,7 +392,7 @@ async fn run_headless(
                         config,
                     ),
                 },
-                LaunchSemantics::RemoteAutomation => Request::NewDojoAutomation {
+                LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
                     expected_topology_revision,
                     lair_id,
                     name,
@@ -477,7 +477,7 @@ async fn run_headless(
                         config,
                     ),
                 },
-                LaunchSemantics::RemoteAutomation => Request::RelaunchSplintAutomation {
+                LaunchSemantics::RemoteInteractive => Request::RelaunchSplintAutomation {
                     expected_topology_revision,
                     splint_id,
                     launch: automation_launch(cwd, command),
@@ -874,7 +874,7 @@ mod tests {
             ..AppConfig::default()
         };
         let request = create_request_for(
-            LaunchSemantics::RemoteAutomation,
+            LaunchSemantics::RemoteInteractive,
             TopologyRevision::default(),
             "remote".to_owned(),
             None,

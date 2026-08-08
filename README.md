@@ -109,11 +109,6 @@ Inside a managed Splinterm window, these controls cover the essential workflow:
 | Search scrollback | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> |
 | Copy / paste | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> |
 
-These creation shortcuts apply to trusted local Windows. Native remote Windows
-keep New Session, New Dojo, and Split visibly disabled because remote policy
-selectors exclude future descendants. Create remote topology through explicit
-CLI commands, republish the exact policy, then reopen the Dojo.
-
 Reopening attaches to processes that are still running. Starting an exited process again from saved launch metadata is an explicit **restore** operation.
 
 Continue with the [quickstart](https://splinterm.com/docs/quickstart/) or [sessions and persistence](https://splinterm.com/docs/sessions/).
@@ -158,7 +153,7 @@ Splinterm exposes a deliberately bounded automation surface rather than making i
 - **Native remote client** for a profile-bound graphical workflow over an authenticated relay.
 - **MCP adapter** as an optional, separately packaged and policy-identified integration.
 
-Machine access does not inherit trusted graphical authority. An SSH login, the same Unix UID, or a process running inside a Splint is not sufficient authorization on its own.
+Machine access does not inherit human graphical authority and remains governed by automation policy. Native remote Windows are different: OpenSSH authenticates the human account, and the installed graphical relay receives normal terminal-multiplexer authority without automation policy.
 
 Authoritative references:
 

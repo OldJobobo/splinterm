@@ -69,7 +69,7 @@ pub(in crate::app) fn create_request_for(
                 config,
             ),
         },
-        LaunchSemantics::RemoteAutomation => Request::CreateLairAutomation {
+        LaunchSemantics::RemoteInteractive => Request::CreateLairAutomation {
             expected_topology_revision,
             name,
             launch: automation_launch(cwd, command),

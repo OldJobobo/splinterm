@@ -12,7 +12,7 @@ use splinterm_core::{
     Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 27;
+pub const PROTOCOL_VERSION: u16 = 28;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -60,6 +60,7 @@ pub fn image_content_socket_path(control_socket: &Path) -> PathBuf {
 #[serde(rename_all = "snake_case")]
 pub enum ClientRole {
     TrustedUi,
+    RemoteInteractive,
     Automation,
 }
 
@@ -2180,6 +2181,17 @@ mod tests {
                 .unwrap()
                 .contains("\"type\":\"hello\"")
         );
+        let remote = encode_frame(&ClientFrame::Hello {
+            minimum_version: PROTOCOL_VERSION,
+            maximum_version: PROTOCOL_VERSION,
+            role: ClientRole::RemoteInteractive,
+        })
+        .unwrap();
+        assert!(
+            std::str::from_utf8(&remote[4..])
+                .unwrap()
+                .contains("\"role\":\"remote_interactive\"")
+        );
     }
 
     #[test]
@@ -2217,7 +2229,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 27);
+        assert_eq!(PROTOCOL_VERSION, 28);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

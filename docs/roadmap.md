@@ -82,23 +82,23 @@ Detailed plan: [`plans/0028-remote-graphical-client.md`](plans/0028-remote-graph
 
 - Phase 1 transport/authentication foundation implemented: strict remote
   profiles, exact OpenSSH argv, separate graphical relay mode, bounded logical
-  channel multiplexer, transport-neutral automation connections, one-child
+  channel multiplexer, transport-neutral protocol connections, one-child
   lifecycle, askpass validation, categorized diagnostics, explicit endpoint
   capabilities, and non-mutating `remote check`
 - Existing byte-transparent `relay --stdio` compatibility retained
 - Phase 2 native workflow implemented and non-graphically validated: global
   endpoint selection, remote Recent Sessions and Window attachment, pane/tab
-  observation and control, history/search/resync, remote-safe CLI automation
-  mutations, endpoint recency namespaces, no-image enforcement, suppression of
-  trusted graphical-focus publication, and trusted-only forced-transfer gating.
-  In-Window creation is disabled because published parent selectors exclude
-  future descendants; operators mutate explicitly, republish policy, and reopen.
-- Fake-relay integration covers exact interactive identities, policy denial,
+  observation and control, history/search/resync, remote-safe launch mutations,
+  endpoint recency namespaces, no-image enforcement, suppression of trusted
+  graphical-focus publication, and trusted-only forced-transfer gating
+- Human remote channels now negotiate `RemoteInteractive`; OpenSSH-authenticated
+  graphical sessions receive normal terminal authority without automation policy,
+  including immediate creation and attachment of new Lairs, Dojos, and Splints
+- Fake-relay integration covers exact interactive identities, daemon denials,
   mismatched acknowledgements, and channel-local controller/subscription loss
-- Phase 3 aggregate non-graphical closure is complete. Phase 4 has recorded
-  real-host map, input, search, persistence, reconnect, and clean-close evidence;
-  password prompting and the remaining bounded failure/local-regression matrix
-  are still open.
+- Phase 3 aggregate non-graphical closure passes, including strict workspace
+  Clippy, affected package suites, and 18 serialized daemon end-to-end tests;
+  remaining supported-boundary work is the operator-gated Phase 4 graphical matrix
 
 ## Phase 4.1 — output throughput stabilization (complete)
 

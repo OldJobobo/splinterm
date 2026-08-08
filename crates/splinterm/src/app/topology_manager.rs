@@ -10,7 +10,7 @@ use splinterm::{
     WindowTopologyUpdate,
     automation::{Connection, SharedImageContentCache, protocol_error},
     config::AppConfig,
-    endpoint::{ConnectionFactory, GraphicalTopologyCreation, LaunchSemantics},
+    endpoint::{ConnectionFactory, LaunchSemantics},
     session_picker::{SessionEntry, collect_sessions},
     tab::{DojoTab, OpenTabOutcome, WindowTabSet},
 };
@@ -395,7 +395,7 @@ async fn apply_topology_command(
                         config,
                     ),
                 },
-                LaunchSemantics::RemoteAutomation => Request::SplitSplintAutomation {
+                LaunchSemantics::RemoteInteractive => Request::SplitSplintAutomation {
                     expected_topology_revision,
                     target_splint_id: target,
                     axis,
@@ -491,10 +491,6 @@ fn topology_identity_diff(
         current.difference(&previous).copied().collect(),
         previous.difference(&current).copied().collect(),
     )
-}
-
-fn topology_reconciliation_blocked(blocked_root: Option<&LayoutNode>, next: &LayoutNode) -> bool {
-    blocked_root == Some(next)
 }
 
 fn pending_focus_for_observation(
@@ -691,7 +687,7 @@ async fn create_dojo_in_lair(
                 config,
             ),
         },
-        LaunchSemantics::RemoteAutomation => Request::NewDojoAutomation {
+        LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
             expected_topology_revision,
             lair_id,
             name: format!("terminal-{stamp}"),
@@ -707,32 +703,8 @@ async fn create_dojo_in_lair(
 struct ManagedDojo {
     identity: WindowDojoIdentity,
     root: LayoutNode,
-    blocked_root: Option<LayoutNode>,
     pending_focus: Option<PendingTopologyFocus>,
     pane_tasks: HashMap<SplintId, PaneTask>,
-}
-
-const REMOTE_GRAPHICAL_CREATION_UNAVAILABLE: &str =
-    "remote graphical creation requires policy republish and Window reopen";
-
-fn graphical_creation_command(command: &WindowTopologyCommand) -> bool {
-    matches!(
-        command,
-        WindowTopologyCommand::Split { .. }
-            | WindowTopologyCommand::NewLair
-            | WindowTopologyCommand::NewDojo { .. }
-    )
-}
-
-fn ensure_graphical_creation_allowed(
-    capability: GraphicalTopologyCreation,
-    command: &WindowTopologyCommand,
-) -> Result<()> {
-    anyhow::ensure!(
-        capability == GraphicalTopologyCreation::Enabled || !graphical_creation_command(command),
-        REMOTE_GRAPHICAL_CREATION_UNAVAILABLE
-    );
-    Ok(())
 }
 
 async fn cancel_pane_tasks(pane_tasks: HashMap<SplintId, PaneTask>) {
@@ -860,7 +832,6 @@ async fn finish_managed_window_open(
             ManagedDojo {
                 identity: prepared.identity,
                 root: prepared.dojo.root,
-                blocked_root: None,
                 pending_focus: None,
                 pane_tasks: prepared.pane_tasks,
             },
@@ -1172,9 +1143,6 @@ async fn reconcile_managed_topology(
             }
             managed.identity = identity;
         }
-        if topology_reconciliation_blocked(managed.blocked_root.as_ref(), &root) {
-            continue;
-        }
         let (added, _) = topology_identity_diff(&managed.root, &root);
         let (focused, consumed) =
             pending_focus_for_observation(managed.pending_focus, snapshot.revision, &added);
@@ -1184,30 +1152,20 @@ async fn reconcile_managed_topology(
             image_cache,
             dojo_id,
             &mut managed.root,
-            root.clone(),
+            root,
             focused,
             updates,
             &mut managed.pane_tasks,
         )
         .await
         {
-            Ok(true) => managed.blocked_root = None,
+            Ok(true) => {}
             Ok(false) => return Ok(false),
             Err(error) => {
-                let policy_snapshot_denial = factory.capabilities().graphical_topology_creation
-                    == GraphicalTopologyCreation::RequiresPolicyRepublish
-                    && protocol_error(&error)
-                        .is_some_and(|error| error.code == ErrorCode::Unauthorized);
-                let message = if policy_snapshot_denial {
-                    REMOTE_GRAPHICAL_CREATION_UNAVAILABLE.to_owned()
-                } else {
-                    format!("{error:#}")
-                };
-                managed.blocked_root = policy_snapshot_denial.then_some(root);
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
                         dojo_id: Some(dojo_id),
-                        message,
+                        message: format!("{error:#}"),
                     })
                     .await;
             }
@@ -1291,7 +1249,6 @@ pub(in crate::app) async fn run_topology_manager(
             ManagedDojo {
                 identity: initial_identity,
                 root,
-                blocked_root: None,
                 pending_focus: None,
                 pane_tasks,
             },
@@ -1305,23 +1262,6 @@ pub(in crate::app) async fn run_topology_manager(
                 TopologyManagerWake::Shutdown => break,
             };
         let command = if let Some(command) = command {
-            if let Err(error) = ensure_graphical_creation_allowed(
-                factory.capabilities().graphical_topology_creation,
-                &command,
-            ) {
-                let dojo_id = match &command {
-                    WindowTopologyCommand::Split { dojo_id, .. } => Some(*dojo_id),
-                    WindowTopologyCommand::NewLair | WindowTopologyCommand::NewDojo { .. } => None,
-                    _ => unreachable!("only graphical creation commands are rejected"),
-                };
-                let _ = updates
-                    .send(WindowTopologyUpdate::TabFailed {
-                        dojo_id,
-                        message: format!("{error:#}"),
-                    })
-                    .await;
-                continue;
-            }
             match handle_session_manager_command(
                 &factory,
                 command,
@@ -1474,59 +1414,11 @@ mod tests {
         Axis, CloseAction, DojoId, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
         SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyManagerWake,
         TopologyRevision, WindowTopologyCommand, captured_dojo_kill_targets, close_action,
-        close_other_tab_targets, ensure_graphical_creation_allowed, next_topology_manager_wake,
-        parent_ratio, pending_focus_for_observation, refreshed_close_state,
-        topology_command_outcome, topology_identity_diff, topology_reconciliation_blocked,
-        validate_exited_close_target, window_has_tab_capacity,
+        close_other_tab_targets, next_topology_manager_wake, parent_ratio,
+        pending_focus_for_observation, refreshed_close_state, topology_command_outcome,
+        topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::pane_claims_initial_control;
-    use splinterm::endpoint::GraphicalTopologyCreation;
-
-    #[test]
-    fn policy_bound_remote_window_rejects_only_new_graphical_descendants() {
-        let dojo_id = DojoId::new();
-        let splint_id = SplintId::new();
-        for command in [
-            WindowTopologyCommand::NewLair,
-            WindowTopologyCommand::NewDojo {
-                lair_id: splinterm_core::LairId::new(),
-            },
-            WindowTopologyCommand::Split {
-                dojo_id,
-                target: splint_id,
-                axis: Axis::Horizontal,
-            },
-        ] {
-            let error = ensure_graphical_creation_allowed(
-                GraphicalTopologyCreation::RequiresPolicyRepublish,
-                &command,
-            )
-            .unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "remote graphical creation requires policy republish and Window reopen"
-            );
-            ensure_graphical_creation_allowed(GraphicalTopologyCreation::Enabled, &command)
-                .unwrap();
-        }
-        ensure_graphical_creation_allowed(
-            GraphicalTopologyCreation::RequiresPolicyRepublish,
-            &WindowTopologyCommand::Close {
-                dojo_id,
-                target: splint_id,
-            },
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn denied_topology_is_suppressed_until_the_authoritative_layout_changes() {
-        let first = LayoutNode::Leaf(splinterm_core::Splint::shell(PathBuf::from("first")));
-        let second = LayoutNode::Leaf(splinterm_core::Splint::shell(PathBuf::from("second")));
-        assert!(topology_reconciliation_blocked(Some(&first), &first));
-        assert!(!topology_reconciliation_blocked(Some(&first), &second));
-        assert!(!topology_reconciliation_blocked(None, &first));
-    }
 
     #[tokio::test]
     async fn closed_window_command_channel_stops_before_another_topology_poll() {

@@ -31,7 +31,7 @@ async fn check_remote(profile: &RemoteProfile) -> Result<()> {
         .await
         .with_context(|| format!("remote {} transport check failed", profile.name()))?;
     let mut connection: Connection = session
-        .connect_automation()
+        .connect_interactive()
         .await
         .with_context(|| format!("remote {} daemon handshake failed", profile.name()))?;
     let deadline = Duration::from_secs(u64::from(profile.connect_timeout_seconds()));
@@ -46,14 +46,12 @@ async fn check_remote(profile: &RemoteProfile) -> Result<()> {
     let Response::Lairs { lairs, .. } = connection
         .request_with_deadline(Request::ListLairs, deadline)
         .await
-        .context(
-            "remote topology read failed; persistent policy may deny topology_metadata_read",
-        )?
+        .context("remote topology read failed")?
     else {
         bail!("remote splinterd returned an invalid topology response");
     };
     println!(
-        "Remote {} is reachable ({} Lairs); this check does not enumerate all authority.",
+        "Remote {} is reachable ({} Lairs).",
         profile.name(),
         lairs.len()
     );

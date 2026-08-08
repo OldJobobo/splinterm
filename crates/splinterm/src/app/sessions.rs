@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use splinterm::{
     SessionPickerDecision, SessionPickerUi, WindowOptions,
     config::{AppConfig, ResolvedTheme},
-    endpoint::{ConnectionFactory, GraphicalTopologyCreation},
+    endpoint::ConnectionFactory,
     renderer::{self, RendererOptions},
     run_window,
     session_picker::{SessionEntry, collect_sessions},
@@ -140,14 +140,12 @@ fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result
 fn choose_recent_session(
     config: &AppConfig,
     entries: &[SessionEntry],
-    graphical_topology_creation: GraphicalTopologyCreation,
 ) -> Result<Option<SessionPickerDecision>> {
     let theme = load_startup_theme(config);
     configure_picker_renderer(config, theme)?;
     let items = entries.iter().map(session_picker_item).collect();
     let (decision, receiver) = std_mpsc::channel();
-    let mut picker = SessionPickerUi::new(items, decision)
-        .with_new_enabled(graphical_topology_creation == GraphicalTopologyCreation::Enabled);
+    let mut picker = SessionPickerUi::new(items, decision);
     let snapshot = picker.snapshot();
     run_window(WindowOptions {
         snapshot: Some(snapshot),
@@ -158,7 +156,6 @@ fn choose_recent_session(
         cursor_blink: false,
         theme,
         keymap: config.keymap.clone(),
-        graphical_topology_creation,
         ..WindowOptions::default()
     })?;
     Ok(receiver.try_recv().ok())
@@ -203,12 +200,10 @@ pub(in crate::app) async fn run_sessions(
         .collect::<Vec<_>>();
     let picker_entries = entries.clone();
     let picker_config = config.clone();
-    let graphical_topology_creation = factory.capabilities().graphical_topology_creation;
-    let decision = tokio::task::spawn_blocking(move || {
-        choose_recent_session(&picker_config, &picker_entries, graphical_topology_creation)
-    })
-    .await
-    .context("session picker task failed")??;
+    let decision =
+        tokio::task::spawn_blocking(move || choose_recent_session(&picker_config, &picker_entries))
+            .await
+            .context("session picker task failed")??;
     match decision {
         None => Ok(()),
         Some(SessionPickerDecision::New) => {

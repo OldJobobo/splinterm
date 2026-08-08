@@ -83,7 +83,7 @@ while True:
             buffers[channel] = buffers[channel][4+length:]
             message = json.loads(body)
             if channel not in handshaken:
-                if message.get('type') != 'hello' or message.get('role') != 'automation':
+                if message.get('type') != 'hello' or message.get('role') != 'remote_interactive':
                     raise SystemExit(6)
                 if mode == 'close-first-private-hello' and not closed_once:
                     closed_once = True
@@ -95,7 +95,7 @@ while True:
                     continue
                 private_write(channel, {
                     'type': 'hello',
-                    'version': 27,
+                    'version': 28,
                     'limits': {
                         'maximum_frame_bytes': 8388608,
                         'maximum_input_bytes': 65536,
@@ -138,7 +138,7 @@ while True:
                     private_write(channel, {
                         'type': 'error',
                         'request_id': request_id,
-                        'error': {'code': 'unauthorized', 'message': 'fixture policy denied topology read'}
+                        'error': {'code': 'unauthorized', 'message': 'fixture daemon denied topology read'}
                     })
                     continue
                 if mode == 'read-only-pane' and request['type'] == 'request_access' and any(
@@ -147,14 +147,14 @@ while True:
                     private_write(channel, {
                         'type': 'error',
                         'request_id': request_id,
-                        'error': {'code': 'unauthorized', 'message': 'fixture read-only policy denied interactive access'}
+                        'error': {'code': 'unauthorized', 'message': 'fixture denied interactive access'}
                     })
                     continue
                 if mode in ('denied-interactive', 'read-only-pane') and request['type'] in ('acquire_control', 'input', 'resize'):
                     private_write(channel, {
                         'type': 'error',
                         'request_id': request_id,
-                        'error': {'code': 'unauthorized', 'message': 'fixture policy denied interactive control'}
+                        'error': {'code': 'unauthorized', 'message': 'fixture denied interactive control'}
                     })
                     continue
                 if request['type'] == 'ping':

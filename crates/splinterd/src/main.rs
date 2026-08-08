@@ -3,7 +3,7 @@ mod consent;
 mod persistence;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     io::{ErrorKind, IoSlice},
@@ -70,7 +70,7 @@ use tokio::{
     time,
 };
 use tokio_util::task::TaskTracker;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const CONNECTION_LIMIT: usize = 32;
@@ -175,18 +175,20 @@ struct PendingControlTransfer {
     incarnation: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum ControlNotice {
     Status {
         splint_id: SplintId,
         incarnation: u64,
         owner_connection_id: Option<u64>,
+        excluded_connections: Option<Arc<HashSet<u64>>>,
     },
     TransferRequested(PendingControlTransfer),
     TransferResolved {
         transfer: PendingControlTransfer,
         outcome: ControlTransferOutcome,
         controller_id: Option<u64>,
+        excluded_connections: Option<Arc<HashSet<u64>>>,
     },
 }
 
@@ -475,16 +477,35 @@ impl ControllerState {
         ids.into_iter().filter_map(|id| self.release(id)).collect()
     }
 
-    fn reset_connections(&mut self) -> (Vec<ControllerLease>, Vec<PendingControlTransfer>) {
-        let leases = self.by_id.drain().map(|(_, lease)| lease).collect();
-        let transfers = self
-            .transfers
-            .drain()
-            .map(|(_, transfer)| transfer)
+    fn release_connections(
+        &mut self,
+        connection_ids: &HashSet<u64>,
+    ) -> (Vec<ControllerLease>, Vec<PendingControlTransfer>) {
+        let mut lease_ids = self
+            .by_id
+            .values()
+            .filter(|lease| connection_ids.contains(&lease.connection_id))
+            .map(|lease| lease.id)
+            .collect::<Vec<_>>();
+        lease_ids.sort_unstable();
+        let leases = lease_ids
+            .into_iter()
+            .filter_map(|id| self.release(id))
             .collect();
-        self.by_splint.clear();
-        self.by_connection.clear();
-        self.transfer_by_splint.clear();
+        let mut transfer_ids = self
+            .transfers
+            .values()
+            .filter(|transfer| {
+                connection_ids.contains(&transfer.owner_connection_id)
+                    || connection_ids.contains(&transfer.requester_connection_id)
+            })
+            .map(|transfer| transfer.id)
+            .collect::<Vec<_>>();
+        transfer_ids.sort_unstable();
+        let transfers = transfer_ids
+            .into_iter()
+            .filter_map(|id| self.expire_transfer(id))
+            .collect();
         (leases, transfers)
     }
 
@@ -550,6 +571,7 @@ impl RuntimeRegistry {
 }
 
 struct TopologySubscriber {
+    owner_connection_id: u64,
     changes: mpsc::Sender<Arc<TopologyChange>>,
     resync: tokio::sync::watch::Sender<Option<splinterm_core::TopologyRevision>>,
 }
@@ -566,11 +588,17 @@ struct TopologySubscription {
 }
 
 impl TopologyHub {
-    fn subscribe(&mut self, id: u64) -> TopologySubscription {
+    fn subscribe(&mut self, id: u64, owner_connection_id: u64) -> TopologySubscription {
         let (changes, receiver) = mpsc::channel(TOPOLOGY_QUEUE);
         let (resync, resync_receiver) = tokio::sync::watch::channel(None);
-        self.subscribers
-            .insert(id, TopologySubscriber { changes, resync });
+        self.subscribers.insert(
+            id,
+            TopologySubscriber {
+                owner_connection_id,
+                changes,
+                resync,
+            },
+        );
         TopologySubscription {
             changes: receiver,
             resync: resync_receiver,
@@ -581,8 +609,9 @@ impl TopologyHub {
         self.subscribers.remove(&id);
     }
 
-    fn clear(&mut self) {
-        self.subscribers.clear();
+    fn remove_connections(&mut self, connection_ids: &HashSet<u64>) {
+        self.subscribers
+            .retain(|_, subscriber| !connection_ids.contains(&subscriber.owner_connection_id));
     }
 
     fn publish(&mut self, change: &TopologyChange) {
@@ -612,6 +641,7 @@ struct DaemonState {
     audit: Mutex<audit::AuditStore>,
     daemon_audit_peer: splinterm_protocol::AuditPeer,
     policy_reloads: broadcast::Sender<u64>,
+    automation_connections: Mutex<HashSet<u64>>,
     controller: Mutex<ControllerState>,
     control_events: broadcast::Sender<ControlNotice>,
     connection_revocations: broadcast::Sender<u64>,
@@ -731,6 +761,7 @@ async fn main() -> Result<()> {
         audit: Mutex::new(audit::AuditStore::default()),
         daemon_audit_peer,
         policy_reloads,
+        automation_connections: Mutex::new(HashSet::new()),
         controller: Mutex::new(ControllerState::default()),
         control_events,
         connection_revocations,
@@ -799,9 +830,19 @@ async fn main() -> Result<()> {
                     .await
                     .publish(candidate, &topology_snapshot);
                 record_policy_reload(&state, &generation).await;
+                let automation_connections =
+                    Arc::new(state.automation_connections.lock().await.clone());
+                state
+                    .topology_hub
+                    .lock()
+                    .await
+                    .remove_connections(&automation_connections);
+                let (leases, transfers) = state
+                    .controller
+                    .lock()
+                    .await
+                    .release_connections(&automation_connections);
                 let _ = state.policy_reloads.send(generation.id);
-                state.topology_hub.lock().await.clear();
-                let (leases, transfers) = state.controller.lock().await.reset_connections();
                 for lease in &leases {
                     append_daemon_splint_audit(
                         &state,
@@ -811,6 +852,13 @@ async fn main() -> Result<()> {
                         splinterm_protocol::AuditDecision::Revoked,
                         "policy_reload_revoked",
                         splinterm_protocol::AuditOutcome::Cancelled,
+                    )
+                    .await;
+                    publish_control_status_excluding(
+                        &state,
+                        lease.splint_id,
+                        lease.incarnation,
+                        Some(Arc::clone(&automation_connections)),
                     )
                     .await;
                 }
@@ -825,11 +873,20 @@ async fn main() -> Result<()> {
                         splinterm_protocol::AuditOutcome::Cancelled,
                     )
                     .await;
+                    publish_control_notice(
+                        &state,
+                        ControlNotice::TransferResolved {
+                            transfer: *transfer,
+                            outcome: ControlTransferOutcome::Cancelled,
+                            controller_id: None,
+                            excluded_connections: Some(Arc::clone(&automation_connections)),
+                        },
+                    );
                 }
                 if let Some(diagnostic) = &generation.diagnostic {
-                    warn!(generation = generation.id, %diagnostic, released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reload rejected; installed deny-all generation and disconnected clients");
+                    warn!(generation = generation.id, %diagnostic, disconnected_automation_connections = automation_connections.len(), released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reload rejected; installed deny-all generation and disconnected automation clients");
                 } else {
-                    info!(generation = generation.id, rules = generation.document.rule_count(), released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reloaded atomically; disconnected clients");
+                    info!(generation = generation.id, rules = generation.document.rule_count(), disconnected_automation_connections = automation_connections.len(), released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reloaded atomically; disconnected automation clients");
                 }
             }
             accepted = image_listener.accept() => {
@@ -1185,6 +1242,11 @@ async fn append_daemon_splint_audit(
 }
 
 async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
+    state
+        .automation_connections
+        .lock()
+        .await
+        .remove(&connection_id);
     {
         let mut focus = state.graphical_focus.lock().await;
         if focus
@@ -1214,9 +1276,14 @@ async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
                 transfer,
                 outcome: ControlTransferOutcome::Cancelled,
                 controller_id: None,
+                excluded_connections: None,
             },
         );
     }
+}
+
+const fn policy_reload_disconnects(role: ClientRole) -> bool {
+    matches!(role, ClientRole::Automation)
 }
 
 #[allow(
@@ -1259,6 +1326,45 @@ async fn serve_authenticated(
         .await?;
         bail!("incompatible protocol version");
     }
+    let trusted_ui_client = role == ClientRole::TrustedUi;
+    let matching_splinterm = peer.is_matching_splinterm();
+    let remote_interactive_client = role == ClientRole::RemoteInteractive;
+    let matching_graphical_relay = peer.is_matching_graphical_relay();
+    debug!(
+        ?role,
+        matching_splinterm, matching_graphical_relay, "client role negotiated"
+    );
+    if trusted_ui_client && !matching_splinterm {
+        send_control(
+            control,
+            protocol_error(
+                None,
+                ErrorCode::Unauthorized,
+                "trusted UI role requires the installed graphical client",
+            ),
+        )
+        .await?;
+        bail!("trusted UI role claimed outside the installed graphical client");
+    }
+    if remote_interactive_client && !matching_graphical_relay {
+        send_control(
+            control,
+            protocol_error(
+                None,
+                ErrorCode::Unauthorized,
+                "remote interactive role requires the installed graphical relay",
+            ),
+        )
+        .await?;
+        bail!("remote interactive role claimed outside the installed graphical relay");
+    }
+    if role == ClientRole::Automation {
+        state
+            .automation_connections
+            .lock()
+            .await
+            .insert(connection_id);
+    }
     send_control(
         control,
         ServerFrame::Hello {
@@ -1276,7 +1382,7 @@ async fn serve_authenticated(
     loop {
         let frame = tokio::select! {
             biased;
-            reload = policy_reloads.recv() => {
+            reload = policy_reloads.recv(), if policy_reload_disconnects(role) => {
                 if !matches!(reload, Err(broadcast::error::RecvError::Closed)) {
                     send_control(
                         control,
@@ -1398,7 +1504,8 @@ async fn serve_authenticated(
                     peer,
                     connection_id,
                     subscriptions.len(),
-                    role == ClientRole::TrustedUi,
+                    trusted_ui_client,
+                    remote_interactive_client,
                 )
                 .await;
                 match handled {
@@ -1490,7 +1597,12 @@ async fn serve_authenticated(
             }
         }
     }
+    let subscription_ids = subscriptions.keys().copied().collect::<Vec<_>>();
     drop(subscriptions);
+    let mut topology_hub = state.topology_hub.lock().await;
+    for subscription_id in subscription_ids {
+        topology_hub.remove(subscription_id);
+    }
     Ok(())
 }
 
@@ -1545,6 +1657,15 @@ fn publish_control_notice(state: &DaemonState, notice: ControlNotice) {
 }
 
 async fn publish_control_status(state: &DaemonState, splint_id: SplintId, incarnation: u64) {
+    publish_control_status_excluding(state, splint_id, incarnation, None).await;
+}
+
+async fn publish_control_status_excluding(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: u64,
+    excluded_connections: Option<Arc<HashSet<u64>>>,
+) {
     let owner_connection_id = {
         let controllers = state.controller.lock().await;
         controllers
@@ -1560,6 +1681,7 @@ async fn publish_control_status(state: &DaemonState, splint_id: SplintId, incarn
             splint_id,
             incarnation,
             owner_connection_id,
+            excluded_connections,
         },
     );
 }
@@ -1577,6 +1699,7 @@ fn publish_transfer_timeout(state: &DaemonState, transfer: PendingControlTransfe
             transfer,
             outcome: ControlTransferOutcome::TimedOut,
             controller_id: None,
+            excluded_connections: None,
         },
     );
 }
@@ -1669,23 +1792,27 @@ fn first_party_ui_scopes(scopes: &[AccessScope]) -> bool {
     })
 }
 
-fn trusted_first_party_ui(
+fn first_party_human_ui(
     trusted_ui_client: bool,
+    remote_interactive_client: bool,
     peer: &PeerIdentity,
     scopes: &[AccessScope],
 ) -> bool {
-    trusted_ui_client && peer.is_matching_splinterm() && first_party_ui_scopes(scopes)
+    ((trusted_ui_client && peer.is_matching_splinterm()) || remote_interactive_client)
+        && first_party_ui_scopes(scopes)
 }
 
 async fn authorize_scope(
     state: &DaemonState,
     peer: &PeerIdentity,
     trusted_ui_client: bool,
+    remote_interactive_client: bool,
     splint_id: SplintId,
     incarnation: u64,
     scopes: &[AccessScope],
 ) -> Result<Option<u64>, ProtocolError> {
-    if state.development_terminal_access || trusted_first_party_ui(trusted_ui_client, peer, scopes)
+    if state.development_terminal_access
+        || first_party_human_ui(trusted_ui_client, remote_interactive_client, peer, scopes)
     {
         return Ok(None);
     }
@@ -2137,7 +2264,7 @@ fn observe_process_exit(state: &Arc<DaemonState>, handle: LiveSplintHandle) {
 #[derive(Debug, Default)]
 struct RequestAuthorizationContext {
     policy_match: Option<policy::PolicyMatch>,
-    trusted_ui_bypass: bool,
+    interactive_bypass: bool,
 }
 
 impl RequestAuthorizationContext {
@@ -2148,7 +2275,7 @@ impl RequestAuthorizationContext {
     }
 
     fn requires_terminate_scope_authorization(&self) -> bool {
-        !self.trusted_ui_bypass && !self.policy_authorized()
+        !self.interactive_bypass && !self.policy_authorized()
     }
 
     fn maximum_returned_bytes(&self) -> Option<usize> {
@@ -2208,12 +2335,23 @@ fn trusted_ui_request(request: &Request) -> bool {
     )
 }
 
-fn trusted_ui_bypass(
+fn interactive_bypass(
     trusted_ui_client: bool,
     matching_splinterm_executable: bool,
+    remote_interactive_client: bool,
     request: &Request,
 ) -> bool {
-    trusted_ui_client && matching_splinterm_executable && trusted_ui_request(request)
+    let trusted_local =
+        trusted_ui_client && matching_splinterm_executable && trusted_ui_request(request);
+    let remote_human = remote_interactive_client
+        && trusted_ui_request(request)
+        && !matches!(
+            request,
+            Request::PublishGraphicalFocus { .. }
+                | Request::RequestImageContent { .. }
+                | Request::ForceControlTransfer { .. }
+        );
+    trusted_local || remote_human
 }
 
 fn intrinsically_authorized(
@@ -2232,16 +2370,21 @@ fn intrinsically_authorized(
             ))
 }
 
-fn trusted_ui_authorization_context(
+fn interactive_authorization_context(
     trusted_ui_client: bool,
+    remote_interactive_client: bool,
     peer: &PeerIdentity,
     request: &Request,
 ) -> Option<RequestAuthorizationContext> {
-    trusted_ui_bypass(trusted_ui_client, peer.is_matching_splinterm(), request).then(|| {
-        RequestAuthorizationContext {
-            trusted_ui_bypass: true,
-            ..RequestAuthorizationContext::default()
-        }
+    interactive_bypass(
+        trusted_ui_client,
+        peer.is_matching_splinterm(),
+        remote_interactive_client,
+        request,
+    )
+    .then(|| RequestAuthorizationContext {
+        interactive_bypass: true,
+        ..RequestAuthorizationContext::default()
     })
 }
 
@@ -2885,6 +3028,7 @@ async fn authorize_request(
     peer: &PeerIdentity,
     active_subscriptions: usize,
     trusted_ui_client: bool,
+    remote_interactive_client: bool,
 ) -> Result<RequestAuthorizationContext, ProtocolError> {
     use authorization::RequestAuthorization;
 
@@ -2892,8 +3036,12 @@ async fn authorize_request(
     if intrinsically_authorized(&plan, state.development_terminal_access) {
         return Ok(RequestAuthorizationContext::default());
     }
-    if let Some(authorization) = trusted_ui_authorization_context(trusted_ui_client, peer, request)
-    {
+    if let Some(authorization) = interactive_authorization_context(
+        trusted_ui_client,
+        remote_interactive_client,
+        peer,
+        request,
+    ) {
         return Ok(authorization);
     }
     if matches!(plan, RequestAuthorization::TrustedUi) {
@@ -3468,6 +3616,7 @@ async fn handle_request(
     connection_id: u64,
     active_subscriptions: usize,
     trusted_ui_client: bool,
+    remote_interactive_client: bool,
 ) -> Result<Handled, ProtocolError> {
     let request = bind_current_terminal_incarnation(request, state, peer).await?;
     let audit_resource = request_policy_resources(&request, state)
@@ -3482,6 +3631,7 @@ async fn handle_request(
         peer,
         active_subscriptions,
         trusted_ui_client,
+        remote_interactive_client,
     )
     .await
     {
@@ -3509,6 +3659,7 @@ async fn handle_request(
         peer,
         connection_id,
         trusted_ui_client,
+        remote_interactive_client,
         &authorization,
     )
     .await;
@@ -3545,6 +3696,7 @@ async fn handle_authorized_request(
     peer: &PeerIdentity,
     connection_id: u64,
     trusted_ui_client: bool,
+    remote_interactive_client: bool,
     authorization: &RequestAuthorizationContext,
 ) -> Result<Handled, ProtocolError> {
     let request = resolve_automation_mutation(request, state).await?;
@@ -3605,7 +3757,7 @@ async fn handle_authorized_request(
             snapshot: consistent_topology_snapshot(state).await,
         },
         Request::SubscribeTopology => {
-            let (id, snapshot, stream) = subscribe_topology(state).await;
+            let (id, snapshot, stream) = subscribe_topology(state, connection_id).await;
             return Ok(Handled {
                 response: Response::TopologySubscribed {
                     subscription_id: id,
@@ -3655,7 +3807,12 @@ async fn handle_authorized_request(
                     development_grant(peer, splint_id, incarnation, scopes),
                 )
                 .await?
-            } else if trusted_first_party_ui(trusted_ui_client, peer, &scopes) {
+            } else if first_party_human_ui(
+                trusted_ui_client,
+                remote_interactive_client,
+                peer,
+                &scopes,
+            ) {
                 nonstored_access_response(state, first_party_grant(splint_id, incarnation, scopes))
                     .await?
             } else if let Some(grant_id) =
@@ -4343,6 +4500,7 @@ async fn handle_authorized_request(
                     state,
                     peer,
                     trusted_ui_client,
+                    remote_interactive_client,
                     splint_id,
                     incarnation,
                     &required,
@@ -4405,6 +4563,7 @@ async fn handle_authorized_request(
                     state,
                     peer,
                     trusted_ui_client,
+                    remote_interactive_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Observe, AccessScope::Scrollback],
@@ -4437,6 +4596,7 @@ async fn handle_authorized_request(
                     state,
                     peer,
                     trusted_ui_client,
+                    remote_interactive_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Observe, AccessScope::Scrollback],
@@ -4479,6 +4639,7 @@ async fn handle_authorized_request(
                     state,
                     peer,
                     trusted_ui_client,
+                    remote_interactive_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Observe, AccessScope::Scrollback],
@@ -4515,6 +4676,7 @@ async fn handle_authorized_request(
                     state,
                     peer,
                     trusted_ui_client,
+                    remote_interactive_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Observe, AccessScope::Scrollback],
@@ -4550,8 +4712,9 @@ async fn handle_authorized_request(
             splinterm_protocol::validate_control_modes(&modes)?;
             let grant_id = if authorization.policy_authorized()
                 || state.development_terminal_access
-                || trusted_first_party_ui(
+                || first_party_human_ui(
                     trusted_ui_client,
+                    remote_interactive_client,
                     peer,
                     &[AccessScope::Input, AccessScope::Resize],
                 ) {
@@ -4600,7 +4763,12 @@ async fn handle_authorized_request(
         } => {
             if !authorization.policy_authorized()
                 && !state.development_terminal_access
-                && !trusted_first_party_ui(trusted_ui_client, peer, &[AccessScope::Observe])
+                && !first_party_human_ui(
+                    trusted_ui_client,
+                    remote_interactive_client,
+                    peer,
+                    &[AccessScope::Observe],
+                )
             {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
@@ -4638,8 +4806,9 @@ async fn handle_authorized_request(
             splinterm_protocol::validate_control_modes(&modes)?;
             if !authorization.policy_authorized()
                 && !state.development_terminal_access
-                && !trusted_first_party_ui(
+                && !first_party_human_ui(
                     trusted_ui_client,
+                    remote_interactive_client,
                     peer,
                     &[AccessScope::Input, AccessScope::Resize],
                 )
@@ -4681,6 +4850,7 @@ async fn handle_authorized_request(
                     transfer,
                     outcome,
                     controller_id: lease.map(|lease| lease.id),
+                    excluded_connections: None,
                 },
             );
             if outcome == ControlTransferOutcome::Granted {
@@ -4695,11 +4865,7 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
         } => {
-            if !trusted_first_party_ui(
-                trusted_ui_client,
-                peer,
-                &[AccessScope::Input, AccessScope::Resize],
-            ) {
+            if !trusted_ui_client || !peer.is_matching_splinterm() {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
                     "forced transfer is restricted to the trusted first-party UI",
@@ -4767,6 +4933,7 @@ async fn handle_authorized_request(
                     state,
                     peer,
                     trusted_ui_client,
+                    remote_interactive_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Input],
@@ -4796,6 +4963,7 @@ async fn handle_authorized_request(
                     state,
                     peer,
                     trusted_ui_client,
+                    remote_interactive_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Resize],
@@ -4839,6 +5007,7 @@ async fn handle_authorized_request(
                     state,
                     peer,
                     trusted_ui_client,
+                    remote_interactive_client,
                     splint_id,
                     incarnation,
                     &[AccessScope::Terminate],
@@ -4928,7 +5097,10 @@ async fn handle_authorized_request(
     })
 }
 
-async fn subscribe_topology(state: &DaemonState) -> (u64, TopologySnapshot, TopologySubscription) {
+async fn subscribe_topology(
+    state: &DaemonState,
+    connection_id: u64,
+) -> (u64, TopologySnapshot, TopologySubscription) {
     let _transaction = state
         .topology_transactions
         .acquire()
@@ -4939,7 +5111,7 @@ async fn subscribe_topology(state: &DaemonState) -> (u64, TopologySnapshot, Topo
     let live = state.runtimes.lock().await.handles();
     let snapshot = topology_snapshot_from(lair, &live);
     let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
-    let subscription = state.topology_hub.lock().await.subscribe(id);
+    let subscription = state.topology_hub.lock().await.subscribe(id, connection_id);
     drop(lair_guard);
     (id, snapshot, subscription)
 }
@@ -5163,7 +5335,13 @@ fn spawn_control_subscription(
                     splint_id: event_splint,
                     incarnation: event_incarnation,
                     owner_connection_id,
-                }) if event_splint == splint_id && event_incarnation == incarnation => {
+                    excluded_connections,
+                }) if event_splint == splint_id
+                    && event_incarnation == incarnation
+                    && excluded_connections
+                        .as_ref()
+                        .is_none_or(|excluded| !excluded.contains(&connection_id)) =>
+                {
                     Some(SubscriptionEvent::ControlStatusChanged {
                         status: ControlStatus {
                             splint_id,
@@ -5186,10 +5364,14 @@ fn spawn_control_subscription(
                     transfer,
                     outcome,
                     controller_id,
+                    excluded_connections,
                 }) if transfer.splint_id == splint_id
                     && transfer.incarnation == incarnation
                     && (transfer.owner_connection_id == connection_id
-                        || transfer.requester_connection_id == connection_id) =>
+                        || transfer.requester_connection_id == connection_id)
+                    && excluded_connections
+                        .as_ref()
+                        .is_none_or(|excluded| !excluded.contains(&connection_id)) =>
                 {
                     Some(SubscriptionEvent::ControlTransferResolved {
                         transfer_id: transfer.id,
@@ -6907,6 +7089,7 @@ mod tests {
                 inode: Some(1),
             },
             policy_reloads: broadcast::channel(1).0,
+            automation_connections: Mutex::new(HashSet::new()),
             controller: Mutex::new(ControllerState::default()),
             control_events,
             connection_revocations: broadcast::channel(CONNECTION_LIMIT).0,
@@ -6932,20 +7115,34 @@ mod tests {
         env::temp_dir().join(format!("splinterd-test-{}-{nonce}", std::process::id()))
     }
     #[test]
-    fn automation_role_never_receives_trusted_ui_bypass() {
-        assert!(!trusted_ui_bypass(false, true, &Request::ListLairs));
-        assert!(trusted_ui_bypass(true, true, &Request::ListLairs));
-        assert!(!trusted_ui_bypass(true, false, &Request::ListLairs));
-        assert!(!trusted_ui_bypass(
+    fn human_roles_bypass_policy_only_for_their_supported_ui_surface() {
+        assert!(policy_reload_disconnects(ClientRole::Automation));
+        assert!(!policy_reload_disconnects(ClientRole::TrustedUi));
+        assert!(!policy_reload_disconnects(ClientRole::RemoteInteractive));
+        assert!(!interactive_bypass(false, true, false, &Request::ListLairs));
+        assert!(interactive_bypass(true, true, false, &Request::ListLairs));
+        assert!(!interactive_bypass(true, false, false, &Request::ListLairs));
+        assert!(!interactive_bypass(
             true,
             true,
+            false,
             &Request::AuditInspect {
                 after_audit_id: None,
                 max_records: 1,
             }
         ));
-        assert!(trusted_ui_bypass(
+        assert!(interactive_bypass(
             true,
+            true,
+            false,
+            &Request::PublishGraphicalFocus {
+                focused_splint_id: None,
+            }
+        ));
+        assert!(interactive_bypass(false, false, true, &Request::ListLairs));
+        assert!(!interactive_bypass(
+            false,
+            false,
             true,
             &Request::PublishGraphicalFocus {
                 focused_splint_id: None,
@@ -6956,18 +7153,29 @@ mod tests {
             true,
         ));
         let peer = PeerIdentity::for_test();
-        assert!(!trusted_first_party_ui(false, &peer, &[AccessScope::Input]));
+        assert!(!first_party_human_ui(
+            false,
+            false,
+            &peer,
+            &[AccessScope::Input]
+        ));
+        assert!(first_party_human_ui(
+            false,
+            true,
+            &peer,
+            &[AccessScope::Input, AccessScope::Resize]
+        ));
     }
 
     #[test]
-    fn trusted_ui_bypass_skips_redundant_terminate_scope_authorization() {
+    fn interactive_bypass_skips_redundant_terminate_scope_authorization() {
         let untrusted = RequestAuthorizationContext::default();
         assert!(untrusted.requires_terminate_scope_authorization());
-        let trusted = RequestAuthorizationContext {
-            trusted_ui_bypass: true,
+        let interactive = RequestAuthorizationContext {
+            interactive_bypass: true,
             ..RequestAuthorizationContext::default()
         };
-        assert!(!trusted.requires_terminate_scope_authorization());
+        assert!(!interactive.requires_terminate_scope_authorization());
     }
 
     #[test]
@@ -6988,7 +7196,7 @@ mod tests {
     async fn graphical_focus_read_is_authenticated_but_publication_requires_trusted_ui() {
         let state = test_state(true);
         let peer = PeerIdentity::for_test();
-        authorize_request(&Request::ReadGraphicalFocus, &state, &peer, 0, false)
+        authorize_request(&Request::ReadGraphicalFocus, &state, &peer, 0, false, false)
             .await
             .unwrap();
         let error = authorize_request(
@@ -6999,10 +7207,98 @@ mod tests {
             &peer,
             0,
             false,
+            false,
         )
         .await
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn remote_interactive_role_uses_human_terminal_authority_without_policy() {
+        let state = test_state(false);
+        let peer = PeerIdentity::for_test();
+        let splint_id = SplintId::new();
+        for request in [
+            Request::ListLairs,
+            Request::InspectTopology,
+            Request::SubscribeTopology,
+            Request::CreateLairAutomation {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "remote".to_owned(),
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: None,
+                    argv: Vec::new(),
+                },
+            },
+            Request::SplitSplintAutomation {
+                expected_topology_revision: TopologyRevision::default(),
+                target_splint_id: splint_id,
+                axis: splinterm_core::Axis::Horizontal,
+                side: splinterm_core::SplitSide::Second,
+                ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: None,
+                    argv: Vec::new(),
+                },
+            },
+            Request::Attach {
+                splint_id,
+                incarnation: Some(1),
+                scrollback_rows: 100,
+            },
+            Request::AcquireControl {
+                splint_id,
+                incarnation: 1,
+                modes: vec![
+                    splinterm_protocol::ControlMode::Input,
+                    splinterm_protocol::ControlMode::Resize,
+                ],
+            },
+        ] {
+            let authorization = authorize_request(&request, &state, &peer, 0, false, true)
+                .await
+                .unwrap();
+            assert!(authorization.interactive_bypass);
+            assert!(!authorization.policy_authorized());
+        }
+
+        let forced = handle_request(
+            Request::ForceControlTransfer {
+                splint_id,
+                incarnation: 1,
+            },
+            &state,
+            &peer,
+            1,
+            0,
+            false,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(forced.code, ErrorCode::Unauthorized);
+
+        for request in [
+            Request::PublishGraphicalFocus {
+                focused_splint_id: None,
+            },
+            Request::RequestImageContent {
+                request: splinterm_protocol::ImageContentRequest {
+                    splint_id,
+                    incarnation: 1,
+                    content_id: 1,
+                    generation: 1,
+                    digest: [1; 32],
+                    accepted_transfers: vec![ImageTransferMode::BinaryChunks],
+                },
+            },
+        ] {
+            let error = authorize_request(&request, &state, &peer, 0, false, true)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Unauthorized);
+        }
     }
 
     #[tokio::test]
@@ -7195,7 +7491,7 @@ mod tests {
             .expect("snapshot test executable");
         peer.install_persistent_executable(executable.clone());
 
-        let denied = authorize_request(&Request::ListLairs, &state, &peer, 0, false)
+        let denied = authorize_request(&Request::ListLairs, &state, &peer, 0, false, false)
             .await
             .unwrap_err();
         assert_eq!(denied.code, ErrorCode::Unauthorized);
@@ -7229,17 +7525,18 @@ mod tests {
             .await
             .reload(Some(policy_path.as_path()), &topology_snapshot);
 
-        let allowed = authorize_request(&Request::ListLairs, &state, &peer, 0, false)
+        let allowed = authorize_request(&Request::ListLairs, &state, &peer, 0, false, false)
             .await
             .unwrap();
         assert!(allowed.policy_authorized());
-        let oversized = handle_request(Request::ListLairs, &state, &peer, 1, 0, false)
+        let oversized = handle_request(Request::ListLairs, &state, &peer, 1, 0, false, false)
             .await
             .unwrap_err();
         assert_eq!(oversized.code, ErrorCode::ResourceLimit);
-        let wrong_scope = authorize_request(&Request::SubscribeTopology, &state, &peer, 0, false)
-            .await
-            .unwrap_err();
+        let wrong_scope =
+            authorize_request(&Request::SubscribeTopology, &state, &peer, 0, false, false)
+                .await
+                .unwrap_err();
         assert_eq!(wrong_scope.code, ErrorCode::Unauthorized);
         fs::remove_dir_all(directory).await.unwrap();
     }
@@ -7364,6 +7661,7 @@ mod tests {
             1,
             0,
             false,
+            false,
         )
         .await
         .unwrap_err();
@@ -7402,6 +7700,7 @@ mod tests {
             &peer,
             1,
             0,
+            false,
             false,
         )
         .await
@@ -7464,6 +7763,7 @@ mod tests {
                 1,
                 0,
                 false,
+                false,
             )
             .await
         });
@@ -7480,6 +7780,7 @@ mod tests {
                 &close_peer,
                 2,
                 0,
+                false,
                 false,
             )
             .await
@@ -7517,6 +7818,7 @@ mod tests {
             1,
             0,
             false,
+            false,
         )
         .await
         .unwrap_err();
@@ -7545,6 +7847,7 @@ mod tests {
             &peer,
             1,
             0,
+            false,
             false,
         )
         .await
@@ -7590,7 +7893,7 @@ mod tests {
     #[tokio::test]
     async fn topology_subscription_overflow_requires_resync() {
         let mut hub = TopologyHub::default();
-        let subscription = hub.subscribe(1);
+        let subscription = hub.subscribe(1, 10);
         for _ in 1..=TOPOLOGY_QUEUE + 2 {
             hub.publish(&TopologyChange {
                 revision: splinterm_core::TopologyRevision::default(),
@@ -7684,21 +7987,41 @@ mod tests {
     }
 
     #[test]
-    fn policy_reload_reset_revokes_all_connection_owned_control() {
+    fn policy_reload_revokes_only_automation_owned_control_and_topology_subscriptions() {
         let mut controllers = ControllerState::default();
-        let splint_id = SplintId::new();
-        let lease = controllers.acquire(10, splint_id, 4, None).unwrap();
-        let transfer = controllers.request_transfer(20, splint_id, 4).unwrap();
+        let automation_splint = SplintId::new();
+        let human_splint = SplintId::new();
+        let automation_lease = controllers.acquire(10, automation_splint, 4, None).unwrap();
+        let human_lease = controllers.acquire(20, human_splint, 5, None).unwrap();
+        let automation_transfer = controllers
+            .request_transfer(11, automation_splint, 4)
+            .unwrap();
+        let human_transfer = controllers.request_transfer(21, human_splint, 5).unwrap();
+        let automation_connections = HashSet::from([10, 11]);
 
-        let (leases, transfers) = controllers.reset_connections();
+        let (leases, transfers) = controllers.release_connections(&automation_connections);
 
-        assert_eq!(leases, vec![lease]);
-        assert_eq!(transfers, vec![transfer]);
-        assert!(controllers.by_id.is_empty());
-        assert!(controllers.by_splint.is_empty());
-        assert!(controllers.by_connection.is_empty());
-        assert!(controllers.transfers.is_empty());
-        assert!(controllers.transfer_by_splint.is_empty());
+        assert_eq!(leases, vec![automation_lease]);
+        assert_eq!(transfers, vec![automation_transfer]);
+        assert!(
+            controllers
+                .authorize(human_lease.connection_id, human_lease.id, human_splint, 5,)
+                .is_ok()
+        );
+        assert!(
+            controllers
+                .authorize(10, automation_lease.id, automation_splint, 4)
+                .is_err()
+        );
+        assert!(controllers.transfers.contains_key(&human_transfer.id));
+        assert!(!controllers.transfers.contains_key(&automation_transfer.id));
+
+        let mut topology_hub = TopologyHub::default();
+        let _automation_subscription = topology_hub.subscribe(101, 10);
+        let _human_subscription = topology_hub.subscribe(102, 20);
+        topology_hub.remove_connections(&automation_connections);
+        assert!(!topology_hub.subscribers.contains_key(&101));
+        assert!(topology_hub.subscribers.contains_key(&102));
     }
 
     #[tokio::test]

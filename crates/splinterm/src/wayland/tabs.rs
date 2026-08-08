@@ -115,14 +115,6 @@ const fn tab_foreground(theme: ResolvedTheme, active: bool) -> u32 {
     }
 }
 
-const fn tab_new_foreground(theme: ResolvedTheme, enabled: bool) -> u32 {
-    if enabled {
-        theme.ui_accent
-    } else {
-        theme.pane_border
-    }
-}
-
 pub(super) fn tab_strip_hit_test(
     layout: &TabStripLayout,
     position: (f64, f64),
@@ -472,7 +464,6 @@ impl App {
         labels: &HashMap<DojoId, CachedFrameTitle>,
         close_text: Option<&ChromeText>,
         new_text: Option<&ChromeText>,
-        new_enabled: bool,
     ) -> Result<()> {
         let rgba = |color: u32| {
             [
@@ -570,7 +561,7 @@ impl App {
                         .saturating_add(new_rect.height.saturating_sub(text.pixel_height()) / 2),
                 ),
                 new_rect,
-                tab_new_foreground(theme, new_enabled),
+                theme.ui_accent,
             );
         }
         Ok(())
@@ -581,7 +572,7 @@ impl App {
 mod tests {
     use super::{
         DojoId, ResolvedTheme, TabHitTarget, tab_context_target, tab_foreground,
-        tab_new_foreground, tab_strip_hit_test, tab_strip_layout,
+        tab_strip_hit_test, tab_strip_layout,
     };
 
     #[test]
@@ -593,17 +584,6 @@ mod tests {
         };
         assert_eq!(tab_foreground(theme, false), 0xaa_bb_cc);
         assert_eq!(tab_foreground(theme, true), 0x11_22_33);
-    }
-
-    #[test]
-    fn new_tab_affordance_distinguishes_disabled_remote_creation() {
-        let theme = ResolvedTheme {
-            ui_accent: 0x11_22_33,
-            pane_border: 0x44_55_66,
-            ..ResolvedTheme::default()
-        };
-        assert_eq!(tab_new_foreground(theme, true), 0x11_22_33);
-        assert_eq!(tab_new_foreground(theme, false), 0x44_55_66);
     }
 
     #[test]

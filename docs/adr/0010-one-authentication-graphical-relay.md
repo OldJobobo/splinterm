@@ -1,6 +1,6 @@
 # ADR 0010: Multiplex native remote channels over one authenticated SSH process
 
-- **Status:** Accepted — Phase 1 transport foundation implemented; graphical workflow routing remains Plan 0028 Phase 2
+- **Status:** Accepted — transport and native human-interactive routing implemented; real-host graphical closure remains Plan 0028 Phase 4
 - **Date:** 2026-08-07
 - **Plan:** [Plan 0028](../plans/0028-remote-graphical-client.md)
 - **Input:** [Remote graphical client handoff](../remote-graphical-client-handoff.md)
@@ -38,8 +38,11 @@ and eight fixed/transient Window service channels. Channel IDs are nonzero,
 monotonically allocated, and never reused. Every accepted channel opens
 and repeats the existing owner, mode, UID, pidfd, and exact adjacent
 `splinterd` executable validation before carrying opaque private-protocol bytes.
-The daemon sees the installed `splinterm-relay` executable and every remote
-channel negotiates `ClientRole::Automation`.
+The daemon sees the installed `splinterm-relay` executable and requires its
+exact `--graphical-stdio` mode before accepting `ClientRole::RemoteInteractive`.
+OpenSSH-authenticated native Windows therefore receive normal human terminal
+authority without automation policy. Raw `--stdio` connections continue to
+negotiate `ClientRole::Automation`.
 
 The outer protocol has exact magic and version plus `Hello`, `HelloAck`,
 `OpenChannel`, `ChannelOpened`, `ChannelRejected`, `Data`, `HalfClose`,
@@ -86,17 +89,16 @@ consuming additional SSH sessions. Dropping the final session/channel owner
 closes stdin, permits a short graceful exit, then terminates and reaps a stuck
 child. Remote daemon-owned Splints are not terminated.
 
-Persistent Splinterm policy remains a separate authorization boundary. A policy
-for `/usr/bin/splinterm-relay` delegates its scopes to every SSH caller able to
-execute that relay under the account. Dedicated accounts or administrator-owned
-forced commands/restricted keys are recommended when that delegation is too
-broad.
+Persistent Splinterm policy remains a separate authorization boundary for
+machine clients using raw `--stdio`, JSON/NDJSON, or MCP. It is not part of the
+native remote Window path, and policy reload does not disconnect human graphical
+connections.
 
-Phase 1 provides profiles, inspection, non-mutating `remote check`, transport,
-automation channels, and an explicit endpoint capability factory. Routing native
-Windows, remote-safe graphical mutations, recency namespaces, focus suppression,
-and complete remote UI behavior remain Phase 2 and must not be described as
-implemented yet.
+The implemented native path provides profiles, inspection, non-mutating
+`remote check`, human-interactive channels, remote-safe graphical mutations,
+recency namespaces, focus suppression, and complete remote UI routing. New
+Lairs, Dojos, and Splints are immediately attachable without policy publication
+or Window restart.
 
 ## Rejected alternatives
 
@@ -113,7 +115,7 @@ implemented yet.
 
 ## Validation
 
-Phase 1 validation covers exact raw-relay compatibility, outer framing under
+Validation covers exact raw-relay compatibility, outer framing under
 fragmentation and corruption, channel limits, queue backpressure, half-close,
 channel/session EOF, daemon pidfd exit, anti-starvation behavior, split transport
 handshake/cancellation, no remote image transport, exact fake-SSH argv, one fake

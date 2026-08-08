@@ -113,7 +113,7 @@ They need:
 3. **Resume deliberately:** Let me create a fresh terminal by default, choose a recent running Dojo, or reopen the last remembered running Dojo without confusing reopening with process restoration.
 4. **Control safely:** Let multiple clients observe the same state while ensuring only one controller owns input and resize authority for a Splint at a time.
 5. **Automate explicitly:** Let authorized tools inspect and mutate terminal topology through stable machine contracts without inheriting human UI trust.
-6. **Work remotely without exposing a daemon port:** Let an authenticated SSH session carry a dedicated, policy-identified stdio relay to the local daemon.
+6. **Work remotely without exposing a daemon port:** Let a human use native remote Splinterm through authenticated SSH, while separately policy-scoped automation uses the raw stdio relay.
 7. **Retain terminal compatibility:** Give me terminal behavior grounded in a pinned Foot authority rather than an undocumented approximation.
 8. **Fit Omarchy naturally:** Follow the active Omarchy theme, launch through `xdg-terminal-exec`, and behave as a native Wayland application without modifying user configuration automatically.
 
@@ -151,7 +151,7 @@ The following table summarizes the current repository state. “Validated” mea
 | iTerm2 inline images | Supported bounded inline-PNG subset. |
 | JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; this does not imply public product availability. |
 | SSH stdio relay | Implemented and validated; no daemon network listener. |
-| Native remote graphical transport | Phases 1–2 implemented and non-graphically validated: strict profiles, one-authentication multiplexer, endpoint-bound native workflow, automation-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, and non-mutating check. Real-host graphical evidence remains Phase 4. |
+| Native remote graphical transport | Phases 1–2 implemented and non-graphically validated: strict profiles, one-authentication multiplexer, endpoint-bound human-interactive workflow, remote-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, and non-mutating check. Real-host graphical evidence remains Phase 4. |
 | MCP adapter | Implemented and validated as an optional separately identified package. |
 | Arch/Omarchy package and edge installer | Private prerelease package and installation path implemented and validated. |
 | Public distribution and support policy | Not released. |
@@ -282,12 +282,13 @@ Priority meanings:
 | `FR-AUTO-03` | P0 | Machine mode must never prompt; destructive actions must require explicit confirmation flags or remain outside the machine contract. | Implemented |
 | `FR-AUTO-04` | P0 | Automation topology mutation must not imply native Window mapping, compositor focus, movement, resize, or workspace control. | Implemented and documented |
 | `FR-AUTO-05` | P1 | Provide a separately executable and independently policy-identifiable MCP adapter with the documented operation coverage. | Implemented and validated |
-| `FR-REMOTE-01` | P0 | Remote operation must use a dedicated exact-policy stdio relay over authenticated SSH; `splinterd` must expose no network listener by default. | Implemented and validated |
-| `FR-REMOTE-02` | P0 | SSH login, socket access, same-UID execution, or being inside a Splint must not independently grant terminal authority. | Implemented |
+| `FR-REMOTE-01` | P0 | Remote operation must use SSH relays; `splinterd` must expose no network listener by default. Raw automation relay access remains exact-policy scoped. | Implemented and validated |
+| `FR-REMOTE-02` | P0 | Machine clients must not gain human terminal authority from SSH login, socket access, same-UID execution, or being inside a Splint. | Implemented |
 | `FR-REMOTE-03` | P0 | A native remote client must use one authenticated OpenSSH process carrying bounded independent daemon channels rather than one login per pane or a daemon network listener. | Implemented through native workflow; real-host graphical evidence pending |
-| `FR-REMOTE-04` | P0 | Every SSH-arriving graphical channel must negotiate automation role, use persistent policy, suppress trusted-local focus authority, and have no image-content transport. | Implemented and non-graphically validated |
+| `FR-REMOTE-04` | P0 | Every SSH graphical channel must negotiate the human `RemoteInteractive` role without automation policy, while suppressing trusted-local focus, image, and forced-transfer authority. | Implemented and non-graphically validated; real-host graphical evidence pending |
 | `FR-REMOTE-05` | P0 | OpenSSH must retain authority for keys, agents, passwords, passphrases, askpass, and host keys; Splinterm must store no credentials or accept unknown keys automatically. | Implemented in Phase 1 transport lifecycle |
 | `FR-REMOTE-06` | P0 | Disconnecting the local remote client must release connection-owned authority without terminating daemon-owned remote Splints. | Transport cleanup implemented; real-host proof remains Phase 4 |
+| `FR-REMOTE-07` | P0 | A native remote Window must create, attach, and control new Lairs, Dojos, and Splints immediately without policy publication or reopening. | Implemented and non-graphically validated; real-host graphical validation pending |
 
 ### 10.7 Packaging and installation
 

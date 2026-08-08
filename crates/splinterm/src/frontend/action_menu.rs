@@ -2,10 +2,7 @@
 
 use splinterm_core::{Axis, DojoId, LairId, SplintId};
 
-use crate::{
-    endpoint::GraphicalTopologyCreation,
-    keymap::{ActionId, ResolvedKeymap},
-};
+use crate::keymap::{ActionId, ResolvedKeymap};
 
 use super::WindowTopologyCommand;
 
@@ -200,7 +197,6 @@ pub(crate) struct TabMenuContext {
     pub(crate) pane_count: usize,
     pub(crate) splints: Vec<(SplintId, u64)>,
     pub(crate) active: bool,
-    pub(crate) graphical_topology_creation: GraphicalTopologyCreation,
     pub(crate) other_dojo_ids: Vec<DojoId>,
 }
 
@@ -264,13 +260,11 @@ pub(crate) const fn tab_menu_right_press(target: Option<DojoId>) -> TabMenuRight
 pub(crate) fn tab_menu_action_enabled(id: TabMenuActionId, context: &TabMenuContext) -> bool {
     match id {
         TabMenuActionId::ActivateTab => !context.active,
-        TabMenuActionId::NewDojo => {
-            context.graphical_topology_creation == GraphicalTopologyCreation::Enabled
-        }
         TabMenuActionId::CloseOtherTabs => !context.other_dojo_ids.is_empty(),
-        TabMenuActionId::RenameTab | TabMenuActionId::CloseTab | TabMenuActionId::TerminateDojo => {
-            true
-        }
+        TabMenuActionId::RenameTab
+        | TabMenuActionId::NewDojo
+        | TabMenuActionId::CloseTab
+        | TabMenuActionId::TerminateDojo => true,
     }
 }
 
@@ -478,7 +472,6 @@ pub(crate) struct CommandPaletteContext {
     pub(crate) viewport_detached: bool,
     pub(crate) controller_active: bool,
     pub(crate) forced_control_transfer: bool,
-    pub(crate) graphical_topology_creation: GraphicalTopologyCreation,
     pub(crate) grant_ids: Vec<u64>,
     pub(crate) pending_transfer_id: Option<u64>,
 }
@@ -805,12 +798,6 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         BuiltInCommandId::FocusUp => context.focus_up.is_some(),
         BuiltInCommandId::FocusDown => context.focus_down.is_some(),
         BuiltInCommandId::CloseOtherTabs => !context.other_dojo_ids.is_empty(),
-        BuiltInCommandId::NewSession
-        | BuiltInCommandId::NewDojo
-        | BuiltInCommandId::SplitHorizontal
-        | BuiltInCommandId::SplitVertical => {
-            context.graphical_topology_creation == GraphicalTopologyCreation::Enabled
-        }
         BuiltInCommandId::ReturnToLive => context.viewport_detached,
         BuiltInCommandId::RequestControl => !context.controller_active,
         BuiltInCommandId::ForceControl => {
@@ -822,9 +809,13 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
             context.pending_transfer_id.is_some()
         }
         BuiltInCommandId::RecentSessions
+        | BuiltInCommandId::NewSession
         | BuiltInCommandId::RenameCurrentTab
+        | BuiltInCommandId::NewDojo
         | BuiltInCommandId::CloseCurrentTab
         | BuiltInCommandId::TerminateCurrentDojo
+        | BuiltInCommandId::SplitHorizontal
+        | BuiltInCommandId::SplitVertical
         | BuiltInCommandId::CloseFocusedPane
         | BuiltInCommandId::ResizePaneSmaller
         | BuiltInCommandId::ResizePaneLarger
@@ -1197,7 +1188,6 @@ mod tests {
             viewport_detached: true,
             controller_active: false,
             forced_control_transfer: true,
-            graphical_topology_creation: GraphicalTopologyCreation::Enabled,
             grant_ids: vec![7, 9],
             pending_transfer_id: Some(42),
         })
@@ -1281,7 +1271,6 @@ mod tests {
                 (SplintId::new(), 6),
             ],
             active: false,
-            graphical_topology_creation: GraphicalTopologyCreation::Enabled,
             other_dojo_ids: other_dojo_ids.clone(),
         };
         let mut menu = TabContextMenuUi::new(context.clone());
@@ -1327,40 +1316,6 @@ mod tests {
         assert!(!active.action_enabled(TabMenuActionId::ActivateTab));
         assert!(!active.action_enabled(TabMenuActionId::CloseOtherTabs));
         assert!(!active.update_hovered(Some(TabMenuActionId::ActivateTab)));
-    }
-
-    #[test]
-    fn policy_bound_remote_context_disables_only_graphical_creation() {
-        let mut context = palette().context();
-        context.graphical_topology_creation = GraphicalTopologyCreation::RequiresPolicyRepublish;
-        for command in [
-            BuiltInCommandId::NewSession,
-            BuiltInCommandId::NewDojo,
-            BuiltInCommandId::SplitHorizontal,
-            BuiltInCommandId::SplitVertical,
-        ] {
-            assert!(!command_enabled(command, &context));
-            assert_eq!(command_dispatch(command, &context), None);
-        }
-        assert!(command_enabled(BuiltInCommandId::RecentSessions, &context));
-        assert!(command_enabled(
-            BuiltInCommandId::CloseFocusedPane,
-            &context
-        ));
-
-        let tab = TabMenuContext {
-            lair_id: context.lair_id,
-            dojo_id: context.dojo_id,
-            dojo_name: context.dojo_name,
-            pane_count: context.pane_count,
-            splints: context.dojo_splints,
-            active: true,
-            graphical_topology_creation: GraphicalTopologyCreation::RequiresPolicyRepublish,
-            other_dojo_ids: context.other_dojo_ids,
-        };
-        assert!(!tab_menu_action_enabled(TabMenuActionId::NewDojo, &tab));
-        assert_eq!(tab_menu_dispatch(TabMenuActionId::NewDojo, &tab), None);
-        assert!(tab_menu_action_enabled(TabMenuActionId::RenameTab, &tab));
     }
 
     #[test]

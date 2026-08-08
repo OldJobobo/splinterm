@@ -763,6 +763,53 @@ async fn assert_connection_closed(connection: &mut Connection, reason: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn human_roles_require_their_exact_installed_graphical_processes() {
+    time::timeout(Duration::from_secs(30), async {
+        let daemon = Daemon::start().await;
+        for (role, expected) in [
+            (
+                ClientRole::TrustedUi,
+                "trusted UI role requires the installed graphical client",
+            ),
+            (
+                ClientRole::RemoteInteractive,
+                "remote interactive role requires the installed graphical relay",
+            ),
+        ] {
+            let mut stream = UnixStream::connect(&daemon.socket).await.unwrap();
+            write_frame(
+                &mut stream,
+                &ClientFrame::Hello {
+                    minimum_version: PROTOCOL_VERSION,
+                    maximum_version: PROTOCOL_VERSION,
+                    role,
+                },
+            )
+            .await;
+            assert!(matches!(
+                read_frame(&mut stream).await,
+                ServerFrame::Error {
+                    request_id: None,
+                    error: ProtocolError {
+                        code: ErrorCode::Unauthorized,
+                        ref message,
+                        ..
+                    },
+                } if message == expected
+            ));
+        }
+        let mut automation = daemon.connect().await;
+        assert!(matches!(
+            automation.request(Request::Ping).await,
+            Response::Pong
+        ));
+        daemon.shutdown();
+    })
+    .await
+    .expect("human-role identity validation timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
     reason = "one isolated scenario proves the complete mutation preflight authority boundary"

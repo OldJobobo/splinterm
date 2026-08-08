@@ -137,16 +137,16 @@ or passphrase values.
 `endpoint.rs` defines the behavior carried with a clonable connection factory:
 local uses `TrustedUi`, trusted local image content, focus publication, local
 launch semantics, trusted force-transfer authority, and the `local` recency
-namespace; remote uses `Automation`, unavailable image transport, disabled focus
-publication, unavailable forced transfer, automation launch semantics,
-policy-republish-required graphical creation, and `remote-PROFILE` recency.
-Phase 2 routes CLI selection, session discovery, Window startup, pane
-observation/control, topology reconciliation, hidden tabs, history, search,
-existing-resource mutations, and cleanup through clones of that one factory. A
-Window therefore cannot retarget or mix local and remote identities after
-startup. New remote descendants are created through explicit CLI mutation,
-followed by exact policy republish and Window reopen; policy reload disconnects
-all existing daemon clients by design.
+namespace; remote uses `RemoteInteractive`, unavailable image transport,
+disabled focus publication, unavailable forced transfer, remote-daemon launch
+defaults, and `remote-PROFILE` recency. OpenSSH authenticates the human remote
+account; persistent automation policy is not part of this path. The daemon
+accepts the role only from the adjacent relay running `--graphical-stdio`, while
+raw `--stdio` remains `Automation`. Phase 2 routes CLI selection, session
+discovery, Window startup, pane observation/control, topology reconciliation,
+hidden tabs, history, search, mutations, and cleanup through clones of that one
+factory. A Window therefore cannot retarget or mix local and remote identities
+after startup.
 
 ## Client module boundaries
 
@@ -161,7 +161,7 @@ one private application entry point. Binary-owned orchestration lives under
 | `app/machine/` | Stable JSON/NDJSON requests, envelopes, deadlines, and subscriptions |
 | `app/local_service.rs`, `consent.rs`, `sessions.rs` | Local policy/reset/relay services, trusted consent, session selection, and picker presentation |
 | `app/remote_cli.rs` | Strict profile listing/inspection and non-mutating remote reachability checks |
-| `app/session_catalog.rs` | Endpoint-aware trusted/automation launch requests, namespaced recent-session state, and picker projections |
+| `app/session_catalog.rs` | Endpoint-aware local/remote-safe launch requests, namespaced recent-session state, and picker projections |
 | `app/window.rs` | Graphical task startup, renderer configuration, image-cache setup, and single-/multi-pane lifecycle coordination |
 | `app/pane_bridge.rs` | Bounded daemon-to-frontend pane subscriptions, control, resize, image leases, and resynchronization |
 | `app/topology_manager.rs` | Per-Dojo async task ownership and topology reconciliation |
@@ -278,12 +278,11 @@ Wayland client's lifetime.
 3. Domain types do not know about rendering or transport.
 4. The protocol is versioned and rejects incompatible peers.
 5. Ported Foot code retains MIT attribution and provenance.
-6. Headless remote access uses the dedicated, exact-policy
-   `splinterm-relay` transport over authenticated SSH; `splinterd` exposes no
-   network listener and never attributes the remote caller as its local peer.
-   Native remote transport uses one authenticated SSH child with bounded logical
-   channels, all negotiating automation role; it never receives trusted image or
-   graphical-focus authority.
+6. Headless automation uses the dedicated, exact-policy raw relay over
+   authenticated SSH. Native human remote transport uses one authenticated SSH
+   child with bounded logical channels negotiating `RemoteInteractive`; it does
+   not consult automation policy or receive trusted image, forced-transfer, or
+   graphical-focus authority. `splinterd` exposes no network listener.
 7. Shutdown owns and drains connection tasks before runtime shutdown and final
    metadata persistence; one pinned signal future prevents lost SIGINT events.
 8. Dojo mutation never claims native Window mapping or focus; Window-local tab

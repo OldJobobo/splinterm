@@ -107,10 +107,10 @@ splinterm --output json audit --max-records 16
 ```
 
 Reload is atomic and fail-closed. A rejected file installs a new deny-all
-policy generation. Every reload disconnects existing clients and revokes
-connection-owned subscriptions, controller leases, and pending transfers. The
-daemon sends the bounded diagnostic `persistent policy reloaded; reconnect
-required` before closing each connection; clients must reconnect explicitly.
+policy generation. Every reload disconnects automation-role clients and revokes
+their connection-owned subscriptions, controller leases, and pending transfers;
+automation clients must reconnect explicitly. Local and SSH-remote human
+graphical clients do not use persistent policy and remain connected.
 
 ## Runtime, state, restart, and recovery
 

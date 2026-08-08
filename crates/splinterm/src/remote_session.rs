@@ -41,7 +41,6 @@ pub enum RemoteFailureKind {
     RelayIdentityRejected,
     MultiplexerIncompatible,
     DaemonProtocolIncompatible,
-    PolicyDenied,
     TransportFailed,
 }
 
@@ -60,7 +59,6 @@ impl std::fmt::Display for RemoteFailureKind {
             Self::RelayIdentityRejected => "remote relay or daemon identity validation failed",
             Self::MultiplexerIncompatible => "graphical relay protocol is incompatible",
             Self::DaemonProtocolIncompatible => "private daemon protocol is incompatible",
-            Self::PolicyDenied => "remote Splinterm policy denied the operation",
             Self::TransportFailed => "remote transport failed",
         };
         formatter.write_str(label)
@@ -263,13 +261,13 @@ impl RemoteSession {
         })
     }
 
-    /// Opens and negotiates one independent automation-role daemon connection.
+    /// Opens and negotiates one independent human-interactive daemon connection.
     ///
     /// # Errors
     ///
     /// Returns an error when channel admission or the private daemon handshake
-    /// fails. The connection never receives trusted image authority.
-    pub async fn connect_automation(&self) -> Result<Connection> {
+    /// fails. The connection never receives local compositor or image authority.
+    pub async fn connect_interactive(&self) -> Result<Connection> {
         let deadline = tokio::time::Instant::now() + self.operation_timeout;
         let channel = if let Ok(result) =
             tokio::time::timeout_at(deadline, self.multiplexer.open_channel()).await
@@ -303,7 +301,7 @@ impl RemoteSession {
         let (reader, writer) = tokio::io::split(channel);
         match tokio::time::timeout_at(
             deadline,
-            Connection::connect_automation_transport(reader, writer),
+            Connection::connect_remote_interactive_transport(reader, writer),
         )
         .await
         {
@@ -318,8 +316,10 @@ impl RemoteSession {
                     || lower.contains("invalid handshake")
                 {
                     RemoteFailureKind::DaemonProtocolIncompatible
-                } else if lower.contains("unauthorized") || lower.contains("policy") {
-                    RemoteFailureKind::PolicyDenied
+                } else if lower.contains("unauthorized")
+                    || lower.contains("installed graphical relay")
+                {
+                    RemoteFailureKind::RelayIdentityRejected
                 } else {
                     RemoteFailureKind::TransportFailed
                 };

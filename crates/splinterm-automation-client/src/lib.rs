@@ -3072,6 +3072,24 @@ impl Connection {
         Self::connect_role(ClientRole::Automation).await
     }
 
+    /// Negotiates a human-interactive connection carried by the graphical SSH relay.
+    ///
+    /// This role receives normal terminal authority from the remote daemon but
+    /// never gains local compositor-focus or image-content privileges.
+    pub async fn connect_remote_interactive_transport<R, W>(reader: R, writer: W) -> Result<Self>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_transport(
+            Box::new(reader),
+            Box::new(writer),
+            ClientRole::RemoteInteractive,
+            None,
+        )
+        .await
+    }
+
     /// Connects as automation to one explicit socket for isolated integration tests.
     #[doc(hidden)]
     pub async fn connect_automation_at(socket: &Path) -> Result<Self> {
@@ -4851,6 +4869,39 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("invalid handshake"));
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_interactive_transport_negotiates_the_human_role_without_local_ui_authority() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let (reader, writer) = client.into_split();
+        let daemon = tokio::spawn(async move {
+            assert_eq!(
+                read_client_frame(&mut server).await,
+                ClientFrame::Hello {
+                    minimum_version: PROTOCOL_VERSION,
+                    maximum_version: PROTOCOL_VERSION,
+                    role: ClientRole::RemoteInteractive,
+                }
+            );
+            server
+                .write_all(
+                    &encode_frame(&ServerFrame::Hello {
+                        version: PROTOCOL_VERSION,
+                        limits: ServerLimits::default(),
+                        development_terminal_access: false,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let connection = Connection::connect_remote_interactive_transport(reader, writer)
+            .await
+            .unwrap();
+        assert!(!connection.trusted_ui);
+        daemon.await.unwrap();
     }
 
     #[tokio::test]

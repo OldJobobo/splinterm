@@ -37,7 +37,7 @@ fn fake_ssh(directory: &Path, mode: &str) -> PathBuf {
 }
 
 #[tokio::test]
-async fn one_fake_ssh_process_serves_multiple_automation_connections() {
+async fn one_fake_ssh_process_serves_multiple_interactive_connections() {
     let directory = test_directory("multiplex");
     let ssh = fake_ssh(&directory, "read-only");
     let record = directory.join("argv.json");
@@ -53,7 +53,8 @@ async fn one_fake_ssh_process_serves_multiple_automation_connections() {
     )
     .await
     .unwrap();
-    let (first, second) = tokio::join!(session.connect_automation(), session.connect_automation());
+    let (first, second) =
+        tokio::join!(session.connect_interactive(), session.connect_interactive());
     let mut first = first.unwrap();
     let mut second = second.unwrap();
     assert!(matches!(
@@ -161,7 +162,7 @@ async fn channel_admission_timeout_names_the_stalled_stage() {
     .await
     .unwrap();
 
-    let error = session.connect_automation().await.unwrap_err();
+    let error = session.connect_interactive().await.unwrap_err();
     assert_eq!(
         error
             .downcast_ref::<splinterm::remote_session::RemoteFailure>()
@@ -206,7 +207,7 @@ async fn private_daemon_hello_timeout_names_the_stalled_stage() {
     .await
     .unwrap();
 
-    let error = session.connect_automation().await.unwrap_err();
+    let error = session.connect_interactive().await.unwrap_err();
     assert_eq!(
         error
             .downcast_ref::<splinterm::remote_session::RemoteFailure>()
@@ -240,7 +241,7 @@ async fn immediate_private_hello_eof_names_channel_and_preserves_later_admission
     let directory = test_directory("private-hello-eof");
     let session = session(&directory, "close-first-private-hello").await;
 
-    let error = session.connect_automation().await.unwrap_err();
+    let error = session.connect_interactive().await.unwrap_err();
     assert_eq!(
         error
             .downcast_ref::<splinterm::remote_session::RemoteFailure>()
@@ -258,7 +259,7 @@ async fn immediate_private_hello_eof_names_channel_and_preserves_later_admission
         "unexpected diagnostic: {diagnostic}"
     );
 
-    let mut later = session.connect_automation().await.unwrap();
+    let mut later = session.connect_interactive().await.unwrap();
     assert!(matches!(
         later.request(Request::Ping).await.unwrap(),
         Response::Pong
@@ -280,16 +281,16 @@ async fn startup_channel_pattern_repeats_on_a_fresh_session_after_complete_teard
             RemoteSession::connect_with_program(catalog.get("test").unwrap(), ssh.as_os_str())
                 .await
                 .unwrap();
-        let mut identity = session.connect_automation().await.unwrap();
+        let mut identity = session.connect_interactive().await.unwrap();
         assert!(matches!(
             identity.request(Request::ListLairs).await.unwrap(),
             Response::Lairs { lairs, .. } if lairs.is_empty()
         ));
         drop(identity);
 
-        let mut observation = session.connect_automation().await.unwrap();
-        let mut control = session.connect_automation().await.unwrap();
-        let mut topology = session.connect_automation().await.unwrap();
+        let mut observation = session.connect_interactive().await.unwrap();
+        let mut control = session.connect_interactive().await.unwrap();
+        let mut topology = session.connect_interactive().await.unwrap();
         for connection in [&mut observation, &mut control, &mut topology] {
             assert!(matches!(
                 connection.request(Request::Ping).await.unwrap(),
@@ -332,7 +333,7 @@ async fn startup_channel_pattern_repeats_on_a_fresh_session_after_complete_teard
 async fn interactive_requests_preserve_exact_controller_and_terminal_identity() {
     let directory = test_directory("interactive");
     let session = session(&directory, "interactive").await;
-    let mut connection = session.connect_automation().await.unwrap();
+    let mut connection = session.connect_interactive().await.unwrap();
     let splint_id = SplintId::new();
     let incarnation = 17;
     let controller_id = connection
@@ -386,7 +387,7 @@ async fn interactive_requests_preserve_exact_controller_and_terminal_identity() 
 async fn read_only_pane_access_succeeds_without_interactive_scopes() {
     let directory = test_directory("read-only-pane");
     let session = session(&directory, "read-only-pane").await;
-    let mut connection = session.connect_automation().await.unwrap();
+    let mut connection = session.connect_interactive().await.unwrap();
     let splint_id = SplintId::new();
     assert!(matches!(
         connection
@@ -443,10 +444,10 @@ async fn read_only_pane_access_succeeds_without_interactive_scopes() {
 }
 
 #[tokio::test]
-async fn interactive_policy_denial_is_returned_without_losing_the_session() {
+async fn interactive_daemon_denial_is_returned_without_losing_the_session() {
     let directory = test_directory("denied-interactive");
     let session = session(&directory, "denied-interactive").await;
-    let mut connection = session.connect_automation().await.unwrap();
+    let mut connection = session.connect_interactive().await.unwrap();
     let error = connection
         .acquire_control(
             SplintId::new(),
@@ -473,7 +474,7 @@ async fn interactive_policy_denial_is_returned_without_losing_the_session() {
 async fn mismatched_terminal_acknowledgement_cannot_match_the_requested_splint() {
     let directory = test_directory("mismatched-identity");
     let session = session(&directory, "mismatched-identity").await;
-    let mut connection = session.connect_automation().await.unwrap();
+    let mut connection = session.connect_interactive().await.unwrap();
     let splint_id = SplintId::new();
     let response = connection
         .request(Request::Input {
@@ -502,8 +503,8 @@ async fn mismatched_terminal_acknowledgement_cannot_match_the_requested_splint()
 async fn one_logical_channel_loss_does_not_retarget_or_close_another_channel() {
     let directory = test_directory("channel-loss");
     let session = session(&directory, "close-first").await;
-    let mut first = session.connect_automation().await.unwrap();
-    let mut second = session.connect_automation().await.unwrap();
+    let mut first = session.connect_interactive().await.unwrap();
+    let mut second = session.connect_interactive().await.unwrap();
     let splint_id = SplintId::new();
     assert!(matches!(
         first
