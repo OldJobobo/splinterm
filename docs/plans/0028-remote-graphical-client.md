@@ -880,7 +880,19 @@ only for already-issued retired IDs. Data for retired/unknown channels and
 shutdown frames for future IDs remain session-fatal. A deterministic
 server-first regression failed before the fix, and the exact production Rust
 three-channel sequence—short-lived identity, retained Observe/Scrollback attach,
-then control admission—passes after it. Holodeck confirmation remains required.
+then control admission—passes after it.
+
+Holodeck package `b6a2292` then admitted channel 3, mapped a native Window on the
+isolated display, detached while the remote Splint remained running, and mapped
+a second Window against the same exact Dojo. This confirms the reconnect blocker
+is fixed. Closing the second Window exposed a separate shutdown-only error,
+`splinterd closed a partial frame`, after successful rendering. The topology
+manager still treated a closed frontend command channel like a timer tick and
+performed one final daemon inspection while the Window and pane channels were
+tearing down. The bounded fix gives frontend closure priority and stops before
+that unnecessary poll; a deterministic regression closes the command sender
+while the initial interval tick is also ready and requires shutdown to win.
+Real-host confirmation of the clean close remains required.
 
 ## Stop gates
 

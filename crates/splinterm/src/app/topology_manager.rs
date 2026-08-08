@@ -1181,6 +1181,46 @@ async fn reconcile_managed_topology(
     Ok(true)
 }
 
+enum TopologyManagerWake {
+    Command(WindowTopologyCommand),
+    Poll,
+    Shutdown,
+}
+
+async fn next_topology_manager_wake(
+    commands: &mut mpsc::Receiver<WindowTopologyCommand>,
+    poll: &mut tokio::time::Interval,
+    poll_priority: &mut bool,
+) -> TopologyManagerWake {
+    if commands.is_closed() {
+        return TopologyManagerWake::Shutdown;
+    }
+    let wake = if *poll_priority {
+        tokio::select! {
+            biased;
+            _ = poll.tick() => TopologyManagerWake::Poll,
+            command = commands.recv() => command.map_or(
+                TopologyManagerWake::Shutdown,
+                TopologyManagerWake::Command,
+            ),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            command = commands.recv() => command.map_or(
+                TopologyManagerWake::Shutdown,
+                TopologyManagerWake::Command,
+            ),
+            _ = poll.tick() => TopologyManagerWake::Poll,
+        }
+    };
+    if commands.is_closed() {
+        return TopologyManagerWake::Shutdown;
+    }
+    *poll_priority = matches!(wake, TopologyManagerWake::Command(_));
+    wake
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -1199,6 +1239,7 @@ pub(in crate::app) async fn run_topology_manager(
     let mut connection = factory.connect().await?;
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut poll_priority = false;
     let initial_lair_id = initial_identity.lair_id;
     let initial_dojo_id = initial_identity.dojo_id;
     let mut state = TopologyManagerState {
@@ -1214,10 +1255,12 @@ pub(in crate::app) async fn run_topology_manager(
         )),
     };
     loop {
-        let command = tokio::select! {
-            command = commands.recv() => command,
-            _ = poll.tick() => None,
-        };
+        let command =
+            match next_topology_manager_wake(&mut commands, &mut poll, &mut poll_priority).await {
+                TopologyManagerWake::Command(command) => Some(command),
+                TopologyManagerWake::Poll => None,
+                TopologyManagerWake::Shutdown => break,
+            };
         let command = if let Some(command) = command {
             match handle_session_manager_command(
                 &factory,
@@ -1259,9 +1302,6 @@ pub(in crate::app) async fn run_topology_manager(
             break;
         }
         let Some(command) = command else {
-            if commands.is_closed() {
-                break;
-            }
             continue;
         };
         let dojo_id = match &command {
@@ -1366,16 +1406,57 @@ pub(in crate::app) async fn initial_window_dojo_identity(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Duration};
+
+    use tokio::sync::mpsc;
 
     use super::{
         Axis, CloseAction, DojoId, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
-        SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyRevision,
-        captured_dojo_kill_targets, close_action, close_other_tab_targets, parent_ratio,
+        SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyManagerWake,
+        TopologyRevision, WindowTopologyCommand, captured_dojo_kill_targets, close_action,
+        close_other_tab_targets, next_topology_manager_wake, parent_ratio,
         pending_focus_for_observation, refreshed_close_state, topology_command_outcome,
         topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::pane_claims_initial_control;
+
+    #[tokio::test]
+    async fn closed_window_command_channel_stops_before_another_topology_poll() {
+        let (sender, mut commands) = mpsc::channel(1);
+        drop(sender);
+        let mut poll = tokio::time::interval(Duration::from_secs(60));
+        let mut poll_priority = false;
+
+        assert!(matches!(
+            next_topology_manager_wake(&mut commands, &mut poll, &mut poll_priority).await,
+            TopologyManagerWake::Shutdown
+        ));
+    }
+
+    #[tokio::test]
+    async fn ready_poll_follows_one_command_when_both_remain_ready() {
+        let (sender, mut commands) = mpsc::channel(2);
+        sender
+            .send(WindowTopologyCommand::RequestSessionPicker)
+            .await
+            .unwrap();
+        let mut poll = tokio::time::interval(Duration::from_millis(1));
+        let mut poll_priority = false;
+
+        assert!(matches!(
+            next_topology_manager_wake(&mut commands, &mut poll, &mut poll_priority).await,
+            TopologyManagerWake::Command(_)
+        ));
+        sender
+            .send(WindowTopologyCommand::RequestSessionPicker)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(matches!(
+            next_topology_manager_wake(&mut commands, &mut poll, &mut poll_priority).await,
+            TopologyManagerWake::Poll
+        ));
+    }
 
     #[test]
     fn termination_targets_exact_captured_incarnations_without_expanding_scope() {

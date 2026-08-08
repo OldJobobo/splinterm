@@ -90,6 +90,14 @@ fn pane_chrome_capture() -> Result<Option<PathBuf>> {
     Ok(Some(PathBuf::from(path)))
 }
 
+fn finish_topology_manager(
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    result
+        .context("topology manager task failed")?
+        .context("topology manager stopped")
+}
+
 pub(super) async fn run_live_multipane_window(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
@@ -189,9 +197,7 @@ pub(super) async fn run_live_multipane_window(
     if let Some(smoke) = topology_smoke {
         smoke.await.context("topology smoke task failed")??;
     }
-    topology_manager
-        .await
-        .context("topology manager task failed")??;
+    finish_topology_manager(topology_manager.await)?;
     result
 }
 
