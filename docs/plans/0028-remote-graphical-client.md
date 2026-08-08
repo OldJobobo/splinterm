@@ -781,10 +781,11 @@ Recorded successful evidence:
 The reconnect acceptance boundary failed. The first reopen attempt reported an
 invalid graphical-relay magic. A direct exact-frame probe then ruled out remote
 shell/banner contamination. The one bounded retry reached the relay but timed
-out waiting for a logical channel or daemon handshake. Bounded daemon audit
-metadata contained no denials and showed the failed reconnect continuously
-issuing authorized `inspect_topology` operations (the entire newest 64-record
-page), while another channel never completed. The matrix was aborted before
+out waiting for a logical channel or daemon handshake. A bounded audit query
+reported retained IDs through `1344`, but captured only the first page
+(`321–384`), whose timestamps belong to the successful Window's normal topology
+polling. That page contained no denials and does not identify which reconnect
+stage stalled; no stronger audit claim is retained. The matrix was aborted before
 password-only/SSH_ASKPASS authentication, split/new Dojo/new Lair, controller
 transfer, SSH/relay/daemon-loss, and local graphical-regression cases. Synthetic
 Ctrl-shortcut injection was also inconclusive; physical-key search validation

@@ -145,6 +145,156 @@ async fn session(directory: &Path, mode: &str) -> RemoteSession {
 }
 
 #[tokio::test]
+async fn channel_admission_timeout_names_the_stalled_stage() {
+    let directory = test_directory("channel-admission-timeout");
+    let ssh = fake_ssh(&directory, "stall-channel-open");
+    let catalog = RemoteCatalog::parse(
+        "version = 1\n[remotes.test]\nhost = \"example.invalid\"\nconnect_timeout_seconds = 1\n",
+        None,
+    )
+    .unwrap();
+    let session = RemoteSession::connect_with_program_and_timeout(
+        catalog.get("test").unwrap(),
+        ssh.as_os_str(),
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+
+    let error = session.connect_automation().await.unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<splinterm::remote_session::RemoteFailure>()
+            .unwrap()
+            .kind(),
+        splinterm::remote_session::RemoteFailureKind::TransportFailed
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("logical channel admission timed out: graphical relay channel 1")
+    );
+    assert_eq!(
+        session.terminal_failure().as_deref(),
+        Some("graphical relay channel 1 admission was cancelled")
+    );
+
+    drop(session);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let pid = fs::read_to_string(directory.join("pid-1")).unwrap();
+    assert!(
+        !std::path::Path::new("/proc").join(pid).exists(),
+        "admission timeout did not reap the SSH fixture"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn private_daemon_hello_timeout_names_the_stalled_stage() {
+    let directory = test_directory("private-hello-timeout");
+    let ssh = fake_ssh(&directory, "stall-private-hello");
+    let catalog = RemoteCatalog::parse(
+        "version = 1\n[remotes.test]\nhost = \"example.invalid\"\nconnect_timeout_seconds = 1\n",
+        None,
+    )
+    .unwrap();
+    let session = RemoteSession::connect_with_program_and_timeout(
+        catalog.get("test").unwrap(),
+        ssh.as_os_str(),
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+
+    let error = session.connect_automation().await.unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<splinterm::remote_session::RemoteFailure>()
+            .unwrap()
+            .kind(),
+        splinterm::remote_session::RemoteFailureKind::TransportFailed
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("private daemon Hello timed out on logical channel 1")
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        fs::read_to_string(directory.join("events.jsonl")).unwrap(),
+        "close:1\n"
+    );
+
+    drop(session);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let pid = fs::read_to_string(directory.join("pid-1")).unwrap();
+    assert!(
+        !std::path::Path::new("/proc").join(pid).exists(),
+        "private Hello timeout did not reap the SSH fixture"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn startup_channel_pattern_repeats_on_a_fresh_session_after_complete_teardown() {
+    let directory = test_directory("startup-reconnect");
+    let ssh = fake_ssh(&directory, "read-only");
+    let catalog = profile();
+
+    for expected_processes in 1..=2 {
+        let session =
+            RemoteSession::connect_with_program(catalog.get("test").unwrap(), ssh.as_os_str())
+                .await
+                .unwrap();
+        let mut identity = session.connect_automation().await.unwrap();
+        assert!(matches!(
+            identity.request(Request::ListLairs).await.unwrap(),
+            Response::Lairs { lairs, .. } if lairs.is_empty()
+        ));
+        drop(identity);
+
+        let mut observation = session.connect_automation().await.unwrap();
+        let mut control = session.connect_automation().await.unwrap();
+        let mut topology = session.connect_automation().await.unwrap();
+        for connection in [&mut observation, &mut control, &mut topology] {
+            assert!(matches!(
+                connection.request(Request::Ping).await.unwrap(),
+                Response::Pong
+            ));
+        }
+        drop(observation);
+        drop(control);
+        drop(topology);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(session);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        assert_eq!(
+            fs::read_to_string(directory.join("count")).unwrap(),
+            expected_processes.to_string()
+        );
+        let pid = fs::read_to_string(directory.join(format!("pid-{expected_processes}"))).unwrap();
+        assert!(
+            !std::path::Path::new("/proc").join(pid).exists(),
+            "fresh-session SSH fixture was not reaped"
+        );
+    }
+
+    let events = fs::read_to_string(directory.join("events.jsonl")).unwrap();
+    for channel_id in 1..=4 {
+        assert_eq!(
+            events
+                .lines()
+                .filter(|event| *event == format!("close:{channel_id}"))
+                .count(),
+            2,
+            "channel {channel_id} was not closed once per session"
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
 async fn interactive_requests_preserve_exact_controller_and_terminal_identity() {
     let directory = test_directory("interactive");
     let session = session(&directory, "interactive").await;

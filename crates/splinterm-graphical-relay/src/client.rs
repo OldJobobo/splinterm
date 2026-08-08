@@ -86,6 +86,30 @@ impl ClientState {
 }
 
 #[derive(Debug)]
+struct OpeningGuard {
+    state: Arc<ClientState>,
+    channel_id: u32,
+    armed: bool,
+}
+
+impl OpeningGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for OpeningGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.fail(format!(
+                "graphical relay channel {} admission was cancelled",
+                self.channel_id
+            ));
+        }
+    }
+}
+
+#[derive(Debug)]
 struct ClientHandle {
     state: Arc<ClientState>,
 }
@@ -224,6 +248,11 @@ impl ClientMultiplexer {
                     incoming,
                 },
             );
+        let mut opening = OpeningGuard {
+            state: state.clone(),
+            channel_id,
+            armed: true,
+        };
         tokio::spawn(run_incoming_channel(
             channel_id,
             bridge_writer,
@@ -237,9 +266,12 @@ impl ClientMultiplexer {
             .is_err()
         {
             state.close_channel(channel_id);
+            opening.disarm();
             bail!("graphical relay writer is unavailable");
         }
-        match opened_rx.await {
+        let admission = opened_rx.await;
+        opening.disarm();
+        match admission {
             Ok(Ok(())) => {}
             Ok(Err(reason)) => bail!(reason),
             Err(_) => bail!(
@@ -476,6 +508,14 @@ pub struct LogicalChannel {
     guard: Arc<ChannelGuard>,
 }
 
+impl LogicalChannel {
+    /// Returns the monotonically allocated session-local channel identity.
+    #[must_use]
+    pub fn channel_id(&self) -> u32 {
+        self.guard.channel_id
+    }
+}
+
 impl AsyncRead for LogicalChannel {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -648,6 +688,45 @@ mod tests {
         drop(client);
         heavy_task.abort();
         let _ = heavy_task.await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_channel_admission_fails_the_session_and_closes_transport() {
+        let (client, server) = tokio::io::duplex(32 * 1024);
+        let (client_reader, client_writer) = tokio::io::split(client);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::Hello)
+            );
+            write_frame(&mut server_writer, &Frame::HelloAck)
+                .await
+                .unwrap();
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::OpenChannel { channel_id: 1 })
+            );
+            assert_eq!(read_frame(&mut server_reader).await.unwrap(), None);
+        });
+        let client = ClientMultiplexer::negotiate(client_reader, client_writer)
+            .await
+            .unwrap();
+
+        assert!(
+            time::timeout(Duration::from_millis(20), client.open_channel())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            client.terminal_failure().as_deref(),
+            Some("graphical relay channel 1 admission was cancelled")
+        );
+        assert!(client.open_channel().await.is_err());
+        time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

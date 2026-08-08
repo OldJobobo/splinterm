@@ -270,35 +270,44 @@ impl RemoteSession {
     /// Returns an error when channel admission or the private daemon handshake
     /// fails. The connection never receives trusted image authority.
     pub async fn connect_automation(&self) -> Result<Connection> {
-        match tokio::time::timeout(self.operation_timeout, self.connect_automation_inner()).await {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::Error::new(RemoteFailure {
+        let deadline = tokio::time::Instant::now() + self.operation_timeout;
+        let channel = if let Ok(result) =
+            tokio::time::timeout_at(deadline, self.multiplexer.open_channel()).await
+        {
+            result.map_err(|error| {
+                let diagnostic = rendered_diagnostics(&self.diagnostics);
+                anyhow::Error::new(RemoteFailure {
+                    kind: classify_failure(
+                        &format!("{error:#}\n{diagnostic}"),
+                        self.terminal,
+                        self.askpass_available,
+                    ),
+                    diagnostic: bounded_failure_message(&format!("{error:#}\n{diagnostic}")),
+                })
+            })?
+        } else {
+            let stage = self
+                .multiplexer
+                .terminal_failure()
+                .unwrap_or_else(|| "graphical relay channel admission was cancelled".to_owned());
+            return Err(anyhow::Error::new(RemoteFailure {
                 kind: RemoteFailureKind::TransportFailed,
-                diagnostic: "remote logical channel or daemon handshake timed out".to_owned(),
-            })),
-        }
-    }
-
-    async fn connect_automation_inner(&self) -> Result<Connection> {
-        let channel = self.multiplexer.open_channel().await.map_err(|error| {
-            let diagnostic = rendered_diagnostics(&self.diagnostics);
-            anyhow::Error::new(RemoteFailure {
-                kind: classify_failure(
-                    &format!("{error:#}\n{diagnostic}"),
-                    self.terminal,
-                    self.askpass_available,
-                ),
-                diagnostic: bounded_failure_message(&format!("{error:#}\n{diagnostic}")),
-            })
-        })?;
+                diagnostic: format!("remote logical channel admission timed out: {stage}"),
+            }));
+        };
+        let channel_id = channel.channel_id();
         let channel = SessionChannel {
             inner: channel,
             _lifetime: self.lifetime.clone(),
         };
         let (reader, writer) = tokio::io::split(channel);
-        Connection::connect_automation_transport(reader, writer)
-            .await
-            .map_err(|error| {
+        match tokio::time::timeout_at(
+            deadline,
+            Connection::connect_automation_transport(reader, writer),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|error| {
                 let text = format!("{error:#}");
                 let lower = text.to_ascii_lowercase();
                 let kind = if lower.contains("incompatibleversion")
@@ -315,7 +324,14 @@ impl RemoteSession {
                     kind,
                     diagnostic: bounded_failure_message(&text),
                 })
-            })
+            }),
+            Err(_) => Err(anyhow::Error::new(RemoteFailure {
+                kind: RemoteFailureKind::TransportFailed,
+                diagnostic: format!(
+                    "remote private daemon Hello timed out on logical channel {channel_id}"
+                ),
+            })),
+        }
     }
 
     /// Returns bounded sanitized SSH diagnostics retained for this session.

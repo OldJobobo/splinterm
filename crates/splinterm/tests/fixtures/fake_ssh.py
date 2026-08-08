@@ -16,8 +16,11 @@ try:
     value = int(open(count, encoding='utf-8').read())
 except Exception:
     value = 0
+instance = value + 1
 with open(count, 'w', encoding='utf-8') as handle:
-    handle.write(str(value + 1))
+    handle.write(str(instance))
+with open(os.path.join(base, 'pid-' + str(instance)), 'w', encoding='utf-8') as handle:
+    handle.write(str(os.getpid()))
 
 stdin = sys.stdin.buffer
 stdout = sys.stdout.buffer
@@ -68,7 +71,8 @@ while True:
     kind, channel, payload = frame
     if kind == 3:
         buffers[channel] = b''
-        outer_write(4, channel)
+        if mode != 'stall-channel-open':
+            outer_write(4, channel)
     elif kind == 6:
         buffers[channel] = buffers.get(channel, b'') + payload
         while len(buffers[channel]) >= 4:
@@ -82,6 +86,8 @@ while True:
                 if message.get('type') != 'hello' or message.get('role') != 'automation':
                     raise SystemExit(6)
                 handshaken.add(channel)
+                if mode == 'stall-private-hello':
+                    continue
                 private_write(channel, {
                     'type': 'hello',
                     'version': 27,
