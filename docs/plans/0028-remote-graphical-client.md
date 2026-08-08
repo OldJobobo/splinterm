@@ -845,6 +845,30 @@ also report their admitted logical channel ID. This defect matches the observed
 create-topology-then-`early eof` sequence, but final attribution and reconnect
 acceptance still require a newly built package and approved Holodeck smoke.
 
+The reviewed fix was deployed from commit `e37f425` in a package with SHA-256
+`78e23c81952f9ac8a5ecf85d0ed93ab7b1b64bc892d099a39cd1e22e2801c663`.
+Pacman integrity, executable identities, exact relay policy digest
+`063e93c33eafe47562d5adf64b57cd7b022fd82259a762f79182302c5190e748`, daemon
+health, and `remote check` passed. The first approved smoke reached a policy
+denial after creating topology instead of the previous `early eof`, confirming
+that the crossed-close fix preserved the multiplexer through that boundary. It
+aborted before mapping because the retained daemon-only policy intentionally
+lacked pane scopes.
+
+A separately approved temporary rule then granted only topology/terminal
+observation, scrollback, ordinary controller/input/resize, and authorization
+inspection for exact test Lair
+`a7be30e9-77bb-4758-974f-4c7e35bcde25`. The exact-Dojo Window retry again
+aborted before mapping, now with the localized diagnostic
+`remote logical channel admission timed out: graphical relay channel 3 admission
+was cancelled`. No graphical input was sent. This establishes a second release
+blocker after the fixed crossed-close race; inline connector head-of-line
+blocking remains an investigation lead rather than a proven cause. Cleanup
+removed the temporary exact-Lair rule and sole test topology, restored the
+single daemon-bootstrap policy, preserved the original Window focus, and left
+Holodeck active and empty. The final reversible reset backup is
+`/home/oldjobobo/.local/state/splinterm.reset-1786157518619`.
+
 ## Stop gates
 
 Stop and request a product/security decision if implementation would require:
