@@ -1,6 +1,6 @@
 # Plan 0028: Remote graphical client over SSH
 
-- **Status:** In progress — Phases 1–3 complete, non-graphically validated, and independently reviewed; Phase 4 real-host graphical validation pending approval
+- **Status:** In progress — Phases 1–3 complete and reviewed; Phase 4 Holodeck validation attempted and blocked by reconnect logical-channel timeout
 - **Date:** 2026-08-07
 - **Product goal:** provide the Splinterm equivalent of a local terminal emulator attaching through SSH to a remote tmux server
 - **Depends on:** the accepted daemon-owned multiplexing, control, policy, image-security, headless-service, and SSH-relay work
@@ -752,6 +752,51 @@ without asking again if the smoke succeeds:
 Abort on wrong-target input, focus/placement failure, unexpected password
 repetition, remote process loss, or cleanup failure. Completion requires
 recorded evidence and independent review, not additional progress approvals.
+
+#### Phase 4 Holodeck attempt — 2026-08-07
+
+The approved guarded sequence used `oldjobobo@holodeck` and isolated workspace 8
+on DP-2. Commit `3475725` supplied the feature, followed by packaging
+compatibility commits `25e4ef2` and `efebc7e`. The validated Arch package was
+installed on an initially empty x86_64 Arch/Omarchy host. The deployment exposed
+and fixed the package's unnecessarily new-only JetBrains Nerd Font dependency;
+Pacman integrity, adjacent executable identities, daemon startup, exact relay
+digest policy, and an agent-backed `remote check` then passed.
+
+Recorded successful evidence:
+
+- unknown and changed host keys failed closed with distinct diagnostics against
+  isolated known-hosts fixtures;
+- one native remote Window mapped only on workspace 8 / DP-2 and was selected by
+  exact Hyprland address before focus or input;
+- the remote shell rendered ordered text, accepted input, and reported
+  `/home/oldjobobo` and `/bin/bash`, proving remote CWD/shell semantics;
+- 200 ordered output lines, detached scrollback, and compositor-driven Window
+  resize rendered correctly;
+- closing the local Window ended its client/SSH lifetime while the exact remote
+  shell PID remained alive; and
+- the raw relay accepted an exact `SPGR` v1 Hello and returned the byte-perfect
+  16-byte HelloAck.
+
+The reconnect acceptance boundary failed. The first reopen attempt reported an
+invalid graphical-relay magic. A direct exact-frame probe then ruled out remote
+shell/banner contamination. The one bounded retry reached the relay but timed
+out waiting for a logical channel or daemon handshake. Bounded daemon audit
+metadata contained no denials and showed the failed reconnect continuously
+issuing authorized `inspect_topology` operations (the entire newest 64-record
+page), while another channel never completed. The matrix was aborted before
+password-only/SSH_ASKPASS authentication, split/new Dojo/new Lair, controller
+transfer, SSH/relay/daemon-loss, and local graphical-regression cases. Synthetic
+Ctrl-shortcut injection was also inconclusive; physical-key search validation
+was not claimed.
+
+Cleanup removed every test Lair/Splint, uploaded package fixture, temporary host
+keys, test windows, and local launch scripts; restored the original workspace
+and focus; and left Holodeck with the validated package, active empty daemon,
+normal local `holodeck` profile, and a narrow daemon-only exact-digest relay
+bootstrap policy. Holodeck retained the reversible reset backup at
+`/home/oldjobobo/.local/state/splinterm.reset-1786150469754`. Phase 4 is not
+complete and the feature must not be described as reconnect-validated.
 
 ## Stop gates
 
