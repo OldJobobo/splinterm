@@ -501,7 +501,7 @@ existing picker sanitization and bounds.
 Remote graphical creation must not send local `AppConfig.shell`, local process
 CWD, or other local host paths through trusted-local `LaunchParameters`.
 
-Use the existing automation variants:
+Use the existing automation variants for explicit remote CLI mutations:
 
 - `CreateLairAutomation`;
 - `SplitSplintAutomation`;
@@ -509,17 +509,19 @@ Use the existing automation variants:
 - `NewDojoAutomation`.
 
 Default remote creation uses `AutomationLaunch { cwd: None, argv: [] }`, causing
-the remote daemon to select its configured/default shell.
-
-For pane and Dojo creation from an existing remote view, an inherited CWD must
+the remote daemon to select its configured/default shell. An inherited CWD must
 come from an exact captured remote Splint identity and its remote CWD. An
 explicit `--cwd` under `--remote` is documented as a path on the remote host.
 It is not canonicalized or existence-checked locally. Direct command argv is
 transported as structured argv and never rebuilt as a shell string.
 
-Any UI action whose implementation has only trusted-local launch semantics must
-be disabled remotely until converted. It must not silently fall back to local
-semantics.
+Persistent parent selectors snapshot only descendants present at policy
+publication; future-descendant authority remains outside policy v2. Native
+remote Windows therefore disable New Lair, New Dojo, and Split actions. The
+operator closes the Window, performs an explicit remote CLI mutation, reviews
+the resulting IDs, republishes the exact policy snapshot, and reopens the Dojo.
+Policy reload deliberately disconnects clients and is not an in-place refresh.
+Local trusted graphical creation remains unchanged.
 
 ### Focus, control, and consent
 
@@ -655,8 +657,10 @@ Deliver as one product phase:
    transport explicitly unavailable.
 6. Implement ordinary controller acquisition/status/transfer, input, resize,
    release, pane focus, tabs, and hidden-tab synchronization.
-7. Convert remote New, launch, split, new Dojo, and relaunch behavior to the
-   existing automation request variants and remote-safe `AutomationLaunch`.
+7. Convert explicit remote CLI New, launch, split, new Dojo, and relaunch
+   behavior to the automation request variants and remote-safe
+   `AutomationLaunch`; keep in-Window creation disabled because policy snapshots
+   exclude future descendants.
 8. Inherit CWD only from exact captured remote state; treat explicit remote
    `--cwd` as a remote path and never send local shell/CWD defaults.
 9. Make rename, ratio, close, restore, and termination actions endpoint- and
@@ -741,7 +745,8 @@ without asking again if the smoke succeeds:
 6. remote session picker and existing Dojo open;
 7. multi-pane text output and ordered updates;
 8. input, resize, scrollback, search, and normal controller transfer;
-9. remote split/new Dojo/new Lair using remote shell and CWD semantics;
+9. explicit remote CLI split/new Dojo/new Lair using remote shell and CWD
+   semantics, followed by exact policy republish and Window reopen;
 10. local Window close followed by proof that remote Splints remain running;
 11. reconnect and reopen;
 12. SSH kill, relay kill, and daemon loss behavior;
@@ -925,6 +930,24 @@ focus, and left Holodeck with an active empty daemon and only the exact-digest
 and clean-close acceptance boundary; Phase 4 items not exercised by this bounded
 smoke remain subject to their recorded matrix requirements.
 
+A later approved interaction matrix mapped a remote Window, accepted bounded
+input, verified `/home/oldjobobo` and `/usr/bin/bash`, rendered 200 ordered rows,
+and showed a local search result at `P4_ORDER_150`. Invoking Split created one
+Running remote sibling, but the published exact-Lair selector correctly denied
+attachment because new descendants are excluded from that generation. Reloading
+the policy then intentionally disconnected every client; the Window reported
+`topology manager stopped` with `splinterd closed a partial frame`. Both Splints
+remained Running. Cleanup removed temporary authority and topology and restored
+the original focus, empty workspace 8, healthy daemon, and one bootstrap rule.
+
+The resulting product/security decision preserves publication-snapshotted
+resource authority. Remote graphical creation controls are disabled instead of
+creating inaccessible descendants. Creation remains an explicit CLI workflow:
+close the Window, mutate, review IDs, republish policy, and reopen. The daemon
+now sends `persistent policy reloaded; reconnect required` as one complete frame
+before a reload disconnect, and clients preserve that diagnostic in request and
+subscription paths. Seamless future-descendant authority remains deferred.
+
 ## Stop gates
 
 Stop and request a product/security decision if implementation would require:
@@ -965,8 +988,9 @@ The feature is complete only when all of the following are demonstrated:
    UI bypass.
 7. Policy-authorized text output, panes, tabs, input, resize, scrollback, search,
    and ordinary controller ownership work against exact remote identities.
-8. New remote terminals use remote daemon defaults; local shell and CWD do not
-   leak into default remote launches.
+8. Explicit CLI-created remote terminals use remote daemon defaults; local shell
+   and CWD do not leak, and native Windows require policy republish plus reopen
+   before attaching newly created descendants.
 9. Closing or crashing the local client, SSH, or relay leaves remote Splints
    running while releasing connection-owned subscriptions and controllers.
 10. SSH failure, relay failure, daemon loss, policy denial, channel failure,

@@ -35,6 +35,13 @@ pub enum ForcedControlTransfer {
     Disabled,
 }
 
+/// Whether a live graphical Window may create topology descendants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphicalTopologyCreation {
+    Enabled,
+    RequiresPolicyRepublish,
+}
+
 /// Stable behavior carried with every connection factory clone.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EndpointCapabilities {
@@ -42,6 +49,7 @@ pub struct EndpointCapabilities {
     pub graphical_focus_publication: GraphicalFocusPublication,
     pub launch_semantics: LaunchSemantics,
     pub forced_control_transfer: ForcedControlTransfer,
+    pub graphical_topology_creation: GraphicalTopologyCreation,
     pub recency_namespace: String,
 }
 
@@ -69,6 +77,7 @@ impl ConnectionFactory {
                 graphical_focus_publication: GraphicalFocusPublication::Enabled,
                 launch_semantics: LaunchSemantics::LocalTrusted,
                 forced_control_transfer: ForcedControlTransfer::Enabled,
+                graphical_topology_creation: GraphicalTopologyCreation::Enabled,
                 recency_namespace: "local".to_owned(),
             }),
         }
@@ -94,6 +103,7 @@ impl ConnectionFactory {
                 graphical_focus_publication: GraphicalFocusPublication::Disabled,
                 launch_semantics: LaunchSemantics::RemoteAutomation,
                 forced_control_transfer: ForcedControlTransfer::Disabled,
+                graphical_topology_creation: GraphicalTopologyCreation::RequiresPolicyRepublish,
                 recency_namespace: format!("remote-{profile_name}"),
             }),
         }
@@ -140,6 +150,7 @@ mod tests {
                 graphical_focus_publication: GraphicalFocusPublication::Enabled,
                 launch_semantics: LaunchSemantics::LocalTrusted,
                 forced_control_transfer: ForcedControlTransfer::Enabled,
+                graphical_topology_creation: GraphicalTopologyCreation::Enabled,
                 recency_namespace: "local".to_owned(),
             }
         );

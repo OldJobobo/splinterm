@@ -644,6 +644,7 @@ pub(crate) fn paint_session_picker_overlay(
     selected: PickerHitTarget,
     hovered: Option<PickerHitTarget>,
     pressed: Option<PickerHitTarget>,
+    new_enabled: bool,
     keyboard_focused: bool,
 ) -> Result<()> {
     blend_rect(
@@ -818,7 +819,8 @@ pub(crate) fn paint_session_picker_overlay(
 
     for row in &layout.rows {
         let row_buffer = picker_buffer_rect(row.surface, scale_120);
-        let is_selected = row.target == selected;
+        let row_enabled = new_enabled || !matches!(row.target, PickerHitTarget::New);
+        let is_selected = row_enabled && row.target == selected;
         if is_selected {
             fill_rect(
                 canvas,
@@ -840,7 +842,7 @@ pub(crate) fn paint_session_picker_overlay(
                 ),
                 opaque_rgba(palette.selected_rail),
             );
-        } else if hovered == Some(row.target) {
+        } else if row_enabled && hovered == Some(row.target) {
             blend_rect(
                 canvas,
                 canvas_width,
@@ -854,7 +856,7 @@ pub(crate) fn paint_session_picker_overlay(
                 ],
             );
         }
-        if pressed == Some(row.target) {
+        if row_enabled && pressed == Some(row.target) {
             blend_rect(
                 canvas,
                 canvas_width,
@@ -868,7 +870,9 @@ pub(crate) fn paint_session_picker_overlay(
                 ],
             );
         }
-        let primary = if is_selected {
+        let primary = if !row_enabled {
+            palette.secondary
+        } else if is_selected {
             palette.selected_primary
         } else {
             palette.primary
@@ -910,7 +914,14 @@ pub(crate) fn paint_session_picker_overlay(
             height: row_buffer.height,
         };
         let (title, working_directory, status) = match row.target {
-            PickerHitTarget::New => ("+ New terminal", "", "Start a fresh shell".to_owned()),
+            PickerHitTarget::New if new_enabled => {
+                ("+ New terminal", "", "Start a fresh shell".to_owned())
+            }
+            PickerHitTarget::New => (
+                "+ New terminal",
+                "",
+                "Policy republish and reopen required".to_owned(),
+            ),
             PickerHitTarget::Open(index) => {
                 let Some(item) = items.get(index) else {
                     continue;
@@ -1291,6 +1302,7 @@ mod tests {
             None,
             None,
             true,
+            true,
         )
         .unwrap();
         let shaped = cache.len();
@@ -1348,9 +1360,40 @@ mod tests {
             None,
             None,
             true,
+            true,
         )
         .unwrap();
         assert_eq!(cache.len(), shaped);
+
+        paint_session_picker_overlay(
+            &mut cache,
+            &RenderContext::new(u16::MAX),
+            &mut canvas,
+            960,
+            600,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 960,
+                height: 600,
+            },
+            120,
+            1,
+            &layout,
+            palette,
+            &items,
+            PickerHitTarget::New,
+            Some(PickerHitTarget::New),
+            Some(PickerHitTarget::New),
+            false,
+            true,
+        )
+        .unwrap();
+        assert_ne!(
+            &canvas[rail..rail + 4],
+            &[accent_blue, accent_green, accent_red, 0xff]
+        );
+        assert!(cache.len() <= shaped + 1);
     }
 
     #[test]
@@ -1402,6 +1445,7 @@ mod tests {
                 PickerHitTarget::Open(selected),
                 None,
                 None,
+                true,
                 true,
             )
             .unwrap();

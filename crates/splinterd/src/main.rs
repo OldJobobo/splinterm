@@ -1276,7 +1276,20 @@ async fn serve_authenticated(
     loop {
         let frame = tokio::select! {
             biased;
-            _ = policy_reloads.recv() => break,
+            reload = policy_reloads.recv() => {
+                if !matches!(reload, Err(broadcast::error::RecvError::Closed)) {
+                    send_control(
+                        control,
+                        protocol_error(
+                            None,
+                            ErrorCode::Unauthorized,
+                            "persistent policy reloaded; reconnect required",
+                        ),
+                    )
+                    .await?;
+                }
+                break;
+            }
             revoked = connection_revocations.recv() => match revoked {
                 Ok(revoked) if revoked == connection_id => break,
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,

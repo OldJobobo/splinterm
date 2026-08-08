@@ -152,6 +152,7 @@ use crate::renderer::{
     write_ppm,
 };
 use crate::{
+    endpoint::GraphicalTopologyCreation,
     keymap::{ActionId, ResolvedKeymap},
     tab::{DojoTab, WindowTabSet, sanitized_tab_label},
     viewport::ScrollbackViewport,
@@ -185,9 +186,10 @@ use input::{
     application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
     font_zoom_action, history_overlay_status, history_return_to_live_hit, key_input,
     local_selection_owner, mouse_report, pane_focus_action, pane_topology_action,
-    pending_selection_drag_anchor, picker_ime_reconcile, picker_release_activation,
-    pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
-    shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
+    pane_topology_creation_allowed, pending_selection_drag_anchor, picker_ime_reconcile,
+    picker_release_activation, pointer_axis_focus_target, reconciled_focus_report,
+    session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
+    tab_shortcut_action, tab_shortcut_creation_allowed, take_press_owner,
 };
 use selection::{
     CellPosition, Selection, SelectionEndpoint, selection_display_bounds, selection_endpoint,
@@ -785,6 +787,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             keyboard_focused: false,
             graphical_focus: options.graphical_focus,
             forced_control_transfer: options.forced_control_transfer,
+            graphical_topology_creation: options.graphical_topology_creation,
             input_generation: 0,
             terminal_focus_reported: false,
             ime_generation: 0,
@@ -1702,6 +1705,7 @@ struct InputState {
     keyboard_focused: bool,
     graphical_focus: Option<tokio::sync::watch::Sender<Option<SplintId>>>,
     forced_control_transfer: bool,
+    graphical_topology_creation: GraphicalTopologyCreation,
     input_generation: u64,
     terminal_focus_reported: bool,
     ime_generation: u64,
@@ -3671,6 +3675,7 @@ impl App {
             viewport_detached: !self.panes.pane.scrollback_viewport.is_live(),
             controller_active: self.panes.pane.controller_active,
             forced_control_transfer: self.input.forced_control_transfer,
+            graphical_topology_creation: self.input.graphical_topology_creation,
             grant_ids: self
                 .panes
                 .pane
@@ -3982,6 +3987,7 @@ impl App {
             pane_count,
             splints,
             active,
+            graphical_topology_creation: self.input.graphical_topology_creation,
             other_dojo_ids,
         }));
         self.modal.tab_context_menu_anchor = (
@@ -4129,7 +4135,9 @@ impl App {
             self.commit_text_input();
         }
         self.clear_ime_preedit();
-        self.modal.session_picker = Some(SessionPickerUi::inline(items));
+        self.modal.session_picker = Some(SessionPickerUi::inline(items).with_new_enabled(
+            self.input.graphical_topology_creation == GraphicalTopologyCreation::Enabled,
+        ));
         self.modal.session_picker_targets = targets;
         self.modal.session_picker_layout = None;
         self.modal.session_picker_pressed = None;
@@ -4578,9 +4586,14 @@ impl App {
                         | (BTN_MIDDLE, TabHitTarget::Activate(dojo_id)) => {
                             Some(WindowTopologyCommand::CloseTab { dojo_id })
                         }
-                        (BTN_LEFT, TabHitTarget::New) => Some(WindowTopologyCommand::NewDojo {
-                            lair_id: self.tab_state.active_identity.lair_id,
-                        }),
+                        (BTN_LEFT, TabHitTarget::New)
+                            if self.input.graphical_topology_creation
+                                == GraphicalTopologyCreation::Enabled =>
+                        {
+                            Some(WindowTopologyCommand::NewDojo {
+                                lair_id: self.tab_state.active_identity.lair_id,
+                            })
+                        }
                         _ => None,
                     };
                     if let Some(command) = command {
@@ -4811,7 +4824,13 @@ impl App {
             .modal
             .session_picker_layout
             .as_ref()
-            .and_then(|layout| session_picker_hit_test(layout, event.position));
+            .and_then(|layout| session_picker_hit_test(layout, event.position))
+            .filter(|target| {
+                self.modal
+                    .session_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.target_enabled(*target))
+            });
         let mut changed = false;
         let mut activate = None;
         match event.kind {
@@ -4884,6 +4903,13 @@ impl App {
     }
 
     fn decide_session_picker(&mut self, decision: SessionPickerDecision) {
+        if decision == SessionPickerDecision::New
+            && self.input.graphical_topology_creation
+                == GraphicalTopologyCreation::RequiresPolicyRepublish
+        {
+            eprintln!("splinterm remote creation requires policy republish and Window reopen");
+            return;
+        }
         if self.modal.inline_picker_open() {
             let command = match decision {
                 SessionPickerDecision::New => WindowTopologyCommand::NewLair,
@@ -5121,13 +5147,20 @@ impl App {
                         .modal
                         .session_picker
                         .as_ref()
-                        .map(SessionPickerUi::selected_decision)
+                        .and_then(SessionPickerUi::selected_decision)
                     {
                         self.decide_session_picker(decision);
                     }
                 }
                 Keysym::n | Keysym::N => {
-                    self.decide_session_picker(SessionPickerDecision::New);
+                    if self
+                        .modal
+                        .session_picker
+                        .as_ref()
+                        .is_some_and(SessionPickerUi::new_enabled)
+                    {
+                        self.decide_session_picker(SessionPickerDecision::New);
+                    }
                 }
                 Keysym::Escape => self.cancel_session_picker(),
                 _ => {}
@@ -7282,6 +7315,7 @@ impl App {
                 &self.tab_state.tab_label_cache,
                 self.tab_state.tab_close_text.as_ref().map(|(_, text)| text),
                 self.tab_state.tab_new_text.as_ref().map(|(_, text)| text),
+                self.input.graphical_topology_creation == GraphicalTopologyCreation::Enabled,
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
@@ -7313,6 +7347,7 @@ impl App {
                 picker.selected_target(),
                 picker.hovered(),
                 self.modal.session_picker_pressed,
+                picker.new_enabled(),
                 self.input.keyboard_focused,
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();

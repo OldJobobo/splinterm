@@ -147,19 +147,28 @@ splinterm --remote PROFILE launch [--working-directory REMOTE_PATH] [-- ARGV...]
 Omitting the subcommand after `--remote PROFILE` opens that endpoint's Recent
 Sessions picker. Session discovery, tabs, pane snapshots and ordered updates,
 resynchronization, scrollback/search, ordinary requested control/input/resize,
-and policy-authorized lifecycle actions all use logical channels on the same SSH
-child. Trusted forced control transfer remains visibly unavailable and is
-rejected before request construction. A Window remains bound to exactly one
-endpoint. Local and remote recency
-files are distinct, and profile names—not remote titles or CWDs—select the
-namespace.
+and policy-authorized operations on already published resources all use logical
+channels on the same SSH child. Trusted forced control transfer remains visibly
+unavailable and is rejected before request construction. Creating a Lair, Dojo,
+or Splint inside a remote Window is also visibly disabled: persistent parent
+selectors exclude future descendants by design. A Window remains bound to
+exactly one endpoint. Local and remote recency files are distinct, and profile
+names—not remote titles or CWDs—select the namespace.
 
-Remote default creation sends `AutomationLaunch { cwd: None, argv: [] }`; the
-remote daemon selects its own home, shell, and defaults. Split/relaunch
+Explicit remote CLI creation sends `AutomationLaunch { cwd: None, argv: [] }`;
+the remote daemon selects its own home, shell, and defaults. Split/relaunch
 inheritance is resolved by the remote daemon from the exact target Splint. An
 explicit `--cwd`/`--working-directory` is an absolute remote path and structured
 argv is never rebuilt as a shell string. Local shell settings and local CWD are
 never default remote launch state.
+
+Policy v2 does not grant future-descendant authority. To create remote topology,
+close the native Window, use an explicit `--remote` lifecycle command, review the
+new IDs, republish the exact policy snapshot, and reopen the selected Dojo. A
+policy reload deliberately disconnects existing clients, so reloading underneath
+a live Window is not a refresh mechanism. Updated clients receive
+`persistent policy reloaded; reconnect required` before the connection closes.
+Do not add wildcard resources to avoid this workflow.
 
 Profile inspection and reachability commands remain non-graphical:
 
@@ -243,7 +252,9 @@ Lair/Splint resources. Pane attachment requests only observe and scrollback
 access; denied initial controller acquisition falls back to an observer Window
 rather than blocking attachment. Review every UUID and replace the executable digest; do
 not copy wildcard resources merely to make a test pass. A Lair selector snapshots
-only its descendants that exist when that policy generation is published:
+only its descendants that exist when that policy generation is published. New
+children require explicit policy republish and Window reopen; they never become
+attachable through an in-place refresh:
 
 ```json
 {
@@ -307,8 +318,11 @@ wildcards:
 }
 ```
 
-Remove restore, terminate, spawn, layout, or naming scopes when those UI actions
-should stay unavailable; never add them to a read-only profile. Policy denial is
+Remove restore, terminate, spawn, layout, or naming scopes when those CLI
+actions should stay unavailable; never add them to a read-only profile. Native
+remote Windows disable new-Lair, new-Dojo, and split actions even when these
+scopes exist because the resulting descendants are outside the published
+resource snapshot. Policy denial is
 surfaced rather than converted to trusted local consent. Every SSH caller able
 to execute this relay under the account receives the relay executable's
 configured Splinterm authority; use a dedicated account or

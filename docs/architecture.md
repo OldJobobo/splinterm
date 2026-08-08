@@ -138,12 +138,15 @@ or passphrase values.
 local uses `TrustedUi`, trusted local image content, focus publication, local
 launch semantics, trusted force-transfer authority, and the `local` recency
 namespace; remote uses `Automation`, unavailable image transport, disabled focus
-publication, unavailable forced transfer, automation launch semantics, and
-`remote-PROFILE` recency. Phase 2 routes CLI
-selection, session discovery, Window startup, pane observation/control,
-topology reconciliation, hidden tabs, history, search, mutations, and cleanup
-through clones of that one factory. A Window therefore cannot retarget or mix
-local and remote identities after startup.
+publication, unavailable forced transfer, automation launch semantics,
+policy-republish-required graphical creation, and `remote-PROFILE` recency.
+Phase 2 routes CLI selection, session discovery, Window startup, pane
+observation/control, topology reconciliation, hidden tabs, history, search,
+existing-resource mutations, and cleanup through clones of that one factory. A
+Window therefore cannot retarget or mix local and remote identities after
+startup. New remote descendants are created through explicit CLI mutation,
+followed by exact policy republish and Window reopen; policy reload disconnects
+all existing daemon clients by design.
 
 ## Client module boundaries
 

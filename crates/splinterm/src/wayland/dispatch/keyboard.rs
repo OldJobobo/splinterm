@@ -1,10 +1,11 @@
 use super::super::{
-    ActionId, App, CommandPaletteShortcutAction, Connection, KeyEvent, KeyboardHandler, Keysym,
-    Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle, RawModifiers,
-    SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
-    WindowTopologyCommand, command_palette_shortcut_action, font_zoom_action, pane_focus_action,
-    pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
-    tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
+    ActionId, App, CommandPaletteShortcutAction, Connection, GraphicalTopologyCreation, KeyEvent,
+    KeyboardHandler, Keysym, Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget,
+    QueueHandle, RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface,
+    WindowCommand, WindowTopologyCommand, command_palette_shortcut_action, font_zoom_action,
+    pane_focus_action, pane_topology_action, pane_topology_creation_allowed,
+    session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
+    tab_shortcut_action, tab_shortcut_creation_allowed, wl_keyboard, wl_surface,
 };
 
 impl KeyboardHandler for App {
@@ -116,6 +117,12 @@ impl KeyboardHandler for App {
             ]) {
                 return;
             }
+            if !tab_shortcut_creation_allowed(
+                action,
+                self.input.graphical_topology_creation == GraphicalTopologyCreation::Enabled,
+            ) {
+                return;
+            }
             let target = match action {
                 TabShortcutAction::Next => self
                     .tab_state
@@ -179,6 +186,12 @@ impl KeyboardHandler for App {
         if self.tab_state.topology_commands.is_some()
             && let Some(action) = pane_topology_action(shortcut)
         {
+            if !pane_topology_creation_allowed(
+                action,
+                self.input.graphical_topology_creation == GraphicalTopologyCreation::Enabled,
+            ) {
+                return;
+            }
             if let Some(target) = self.panes.focused_splint() {
                 let dojo_id = self.tab_state.active_dojo_id();
                 let command = match action {

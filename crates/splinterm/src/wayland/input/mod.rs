@@ -15,6 +15,7 @@ pub(in crate::wayland) use pointer::{
 pub(in crate::wayland) use shortcuts::{
     CommandPaletteShortcutAction, FontZoomAction, PaneFocusAction, PaneTopologyAction,
     SessionPickerShortcutAction, TabShortcutAction, command_palette_shortcut_action,
-    font_zoom_action, pane_focus_action, pane_topology_action, session_picker_shortcut_action,
-    shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action,
+    font_zoom_action, pane_focus_action, pane_topology_action, pane_topology_creation_allowed,
+    session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
+    tab_shortcut_action, tab_shortcut_creation_allowed,
 };

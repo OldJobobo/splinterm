@@ -25,6 +25,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+splinterm-automation-client = { path = "../splinterm-automation-client" }
 splinterm-mcp = { path = "../splinterm-mcp", features = ["integration-test"] }
 tokio = { workspace = true, features = ["test-util"] }
 

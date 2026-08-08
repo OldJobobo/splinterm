@@ -88,13 +88,17 @@ Detailed plan: [`plans/0028-remote-graphical-client.md`](plans/0028-remote-graph
 - Existing byte-transparent `relay --stdio` compatibility retained
 - Phase 2 native workflow implemented and non-graphically validated: global
   endpoint selection, remote Recent Sessions and Window attachment, pane/tab
-  observation and control, history/search/resync, remote-safe automation launch
+  observation and control, history/search/resync, remote-safe CLI automation
   mutations, endpoint recency namespaces, no-image enforcement, suppression of
-  trusted graphical-focus publication, and trusted-only forced-transfer gating
+  trusted graphical-focus publication, and trusted-only forced-transfer gating.
+  In-Window creation is disabled because published parent selectors exclude
+  future descendants; operators mutate explicitly, republish policy, and reopen.
 - Fake-relay integration covers exact interactive identities, policy denial,
   mismatched acknowledgements, and channel-local controller/subscription loss
-- Complete aggregate non-graphical closure remains Phase 3; real-host graphical evidence
-  remains the single approved Phase 4 gate
+- Phase 3 aggregate non-graphical closure is complete. Phase 4 has recorded
+  real-host map, input, search, persistence, reconnect, and clean-close evidence;
+  password prompting and the remaining bounded failure/local-regression matrix
+  are still open.
 
 ## Phase 4.1 — output throughput stabilization (complete)
 

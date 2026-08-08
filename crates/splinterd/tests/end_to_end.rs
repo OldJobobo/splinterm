@@ -8,6 +8,9 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
+use splinterm_automation_client::{
+    Connection as AutomationConnection, protocol_error as automation_protocol_error,
+};
 use splinterm_core::{
     Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision,
 };
@@ -724,12 +727,39 @@ fn parent_snapshot_policy(lair_id: splinterm_core::LairId) -> String {
 }
 
 async fn assert_connection_closed(connection: &mut Connection, reason: &str) {
-    let mut byte = [0_u8; 1];
-    let closed = time::timeout(Duration::from_secs(5), connection.stream.read(&mut byte))
+    let mut notified = false;
+    for _ in 0..16 {
+        let frame = time::timeout(
+            Duration::from_secs(5),
+            read_frame_or_eof(&mut connection.stream),
+        )
         .await
-        .unwrap_or_else(|_| panic!("{reason} did not close the existing client"))
-        .unwrap();
-    assert_eq!(closed, 0);
+        .unwrap_or_else(|_| panic!("{reason} did not notify the existing client"));
+        match frame {
+            Some(ServerFrame::Error {
+                request_id: None,
+                error:
+                    ProtocolError {
+                        code: ErrorCode::Unauthorized,
+                        ref message,
+                        ..
+                    },
+            }) if message == "persistent policy reloaded; reconnect required" => {
+                notified = true;
+                break;
+            }
+            Some(ServerFrame::Event { .. }) => {}
+            frame => panic!("{reason} returned an unexpected reload frame: {frame:?}"),
+        }
+    }
+    assert!(notified, "{reason} omitted the policy reload diagnostic");
+    let closed = time::timeout(
+        Duration::from_secs(5),
+        read_frame_or_eof(&mut connection.stream),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{reason} did not close the existing client"));
+    assert!(closed.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1857,6 +1887,48 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
     })
     .await
     .expect("scoped authorization policy test timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automation_client_preserves_accepted_and_rejected_reload_diagnostics() {
+    time::timeout(Duration::from_secs(60), async {
+        let daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
+        let policy = daemon.policy.as_ref().unwrap();
+
+        for candidate in [
+            exact_headless_policy(None),
+            r#"{"schema":"wrong","rules":[]}"#.to_owned(),
+        ] {
+            let mut connection = AutomationConnection::connect_automation_at(&daemon.socket)
+                .await
+                .unwrap();
+            assert!(matches!(
+                connection
+                    .request(Request::SubscribeTopology)
+                    .await
+                    .unwrap(),
+                Response::TopologySubscribed { .. }
+            ));
+            fs::write(policy, candidate).unwrap();
+            fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+            daemon.reload_policy();
+
+            let error = connection.next_server_frame().await.unwrap_err();
+            assert_eq!(
+                automation_protocol_error(&error).map(|error| (error.code, error.message.as_str())),
+                Some((
+                    ErrorCode::Unauthorized,
+                    "persistent policy reloaded; reconnect required"
+                ))
+            );
+            let unusable = connection.request(Request::Ping).await.unwrap_err();
+            assert!(unusable.to_string().contains("cannot be reused"));
+        }
+
+        daemon.shutdown();
+    })
+    .await
+    .expect("automation reload diagnostic scenario timed out");
 }
 
 #[allow(

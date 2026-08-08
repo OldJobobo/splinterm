@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+#[cfg(test)]
+use crate::endpoint::GraphicalTopologyCreation;
 use crate::{
     frontend::{
         BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteUi, DojoPromptUi,
@@ -1525,6 +1527,7 @@ mod tests {
             pane_count: 2,
             splints: vec![(SplintId::new(), 1), (SplintId::new(), 2)],
             active: false,
+            graphical_topology_creation: GraphicalTopologyCreation::Enabled,
             other_dojo_ids: vec![DojoId::new()],
         });
         let mut canvas = vec![0_u8; 640 * 400 * 4];
@@ -1601,6 +1604,7 @@ mod tests {
             viewport_detached: false,
             controller_active: false,
             forced_control_transfer: true,
+            graphical_topology_creation: GraphicalTopologyCreation::Enabled,
             grant_ids: Vec::new(),
             pending_transfer_id: None,
         });

@@ -109,6 +109,11 @@ Inside a managed Splinterm window, these controls cover the essential workflow:
 | Search scrollback | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> |
 | Copy / paste | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> |
 
+These creation shortcuts apply to trusted local Windows. Native remote Windows
+keep New Session, New Dojo, and Split visibly disabled because remote policy
+selectors exclude future descendants. Create remote topology through explicit
+CLI commands, republish the exact policy, then reopen the Dojo.
+
 Reopening attaches to processes that are still running. Starting an exited process again from saved launch metadata is an explicit **restore** operation.
 
 Continue with the [quickstart](https://splinterm.com/docs/quickstart/) or [sessions and persistence](https://splinterm.com/docs/sessions/).

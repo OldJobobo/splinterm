@@ -3389,6 +3389,13 @@ impl Connection {
                 } if response_id == request_id => {
                     return Err(anyhow::Error::new(DaemonProtocolFailure(error)));
                 }
+                ServerFrame::Error {
+                    request_id: None,
+                    error,
+                } => {
+                    self.mark_unusable();
+                    return Err(anyhow::Error::new(DaemonProtocolFailure(error)));
+                }
                 event @ ServerFrame::Event { .. } => {
                     if let Err(error) = self.queue_event(event) {
                         self.mark_unusable();
@@ -3410,7 +3417,12 @@ impl Connection {
             self.queued_event_bytes = self.queued_event_bytes.saturating_sub(encoded_bytes);
             return Ok(event);
         }
-        let result = self.read_server_frame().await;
+        let result = match self.read_server_frame().await {
+            Ok(ServerFrame::Error { error, .. }) => {
+                Err(anyhow::Error::new(DaemonProtocolFailure(error)))
+            }
+            result => result,
+        };
         if result.is_err() {
             self.mark_unusable();
         }
@@ -4695,6 +4707,81 @@ mod tests {
             CliEventV2::control_resync(1, 4, splint_id, 3, ResyncReasonV2::HistoryReplaced)
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn requestless_daemon_error_preserves_reload_diagnostic() {
+        async fn serve_reload_error(mut server: UnixStream, expect_request: bool) {
+            assert!(matches!(
+                read_client_frame(&mut server).await,
+                ClientFrame::Hello { .. }
+            ));
+            server
+                .write_all(
+                    &encode_frame(&ServerFrame::Hello {
+                        version: PROTOCOL_VERSION,
+                        limits: ServerLimits::default(),
+                        development_terminal_access: false,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            if expect_request {
+                assert!(matches!(
+                    read_client_frame(&mut server).await,
+                    ClientFrame::Request {
+                        request: Request::Ping,
+                        ..
+                    }
+                ));
+            }
+            server
+                .write_all(
+                    &encode_frame(&ServerFrame::Error {
+                        request_id: None,
+                        error: ProtocolError::new(
+                            ErrorCode::Unauthorized,
+                            "persistent policy reloaded; reconnect required",
+                        ),
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(serve_reload_error(server, true));
+        let mut connection = Connection::connect_stream(client, ClientRole::Automation)
+            .await
+            .unwrap();
+        let error = connection.request(Request::Ping).await.unwrap_err();
+        assert_eq!(
+            protocol_error(&error).map(|error| (error.code, error.message.as_str())),
+            Some((
+                ErrorCode::Unauthorized,
+                "persistent policy reloaded; reconnect required"
+            ))
+        );
+        let unusable = connection.request(Request::Ping).await.unwrap_err();
+        assert!(unusable.to_string().contains("cannot be reused"));
+        server_task.await.unwrap();
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(serve_reload_error(server, false));
+        let mut connection = Connection::connect_stream(client, ClientRole::Automation)
+            .await
+            .unwrap();
+        let error = connection.next_server_frame().await.unwrap_err();
+        assert_eq!(
+            protocol_error(&error).map(|error| (error.code, error.message.as_str())),
+            Some((
+                ErrorCode::Unauthorized,
+                "persistent policy reloaded; reconnect required"
+            ))
+        );
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

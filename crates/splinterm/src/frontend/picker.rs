@@ -42,6 +42,7 @@ pub struct SessionPickerUi {
     selected: usize,
     visible_start: usize,
     hovered: Option<PickerHitTarget>,
+    new_enabled: bool,
     host: SessionPickerHost,
 }
 
@@ -57,6 +58,7 @@ impl SessionPickerUi {
             selected: 0,
             visible_start: 0,
             hovered: None,
+            new_enabled: true,
             host: SessionPickerHost::Standalone {
                 revision: 0,
                 synthetic_id: SplintId::new(),
@@ -71,12 +73,31 @@ impl SessionPickerUi {
             selected: 0,
             visible_start: 0,
             hovered: None,
+            new_enabled: true,
             host: SessionPickerHost::Inline,
         }
     }
 
     pub(crate) const fn is_inline(&self) -> bool {
         matches!(self.host, SessionPickerHost::Inline)
+    }
+
+    #[must_use]
+    pub fn with_new_enabled(mut self, new_enabled: bool) -> Self {
+        self.new_enabled = new_enabled;
+        if !new_enabled && !self.items.is_empty() {
+            self.selected = 1;
+        }
+        self.hovered = self.hovered.filter(|target| self.target_enabled(*target));
+        self
+    }
+
+    pub(crate) const fn new_enabled(&self) -> bool {
+        self.new_enabled
+    }
+
+    pub(crate) const fn target_enabled(&self, target: PickerHitTarget) -> bool {
+        !matches!(target, PickerHitTarget::New) || self.new_enabled
     }
 
     pub(crate) fn selected_target(&self) -> PickerHitTarget {
@@ -104,6 +125,7 @@ impl SessionPickerUi {
     }
 
     pub(crate) fn update_hovered(&mut self, hovered: Option<PickerHitTarget>) -> bool {
+        let hovered = hovered.filter(|target| self.target_enabled(*target));
         if self.hovered == hovered {
             return false;
         }
@@ -122,15 +144,31 @@ impl SessionPickerUi {
         }
     }
 
-    pub(crate) fn selected_decision(&self) -> SessionPickerDecision {
+    pub(crate) fn selected_decision(&self) -> Option<SessionPickerDecision> {
         if self.selected == 0 {
-            SessionPickerDecision::New
+            self.new_enabled.then_some(SessionPickerDecision::New)
         } else {
-            SessionPickerDecision::Open(self.selected - 1)
+            Some(SessionPickerDecision::Open(self.selected - 1))
         }
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
+        if !self.new_enabled {
+            let count = self.items.len();
+            if count == 0 {
+                return;
+            }
+            let current = self.selected.saturating_sub(1).min(count - 1);
+            let magnitude = delta.unsigned_abs() % count;
+            let next = if delta.is_negative() {
+                current.saturating_add(count).saturating_sub(magnitude) % count
+            } else {
+                current.saturating_add(magnitude) % count
+            };
+            self.selected = next + 1;
+            self.ensure_selected_visible(SESSION_PICKER_PAGE_ITEMS);
+            return;
+        }
         let count = self.items.len().saturating_add(1);
         let magnitude = delta.unsigned_abs() % count;
         self.selected = if delta.is_negative() {
@@ -145,7 +183,7 @@ impl SessionPickerUi {
     }
 
     pub(crate) fn select_first(&mut self) {
-        self.selected = 0;
+        self.selected = usize::from(!self.new_enabled && !self.items.is_empty());
         self.visible_start = 0;
     }
 
@@ -174,6 +212,9 @@ impl SessionPickerUi {
 
     pub(crate) fn select_row(&mut self, row: usize) -> Option<SessionPickerDecision> {
         if row == SESSION_PICKER_NEW_ROW || row == SESSION_PICKER_NEW_ROW + 1 {
+            if !self.new_enabled {
+                return None;
+            }
             self.selected = 0;
             return Some(SessionPickerDecision::New);
         }
@@ -208,12 +249,25 @@ impl SessionPickerUi {
         };
         *revision = revision.saturating_add(1).max(1);
         let marker = |selected| if selected { "› " } else { "  " };
+        let new_selected = self.new_enabled && self.selected == 0;
         let mut lines = vec![
             "RECENT SESSIONS".to_owned(),
             "Open a running window without restoring or relaunching.".to_owned(),
             String::new(),
-            format!("{}New Terminal", marker(self.selected == 0)),
-            "    Start a fresh shell".to_owned(),
+            format!(
+                "{}{}",
+                marker(new_selected),
+                if self.new_enabled {
+                    "New Terminal"
+                } else {
+                    "New Terminal — policy republish required"
+                }
+            ),
+            if self.new_enabled {
+                "    Start a fresh shell".to_owned()
+            } else {
+                "    Create remotely, republish exact policy, then reopen".to_owned()
+            },
         ];
         for (index, item) in self
             .items
@@ -242,7 +296,11 @@ impl SessionPickerUi {
         }
         lines.extend([
             String::new(),
-            "↑/↓ or J/K select · Enter open · N new · Escape cancel".to_owned(),
+            if self.new_enabled {
+                "↑/↓ or J/K select · Enter open · N new · Escape cancel".to_owned()
+            } else {
+                "↑/↓ or J/K select · Enter open · Escape cancel".to_owned()
+            },
         ]);
         picker_terminal_snapshot(*synthetic_id, *revision, lines)
     }
@@ -369,15 +427,21 @@ mod tests {
             })
             .collect();
         let mut picker = SessionPickerUi::new(items, decision);
-        assert_eq!(picker.selected_decision(), SessionPickerDecision::New);
+        assert_eq!(picker.selected_decision(), Some(SessionPickerDecision::New));
         picker.move_selection(-1);
-        assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(9));
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(9))
+        );
         assert_eq!(picker.visible_start, 3);
         assert_eq!(
             picker.select_row(SESSION_PICKER_FIRST_ITEM_ROW),
             Some(SessionPickerDecision::Open(3))
         );
-        assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(3));
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(3))
+        );
         let snapshot = picker.snapshot();
         assert!(snapshot.validate().is_ok());
         assert!(
@@ -409,7 +473,7 @@ mod tests {
             } else {
                 SessionPickerDecision::Open(count - 1)
             };
-            assert_eq!(picker.selected_decision(), expected);
+            assert_eq!(picker.selected_decision(), Some(expected));
             picker.ensure_selected_visible(3);
             assert!(picker.visible_start <= count.saturating_sub(3));
             if count > 0 {
@@ -418,10 +482,62 @@ mod tests {
                 assert!(selected < picker.visible_start + 3.min(count));
             }
             picker.select_first();
-            assert_eq!(picker.selected_decision(), SessionPickerDecision::New);
+            assert_eq!(picker.selected_decision(), Some(SessionPickerDecision::New));
             assert_eq!(picker.visible_start, 0);
             picker.select_last();
-            assert_eq!(picker.selected_decision(), expected);
+            assert_eq!(picker.selected_decision(), Some(expected));
         }
+    }
+
+    #[test]
+    fn disabled_new_target_is_unselectable_for_keyboard_and_pointer() {
+        let (decision, _receiver) = std_mpsc::channel();
+        let item = SessionPickerItem {
+            display_title: "existing".to_owned(),
+            working_directory: "/tmp".to_owned(),
+            pane_count: 1,
+            running_pane_count: 1,
+        };
+        let mut picker = SessionPickerUi::new(vec![item], decision).with_new_enabled(false);
+        assert!(!picker.new_enabled());
+        assert_eq!(picker.selected_target(), PickerHitTarget::Open(0));
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(0))
+        );
+        assert_eq!(picker.select_row(SESSION_PICKER_NEW_ROW), None);
+        assert!(!picker.update_hovered(Some(PickerHitTarget::New)));
+        picker.select_first();
+        assert_eq!(picker.selected_target(), PickerHitTarget::Open(0));
+        picker.move_selection(-1);
+        assert_eq!(picker.selected_target(), PickerHitTarget::Open(0));
+        let snapshot = picker.snapshot();
+        let text = snapshot
+            .visible_rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| cell.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("New Terminal — policy republish required"));
+        assert!(text.contains("Create remotely, republish exact policy, then reopen"));
+        assert!(!text.contains("› New Terminal"));
+        assert!(!text.contains("N new"));
+
+        let (decision, _receiver) = std_mpsc::channel();
+        let mut empty = SessionPickerUi::new(Vec::new(), decision).with_new_enabled(false);
+        assert_eq!(empty.selected_decision(), None);
+        let empty_snapshot = empty.snapshot();
+        let new_row = empty_snapshot.visible_rows[SESSION_PICKER_NEW_ROW]
+            .cells
+            .iter()
+            .map(|cell| cell.content.as_str())
+            .collect::<String>();
+        assert!(!new_row.starts_with('›'));
+        assert!(new_row.contains("policy republish required"));
     }
 }
