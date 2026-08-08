@@ -343,10 +343,10 @@ fn dispatch_frame(state: &Arc<ClientState>, frame: Frame) -> std::result::Result
             send_incoming(state, channel_id, IncomingCommand::Data(bytes), "data")?;
         }
         Frame::HalfClose { channel_id } => {
-            send_incoming(state, channel_id, IncomingCommand::HalfClose, "half-close")?;
+            send_shutdown_incoming(state, channel_id, IncomingCommand::HalfClose, "half-close")?;
         }
         Frame::CloseChannel { channel_id } => {
-            state.close_channel(channel_id);
+            close_remote_channel(state, channel_id)?;
         }
         Frame::SessionError { reason } => return Err(format!("remote graphical relay: {reason}")),
         Frame::Hello | Frame::HelloAck | Frame::OpenChannel { .. } => {
@@ -378,6 +378,68 @@ fn send_incoming(
         .incoming
         .try_send(command)
         .map_err(|_| "graphical relay channel queue exceeded its byte bound".to_owned())
+}
+
+fn send_shutdown_incoming(
+    state: &ClientState,
+    channel_id: u32,
+    command: IncomingCommand,
+    label: &str,
+) -> std::result::Result<(), String> {
+    let routes = state
+        .routes
+        .lock()
+        .map_err(|_| "graphical relay route table is poisoned".to_owned())?;
+    let Some(route) = routes.get(&channel_id) else {
+        let last_issued = state
+            .allocator
+            .lock()
+            .map_err(|_| "graphical relay channel allocator is poisoned".to_owned())?
+            .last_issued();
+        return if channel_id <= last_issued {
+            Ok(())
+        } else {
+            Err(format!(
+                "{label} targeted a never-issued graphical relay channel"
+            ))
+        };
+    };
+    if route.opened.is_some() {
+        return Err(format!(
+            "{label} preceded graphical relay channel admission"
+        ));
+    }
+    route
+        .incoming
+        .try_send(command)
+        .map_err(|_| "graphical relay channel queue exceeded its byte bound".to_owned())
+}
+
+fn close_remote_channel(state: &ClientState, channel_id: u32) -> std::result::Result<(), String> {
+    let route = state
+        .routes
+        .lock()
+        .map_err(|_| "graphical relay route table is poisoned".to_owned())?
+        .remove(&channel_id);
+    let Some(mut route) = route else {
+        let last_issued = state
+            .allocator
+            .lock()
+            .map_err(|_| "graphical relay channel allocator is poisoned".to_owned())?
+            .last_issued();
+        return if channel_id <= last_issued {
+            Ok(())
+        } else {
+            Err("close targeted a never-issued graphical relay channel".to_owned())
+        };
+    };
+    if let Some(opened) = route.opened.take() {
+        let _ = opened.send(Err(
+            "graphical relay channel closed while opening".to_owned()
+        ));
+    }
+    let _ = route.incoming.try_send(IncomingCommand::Close);
+    Ok(())
 }
 
 async fn run_incoming_channel(
@@ -630,7 +692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_channel_sends_half_close_before_close() {
+    async fn crossed_server_shutdown_after_drop_preserves_later_admission() {
         let (client, server) = tokio::io::duplex(32 * 1024);
         let (client_reader, client_writer) = tokio::io::split(client);
         let (mut server_reader, mut server_writer) = tokio::io::split(server);
@@ -642,27 +704,41 @@ mod tests {
             write_frame(&mut server_writer, &Frame::HelloAck)
                 .await
                 .unwrap();
-            assert_eq!(
-                read_frame(&mut server_reader).await.unwrap(),
-                Some(Frame::OpenChannel { channel_id: 1 })
-            );
-            write_frame(&mut server_writer, &Frame::ChannelOpened { channel_id: 1 })
-                .await
-                .unwrap();
-            assert_eq!(
-                read_frame(&mut server_reader).await.unwrap(),
-                Some(Frame::HalfClose { channel_id: 1 })
-            );
-            assert_eq!(
-                read_frame(&mut server_reader).await.unwrap(),
-                Some(Frame::CloseChannel { channel_id: 1 })
-            );
+            for expected_id in [1, 2] {
+                loop {
+                    match read_frame(&mut server_reader).await.unwrap() {
+                        Some(Frame::OpenChannel { channel_id }) => {
+                            assert_eq!(channel_id, expected_id);
+                            write_frame(&mut server_writer, &Frame::ChannelOpened { channel_id })
+                                .await
+                                .unwrap();
+                            break;
+                        }
+                        Some(
+                            Frame::HalfClose { channel_id } | Frame::CloseChannel { channel_id },
+                        ) => {
+                            assert_eq!(channel_id, 1);
+                        }
+                        frame => panic!("unexpected client frame: {frame:?}"),
+                    }
+                }
+            }
         });
 
         let client = ClientMultiplexer::negotiate(client_reader, client_writer)
             .await
             .unwrap();
         drop(client.open_channel().await.unwrap());
+        assert!(dispatch_frame(&client.handle.state, Frame::HalfClose { channel_id: 1 }).is_ok());
+        assert!(
+            dispatch_frame(&client.handle.state, Frame::CloseChannel { channel_id: 1 }).is_ok()
+        );
+        let second = client.open_channel().await.unwrap();
+        assert_eq!(second.channel_id(), 2);
+        assert!(dispatch_frame(&client.handle.state, Frame::HalfClose { channel_id: 3 }).is_err());
+        assert!(
+            dispatch_frame(&client.handle.state, Frame::CloseChannel { channel_id: 3 }).is_err()
+        );
         time::timeout(Duration::from_secs(1), server_task)
             .await
             .unwrap()

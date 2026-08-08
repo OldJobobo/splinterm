@@ -894,6 +894,20 @@ that unnecessary poll; a deterministic regression closes the command sender
 while the initial interval tick is also ready and requires shutdown to win.
 Real-host confirmation of the clean close remains required.
 
+The final-package confirmation then reproduced intermittent channel 3
+cancellation before mapping. An outer-frame proxy proved every client frame had
+valid `SPGR` magic while the relay sometimes emitted `graphical relay magic is
+invalid`. Local header instrumentation captured `PGR...S`: the coordinator's
+`tokio::select!` had cancelled `read_graphical_frame` after it consumed one byte
+when a channel-finished event won, so the next read began one byte late. The
+relay now gives outer input to one dedicated capacity-one reader task; ordinary
+channel events cannot cancel an in-progress frame read. Client-side crossed
+server shutdown is also idempotent only for already-issued retired IDs, matching
+the relay invariant; Data and future-ID shutdown remain fatal. A deterministic
+one-byte fragmented-frame/channel-event regression passes, as do 100 consecutive
+production `RemoteSession` three-channel lifecycles against an isolated real
+daemon and relay. A newly packaged real-host confirmation remains required.
+
 ## Stop gates
 
 Stop and request a product/security decision if implementation would require:

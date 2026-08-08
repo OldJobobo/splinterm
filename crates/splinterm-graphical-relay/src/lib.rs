@@ -256,6 +256,10 @@ impl ChannelIdAllocator {
             .context("graphical relay channel ID space exhausted")?;
         Ok(self.last)
     }
+
+    pub(crate) const fn last_issued(&self) -> u32 {
+        self.last
+    }
 }
 
 #[cfg(test)]

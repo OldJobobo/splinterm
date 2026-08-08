@@ -505,6 +505,29 @@ async fn run_graphical_channel(
     finish_channel(channel_id, &output.control, &output.events).await;
 }
 
+async fn run_graphical_input_reader<R>(
+    mut input: R,
+    input_tx: mpsc::Sender<Result<Option<GraphicalFrame>>>,
+    cancellation: CancellationToken,
+) where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        let frame = tokio::select! {
+            () = cancellation.cancelled() => return,
+            frame = read_graphical_frame(&mut input) => frame,
+        };
+        let terminal = !matches!(frame, Ok(Some(_)));
+        let sent = tokio::select! {
+            () = cancellation.cancelled() => return,
+            sent = input_tx.send(frame) => sent,
+        };
+        if sent.is_err() || terminal {
+            return;
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the bounded coordinator keeps one explicit session state machine"
@@ -515,7 +538,7 @@ async fn run_graphical_streams_with_connector<R, W, C, F>(
     connector: C,
 ) -> Result<()>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
     C: Fn() -> F,
     F: Future<Output = Result<ValidatedConnection>>,
@@ -528,6 +551,13 @@ where
     write_graphical_frame(&mut output, &GraphicalFrame::HelloAck).await?;
 
     let cancellation = CancellationToken::new();
+    let input_cancellation = cancellation.clone();
+    let (input_tx, mut input_rx) = mpsc::channel(1);
+    let input_reader = tokio::spawn(run_graphical_input_reader(
+        input,
+        input_tx,
+        input_cancellation,
+    ));
     let (control_tx, mut control_rx) = mpsc::channel::<GraphicalFrame>(CONTROL_QUEUE_FRAMES);
     let (data_tx, mut data_rx) = fair_data_queue();
     let (event_tx, mut event_rx) = mpsc::channel::<GraphicalEvent>(MAX_LOGICAL_CHANNELS * 2 + 1);
@@ -594,12 +624,16 @@ where
                     break;
                 }
             },
-            frame = read_graphical_frame(&mut input) => {
+            frame = input_rx.recv() => {
                 let frame = match frame {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => break,
-                    Err(error) => {
+                    Some(Ok(Some(frame))) => frame,
+                    Some(Ok(None)) => break,
+                    Some(Err(error)) => {
                         terminal_error = Some(bounded_reason(&error));
+                        break;
+                    }
+                    None => {
+                        terminal_error = Some("graphical relay input reader stopped".to_owned());
                         break;
                     }
                 };
@@ -726,6 +760,8 @@ where
         let _ = control_tx.try_send(GraphicalFrame::SessionError { reason });
     }
     cancellation.cancel();
+    drop(input_rx);
+    let _ = input_reader.await;
     for channel in channels.into_values() {
         channel.cancellation.cancel();
     }
@@ -958,6 +994,112 @@ mod tests {
             CHANNEL_QUEUE_FRAMES * MAX_DATA_BYTES,
             MAX_CHANNEL_QUEUED_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn input_reader_cancellation_unblocks_a_full_frame_queue() {
+        let (mut input_writer, input_reader) = tokio::io::duplex(64);
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        let reader = tokio::spawn(run_graphical_input_reader(
+            input_reader,
+            input_tx,
+            cancellation.clone(),
+        ));
+
+        write_graphical_frame(
+            &mut input_writer,
+            &GraphicalFrame::OpenChannel { channel_id: 1 },
+        )
+        .await
+        .unwrap();
+        time::timeout(Duration::from_secs(1), async {
+            while input_rx.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        write_graphical_frame(
+            &mut input_writer,
+            &GraphicalFrame::OpenChannel { channel_id: 2 },
+        )
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+        time::timeout(Duration::from_secs(1), reader)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            input_rx.recv().await.unwrap().unwrap(),
+            Some(GraphicalFrame::OpenChannel { channel_id: 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_event_does_not_cancel_fragmented_outer_frame_read() {
+        let (connection, daemon) = validated_pair();
+        let (later_connection, _later_daemon) = validated_pair();
+        let connections = Arc::new(Mutex::new(VecDeque::from([connection, later_connection])));
+        let (mut client_input, relay_input) = tokio::io::duplex(1);
+        let (relay_output, mut client_output) = tokio::io::duplex(32 * 1024);
+        let relay = tokio::spawn(run_graphical_streams_with_connector(
+            relay_input,
+            relay_output,
+            queued_connector(connections),
+        ));
+
+        write_graphical_frame(&mut client_input, &GraphicalFrame::Hello)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::HelloAck)
+        );
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::OpenChannel { channel_id: 1 },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::ChannelOpened { channel_id: 1 })
+        );
+
+        let (mut encoded_writer, mut encoded_reader) = tokio::io::duplex(64);
+        write_graphical_frame(
+            &mut encoded_writer,
+            &GraphicalFrame::OpenChannel { channel_id: 2 },
+        )
+        .await
+        .unwrap();
+        let mut encoded = [0_u8; 16];
+        encoded_reader.read_exact(&mut encoded).await.unwrap();
+        client_input.write_all(&encoded[..1]).await.unwrap();
+        // Capacity one makes completion of the second write proof that the
+        // reader consumed at least the first byte of this frame.
+        client_input.write_all(&encoded[1..2]).await.unwrap();
+
+        drop(daemon);
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::CloseChannel { channel_id: 1 })
+        );
+        client_input.write_all(&encoded[2..]).await.unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::ChannelOpened { channel_id: 2 })
+        );
+
+        client_input.shutdown().await.unwrap();
+        time::timeout(Duration::from_secs(2), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

@@ -50,11 +50,15 @@ separate bounded control queue prevents data from starving session control.
 Per-channel drain barriers preserve data-before-half-close/close ordering. A
 client half-close or close may cross a channel-local daemon EOF after the relay
 has retired the same monotonically issued ID; those shutdown frames are
-idempotent. Data for any retired or unknown channel, and shutdown frames for a
-future never-issued ID, remain session-fatal. The client also waits for its
-outgoing task to queue `HalfClose` before it queues `CloseChannel`. Data frames,
-queues, diagnostics, and channel counts are bounded. Corrupt outer framing and
-aggregate-bound violations fail the session; ordinary daemon EOF is
+idempotent. The symmetric client route also accepts crossed server half-close or
+close only for an already-issued retired ID. Data for any retired or unknown
+channel, and shutdown frames for a future never-issued ID, remain session-fatal.
+The client waits for its outgoing task to queue `HalfClose` before it queues
+`CloseChannel`. The relay owns outer input in one dedicated capacity-one reader
+task so coordinator events cannot cancel a partially consumed frame; session
+cancellation may stop that reader only after the session is already terminal.
+Data frames, queues, diagnostics, and channel counts are bounded. Corrupt outer
+framing and aggregate-bound violations fail the session; ordinary daemon EOF is
 channel-local unless the validated daemon process exits.
 
 The existing command remains byte-transparent and unchanged:
