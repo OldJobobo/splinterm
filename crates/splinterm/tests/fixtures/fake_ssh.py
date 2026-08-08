@@ -85,6 +85,11 @@ while True:
             if channel not in handshaken:
                 if message.get('type') != 'hello' or message.get('role') != 'automation':
                     raise SystemExit(6)
+                if mode == 'close-first-private-hello' and not closed_once:
+                    closed_once = True
+                    buffers[channel] = b''
+                    outer_write(8, channel)
+                    break
                 handshaken.add(channel)
                 if mode == 'stall-private-hello':
                     continue

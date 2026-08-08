@@ -308,8 +308,11 @@ impl RemoteSession {
         .await
         {
             Ok(result) => result.map_err(|error| {
-                let text = format!("{error:#}");
-                let lower = text.to_ascii_lowercase();
+                let cause = format!("{error:#}");
+                let text = format!(
+                    "remote private daemon handshake failed on logical channel {channel_id}: {cause}"
+                );
+                let lower = cause.to_ascii_lowercase();
                 let kind = if lower.contains("incompatibleversion")
                     || lower.contains("incompatible version")
                     || lower.contains("invalid handshake")

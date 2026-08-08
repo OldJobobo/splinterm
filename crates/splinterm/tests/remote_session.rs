@@ -236,6 +236,40 @@ async fn private_daemon_hello_timeout_names_the_stalled_stage() {
 }
 
 #[tokio::test]
+async fn immediate_private_hello_eof_names_channel_and_preserves_later_admission() {
+    let directory = test_directory("private-hello-eof");
+    let session = session(&directory, "close-first-private-hello").await;
+
+    let error = session.connect_automation().await.unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<splinterm::remote_session::RemoteFailure>()
+            .unwrap()
+            .kind(),
+        splinterm::remote_session::RemoteFailureKind::TransportFailed
+    );
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("private daemon handshake failed on logical channel 1"),
+        "unexpected diagnostic: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("early eof"),
+        "unexpected diagnostic: {diagnostic}"
+    );
+
+    let mut later = session.connect_automation().await.unwrap();
+    assert!(matches!(
+        later.request(Request::Ping).await.unwrap(),
+        Response::Pong
+    ));
+    drop(later);
+    drop(session);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
 async fn startup_channel_pattern_repeats_on_a_fresh_session_after_complete_teardown() {
     let directory = test_directory("startup-reconnect");
     let ssh = fake_ssh(&directory, "read-only");

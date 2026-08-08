@@ -696,12 +696,17 @@ where
                         }
                     }
                     GraphicalFrame::CloseChannel { channel_id } => {
-                        let Some(channel) = channels.remove(&channel_id) else {
+                        if let Some(channel) = channels.remove(&channel_id) {
+                            let _ = channel.commands.try_send(ChannelCommand::Close);
+                            channel.cancellation.cancel();
+                        } else if channel_id > last_channel_id {
                             terminal_error = Some("close targeted an unknown logical channel".to_owned());
                             break;
-                        };
-                        let _ = channel.commands.try_send(ChannelCommand::Close);
-                        channel.cancellation.cancel();
+                        }
+                        // A local close can cross channel-local daemon EOF after the
+                        // relay has already retired the same monotonically issued ID.
+                        // Treat that close as idempotent without accepting data or a
+                        // half-close for any retired or unknown channel.
                     }
                     GraphicalFrame::Hello
                     | GraphicalFrame::HelloAck
@@ -955,9 +960,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graphical_channel_preserves_half_close_and_channel_local_eof() {
+    async fn crossed_close_after_channel_local_eof_preserves_later_admission() {
         let (connection, mut daemon) = validated_pair();
-        let connections = Arc::new(Mutex::new(VecDeque::from([connection])));
+        let (later_connection, _later_daemon) = validated_pair();
+        let connections = Arc::new(Mutex::new(VecDeque::from([connection, later_connection])));
         let (mut client_input, relay_input) = tokio::io::duplex(32 * 1024);
         let (relay_output, mut client_output) = tokio::io::duplex(32 * 1024);
         let relay = tokio::spawn(run_graphical_streams_with_connector(
@@ -1017,6 +1023,38 @@ mod tests {
             Some(GraphicalFrame::CloseChannel { channel_id: 1 })
         );
         daemon_task.await.unwrap();
+
+        // The local connection can finish concurrently with daemon EOF. Its
+        // ordered close may therefore cross the relay's channel-local close.
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::CloseChannel { channel_id: 1 },
+        )
+        .await
+        .unwrap();
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::OpenChannel { channel_id: 2 },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::ChannelOpened { channel_id: 2 })
+        );
+
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::CloseChannel { channel_id: 3 },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::SessionError {
+                reason: "close targeted an unknown logical channel".to_owned(),
+            })
+        );
         client_input.shutdown().await.unwrap();
         time::timeout(Duration::from_secs(2), relay)
             .await

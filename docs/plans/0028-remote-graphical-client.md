@@ -832,6 +832,19 @@ the reversible backup at
 package and its exact-digest policy remain installed. Reconnect validation and
 the production root cause both remain open.
 
+A subsequent local investigation reproduced a concrete relay lifecycle defect.
+After a short-lived launch connection half-closes, daemon EOF can retire its
+logical channel before the client's ordered `CloseChannel` arrives. The relay
+previously treated that crossed close as an unknown-channel session error,
+closed the multiplexer, and caused the next admitted private connection to see
+`early eof`. The deterministic regression failed with exactly
+`close targeted an unknown logical channel` before the fix and passed after
+making close idempotent only for monotonically issued IDs; a close for a future
+never-issued ID remains session-fatal. Immediate private-handshake errors now
+also report their admitted logical channel ID. This defect matches the observed
+create-topology-then-`early eof` sequence, but final attribution and reconnect
+acceptance still require a newly built package and approved Holodeck smoke.
+
 ## Stop gates
 
 Stop and request a product/security decision if implementation would require:
