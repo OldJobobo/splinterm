@@ -10,6 +10,7 @@ use splinterm::{
     WindowTopologyUpdate,
     automation::{Connection, SharedImageContentCache, protocol_error},
     config::AppConfig,
+    endpoint::{ConnectionFactory, LaunchSemantics},
     session_picker::{SessionEntry, collect_sessions},
     tab::{DojoTab, OpenTabOutcome, WindowTabSet},
 };
@@ -23,8 +24,8 @@ use tokio::sync::mpsc;
 use super::{
     pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane},
     session_catalog::{
-        create_request, launch_parameters, recent_dojo_ids, remember_dojo, select_dojo_from,
-        session_picker_item,
+        automation_launch, create_request, launch_parameters, recent_dojo_ids, remember_dojo,
+        select_dojo_from, session_picker_item,
     },
 };
 
@@ -339,7 +340,12 @@ async fn close_focused_splint(
     unreachable!("bounded close retry loop returns on its final attempt")
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed topology command set preserves exact endpoint and revision handling"
+)]
 async fn apply_topology_command(
+    factory: &ConnectionFactory,
     connection: &mut Connection,
     config: &AppConfig,
     dojo_id: DojoId,
@@ -375,17 +381,28 @@ async fn apply_topology_command(
                 target_dojo == dojo_id,
                 "topology split targeted another Dojo"
             );
-            Request::SplitSplint {
-                expected_topology_revision,
-                target_splint_id: target,
-                axis,
-                side: SplitSide::Second,
-                ratio: SplitRatio::new(500).expect("fixed split ratio is valid"),
-                launch: launch_parameters(
-                    env::current_dir().context("failed to read current directory")?,
-                    Vec::new(),
-                    config,
-                ),
+            let ratio = SplitRatio::new(500).expect("fixed split ratio is valid");
+            match factory.capabilities().launch_semantics {
+                LaunchSemantics::LocalTrusted => Request::SplitSplint {
+                    expected_topology_revision,
+                    target_splint_id: target,
+                    axis,
+                    side: SplitSide::Second,
+                    ratio,
+                    launch: launch_parameters(
+                        env::current_dir().context("failed to read current directory")?,
+                        Vec::new(),
+                        config,
+                    ),
+                },
+                LaunchSemantics::RemoteAutomation => Request::SplitSplintAutomation {
+                    expected_topology_revision,
+                    target_splint_id: target,
+                    axis,
+                    side: SplitSide::Second,
+                    ratio,
+                    launch: automation_launch(None, Vec::new()),
+                },
             }
         }
         WindowTopologyCommand::AdjustRatio {
@@ -500,6 +517,7 @@ fn pending_focus_for_observation(
     reason = "one transactional reconciliation owns identity, layout, updates, and task cleanup"
 )]
 async fn reconcile_window_topology(
+    factory: &ConnectionFactory,
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
     dojo_id: DojoId,
@@ -515,7 +533,7 @@ async fn reconcile_window_topology(
     let (added_ids, removed) = topology_identity_diff(root, &next);
     let mut prepared = Vec::new();
     for splint_id in added_ids {
-        match prepare_live_pane(config, splint_id, image_cache.clone(), false).await {
+        match prepare_live_pane(factory, config, splint_id, image_cache.clone(), false).await {
             Ok(pane) => prepared.push((splint_id, pane)),
             Err(error) => {
                 let tasks = prepared
@@ -560,12 +578,13 @@ async fn reconcile_window_topology(
 }
 
 async fn session_picker_catalog(
+    factory: &ConnectionFactory,
     connection: &mut Connection,
 ) -> Result<(Vec<SessionPickerItem>, Vec<(LairId, DojoId)>)> {
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its session list");
     };
-    let entries = collect_sessions(&lairs, &recent_dojo_ids())
+    let entries = collect_sessions(&lairs, &recent_dojo_ids(factory))
         .into_iter()
         .filter(SessionEntry::reopenable)
         .collect::<Vec<_>>();
@@ -612,6 +631,7 @@ async fn reopenable_dojo(
 }
 
 async fn create_daily_dojo(
+    factory: &ConnectionFactory,
     connection: &mut Connection,
     config: &AppConfig,
 ) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
@@ -622,12 +642,17 @@ async fn create_daily_dojo(
     let expected = connection.topology_revision().await?;
     let Response::LairCreated { lair, .. } = connection
         .request(create_request(
+            factory,
             expected,
             format!("terminal-{stamp}-{}", std::process::id()),
-            env::current_dir().context("failed to read current directory")?,
+            if factory.is_local() {
+                Some(env::current_dir().context("failed to read current directory")?)
+            } else {
+                None
+            },
             Vec::new(),
             config,
-        ))
+        )?)
         .await?
     else {
         bail!("splinterd did not create the requested terminal");
@@ -641,6 +666,7 @@ async fn create_daily_dojo(
 }
 
 async fn create_dojo_in_lair(
+    factory: &ConnectionFactory,
     connection: &mut Connection,
     config: &AppConfig,
     lair_id: LairId,
@@ -650,8 +676,8 @@ async fn create_dojo_in_lair(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let Response::DojoStarted { dojo_id, .. } = connection
-        .request(Request::NewDojo {
+    let request = match factory.capabilities().launch_semantics {
+        LaunchSemantics::LocalTrusted => Request::NewDojo {
             expected_topology_revision,
             lair_id,
             name: format!("terminal-{stamp}"),
@@ -660,9 +686,15 @@ async fn create_dojo_in_lair(
                 Vec::new(),
                 config,
             ),
-        })
-        .await?
-    else {
+        },
+        LaunchSemantics::RemoteAutomation => Request::NewDojoAutomation {
+            expected_topology_revision,
+            lair_id,
+            name: format!("terminal-{stamp}"),
+            launch: automation_launch(None, Vec::new()),
+        },
+    };
+    let Response::DojoStarted { dojo_id, .. } = connection.request(request).await? else {
         bail!("splinterd did not create the requested Dojo");
     };
     reopenable_dojo(connection, lair_id, dojo_id).await
@@ -693,6 +725,7 @@ struct PreparedManagedDojo {
 }
 
 async fn prepare_managed_dojo(
+    factory: &ConnectionFactory,
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
     identity: WindowDojoIdentity,
@@ -707,7 +740,7 @@ async fn prepare_managed_dojo(
     let mut panes = Vec::with_capacity(ids.len());
     let mut pane_tasks = HashMap::with_capacity(ids.len());
     for splint_id in ids {
-        match prepare_live_pane(config, splint_id, image_cache.clone(), false).await {
+        match prepare_live_pane(factory, config, splint_id, image_cache.clone(), false).await {
             Ok(pane) => {
                 panes.push(pane.options);
                 pane_tasks.insert(splint_id, pane.task);
@@ -741,6 +774,7 @@ const fn window_has_tab_capacity(tab_count: usize) -> bool {
 }
 
 async fn finish_managed_window_open(
+    factory: &ConnectionFactory,
     target: Result<(WindowDojoIdentity, splinterm_core::Dojo)>,
     state: &mut TopologyManagerState,
     config: &AppConfig,
@@ -751,7 +785,7 @@ async fn finish_managed_window_open(
     let result = async {
         let (identity, dojo) = target?;
         if state.tabs.activate(dojo.id) {
-            remember_dojo(dojo.id);
+            remember_dojo(factory, dojo.id);
             updates
                 .send(WindowTopologyUpdate::ActivateTab { dojo_id: dojo.id })
                 .await
@@ -763,7 +797,7 @@ async fn finish_managed_window_open(
             "a Window may contain at most {} Dojo tabs",
             splinterm::tab::MAX_WINDOW_TABS
         );
-        let prepared = prepare_managed_dojo(config, image_cache, identity, dojo).await?;
+        let prepared = prepare_managed_dojo(factory, config, image_cache, identity, dojo).await?;
         let dojo_id = prepared.dojo.id;
         let lair_id = prepared.identity.lair_id;
         let (acknowledged, acknowledgement) = tokio::sync::oneshot::channel();
@@ -802,7 +836,7 @@ async fn finish_managed_window_open(
                 pane_tasks: prepared.pane_tasks,
             },
         ))?;
-        remember_dojo(dojo_id);
+        remember_dojo(factory, dojo_id);
         Ok(OpenTabOutcome::Opened)
     }
     .await;
@@ -860,6 +894,7 @@ fn close_other_tab_targets(
     reason = "session-level topology commands share one serialized daemon and frontend reconciliation boundary"
 )]
 async fn handle_session_manager_command(
+    factory: &ConnectionFactory,
     command: WindowTopologyCommand,
     connection: &mut Connection,
     config: &AppConfig,
@@ -869,7 +904,7 @@ async fn handle_session_manager_command(
 ) -> TopologyManagerCommandOutcome {
     match command {
         WindowTopologyCommand::RequestSessionPicker => {
-            match session_picker_catalog(connection).await {
+            match session_picker_catalog(factory, connection).await {
                 Ok((items, targets)) => {
                     if updates
                         .send(WindowTopologyUpdate::ShowSessionPicker { items, targets })
@@ -894,7 +929,7 @@ async fn handle_session_manager_command(
             dojo_id: target_id,
         } => {
             let target = reopenable_dojo(connection, lair_id, target_id).await;
-            finish_managed_window_open(target, state, config, image_cache, updates).await
+            finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
         WindowTopologyCommand::NewLair => {
             if !window_has_tab_capacity(state.tabs.len()) {
@@ -909,8 +944,8 @@ async fn handle_session_manager_command(
                     .await;
                 return TopologyManagerCommandOutcome::Continue;
             }
-            let target = create_daily_dojo(connection, config).await;
-            finish_managed_window_open(target, state, config, image_cache, updates).await
+            let target = create_daily_dojo(factory, connection, config).await;
+            finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
         WindowTopologyCommand::NewDojo { lair_id } => {
             if !window_has_tab_capacity(state.tabs.len()) {
@@ -925,8 +960,8 @@ async fn handle_session_manager_command(
                     .await;
                 return TopologyManagerCommandOutcome::Continue;
             }
-            let target = create_dojo_in_lair(connection, config, lair_id).await;
-            finish_managed_window_open(target, state, config, image_cache, updates).await
+            let target = create_dojo_in_lair(factory, connection, config, lair_id).await;
+            finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
         WindowTopologyCommand::RenameDojo { dojo_id, name } => {
             let result = async {
@@ -1062,6 +1097,7 @@ async fn inspect_managed_topology(
 }
 
 async fn reconcile_managed_topology(
+    factory: &ConnectionFactory,
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
     state: &mut TopologyManagerState,
@@ -1111,6 +1147,7 @@ async fn reconcile_managed_topology(
         let (focused, consumed) =
             pending_focus_for_observation(managed.pending_focus, snapshot.revision, &added);
         match reconcile_window_topology(
+            factory,
             config,
             image_cache,
             dojo_id,
@@ -1145,10 +1182,12 @@ async fn reconcile_managed_topology(
 }
 
 #[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
-    reason = "poll reconciliation, stable command targeting, and owned task shutdown share one loop"
+    reason = "endpoint-bound poll reconciliation, command targeting, and task shutdown share one loop"
 )]
 pub(in crate::app) async fn run_topology_manager(
+    factory: ConnectionFactory,
     config: AppConfig,
     image_cache: SharedImageContentCache,
     initial_identity: WindowDojoIdentity,
@@ -1157,7 +1196,7 @@ pub(in crate::app) async fn run_topology_manager(
     updates: mpsc::Sender<WindowTopologyUpdate>,
     pane_tasks: HashMap<SplintId, PaneTask>,
 ) -> Result<()> {
-    let mut connection = Connection::connect().await?;
+    let mut connection = factory.connect().await?;
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let initial_lair_id = initial_identity.lair_id;
@@ -1181,6 +1220,7 @@ pub(in crate::app) async fn run_topology_manager(
         };
         let command = if let Some(command) = command {
             match handle_session_manager_command(
+                &factory,
                 command,
                 &mut connection,
                 &config,
@@ -1206,8 +1246,15 @@ pub(in crate::app) async fn run_topology_manager(
                 return Err(error);
             }
         };
-        if !reconcile_managed_topology(&config, &image_cache, &mut state, &snapshot, &updates)
-            .await?
+        if !reconcile_managed_topology(
+            &factory,
+            &config,
+            &image_cache,
+            &mut state,
+            &snapshot,
+            &updates,
+        )
+        .await?
         {
             break;
         }
@@ -1230,6 +1277,7 @@ pub(in crate::app) async fn run_topology_manager(
             .context("topology command targeted a closed Dojo tab")?
             .value;
         match apply_topology_command(
+            &factory,
             &mut connection,
             &config,
             dojo_id,
@@ -1301,9 +1349,10 @@ pub(in crate::app) fn spawn_topology_smoke(
 }
 
 pub(in crate::app) async fn initial_window_dojo_identity(
+    factory: &ConnectionFactory,
     dojo_id: DojoId,
 ) -> Result<WindowDojoIdentity> {
-    let mut connection = Connection::connect().await?;
+    let mut connection = factory.connect().await?;
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its Lairs for Window identity");
     };

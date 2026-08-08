@@ -112,10 +112,10 @@ impl Dispatch<WpFractionalScaleV1, ()> for App {
         _connection: &Connection,
         queue_handle: &QueueHandle<Self>,
     ) {
-        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            if let Err(error) = state.apply_scale(scale, queue_handle) {
-                state.scheduling.fail(error);
-            }
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
+            && let Err(error) = state.apply_scale(scale, queue_handle)
+        {
+            state.scheduling.fail(error);
         }
     }
 }
@@ -155,10 +155,10 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
                 if surface == *state.surface.window.wl_surface() {
                     state.input.ime.entered = false;
                     state.clear_ime_preedit();
-                    if state.surface.configured {
-                        if let Err(error) = state.schedule_draw(queue_handle) {
-                            state.scheduling.fail(error);
-                        }
+                    if state.surface.configured
+                        && let Err(error) = state.schedule_draw(queue_handle)
+                    {
+                        state.scheduling.fail(error);
                     }
                 }
             }
@@ -177,10 +177,10 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
                     state.scheduling.fail(error);
                     return;
                 }
-                if state.surface.configured {
-                    if let Err(error) = state.schedule_draw(queue_handle) {
-                        state.scheduling.fail(error);
-                    }
+                if state.surface.configured
+                    && let Err(error) = state.schedule_draw(queue_handle)
+                {
+                    state.scheduling.fail(error);
                 }
             }
             _ => {}

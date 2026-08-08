@@ -11,10 +11,13 @@ pub mod automation;
 pub mod background_effect;
 mod box_drawing;
 pub mod config;
+pub mod endpoint;
 pub mod frontend;
 pub mod geometry;
 pub mod keymap;
 pub mod pane;
+pub mod remote;
+pub mod remote_session;
 pub mod renderer;
 pub mod session_picker;
 #[doc(hidden)]

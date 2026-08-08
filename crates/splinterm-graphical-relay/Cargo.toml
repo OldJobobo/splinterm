@@ -1,0 +1,16 @@
+[package]
+name = "splinterm-graphical-relay"
+description = "Bounded outer framing for native Splinterm graphical relay channels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

@@ -11,15 +11,28 @@ fn validate_terminal_state(stdin_terminal: bool, stdout_terminal: bool) -> Resul
     Ok(())
 }
 
-fn validate_invocation() -> Result<()> {
-    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    if arguments.len() != 1 || arguments[0] != "--stdio" {
-        bail!("usage: splinterm-relay --stdio");
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelayMode {
+    Raw,
+    Graphical,
+}
+
+fn mode_for(arguments: &[std::ffi::OsString]) -> Result<RelayMode> {
+    match arguments {
+        [argument] if argument == "--stdio" => Ok(RelayMode::Raw),
+        [argument] if argument == "--graphical-stdio" => Ok(RelayMode::Graphical),
+        _ => bail!("usage: splinterm-relay (--stdio|--graphical-stdio)"),
     }
+}
+
+fn validate_invocation() -> Result<RelayMode> {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let mode = mode_for(&arguments)?;
     validate_terminal_state(
         std::io::stdin().is_terminal(),
         std::io::stdout().is_terminal(),
-    )
+    )?;
+    Ok(mode)
 }
 
 fn bounded_diagnostic(error: &anyhow::Error) -> String {
@@ -43,20 +56,26 @@ fn close_inherited_descriptors() -> Result<()> {
     Ok(())
 }
 
-fn run() -> Result<()> {
+fn run(mode: RelayMode) -> Result<()> {
     close_inherited_descriptors()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(splinterm_relay::run_stdio())
+    match mode {
+        RelayMode::Raw => runtime.block_on(splinterm_relay::run_stdio()),
+        RelayMode::Graphical => runtime.block_on(splinterm_relay::run_graphical_stdio()),
+    }
 }
 
 fn main() {
-    if let Err(error) = validate_invocation() {
-        eprintln!("splinterm-relay: {}", bounded_diagnostic(&error));
-        std::process::exit(2);
-    }
-    if let Err(error) = run() {
+    let mode = match validate_invocation() {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("splinterm-relay: {}", bounded_diagnostic(&error));
+            std::process::exit(2);
+        }
+    };
+    if let Err(error) = run(mode) {
         eprintln!("splinterm-relay: {}", bounded_diagnostic(&error));
         std::process::exit(1);
     }
@@ -81,5 +100,16 @@ mod tests {
         assert!(validate_terminal_state(false, true).is_err());
         assert!(validate_terminal_state(true, true).is_err());
         validate_terminal_state(false, false).unwrap();
+    }
+
+    #[test]
+    fn relay_modes_are_exact_and_distinct() {
+        assert_eq!(mode_for(&["--stdio".into()]).unwrap(), RelayMode::Raw);
+        assert_eq!(
+            mode_for(&["--graphical-stdio".into()]).unwrap(),
+            RelayMode::Graphical
+        );
+        assert!(mode_for(&[]).is_err());
+        assert!(mode_for(&["--stdio".into(), "extra".into()]).is_err());
     }
 }

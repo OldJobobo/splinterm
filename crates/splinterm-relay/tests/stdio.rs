@@ -43,6 +43,21 @@ fn invalid_invocation_and_unsafe_sockets_fail_on_stderr_only() {
     assert!(invocation.stdout.is_empty());
     assert!(String::from_utf8_lossy(&invocation.stderr).contains("usage:"));
 
+    let graphical = Command::new(RELAY)
+        .arg("--graphical-stdio")
+        .env("SPLINTERM_SOCKET", "/nonexistent/daemon.sock")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(graphical.status.code(), Some(1));
+    assert!(graphical.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&graphical.stderr).contains("closed before Hello"),
+        "graphical mode was not selected exactly"
+    );
+
     let directory = test_directory("unsafe-parent");
     let socket = directory.join("daemon.sock");
     let listener = UnixListener::bind(&socket).unwrap();

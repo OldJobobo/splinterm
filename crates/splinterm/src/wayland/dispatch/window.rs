@@ -68,10 +68,10 @@ impl CompositorHandler for App {
                     callback_monotonic_raw_ns,
                 );
             }
-            if self.scheduling.redraw_pending {
-                if let Err(error) = self.draw(queue_handle) {
-                    self.scheduling.fail(error);
-                }
+            if self.scheduling.redraw_pending
+                && let Err(error) = self.draw(queue_handle)
+            {
+                self.scheduling.fail(error);
             }
         }
     }
@@ -121,14 +121,13 @@ impl CompositorHandler for App {
                 ..PerfTraceEvent::default()
             },
         );
-        if was_most_recent {
-            // With no entered output, retain the last observation as Foot does
-            // while temporarily unmapped. Otherwise promote the previous output.
-            if let Some(current) = self.platform.entered_outputs.last().cloned() {
-                if let Err(error) = self.refresh_output_dpi(&current, queue_handle) {
-                    self.scheduling.fail(error);
-                }
-            }
+        // With no entered output, retain the last observation as Foot does
+        // while temporarily unmapped. Otherwise promote the previous output.
+        if was_most_recent
+            && let Some(current) = self.platform.entered_outputs.last().cloned()
+            && let Err(error) = self.refresh_output_dpi(&current, queue_handle)
+        {
+            self.scheduling.fail(error);
         }
     }
 }

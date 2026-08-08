@@ -99,9 +99,9 @@ versioned immutable source URL and checksum.
 
 ## Installed layout
 
-- `/usr/bin/splinterm`, `/usr/bin/splinterd`, the dedicated
-  `/usr/bin/splinterm-relay` SSH transport, and the adjacent
-  `/usr/bin/splinterm-pty-child` helper;
+- `/usr/bin/splinterm`, `/usr/bin/splinterd`, the dedicated adjacent
+  `/usr/bin/splinterm-relay` SSH transport (byte-transparent `--stdio` and
+  bounded `--graphical-stdio` modes), and `/usr/bin/splinterm-pty-child`;
 - optional split package `splinterm-mcp`, containing only the independently
   policy-authorized `/usr/bin/splinterm-mcp`, its setup guide, and notices;
 - `/usr/bin/splinterm-xdg-terminal-exec`, its `splinterm-sessions` and
@@ -121,8 +121,11 @@ policy with SIGHUP, and stops with SIGINT so the daemon can reap its shells and
 remove its socket cleanly. If protocol negotiation fails after an upgrade, it
 restarts the user daemon once and waits a bounded 2.5 seconds. This ends old
 daemon-owned shells because cross-version process migration is not promised.
-See [headless.md](headless.md) for the complete service, policy, backup, and
-recovery workflow, [remote.md](remote.md) for the policy-scoped SSH relay,
+The local and remote packages must be version-compatible, and the relay must
+remain adjacent to the exact packaged `splinterd` executable because every
+logical graphical channel repeats executable-identity validation. See
+[headless.md](headless.md) for the complete service, policy, backup, and
+recovery workflow, [remote.md](remote.md) for both policy-scoped SSH relay modes,
 [integrations.md](integrations.md) for reference-client and in-Splint workflows,
 and [mcp.md](mcp.md) for the optional adapter's host and digest-policy setup.
 

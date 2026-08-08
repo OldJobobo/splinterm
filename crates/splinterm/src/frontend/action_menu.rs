@@ -471,6 +471,7 @@ pub(crate) struct CommandPaletteContext {
     pub(crate) focus_down: Option<SplintId>,
     pub(crate) viewport_detached: bool,
     pub(crate) controller_active: bool,
+    pub(crate) forced_control_transfer: bool,
     pub(crate) grant_ids: Vec<u64>,
     pub(crate) pending_transfer_id: Option<u64>,
 }
@@ -798,8 +799,9 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         BuiltInCommandId::FocusDown => context.focus_down.is_some(),
         BuiltInCommandId::CloseOtherTabs => !context.other_dojo_ids.is_empty(),
         BuiltInCommandId::ReturnToLive => context.viewport_detached,
-        BuiltInCommandId::RequestControl | BuiltInCommandId::ForceControl => {
-            !context.controller_active
+        BuiltInCommandId::RequestControl => !context.controller_active,
+        BuiltInCommandId::ForceControl => {
+            context.forced_control_transfer && !context.controller_active
         }
         BuiltInCommandId::ReleaseControl => context.controller_active,
         BuiltInCommandId::RevokeAllAccess => !context.grant_ids.is_empty(),
@@ -1185,6 +1187,7 @@ mod tests {
             focus_down: Some(SplintId::new()),
             viewport_detached: true,
             controller_active: false,
+            forced_control_transfer: true,
             grant_ids: vec![7, 9],
             pending_transfer_id: Some(42),
         })
@@ -1473,6 +1476,12 @@ mod tests {
         };
         assert!(command_dispatch(BuiltInCommandId::ReleaseControl, &controller).is_some());
         assert!(command_dispatch(BuiltInCommandId::RequestControl, &controller).is_none());
+        let remote = CommandPaletteContext {
+            forced_control_transfer: false,
+            ..context.clone()
+        };
+        assert!(!command_enabled(BuiltInCommandId::ForceControl, &remote));
+        assert!(command_dispatch(BuiltInCommandId::ForceControl, &remote).is_none());
         assert_eq!(
             command_dispatch(BuiltInCommandId::AcceptControlTransfer, &context),
             Some(BuiltInCommandDispatch::Control {

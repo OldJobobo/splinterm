@@ -52,7 +52,10 @@ impl KeyboardHandler for App {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ordered modal, shortcut, IME, and terminal dispatch share one keyboard event boundary"
+    )]
     fn press_key(
         &mut self,
         _connection: &Connection,
@@ -224,10 +227,10 @@ impl KeyboardHandler for App {
                 Ok(true) => {}
                 Ok(false) => {
                     self.handle_key(&event, queue_handle);
-                    if self.presentation.full_redraw {
-                        if let Err(error) = self.schedule_draw(queue_handle) {
-                            self.scheduling.fail(error);
-                        }
+                    if self.presentation.full_redraw
+                        && let Err(error) = self.schedule_draw(queue_handle)
+                    {
+                        self.scheduling.fail(error);
                     }
                 }
                 Err(error) => self.scheduling.fail(error),

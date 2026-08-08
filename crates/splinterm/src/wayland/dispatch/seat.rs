@@ -44,15 +44,15 @@ impl SeatHandler for App {
                 Ok(keyboard) => {
                     self.input.keyboard = Some(keyboard);
                     self.input.keyboard_seat = Some(seat.clone());
-                    if self.input.text_input.is_none() {
-                        if let Some(manager) = &self.platform.text_input_manager {
-                            self.input.text_input = Some(manager.get_text_input(
-                                &seat,
-                                queue_handle,
-                                self.input.ime_generation,
-                            ));
-                            self.input.text_input_seat = Some(seat.clone());
-                        }
+                    if self.input.text_input.is_none()
+                        && let Some(manager) = &self.platform.text_input_manager
+                    {
+                        self.input.text_input = Some(manager.get_text_input(
+                            &seat,
+                            queue_handle,
+                            self.input.ime_generation,
+                        ));
+                        self.input.text_input_seat = Some(seat.clone());
                     }
                 }
                 Err(error) => self

@@ -24,6 +24,10 @@ impl MachineRead {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "stable machine-read envelopes and per-operation projections remain one auditable path"
+)]
 pub(super) async fn run_machine_read(
     command: MachineRead,
     schema_major: u16,

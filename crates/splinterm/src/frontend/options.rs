@@ -34,6 +34,10 @@ pub struct WindowPaneOptions {
     pub image_sources: ImageContentLeaseSet,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent renderer, input, capture, and endpoint capability flags"
+)]
 pub struct WindowOptions {
     pub capture: Option<PathBuf>,
     /// Initial owned daemon snapshot. `None` retains the deterministic evidence row.
@@ -79,6 +83,8 @@ pub struct WindowOptions {
     pub topology_commands: Option<Sender<WindowTopologyCommand>>,
     /// Coalesced ephemeral keyboard/pane focus publication for the supported adapter API.
     pub graphical_focus: Option<WatchSender<Option<SplintId>>>,
+    /// Whether trusted graphical force-transfer actions may be offered or dispatched.
+    pub forced_control_transfer: bool,
     /// Stable identity for the initial managed Dojo; absent for legacy/evidence windows.
     pub initial_dojo: Option<WindowDojoIdentity>,
 }
@@ -112,6 +118,7 @@ impl Default for WindowOptions {
             topology_updates: None,
             topology_commands: None,
             graphical_focus: None,
+            forced_control_transfer: true,
             initial_dojo: None,
         }
     }

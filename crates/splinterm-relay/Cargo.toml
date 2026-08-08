@@ -11,7 +11,9 @@ repository.workspace = true
 anyhow.workspace = true
 nix.workspace = true
 rustix.workspace = true
+splinterm-graphical-relay = { path = "../splinterm-graphical-relay" }
 tokio = { workspace = true, features = ["io-std"] }
+tokio-util.workspace = true
 
 [lints]
 workspace = true

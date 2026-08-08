@@ -9,8 +9,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use splinterm::{
     SessionPickerDecision, SessionPickerUi, WindowOptions,
-    automation::Connection,
     config::{AppConfig, ResolvedTheme},
+    endpoint::ConnectionFactory,
     renderer::{self, RendererOptions},
     run_window,
     session_picker::{SessionEntry, collect_sessions},
@@ -110,9 +110,10 @@ fn dojo_containing(
 }
 
 pub(in crate::app) async fn select_dojo(
+    factory: &ConnectionFactory,
     selection: Option<(LairId, DojoId)>,
 ) -> Result<splinterm_core::Dojo> {
-    let mut connection = Connection::connect().await?;
+    let mut connection = factory.connect().await?;
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its session list");
     };
@@ -160,8 +161,12 @@ fn choose_recent_session(
     Ok(receiver.try_recv().ok())
 }
 
-async fn select_reopenable_dojo(lair_id: LairId, dojo_id: DojoId) -> Result<splinterm_core::Dojo> {
-    let mut connection = Connection::connect().await?;
+async fn select_reopenable_dojo(
+    factory: &ConnectionFactory,
+    lair_id: LairId,
+    dojo_id: DojoId,
+) -> Result<splinterm_core::Dojo> {
+    let mut connection = factory.connect().await?;
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its session list");
     };
@@ -177,15 +182,19 @@ async fn select_reopenable_dojo(lair_id: LairId, dojo_id: DojoId) -> Result<spli
     Ok(dojo)
 }
 
-pub(in crate::app) async fn run_sessions(config: AppConfig) -> Result<()> {
-    let mut connection = Connection::connect()
+pub(in crate::app) async fn run_sessions(
+    config: AppConfig,
+    factory: ConnectionFactory,
+) -> Result<()> {
+    let mut connection = factory
+        .connect()
         .await
         .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its session list");
     };
     drop(connection);
-    let entries = collect_sessions(&lairs, &recent_dojo_ids())
+    let entries = collect_sessions(&lairs, &recent_dojo_ids(&factory))
         .into_iter()
         .filter(SessionEntry::reopenable)
         .collect::<Vec<_>>();
@@ -202,13 +211,19 @@ pub(in crate::app) async fn run_sessions(config: AppConfig) -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            let cwd = if factory.is_local() {
+                Some(env::current_dir().context("failed to read current directory")?)
+            } else {
+                None
+            };
             launch(
                 Some(format!("terminal-{stamp}-{}", std::process::id())),
-                env::current_dir().context("failed to read current directory")?,
+                cwd,
                 None,
                 true,
                 Vec::new(),
                 config,
+                factory,
             )
             .await
         }
@@ -216,21 +231,25 @@ pub(in crate::app) async fn run_sessions(config: AppConfig) -> Result<()> {
             let selected = entries
                 .get(index)
                 .context("session picker returned an invalid selection")?;
-            let dojo = select_reopenable_dojo(selected.lair_id, selected.dojo_id).await?;
-            remember_dojo(dojo.id);
-            run_live_multipane_window(config, dojo).await
+            let dojo = select_reopenable_dojo(&factory, selected.lair_id, selected.dojo_id).await?;
+            remember_dojo(&factory, dojo.id);
+            run_live_multipane_window(config, dojo, factory).await
         }
     }
 }
 
-pub(in crate::app) async fn reopen_recent(config: AppConfig) -> Result<()> {
-    let mut connection = Connection::connect()
+pub(in crate::app) async fn reopen_recent(
+    config: AppConfig,
+    factory: ConnectionFactory,
+) -> Result<()> {
+    let mut connection = factory
+        .connect()
         .await
         .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its session list");
     };
-    let recent = recent_dojo_ids();
+    let recent = recent_dojo_ids(&factory);
     let entries = collect_sessions(&lairs, &recent);
     let selected = recent
         .iter()
@@ -242,8 +261,8 @@ pub(in crate::app) async fn reopen_recent(config: AppConfig) -> Result<()> {
         .context("no recent running session; open the session picker with `splinterm sessions`")?;
     let dojo = select_dojo_from(&lairs, (selected.lair_id, selected.dojo_id))?;
     drop(connection);
-    remember_dojo(dojo.id);
-    run_live_multipane_window(config, dojo).await
+    remember_dojo(&factory, dojo.id);
+    run_live_multipane_window(config, dojo, factory).await
 }
 
 fn fresh_dojo_name(now: SystemTime, process_id: u32) -> String {
@@ -253,13 +272,15 @@ fn fresh_dojo_name(now: SystemTime, process_id: u32) -> String {
 
 pub(in crate::app) async fn launch(
     name: Option<String>,
-    cwd: PathBuf,
+    cwd: Option<PathBuf>,
     splint_id: Option<SplintId>,
     _create_new: bool,
     command: Vec<String>,
     config: AppConfig,
+    factory: ConnectionFactory,
 ) -> Result<()> {
-    let mut connection = Connection::connect()
+    let mut connection = factory
+        .connect()
         .await
         .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
@@ -271,15 +292,17 @@ pub(in crate::app) async fn launch(
         }
         let dojo = dojo_containing(&lairs, splint_id)
             .context("selected Splint is not present in a daemon Dojo")?;
-        remember_dojo(dojo.id);
+        remember_dojo(&factory, dojo.id);
         drop(connection);
-        return run_live_window(config, splint_id).await;
+        return run_live_window(config, splint_id, factory).await;
     }
 
     let name = name.unwrap_or_else(|| fresh_dojo_name(SystemTime::now(), std::process::id()));
     let expected = connection.topology_revision().await?;
     let Response::LairCreated { lair: dojo, .. } = connection
-        .request(create_request(expected, name, cwd, command, &config))
+        .request(create_request(
+            &factory, expected, name, cwd, command, &config,
+        )?)
         .await?
     else {
         bail!("splinterd did not create the requested terminal");
@@ -292,9 +315,9 @@ pub(in crate::app) async fn launch(
         bail!("new dojo did not contain exactly one Splint");
     }
     let dojo = dojo.clone();
-    remember_dojo(dojo.id);
+    remember_dojo(&factory, dojo.id);
     drop(connection);
-    run_live_multipane_window(config, dojo).await
+    run_live_multipane_window(config, dojo, factory).await
 }
 
 #[cfg(test)]

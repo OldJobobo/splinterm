@@ -19,10 +19,11 @@ splinterm-automation-client = { path = "../splinterm-automation-client" }
 splinterm-core = { path = "../splinterm-core" }
 splinterm-filemap = { path = "../splinterm-filemap" }
 splinterm-freetype = { path = "../splinterm-freetype" }
+splinterm-graphical-relay = { path = "../splinterm-graphical-relay" }
 splinterm-protocol = { path = "../splinterm-protocol" }
 smithay-client-toolkit.workspace = true
 swash.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 tokio-util.workspace = true
 toml.workspace = true
 unicode-width.workspace = true

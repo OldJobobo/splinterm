@@ -111,7 +111,8 @@ fn attributes(style: &str) -> Result<CellAttributes> {
 }
 
 fn decode_hex(value: &str) -> Result<String> {
-    if value.len() % 2 != 0 || value.len() > 2 * usize::from(splinterm_protocol::MAX_COLUMNS) * 4096
+    if !value.len().is_multiple_of(2)
+        || value.len() > 2 * usize::from(splinterm_protocol::MAX_COLUMNS) * 4096
     {
         bail!("fixture text hex is malformed or exceeds bounds");
     }

@@ -288,29 +288,30 @@ pub(crate) fn paint_snapshot_overlays(
             }
         }
     }
-    if let Some((start, end)) = hovered_url {
-        if start.0 == end.0 && row_is_dirty(start.0) {
-            for column in start.1..=end.1.min(frame.columns.saturating_sub(1) as usize) {
-                let (Ok(column), Ok(row)) = (u32::try_from(column), u32::try_from(start.0)) else {
-                    continue;
-                };
-                let Some((x, y, cell_width, cell_height)) = frame.cell_rect(geometry, column, row)
-                else {
-                    continue;
-                };
-                fill_rect(
-                    canvas,
-                    width,
-                    height,
-                    (
-                        x,
-                        y + i32::try_from(cell_height.saturating_sub(2)).unwrap_or(0),
-                        cell_width,
-                        2,
-                    ),
-                    themed_bgra(url_color, 255),
-                );
-            }
+    if let Some((start, end)) = hovered_url
+        && start.0 == end.0
+        && row_is_dirty(start.0)
+    {
+        for column in start.1..=end.1.min(frame.columns.saturating_sub(1) as usize) {
+            let (Ok(column), Ok(row)) = (u32::try_from(column), u32::try_from(start.0)) else {
+                continue;
+            };
+            let Some((x, y, cell_width, cell_height)) = frame.cell_rect(geometry, column, row)
+            else {
+                continue;
+            };
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (
+                    x,
+                    y + i32::try_from(cell_height.saturating_sub(2)).unwrap_or(0),
+                    cell_width,
+                    2,
+                ),
+                themed_bgra(url_color, 255),
+            );
         }
     }
 }

@@ -76,6 +76,26 @@ and one pinned shutdown signal.
 - Logical topology automation remains separate from compositor-native window control
 - No network listener in `splinterd` by default
 
+## Native remote graphical client — Plan 0028
+
+Detailed plan: [`plans/0028-remote-graphical-client.md`](plans/0028-remote-graphical-client.md)
+
+- Phase 1 transport/authentication foundation implemented: strict remote
+  profiles, exact OpenSSH argv, separate graphical relay mode, bounded logical
+  channel multiplexer, transport-neutral automation connections, one-child
+  lifecycle, askpass validation, categorized diagnostics, explicit endpoint
+  capabilities, and non-mutating `remote check`
+- Existing byte-transparent `relay --stdio` compatibility retained
+- Phase 2 native workflow implemented and non-graphically validated: global
+  endpoint selection, remote Recent Sessions and Window attachment, pane/tab
+  observation and control, history/search/resync, remote-safe automation launch
+  mutations, endpoint recency namespaces, no-image enforcement, suppression of
+  trusted graphical-focus publication, and trusted-only forced-transfer gating
+- Fake-relay integration covers exact interactive identities, policy denial,
+  mismatched acknowledgements, and channel-local controller/subscription loss
+- Complete aggregate non-graphical closure remains Phase 3; real-host graphical evidence
+  remains the single approved Phase 4 gate
+
 ## Phase 4.1 — output throughput stabilization (complete)
 
 Detailed plan: [`plans/0009-output-throughput-optimization.md`](plans/0009-output-throughput-optimization.md)

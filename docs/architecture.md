@@ -11,16 +11,15 @@ client, including a coding agent or MCP adapter, is also disposable and receives
 no authority from running inside a Splint.
 
 ```text
-┌──────────────── splinterm ────────────────┐
-│ Wayland frontend · input · renderer · UI  │
-└───────────────────┬───────────────────────┘
-                    │ versioned Unix socket
-┌───────────────────▼───────────────────────┐
-│                 splinterd                 │
-│ protocol · Topology · PTYs · persistence │
-└───────────────────┬───────────────────────┘
-                    │
-        Topology → Lairs → Dojos → Splints
+local native splinterm
+  ├─ trusted local endpoint ───────────────→ owner-only splinterd Unix socket
+  └─ remote endpoint (native Window, one endpoint per lifetime)
+       └─ one OpenSSH child
+            └─ splinterm relay --graphical-stdio
+                 └─ bounded logical channels
+                      └─ independently validated remote splinterd Unix connections
+
+splinterd → Topology → Lairs → Dojos → Splints
 ```
 
 ## Crate boundaries
@@ -38,7 +37,7 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 Request/response types shared by both processes. The current development
 protocol uses bounded length-prefixed JSON frames, version-range negotiation,
 request IDs, peer-UID verification, stable errors, and explicit subscription
-resynchronization. Protocol v25 carries closed access scopes, grant status,
+resynchronization. Protocol v27 carries closed access scopes, grant status,
 revocation events, bounded direct command argv/working-directory/shell launch
 fields, semantic terminal updates, topology and history generations, stable row
 IDs, revision-bound scrollback/search pages, visible-row identity, and bounded
@@ -112,6 +111,40 @@ native `Window`. Mapping, focusing, moving, resizing, or assigning a Window to a
 compositor workspace requires a separate trusted graphical broker and is not
 implied by topology mutation or the persisted default-focus hint.
 
+### `splinterm-graphical-relay` and `splinterm-relay`
+
+The shared graphical-relay crate owns only the bounded outer framing and the
+client-side logical byte-channel router. It does not depend on or parse the
+private daemon protocol. Exact magic/version, channel identities, data and
+diagnostic sizes, channel count, per-channel queues, and aggregate queues fail
+closed.
+
+`splinterm-relay --stdio` remains one byte-transparent automation connection.
+The distinct `--graphical-stdio` mode accepts outer channel requests and repeats
+socket path, owner/mode, peer UID, pidfd lifetime, and exact adjacent daemon
+executable validation for every channel. Daemon EOF is channel-local; validated
+daemon process exit, SSH/stdin EOF, corrupt outer framing, or aggregate-bound
+failure closes the complete session.
+
+### Remote endpoint foundation
+
+`remote.rs` owns strict credential-free profile parsing and structured OpenSSH
+argv. `remote_session.rs` owns one SSH child, separate bounded stderr drain,
+outer negotiation, cloneable logical-channel creation, shutdown/kill/reap, and
+categorized transport failures. It never reads key material or stores password
+or passphrase values.
+
+`endpoint.rs` defines the behavior carried with a clonable connection factory:
+local uses `TrustedUi`, trusted local image content, focus publication, local
+launch semantics, trusted force-transfer authority, and the `local` recency
+namespace; remote uses `Automation`, unavailable image transport, disabled focus
+publication, unavailable forced transfer, automation launch semantics, and
+`remote-PROFILE` recency. Phase 2 routes CLI
+selection, session discovery, Window startup, pane observation/control,
+topology reconciliation, hidden tabs, history, search, mutations, and cleanup
+through clones of that one factory. A Window therefore cannot retarget or mix
+local and remote identities after startup.
+
 ## Client module boundaries
 
 The `splinterm` binary entry point performs only Tokio runtime setup and calls
@@ -124,7 +157,8 @@ one private application entry point. Binary-owned orchestration lives under
 | `app/cli.rs` | Output-mode selection and human command routing |
 | `app/machine/` | Stable JSON/NDJSON requests, envelopes, deadlines, and subscriptions |
 | `app/local_service.rs`, `consent.rs`, `sessions.rs` | Local policy/reset/relay services, trusted consent, session selection, and picker presentation |
-| `app/session_catalog.rs` | Neutral launch requests, recent-session state, and picker projections |
+| `app/remote_cli.rs` | Strict profile listing/inspection and non-mutating remote reachability checks |
+| `app/session_catalog.rs` | Endpoint-aware trusted/automation launch requests, namespaced recent-session state, and picker projections |
 | `app/window.rs` | Graphical task startup, renderer configuration, image-cache setup, and single-/multi-pane lifecycle coordination |
 | `app/pane_bridge.rs` | Bounded daemon-to-frontend pane subscriptions, control, resize, image leases, and resynchronization |
 | `app/topology_manager.rs` | Per-Dojo async task ownership and topology reconciliation |
@@ -244,6 +278,9 @@ Wayland client's lifetime.
 6. Headless remote access uses the dedicated, exact-policy
    `splinterm-relay` transport over authenticated SSH; `splinterd` exposes no
    network listener and never attributes the remote caller as its local peer.
+   Native remote transport uses one authenticated SSH child with bounded logical
+   channels, all negotiating automation role; it never receives trusted image or
+   graphical-focus authority.
 7. Shutdown owns and drains connection tasks before runtime shutdown and final
    metadata persistence; one pinned signal future prevents lost SIGINT events.
 8. Dojo mutation never claims native Window mapping or focus; Window-local tab

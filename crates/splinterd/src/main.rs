@@ -2862,6 +2862,10 @@ async fn request_policy_resources(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "authorization exhaustively evaluates every request authority in one auditable path"
+)]
 async fn authorize_request(
     request: &Request,
     state: &DaemonState,

@@ -5,14 +5,15 @@ use std::{collections::HashMap, env, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use splinterm::{
     PerfTraceCorrelation, WindowOptions, WindowUpdate,
-    automation::{Connection, MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
+    automation::{MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
     config::AppConfig,
+    endpoint::{ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication},
     renderer::{self, RendererOptions},
     run_window,
 };
 use splinterm_core::SplintId;
 use splinterm_protocol::{
-    AccessScope, ControlMode, Request, Response, ServerFrame,
+    ControlMode, Request, Response, ServerFrame,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use tokio::sync::{mpsc, watch};
@@ -21,18 +22,20 @@ use super::{
     pane_bridge::{
         ControllerOutputs, EventAction, WINDOW_COMMAND_QUEUE, WINDOW_UPDATE_QUEUE, attach,
         classify_subscription_event, layout_splint_ids, lease_snapshot_images, lease_update_images,
-        load_authority_status, pane_claims_initial_control, prepare_live_pane,
-        resolve_image_contents, resolve_update_images, resynchronize, run_controller,
-        update_advances_from, validate_attached_snapshot,
+        load_authority_status, optional_pane_controller, pane_access_scopes,
+        pane_claims_initial_control, prepare_live_pane, resolve_image_contents,
+        resolve_update_images, resynchronize, run_controller, update_advances_from,
+        validate_attached_snapshot,
     },
     theme_watch::{ThemeUpdateSink, load_startup_theme, watch_theme},
     topology_manager::{initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke},
 };
 
 async fn run_graphical_focus_reporter(
+    factory: ConnectionFactory,
     mut updates: watch::Receiver<Option<SplintId>>,
 ) -> Result<()> {
-    let mut connection = Connection::connect().await?;
+    let mut connection = factory.connect().await?;
     loop {
         let focused_splint_id = *updates.borrow_and_update();
         let response = connection
@@ -49,13 +52,31 @@ async fn run_graphical_focus_reporter(
 }
 
 fn spawn_graphical_focus_reporter(
+    factory: ConnectionFactory,
     updates: watch::Receiver<Option<SplintId>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = run_graphical_focus_reporter(updates).await {
+        if let Err(error) = run_graphical_focus_reporter(factory, updates).await {
             eprintln!("splinterm graphical focus reporter: {error:#}");
         }
     })
+}
+
+fn endpoint_graphical_focus(
+    factory: &ConnectionFactory,
+) -> (
+    Option<watch::Sender<Option<SplintId>>>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    if factory.capabilities().graphical_focus_publication == GraphicalFocusPublication::Enabled {
+        let (sender, updates) = watch::channel(None);
+        (
+            Some(sender),
+            Some(spawn_graphical_focus_reporter(factory.clone(), updates)),
+        )
+    } else {
+        (None, None)
+    }
 }
 
 fn pane_chrome_capture() -> Result<Option<PathBuf>> {
@@ -72,8 +93,9 @@ fn pane_chrome_capture() -> Result<Option<PathBuf>> {
 pub(super) async fn run_live_multipane_window(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
+    factory: ConnectionFactory,
 ) -> Result<()> {
-    let initial_identity = initial_window_dojo_identity(dojo_model.id).await?;
+    let initial_identity = initial_window_dojo_identity(&factory, dojo_model.id).await?;
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
@@ -91,6 +113,7 @@ pub(super) async fn run_live_multipane_window(
     for splint_id in ids {
         prepared.push(
             prepare_live_pane(
+                &factory,
                 &config,
                 splint_id,
                 image_cache.clone(),
@@ -101,8 +124,9 @@ pub(super) async fn run_live_multipane_window(
     }
     let (topology_commands, topology_command_receiver) = mpsc::channel(8);
     let (topology_update_sender, topology_updates) = mpsc::channel(4);
-    let (graphical_focus, graphical_focus_updates) = watch::channel(None);
-    let _graphical_focus_reporter = spawn_graphical_focus_reporter(graphical_focus_updates);
+    let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
+    let forced_control_transfer =
+        factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let theme_task = tokio::spawn(watch_theme(
         config.theme_source(),
         config.background_alpha,
@@ -127,6 +151,7 @@ pub(super) async fn run_live_multipane_window(
     let manager_root = root.clone();
     let active_splint = dojo_model.default_focus;
     let topology_manager = tokio::spawn(run_topology_manager(
+        factory,
         config,
         image_cache,
         initial_identity.clone(),
@@ -143,7 +168,8 @@ pub(super) async fn run_live_multipane_window(
             active_splint: Some(active_splint),
             topology_updates: Some(topology_updates),
             topology_commands: Some(topology_commands),
-            graphical_focus: Some(graphical_focus),
+            graphical_focus,
+            forced_control_transfer,
             initial_dojo: Some(initial_identity),
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
@@ -173,7 +199,11 @@ pub(super) async fn run_live_multipane_window(
     clippy::too_many_lines,
     reason = "subscription resync, controller ownership, and window task shutdown are one lifecycle"
 )]
-pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> Result<()> {
+pub(super) async fn run_live_window(
+    config: AppConfig,
+    splint_id: SplintId,
+    factory: ConnectionFactory,
+) -> Result<()> {
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
@@ -183,14 +213,9 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
         padding: config.padding,
         background_alpha: theme.background_alpha,
     })?;
-    let mut connection = Connection::connect().await?;
+    let mut connection = factory.connect().await?;
     let incarnation = connection.live_incarnation(splint_id).await?;
-    let requested_scopes = vec![
-        AccessScope::Observe,
-        AccessScope::Scrollback,
-        AccessScope::Input,
-        AccessScope::Resize,
-    ];
+    let requested_scopes = pane_access_scopes();
     if !matches!(
         connection
             .request(Request::RequestAccess {
@@ -207,21 +232,32 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
     let mut attachment = attach(&mut connection, splint_id, incarnation).await?;
     let image_cache =
         SharedImageContentCache::with_maximum_bytes(MAX_RENDERER_IMAGE_RESIDENT_BYTES)?;
-    resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+    let image_transport = factory.capabilities().image_transport;
+    resolve_image_contents(
+        image_transport,
+        &mut connection,
+        &attachment.snapshot,
+        &image_cache,
+    )
+    .await?;
     let initial_image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
-    let mut control = Connection::connect().await?;
+    let mut control = factory.connect().await?;
     let control_incarnation = control.live_incarnation(splint_id).await?;
     if control_incarnation != incarnation {
         bail!("control connection observed a different process incarnation");
     }
-    let controller_id = control
-        .acquire_control(
-            splint_id,
-            incarnation,
-            vec![ControlMode::Input, ControlMode::Resize],
-        )
-        .await?;
-    println!("Controller lease {controller_id} granted for live Splint");
+    let controller_id = optional_pane_controller(
+        control
+            .acquire_control(
+                splint_id,
+                incarnation,
+                vec![ControlMode::Input, ControlMode::Resize],
+            )
+            .await,
+    )?;
+    if let Some(controller_id) = controller_id {
+        println!("Controller lease {controller_id} granted for live Splint");
+    }
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
     let _theme_watcher = tokio::spawn(watch_theme(
         config.theme_source(),
@@ -240,17 +276,19 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
             updates: updates.clone(),
             resyncs: resync_sender,
         },
-        Some(controller_id),
+        controller_id,
         splint_id,
         incarnation,
+        factory.capabilities().forced_control_transfer,
         config.resize_delay_ms,
         controller_cancellation,
     ));
     let mut last_revision = attachment.snapshot.revision;
     let initial_snapshot = attachment.snapshot;
     let window_config = config.clone();
-    let (graphical_focus, graphical_focus_updates) = watch::channel(None);
-    let _graphical_focus_reporter = spawn_graphical_focus_reporter(graphical_focus_updates);
+    let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
+    let forced_control_transfer =
+        factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let mut window = tokio::task::spawn_blocking(move || {
         run_window(WindowOptions {
             snapshot: Some(initial_snapshot),
@@ -258,7 +296,9 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
             updates: Some(receiver),
             commands: Some(command_sender),
             authority,
-            graphical_focus: Some(graphical_focus),
+            controlled: controller_id.is_some(),
+            graphical_focus,
+            forced_control_transfer,
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
             cursor_style: window_config.cursor_style,
@@ -302,7 +342,9 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                     splint_id,
                     incarnation,
                 ).await?;
-                resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                resolve_image_contents(
+                    image_transport, &mut connection, &attachment.snapshot, &image_cache,
+                ).await?;
                 let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
                 if updates
                     .send(WindowUpdate::Snapshot {
@@ -337,7 +379,9 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                         EventAction::Snapshot { sequence, snapshot } => {
                             validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
                             last_revision = snapshot.revision;
-                            resolve_image_contents(&mut connection, &snapshot, &image_cache).await?;
+                            resolve_image_contents(
+                                image_transport, &mut connection, &snapshot, &image_cache,
+                            ).await?;
                             let image_sources = lease_snapshot_images(&image_cache, &snapshot)?;
                             if updates.send(WindowUpdate::Snapshot {
                                 snapshot,
@@ -373,6 +417,7 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                             }
                             last_revision = update.revision;
                             resolve_update_images(
+                                image_transport,
                                 &mut connection,
                                 &update,
                                 splint_id,
@@ -416,7 +461,9 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                                 splint_id,
                                 incarnation,
                             ).await?;
-                            resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                            resolve_image_contents(
+                                image_transport, &mut connection, &attachment.snapshot, &image_cache,
+                            ).await?;
                             let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
                             if updates
                                 .send(WindowUpdate::Snapshot {
@@ -446,7 +493,9 @@ pub(super) async fn run_live_window(config: AppConfig, splint_id: SplintId) -> R
                                 splint_id,
                                 incarnation,
                             ).await?;
-                            resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                            resolve_image_contents(
+                                image_transport, &mut connection, &attachment.snapshot, &image_cache,
+                            ).await?;
                             let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
                             if updates
                                 .send(WindowUpdate::Snapshot {

@@ -110,3 +110,214 @@ single protocol parser and rejects them under its normal frame limits.
 Unix-socket forwarding is not a supported alternative in this slice. Its path
 expansion, ownership, cleanup, and peer-identity behavior have not passed the
 same review as the stdio relay.
+
+## Native graphical client
+
+Plan 0028 uses a distinct transport for the native remote Window:
+
+```text
+/usr/bin/splinterm relay --graphical-stdio
+```
+
+This mode is not byte-compatible with `--stdio`. It negotiates an exact bounded
+outer protocol and maps independent logical channels to independently validated
+daemon Unix connections. One local OpenSSH child therefore carries topology,
+observation, control, and pane-task connections after one authentication. It
+does not depend on OpenSSH ControlMaster or server `MaxSessions`.
+
+Every logical daemon connection negotiates `ClientRole::Automation`. The relay
+cannot claim trusted local UI identity, publish compositor focus on its own, or
+retrieve image bodies. Persistent policy for the exact installed
+`/usr/bin/splinterm-relay` digest remains required. Closing SSH or the local
+session releases connection-owned subscriptions and controllers but sends no
+Splint termination request. Fake-relay coverage exercises interactive identity,
+policy denial, deliberate acknowledgement mismatch, and channel-local loss with
+an owned control subscription and controller while another channel stays live.
+
+Select one profile globally to bind the complete native client lifetime to it:
+
+```text
+splinterm --remote PROFILE
+splinterm --remote PROFILE sessions
+splinterm --remote PROFILE reopen
+splinterm --remote PROFILE window --lair-id LAIR_ID --dojo-id DOJO_ID
+splinterm --remote PROFILE launch [--working-directory REMOTE_PATH] [-- ARGV...]
+```
+
+Omitting the subcommand after `--remote PROFILE` opens that endpoint's Recent
+Sessions picker. Session discovery, tabs, pane snapshots and ordered updates,
+resynchronization, scrollback/search, ordinary requested control/input/resize,
+and policy-authorized lifecycle actions all use logical channels on the same SSH
+child. Trusted forced control transfer remains visibly unavailable and is
+rejected before request construction. A Window remains bound to exactly one
+endpoint. Local and remote recency
+files are distinct, and profile names—not remote titles or CWDs—select the
+namespace.
+
+Remote default creation sends `AutomationLaunch { cwd: None, argv: [] }`; the
+remote daemon selects its own home, shell, and defaults. Split/relaunch
+inheritance is resolved by the remote daemon from the exact target Splint. An
+explicit `--cwd`/`--working-directory` is an absolute remote path and structured
+argv is never rebuilt as a shell string. Local shell settings and local CWD are
+never default remote launch state.
+
+Profile inspection and reachability commands remain non-graphical:
+
+```text
+splinterm remote list
+splinterm remote inspect PROFILE
+splinterm remote check PROFILE
+```
+
+`check` starts the fixed graphical relay, negotiates one automation channel,
+sends `Ping` and `ListLairs`, and exits without mapping a Window or mutating
+topology. A successful check proves reachability and the tested read scope only;
+it does not enumerate every resource-dependent permission.
+
+## Remote profiles
+
+Profiles live at `${XDG_CONFIG_HOME:-~/.config}/splinterm/remotes.toml`.
+`SPLINTERM_REMOTES` selects an explicit file for isolated testing. The schema is
+strict and versioned:
+
+```toml
+version = 1
+
+[remotes.wintermute]
+host = "wintermute"
+user = "operator"                    # optional
+port = 22                            # optional
+identity_files = ["~/.ssh/id_ed25519"]
+known_hosts_file = "~/.ssh/known_hosts"
+connect_timeout_seconds = 15
+```
+
+Unknown fields, unsupported versions, more than 64 profiles, unsafe names,
+ambiguous host/user tokens, zero ports, timeouts outside 1–300 seconds, more
+than eight identity files, documents above 64 KiB, and path values above 4 KiB
+fail closed. Explicit paths must be absolute or begin with `~/`, name readable
+regular files, and contain no whitespace or control characters. Profiles cannot
+supply arbitrary SSH options, commands, forwarding, environment, or shell
+fragments.
+
+`~/.ssh/config` may still select ordinary aliases, identities, certificates, and
+proxy routing. Splinterm's command-line safety options override conflicting
+`RemoteCommand`, `LocalCommand`, terminal, stdin, forwarding, and host-key
+settings. `remote inspect` prints resolved non-secret settings and structured
+argv; it never reads or prints private-key contents.
+
+## Authentication and host keys
+
+Splinterm directly spawns the installed `ssh` executable with piped protocol
+stdin/stdout and separate bounded stderr. It does not force batch mode. When a
+controlling terminal exists, OpenSSH may use `/dev/tty` for password, key
+passphrase, PIN, or hardware-token interaction.
+
+Without a controlling terminal, an existing `SSH_ASKPASS` provider remains
+OpenSSH's authority. Splinterm requires that value to name an absolute executable
+local file before setting `SSH_ASKPASS_REQUIRE=force`. It never places a password
+or passphrase in argv, TOML, relay frames, diagnostics, or application storage.
+Agent-backed authentication can still succeed without a prompt provider;
+interactive authentication failures are reported rather than replaced with an
+application password field. Post-connect SSH authentication and relay
+negotiation are bounded by the profile timeout plus a 120-second human/hardware
+interaction allowance. Logical-channel admission, private daemon handshake, and
+each `remote check` probe use the validated profile timeout.
+
+`StrictHostKeyChecking=yes` is always supplied. Unknown and changed host keys
+fail closed. Establish trust explicitly with normal OpenSSH tooling; Splinterm
+does not run `ssh-keyscan`, append known-hosts files, or offer accept-anything
+behavior.
+
+Bounded errors distinguish host-key changes/unknown keys, routing or timeout,
+authentication failure, unavailable terminal/askpass interaction, missing remote
+command, unavailable daemon, relay/daemon identity rejection, outer protocol
+mismatch, private protocol mismatch, policy denial, and generic transport loss.
+SSH configuration can still affect routing and authentication, so inspect it
+with standard OpenSSH tools when diagnosing aliases or proxies.
+
+## Graphical relay policy templates
+
+A read-only native Window requires daemon topology plus exact retained
+Lair/Splint resources. Pane attachment requests only observe and scrollback
+access; denied initial controller acquisition falls back to an observer Window
+rather than blocking attachment. Review every UUID and replace the executable digest; do
+not copy wildcard resources merely to make a test pass. A Lair selector snapshots
+only its descendants that exist when that policy generation is published:
+
+```json
+{
+  "schema": "splinterm.policy.v2",
+  "rules": [{
+    "id": "ssh-graphical-read-only",
+    "executable": {
+      "path": "/usr/bin/splinterm-relay",
+      "sha256": "REPLACE_WITH_REVIEWED_SHA256"
+    },
+    "scopes": [
+      "topology_metadata_read", "topology_subscribe",
+      "terminal_visible_read", "terminal_subscribe",
+      "scrollback_read", "scrollback_search",
+      "authorization_inspect"
+    ],
+    "resources": [
+      {"kind": "daemon"},
+      {"kind": "lair", "lair_id": "REPLACE_WITH_REVIEWED_UUID"}
+    ],
+    "limits": {
+      "max_returned_rows": 64, "max_results": 64,
+      "max_returned_bytes": 1048576, "max_live_subscriptions": 4,
+      "deadline_ms": 5000
+    }
+  }]
+}
+```
+
+A reviewed interactive profile can add control and lifecycle authority without
+wildcards:
+
+```json
+{
+  "schema": "splinterm.policy.v2",
+  "rules": [{
+    "id": "ssh-graphical-interactive-reviewed",
+    "executable": {
+      "path": "/usr/bin/splinterm-relay",
+      "sha256": "REPLACE_WITH_REVIEWED_SHA256"
+    },
+    "scopes": [
+      "topology_metadata_read", "topology_subscribe",
+      "terminal_visible_read", "terminal_subscribe",
+      "scrollback_read", "scrollback_search",
+      "controller_acquire", "controller_transfer", "input", "resize",
+      "process_spawn", "process_restore", "process_terminate",
+      "topology_layout_mutate", "topology_name_mutate",
+      "authorization_inspect"
+    ],
+    "resources": [
+      {"kind": "daemon"},
+      {"kind": "lair", "lair_id": "REPLACE_WITH_REVIEWED_UUID"}
+    ],
+    "limits": {
+      "max_returned_rows": 64, "max_results": 64,
+      "max_returned_bytes": 1048576, "max_live_subscriptions": 4,
+      "max_spawn_count": 4, "deadline_ms": 10000
+    }
+  }]
+}
+```
+
+Remove restore, terminate, spawn, layout, or naming scopes when those UI actions
+should stay unavailable; never add them to a read-only profile. Policy denial is
+surfaced rather than converted to trusted local consent. Every SSH caller able
+to execute this relay under the account receives the relay executable's
+configured Splinterm authority; use a dedicated account or
+administrator-owned forced-command/restricted-key setup when that is too broad.
+
+Remote snapshots must omit image metadata. The client never opens a `.content`
+socket for a remote endpoint; unexpected remote image metadata fails the pane
+closed before any body request. `PublishGraphicalFocus` is never sent remotely.
+SSH/relay/channel loss shuts down the affected local views and drops their
+connections, releasing subscriptions and controller leases. It sends no kill,
+close, restore, or other process-lifecycle request, so daemon-owned remote
+Splints continue running.

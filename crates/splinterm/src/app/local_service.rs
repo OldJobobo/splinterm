@@ -63,13 +63,15 @@ pub(in crate::app) fn usage_error(message: &str) -> ! {
         .exit()
 }
 
-pub(in crate::app) fn run_relay_command(stdio: bool) -> Result<()> {
-    if !stdio {
-        bail!("relay requires --stdio");
-    }
+pub(in crate::app) fn run_relay_command(stdio: bool, graphical_stdio: bool) -> Result<()> {
+    let relay_argument = match (stdio, graphical_stdio) {
+        (true, false) => "--stdio",
+        (false, true) => "--graphical-stdio",
+        _ => bail!("relay requires exactly one stdio transport mode"),
+    };
     let current = env::current_exe().context("cannot resolve the splinterm executable")?;
     let relay = current.with_file_name("splinterm-relay");
-    let error = ProcessCommand::new(&relay).arg("--stdio").exec();
+    let error = ProcessCommand::new(&relay).arg(relay_argument).exec();
     Err(error).with_context(|| format!("failed to execute {}", relay.display()))
 }
 

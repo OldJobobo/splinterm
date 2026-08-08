@@ -784,6 +784,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             reduced_motion: reduced_motion_requested(),
             keyboard_focused: false,
             graphical_focus: options.graphical_focus,
+            forced_control_transfer: options.forced_control_transfer,
             input_generation: 0,
             terminal_focus_reported: false,
             ime_generation: 0,
@@ -1700,6 +1701,7 @@ struct InputState {
     reduced_motion: bool,
     keyboard_focused: bool,
     graphical_focus: Option<tokio::sync::watch::Sender<Option<SplintId>>>,
+    forced_control_transfer: bool,
     input_generation: u64,
     terminal_focus_reported: bool,
     ime_generation: u64,
@@ -1738,6 +1740,10 @@ struct PanesState {
     dirty_inactive_panes: HashSet<SplintId>,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent modal lifecycle and redraw flags span distinct trusted overlays"
+)]
 struct ModalState {
     trusted_consent: Option<TrustedConsentUi>,
     command_palette: Option<CommandPaletteUi>,
@@ -2014,10 +2020,10 @@ fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Opt
         for character in text.chars() {
             let width = UnicodeWidthChar::width(character).unwrap_or(1).min(2);
             if width == 0 {
-                if let Some(leader) = leader {
-                    if let Some(cell) = snapshot.visible_rows[row].cells.get_mut(leader) {
-                        cell.content.push(character);
-                    }
+                if let Some(leader) = leader
+                    && let Some(cell) = snapshot.visible_rows[row].cells.get_mut(leader)
+                {
+                    cell.content.push(character);
                 }
                 continue;
             }
@@ -2029,11 +2035,11 @@ fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Opt
                 cell.spacer_remaining = None;
             }
             leader = Some(column);
-            if width == 2 {
-                if let Some(spacer) = snapshot.visible_rows[row].cells.get_mut(column + 1) {
-                    spacer.content.clear();
-                    spacer.spacer_remaining = Some(1);
-                }
+            if width == 2
+                && let Some(spacer) = snapshot.visible_rows[row].cells.get_mut(column + 1)
+            {
+                spacer.content.clear();
+                spacer.spacer_remaining = Some(1);
             }
             column += width;
         }
@@ -3664,6 +3670,7 @@ impl App {
             focus_down: self.directional_splint(FocusDirection::Down),
             viewport_detached: !self.panes.pane.scrollback_viewport.is_live(),
             controller_active: self.panes.pane.controller_active,
+            forced_control_transfer: self.input.forced_control_transfer,
             grant_ids: self
                 .panes
                 .pane
@@ -3811,9 +3818,10 @@ impl App {
                     CommandControlAction::Release => {
                         Self::request_pane_control_release(&mut self.panes.pane);
                     }
-                    CommandControlAction::Force => {
+                    CommandControlAction::Force if self.input.forced_control_transfer => {
                         self.send_command(WindowCommand::ForceControlTransfer);
                     }
+                    CommandControlAction::Force => {}
                     CommandControlAction::Accept(transfer_id)
                     | CommandControlAction::Deny(transfer_id) => {
                         anyhow::ensure!(
@@ -5246,7 +5254,9 @@ impl App {
                 return;
             }
             Some(ActionId::ForceControl) => {
-                self.send_command(WindowCommand::ForceControlTransfer);
+                if self.input.forced_control_transfer {
+                    self.send_command(WindowCommand::ForceControlTransfer);
+                }
                 return;
             }
             Some(ActionId::AcceptControlTransfer) => {
@@ -5492,7 +5502,10 @@ impl App {
         Ok(false)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "bounded topology draining, tab reconciliation, and deferred picker updates remain one transaction"
+    )]
     fn apply_topology_updates(&mut self) -> Result<(bool, Option<ThemeUpdate>)> {
         let mut pending = VecDeque::new();
         if let Some(updates) = &mut self.tab_state.topology_updates {
@@ -6067,11 +6080,11 @@ impl App {
                                 self.panes.pane.raster_dirty_rows[row] = true;
                                 self.panes.pane.surface_dirty_rows[row] = true;
                             }
-                            if let Ok(row) = usize::try_from(snapshot.cursor_row) {
-                                if row < rows {
-                                    self.panes.pane.raster_dirty_rows[row] = true;
-                                    self.panes.pane.surface_dirty_rows[row] = true;
-                                }
+                            if let Ok(row) = usize::try_from(snapshot.cursor_row)
+                                && row < rows
+                            {
+                                self.panes.pane.raster_dirty_rows[row] = true;
+                                self.panes.pane.surface_dirty_rows[row] = true;
                             }
                         }
                         self.panes.pane.pending_scrolls.extend(scrolls);
@@ -6579,7 +6592,7 @@ impl App {
         {
             return Ok(());
         }
-        if self.surface.viewport.is_none() && scale_120 % SCALE_DENOMINATOR != 0 {
+        if self.surface.viewport.is_none() && !scale_120.is_multiple_of(SCALE_DENOMINATOR) {
             return Ok(());
         }
         if self.surface.viewport.is_none() {
@@ -6649,42 +6662,40 @@ impl App {
         if blinking && self.input.last_cursor_blink.elapsed() >= CURSOR_BLINK_INTERVAL {
             self.input.cursor_blink_visible = !self.input.cursor_blink_visible;
             self.input.last_cursor_blink = Instant::now();
-            if let Some(snapshot) = &self.panes.pane.snapshot {
-                if let Ok(row) = usize::try_from(snapshot.cursor_row) {
-                    if row < snapshot.rows {
-                        self.panes
-                            .pane
-                            .raster_dirty_rows
-                            .resize(snapshot.rows, false);
-                        self.panes
-                            .pane
-                            .surface_dirty_rows
-                            .resize(snapshot.rows, false);
-                        self.panes.pane.raster_dirty_rows[row] = true;
-                        self.panes.pane.surface_dirty_rows[row] = true;
-                    }
-                }
+            if let Some(snapshot) = &self.panes.pane.snapshot
+                && let Ok(row) = usize::try_from(snapshot.cursor_row)
+                && row < snapshot.rows
+            {
+                self.panes
+                    .pane
+                    .raster_dirty_rows
+                    .resize(snapshot.rows, false);
+                self.panes
+                    .pane
+                    .surface_dirty_rows
+                    .resize(snapshot.rows, false);
+                self.panes.pane.raster_dirty_rows[row] = true;
+                self.panes.pane.surface_dirty_rows[row] = true;
             }
             if self.surface.configured {
                 self.schedule_draw(queue_handle)?;
             }
         } else if !blinking && !self.input.cursor_blink_visible {
             self.input.cursor_blink_visible = true;
-            if let Some(snapshot) = &self.panes.pane.snapshot {
-                if let Ok(row) = usize::try_from(snapshot.cursor_row) {
-                    if row < snapshot.rows {
-                        self.panes
-                            .pane
-                            .raster_dirty_rows
-                            .resize(snapshot.rows, false);
-                        self.panes
-                            .pane
-                            .surface_dirty_rows
-                            .resize(snapshot.rows, false);
-                        self.panes.pane.raster_dirty_rows[row] = true;
-                        self.panes.pane.surface_dirty_rows[row] = true;
-                    }
-                }
+            if let Some(snapshot) = &self.panes.pane.snapshot
+                && let Ok(row) = usize::try_from(snapshot.cursor_row)
+                && row < snapshot.rows
+            {
+                self.panes
+                    .pane
+                    .raster_dirty_rows
+                    .resize(snapshot.rows, false);
+                self.panes
+                    .pane
+                    .surface_dirty_rows
+                    .resize(snapshot.rows, false);
+                self.panes.pane.raster_dirty_rows[row] = true;
+                self.panes.pane.surface_dirty_rows[row] = true;
             }
             if self.surface.configured {
                 self.schedule_draw(queue_handle)?;
@@ -7571,21 +7582,21 @@ impl App {
                 );
             }
         }
-        if self.scheduling.scroll_trace {
-            if let Some(scroll_started) = scroll_started {
-                eprintln!(
-                    "scroll-trace input_to_commit_us={} draw_us={} viewport_offset={} cached_rows={} page_pending={}",
-                    scroll_started.elapsed().as_micros(),
-                    draw_started.elapsed().as_micros(),
-                    self.panes.pane.scrollback_viewport.offset_from_bottom(),
-                    self.panes
-                        .pane
-                        .snapshot
-                        .as_ref()
-                        .map_or(0, |snapshot| snapshot.scrollback_rows.len()),
-                    self.panes.pane.history_page_pending,
-                );
-            }
+        if self.scheduling.scroll_trace
+            && let Some(scroll_started) = scroll_started
+        {
+            eprintln!(
+                "scroll-trace input_to_commit_us={} draw_us={} viewport_offset={} cached_rows={} page_pending={}",
+                scroll_started.elapsed().as_micros(),
+                draw_started.elapsed().as_micros(),
+                self.panes.pane.scrollback_viewport.offset_from_bottom(),
+                self.panes
+                    .pane
+                    .snapshot
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.scrollback_rows.len()),
+                self.panes.pane.history_page_pending,
+            );
         }
         Ok(())
     }
@@ -8797,6 +8808,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one regression preserves the complete inactive-pane burst and rebuild lifecycle"
+    )]
     fn inactive_pane_batch_defers_one_rebuild_until_after_contiguous_burst() {
         let splint_id = SplintId::new();
         let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
@@ -9783,6 +9798,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one regression compares every local overlay invalidation class"
+    )]
     fn visible_content_updates_invalidate_local_overlays_but_metadata_does_not() {
         let mut cursor_only = empty_update();
         cursor_only.cursor = Some(splinterm_protocol::TerminalCursor {

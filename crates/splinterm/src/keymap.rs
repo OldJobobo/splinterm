@@ -264,6 +264,10 @@ impl ModifierPattern {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the four protocol modifiers are independent keyboard state"
+)]
 pub struct ActiveModifiers {
     pub ctrl: bool,
     pub shift: bool,
@@ -478,6 +482,10 @@ fn normalized(ctrl: bool, shift: bool, key: KeyIdentity) -> NormalizedChord {
 }
 
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed built-in keymap keeps every default binding visibly auditable"
+)]
 pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
     match profile {
         KeymapProfile::Splinterm => ResolvedKeymap {
@@ -744,6 +752,10 @@ pub(crate) fn resolve_keymap(
         .with_context(|| format!("parse keymap {}", path.display()))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "strict keymap parsing and conflict diagnostics form one validation transaction"
+)]
 pub(crate) fn resolve_keymap_text(
     selected_profile: KeymapProfile,
     text: &str,

@@ -20,7 +20,9 @@ persistent multiplexing built in.
 > and public-CLI reference session picker are validated. The full-capability
 > `splinterm-mcp` implementation, optional split package, extracted-package
 > runtime, host interoperability, and approved stdio fallback evidence are
-> validated. Core Phase 4 is complete; public distribution remains open.
+> validated. The native remote graphical workflow through Plan 0028 Phase 2 is
+> implemented and non-graphically validated; real-host graphical validation
+> remains Plan 0028 Phase 4. Core Phase 4 is complete; public distribution remains open.
 
 ## Workspace
 
@@ -30,7 +32,8 @@ crates/
 ├── splinterd/           # persistent session daemon
 ├── splinterm-core/      # Topology/Lair/Dojo/Splint state model
 ├── splinterm-protocol/  # versioned client-daemon wire protocol
-├── splinterm-relay/     # dedicated policy-identified SSH stdio transport
+├── splinterm-relay/     # raw and graphical policy-identified SSH transport
+├── splinterm-graphical-relay/ # bounded outer channel framing/multiplexer
 ├── splinterm-mcp/       # optional policy-identified MCP stdio adapter
 ├── splinterm-pty/       # Linux PTY and child-process boundary
 └── splinterm-terminal/  # Foot-derived grid and streaming VT kernel
@@ -93,6 +96,8 @@ is supplied. Reopening is a separate, non-destructive action:
 ```bash
 splinterm sessions  # choose New Terminal or a recent running Dojo
 splinterm reopen    # reopen the last locally remembered running Dojo
+splinterm --remote wintermute          # authenticate once; open remote Recent Sessions
+splinterm --remote wintermute reopen   # reopen that profile's most recent running Dojo
 ```
 
 From any focused managed Splinterm terminal, **Ctrl+Shift+S** opens Recent
@@ -276,7 +281,11 @@ operation with explicit owner-controlled policy. See
 [`docs/headless.md`](docs/headless.md) for policy validation/reload, logout and
 lingering behavior, service accounts, backups, upgrades, and recovery. Remote
 automation uses the dedicated, policy-scoped SSH stdio relay documented in
-[`docs/remote.md`](docs/remote.md). Client authors and in-Splint tools should use
+[`docs/remote.md`](docs/remote.md). Strict profiles plus `remote list`,
+`remote inspect`, and non-mutating `remote check` are available. A native remote
+Window uses `splinterm --remote PROFILE`, authenticates once, and binds its
+picker, tabs, panes, control, history, and remote-safe lifecycle requests to that
+single endpoint. Client authors and in-Splint tools should use
 the checklist, safe `jq` examples, and packaged reference picker in
 [`docs/integrations.md`](docs/integrations.md).
 

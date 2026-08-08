@@ -1179,6 +1179,7 @@ dependencies = [
  "splinterm-core",
  "splinterm-filemap",
  "splinterm-freetype",
+ "splinterm-graphical-relay",
  "splinterm-protocol",
  "swash",
  "tokio",
@@ -1233,6 +1234,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "splinterm-graphical-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "splinterm-mcp"
 version = "0.1.0"
 dependencies = [
@@ -1283,7 +1293,9 @@ dependencies = [
  "anyhow",
  "nix",
  "rustix",
+ "splinterm-graphical-relay",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

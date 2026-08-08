@@ -4,6 +4,7 @@ members = [
     "crates/splinterm-automation-client",
     "crates/splinterd",
     "crates/splinterm-relay",
+    "crates/splinterm-graphical-relay",
     "crates/splinterm-core",
     "crates/splinterm-protocol",
     "crates/splinterm-pty",

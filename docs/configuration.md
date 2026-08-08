@@ -58,7 +58,8 @@ control. In addition to recent sessions, tab navigation, splits, pane focus,
 closing, and font zoom, it can create a session, rename the current tab, detach
 other tabs, open confirmed Dojo termination, resize a pane, search/page
 scrollback, return to live output, request/release/force control, revoke captured
-access grants, and accept or deny a captured pending transfer. Typing filters
+access grants, and accept or deny a captured pending transfer. Force control is
+trusted-local only and remains visibly disabled in remote Windows. Typing filters
 titles, categories, and keywords; arrows skip unavailable commands, Enter runs,
 and Escape closes. Actions without an available captured target remain visible
 but disabled. Right-clicking a visible Dojo tab opens a compact trusted menu
@@ -162,6 +163,45 @@ splinterm keymap conflicts
 a name displays the effective keymap with source locations; with a name it shows
 the packaged profile. Invalid configuration is never partially applied: Window
 startup fails before mapping rather than falling back to a half-resolved keymap.
+
+## Remote profile configuration
+
+Remote SSH endpoints use a separate strict TOML file rather than the
+Foot-compatible INI parser:
+
+```text
+${XDG_CONFIG_HOME:-~/.config}/splinterm/remotes.toml
+```
+
+```toml
+version = 1
+
+[remotes.wintermute]
+host = "wintermute"
+user = "operator"                    # optional; OpenSSH default otherwise
+port = 22                            # optional; OpenSSH config/default otherwise
+identity_files = ["~/.ssh/id_ed25519"]
+known_hosts_file = "~/.ssh/known_hosts"
+connect_timeout_seconds = 15
+```
+
+The schema rejects unknown fields at every level. Profile names, host/user
+tokens, counts, document size, paths, ports, and timeouts are bounded. Explicit
+files must be readable regular local files; path expansion never invokes a
+shell. There is deliberately no arbitrary option, forwarding, environment,
+proxy-command, local-command, or remote-command field. Ordinary safe alias,
+identity, certificate, agent, and proxy routing configured in OpenSSH remains
+available, while Splinterm supplies fixed safety overrides and the fixed remote
+command.
+
+Use `splinterm remote list` and `splinterm remote inspect PROFILE` for local-only
+validation. `splinterm remote check PROFILE` additionally starts SSH and performs
+bounded non-mutating relay/daemon reachability probes. `splinterm --remote
+PROFILE` authenticates once and opens that profile's native Recent Sessions
+picker; explicit `sessions`, `reopen`, `window`, and `launch` forms are also
+available. Recency is namespaced by validated local profile identity. See
+[remote.md](remote.md) for authentication, host-key, policy, remote-path,
+no-image, and disconnect behavior.
 
 ## Daily launch and session reopening
 

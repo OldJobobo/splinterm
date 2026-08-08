@@ -8,6 +8,7 @@ mod keymap_cli;
 mod local_service;
 mod machine;
 mod pane_bridge;
+mod remote_cli;
 mod session_catalog;
 mod sessions;
 mod theme_watch;

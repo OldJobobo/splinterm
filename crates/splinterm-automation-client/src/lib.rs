@@ -36,7 +36,7 @@ use splinterm_protocol::{
     TopologyChangeKind, TopologySnapshot, encode_frame, image_content_socket_path,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::UnixStream,
 };
 use tokio_util::sync::CancellationToken;
@@ -2998,9 +2998,12 @@ impl SharedImageContentCache {
 ///
 /// This type is an internal implementation boundary. Public automation
 /// compatibility is defined only by the checked-in JSON/NDJSON schemas.
-#[derive(Debug)]
+type BoxedReader = Box<dyn AsyncRead + Unpin + Send>;
+type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
+
 pub struct Connection {
-    stream: Option<UnixStream>,
+    reader: Option<BoxedReader>,
+    writer: Option<BoxedWriter>,
     next_request: u64,
     read_buffer: Vec<u8>,
     read_offset: usize,
@@ -3011,6 +3014,23 @@ pub struct Connection {
     socket_path: Option<PathBuf>,
     trusted_ui: bool,
     unusable: bool,
+}
+
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Connection")
+            .field(
+                "connected",
+                &(self.reader.is_some() && self.writer.is_some()),
+            )
+            .field("next_request", &self.next_request)
+            .field("limits", &self.limits)
+            .field("socket_path", &self.socket_path)
+            .field("trusted_ui", &self.trusted_ui)
+            .field("unusable", &self.unusable)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Drop guard ensuring an abandoned request cannot leave a correlated response
@@ -3061,6 +3081,24 @@ impl Connection {
         Self::connect_stream_at(stream, ClientRole::Automation, Some(socket.to_owned())).await
     }
 
+    /// Negotiates an automation-role daemon connection over split async transports.
+    ///
+    /// The transport does not gain trusted image-content access and is closed on
+    /// cancellation or any framing/protocol failure.
+    pub async fn connect_automation_transport<R, W>(reader: R, writer: W) -> Result<Self>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_transport(
+            Box::new(reader),
+            Box::new(writer),
+            ClientRole::Automation,
+            None,
+        )
+        .await
+    }
+
     async fn connect_role(role: ClientRole) -> Result<Self> {
         let socket = socket_path()?;
         let stream = UnixStream::connect(&socket)
@@ -3075,12 +3113,22 @@ impl Connection {
     }
 
     async fn connect_stream_at(
-        mut stream: UnixStream,
+        stream: UnixStream,
+        role: ClientRole,
+        socket_path: Option<PathBuf>,
+    ) -> Result<Self> {
+        let (reader, writer) = stream.into_split();
+        Self::connect_transport(Box::new(reader), Box::new(writer), role, socket_path).await
+    }
+
+    async fn connect_transport(
+        mut reader: BoxedReader,
+        mut writer: BoxedWriter,
         role: ClientRole,
         socket_path: Option<PathBuf>,
     ) -> Result<Self> {
         write_frame(
-            &mut stream,
+            writer.as_mut(),
             &ClientFrame::Hello {
                 minimum_version: PROTOCOL_VERSION,
                 maximum_version: PROTOCOL_VERSION,
@@ -3088,7 +3136,7 @@ impl Connection {
             },
         )
         .await?;
-        let limits = match read_frame(&mut stream).await? {
+        let limits = match read_frame(reader.as_mut()).await? {
             ServerFrame::Hello {
                 version, limits, ..
             } if version == PROTOCOL_VERSION => limits,
@@ -3098,7 +3146,8 @@ impl Connection {
             _ => bail!("splinterd sent an invalid handshake"),
         };
         Ok(Self {
-            stream: Some(stream),
+            reader: Some(reader),
+            writer: Some(writer),
             next_request: 1,
             read_buffer: Vec::with_capacity(READ_CHUNK_BYTES),
             read_offset: 0,
@@ -3412,7 +3461,7 @@ impl Connection {
                 self.read_offset = 0;
             }
             let read = self
-                .stream
+                .reader
                 .as_mut()
                 .context("splinterd connection is closed")?
                 .read(self.read_scratch.as_mut_slice())
@@ -3431,9 +3480,10 @@ impl Connection {
     async fn write_client_frame(&mut self, frame: &ClientFrame) -> Result<()> {
         self.ensure_usable()?;
         write_frame(
-            self.stream
+            self.writer
                 .as_mut()
-                .context("splinterd connection is closed")?,
+                .context("splinterd connection is closed")?
+                .as_mut(),
             frame,
         )
         .await
@@ -3445,15 +3495,23 @@ impl Connection {
         self.queued_event_bytes = 0;
         self.read_buffer.clear();
         self.read_offset = 0;
-        if let Some(stream) = self.stream.take()
+        self.reader.take();
+        if let Some(mut writer) = self.writer.take()
             && let Ok(frame) = encode_frame(&ClientFrame::Cancel { request_id })
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
-            let _ = stream.try_write(&frame);
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_millis(100), async {
+                    writer.write_all(&frame).await?;
+                    writer.shutdown().await
+                })
+                .await;
+            });
         }
     }
 
     fn ensure_usable(&self) -> Result<()> {
-        if self.unusable || self.stream.is_none() {
+        if self.unusable || self.reader.is_none() || self.writer.is_none() {
             bail!("splinterd connection cannot be reused after cancellation or protocol failure");
         }
         Ok(())
@@ -3461,7 +3519,8 @@ impl Connection {
 
     fn mark_unusable(&mut self) {
         self.unusable = true;
-        self.stream.take();
+        self.reader.take();
+        self.writer.take();
         self.queued_events.clear();
         self.queued_event_bytes = 0;
         self.read_buffer.clear();
@@ -3533,12 +3592,18 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(runtime.join("splinterm/splinterd.sock"))
 }
 
-async fn write_frame(stream: &mut UnixStream, frame: &ClientFrame) -> Result<()> {
+async fn write_frame<W>(stream: &mut W, frame: &ClientFrame) -> Result<()>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+{
     stream.write_all(&encode_frame(frame)?).await?;
     Ok(())
 }
 
-async fn read_frame(stream: &mut UnixStream) -> Result<ServerFrame> {
+async fn read_frame<R>(stream: &mut R) -> Result<ServerFrame>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
     let mut length = [0_u8; 4];
     stream.read_exact(&mut length).await?;
     let length = u32::from_be_bytes(length) as usize;
@@ -3870,7 +3935,10 @@ mod tests {
         sender.await.unwrap();
     }
 
-    async fn read_client_frame(stream: &mut UnixStream) -> ClientFrame {
+    async fn read_client_frame<R>(stream: &mut R) -> ClientFrame
+    where
+        R: AsyncRead + Unpin,
+    {
         let mut length = [0_u8; 4];
         stream.read_exact(&mut length).await.unwrap();
         let mut body = vec![0_u8; u32::from_be_bytes(length) as usize];
@@ -3879,8 +3947,10 @@ mod tests {
     }
 
     fn established(stream: UnixStream) -> Connection {
+        let (reader, writer) = stream.into_split();
         Connection {
-            stream: Some(stream),
+            reader: Some(Box::new(reader)),
+            writer: Some(Box::new(writer)),
             next_request: 1,
             read_buffer: Vec::with_capacity(READ_CHUNK_BYTES),
             read_offset: 0,
@@ -4697,6 +4767,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn split_transport_negotiates_only_the_automation_role() {
+        let (client, mut server) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let server_task = tokio::spawn(async move {
+            assert!(matches!(
+                read_client_frame(&mut server).await,
+                ClientFrame::Hello {
+                    role: ClientRole::Automation,
+                    ..
+                }
+            ));
+            server
+                .write_all(
+                    &encode_frame(&ServerFrame::Hello {
+                        version: PROTOCOL_VERSION,
+                        limits: ServerLimits::default(),
+                        development_terminal_access: false,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        let connection = Connection::connect_automation_transport(reader, writer)
+            .await
+            .unwrap();
+        assert!(!connection.trusted_ui);
+        assert!(connection.socket_path.is_none());
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn buffered_reader_rejects_oversized_truncated_and_eof_frames() {
         let (client, mut server) = UnixStream::pair().unwrap();
         let mut connection = established(client);
@@ -4866,7 +4968,8 @@ mod tests {
                 "preflight rejection emitted a frame or closed the connection"
             );
             assert_eq!(connection.next_request, 1);
-            assert!(connection.stream.is_some());
+            assert!(connection.reader.is_some());
+            assert!(connection.writer.is_some());
         }
     }
 
@@ -4909,7 +5012,8 @@ mod tests {
         );
         assert!(connection.queued_events.is_empty());
         assert!(connection.read_buffer.is_empty());
-        assert!(connection.stream.is_none());
+        assert!(connection.reader.is_none());
+        assert!(connection.writer.is_none());
         assert!(connection.request(Request::Ping).await.is_err());
         server_task.await.unwrap();
     }
@@ -4982,7 +5086,8 @@ mod tests {
         }
         drop(request);
 
-        assert!(connection.stream.is_none());
+        assert!(connection.reader.is_none());
+        assert!(connection.writer.is_none());
         assert!(connection.queued_events.is_empty());
         assert!(connection.read_buffer.is_empty());
         assert!(connection.request(Request::Ping).await.is_err());

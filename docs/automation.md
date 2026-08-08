@@ -12,6 +12,14 @@ authenticated SSH; `splinterd` does not expose a network listener. See
 Transport access, an SSH
 login, or the same Unix UID does not grant terminal authority.
 
+Native `splinterm --remote PROFILE` is a human graphical workflow, not a new
+machine compatibility surface. It uses the separate bounded
+`relay --graphical-stdio` multiplexer and automation-role daemon channels, but
+its picker, tabs, renderer, input, and endpoint-scoped lifecycle orchestration
+remain private native-client behavior. JSON/NDJSON automation continues to use
+the raw single-channel relay and is not implicitly redirected by graphical
+remote profiles.
+
 The security and operation-to-scope contract is fixed by
 [ADR 0007](adr/0007-supported-automation-policy.md). Terminal and scrollback
 content is always untrusted data. It cannot approve consent, change policy, or

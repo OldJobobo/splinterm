@@ -7,8 +7,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use splinterm::{
-    automation::Connection,
     config::{AppConfig, ConfigLoad, load_default},
+    endpoint::{ConnectionFactory, LaunchSemantics},
+    remote::RemoteCatalog,
 };
 use splinterm_core::SplitRatio;
 use splinterm_protocol::{ControlMode, Request, Response};
@@ -46,17 +47,28 @@ use super::{
         machine_exit_code, require_expected_incarnation, require_incarnation, run_machine_command,
         run_machine_subscription,
     },
-    session_catalog::{create_request, launch_parameters, remember_dojo},
+    remote_cli::run_remote_command,
+    session_catalog::{automation_launch, create_request, launch_parameters, remember_dojo},
     sessions::{launch, reopen_recent, run_sessions, select_dojo},
 };
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "top-level CLI validation and endpoint dispatch form one explicit routing boundary"
+)]
 pub(crate) async fn run() -> Result<()> {
     let Cli {
         output,
         schema_major,
         timeout_ms,
+        remote,
         command,
     } = Cli::parse();
+    let command = match command {
+        Some(command) => command,
+        None if remote.is_some() => Command::Sessions,
+        None => usage_error("a command is required unless --remote PROFILE is selected"),
+    };
     if matches!(
         &command,
         Command::Sessions
@@ -68,6 +80,7 @@ pub(crate) async fn run() -> Result<()> {
             | Command::Keymap { .. }
             | Command::Policy { .. }
             | Command::Relay { .. }
+            | Command::Remote { .. }
             | Command::Reset { .. }
     ) && (output.is_some() || schema_major.is_some() || timeout_ms.is_some())
     {
@@ -80,6 +93,11 @@ pub(crate) async fn run() -> Result<()> {
     }
     if matches!(command, Command::Focus) && output != Some(OutputMode::Json) {
         usage_error("focus requires --output json");
+    }
+    if remote.is_some() && output.is_some() {
+        usage_error(
+            "--remote is currently available for native and human command flows, not machine output",
+        );
     }
     if output == Some(OutputMode::Json) {
         let focus_command = matches!(&command, Command::Focus);
@@ -122,6 +140,20 @@ pub(crate) async fn run() -> Result<()> {
     if schema_major.is_some() || timeout_ms.is_some() {
         usage_error("--schema-major and --timeout-ms require --output json or ndjson");
     }
+    if remote.is_some()
+        && matches!(
+            command,
+            Command::Consent
+                | Command::Config { .. }
+                | Command::Keymap { .. }
+                | Command::Policy { .. }
+                | Command::Relay { .. }
+                | Command::Remote { .. }
+                | Command::Reset { .. }
+        )
+    {
+        usage_error("--remote cannot select local service, relay, policy, or consent commands");
+    }
     if let Command::Config { command } = command {
         return run_config_command(command);
     }
@@ -131,13 +163,26 @@ pub(crate) async fn run() -> Result<()> {
     if let Command::Policy { command } = command {
         return run_policy_command(command);
     }
-    if let Command::Relay { stdio } = command {
-        return run_relay_command(stdio);
+    if let Command::Relay {
+        stdio,
+        graphical_stdio,
+    } = command
+    {
+        return run_relay_command(stdio, graphical_stdio);
+    }
+    if let Command::Remote { command } = command {
+        return run_remote_command(command).await;
     }
     if let Command::Reset { yes } = command {
         return run_reset_command(yes);
     }
 
+    let factory = if let Some(profile_name) = remote {
+        let catalog = RemoteCatalog::load_default()?;
+        ConnectionFactory::remote(catalog.get(&profile_name)?).await?
+    } else {
+        ConnectionFactory::local()
+    };
     let ConfigLoad {
         config,
         diagnostics,
@@ -145,17 +190,21 @@ pub(crate) async fn run() -> Result<()> {
     for diagnostic in diagnostics {
         eprintln!("splinterm config: {diagnostic}");
     }
-    run_configured_command(command, config).await
+    run_configured_command(command, config, factory).await
 }
 
-async fn run_configured_command(command: Command, config: AppConfig) -> Result<()> {
+async fn run_configured_command(
+    command: Command,
+    config: AppConfig,
+    factory: ConnectionFactory,
+) -> Result<()> {
     match command {
-        Command::Sessions => run_sessions(config).await,
-        Command::Reopen => reopen_recent(config).await,
+        Command::Sessions => run_sessions(config, factory).await,
+        Command::Reopen => reopen_recent(config, factory).await,
         Command::Window { lair_id, dojo_id } => {
-            let dojo = select_dojo(lair_id.zip(dojo_id)).await?;
-            remember_dojo(dojo.id);
-            run_live_multipane_window(config, dojo).await
+            let dojo = select_dojo(&factory, lair_id.zip(dojo_id)).await?;
+            remember_dojo(&factory, dojo.id);
+            run_live_multipane_window(config, dojo, factory).await
         }
         Command::Launch {
             cwd,
@@ -164,14 +213,19 @@ async fn run_configured_command(command: Command, config: AppConfig) -> Result<(
             new,
             command,
         } => {
-            let cwd =
-                cwd.unwrap_or(env::current_dir().context("failed to read current directory")?);
-            launch(name, cwd, splint_id, new, command, config).await
+            let cwd = match (cwd, factory.is_local()) {
+                (Some(cwd), _) => Some(cwd),
+                (None, true) => {
+                    Some(env::current_dir().context("failed to read current directory")?)
+                }
+                (None, false) => None,
+            };
+            launch(name, cwd, splint_id, new, command, config, factory).await
         }
         Command::Consent => tokio::task::spawn_blocking(run_consent_client)
             .await
             .context("trusted consent task failed")?,
-        command => run_headless(command, &config).await,
+        command => run_headless(command, &config, &factory).await,
     }
 }
 
@@ -179,8 +233,29 @@ async fn run_configured_command(command: Command, config: AppConfig) -> Result<(
     clippy::too_many_lines,
     reason = "explicit-ID lifecycle command construction stays adjacent for auditability"
 )]
-async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
-    let mut connection = Connection::connect().await?;
+fn endpoint_launch_cwd(
+    factory: &ConnectionFactory,
+    cwd: Option<std::path::PathBuf>,
+) -> Result<Option<std::path::PathBuf>> {
+    match (cwd, factory.is_local()) {
+        (Some(cwd), _) => Ok(Some(cwd)),
+        (None, true) => Ok(Some(
+            env::current_dir().context("failed to read current directory")?,
+        )),
+        (None, false) => Ok(None),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed human command catalog keeps request construction and response handling adjacent"
+)]
+async fn run_headless(
+    command: Command,
+    config: &AppConfig,
+    factory: &ConnectionFactory,
+) -> Result<()> {
+    let mut connection = factory.connect().await?;
     match command {
         Command::Sessions
         | Command::Reopen
@@ -191,6 +266,7 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
         | Command::Keymap { .. }
         | Command::Policy { .. }
         | Command::Relay { .. }
+        | Command::Remote { .. }
         | Command::Reset { .. } => {
             unreachable!("graphical, policy, or relay command returned before daemon connection")
         }
@@ -215,14 +291,13 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
             print_response(
                 connection
                     .request(create_request(
+                        factory,
                         expected,
                         name,
-                        cwd.unwrap_or(
-                            env::current_dir().context("failed to read current directory")?,
-                        ),
+                        endpoint_launch_cwd(factory, cwd)?,
                         command,
                         config,
-                    ))
+                    )?)
                     .await?,
             )
         }
@@ -244,24 +319,30 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
             };
             require_expected_incarnation(&snapshot, target_splint_id, expected_incarnation)?;
             let expected_topology_revision = snapshot.revision;
-            print_response(
-                connection
-                    .request(Request::SplitSplint {
-                        expected_topology_revision,
-                        target_splint_id,
-                        axis: axis.into(),
-                        side: side.into(),
-                        ratio,
-                        launch: launch_parameters(
-                            cwd.unwrap_or(
-                                env::current_dir().context("failed to read current directory")?,
-                            ),
-                            command,
-                            config,
-                        ),
-                    })
-                    .await?,
-            )
+            let cwd = endpoint_launch_cwd(factory, cwd)?;
+            let request = match factory.capabilities().launch_semantics {
+                LaunchSemantics::LocalTrusted => Request::SplitSplint {
+                    expected_topology_revision,
+                    target_splint_id,
+                    axis: axis.into(),
+                    side: side.into(),
+                    ratio,
+                    launch: launch_parameters(
+                        cwd.context("local split working directory is unavailable")?,
+                        command,
+                        config,
+                    ),
+                },
+                LaunchSemantics::RemoteAutomation => Request::SplitSplintAutomation {
+                    expected_topology_revision,
+                    target_splint_id,
+                    axis: axis.into(),
+                    side: side.into(),
+                    ratio,
+                    launch: automation_launch(cwd, command),
+                },
+            };
+            print_response(connection.request(request).await?)
         }
         Command::Close { splint_id, .. } => {
             let expected_topology_revision = connection.topology_revision().await?;
@@ -299,22 +380,26 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
             command,
         } => {
             let expected_topology_revision = connection.topology_revision().await?;
-            print_response(
-                connection
-                    .request(Request::NewDojo {
-                        expected_topology_revision,
-                        lair_id,
-                        name,
-                        launch: launch_parameters(
-                            cwd.unwrap_or(
-                                env::current_dir().context("failed to read current directory")?,
-                            ),
-                            command,
-                            config,
-                        ),
-                    })
-                    .await?,
-            )
+            let cwd = endpoint_launch_cwd(factory, cwd)?;
+            let request = match factory.capabilities().launch_semantics {
+                LaunchSemantics::LocalTrusted => Request::NewDojo {
+                    expected_topology_revision,
+                    lair_id,
+                    name,
+                    launch: launch_parameters(
+                        cwd.context("local Dojo working directory is unavailable")?,
+                        command,
+                        config,
+                    ),
+                },
+                LaunchSemantics::RemoteAutomation => Request::NewDojoAutomation {
+                    expected_topology_revision,
+                    lair_id,
+                    name,
+                    launch: automation_launch(cwd, command),
+                },
+            };
+            print_response(connection.request(request).await?)
         }
         Command::CloseDojo { dojo_id, .. } => {
             let expected_topology_revision = connection.topology_revision().await?;
@@ -381,21 +466,24 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
             command,
         } => {
             let expected_topology_revision = connection.topology_revision().await?;
-            print_response(
-                connection
-                    .request(Request::RelaunchSplint {
-                        expected_topology_revision,
-                        splint_id,
-                        launch: launch_parameters(
-                            cwd.unwrap_or(
-                                env::current_dir().context("failed to read current directory")?,
-                            ),
-                            command,
-                            config,
-                        ),
-                    })
-                    .await?,
-            )
+            let cwd = endpoint_launch_cwd(factory, cwd)?;
+            let request = match factory.capabilities().launch_semantics {
+                LaunchSemantics::LocalTrusted => Request::RelaunchSplint {
+                    expected_topology_revision,
+                    splint_id,
+                    launch: launch_parameters(
+                        cwd.context("local relaunch working directory is unavailable")?,
+                        command,
+                        config,
+                    ),
+                },
+                LaunchSemantics::RemoteAutomation => Request::RelaunchSplintAutomation {
+                    expected_topology_revision,
+                    splint_id,
+                    launch: automation_launch(cwd, command),
+                },
+            };
+            print_response(connection.request(request).await?)
         }
         Command::Restore { splint_id } => {
             let expected_topology_revision = connection.topology_revision().await?;
@@ -517,32 +605,43 @@ async fn run_headless(command: Command, config: &AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{commands::RemoteCommand, session_catalog::create_request_for};
     use splinterm_protocol::{ActiveScreen, TerminalInputModes, TerminalRow};
 
     #[test]
     fn reset_requires_explicit_confirmation_for_unattended_use() {
         let guarded = Cli::try_parse_from(["splinterm", "reset"]).unwrap();
-        assert!(matches!(guarded.command, Command::Reset { yes: false }));
+        assert!(matches!(
+            guarded.command,
+            Some(Command::Reset { yes: false })
+        ));
 
         let confirmed = Cli::try_parse_from(["splinterm", "reset", "--yes"]).unwrap();
-        assert!(matches!(confirmed.command, Command::Reset { yes: true }));
+        assert!(matches!(
+            confirmed.command,
+            Some(Command::Reset { yes: true })
+        ));
     }
 
     #[test]
     fn graphical_session_commands_are_explicit() {
         let sessions = Cli::try_parse_from(["splinterm", "sessions"]).unwrap();
-        assert!(matches!(sessions.command, Command::Sessions));
+        assert!(matches!(sessions.command, Some(Command::Sessions)));
         let reopen = Cli::try_parse_from(["splinterm", "reopen"]).unwrap();
-        assert!(matches!(reopen.command, Command::Reopen));
+        assert!(matches!(reopen.command, Some(Command::Reopen)));
+        let remote_default = Cli::try_parse_from(["splinterm", "--remote", "wintermute"])
+            .expect("a selected remote may omit the sessions subcommand");
+        assert_eq!(remote_default.remote.as_deref(), Some("wintermute"));
+        assert!(remote_default.command.is_none());
     }
 
     #[test]
     fn list_defaults_to_active_lairs_and_all_is_explicit() {
         let active = Cli::try_parse_from(["splinterm", "list"]).unwrap();
-        assert!(matches!(active.command, Command::List { all: false }));
+        assert!(matches!(active.command, Some(Command::List { all: false })));
 
         let all = Cli::try_parse_from(["splinterm", "list", "--all"]).unwrap();
-        assert!(matches!(all.command, Command::List { all: true }));
+        assert!(matches!(all.command, Some(Command::List { all: true })));
     }
 
     fn snapshot(revision: u64) -> TerminalSnapshot {
@@ -604,14 +703,14 @@ mod tests {
             "ready",
         ])
         .unwrap();
-        let Command::Split {
+        let Some(Command::Split {
             target_splint_id,
             axis: SplitAxis::Vertical,
             side: NewSplintSide::First,
             ratio: 400,
             command,
             ..
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected parsed split command");
         };
@@ -636,22 +735,68 @@ mod tests {
             Cli::try_parse_from(["splinterm", "kill", &id.to_string(), "--yes"])
                 .unwrap()
                 .command,
-            Command::Kill {
+            Some(Command::Kill {
                 splint_id,
                 yes: true,
-            } if splint_id == id
+            }) if splint_id == id
         ));
     }
 
     #[test]
-    fn relay_requires_explicit_stdio_transport() {
+    fn relay_modes_are_explicit_and_mutually_exclusive() {
         assert!(matches!(
             Cli::try_parse_from(["splinterm", "relay", "--stdio"])
                 .unwrap()
                 .command,
-            Command::Relay { stdio: true }
+            Some(Command::Relay {
+                stdio: true,
+                graphical_stdio: false
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "relay", "--graphical-stdio"])
+                .unwrap()
+                .command,
+            Some(Command::Relay {
+                stdio: false,
+                graphical_stdio: true
+            })
         ));
         assert!(Cli::try_parse_from(["splinterm", "relay"]).is_err());
+        assert!(
+            Cli::try_parse_from(["splinterm", "relay", "--stdio", "--graphical-stdio"]).is_err()
+        );
+    }
+
+    #[test]
+    fn remote_profile_commands_are_explicit_and_non_networked() {
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "remote", "list"])
+                .unwrap()
+                .command,
+            Some(Command::Remote {
+                command: RemoteCommand::List
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "remote", "inspect", "wintermute"])
+                .unwrap()
+                .command,
+            Some(Command::Remote {
+                command: RemoteCommand::Inspect { profile }
+            }) if profile == "wintermute"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "remote", "check", "wintermute"])
+                .unwrap()
+                .command,
+            Some(Command::Remote {
+                command: RemoteCommand::Check { profile }
+            }) if profile == "wintermute"
+        ));
+        assert!(Cli::try_parse_from(["splinterm", "remote"]).is_err());
+        assert!(Cli::try_parse_from(["splinterm", "remote", "inspect"]).is_err());
+        assert!(Cli::try_parse_from(["splinterm", "remote", "check"]).is_err());
     }
 
     #[test]
@@ -669,10 +814,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             parsed.command,
-            Command::Window {
+            Some(Command::Window {
                 lair_id: Some(parsed_lair),
                 dojo_id: Some(parsed_dojo),
-            } if parsed_lair == lair_id && parsed_dojo == dojo_id
+            }) if parsed_lair == lair_id && parsed_dojo == dojo_id
         ));
         assert!(
             Cli::try_parse_from(["splinterm", "window", "--dojo-id", &dojo_id.to_string(),])
@@ -683,13 +828,13 @@ mod tests {
     #[test]
     fn launch_defaults_to_fresh_creation_with_a_collision_resistant_name() {
         let cli = Cli::try_parse_from(["splinterm", "launch"]).unwrap();
-        let Command::Launch {
+        let Some(Command::Launch {
             name,
             splint_id,
             new,
             command,
             ..
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected launch command");
         };
@@ -707,16 +852,43 @@ mod tests {
             "$(touch /tmp/must-not-run); spaced argument".to_owned(),
         ];
         let request = create_request(
+            &ConnectionFactory::local(),
             TopologyRevision::default(),
             "argv".to_owned(),
-            PathBuf::from("/tmp"),
+            Some(PathBuf::from("/tmp")),
             argv.clone(),
             &AppConfig::default(),
-        );
+        )
+        .unwrap();
         let Request::CreateLair { launch, .. } = request else {
             panic!("expected create request");
         };
         assert_eq!(launch.command, argv);
+    }
+
+    #[test]
+    fn remote_default_launch_uses_daemon_defaults_without_local_shell_or_cwd() {
+        let config = AppConfig {
+            shell: Some("/local/home/bin/private-shell".to_owned()),
+            login_shell: true,
+            ..AppConfig::default()
+        };
+        let request = create_request_for(
+            LaunchSemantics::RemoteAutomation,
+            TopologyRevision::default(),
+            "remote".to_owned(),
+            None,
+            Vec::new(),
+            &config,
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::CreateLairAutomation {
+                launch: splinterm_protocol::AutomationLaunch { cwd: None, argv },
+                ..
+            } if argv.is_empty()
+        ));
     }
 
     #[test]
@@ -863,12 +1035,14 @@ mod tests {
     }
 
     #[test]
-    fn control_conflict_falls_back_to_observer_without_hiding_other_errors() {
-        let unavailable = response_protocol_error(splinterm_protocol::ProtocolError::new(
-            ErrorCode::ControllerUnavailable,
-            "live Splint already has a controller",
-        ));
-        assert_eq!(optional_pane_controller(Err(unavailable)).unwrap(), None);
+    fn unavailable_or_policy_denied_initial_control_falls_back_to_observer() {
+        for code in [ErrorCode::ControllerUnavailable, ErrorCode::Unauthorized] {
+            let unavailable = response_protocol_error(splinterm_protocol::ProtocolError::new(
+                code,
+                "initial controller is unavailable",
+            ));
+            assert_eq!(optional_pane_controller(Err(unavailable)).unwrap(), None);
+        }
         assert_eq!(optional_pane_controller(Ok(42)).unwrap(), Some(42));
 
         let invalid = response_protocol_error(splinterm_protocol::ProtocolError::new(

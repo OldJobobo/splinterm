@@ -7,6 +7,7 @@ use splinterm::automation::{
     Connection, ImageContentLeaseSet, SharedImageContentCache, protocol_error,
 };
 use splinterm::config::AppConfig;
+use splinterm::endpoint::{ConnectionFactory, ForcedControlTransfer, ImageTransport};
 use splinterm::{
     AuthorityStatus, PerfTraceCorrelation, WindowCommand, WindowPaneOptions, WindowUpdate,
 };
@@ -578,6 +579,7 @@ pub(in crate::app) async fn run_controller(
     controller_id: Option<u64>,
     splint_id: SplintId,
     incarnation: u64,
+    forced_control_transfer: ForcedControlTransfer,
     resize_delay_ms: u64,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
@@ -787,13 +789,12 @@ pub(in crate::app) async fn run_controller(
                     decision,
                 },
                 WindowCommand::ForceControlTransfer => {
-                    active_controller = match control
-                        .request(Request::ForceControlTransfer {
-                            splint_id,
-                            incarnation,
-                        })
-                        .await?
-                    {
+                    let Some(request) =
+                        forced_control_request(forced_control_transfer, splint_id, incarnation)
+                    else {
+                        continue;
+                    };
+                    active_controller = match control.request(request).await? {
                         Response::ControlGranted { controller_id, .. } => Some(controller_id),
                         _ => bail!("splinterd did not grant forced control"),
                     };
@@ -878,6 +879,17 @@ pub(in crate::app) async fn run_controller(
     result
 }
 
+fn forced_control_request(
+    capability: ForcedControlTransfer,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Option<Request> {
+    (capability == ForcedControlTransfer::Enabled).then_some(Request::ForceControlTransfer {
+        splint_id,
+        incarnation,
+    })
+}
+
 pub(in crate::app) struct PaneTask {
     pub(in crate::app) cancellation: tokio_util::sync::CancellationToken,
     pub(in crate::app) task: tokio::task::JoinHandle<Result<()>>,
@@ -909,8 +921,12 @@ pub(in crate::app) fn optional_pane_controller(result: Result<u64>) -> Result<Op
     match result {
         Ok(controller_id) => Ok(Some(controller_id)),
         Err(error)
-            if protocol_error(&error)
-                .is_some_and(|error| error.code == ErrorCode::ControllerUnavailable) =>
+            if protocol_error(&error).is_some_and(|error| {
+                matches!(
+                    error.code,
+                    ErrorCode::ControllerUnavailable | ErrorCode::Unauthorized
+                )
+            }) =>
         {
             Ok(None)
         }
@@ -918,20 +934,20 @@ pub(in crate::app) fn optional_pane_controller(result: Result<u64>) -> Result<Op
     }
 }
 
+pub(in crate::app) fn pane_access_scopes() -> Vec<AccessScope> {
+    vec![AccessScope::Observe, AccessScope::Scrollback]
+}
+
 pub(in crate::app) async fn prepare_live_pane(
+    factory: &ConnectionFactory,
     config: &AppConfig,
     splint_id: SplintId,
     image_cache: SharedImageContentCache,
     claim_control: bool,
 ) -> Result<PreparedPane> {
-    let mut connection = Connection::connect().await?;
+    let mut connection = factory.connect().await?;
     let incarnation = connection.live_incarnation(splint_id).await?;
-    let scopes = vec![
-        AccessScope::Observe,
-        AccessScope::Scrollback,
-        AccessScope::Input,
-        AccessScope::Resize,
-    ];
+    let scopes = pane_access_scopes();
     if !matches!(
         connection
             .request(Request::RequestAccess {
@@ -947,9 +963,15 @@ pub(in crate::app) async fn prepare_live_pane(
     let authority = load_authority_status(&mut connection, splint_id, incarnation).await?;
     let attachment = attach(&mut connection, splint_id, incarnation).await?;
     let snapshot = attachment.snapshot.clone();
-    resolve_image_contents(&mut connection, &snapshot, &image_cache).await?;
+    resolve_image_contents(
+        factory.capabilities().image_transport,
+        &mut connection,
+        &snapshot,
+        &image_cache,
+    )
+    .await?;
     let image_sources = lease_snapshot_images(&image_cache, &snapshot)?;
-    let mut control = Connection::connect().await?;
+    let mut control = factory.connect().await?;
     if control.live_incarnation(splint_id).await? != incarnation {
         bail!("control connection observed a different process incarnation");
     }
@@ -982,6 +1004,7 @@ pub(in crate::app) async fn prepare_live_pane(
         controller_id,
         splint_id,
         incarnation,
+        factory.capabilities().forced_control_transfer,
         resize_delay_ms,
         cancellation.clone(),
     ));
@@ -994,6 +1017,7 @@ pub(in crate::app) async fn prepare_live_pane(
         task_updates,
         splint_id,
         incarnation,
+        factory.capabilities().image_transport,
         image_cache.clone(),
         cancellation.clone(),
     ));
@@ -1031,11 +1055,20 @@ pub(in crate::app) fn lease_update_images(
         .transpose()
 }
 
+fn ensure_image_transport(transport: ImageTransport, metadata_present: bool) -> Result<()> {
+    if transport == ImageTransport::Unavailable && metadata_present {
+        bail!("remote endpoint supplied forbidden terminal image metadata");
+    }
+    Ok(())
+}
+
 pub(in crate::app) async fn resolve_image_contents(
+    transport: ImageTransport,
     connection: &mut Connection,
     snapshot: &TerminalSnapshot,
     cache: &SharedImageContentCache,
 ) -> Result<()> {
+    ensure_image_transport(transport, snapshot.images.is_some())?;
     let Some(images) = &snapshot.images else {
         return Ok(());
     };
@@ -1057,12 +1090,14 @@ pub(in crate::app) async fn resolve_image_contents(
 }
 
 pub(in crate::app) async fn resolve_update_images(
+    transport: ImageTransport,
     connection: &mut Connection,
     update: &TerminalUpdate,
     splint_id: SplintId,
     incarnation: u64,
     cache: &SharedImageContentCache,
 ) -> Result<()> {
+    ensure_image_transport(transport, update.images.is_some())?;
     let Some(images) = &update.images else {
         return Ok(());
     };
@@ -1109,6 +1144,7 @@ pub(in crate::app) async fn run_pane_subscription(
     updates: mpsc::Sender<WindowUpdate>,
     splint_id: SplintId,
     incarnation: u64,
+    image_transport: ImageTransport,
     image_cache: SharedImageContentCache,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
@@ -1131,7 +1167,9 @@ pub(in crate::app) async fn run_pane_subscription(
                 ).await?;
                 last_revision = attachment.snapshot.revision;
                 last_sequence = 0;
-                resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                resolve_image_contents(
+                    image_transport, &mut connection, &attachment.snapshot, &image_cache,
+                ).await?;
                 let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
                 if updates.send(WindowUpdate::Snapshot {
                     snapshot: attachment.snapshot.clone(),
@@ -1152,7 +1190,9 @@ pub(in crate::app) async fn run_pane_subscription(
                     EventAction::Snapshot { sequence, snapshot } => {
                         validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
                         last_revision = snapshot.revision;
-                        resolve_image_contents(&mut connection, &snapshot, &image_cache).await?;
+                        resolve_image_contents(
+                            image_transport, &mut connection, &snapshot, &image_cache,
+                        ).await?;
                         let image_sources = lease_snapshot_images(&image_cache, &snapshot)?;
                         if updates.send(WindowUpdate::Snapshot {
                             snapshot,
@@ -1184,6 +1224,7 @@ pub(in crate::app) async fn run_pane_subscription(
                         }
                         last_revision = update.revision;
                         resolve_update_images(
+                            image_transport,
                             &mut connection,
                             &update,
                             splint_id,
@@ -1241,7 +1282,9 @@ pub(in crate::app) async fn run_pane_subscription(
                         ).await?;
                         last_revision = attachment.snapshot.revision;
                         last_sequence = 0;
-                        resolve_image_contents(&mut connection, &attachment.snapshot, &image_cache).await?;
+                        resolve_image_contents(
+                            image_transport, &mut connection, &attachment.snapshot, &image_cache,
+                        ).await?;
                         let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
                         if updates.send(WindowUpdate::Snapshot {
                             snapshot: attachment.snapshot.clone(),
@@ -1262,5 +1305,41 @@ pub(in crate::app) async fn run_pane_subscription(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_image_transport_fails_closed_on_metadata() {
+        assert!(ensure_image_transport(ImageTransport::Unavailable, false).is_ok());
+        assert!(ensure_image_transport(ImageTransport::Unavailable, true).is_err());
+        assert!(ensure_image_transport(ImageTransport::LocalTrusted, true).is_ok());
+    }
+
+    #[test]
+    fn pane_attachment_access_does_not_preemptively_require_interactive_policy() {
+        assert_eq!(
+            pane_access_scopes(),
+            vec![AccessScope::Observe, AccessScope::Scrollback]
+        );
+    }
+
+    #[test]
+    fn remote_forced_control_transfer_is_rejected_before_request_construction() {
+        let splint_id = SplintId::new();
+        assert_eq!(
+            forced_control_request(ForcedControlTransfer::Disabled, splint_id, 7),
+            None
+        );
+        assert_eq!(
+            forced_control_request(ForcedControlTransfer::Enabled, splint_id, 7),
+            Some(Request::ForceControlTransfer {
+                splint_id,
+                incarnation: 7,
+            })
+        );
     }
 }

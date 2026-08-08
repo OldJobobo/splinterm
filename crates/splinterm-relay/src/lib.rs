@@ -3,8 +3,10 @@
 //! Byte-transparent, bounded stdio transport for one local Splinterm socket.
 
 use std::{
+    collections::HashMap,
     env,
     fs::File,
+    future::Future,
     net::Shutdown,
     os::{
         fd::{AsFd, OwnedFd},
@@ -14,15 +16,22 @@ use std::{
         },
     },
     path::{Component, Path, PathBuf},
-    sync::mpsc,
+    sync::mpsc as std_mpsc,
     thread,
 };
 
 use anyhow::{Context, Result, bail};
+use splinterm_graphical_relay::{
+    FairData, FairDataChannel, Frame as GraphicalFrame, MAX_CHANNEL_QUEUED_BYTES, MAX_DATA_BYTES,
+    MAX_LOGICAL_CHANNELS, fair_data_queue, read_frame as read_graphical_frame,
+    write_data_frame as write_graphical_data_frame, write_frame as write_graphical_frame,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::UnixStream,
+    net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
+    sync::mpsc,
 };
+use tokio_util::sync::CancellationToken;
 
 const COPY_BUFFER_BYTES: usize = 16 * 1024;
 
@@ -244,7 +253,7 @@ fn relay_process_stdio(stream: StdUnixStream, peer_pidfd: OwnedFd) -> Result<()>
     let mut upstream_socket = stream
         .try_clone()
         .context("cannot duplicate relay socket")?;
-    let (completed_tx, completed_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = std_mpsc::channel();
     let upstream_tx = completed_tx.clone();
     thread::spawn(move || {
         let result = copy_bounded_blocking(&mut std::io::stdin().lock(), &mut upstream_socket)
@@ -307,11 +316,450 @@ pub async fn run_stdio() -> Result<()> {
         .context("relay coordinator task failed")?
 }
 
+const CHANNEL_QUEUE_FRAMES: usize = MAX_CHANNEL_QUEUED_BYTES / MAX_DATA_BYTES;
+const CONTROL_QUEUE_FRAMES: usize = MAX_LOGICAL_CHANNELS * 2 + 16;
+
+#[derive(Debug)]
+enum ChannelCommand {
+    Data(Vec<u8>),
+    HalfClose,
+    Close,
+}
+
+#[derive(Debug)]
+enum GraphicalEvent {
+    ChannelFinished(u32),
+    DaemonExited,
+    SessionFailure(String),
+}
+
+#[derive(Debug)]
+enum ScheduledOutput {
+    Control(GraphicalFrame),
+    Data(FairData),
+}
+
+#[derive(Debug)]
+struct ActiveChannel {
+    commands: mpsc::Sender<ChannelCommand>,
+    cancellation: CancellationToken,
+}
+
+#[derive(Debug)]
+struct ChannelOutput {
+    control: mpsc::Sender<GraphicalFrame>,
+    data: FairDataChannel,
+    events: mpsc::Sender<GraphicalEvent>,
+}
+
+fn bounded_reason(error: &anyhow::Error) -> String {
+    let reason = format!("{error:#}");
+    let reason: String = reason
+        .chars()
+        .filter(|character| character.is_ascii() && !character.is_control())
+        .take(1024)
+        .collect();
+    if reason.is_empty() {
+        "graphical relay channel failed".to_owned()
+    } else {
+        reason
+    }
+}
+
+async fn monitor_daemon_peer(
+    peer_pidfd: OwnedFd,
+    cancellation: CancellationToken,
+    events: mpsc::Sender<GraphicalEvent>,
+) {
+    let descriptor = match tokio::io::unix::AsyncFd::new(peer_pidfd) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            let _ = events
+                .send(GraphicalEvent::SessionFailure(format!(
+                    "cannot monitor daemon peer: {error}"
+                )))
+                .await;
+            return;
+        }
+    };
+    tokio::select! {
+        () = cancellation.cancelled() => {}
+        result = descriptor.readable() => {
+            match result {
+                Ok(_) => { let _ = events.send(GraphicalEvent::DaemonExited).await; }
+                Err(error) => {
+                    let _ = events.send(GraphicalEvent::SessionFailure(format!(
+                        "daemon peer monitor failed: {error}"
+                    ))).await;
+                }
+            }
+        }
+    }
+}
+
+async fn finish_channel(
+    channel_id: u32,
+    control_outbound: &mpsc::Sender<GraphicalFrame>,
+    events: &mpsc::Sender<GraphicalEvent>,
+) {
+    let _ = control_outbound
+        .send(GraphicalFrame::CloseChannel { channel_id })
+        .await;
+    let _ = events
+        .send(GraphicalEvent::ChannelFinished(channel_id))
+        .await;
+}
+
+async fn apply_channel_command(
+    command: Option<ChannelCommand>,
+    upstream_open: &mut bool,
+    daemon_writer: &mut OwnedWriteHalf,
+    events: &mpsc::Sender<GraphicalEvent>,
+) -> bool {
+    match command {
+        Some(ChannelCommand::Data(bytes)) if *upstream_open => {
+            daemon_writer.write_all(&bytes).await.is_ok()
+        }
+        Some(ChannelCommand::Data(_)) => {
+            let _ = events
+                .send(GraphicalEvent::SessionFailure(
+                    "data followed a logical channel half-close".to_owned(),
+                ))
+                .await;
+            false
+        }
+        Some(ChannelCommand::HalfClose) if *upstream_open => {
+            *upstream_open = false;
+            daemon_writer.shutdown().await.is_ok()
+        }
+        Some(ChannelCommand::HalfClose) => {
+            let _ = events
+                .send(GraphicalEvent::SessionFailure(
+                    "logical channel was half-closed twice".to_owned(),
+                ))
+                .await;
+            false
+        }
+        Some(ChannelCommand::Close) | None => false,
+    }
+}
+
+async fn run_graphical_channel(
+    channel_id: u32,
+    daemon_reader: OwnedReadHalf,
+    daemon_writer: OwnedWriteHalf,
+    mut commands: mpsc::Receiver<ChannelCommand>,
+    output: ChannelOutput,
+    cancellation: CancellationToken,
+) {
+    let mut daemon_reader = daemon_reader;
+    let mut daemon_writer = daemon_writer;
+    let mut read_buffer = vec![0_u8; MAX_DATA_BYTES];
+    let mut upstream_open = true;
+    'channel: loop {
+        let permit = tokio::select! {
+            () = cancellation.cancelled() => break,
+            command = commands.recv() => {
+                if !apply_channel_command(
+                    command,
+                    &mut upstream_open,
+                    &mut daemon_writer,
+                    &output.events,
+                ).await {
+                    break;
+                }
+                continue 'channel;
+            }
+            permit = output.data.reserve() => match permit {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
+        };
+        let read = tokio::select! {
+            () = cancellation.cancelled() => break,
+            command = commands.recv() => {
+                drop(permit);
+                if !apply_channel_command(
+                    command,
+                    &mut upstream_open,
+                    &mut daemon_writer,
+                    &output.events,
+                ).await {
+                    break;
+                }
+                continue 'channel;
+            }
+            read = daemon_reader.read(&mut read_buffer) => read,
+        };
+        match read {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                if permit.send(read_buffer[..count].to_vec()).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    cancellation.cancel();
+    let _ = output.data.drain().await;
+    finish_channel(channel_id, &output.control, &output.events).await;
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the bounded coordinator keeps one explicit session state machine"
+)]
+async fn run_graphical_streams_with_connector<R, W, C, F>(
+    mut input: R,
+    mut output: W,
+    connector: C,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+    C: Fn() -> F,
+    F: Future<Output = Result<ValidatedConnection>>,
+{
+    match read_graphical_frame(&mut input).await? {
+        Some(GraphicalFrame::Hello) => {}
+        Some(_) => bail!("graphical relay handshake must begin with Hello"),
+        None => bail!("graphical relay input closed before Hello"),
+    }
+    write_graphical_frame(&mut output, &GraphicalFrame::HelloAck).await?;
+
+    let cancellation = CancellationToken::new();
+    let (control_tx, mut control_rx) = mpsc::channel::<GraphicalFrame>(CONTROL_QUEUE_FRAMES);
+    let (data_tx, mut data_rx) = fair_data_queue();
+    let (event_tx, mut event_rx) = mpsc::channel::<GraphicalEvent>(MAX_LOGICAL_CHANNELS * 2 + 1);
+    let writer_events = event_tx.clone();
+    let writer = tokio::spawn(async move {
+        let mut control_open = true;
+        let mut data_open = true;
+        while control_open || data_open {
+            let scheduled = tokio::select! {
+                biased;
+                frame = control_rx.recv(), if control_open => if let Some(frame) = frame {
+                    Some(ScheduledOutput::Control(frame))
+                } else {
+                    control_open = false;
+                    None
+                },
+                data = data_rx.recv(), if data_open => if let Some(data) = data {
+                    Some(ScheduledOutput::Data(data))
+                } else {
+                    data_open = false;
+                    None
+                },
+            };
+            let Some(scheduled) = scheduled else {
+                continue;
+            };
+            let result = match &scheduled {
+                ScheduledOutput::Control(frame) => write_graphical_frame(&mut output, frame).await,
+                ScheduledOutput::Data(data) => {
+                    write_graphical_data_frame(&mut output, data.channel_id(), data.bytes()).await
+                }
+            };
+            if let Err(error) = result {
+                let _ = writer_events
+                    .send(GraphicalEvent::SessionFailure(format!(
+                        "graphical relay output failed: {error}"
+                    )))
+                    .await;
+                return;
+            }
+        }
+        let _ = output.shutdown().await;
+    });
+
+    let mut channels = HashMap::<u32, ActiveChannel>::new();
+    let mut last_channel_id = 0_u32;
+    let mut terminal_error = None;
+    loop {
+        tokio::select! {
+            event = event_rx.recv() => match event {
+                Some(GraphicalEvent::ChannelFinished(channel_id)) => {
+                    channels.remove(&channel_id);
+                }
+                Some(GraphicalEvent::DaemonExited) => {
+                    terminal_error = Some("validated splinterd process exited".to_owned());
+                    break;
+                }
+                Some(GraphicalEvent::SessionFailure(reason)) => {
+                    terminal_error = Some(reason);
+                    break;
+                }
+                None => {
+                    terminal_error = Some("graphical relay coordinator stopped".to_owned());
+                    break;
+                }
+            },
+            frame = read_graphical_frame(&mut input) => {
+                let frame = match frame {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => break,
+                    Err(error) => {
+                        terminal_error = Some(bounded_reason(&error));
+                        break;
+                    }
+                };
+                match frame {
+                    GraphicalFrame::OpenChannel { channel_id } => {
+                        if channel_id <= last_channel_id {
+                            terminal_error = Some(
+                                "graphical relay channel IDs must increase without reuse".to_owned(),
+                            );
+                            break;
+                        }
+                        last_channel_id = channel_id;
+                        if channels.len() >= MAX_LOGICAL_CHANNELS {
+                            if control_tx.send(GraphicalFrame::ChannelRejected {
+                                channel_id,
+                                reason: "graphical relay logical channel limit reached".to_owned(),
+                            }).await.is_err() {
+                                terminal_error = Some("graphical relay output closed".to_owned());
+                                break;
+                            }
+                            continue;
+                        }
+                        match connector().await {
+                            Ok(connection) => {
+                                let channel_cancellation = cancellation.child_token();
+                                let (commands, command_rx) =
+                                    mpsc::channel(CHANNEL_QUEUE_FRAMES);
+                                let (daemon_reader, daemon_writer) = connection.stream.into_split();
+                                channels.insert(channel_id, ActiveChannel {
+                                    commands,
+                                    cancellation: channel_cancellation.clone(),
+                                });
+                                // Queue the admission acknowledgement before either channel task
+                                // can emit data or a daemon-lifetime failure.
+                                if control_tx
+                                    .send(GraphicalFrame::ChannelOpened { channel_id })
+                                    .await
+                                    .is_err()
+                                {
+                                    terminal_error = Some("graphical relay output closed".to_owned());
+                                    break;
+                                }
+                                tokio::spawn(monitor_daemon_peer(
+                                    connection.peer_pidfd,
+                                    channel_cancellation.clone(),
+                                    event_tx.clone(),
+                                ));
+                                tokio::spawn(run_graphical_channel(
+                                    channel_id,
+                                    daemon_reader,
+                                    daemon_writer,
+                                    command_rx,
+                                    ChannelOutput {
+                                        control: control_tx.clone(),
+                                        data: data_tx.channel(channel_id),
+                                        events: event_tx.clone(),
+                                    },
+                                    channel_cancellation,
+                                ));
+                            }
+                            Err(error) => {
+                                if control_tx.send(GraphicalFrame::ChannelRejected {
+                                    channel_id,
+                                    reason: bounded_reason(&error),
+                                }).await.is_err() {
+                                    terminal_error = Some("graphical relay output closed".to_owned());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    GraphicalFrame::Data { channel_id, bytes } => {
+                        let Some(channel) = channels.get(&channel_id) else {
+                            terminal_error = Some("data targeted an unknown logical channel".to_owned());
+                            break;
+                        };
+                        if channel.commands.try_send(ChannelCommand::Data(bytes)).is_err() {
+                            terminal_error = Some(
+                                "logical channel input queue exceeded its byte bound".to_owned(),
+                            );
+                            break;
+                        }
+                    }
+                    GraphicalFrame::HalfClose { channel_id } => {
+                        let Some(channel) = channels.get(&channel_id) else {
+                            terminal_error = Some("half-close targeted an unknown logical channel".to_owned());
+                            break;
+                        };
+                        if channel.commands.try_send(ChannelCommand::HalfClose).is_err() {
+                            terminal_error = Some(
+                                "logical channel input queue exceeded its byte bound".to_owned(),
+                            );
+                            break;
+                        }
+                    }
+                    GraphicalFrame::CloseChannel { channel_id } => {
+                        let Some(channel) = channels.remove(&channel_id) else {
+                            terminal_error = Some("close targeted an unknown logical channel".to_owned());
+                            break;
+                        };
+                        let _ = channel.commands.try_send(ChannelCommand::Close);
+                        channel.cancellation.cancel();
+                    }
+                    GraphicalFrame::Hello
+                    | GraphicalFrame::HelloAck
+                    | GraphicalFrame::ChannelOpened { .. }
+                    | GraphicalFrame::ChannelRejected { .. }
+                    | GraphicalFrame::SessionError { .. } => {
+                        terminal_error = Some("client sent an invalid graphical relay frame".to_owned());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(reason) = terminal_error {
+        let _ = control_tx.try_send(GraphicalFrame::SessionError { reason });
+    }
+    cancellation.cancel();
+    for channel in channels.into_values() {
+        channel.cancellation.cancel();
+    }
+    drop(control_tx);
+    drop(data_tx);
+    let mut writer = writer;
+    tokio::select! {
+        result = &mut writer => result.context("graphical relay writer task failed")?,
+        () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+            writer.abort();
+            let _ = writer.await;
+        }
+    }
+    Ok(())
+}
+
+/// Runs the bounded graphical multiplexer over process stdin/stdout.
+///
+/// # Errors
+///
+/// Returns an error for invalid outer framing, socket validation failure, daemon
+/// death, or stdio transport failure.
+pub async fn run_graphical_stdio() -> Result<()> {
+    let path = socket_path()?;
+    run_graphical_streams_with_connector(tokio::io::stdin(), tokio::io::stdout(), || {
+        connect_validated(&path)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::VecDeque,
         fs,
         os::unix::fs::PermissionsExt,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -322,6 +770,27 @@ mod tests {
     };
 
     use super::*;
+
+    fn validated_pair() -> (ValidatedConnection, UnixStream) {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let peer_pidfd =
+            nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerPidfd).unwrap();
+        (ValidatedConnection { stream, peer_pidfd }, peer)
+    }
+
+    fn queued_connector(
+        connections: Arc<Mutex<VecDeque<ValidatedConnection>>>,
+    ) -> impl Fn() -> std::future::Ready<Result<ValidatedConnection>> {
+        move || {
+            std::future::ready(
+                connections
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .context("test connector exhausted"),
+            )
+        }
+    }
 
     fn test_directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -464,5 +933,322 @@ mod tests {
         let mut output = Vec::new();
         output_reader.read_to_end(&mut output).await.unwrap();
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn graphical_queue_cap_rejects_before_exceeding_byte_bound() {
+        let (commands, _receiver) = mpsc::channel(CHANNEL_QUEUE_FRAMES);
+        for _ in 0..CHANNEL_QUEUE_FRAMES {
+            commands
+                .try_send(ChannelCommand::Data(vec![0; MAX_DATA_BYTES]))
+                .unwrap();
+        }
+        assert!(
+            commands
+                .try_send(ChannelCommand::Data(vec![0; MAX_DATA_BYTES]))
+                .is_err()
+        );
+        assert_eq!(
+            CHANNEL_QUEUE_FRAMES * MAX_DATA_BYTES,
+            MAX_CHANNEL_QUEUED_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn graphical_channel_preserves_half_close_and_channel_local_eof() {
+        let (connection, mut daemon) = validated_pair();
+        let connections = Arc::new(Mutex::new(VecDeque::from([connection])));
+        let (mut client_input, relay_input) = tokio::io::duplex(32 * 1024);
+        let (relay_output, mut client_output) = tokio::io::duplex(32 * 1024);
+        let relay = tokio::spawn(run_graphical_streams_with_connector(
+            relay_input,
+            relay_output,
+            queued_connector(connections),
+        ));
+
+        write_graphical_frame(&mut client_input, &GraphicalFrame::Hello)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::HelloAck)
+        );
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::OpenChannel { channel_id: 1 },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::ChannelOpened { channel_id: 1 })
+        );
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::Data {
+                channel_id: 1,
+                bytes: b"request".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::HalfClose { channel_id: 1 },
+        )
+        .await
+        .unwrap();
+        let daemon_task = tokio::spawn(async move {
+            let mut request = Vec::new();
+            daemon.read_to_end(&mut request).await.unwrap();
+            assert_eq!(request, b"request");
+            daemon.write_all(b"response").await.unwrap();
+            daemon.shutdown().await.unwrap();
+        });
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::Data {
+                channel_id: 1,
+                bytes: b"response".to_vec(),
+            })
+        );
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::CloseChannel { channel_id: 1 })
+        );
+        daemon_task.await.unwrap();
+        client_input.shutdown().await.unwrap();
+        time::timeout(Duration::from_secs(2), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn graphical_channel_limit_rejects_before_another_socket_open() {
+        let opened = Arc::new(AtomicUsize::new(0));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let connector = {
+            let opened = opened.clone();
+            let peers = peers.clone();
+            move || {
+                let (connection, peer) = validated_pair();
+                peers.lock().unwrap().push(peer);
+                opened.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(connection))
+            }
+        };
+        let (mut client_input, relay_input) = tokio::io::duplex(64 * 1024);
+        let (relay_output, mut client_output) = tokio::io::duplex(64 * 1024);
+        let relay = tokio::spawn(run_graphical_streams_with_connector(
+            relay_input,
+            relay_output,
+            connector,
+        ));
+        write_graphical_frame(&mut client_input, &GraphicalFrame::Hello)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::HelloAck)
+        );
+        for channel_id in 1..=u32::try_from(MAX_LOGICAL_CHANNELS + 1).unwrap() {
+            write_graphical_frame(
+                &mut client_input,
+                &GraphicalFrame::OpenChannel { channel_id },
+            )
+            .await
+            .unwrap();
+            let response = read_graphical_frame(&mut client_output).await.unwrap();
+            if usize::try_from(channel_id).unwrap() <= MAX_LOGICAL_CHANNELS {
+                assert_eq!(response, Some(GraphicalFrame::ChannelOpened { channel_id }));
+            } else {
+                assert!(matches!(
+                    response,
+                    Some(GraphicalFrame::ChannelRejected { channel_id: rejected, .. })
+                        if rejected == channel_id
+                ));
+            }
+        }
+        assert_eq!(opened.load(Ordering::SeqCst), MAX_LOGICAL_CHANNELS);
+        client_input.shutdown().await.unwrap();
+        time::timeout(Duration::from_secs(2), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupt_outer_framing_closes_every_active_channel() {
+        let (connection, mut daemon) = validated_pair();
+        let connections = Arc::new(Mutex::new(VecDeque::from([connection])));
+        let (mut client_input, relay_input) = tokio::io::duplex(32 * 1024);
+        let (relay_output, mut client_output) = tokio::io::duplex(32 * 1024);
+        let relay = tokio::spawn(run_graphical_streams_with_connector(
+            relay_input,
+            relay_output,
+            queued_connector(connections),
+        ));
+        write_graphical_frame(&mut client_input, &GraphicalFrame::Hello)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::HelloAck)
+        );
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::OpenChannel { channel_id: 1 },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::ChannelOpened { channel_id: 1 })
+        );
+        client_input.write_all(&[0_u8; 16]).await.unwrap();
+        assert!(matches!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::SessionError { reason }) if reason.contains("magic")
+        ));
+        time::timeout(Duration::from_secs(2), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(daemon.read(&mut byte).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn validated_daemon_death_fails_the_graphical_session() {
+        let mut child = std::process::Command::new("/usr/bin/sleep")
+            .arg("0.1")
+            .spawn()
+            .unwrap();
+        let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let peer_pidfd =
+            rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap();
+        let (stream, _daemon) = UnixStream::pair().unwrap();
+        let connection = ValidatedConnection { stream, peer_pidfd };
+        let connections = Arc::new(Mutex::new(VecDeque::from([connection])));
+        let (mut client_input, relay_input) = tokio::io::duplex(32 * 1024);
+        let (relay_output, mut client_output) = tokio::io::duplex(32 * 1024);
+        let relay = tokio::spawn(run_graphical_streams_with_connector(
+            relay_input,
+            relay_output,
+            queued_connector(connections),
+        ));
+        write_graphical_frame(&mut client_input, &GraphicalFrame::Hello)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::HelloAck)
+        );
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::OpenChannel { channel_id: 1 },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::ChannelOpened { channel_id: 1 })
+        );
+        assert!(matches!(
+            time::timeout(Duration::from_secs(2), read_graphical_frame(&mut client_output))
+                .await
+                .unwrap()
+                .unwrap(),
+            Some(GraphicalFrame::SessionError { reason }) if reason.contains("splinterd process exited")
+        ));
+        time::timeout(Duration::from_secs(2), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        child.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_heavy_channel_does_not_starve_small_channel() {
+        let (first, mut first_daemon) = validated_pair();
+        let (second, mut second_daemon) = validated_pair();
+        let connections = Arc::new(Mutex::new(VecDeque::from([first, second])));
+        let (mut client_input, relay_input) = tokio::io::duplex(64 * 1024);
+        let (relay_output, mut client_output) = tokio::io::duplex(64 * 1024);
+        let relay = tokio::spawn(run_graphical_streams_with_connector(
+            relay_input,
+            relay_output,
+            queued_connector(connections),
+        ));
+        write_graphical_frame(&mut client_input, &GraphicalFrame::Hello)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_graphical_frame(&mut client_output).await.unwrap(),
+            Some(GraphicalFrame::HelloAck)
+        );
+        for channel_id in [1, 2] {
+            write_graphical_frame(
+                &mut client_input,
+                &GraphicalFrame::OpenChannel { channel_id },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                read_graphical_frame(&mut client_output).await.unwrap(),
+                Some(GraphicalFrame::ChannelOpened { channel_id })
+            );
+        }
+        let heavy = tokio::spawn(async move {
+            for _ in 0..(CHANNEL_QUEUE_FRAMES * 2) {
+                if first_daemon
+                    .write_all(&vec![0x55; MAX_DATA_BYTES])
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        second_daemon.write_all(b"small").await.unwrap();
+        let mut preceding = 0_usize;
+        loop {
+            match read_graphical_frame(&mut client_output).await.unwrap() {
+                Some(GraphicalFrame::Data {
+                    channel_id: 2,
+                    bytes,
+                }) => {
+                    assert_eq!(bytes, b"small");
+                    break;
+                }
+                Some(GraphicalFrame::Data { channel_id: 1, .. }) => preceding += 1,
+                other => panic!("unexpected fairness frame: {other:?}"),
+            }
+            assert!(
+                preceding <= CHANNEL_QUEUE_FRAMES + 1,
+                "small channel was starved beyond the aggregate queue bound"
+            );
+        }
+        client_input.shutdown().await.unwrap();
+        time::timeout(Duration::from_secs(2), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut closed = [0_u8; 1];
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), second_daemon.read(&mut closed))
+                .await
+                .unwrap()
+                .unwrap(),
+            0,
+            "session EOF did not close every active daemon channel"
+        );
+        let _ = heavy.await;
     }
 }

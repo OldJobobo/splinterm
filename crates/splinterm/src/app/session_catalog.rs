@@ -6,10 +6,11 @@ use anyhow::{Context, Result};
 use splinterm::{
     SessionPickerItem,
     config::AppConfig,
+    endpoint::{ConnectionFactory, LaunchSemantics},
     session_picker::{RecentDojos, SessionEntry},
 };
 use splinterm_core::{DojoId, LairId, TopologyRevision};
-use splinterm_protocol::{LaunchParameters, Request};
+use splinterm_protocol::{AutomationLaunch, LaunchParameters, Request};
 
 pub(in crate::app) fn launch_parameters(
     cwd: PathBuf,
@@ -25,18 +26,55 @@ pub(in crate::app) fn launch_parameters(
     }
 }
 
+pub(in crate::app) fn automation_launch(
+    cwd: Option<PathBuf>,
+    argv: Vec<String>,
+) -> AutomationLaunch {
+    AutomationLaunch { cwd, argv }
+}
+
 pub(in crate::app) fn create_request(
+    factory: &ConnectionFactory,
     expected_topology_revision: TopologyRevision,
     name: String,
-    cwd: PathBuf,
+    cwd: Option<PathBuf>,
     command: Vec<String>,
     config: &AppConfig,
-) -> Request {
-    Request::CreateLair {
+) -> Result<Request> {
+    create_request_for(
+        factory.capabilities().launch_semantics,
         expected_topology_revision,
         name,
-        launch: launch_parameters(cwd, command, config),
-    }
+        cwd,
+        command,
+        config,
+    )
+}
+
+pub(in crate::app) fn create_request_for(
+    semantics: LaunchSemantics,
+    expected_topology_revision: TopologyRevision,
+    name: String,
+    cwd: Option<PathBuf>,
+    command: Vec<String>,
+    config: &AppConfig,
+) -> Result<Request> {
+    Ok(match semantics {
+        LaunchSemantics::LocalTrusted => Request::CreateLair {
+            expected_topology_revision,
+            name,
+            launch: launch_parameters(
+                cwd.context("local launch working directory is unavailable")?,
+                command,
+                config,
+            ),
+        },
+        LaunchSemantics::RemoteAutomation => Request::CreateLairAutomation {
+            expected_topology_revision,
+            name,
+            launch: automation_launch(cwd, command),
+        },
+    })
 }
 
 pub(in crate::app) fn select_dojo_from(
@@ -59,8 +97,8 @@ pub(in crate::app) fn select_dojo_from(
     Ok(dojo.clone())
 }
 
-pub(in crate::app) fn recent_dojo_ids() -> Vec<DojoId> {
-    RecentDojos::discover().map_or_else(
+pub(in crate::app) fn recent_dojo_ids(factory: &ConnectionFactory) -> Vec<DojoId> {
+    RecentDojos::discover_namespace(&factory.capabilities().recency_namespace).map_or_else(
         |error| {
             eprintln!("splinterm recent sessions unavailable: {error:#}");
             Vec::new()
@@ -69,8 +107,10 @@ pub(in crate::app) fn recent_dojo_ids() -> Vec<DojoId> {
     )
 }
 
-pub(in crate::app) fn remember_dojo(dojo_id: DojoId) {
-    match RecentDojos::discover().and_then(|store| store.record(dojo_id)) {
+pub(in crate::app) fn remember_dojo(factory: &ConnectionFactory, dojo_id: DojoId) {
+    match RecentDojos::discover_namespace(&factory.capabilities().recency_namespace)
+        .and_then(|store| store.record(dojo_id))
+    {
         Ok(()) => {}
         Err(error) => eprintln!("splinterm could not update recent sessions: {error:#}"),
     }

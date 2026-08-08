@@ -17,8 +17,11 @@ pub(in crate::app) struct Cli {
     /// Bound a machine request deadline in milliseconds.
     #[arg(long, global = true, value_parser = clap::value_parser!(u64).range(1..=300_000))]
     pub(in crate::app) timeout_ms: Option<u64>,
+    /// Bind this invocation to one configured remote daemon endpoint.
+    #[arg(long, global = true, value_name = "PROFILE")]
+    pub(in crate::app) remote: Option<String>,
     #[command(subcommand)]
-    pub(in crate::app) command: Command,
+    pub(in crate::app) command: Option<Command>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -95,9 +98,21 @@ pub(in crate::app) enum Command {
     },
     /// Bridge private protocol bytes over non-terminal stdin/stdout.
     Relay {
-        /// Use stdin and stdout as one full-duplex SSH transport.
-        #[arg(long, required = true)]
+        /// Use stdin and stdout as one byte-transparent automation transport.
+        #[arg(
+            long,
+            conflicts_with = "graphical_stdio",
+            required_unless_present = "graphical_stdio"
+        )]
         stdio: bool,
+        /// Carry bounded channels for one native remote graphical client.
+        #[arg(long, conflicts_with = "stdio", required_unless_present = "stdio")]
+        graphical_stdio: bool,
+    },
+    /// Inspect strictly parsed remote connection profiles without connecting.
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
     },
     /// Validate local client configuration without contacting the daemon.
     Config {
@@ -295,6 +310,16 @@ pub(in crate::app) enum Command {
     /// Private daemon-launched trusted consent surface.
     #[command(hide = true)]
     Consent,
+}
+
+#[derive(Debug, Subcommand)]
+pub(in crate::app) enum RemoteCommand {
+    /// List configured named remotes.
+    List,
+    /// Show one resolved profile and its credential-free SSH process plan.
+    Inspect { profile: String },
+    /// Negotiate SSH, relay, and daemon read-only reachability without mapping a Window.
+    Check { profile: String },
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]

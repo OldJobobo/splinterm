@@ -1860,7 +1860,7 @@ fn image_order_uses_strict_adr_tier_boundary_and_kitty_application_ids() {
     higher_application.placement.application_image_id = Some(20);
     let mut lower_application = test_snapshot_image(&[2, 0, 0, 255], 1, 1, 0, source, 0, 0, 2);
     lower_application.placement.application_image_id = Some(10);
-    let mut images = vec![higher_application, lower_application];
+    let mut images = [higher_application, lower_application];
     images.sort_by(compare_snapshot_images);
     assert_eq!(images[0].placement.application_image_id, Some(10));
     assert_eq!(images[1].placement.application_image_id, Some(20));

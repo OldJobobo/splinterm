@@ -1600,6 +1600,7 @@ mod tests {
             focus_down: None,
             viewport_detached: false,
             controller_active: false,
+            forced_control_transfer: true,
             grant_ids: Vec::new(),
             pending_transfer_id: None,
         });

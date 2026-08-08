@@ -143,15 +143,15 @@ impl PointerHandler for App {
                         }
                         continue;
                     }
-                    if let Some(splint_id) = self.splint_at_point(event.position) {
-                        if self.focus_splint(splint_id) {
-                            cell = self.pointer_cell_at(event.position);
-                            self.panes.pane.pointer_cell = cell;
-                            self.update_ime_cursor_rectangle();
-                            if let Err(error) = self.schedule_draw(queue_handle) {
-                                self.scheduling.fail(error);
-                                return;
-                            }
+                    if let Some(splint_id) = self.splint_at_point(event.position)
+                        && self.focus_splint(splint_id)
+                    {
+                        cell = self.pointer_cell_at(event.position);
+                        self.panes.pane.pointer_cell = cell;
+                        self.update_ime_cursor_rectangle();
+                        if let Err(error) = self.schedule_draw(queue_handle) {
+                            self.scheduling.fail(error);
+                            return;
                         }
                     }
                     if button == BTN_LEFT
@@ -197,12 +197,11 @@ impl PointerHandler for App {
                             sgr,
                             modifiers,
                         } => {
-                            if let Some(position) = cell {
-                                if let Some(report) =
+                            if let Some(position) = cell
+                                && let Some(report) =
                                     mouse_report(MouseAction::Press(code), position, modifiers, sgr)
-                                {
-                                    self.send_command(WindowCommand::Input(report));
-                                }
+                            {
+                                self.send_command(WindowCommand::Input(report));
                             }
                         }
                         PressOwner::Selection => {
@@ -235,15 +234,15 @@ impl PointerHandler for App {
                             sgr,
                             modifiers,
                         } => {
-                            if let Some(position) = cell.or(self.panes.pane.pointer_cell) {
-                                if let Some(report) = mouse_report(
+                            if let Some(position) = cell.or(self.panes.pane.pointer_cell)
+                                && let Some(report) = mouse_report(
                                     MouseAction::Release(code),
                                     position,
                                     modifiers,
                                     sgr,
-                                ) {
-                                    self.send_command(WindowCommand::Input(report));
-                                }
+                                )
+                            {
+                                self.send_command(WindowCommand::Input(report));
                             }
                         }
                         PressOwner::Selection => {

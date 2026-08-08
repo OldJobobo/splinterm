@@ -186,6 +186,22 @@ pub struct RecentDojos {
     path: PathBuf,
 }
 
+fn recent_filename(namespace: &str) -> Result<String> {
+    if namespace.is_empty()
+        || namespace.len() > 96
+        || !namespace
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        bail!("recent-Dojo endpoint namespace is unsafe");
+    }
+    Ok(if namespace == "local" {
+        RECENT_FILE.to_owned()
+    } else {
+        format!("recent-dojos-{namespace}.json")
+    })
+}
+
 impl RecentDojos {
     /// Resolves the owner-local recent-Dojo state path.
     ///
@@ -194,6 +210,16 @@ impl RecentDojos {
     /// Returns an error when neither state-home source is available or when the
     /// configured state base is not absolute.
     pub fn discover() -> Result<Self> {
+        Self::discover_namespace("local")
+    }
+
+    /// Resolves recency state for one application-owned endpoint namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe namespace or state-home path.
+    pub fn discover_namespace(namespace: &str) -> Result<Self> {
+        let filename = recent_filename(namespace)?;
         let base = match env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
             Some(path) => PathBuf::from(path),
             None => {
@@ -204,7 +230,7 @@ impl RecentDojos {
         if !base.is_absolute() {
             bail!("state directory base must be absolute");
         }
-        Ok(Self::from_path(base.join("splinterm").join(RECENT_FILE)))
+        Ok(Self::from_path(base.join("splinterm").join(filename)))
     }
 
     #[must_use]
@@ -467,6 +493,17 @@ mod tests {
         assert!(path.exists());
         assert!(legacy.exists());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn endpoint_recency_filenames_are_distinct_and_path_safe() {
+        assert_eq!(recent_filename("local").unwrap(), RECENT_FILE);
+        assert_eq!(
+            recent_filename("remote-wintermute").unwrap(),
+            "recent-dojos-remote-wintermute.json"
+        );
+        assert!(recent_filename("remote/escape").is_err());
+        assert!(recent_filename("remote\u{202e}spoof").is_err());
     }
 
     #[test]
