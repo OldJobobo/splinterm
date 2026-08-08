@@ -684,14 +684,15 @@ where
                         }
                     }
                     GraphicalFrame::HalfClose { channel_id } => {
-                        let Some(channel) = channels.get(&channel_id) else {
+                        if let Some(channel) = channels.get(&channel_id) {
+                            if channel.commands.try_send(ChannelCommand::HalfClose).is_err() {
+                                terminal_error = Some(
+                                    "logical channel input queue exceeded its byte bound".to_owned(),
+                                );
+                                break;
+                            }
+                        } else if channel_id > last_channel_id {
                             terminal_error = Some("half-close targeted an unknown logical channel".to_owned());
-                            break;
-                        };
-                        if channel.commands.try_send(ChannelCommand::HalfClose).is_err() {
-                            terminal_error = Some(
-                                "logical channel input queue exceeded its byte bound".to_owned(),
-                            );
                             break;
                         }
                     }
@@ -998,16 +999,10 @@ mod tests {
         )
         .await
         .unwrap();
-        write_graphical_frame(
-            &mut client_input,
-            &GraphicalFrame::HalfClose { channel_id: 1 },
-        )
-        .await
-        .unwrap();
         let daemon_task = tokio::spawn(async move {
-            let mut request = Vec::new();
-            daemon.read_to_end(&mut request).await.unwrap();
-            assert_eq!(request, b"request");
+            let mut request = [0_u8; 7];
+            daemon.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"request");
             daemon.write_all(b"response").await.unwrap();
             daemon.shutdown().await.unwrap();
         });
@@ -1025,7 +1020,14 @@ mod tests {
         daemon_task.await.unwrap();
 
         // The local connection can finish concurrently with daemon EOF. Its
-        // ordered close may therefore cross the relay's channel-local close.
+        // ordered half-close and close may therefore cross the relay's
+        // channel-local close.
+        write_graphical_frame(
+            &mut client_input,
+            &GraphicalFrame::HalfClose { channel_id: 1 },
+        )
+        .await
+        .unwrap();
         write_graphical_frame(
             &mut client_input,
             &GraphicalFrame::CloseChannel { channel_id: 1 },

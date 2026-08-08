@@ -48,10 +48,12 @@ per-channel byte permits before reading; permits survive through physical write.
 A central round-robin scheduler services one frame per ready channel while a
 separate bounded control queue prevents data from starving session control.
 Per-channel drain barriers preserve data-before-half-close/close ordering. A
-client close may cross a channel-local daemon EOF after the relay has retired the
-same monotonically issued ID; that close is idempotent, while data, half-close,
-or close for a future never-issued ID remains session-fatal. Data frames, queues,
-diagnostics, and channel counts are bounded. Corrupt outer framing and
+client half-close or close may cross a channel-local daemon EOF after the relay
+has retired the same monotonically issued ID; those shutdown frames are
+idempotent. Data for any retired or unknown channel, and shutdown frames for a
+future never-issued ID, remain session-fatal. The client also waits for its
+outgoing task to queue `HalfClose` before it queues `CloseChannel`. Data frames,
+queues, diagnostics, and channel counts are bounded. Corrupt outer framing and
 aggregate-bound violations fail the session; ordinary daemon EOF is
 channel-local unless the validated daemon process exits.
 

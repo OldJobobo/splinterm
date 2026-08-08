@@ -282,18 +282,20 @@ impl ClientMultiplexer {
             ),
         }
         let data_outbound = state.data_outbound.channel(channel_id);
-        tokio::spawn(run_outgoing_channel(
-            channel_id,
-            bridge_reader,
-            data_outbound.clone(),
-            state.clone(),
-        ));
+        let outgoing_data = data_outbound.clone();
+        let outgoing_state = state.clone();
+        let (outgoing_finished, outgoing_completion) = oneshot::channel();
+        tokio::spawn(async move {
+            run_outgoing_channel(channel_id, bridge_reader, outgoing_data, outgoing_state).await;
+            let _ = outgoing_finished.send(());
+        });
         Ok(LogicalChannel {
             stream: application,
             guard: Arc::new(ChannelGuard {
                 channel_id,
                 handle: self.handle.clone(),
                 data_outbound,
+                outgoing_completion: Some(outgoing_completion),
             }),
         })
     }
@@ -470,6 +472,7 @@ struct ChannelGuard {
     channel_id: u32,
     handle: Arc<ClientHandle>,
     data_outbound: FairDataChannel,
+    outgoing_completion: Option<oneshot::Receiver<()>>,
 }
 
 impl Drop for ChannelGuard {
@@ -479,11 +482,15 @@ impl Drop for ChannelGuard {
         let channel_id = self.channel_id;
         let handle = self.handle.clone();
         let data_outbound = self.data_outbound.clone();
+        let outgoing_completion = self.outgoing_completion.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             state.fail("graphical relay channel closed outside an async runtime");
             return;
         };
         runtime.spawn(async move {
+            if let Some(completion) = outgoing_completion {
+                let _ = completion.await;
+            }
             let _ = data_outbound.drain().await;
             if handle
                 .state
@@ -620,6 +627,46 @@ mod tests {
         assert_eq!(&second_echo, b"second");
         done_tx.send(()).unwrap();
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_channel_sends_half_close_before_close() {
+        let (client, server) = tokio::io::duplex(32 * 1024);
+        let (client_reader, client_writer) = tokio::io::split(client);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::Hello)
+            );
+            write_frame(&mut server_writer, &Frame::HelloAck)
+                .await
+                .unwrap();
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::OpenChannel { channel_id: 1 })
+            );
+            write_frame(&mut server_writer, &Frame::ChannelOpened { channel_id: 1 })
+                .await
+                .unwrap();
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::HalfClose { channel_id: 1 })
+            );
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::CloseChannel { channel_id: 1 })
+            );
+        });
+
+        let client = ClientMultiplexer::negotiate(client_reader, client_writer)
+            .await
+            .unwrap();
+        drop(client.open_channel().await.unwrap());
+        time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

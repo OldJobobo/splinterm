@@ -869,6 +869,19 @@ single daemon-bootstrap policy, preserved the original Window focus, and left
 Holodeck active and empty. The final reversible reset backup is
 `/home/oldjobobo/.local/state/splinterm.reset-1786157518619`.
 
+The channel-3 follow-up reproduced the remaining defect with production
+`RemoteSession` and `ClientMultiplexer` code against an isolated real daemon and
+real relay. Dropping a channel started outgoing `HalfClose` and guard-owned
+`CloseChannel` independently; with no queued data, close could overtake
+half-close. The relay retired the channel, then treated the crossed half-close as
+an unknown-channel session error. The fix waits for the outgoing task to queue
+half-close before guard close and treats crossed half-close/close as idempotent
+only for already-issued retired IDs. Data for retired/unknown channels and
+shutdown frames for future IDs remain session-fatal. A deterministic
+server-first regression failed before the fix, and the exact production Rust
+three-channel sequence—short-lived identity, retained Observe/Scrollback attach,
+then control admission—passes after it. Holodeck confirmation remains required.
+
 ## Stop gates
 
 Stop and request a product/security decision if implementation would require:
