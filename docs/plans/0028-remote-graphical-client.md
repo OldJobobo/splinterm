@@ -799,6 +799,39 @@ bootstrap policy. Holodeck retained the reversible reset backup at
 `/home/oldjobobo/.local/state/splinterm.reset-1786150469754`. Phase 4 is not
 complete and the feature must not be described as reconnect-validated.
 
+#### Diagnostic-package Holodeck attempt — 2026-08-07
+
+Commit `0dcb3cb` split channel-admission timeout reporting from private daemon
+Hello timeout reporting, added logical channel IDs to those timeout paths, and
+made cancellation during admission terminal for the multiplexer. Its clean Arch
+package (`2d968dec1898ce40319515797ab021727b4293b1d501d05a539de114ffdfe7c4`)
+passed the package's full check and validation suite before installation.
+Holodeck then passed Pacman integrity, adjacent executable identity, exact relay
+policy rebinding to
+`f2b79636433a01c82a713f2721c3de6f935a9b6807d2120b081f45a4ce83e95e`, daemon
+health, and an agent-backed non-graphical `remote check`.
+
+The first approved isolated smoke aborted before mapping because the
+compositor-launched process did not inherit `SSH_AUTH_SOCK`; it reported
+interactive authentication unavailable, created no topology, and was cleaned
+without retry. A separately approved retry explicitly bound the known agent
+socket. It created the fresh `phase4-hotfix-smoke` Lair, Dojo, and Splint, but
+then failed before mapping with `remote transport failed: early eof`. The daemon
+remained active and responsive. This immediate private-transport error is not
+one of the newly stage-tagged timeout paths, so it supplied no logical channel
+ID and does not prove the production root cause. The narrow daemon-only policy
+denied audit inspection; its authority was not broadened during the aborted
+smoke.
+
+No test Window mapped and no graphical input was sent. Workspace 8 remained
+empty. Focus changed concurrently to an unrelated user Window, so cleanup
+preserved that current focus instead of forcing the older recorded Window.
+Cleanup reset only the sole test topology and left an empty active daemon, with
+the reversible backup at
+`/home/oldjobobo/.local/state/splinterm.reset-1786154406542`. The diagnostic
+package and its exact-digest policy remain installed. Reconnect validation and
+the production root cause both remain open.
+
 ## Stop gates
 
 Stop and request a product/security decision if implementation would require:
