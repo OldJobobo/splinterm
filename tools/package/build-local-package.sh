@@ -39,7 +39,7 @@ fi
 if [[ $check_system_dependencies == true ]]; then
   required=(appstream cargo desktop-file-utils fontconfig freetype2 gcc-libs glibc
     hicolor-icon-theme libxkbcommon noto-fonts-cjk noto-fonts-emoji pixman pkgconf
-    python rust ttf-jetbrains-mono-nerd-basic wayland xdg-terminal-exec)
+    python rust ttf-jetbrains-mono-nerd wayland xdg-terminal-exec)
   missing=$(pacman -T "${required[@]}" || true)
   if [[ -n "$missing" ]]; then
     printf 'missing package dependencies:\n%s\n' "$missing" >&2

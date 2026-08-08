@@ -76,7 +76,7 @@ RUNTIME_DEPENDENCIES = {
     "noto-fonts-emoji",
     "pixman",
     "python",
-    "ttf-jetbrains-mono-nerd-basic",
+    "ttf-jetbrains-mono-nerd",
     "wayland",
     "xdg-terminal-exec",
 }
