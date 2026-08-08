@@ -1,6 +1,6 @@
 # Plan 0028: Remote graphical client over SSH
 
-- **Status:** In progress — Phases 1–3 complete and reviewed; Phase 4 Holodeck validation attempted and blocked by reconnect logical-channel timeout
+- **Status:** In progress — Phases 1–3 complete and reviewed; Phase 4 Holodeck native map, reconnect, persistence, and clean-close boundary passed, with the remaining matrix still to be recorded
 - **Date:** 2026-08-07
 - **Product goal:** provide the Splinterm equivalent of a local terminal emulator attaching through SSH to a remote tmux server
 - **Depends on:** the accepted daemon-owned multiplexing, control, policy, image-security, headless-service, and SSH-relay work
@@ -906,7 +906,24 @@ server shutdown is also idempotent only for already-issued retired IDs, matching
 the relay invariant; Data and future-ID shutdown remain fatal. A deterministic
 one-byte fragmented-frame/channel-event regression passes, as do 100 consecutive
 production `RemoteSession` three-channel lifecycles against an isolated real
-daemon and relay. A newly packaged real-host confirmation remains required.
+daemon and relay.
+
+The reviewed fix was committed as `b5b9399` and packaged with SHA-256
+`25288f986ad7ae44646eeec9d724f7aa9867389cccc79a623b3d22bbdd8af7d1`.
+Holodeck passed Pacman integrity (`42 total files, 0 altered files`), daemon
+health, adjacent executable identity, and exact policy binding to relay digest
+`e97ea2daf499116a4d6bb9e5ea091fff80c13edc106a62204115f615a6d37ff8`.
+The approved no-input smoke mapped one native Window on workspace 8 / DP-2
+without changing focus. Closing that exact Window exited the client with status
+0 while the remote Splint remained Running. Reopening the exact same Lair and
+Dojo mapped a second native Window on the same isolated display; closing it also
+exited with status 0, with no partial-frame or transport diagnostic, while the
+same Splint remained Running. Cleanup removed the temporary exact-Lair rule,
+reset only the test topology, restored an empty workspace 8 and the original
+focus, and left Holodeck with an active empty daemon and only the exact-digest
+`holodeck-native-remote-bootstrap` rule. This completes the real-host reconnect
+and clean-close acceptance boundary; Phase 4 items not exercised by this bounded
+smoke remain subject to their recorded matrix requirements.
 
 ## Stop gates
 
