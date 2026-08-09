@@ -1,6 +1,6 @@
 # Plan 0028: Remote graphical client over SSH
 
-- **Status:** In progress — Phases 1–3 complete and reviewed; Phase 4 Holodeck native map, reconnect, persistence, and clean-close boundary passed, with the remaining matrix still to be recorded
+- **Status:** Complete — Phases 1–4 implemented, validated, recorded, and independently reviewed; final closure evidence is retained under [`artifacts/0028-remote-graphical-client/closure-2026-08-09/`](artifacts/0028-remote-graphical-client/closure-2026-08-09/)
 - **Date:** 2026-08-07
 - **Product goal:** provide the Splinterm equivalent of a local terminal emulator attaching through SSH to a remote tmux server
 - **Depends on:** the accepted daemon-owned multiplexing, control, policy, image-security, headless-service, and SSH-relay work
@@ -1015,9 +1015,46 @@ matched disk, the desktop entry validated, and `remote check wintermute` passed
 with no active Lairs.
 
 This evidence validates SSH-human creation, native multipane rendering, input,
-split, clean client close, and remote persistence on Freeside/Wintermute. It does
-not claim the still-unrecorded password/`SSH_ASKPASS`, multi-tab/control-transfer,
-or transport/daemon-loss matrix items.
+split, clean client close, and remote persistence on Freeside/Wintermute. At
+that milestone it did not claim password/`SSH_ASKPASS`, multi-tab/control-transfer,
+or transport/daemon-loss matrix items; those cases were recorded by the final
+closure below.
+
+#### Final Phase 4 closure — 2026-08-09
+
+The complete operator-approved matrix ran from Wintermute against Holodeck with
+native test Windows isolated on workspace 8 / DP-2 and selected by fresh exact
+Hyprland address before input. Clean package `2884fd09f8d0d91818ed74acaeec92a4463707775d056c805a90b5e2c3446d44`
+from commit `6a7263d` passed the package's complete validation suite and was
+installed on both hosts. Pacman reported `42 total files, 0 altered files` on
+each host, installed executable hashes matched exactly, and `remote check`
+passed before and after the matrix.
+
+The matrix recorded agent-backed authentication, one-prompt terminal password
+authentication, desktop `/usr/lib/seahorse/ssh-askpass`, native creation,
+remote shell/CWD semantics, ordered output, detached scrollback, physical-key
+search, compositor resize, panes, tabs, new Dojo, ordinary control-transfer
+timeout/accept/release, clean close and persistence, exact SSH-child loss,
+exact remote-relay loss, daemon stop/restart with coherent exited persistence,
+and an isolated packaged local graphical regression. Earlier retained Phase 4
+evidence supplies unknown/changed host-key rejection, reconnect/reopen, protocol
+and role rejection, no-image authority, and raw-relay compatibility.
+
+The first control-transfer attempt exposed that transfer timeout disconnected
+human roles through an Automation adapter-handle revocation channel and labeled
+clean EOF as a partial frame. Commit `6a7263d` restricts those disconnects to
+`Automation` while preserving server-side expiry/revocation, and distinguishes
+clean EOF from buffered truncation. Focused tests, strict Clippy, complete package
+validation, fresh security/lifecycle review `f0b233ca`, and the corrected real-host
+15-second timeout plus accepted-transfer smoke passed.
+
+Cleanup removed only the test topology and temporary authentication profiles,
+left Holodeck active with zero Lairs, preserved Wintermute's historical topology,
+emptied workspace 8, and restored the original Foot focus. Final closure review
+`f30bada9` found no blocker or required evidence gap and concluded that the plan
+may be marked complete. Exact commands, hashes, case results, cleanup notes, and
+six verified screenshots are retained in
+[`closure-2026-08-09/EVIDENCE.md`](artifacts/0028-remote-graphical-client/closure-2026-08-09/EVIDENCE.md).
 
 ## Stop gates
 

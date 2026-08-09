@@ -97,8 +97,12 @@ Detailed plan: [`plans/0028-remote-graphical-client.md`](plans/0028-remote-graph
 - Fake-relay integration covers exact interactive identities, daemon denials,
   mismatched acknowledgements, and channel-local controller/subscription loss
 - Phase 3 aggregate non-graphical closure passes, including strict workspace
-  Clippy, affected package suites, and 18 serialized daemon end-to-end tests;
-  remaining supported-boundary work is the operator-gated Phase 4 graphical matrix
+  Clippy, affected package suites, and 18 serialized daemon end-to-end tests
+- Phase 4 real-host closure passes: agent, terminal-password, and desktop
+  `SSH_ASKPASS` authentication; native panes/tabs/search/scrollback/resize;
+  ordinary control transfer; SSH/relay/daemon loss; persistence; isolated local
+  regression; exact cleanup; and independent review are recorded under the Plan
+  0028 closure artifact
 
 ## Phase 4.1 — output throughput stabilization (complete)
 
