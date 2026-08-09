@@ -972,6 +972,20 @@ Affected relay, remote-session, and Splinterm suites, strict workspace Clippy,
 formatting, diff hygiene, and a fresh read-only security/lifecycle review all
 passed.
 
+The clean `3f6db5f` package (`28f09e6594bf8823c977ad6c50951d7c2686b5da43e600d08b3b19ad72123f59`)
+then passed package validation and was installed on Freeside. Its exact client
+checksum is `8d9ace8c1fc76ef2edc2c5dbe2985b7ed67e65b64b8f28635fb069f096ed5d01`;
+Pacman reported `42 total files, 0 altered files`, the running local daemon inode
+matched disk, the desktop entry validated, and `remote check wintermute` passed.
+The installed client directly created `packaged-final`, remained stable through
+a 10-second gate, rendered `PACKAGED_OK`, created a second live remote Splint
+through `Ctrl+Shift+Enter`, and rendered `PACKAGED_SPLIT_OK`. The user
+intentionally closed the Window; its service exited with status 0 while both
+Splints remained Running. Exact cleanup removed only that test Dojo, left no
+active Lairs, emptied workspace 3, and restored the recorded focus. The split
+pane opened noticeably slowly, which remains a performance issue to measure; it
+did not time out or fail.
+
 This evidence validates SSH-human creation, native multipane rendering, input,
 split, clean client close, and remote persistence on Freeside/Wintermute. It does
 not claim the still-unrecorded password/`SSH_ASKPASS`, multi-tab/control-transfer,
