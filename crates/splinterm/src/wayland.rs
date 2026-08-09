@@ -87,16 +87,16 @@ use wayland_protocols::ext::background_effect::v1::client::{
 };
 
 use splinterm_automation_client::ImageContentLeaseSet;
-use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplitRatio};
+use splinterm_core::{Axis, DojoId, LairId, LayoutNode, Splint, SplintId, SplitRatio};
 use splinterm_protocol::{
-    ActiveScreen, ControlTransferDecision, MouseTracking, SearchMatch, TerminalInputModes,
-    TerminalRow, TerminalSnapshot,
+    ActiveScreen, ControlTransferDecision, MouseTracking, SearchMatch, TerminalCell,
+    TerminalInputModes, TerminalRow, TerminalSnapshot,
     perf_trace::{
         PerfTraceEvent, emit_perf_trace, emit_perf_trace_at, monotonic_raw_ns, perf_trace_enabled,
     },
 };
 #[cfg(test)]
-use splinterm_protocol::{HistoryTransition, TerminalCell, TerminalUpdate};
+use splinterm_protocol::{HistoryTransition, TerminalUpdate};
 
 use smithay_client_toolkit::reexports::protocols::wp::{
     fractional_scale::v1::client::{
@@ -785,6 +785,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             keyboard_focused: false,
             graphical_focus: options.graphical_focus,
             forced_control_transfer: options.forced_control_transfer,
+            optimistic_remote_splits: options.optimistic_remote_splits,
             input_generation: 0,
             terminal_focus_reported: false,
             ime_generation: 0,
@@ -850,6 +851,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             layout: options.layout,
             restored_frontend_needs_resize: false,
             pending_exited_splints: HashSet::new(),
+            pending_remote_splits: HashMap::new(),
             dirty_inactive_panes: HashSet::new(),
         },
         tab_state: TabsState {
@@ -1702,6 +1704,7 @@ struct InputState {
     keyboard_focused: bool,
     graphical_focus: Option<tokio::sync::watch::Sender<Option<SplintId>>>,
     forced_control_transfer: bool,
+    optimistic_remote_splits: bool,
     input_generation: u64,
     terminal_focus_reported: bool,
     ime_generation: u64,
@@ -1737,6 +1740,7 @@ struct PanesState {
     layout: Option<LayoutNode>,
     restored_frontend_needs_resize: bool,
     pending_exited_splints: HashSet<SplintId>,
+    pending_remote_splits: HashMap<SplintId, SplintId>,
     dirty_inactive_panes: HashSet<SplintId>,
 }
 
@@ -2007,6 +2011,32 @@ fn try_topology_command(
         TrySendError::Full(_) => anyhow::anyhow!("topology command queue is full"),
         TrySendError::Closed(_) => anyhow::anyhow!("topology command queue is closed"),
     })
+}
+
+fn try_topology_command_with_rollback(
+    commands: Option<&Sender<WindowTopologyCommand>>,
+    command: WindowTopologyCommand,
+    rollback: impl FnOnce(SplintId, SplintId) -> Result<()>,
+) -> Result<()> {
+    let pending_split = match &command {
+        WindowTopologyCommand::Split {
+            target,
+            pending: Some(pending),
+            ..
+        } => Some((*target, *pending)),
+        _ => None,
+    };
+    let result = commands
+        .context("topology command queue is unavailable")
+        .and_then(|commands| try_topology_command(commands, command));
+    if let Err(error) = result {
+        if let Some((target, pending)) = pending_split {
+            rollback(target, pending)
+                .context("failed to roll back unsent remote split placeholder")?;
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Option<usize> {
@@ -2335,6 +2365,129 @@ fn background_effect_trace_line(action: EffectAction) -> Option<String> {
     }
 }
 
+fn remote_split_can_begin(pending: &HashMap<SplintId, SplintId>) -> bool {
+    pending.is_empty()
+}
+
+fn is_pending_remote_splint(pending: &HashMap<SplintId, SplintId>, splint_id: SplintId) -> bool {
+    pending.values().any(|candidate| *candidate == splint_id)
+}
+
+fn insert_pending_split(
+    node: &mut LayoutNode,
+    target: SplintId,
+    pending: Splint,
+    axis: Axis,
+) -> bool {
+    match node {
+        LayoutNode::Leaf(splint) if splint.id == target => {
+            let current = LayoutNode::Leaf(splint.clone());
+            *node = LayoutNode::Branch {
+                axis,
+                ratio: SplitRatio::new(500).expect("fixed pending split ratio is valid"),
+                first: Box::new(current),
+                second: Box::new(LayoutNode::Leaf(pending)),
+            };
+            true
+        }
+        LayoutNode::Leaf(_) => false,
+        LayoutNode::Branch { first, second, .. } => {
+            if first.find_splint(target).is_some() {
+                insert_pending_split(first, target, pending, axis)
+            } else {
+                insert_pending_split(second, target, pending, axis)
+            }
+        }
+    }
+}
+
+fn remove_pending_split(node: LayoutNode, pending: SplintId) -> (Option<LayoutNode>, bool) {
+    match node {
+        LayoutNode::Leaf(splint) if splint.id == pending => (None, true),
+        leaf @ LayoutNode::Leaf(_) => (Some(leaf), false),
+        LayoutNode::Branch {
+            axis,
+            ratio,
+            first,
+            second,
+        } => {
+            let (first, removed_first) = remove_pending_split(*first, pending);
+            let (second, removed_second) = remove_pending_split(*second, pending);
+            let removed = removed_first || removed_second;
+            let node = match (first, second) {
+                (Some(first), Some(second)) => Some(LayoutNode::Branch {
+                    axis,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+                (None, None) => None,
+            };
+            (node, removed)
+        }
+    }
+}
+
+fn pending_remote_snapshot(splint_id: SplintId, columns: usize, rows: usize) -> TerminalSnapshot {
+    let message_cells = "Opening remote pane…"
+        .chars()
+        .take(columns)
+        .map(|character| TerminalCell {
+            content: character.to_string(),
+            spacer_remaining: None,
+            attributes: splinterm_protocol::CellAttributes::default(),
+        })
+        .collect::<Vec<_>>();
+    let visible_rows = (0..rows)
+        .map(|index| TerminalRow {
+            row_id: u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1)),
+            linebreak: false,
+            cells: if index == 0 {
+                message_cells.clone()
+            } else {
+                Vec::new()
+            },
+        })
+        .collect();
+    TerminalSnapshot {
+        splint_id,
+        incarnation: 1,
+        revision: 1,
+        columns,
+        rows,
+        cursor_column: 0,
+        cursor_row: 0,
+        cursor_deferred_wrap: false,
+        active_screen: ActiveScreen::Normal,
+        input_modes: TerminalInputModes {
+            application_cursor: false,
+            application_keypad: false,
+            focus_reporting: false,
+            bracketed_paste: false,
+            cursor_visible: false,
+            cursor_blink: false,
+            mouse_tracking: MouseTracking::None,
+            sgr_mouse: false,
+        },
+        palette: vec![0; 256],
+        default_colors: [0xff_d8dee9, 0xff_2e3440, 0xff_d8dee9],
+        title: "Opening remote pane…".to_owned(),
+        visible_rows,
+        history_generation: 1,
+        oldest_available_scrollback_row_id: None,
+        newest_available_scrollback_row_id: None,
+        scrollback_rows: Vec::new(),
+        available_scrollback_rows: 0,
+        omitted_oldest_scrollback_rows: 0,
+        images: None,
+        exited_code: None,
+        exited_signal: None,
+    }
+}
+
 impl App {
     fn content_rect(&self) -> Rect {
         let y = if self.tab_state.managed_tabs {
@@ -2446,6 +2599,10 @@ impl App {
             pending_exited_splints: std::mem::replace(
                 &mut self.panes.pending_exited_splints,
                 next.pending_exited_splints,
+            ),
+            pending_remote_splits: std::mem::replace(
+                &mut self.panes.pending_remote_splits,
+                next.pending_remote_splits,
             ),
             frame_titles: std::mem::replace(&mut self.presentation.frame_titles, next.frame_titles),
             dirty_inactive_panes: std::mem::replace(
@@ -2648,6 +2805,9 @@ impl App {
     }
 
     fn focus_splint(&mut self, splint_id: SplintId) -> bool {
+        if is_pending_remote_splint(&self.panes.pending_remote_splits, splint_id) {
+            return false;
+        }
         if self.panes.focused_splint() == Some(splint_id) {
             return false;
         }
@@ -3751,7 +3911,32 @@ impl App {
             self.reconcile_command_palette_close(queue_handle);
         }
         let result = match dispatch {
-            BuiltInCommandDispatch::Topology(command) => self.send_topology_command(command),
+            BuiltInCommandDispatch::Topology(mut command) => (|| -> Result<()> {
+                let pending_started = if self.input.optimistic_remote_splits
+                    && let WindowTopologyCommand::Split {
+                        target,
+                        axis,
+                        pending,
+                        ..
+                    } = &mut command
+                    && pending.is_none()
+                {
+                    match self.begin_pending_remote_split(*target, *axis)? {
+                        Some(pending_id) => {
+                            *pending = Some(pending_id);
+                            true
+                        }
+                        None => return Ok(()),
+                    }
+                } else {
+                    false
+                };
+                self.send_topology_command(command)?;
+                if pending_started && self.surface.configured {
+                    self.schedule_draw(queue_handle)?;
+                }
+                Ok(())
+            })(),
             BuiltInCommandDispatch::Focus(splint_id) => {
                 if self.focus_splint(splint_id) {
                     self.update_ime_cursor_rectangle();
@@ -4159,13 +4344,11 @@ impl App {
         true
     }
 
-    fn send_topology_command(&self, command: WindowTopologyCommand) -> Result<()> {
-        let commands = self
-            .tab_state
-            .topology_commands
-            .as_ref()
-            .context("topology command queue is unavailable")?;
-        try_topology_command(commands, command)
+    fn send_topology_command(&mut self, command: WindowTopologyCommand) -> Result<()> {
+        let commands = self.tab_state.topology_commands.clone();
+        try_topology_command_with_rollback(commands.as_ref(), command, |target, pending| {
+            self.rollback_pending_remote_split(target, pending)
+        })
     }
 
     fn send_command(&mut self, command: WindowCommand) {
@@ -5406,6 +5589,99 @@ impl App {
         Ok(())
     }
 
+    fn begin_pending_remote_split(
+        &mut self,
+        target: SplintId,
+        axis: Axis,
+    ) -> Result<Option<SplintId>> {
+        if !remote_split_can_begin(&self.panes.pending_remote_splits) {
+            return Ok(None);
+        }
+        let target_snapshot = std::iter::once(&self.panes.pane)
+            .chain(self.panes.inactive_panes.iter())
+            .find_map(|pane| {
+                pane.snapshot
+                    .as_ref()
+                    .filter(|snapshot| snapshot.splint_id == target)
+            })
+            .context("pending split target has no frontend pane")?;
+        let pending_id = SplintId::new();
+        let mut pending_splint = Splint::shell(PathBuf::from("/"));
+        pending_splint.id = pending_id;
+        "Opening remote pane…".clone_into(&mut pending_splint.title);
+        let mut layout = self
+            .panes
+            .layout
+            .clone()
+            .context("pending split requires a managed layout")?;
+        anyhow::ensure!(
+            insert_pending_split(&mut layout, target, pending_splint, axis),
+            "pending split target is absent from the managed layout"
+        );
+        let mut snapshot =
+            pending_remote_snapshot(pending_id, target_snapshot.columns, target_snapshot.rows);
+        apply_theme(&mut snapshot, self.presentation.theme);
+        let (update_sender, updates) = tokio::sync::mpsc::channel(1);
+        let (commands, command_receiver) = tokio::sync::mpsc::channel(1);
+        let options = WindowPaneOptions {
+            snapshot,
+            updates,
+            commands,
+            authority: AuthorityStatus::default(),
+            controlled: false,
+            image_sources: ImageContentLeaseSet::default(),
+        };
+        let mut pane = PaneView::from_inactive_options_with_context(
+            options,
+            self.surface.scale_120,
+            &self.presentation.render_context,
+        )?;
+        // Placeholder channels never cross the trust boundary and must not emit
+        // terminal input, resize, focus, or disconnect events.
+        pane.updates = None;
+        pane.commands = None;
+        drop(update_sender);
+        drop(command_receiver);
+        self.panes.inactive_panes.push(pane);
+        self.panes.layout = Some(layout);
+        self.panes.pending_remote_splits.insert(target, pending_id);
+        self.presentation.full_redraw = true;
+        Ok(Some(pending_id))
+    }
+
+    fn rollback_pending_remote_split(&mut self, target: SplintId, pending: SplintId) -> Result<()> {
+        anyhow::ensure!(
+            self.panes.pending_remote_splits.get(&target) == Some(&pending),
+            "remote split placeholder reservation changed before rollback"
+        );
+        let layout = self
+            .panes
+            .layout
+            .take()
+            .context("remote split placeholder has no managed layout")?;
+        let (layout, removed) = remove_pending_split(layout, pending);
+        anyhow::ensure!(
+            removed,
+            "remote split placeholder is absent from its layout"
+        );
+        let layout = layout.context("remote split placeholder consumed the complete layout")?;
+        self.panes.inactive_panes.retain(|pane| {
+            pane.snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.splint_id != pending)
+        });
+        self.panes.pending_remote_splits.remove(&target);
+        self.presentation.frame_titles.remove(&pending);
+        self.panes.layout = Some(layout);
+        let _ = self.focus_splint(target);
+        anyhow::ensure!(
+            self.panes.focused_splint() == Some(target),
+            "remote split rollback could not restore target focus"
+        );
+        self.presentation.full_redraw = true;
+        Ok(())
+    }
+
     fn apply_topology_replacement(
         &mut self,
         layout: LayoutNode,
@@ -5469,6 +5745,9 @@ impl App {
                 .as_ref()
                 .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
         });
+        self.panes
+            .pending_remote_splits
+            .retain(|_, pending| layout.find_splint(*pending).is_some());
         self.panes.layout = Some(layout);
         self.presentation.full_redraw = true;
         Ok(())
@@ -7632,6 +7911,95 @@ mod tests {
             .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
+    }
+
+    #[test]
+    fn one_pending_remote_split_blocks_more_splits_and_cannot_receive_focus() {
+        let target = SplintId::new();
+        let pending = SplintId::new();
+        let mut splits = HashMap::new();
+        assert!(remote_split_can_begin(&splits));
+        assert!(!is_pending_remote_splint(&splits, target));
+
+        splits.insert(target, pending);
+        assert!(!remote_split_can_begin(&splits));
+        assert!(is_pending_remote_splint(&splits, pending));
+        assert!(!is_pending_remote_splint(&splits, target));
+    }
+
+    #[test]
+    fn pending_remote_snapshot_is_valid_and_identifiable() {
+        let splint_id = SplintId::new();
+        let snapshot = pending_remote_snapshot(splint_id, 80, 24);
+
+        snapshot.validate().unwrap();
+        assert_eq!(snapshot.splint_id, splint_id);
+        assert_eq!(snapshot.title, "Opening remote pane…");
+        assert_eq!(
+            snapshot.visible_rows[0]
+                .cells
+                .iter()
+                .map(|cell| cell.content.as_str())
+                .collect::<String>(),
+            "Opening remote pane…"
+        );
+        assert!(!snapshot.input_modes.cursor_visible);
+    }
+
+    #[test]
+    fn pending_split_inserts_second_leaf_without_changing_target_identity() {
+        let target = Splint::shell(PathBuf::from("/tmp"));
+        let target_id = target.id;
+        let mut pending = Splint::shell(PathBuf::from("/"));
+        let pending_id = pending.id;
+        "Opening remote pane…".clone_into(&mut pending.title);
+        let mut layout = LayoutNode::Leaf(target);
+
+        assert!(insert_pending_split(
+            &mut layout,
+            target_id,
+            pending,
+            Axis::Horizontal,
+        ));
+        assert_eq!(layout.splint_count(), 2);
+        assert!(layout.find_splint(target_id).is_some());
+        assert_eq!(
+            layout
+                .find_splint(pending_id)
+                .map(|splint| splint.title.as_str()),
+            Some("Opening remote pane…")
+        );
+    }
+
+    #[test]
+    fn pending_split_rollback_collapses_only_the_placeholder_leaf() {
+        let target = Splint::shell(PathBuf::from("/tmp"));
+        let target_id = target.id;
+        let sibling = Splint::shell(PathBuf::from("/tmp"));
+        let sibling_id = sibling.id;
+        let pending = Splint::shell(PathBuf::from("/"));
+        let pending_id = pending.id;
+        let mut split = LayoutNode::Leaf(target);
+        assert!(insert_pending_split(
+            &mut split,
+            target_id,
+            pending,
+            Axis::Horizontal,
+        ));
+        let layout = LayoutNode::Branch {
+            axis: Axis::Vertical,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(split),
+            second: Box::new(LayoutNode::Leaf(sibling)),
+        };
+
+        let (restored, removed) = remove_pending_split(layout, pending_id);
+        let restored = restored.unwrap();
+        assert!(removed);
+        assert_eq!(restored.splint_count(), 2);
+        assert!(restored.find_splint(target_id).is_some());
+        assert!(restored.find_splint(sibling_id).is_some());
+        assert!(restored.find_splint(pending_id).is_none());
     }
 
     #[test]
@@ -10172,6 +10540,44 @@ mod tests {
         )
         .expect_err("disconnected topology receiver");
         assert!(error.to_string().contains("closed"));
+
+        let target = SplintId::new();
+        let pending = SplintId::new();
+        let pending_command = || WindowTopologyCommand::Split {
+            dojo_id: DojoId::new(),
+            target,
+            axis: Axis::Horizontal,
+            pending: Some(pending),
+        };
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        try_topology_command(&sender, WindowTopologyCommand::NewLair).unwrap();
+        let mut rolled_back = None;
+        let error = try_topology_command_with_rollback(
+            Some(&sender),
+            pending_command(),
+            |rollback_target, rollback_pending| {
+                rolled_back = Some((rollback_target, rollback_pending));
+                Ok(())
+            },
+        )
+        .expect_err("full pending split queue");
+        assert!(error.to_string().contains("full"));
+        assert_eq!(rolled_back, Some((target, pending)));
+
+        assert!(receiver.try_recv().is_ok());
+        drop(receiver);
+        rolled_back = None;
+        let error = try_topology_command_with_rollback(
+            Some(&sender),
+            pending_command(),
+            |rollback_target, rollback_pending| {
+                rolled_back = Some((rollback_target, rollback_pending));
+                Ok(())
+            },
+        )
+        .expect_err("closed pending split queue");
+        assert!(error.to_string().contains("closed"));
+        assert_eq!(rolled_back, Some((target, pending)));
     }
 
     #[test]

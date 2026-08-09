@@ -90,6 +90,28 @@ enum CloseAction {
 struct PendingTopologyFocus {
     splint_id: SplintId,
     revision: TopologyRevision,
+    placeholder: Option<SplintId>,
+}
+
+fn topology_edit_label(command: &WindowTopologyCommand) -> &'static str {
+    match command {
+        WindowTopologyCommand::Split { .. } => "split",
+        WindowTopologyCommand::Close { .. } => "close",
+        WindowTopologyCommand::AdjustRatio { .. } | WindowTopologyCommand::SetRatio { .. } => {
+            "resize"
+        }
+        _ => "session",
+    }
+}
+
+fn command_has_pending_split(command: Option<&WindowTopologyCommand>) -> bool {
+    matches!(
+        command,
+        Some(WindowTopologyCommand::Split {
+            pending: Some(_),
+            ..
+        })
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -371,11 +393,16 @@ async fn apply_topology_command(
         )
         .await;
     }
+    let pending_placeholder = match &command {
+        WindowTopologyCommand::Split { pending, .. } => *pending,
+        _ => None,
+    };
     let request = match command {
         WindowTopologyCommand::Split {
             dojo_id: target_dojo,
             target,
             axis,
+            pending: _,
         } => {
             anyhow::ensure!(
                 target_dojo == dojo_id,
@@ -451,10 +478,13 @@ async fn apply_topology_command(
             unreachable!("session commands are handled by the topology manager")
         }
     };
-    topology_command_outcome(connection.request(request).await?)
+    topology_command_outcome(connection.request(request).await?, pending_placeholder)
 }
 
-fn topology_command_outcome(response: Response) -> Result<TopologyCommandOutcome> {
+fn topology_command_outcome(
+    response: Response,
+    pending_placeholder: Option<SplintId>,
+) -> Result<TopologyCommandOutcome> {
     match response {
         Response::SplintStarted {
             splint_id,
@@ -464,6 +494,7 @@ fn topology_command_outcome(response: Response) -> Result<TopologyCommandOutcome
             pending_focus: Some(PendingTopologyFocus {
                 splint_id,
                 revision: topology_revision,
+                placeholder: pending_placeholder,
             }),
         }),
         Response::TopologyCommitted { .. } => Ok(TopologyCommandOutcome::Updated {
@@ -497,17 +528,18 @@ fn pending_focus_for_observation(
     pending: Option<PendingTopologyFocus>,
     observed_revision: TopologyRevision,
     added: &[SplintId],
-) -> (Option<SplintId>, bool) {
+) -> (Option<SplintId>, Option<SplintId>, bool) {
     let Some(pending) = pending else {
-        return (None, false);
+        return (None, None, false);
     };
     if observed_revision < pending.revision {
-        return (None, false);
+        return (None, None, false);
     }
     (
         added
             .contains(&pending.splint_id)
             .then_some(pending.splint_id),
+        pending.placeholder,
         true,
     )
 }
@@ -524,13 +556,29 @@ async fn reconcile_window_topology(
     root: &mut LayoutNode,
     next: LayoutNode,
     focused: Option<SplintId>,
+    placeholder: Option<SplintId>,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
     pane_tasks: &mut HashMap<SplintId, PaneTask>,
 ) -> Result<bool> {
     if *root == next {
-        return Ok(true);
+        let Some(placeholder) = placeholder else {
+            return Ok(true);
+        };
+        return Ok(updates
+            .send(WindowTopologyUpdate::Apply {
+                dojo_id,
+                layout: next,
+                added: Vec::new(),
+                removed: vec![placeholder],
+                focused,
+            })
+            .await
+            .is_ok());
     }
-    let (added_ids, removed) = topology_identity_diff(root, &next);
+    let (added_ids, mut removed) = topology_identity_diff(root, &next);
+    if let Some(placeholder) = placeholder {
+        removed.push(placeholder);
+    }
     let mut prepared = Vec::new();
     for splint_id in added_ids {
         match prepare_live_pane(factory, config, splint_id, image_cache.clone(), false).await {
@@ -1144,7 +1192,7 @@ async fn reconcile_managed_topology(
             managed.identity = identity;
         }
         let (added, _) = topology_identity_diff(&managed.root, &root);
-        let (focused, consumed) =
+        let (focused, placeholder, consumed) =
             pending_focus_for_observation(managed.pending_focus, snapshot.revision, &added);
         match reconcile_window_topology(
             factory,
@@ -1154,6 +1202,7 @@ async fn reconcile_managed_topology(
             &mut managed.root,
             root,
             focused,
+            placeholder,
             updates,
             &mut managed.pane_tasks,
         )
@@ -1289,15 +1338,19 @@ pub(in crate::app) async fn run_topology_manager(
                 return Err(error);
             }
         };
-        if !reconcile_managed_topology(
-            &factory,
-            &config,
-            &image_cache,
-            &mut state,
-            &snapshot,
-            &updates,
-        )
-        .await?
+        // The placeholder exists only in the frontend until this mutation is
+        // acknowledged. An unrelated external topology change must therefore
+        // reconcile together with the split, not against the placeholder alone.
+        if !command_has_pending_split(command.as_ref())
+            && !reconcile_managed_topology(
+                &factory,
+                &config,
+                &image_cache,
+                &mut state,
+                &snapshot,
+                &updates,
+            )
+            .await?
         {
             break;
         }
@@ -1310,6 +1363,15 @@ pub(in crate::app) async fn run_topology_manager(
             | WindowTopologyCommand::AdjustRatio { dojo_id, .. }
             | WindowTopologyCommand::SetRatio { dojo_id, .. } => *dojo_id,
             _ => unreachable!("session command escaped manager dispatch"),
+        };
+        let operation = topology_edit_label(&command);
+        let pending_split = match &command {
+            WindowTopologyCommand::Split {
+                target,
+                pending: Some(pending),
+                ..
+            } => Some((*target, *pending)),
+            _ => None,
         };
         let managed = &mut state
             .tabs
@@ -1338,7 +1400,27 @@ pub(in crate::app) async fn run_topology_manager(
                     break;
                 }
             }
-            Err(error) => eprintln!("splinterm topology edit rejected: {error:#}"),
+            Err(error) => {
+                if let Some((target, pending)) = pending_split {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::Apply {
+                            dojo_id,
+                            layout: managed.root.clone(),
+                            added: Vec::new(),
+                            removed: vec![pending],
+                            focused: Some(target),
+                        })
+                        .await;
+                }
+                let message = format!("{operation} failed: {error:#}");
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: Some(dojo_id),
+                        message: message.clone(),
+                    })
+                    .await;
+                eprintln!("splinterm topology edit rejected: {message}");
+            }
         }
     }
     let mut remaining_tasks = Vec::new();
@@ -1373,6 +1455,7 @@ pub(in crate::app) fn spawn_topology_smoke(
                 dojo_id,
                 target,
                 axis: Axis::Horizontal,
+                pending: None,
             })
             .await
             .map_err(|_| anyhow::anyhow!("topology smoke split channel closed"))?;
@@ -1414,9 +1497,10 @@ mod tests {
         Axis, CloseAction, DojoId, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
         SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyManagerWake,
         TopologyRevision, WindowTopologyCommand, captured_dojo_kill_targets, close_action,
-        close_other_tab_targets, next_topology_manager_wake, parent_ratio,
-        pending_focus_for_observation, refreshed_close_state, topology_command_outcome,
-        topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
+        close_other_tab_targets, command_has_pending_split, next_topology_manager_wake,
+        parent_ratio, pending_focus_for_observation, refreshed_close_state,
+        topology_command_outcome, topology_identity_diff, validate_exited_close_target,
+        window_has_tab_capacity,
     };
     use crate::app::pane_bridge::pane_claims_initial_control;
 
@@ -1600,26 +1684,57 @@ mod tests {
     }
 
     #[test]
+    fn optimistic_split_defers_only_its_pre_mutation_reconciliation() {
+        let dojo_id = DojoId::new();
+        let target = SplintId::new();
+        assert!(command_has_pending_split(Some(
+            &WindowTopologyCommand::Split {
+                dojo_id,
+                target,
+                axis: Axis::Horizontal,
+                pending: Some(SplintId::new()),
+            }
+        )));
+        assert!(!command_has_pending_split(Some(
+            &WindowTopologyCommand::Split {
+                dojo_id,
+                target,
+                axis: Axis::Horizontal,
+                pending: None,
+            }
+        )));
+        assert!(!command_has_pending_split(None));
+    }
+
+    #[test]
     fn successful_split_focuses_the_new_local_splint() {
         let splint_id = SplintId::new();
+        let placeholder = SplintId::new();
         assert_eq!(
-            topology_command_outcome(Response::SplintStarted {
-                splint_id,
-                incarnation: 1,
-                topology_revision: TopologyRevision::new(2),
-            })
+            topology_command_outcome(
+                Response::SplintStarted {
+                    splint_id,
+                    incarnation: 1,
+                    topology_revision: TopologyRevision::new(2),
+                },
+                Some(placeholder),
+            )
             .unwrap(),
             TopologyCommandOutcome::Updated {
                 pending_focus: Some(PendingTopologyFocus {
                     splint_id,
                     revision: TopologyRevision::new(2),
+                    placeholder: Some(placeholder),
                 })
             }
         );
         assert_eq!(
-            topology_command_outcome(Response::TopologyCommitted {
-                topology_revision: TopologyRevision::new(3),
-            })
+            topology_command_outcome(
+                Response::TopologyCommitted {
+                    topology_revision: TopologyRevision::new(3),
+                },
+                None,
+            )
             .unwrap(),
             TopologyCommandOutcome::Updated {
                 pending_focus: None
@@ -1631,26 +1746,28 @@ mod tests {
     fn pending_split_focus_is_revision_bound_and_requires_the_added_splint() {
         let splint_id = SplintId::new();
         let unrelated = SplintId::new();
+        let placeholder = SplintId::new();
         let pending = Some(PendingTopologyFocus {
             splint_id,
             revision: TopologyRevision::new(4),
+            placeholder: Some(placeholder),
         });
 
         assert_eq!(
             pending_focus_for_observation(pending, TopologyRevision::new(3), &[splint_id]),
-            (None, false)
+            (None, None, false)
         );
         assert_eq!(
             pending_focus_for_observation(pending, TopologyRevision::new(4), &[splint_id]),
-            (Some(splint_id), true)
+            (Some(splint_id), Some(placeholder), true)
         );
         assert_eq!(
             pending_focus_for_observation(pending, TopologyRevision::new(4), &[unrelated]),
-            (None, true)
+            (None, Some(placeholder), true)
         );
         assert_eq!(
             pending_focus_for_observation(pending, TopologyRevision::new(5), &[]),
-            (None, true)
+            (None, Some(placeholder), true)
         );
     }
 }

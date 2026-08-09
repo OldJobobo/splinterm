@@ -18,6 +18,8 @@ pub enum WindowTopologyCommand {
         dojo_id: DojoId,
         target: SplintId,
         axis: splinterm_core::Axis,
+        /// Client-local placeholder already rendered for a remote split.
+        pending: Option<SplintId>,
     },
     Close {
         dojo_id: DojoId,

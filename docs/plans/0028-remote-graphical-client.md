@@ -986,6 +986,28 @@ active Lairs, emptied workspace 3, and restored the recorded focus. The split
 pane opened noticeably slowly, which remains a performance issue to measure; it
 did not time out or fail.
 
+The remote-split UX now exposes that bounded wait instead of leaving the layout
+unchanged. The Wayland thread inserts an immediate noninteractive `Opening
+remote pane…` placeholder with a client-only identity, permits one pending split
+per tab, and sends no placeholder input, resize, focus, or topology traffic. The
+manager replaces it only through the authoritative split identity and removes it
+on mutation rejection, missing/full command queues, or the equal-root race where
+the new remote Splint disappears before first observation. Local endpoints keep
+the existing synchronous path.
+
+The first guarded workspace 3 smoke confirmed immediate rendering but exposed
+that a synthetic placeholder still had to be explicitly unfocusable; the daemon
+committed no second Splint, operation diagnostics remained bounded, the exact
+Window closed cleanly, the original Splint persisted, and exact cleanup left no
+active Lairs. The corrected v2 smoke used one physical `Ctrl+Shift+Enter`: the
+placeholder appeared immediately, became a live second Wintermute shell, and
+rendered `OPTIMISTIC_V2`. Objective inspection found exactly two Running Splints
+and no topology-edit error. Closing the exact Window exited cleanly while both
+Splints remained Running; exact test-Dojo cleanup emptied workspace 3 and
+restored the recorded focus. The complete Splinterm library, binary,
+remote-session, and remote-CLI suites, workspace strict Clippy, formatting, and
+diff hygiene passed.
+
 This evidence validates SSH-human creation, native multipane rendering, input,
 split, clean client close, and remote persistence on Freeside/Wintermute. It does
 not claim the still-unrecorded password/`SSH_ASKPASS`, multi-tab/control-transfer,

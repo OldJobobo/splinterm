@@ -85,6 +85,8 @@ pub struct WindowOptions {
     pub graphical_focus: Option<WatchSender<Option<SplintId>>>,
     /// Whether trusted graphical force-transfer actions may be offered or dispatched.
     pub forced_control_transfer: bool,
+    /// Render a client-local placeholder before dispatching a remote split.
+    pub optimistic_remote_splits: bool,
     /// Stable identity for the initial managed Dojo; absent for legacy/evidence windows.
     pub initial_dojo: Option<WindowDojoIdentity>,
 }
@@ -119,6 +121,7 @@ impl Default for WindowOptions {
             topology_commands: None,
             graphical_focus: None,
             forced_control_transfer: true,
+            optimistic_remote_splits: false,
             initial_dojo: None,
         }
     }

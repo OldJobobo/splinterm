@@ -142,6 +142,7 @@ pub(super) struct DojoTabView {
     pub(super) inactive_panes: Vec<PaneView>,
     pub(super) layout: Option<LayoutNode>,
     pub(super) pending_exited_splints: HashSet<SplintId>,
+    pub(super) pending_remote_splits: HashMap<SplintId, SplintId>,
     pub(super) frame_titles: HashMap<SplintId, CachedFrameTitle>,
     pub(super) dirty_inactive_panes: HashSet<SplintId>,
 }
@@ -216,6 +217,8 @@ impl DojoTabView {
 
         self.pending_exited_splints
             .retain(|splint_id| !removed.contains(splint_id));
+        self.pending_remote_splits
+            .retain(|_, pending| layout.find_splint(*pending).is_some());
         self.inactive_panes.extend(prepared);
         let focused = self.focus_splint(next_focus);
         debug_assert!(focused);
@@ -305,6 +308,7 @@ impl DojoTabView {
             inactive_panes,
             layout: Some(layout),
             pending_exited_splints: HashSet::new(),
+            pending_remote_splits: HashMap::new(),
             frame_titles: HashMap::new(),
             dirty_inactive_panes: HashSet::new(),
         })

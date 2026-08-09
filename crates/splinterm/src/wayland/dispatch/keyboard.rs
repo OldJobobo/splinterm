@@ -181,12 +181,31 @@ impl KeyboardHandler for App {
         {
             if let Some(target) = self.panes.focused_splint() {
                 let dojo_id = self.tab_state.active_dojo_id();
+                let mut pending_started = false;
                 let command = match action {
-                    PaneTopologyAction::Split(axis) => WindowTopologyCommand::Split {
-                        dojo_id,
-                        target,
-                        axis,
-                    },
+                    PaneTopologyAction::Split(axis) => {
+                        let pending = if self.input.optimistic_remote_splits {
+                            match self.begin_pending_remote_split(target, axis) {
+                                Ok(Some(pending)) => {
+                                    pending_started = true;
+                                    Some(pending)
+                                }
+                                Ok(None) => return,
+                                Err(error) => {
+                                    self.scheduling.fail(error);
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        WindowTopologyCommand::Split {
+                            dojo_id,
+                            target,
+                            axis,
+                            pending,
+                        }
+                    }
                     PaneTopologyAction::Close => WindowTopologyCommand::Close { dojo_id, target },
                     PaneTopologyAction::AdjustRatio(delta) => WindowTopologyCommand::AdjustRatio {
                         dojo_id,
@@ -195,6 +214,8 @@ impl KeyboardHandler for App {
                     },
                 };
                 if let Err(error) = self.send_topology_command(command) {
+                    self.scheduling.fail(error);
+                } else if pending_started && let Err(error) = self.schedule_draw(queue_handle) {
                     self.scheduling.fail(error);
                 }
             }

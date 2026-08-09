@@ -1077,6 +1077,7 @@ pub(crate) fn command_dispatch(
                 dojo_id: context.dojo_id,
                 target: context.splint_id,
                 axis: Axis::Horizontal,
+                pending: None,
             })
         }
         BuiltInCommandId::SplitVertical => {
@@ -1084,6 +1085,7 @@ pub(crate) fn command_dispatch(
                 dojo_id: context.dojo_id,
                 target: context.splint_id,
                 axis: Axis::Vertical,
+                pending: None,
             })
         }
         BuiltInCommandId::FocusLeft => BuiltInCommandDispatch::Focus(context.focus_left?),
@@ -1522,6 +1524,7 @@ mod tests {
                     dojo_id: context.dojo_id,
                     target: context.splint_id,
                     axis: Axis::Horizontal,
+                    pending: None,
                 }
             ))
         );

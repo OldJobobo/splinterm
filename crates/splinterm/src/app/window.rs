@@ -7,7 +7,9 @@ use splinterm::{
     PerfTraceCorrelation, WindowOptions, WindowUpdate,
     automation::{MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
     config::AppConfig,
-    endpoint::{ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication},
+    endpoint::{
+        ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication, LaunchSemantics,
+    },
     renderer::{self, RendererOptions},
     run_window,
 };
@@ -135,6 +137,8 @@ pub(super) async fn run_live_multipane_window(
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
+    let optimistic_remote_splits =
+        factory.capabilities().launch_semantics == LaunchSemantics::RemoteInteractive;
     let theme_task = tokio::spawn(watch_theme(
         config.theme_source(),
         config.background_alpha,
@@ -156,8 +160,7 @@ pub(super) async fn run_live_multipane_window(
     )?;
     let window_config = config.clone();
     let root = dojo_model.root;
-    let manager_root = root.clone();
-    let active_splint = dojo_model.default_focus;
+    let (manager_root, active_splint) = (root.clone(), dojo_model.default_focus);
     let topology_manager = tokio::spawn(run_topology_manager(
         factory,
         config,
@@ -178,6 +181,7 @@ pub(super) async fn run_live_multipane_window(
             topology_commands: Some(topology_commands),
             graphical_focus,
             forced_control_transfer,
+            optimistic_remote_splits,
             initial_dojo: Some(initial_identity),
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
