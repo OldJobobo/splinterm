@@ -80,8 +80,49 @@ const capabilities = [
     <p class="boundary-note"><span aria-hidden="true">◆</span> Discipline is structural: terminal output remains data, never authority or automatic instruction.</p>
   </section>
 
+  <section class="performance-section shell-section" aria-labelledby="performance-title">
+    <div class="section-index" aria-hidden="true">03 / Measured footprint</div>
+    <div class="performance-heading">
+      <p class="eyebrow">Measured, not mythologized</p>
+      <h2 id="performance-title">Foot-class light.<br />Built to multiply.</h2>
+      <p>
+        Splinterm keeps panes inside one native topology instead of stacking a separate
+        multiplexer onto every terminal window. The payoff shows up most clearly as the
+        workspace grows.
+      </p>
+    </div>
+
+    <div class="performance-feature" aria-label="Splinterm idle memory benchmark">
+      <span>Idle footprint</span>
+      <strong>52.9 <small>MiB</small></strong>
+      <p>Comparable to Foot at 50.9 MiB—and 76–85% below the tested Alacritty, Ghostty, and Kitty builds.</p>
+    </div>
+
+    <div class="benchmark-grid">
+      <article>
+        <span class="benchmark-label">Shell ready</span>
+        <strong>76.7 <small>ms</small></strong>
+        <p>Comparable to Foot, and faster than the tested Alacritty, Kitty, and Ghostty launches.</p>
+      </article>
+      <article>
+        <span class="benchmark-label">Native four-pane grid</span>
+        <strong>111 <small>MiB</small></strong>
+        <p>Less memory than Foot + tmux at 122 MiB, four Foot windows at 197 MiB, or Foot + Zellij at 204 MiB.</p>
+      </article>
+    </div>
+
+    <div class="benchmark-note">
+      <span aria-hidden="true">◆</span>
+      <p>
+        Medians from randomized, checksum-verified runs on one Linux/Wayland host. Splinterm
+        used its prestarted daemon; peer terminals used standalone launches. These are measured
+        results for the recorded hardware and builds—not a universal ranking.
+      </p>
+    </div>
+  </section>
+
   <section class="status-section shell-section" aria-labelledby="status-title">
-    <div class="section-index" aria-hidden="true">03 / Current state</div>
+    <div class="section-index" aria-hidden="true">04 / Current state</div>
     <div class="status-intro">
       <h2 id="status-title">Forged in private.<br />Not ready for daylight.</h2>
       <p>

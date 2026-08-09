@@ -101,7 +101,7 @@ a:focus-visible { outline: 2px solid var(--signal); outline-offset: 4px; }
 .topology-scene figcaption strong { color: var(--ink); font-weight: 400; }
 
 .section-index { color: var(--dim); font: 400 .64rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
-.manifesto, .control-section, .status-section { border-top: 1px solid var(--line); padding-block: clamp(5rem, 9vw, 9rem); }
+.manifesto, .control-section, .performance-section, .status-section { border-top: 1px solid var(--line); padding-block: clamp(5rem, 9vw, 9rem); }
 .manifesto { display: grid; grid-template-columns: .36fr 1.05fr 1fr; gap: 4vw; }
 h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter-spacing: -.06em; font-weight: 500; }
 .manifesto-copy p, .control-heading p, .status-intro p { max-width: 650px; margin: 1.8rem 0 0; color: var(--muted); font-size: 1rem; line-height: 1.75; }
@@ -126,6 +126,40 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
 .control-card li::before { content: '+ '; color: var(--signal); }
 .boundary-note { grid-column: 2; margin: 1rem 0 0; color: var(--dim); font: 300 .68rem var(--mono); }
 .boundary-note span { color: var(--ember); }
+
+.performance-section {
+  display: grid;
+  grid-template-columns: .36fr .9fr 1.1fr;
+  gap: 4vw;
+  background:
+    linear-gradient(135deg, transparent 0 63%, rgb(218 147 54 / .035) 63% 100%),
+    var(--panel);
+}
+.performance-heading { grid-column: 2; }
+.performance-heading .eyebrow { color: var(--signal); }
+.performance-heading p:last-child { max-width: 650px; margin: 1.8rem 0 0; color: var(--muted); line-height: 1.75; }
+.performance-feature {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: start;
+  min-height: 370px;
+  padding: clamp(1.7rem, 3vw, 3rem);
+  border: 1px solid var(--line-hot);
+  border-top: 3px solid var(--signal);
+  background: var(--ground);
+  box-shadow: 18px 18px 0 rgb(23 23 25 / .42);
+}
+.performance-feature > span, .benchmark-label { color: var(--dim); font: 400 .64rem var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+.performance-feature > strong { display: block; margin-top: clamp(4rem, 8vw, 7rem); color: var(--signal); font: 500 clamp(4.6rem, 8vw, 8rem)/.8 var(--sans); letter-spacing: -.09em; }
+.performance-feature strong small, .benchmark-grid strong small { color: var(--muted); font: 400 .8rem var(--mono); letter-spacing: 0; }
+.performance-feature p { max-width: 500px; margin: 2rem 0 0; color: var(--muted); line-height: 1.65; }
+.benchmark-grid { grid-column: 2; display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 3rem; }
+.benchmark-grid article { padding: 1.5rem 0; border-top: 1px solid var(--line-hot); }
+.benchmark-grid strong { display: block; margin: 1.2rem 0 .8rem; color: var(--ink); font-size: clamp(2.2rem, 4vw, 4rem); line-height: .9; letter-spacing: -.065em; }
+.benchmark-grid p { margin: 0; color: var(--muted); font-size: .84rem; line-height: 1.65; }
+.benchmark-note { grid-column: 2 / 4; display: grid; grid-template-columns: 20px minmax(0, 820px); gap: .8rem; margin-top: 1rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--dim); font: 300 .66rem/1.65 var(--mono); }
+.benchmark-note span { color: var(--signal); }
+.benchmark-note p { margin: 0; }
 
 .status-section { display: grid; grid-template-columns: .36fr .8fr 1fr; gap: 4vw; }
 .text-link { display: inline-flex; gap: 1rem; margin-top: 2rem; color: var(--signal); font: 400 .72rem var(--mono); text-decoration: none; }
@@ -167,9 +201,11 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
 @media (max-width: 960px) {
   .hero { grid-template-columns: 1fr; }
   .topology-scene { margin: 1rem 0 2rem; }
-  .manifesto, .status-section { grid-template-columns: 1fr; }
+  .manifesto, .performance-section, .status-section { grid-template-columns: 1fr; }
   .control-section { grid-template-columns: 1fr; }
   .control-heading, .control-grid, .boundary-note { grid-column: 1; }
+  .performance-heading, .performance-feature, .benchmark-grid, .benchmark-note { grid-column: 1; }
+  .performance-feature { grid-row: auto; margin-top: 2rem; }
   .control-heading { grid-template-columns: 1fr; }
   .first-workflow, .docs-gateway { grid-template-columns: 1fr; }
 }
@@ -183,8 +219,10 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
   .topology-canvas { min-height: 390px; }
   .window { width: 155px; }
   .topology-scene figcaption { grid-template-columns: 1fr; }
-  .control-grid { grid-template-columns: 1fr; }
+  .control-grid, .benchmark-grid { grid-template-columns: 1fr; }
   .control-card { min-height: 340px; }
+  .performance-feature { min-height: 320px; }
+  .performance-feature > strong { margin-top: 4rem; font-size: clamp(4.2rem, 20vw, 6.5rem); }
   .control-card h3 { margin-top: 3rem; }
   .sequence li { grid-template-columns: 28px 65px 1fr; }
   .capability-row { grid-template-columns: 28px 1fr; }
