@@ -1,0 +1,60 @@
+{
+  "schema": "splinterm.plan0017.matrix.v1",
+  "exact": true,
+  "git_head": "47d2e450ec21a8e07f4f9d316b2e37acfc58f028",
+  "binary_sha256": "1c579a1ac16ccb91c47c6b996afb4c660037b7de1bbe79e7db80531878233cbf",
+  "cases": [
+    {
+      "case": "corrected-keyboard-light-translucent-compact-scale150",
+      "capture": {
+        "file": "corrected-keyboard-light-translucent-compact-scale150.png",
+        "sha256": "67faf3a00ee233c8363b70435fddeeff4589ed3ac51e4839a102169bdf61b4e3"
+      },
+      "ignored_keys": "vvvv",
+      "input_leak": false,
+      "keyboard_same_window": true,
+      "post_switch_capture": {
+        "file": "keyboard-same-window-switch.png",
+        "sha256": "8580c9e0f458a63f83dfc3f0102cb61efbf33fc83a6442e33c1a839ad997fa73"
+      },
+      "dojo_count": 3
+    },
+    {
+      "case": "minimal-pointer-dark-translucent-scale240",
+      "hover_capture": {
+        "file": "minimal-hover-dark-translucent-scale240.png",
+        "sha256": "a4c9b0cf889e333c7b1fb2e31d53e91d64d024ae11aabb871128fbeca92ad95e"
+      },
+      "cancel_capture": {
+        "file": "minimal-press-release-cancel.png",
+        "sha256": "cf25cd2d4e81efbb64f6fca161767b43b90cb3b7dd7c7a08952cb41a402358bc"
+      },
+      "press_release_cancelled": true,
+      "pointer_activation_same_window": true,
+      "pointer_capture": {
+        "file": "pointer-new-same-window.png",
+        "sha256": "94f75068ace0472be616b9dee3e6e9bcc09df62bffc131c1b5a330419b8793f3"
+      },
+      "dojo_count_before": 4,
+      "dojo_count_after": 5
+    }
+  ],
+  "target": {
+    "address": "0x55a319721660",
+    "pid": 1925816,
+    "splint_id": "2464c16d-9440-46e7-951b-25754ce49dd6",
+    "long_unicode_name": "Plan0017\u2013Unicode\u2013\u6e2c\u8a66\u2013e\u0301"
+  },
+  "scales": [
+    1.5,
+    2.4
+  ],
+  "themes": [
+    "light-translucent",
+    "dark-translucent"
+  ],
+  "sizes": [
+    "compact",
+    "minimal"
+  ]
+}

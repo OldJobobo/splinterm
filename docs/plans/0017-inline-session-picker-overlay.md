@@ -2,10 +2,28 @@
 
 ## Status
 
-Implemented with non-graphical validation; required graphical validation remains
-pending separate approval. This document records the visual and architectural
-contract for the native inline Recent Sessions picker and does not itself
-authorize graphical testing.
+Complete — implementation, current non-graphical validation, the
+operator-approved graphical matrix, exact cleanup, and independent review pass.
+Evidence is retained under
+[`artifacts/0017-inline-session-picker/closure-2026-08-09/`](artifacts/0017-inline-session-picker/closure-2026-08-09/).
+
+## Final closure — 2026-08-09
+
+The Pacman-verified client passed the approved isolated workspace-8 / DP-2 smoke
+and bounded matrix across dark/light, opaque/translucent, normal/compact/minimal,
+scales 120/150/240, empty/single/paged/long-Unicode catalogs, keyboard and
+pointer activation, paired pointer cancellation, Escape restoration, ignored-key
+PTY isolation, and New/existing same-Window switching. Every run used a private
+daemon/socket/state/config, freshly validated exact Window address/PID, and exact
+cleanup. DP-2 returned to scale 1.0/transform 0, workspace 8 ended empty, and the
+pre-run Foot focus and cursor were restored.
+
+Current validation passes 293 active Splinterm library tests with one ignored
+manual benchmark, exact strict workspace Clippy, formatting, and diff hygiene.
+Exact captures, summaries, executed harnesses, cleanup records, false-start
+diagnoses, acceptance mapping, and SHA-256 manifest are retained in
+[`EVIDENCE.md`](artifacts/0017-inline-session-picker/closure-2026-08-09/EVIDENCE.md).
+Fresh review `c341bfbb` found no product, source, input, matrix-coverage, or visual blocker. Its sole cleanup-attestation finding was resolved by retaining exact pre/post cursor comparisons, removing every temporary harness root/script after export, and recording `final-cleanup.json`; no unresolved blocker remains.
 
 ## Objective
 

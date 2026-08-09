@@ -53,5 +53,14 @@ the guarded focus address was unchanged. Exact evidence is under
 `resource-idle*/` and `harness/resource-idle-runner-attempt-*.executed.py`.
 
 No known product, code, documentation, lint-policy, resource, or graphical gate
-remains. Final plan closure still requires an independent review of this newly
-retained resource/policy evidence.
+remains.
+
+## Final closure review — 2026-08-09
+
+Current focused reducer/config/generator tests and exact strict workspace Clippy
+passed, and every retained checksum verified. Fresh read-only reviewer `083c2489`
+compared the Plan 0013 completion criteria against current source, documentation,
+Spike 0032 graphical and Foot evidence, matched resource/idle results, validation
+summaries, and the complete review history. It found no concrete blocker and
+concluded `may mark complete`. Plan 0013 is therefore complete within its
+Hyprland 0.56.1+, staging-protocol, opt-in, and graceful-fallback boundaries.

@@ -1,0 +1,520 @@
+{
+  "focus": {
+    "address": "0x55a31a6b0ac0",
+    "mapped": true,
+    "hidden": false,
+    "visible": true,
+    "acceptsInput": true,
+    "at": [
+      1283,
+      35
+    ],
+    "size": [
+      1240,
+      1394
+    ],
+    "workspace": {
+      "id": 1,
+      "name": "1"
+    },
+    "floating": false,
+    "monitor": 0,
+    "class": "foot",
+    "title": "\u03c0 - splinterm",
+    "initialClass": "foot",
+    "initialTitle": "Foot",
+    "pid": 452322,
+    "xwayland": false,
+    "pinned": false,
+    "pinFullscreened": false,
+    "fullscreen": 0,
+    "fullscreenClient": 0,
+    "fullscreenHandler": "scrolling",
+    "allowedOverFullscreen": true,
+    "grouped": [],
+    "tags": [
+      "default-opacity*",
+      "terminal*"
+    ],
+    "swallowing": "0x0",
+    "focusHistoryID": 0,
+    "inhibitingIdle": false,
+    "xdgTag": "",
+    "xdgDescription": "",
+    "contentType": "none",
+    "tearingHint": false,
+    "stableId": "180000bb"
+  },
+  "cursor": {
+    "x": 1674,
+    "y": 1182
+  },
+  "monitors": [
+    {
+      "id": 0,
+      "name": "DP-1",
+      "description": "Microstep G274QPF E2 CC2HS85708654",
+      "make": "Microstep",
+      "model": "G274QPF E2",
+      "serial": "CC2HS85708654",
+      "width": 2560,
+      "height": 1440,
+      "physicalWidth": 600,
+      "physicalHeight": 330,
+      "refreshRate": 60.0,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        8,
+        32,
+        8,
+        8
+      ],
+      "scale": 1.0,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitary": "0",
+      "solitaryBlockedBy": [
+        "WINDOWED",
+        "CANDIDATE"
+      ],
+      "activelyTearing": false,
+      "tearingBlockedBy": [
+        "NOT_TORN",
+        "USER",
+        "CANDIDATE"
+      ],
+      "directScanoutTo": "0",
+      "directScanoutBlockedBy": [
+        "USER",
+        "CANDIDATE"
+      ],
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "2560x1440@60.00Hz",
+        "2560x1440@180.00Hz",
+        "2560x1440@165.00Hz",
+        "2560x1440@144.00Hz",
+        "2560x1440@120.00Hz",
+        "1920x1080@144.00Hz",
+        "1920x1080@119.97Hz",
+        "1920x1080@120.00Hz",
+        "1920x1080@119.88Hz",
+        "1920x1080@60.00Hz",
+        "1920x1080@60.00Hz",
+        "1920x1080@59.94Hz",
+        "1920x1080@50.00Hz",
+        "1920x1080@24.00Hz",
+        "1920x1080@23.98Hz",
+        "1280x1440@60.00Hz",
+        "1680x1050@119.95Hz",
+        "1680x1050@59.95Hz",
+        "1600x900@60.00Hz",
+        "1280x1024@75.03Hz",
+        "1280x1024@60.02Hz",
+        "1440x900@59.89Hz",
+        "1152x864@75.00Hz",
+        "1280x720@60.00Hz",
+        "1280x720@59.94Hz",
+        "1280x720@50.00Hz",
+        "1024x768@75.03Hz",
+        "1024x768@70.07Hz",
+        "1024x768@60.00Hz",
+        "800x600@75.00Hz",
+        "800x600@72.19Hz",
+        "800x600@60.32Hz",
+        "800x600@56.25Hz",
+        "720x576@50.00Hz",
+        "720x576@50.00Hz",
+        "720x480@60.00Hz",
+        "720x480@59.94Hz",
+        "640x480@75.00Hz",
+        "640x480@72.81Hz",
+        "640x480@66.67Hz",
+        "640x480@60.00Hz",
+        "640x480@59.94Hz",
+        "640x480@59.94Hz",
+        "720x400@70.08Hz"
+      ],
+      "colorManagementPreset": "srgb",
+      "sdrBrightness": 1.0,
+      "sdrSaturation": 1.0,
+      "sdrMinLuminance": 0.2,
+      "sdrMaxLuminance": 80,
+      "hardwareCursorsInUse": true
+    },
+    {
+      "id": 1,
+      "name": "DP-2",
+      "description": "Dell Inc. DELL U2312HM 2GFKN365EE5L",
+      "make": "Dell Inc.",
+      "model": "DELL U2312HM",
+      "serial": "2GFKN365EE5L",
+      "width": 1920,
+      "height": 1080,
+      "physicalWidth": 510,
+      "physicalHeight": 290,
+      "refreshRate": 60.0,
+      "x": 640,
+      "y": -1080,
+      "activeWorkspace": {
+        "id": 8,
+        "name": "8"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        8,
+        32,
+        8,
+        8
+      ],
+      "scale": 1.0,
+      "transform": 0,
+      "focused": false,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitary": "0",
+      "solitaryBlockedBy": [
+        "WINDOWED",
+        "CANDIDATE"
+      ],
+      "activelyTearing": false,
+      "tearingBlockedBy": [
+        "NOT_TORN",
+        "USER",
+        "CANDIDATE"
+      ],
+      "directScanoutTo": "0",
+      "directScanoutBlockedBy": [
+        "USER",
+        "CANDIDATE"
+      ],
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "1920x1080@60.00Hz",
+        "1280x1024@75.03Hz",
+        "1280x1024@60.02Hz",
+        "1152x864@75.00Hz",
+        "1024x768@75.03Hz",
+        "1024x768@60.00Hz",
+        "800x600@75.00Hz",
+        "800x600@60.32Hz",
+        "640x480@75.00Hz",
+        "640x480@59.94Hz",
+        "720x400@70.08Hz"
+      ],
+      "colorManagementPreset": "srgb",
+      "sdrBrightness": 1.0,
+      "sdrSaturation": 1.0,
+      "sdrMinLuminance": 0.2,
+      "sdrMaxLuminance": 80,
+      "hardwareCursorsInUse": true
+    },
+    {
+      "id": 2,
+      "name": "DP-3",
+      "description": "Microstep G274QPF E2 CC2HS85710300",
+      "make": "Microstep",
+      "model": "G274QPF E2",
+      "serial": "CC2HS85710300",
+      "width": 2560,
+      "height": 1440,
+      "physicalWidth": 600,
+      "physicalHeight": 330,
+      "refreshRate": 60.0,
+      "x": 2560,
+      "y": -798,
+      "activeWorkspace": {
+        "id": 6,
+        "name": "6"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        8,
+        32,
+        8,
+        32
+      ],
+      "scale": 1.0,
+      "transform": 1,
+      "focused": false,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitary": "0",
+      "solitaryBlockedBy": [
+        "WINDOWED",
+        "CANDIDATE"
+      ],
+      "activelyTearing": false,
+      "tearingBlockedBy": [
+        "NOT_TORN",
+        "USER",
+        "CANDIDATE"
+      ],
+      "directScanoutTo": "0",
+      "directScanoutBlockedBy": [
+        "USER",
+        "CANDIDATE"
+      ],
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "2560x1440@60.00Hz",
+        "2560x1440@180.00Hz",
+        "2560x1440@165.00Hz",
+        "2560x1440@144.00Hz",
+        "2560x1440@120.00Hz",
+        "1920x1080@144.00Hz",
+        "1920x1080@119.97Hz",
+        "1920x1080@120.00Hz",
+        "1920x1080@119.88Hz",
+        "1920x1080@60.00Hz",
+        "1920x1080@60.00Hz",
+        "1920x1080@59.94Hz",
+        "1920x1080@50.00Hz",
+        "1920x1080@24.00Hz",
+        "1920x1080@23.98Hz",
+        "1280x1440@60.00Hz",
+        "1680x1050@119.95Hz",
+        "1680x1050@59.95Hz",
+        "1600x900@60.00Hz",
+        "1280x1024@75.03Hz",
+        "1280x1024@60.02Hz",
+        "1440x900@59.89Hz",
+        "1152x864@75.00Hz",
+        "1280x720@60.00Hz",
+        "1280x720@59.94Hz",
+        "1280x720@50.00Hz",
+        "1024x768@75.03Hz",
+        "1024x768@70.07Hz",
+        "1024x768@60.00Hz",
+        "800x600@75.00Hz",
+        "800x600@72.19Hz",
+        "800x600@60.32Hz",
+        "800x600@56.25Hz",
+        "720x576@50.00Hz",
+        "720x576@50.00Hz",
+        "720x480@60.00Hz",
+        "720x480@59.94Hz",
+        "640x480@75.00Hz",
+        "640x480@72.81Hz",
+        "640x480@66.67Hz",
+        "640x480@60.00Hz",
+        "640x480@59.94Hz",
+        "640x480@59.94Hz",
+        "720x400@70.08Hz"
+      ],
+      "colorManagementPreset": "srgb",
+      "sdrBrightness": 1.0,
+      "sdrSaturation": 1.0,
+      "sdrMinLuminance": 0.2,
+      "sdrMaxLuminance": 80,
+      "hardwareCursorsInUse": true
+    }
+  ],
+  "clients": [
+    {
+      "address": "0x55a31a544cf0",
+      "mapped": true,
+      "hidden": false,
+      "visible": true,
+      "acceptsInput": true,
+      "at": [
+        2571,
+        480
+      ],
+      "size": [
+        1418,
+        1217
+      ],
+      "workspace": {
+        "id": 6,
+        "name": "6"
+      },
+      "floating": false,
+      "monitor": 2,
+      "class": "brave-browser",
+      "title": "Features - iTerm2 - macOS Terminal Replacement - Brave",
+      "initialClass": "brave-browser",
+      "initialTitle": "New Tab - Brave",
+      "pid": 20711,
+      "xwayland": false,
+      "pinned": false,
+      "pinFullscreened": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "scrolling",
+      "allowedOverFullscreen": true,
+      "grouped": [],
+      "tags": [
+        "chromium-based-browser*",
+        "default-opacity*"
+      ],
+      "swallowing": "0x0",
+      "focusHistoryID": 1,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": "",
+      "contentType": "none",
+      "tearingHint": false,
+      "stableId": "18000007"
+    },
+    {
+      "address": "0x55a31a5fe840",
+      "mapped": true,
+      "hidden": false,
+      "visible": true,
+      "acceptsInput": true,
+      "at": [
+        2571,
+        -734
+      ],
+      "size": [
+        1418,
+        1208
+      ],
+      "workspace": {
+        "id": 6,
+        "name": "6"
+      },
+      "floating": false,
+      "monitor": 2,
+      "class": "vesktop",
+      "title": "(75) Discord | #general | Ministry of Taste",
+      "initialClass": "vesktop",
+      "initialTitle": "(73) Discord | #agents-and-prompts | Ministry of Taste",
+      "pid": 2512,
+      "xwayland": false,
+      "pinned": false,
+      "pinFullscreened": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "scrolling",
+      "allowedOverFullscreen": true,
+      "grouped": [],
+      "tags": [
+        "default-opacity*"
+      ],
+      "swallowing": "0x0",
+      "focusHistoryID": 2,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": "",
+      "contentType": "none",
+      "tearingHint": false,
+      "stableId": "1800001a"
+    },
+    {
+      "address": "0x55a31a480a10",
+      "mapped": true,
+      "hidden": false,
+      "visible": true,
+      "acceptsInput": true,
+      "at": [
+        36,
+        35
+      ],
+      "size": [
+        1241,
+        1394
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": false,
+      "monitor": 0,
+      "class": "foot",
+      "title": "oldjobobo@wintermute:~",
+      "initialClass": "foot",
+      "initialTitle": "Foot",
+      "pid": 425653,
+      "xwayland": false,
+      "pinned": false,
+      "pinFullscreened": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "scrolling",
+      "allowedOverFullscreen": true,
+      "grouped": [],
+      "tags": [
+        "terminal*"
+      ],
+      "swallowing": "0x0",
+      "focusHistoryID": 3,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": "",
+      "contentType": "none",
+      "tearingHint": false,
+      "stableId": "180000b9"
+    },
+    {
+      "address": "0x55a31a6b0ac0",
+      "mapped": true,
+      "hidden": false,
+      "visible": true,
+      "acceptsInput": true,
+      "at": [
+        1283,
+        35
+      ],
+      "size": [
+        1240,
+        1394
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": false,
+      "monitor": 0,
+      "class": "foot",
+      "title": "\u03c0 - splinterm",
+      "initialClass": "foot",
+      "initialTitle": "Foot",
+      "pid": 452322,
+      "xwayland": false,
+      "pinned": false,
+      "pinFullscreened": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "scrolling",
+      "allowedOverFullscreen": true,
+      "grouped": [],
+      "tags": [
+        "default-opacity*",
+        "terminal*"
+      ],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": "",
+      "contentType": "none",
+      "tearingHint": false,
+      "stableId": "180000bb"
+    }
+  ]
+}

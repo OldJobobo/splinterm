@@ -1,0 +1,32 @@
+{
+  "schema": "splinterm.plan0017.smoke.v1",
+  "exact": true,
+  "git_head": "47d2e450ec21a8e07f4f9d316b2e37acfc58f028",
+  "binary_sha256": "1c579a1ac16ccb91c47c6b996afb4c660037b7de1bbe79e7db80531878233cbf",
+  "window": {
+    "address": "0x55a31a76bf40",
+    "pid": 1858814,
+    "class": "com.oldjobobo.splinterm",
+    "title": "Splinterm \u2014 local controller",
+    "workspace": {
+      "id": 8,
+      "name": "8"
+    },
+    "monitor": 1,
+    "at": [
+      960,
+      -918
+    ],
+    "size": [
+      960,
+      600
+    ]
+  },
+  "scale": 1.2,
+  "initial_focus_preserved": true,
+  "escape_same_window": true,
+  "capture": {
+    "file": "picker-smoke.png",
+    "sha256": "bf04f56e597778b548996193b701262de12964102fcd2bfeb7d0977e69d69dc7"
+  }
+}

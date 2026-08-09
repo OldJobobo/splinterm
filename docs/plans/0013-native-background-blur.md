@@ -1,11 +1,29 @@
 # Plan 0013: native Wayland background blur
 
-- **Status:** In progress — Slices 0–6 complete; Slice 7 review in progress
-- **Release decision:** Do not advertise native blur until protocol, fallback, graphical, and review gates pass
+- **Status:** Complete — Slices 0–7 implemented, guarded-validated, resource-validated, and independently reviewed on 2026-08-09
+- **Release decision:** Opt-in native blur is validated on Hyprland 0.56.1+ within the documented staging-protocol and graceful-fallback boundaries
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Protocol authority:** `ext-background-effect-v1`, version 1, from `wayland-protocols` staging
 - **Initial compositor target:** Hyprland 0.56.1 or newer
 - **Related decisions:** [ADR 0004](../adr/0004-font-and-cpu-renderer.md) and [configuration guide](../configuration.md)
+
+## Final closure — 2026-08-09
+
+The retained Spike 0032 smoke, full protocol/fallback/resize/toggle matrix, Foot
+comparison, and matched five-pair RC-versus-pre-feature resource/idle sequence
+all pass. The RC median RSS delta is 61,440 bytes, below the 1 MiB measurement
+noise floor, and both binaries recorded at most one idle CPU tick over two
+seconds. Every retained artifact checksum verifies.
+
+Current validation also passes the eight background-effect reducer tests, the
+strict alpha/blur configuration test, the Omarchy theme-generator test, exact
+`cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check`.
+The earlier non-finite-alpha, release-documentation, checksum, Clippy-policy, and
+resource-evidence findings are resolved in the retained disposition. Fresh final
+read-only closure review `083c2489` found no concrete blocker and concluded that
+Plan 0013 may be marked complete. Native blur remains opt-in and
+compositor-policy-dependent; unsupported protocol/capability paths retain the
+documented ordinary-transparency fallback.
 
 ## Decision
 
