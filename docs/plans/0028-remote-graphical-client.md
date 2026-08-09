@@ -1006,7 +1006,13 @@ and no topology-edit error. Closing the exact Window exited cleanly while both
 Splints remained Running; exact test-Dojo cleanup emptied workspace 3 and
 restored the recorded focus. The complete Splinterm library, binary,
 remote-session, and remote-CLI suites, workspace strict Clippy, formatting, and
-diff hygiene passed.
+diff hygiene passed. Clean commit `b053d37` then produced validated package
+`71651ef5ebe04793f98901ef7595555507058c13f10cc14d878cee6776ba2c42`.
+Freeside installed its exact client
+`d1d56eefd32cd39c8beb1c2352d06e396e6c4ce2b07a65a00033afdd0a2a6bc2`;
+Pacman reported `42 total files, 0 altered files`, the running daemon inode
+matched disk, the desktop entry validated, and `remote check wintermute` passed
+with no active Lairs.
 
 This evidence validates SSH-human creation, native multipane rendering, input,
 split, clean client close, and remote persistence on Freeside/Wintermute. It does
