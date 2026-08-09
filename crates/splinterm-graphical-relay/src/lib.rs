@@ -33,8 +33,13 @@ pub const FIXED_WINDOW_SERVICE_CHANNELS: usize = 8;
 /// Hard maximum channels for the largest supported native Window topology.
 pub const MAX_LOGICAL_CHANNELS: usize =
     MAX_NATIVE_WINDOW_SPLINTS * RETAINED_CHANNELS_PER_SPLINT + FIXED_WINDOW_SERVICE_CHANNELS;
-/// Maximum queued data per logical channel.
+/// Maximum queued outgoing data per logical channel.
 pub const MAX_CHANNEL_QUEUED_BYTES: usize = 64 * 1024;
+/// Maximum queued incoming data per logical channel.
+///
+/// This matches the supported private-frame ceiling without parsing the opaque
+/// payload, allowing one fragmented logical record to survive a delayed consumer.
+pub const MAX_INCOMING_CHANNEL_QUEUED_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum queued data across a complete graphical relay session.
 pub const MAX_SESSION_QUEUED_BYTES: usize = MAX_LOGICAL_CHANNELS * MAX_CHANNEL_QUEUED_BYTES;
 

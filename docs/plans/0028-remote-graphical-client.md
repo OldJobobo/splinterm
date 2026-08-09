@@ -932,6 +932,51 @@ focus, and left Holodeck with an active empty daemon and only the exact-digest
 and clean-close acceptance boundary; Phase 4 items not exercised by this bounded
 smoke remain subject to their recorded matrix requirements.
 
+#### Freeside remote-interactive and multipane validation — 2026-08-08
+
+Protocol 28 packages were installed on Freeside and Wintermute with exact
+Pacman ownership and integrity. Freeside's graphical client reached Wintermute
+through the fixed OpenSSH graphical-relay command with no automation policy on
+the daemon. The first native create exposed one stale handler check:
+`AuthorizationStatus` accepted the remote-interactive request plan but rejected
+its handler context. The reviewed `cd09d53` fix made the existing interactive
+bypass authoritative for authorization status and revocation without weakening
+Automation or the remote exclusions for focus publication, image content, and
+forced transfer.
+
+A subsequent multipane `reopen` exposed a separate client-side transport bound.
+An approved outer-frame trace recorded only frame kind, channel ID, and byte
+length. It showed a renderer-delayed pane observation channel receiving valid
+fragmented bursts larger than the old three-frame incoming queue. Queue overflow
+failed the whole multiplexer and closed healthy controller and topology sibling
+channels. Incoming routing now retains explicit per-channel and shared-session
+byte permits: one channel can hold one maximum 8 MiB private frame, the complete
+incoming session remains bounded by `MAX_SESSION_QUEUED_BYTES`, and outgoing
+bounds are unchanged. A deterministic delayed-consumer regression verifies a
+256 KiB fragmented burst byte-for-byte and then proves a sibling channel remains
+usable. The maximum incoming channel budget is asserted equal to the private
+protocol frame ceiling. Debug validation also replaced an incorrect
+"focus changed" assertion with the real postcondition that the requested Splint
+is focused after topology replacement.
+
+The corrected development client then remained stable on Freeside workspace 3,
+rendered the live Wintermute shell, accepted `FIX_OK`, created a second live
+Splint through the physical `Ctrl+Shift+Enter` graphical shortcut, and accepted
+`SPLIT_OK` in the new pane. Wintermute reported exactly two Running Splints.
+Closing the exact Freeside Window stopped the client while both remote Splints
+remained Running. Cleanup killed and closed only the test Dojo, left no active
+Lairs, removed every temporary wrapper and development binary, and restored the
+original Freeside Foot focus. The retained screenshot SHA-256 is
+`6fac23715246751920e9d8adc3a7dfc7f057e384dc760c0b13c95d12f034b347`.
+Affected relay, remote-session, and Splinterm suites, strict workspace Clippy,
+formatting, diff hygiene, and a fresh read-only security/lifecycle review all
+passed.
+
+This evidence validates SSH-human creation, native multipane rendering, input,
+split, clean client close, and remote persistence on Freeside/Wintermute. It does
+not claim the still-unrecorded password/`SSH_ASKPASS`, multi-tab/control-transfer,
+or transport/daemon-loss matrix items.
+
 ## Stop gates
 
 Stop and request a product/security decision if implementation would require:

@@ -8,22 +8,29 @@ use std::{
 use anyhow::{Result, bail};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf},
-    sync::{mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ChannelIdAllocator, FairDataChannel, FairDataSender, Frame, MAX_CHANNEL_QUEUED_BYTES,
-    MAX_DATA_BYTES, MAX_LOGICAL_CHANNELS, fair_data_queue, read_frame, write_data_frame,
-    write_frame,
+    ChannelIdAllocator, FairDataChannel, FairDataSender, Frame, MAX_DATA_BYTES,
+    MAX_INCOMING_CHANNEL_QUEUED_BYTES, MAX_LOGICAL_CHANNELS, MAX_SESSION_QUEUED_BYTES,
+    fair_data_queue, read_frame, write_data_frame, write_frame,
 };
 
-const CHANNEL_QUEUE_FRAMES: usize = MAX_CHANNEL_QUEUED_BYTES / MAX_DATA_BYTES - 1;
+const CHANNEL_QUEUE_FRAMES: usize = MAX_INCOMING_CHANNEL_QUEUED_BYTES / MAX_DATA_BYTES + 2;
 const CONTROL_QUEUE_FRAMES: usize = MAX_LOGICAL_CHANNELS * 2 + 16;
 
 #[derive(Debug)]
+struct IncomingData {
+    bytes: Vec<u8>,
+    _channel_bytes: OwnedSemaphorePermit,
+    _session_bytes: OwnedSemaphorePermit,
+}
+
+#[derive(Debug)]
 enum IncomingCommand {
-    Data(Vec<u8>),
+    Data(IncomingData),
     HalfClose,
     Close,
 }
@@ -32,12 +39,14 @@ enum IncomingCommand {
 struct Route {
     opened: Option<oneshot::Sender<Result<(), String>>>,
     incoming: mpsc::Sender<IncomingCommand>,
+    incoming_bytes: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
 struct ClientState {
     control_outbound: mpsc::Sender<Frame>,
     data_outbound: FairDataSender,
+    incoming_session_bytes: Arc<Semaphore>,
     routes: Mutex<HashMap<u32, Route>>,
     allocator: Mutex<ChannelIdAllocator>,
     failure: Mutex<Option<String>>,
@@ -152,6 +161,7 @@ impl ClientMultiplexer {
         let state = Arc::new(ClientState {
             control_outbound,
             data_outbound,
+            incoming_session_bytes: Arc::new(Semaphore::new(MAX_SESSION_QUEUED_BYTES)),
             routes: Mutex::new(HashMap::new()),
             allocator: Mutex::new(ChannelIdAllocator::default()),
             failure: Mutex::new(None),
@@ -246,6 +256,7 @@ impl ClientMultiplexer {
                 Route {
                     opened: Some(opened_tx),
                     incoming,
+                    incoming_bytes: Arc::new(Semaphore::new(MAX_INCOMING_CHANNEL_QUEUED_BYTES)),
                 },
             );
         let mut opening = OpeningGuard {
@@ -340,7 +351,7 @@ fn dispatch_frame(state: &Arc<ClientState>, frame: Frame) -> std::result::Result
             let _ = route.incoming.try_send(IncomingCommand::Close);
         }
         Frame::Data { channel_id, bytes } => {
-            send_incoming(state, channel_id, IncomingCommand::Data(bytes), "data")?;
+            send_incoming_data(state, channel_id, bytes)?;
         }
         Frame::HalfClose { channel_id } => {
             send_shutdown_incoming(state, channel_id, IncomingCommand::HalfClose, "half-close")?;
@@ -356,11 +367,10 @@ fn dispatch_frame(state: &Arc<ClientState>, frame: Frame) -> std::result::Result
     Ok(())
 }
 
-fn send_incoming(
+fn send_incoming_data(
     state: &ClientState,
     channel_id: u32,
-    command: IncomingCommand,
-    label: &str,
+    bytes: Vec<u8>,
 ) -> std::result::Result<(), String> {
     let routes = state
         .routes
@@ -368,16 +378,30 @@ fn send_incoming(
         .map_err(|_| "graphical relay route table is poisoned".to_owned())?;
     let route = routes
         .get(&channel_id)
-        .ok_or_else(|| format!("{label} targeted an unknown graphical relay channel"))?;
+        .ok_or_else(|| "data targeted an unknown graphical relay channel".to_owned())?;
     if route.opened.is_some() {
-        return Err(format!(
-            "{label} preceded graphical relay channel admission"
-        ));
+        return Err("data preceded graphical relay channel admission".to_owned());
     }
+    let amount = u32::try_from(bytes.len())
+        .map_err(|_| "graphical relay data length exceeded its byte bound".to_owned())?;
+    let channel_bytes = route
+        .incoming_bytes
+        .clone()
+        .try_acquire_many_owned(amount)
+        .map_err(|_| "graphical relay channel queue exceeded its byte bound".to_owned())?;
+    let session_bytes = state
+        .incoming_session_bytes
+        .clone()
+        .try_acquire_many_owned(amount)
+        .map_err(|_| "graphical relay session queue exceeded its byte bound".to_owned())?;
     route
         .incoming
-        .try_send(command)
-        .map_err(|_| "graphical relay channel queue exceeded its byte bound".to_owned())
+        .try_send(IncomingCommand::Data(IncomingData {
+            bytes,
+            _channel_bytes: channel_bytes,
+            _session_bytes: session_bytes,
+        }))
+        .map_err(|_| "graphical relay channel queue exceeded its frame bound".to_owned())
 }
 
 fn send_shutdown_incoming(
@@ -455,8 +479,8 @@ async fn run_incoming_channel(
             command = incoming.recv() => command,
         };
         match command {
-            Some(IncomingCommand::Data(bytes)) if !half_closed => {
-                if writer.write_all(&bytes).await.is_err() {
+            Some(IncomingCommand::Data(data)) if !half_closed => {
+                if writer.write_all(&data.bytes).await.is_err() {
                     let _ = state
                         .control_outbound
                         .try_send(Frame::CloseChannel { channel_id });
@@ -687,6 +711,84 @@ mod tests {
         second.read_exact(&mut second_echo).await.unwrap();
         assert_eq!(&first_echo, b"first");
         assert_eq!(&second_echo, b"second");
+        done_tx.send(()).unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delayed_consumer_accepts_one_fragmented_private_frame_without_killing_siblings() {
+        const FRAMES: usize = 16;
+        let (client, server) = tokio::io::duplex(MAX_DATA_BYTES * FRAMES * 2);
+        let (client_reader, client_writer) = tokio::io::split(client);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server);
+        let (done_tx, done_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::Hello)
+            );
+            write_frame(&mut server_writer, &Frame::HelloAck)
+                .await
+                .unwrap();
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::OpenChannel { channel_id: 1 })
+            );
+            write_frame(&mut server_writer, &Frame::ChannelOpened { channel_id: 1 })
+                .await
+                .unwrap();
+            for index in 0..FRAMES {
+                write_frame(
+                    &mut server_writer,
+                    &Frame::Data {
+                        channel_id: 1,
+                        bytes: vec![u8::try_from(index).unwrap(); MAX_DATA_BYTES],
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(
+                read_frame(&mut server_reader).await.unwrap(),
+                Some(Frame::OpenChannel { channel_id: 2 })
+            );
+            write_frame(&mut server_writer, &Frame::ChannelOpened { channel_id: 2 })
+                .await
+                .unwrap();
+            let Some(Frame::Data { channel_id, bytes }) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected sibling channel data");
+            };
+            assert_eq!(channel_id, 2);
+            write_frame(&mut server_writer, &Frame::Data { channel_id, bytes })
+                .await
+                .unwrap();
+            done_rx.await.unwrap();
+        });
+
+        let client = ClientMultiplexer::negotiate(client_reader, client_writer)
+            .await
+            .unwrap();
+        let mut delayed = client.open_channel().await.unwrap();
+        time::sleep(Duration::from_millis(50)).await;
+        let mut received = vec![0_u8; MAX_DATA_BYTES * FRAMES];
+        delayed.read_exact(&mut received).await.unwrap();
+        for (index, chunk) in received.chunks_exact(MAX_DATA_BYTES).enumerate() {
+            assert!(
+                chunk
+                    .iter()
+                    .all(|byte| *byte == u8::try_from(index).unwrap())
+            );
+        }
+        assert_eq!(client.terminal_failure(), None);
+
+        let mut sibling = client.open_channel().await.unwrap();
+        sibling.write_all(b"sibling").await.unwrap();
+        let mut echoed = [0_u8; 7];
+        sibling.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"sibling");
+        assert_eq!(client.terminal_failure(), None);
         done_tx.send(()).unwrap();
         server_task.await.unwrap();
     }

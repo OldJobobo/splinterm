@@ -544,6 +544,20 @@ async fn one_logical_channel_loss_does_not_retarget_or_close_another_channel() {
 }
 
 #[test]
+fn incoming_channel_budget_covers_one_maximum_private_frame() {
+    assert_eq!(
+        splinterm_graphical_relay::MAX_INCOMING_CHANNEL_QUEUED_BYTES,
+        splinterm_protocol::MAX_FRAME_BYTES
+    );
+    const {
+        assert!(
+            splinterm_graphical_relay::MAX_SESSION_QUEUED_BYTES
+                >= splinterm_graphical_relay::MAX_INCOMING_CHANNEL_QUEUED_BYTES
+        );
+    }
+}
+
+#[test]
 fn fake_ssh_script_has_no_shell_interpolated_profile_values() {
     assert!(!FAKE_SSH.contains("eval"));
     assert!(!FAKE_SSH.contains("shell=True"));

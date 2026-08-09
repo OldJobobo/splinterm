@@ -5459,8 +5459,11 @@ impl App {
             .pending_exited_splints
             .retain(|splint_id| !removed.contains(splint_id));
         self.panes.inactive_panes.extend(prepared);
-        let focused = self.focus_splint(next_focus);
-        debug_assert!(focused);
+        let _ = self.focus_splint(next_focus);
+        anyhow::ensure!(
+            self.panes.focused_splint() == Some(next_focus),
+            "topology update focus could not be applied"
+        );
         self.panes.inactive_panes.retain(|pane| {
             pane.snapshot
                 .as_ref()
