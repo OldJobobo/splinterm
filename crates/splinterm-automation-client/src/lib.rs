@@ -3497,6 +3497,9 @@ impl Connection {
                 .read(self.read_scratch.as_mut_slice())
                 .await?;
             if read == 0 {
+                if self.read_buffer.is_empty() {
+                    bail!("splinterd closed the connection");
+                }
                 bail!("splinterd closed a partial frame");
             }
             self.read_buffer
@@ -4976,7 +4979,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("partial frame")
+                .contains("closed the connection")
         );
     }
 

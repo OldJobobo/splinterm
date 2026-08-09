@@ -1286,6 +1286,10 @@ const fn policy_reload_disconnects(role: ClientRole) -> bool {
     matches!(role, ClientRole::Automation)
 }
 
+const fn connection_revocation_disconnects(role: ClientRole) -> bool {
+    matches!(role, ClientRole::Automation)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the connection state machine keeps handshake and request-id enforcement together"
@@ -1396,7 +1400,7 @@ async fn serve_authenticated(
                 }
                 break;
             }
-            revoked = connection_revocations.recv() => match revoked {
+            revoked = connection_revocations.recv(), if connection_revocation_disconnects(role) => match revoked {
                 Ok(revoked) if revoked == connection_id => break,
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -7130,6 +7134,11 @@ mod tests {
         assert!(policy_reload_disconnects(ClientRole::Automation));
         assert!(!policy_reload_disconnects(ClientRole::TrustedUi));
         assert!(!policy_reload_disconnects(ClientRole::RemoteInteractive));
+        assert!(connection_revocation_disconnects(ClientRole::Automation));
+        assert!(!connection_revocation_disconnects(ClientRole::TrustedUi));
+        assert!(!connection_revocation_disconnects(
+            ClientRole::RemoteInteractive
+        ));
         assert!(!interactive_bypass(false, true, false, &Request::ListLairs));
         assert!(interactive_bypass(true, true, false, &Request::ListLairs));
         assert!(!interactive_bypass(true, false, false, &Request::ListLairs));
