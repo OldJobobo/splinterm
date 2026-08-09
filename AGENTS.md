@@ -33,13 +33,6 @@ Distinguish execution failure from review outcome:
 * A reviewer finding defects or rejecting a milestone is a successful review, not
   a failed subagent.
 
-If a subagent has an execution failure:
-
-* Do not automatically retry it.
-* Do not automatically resume it.
-* Do not automatically replace it.
-* Stop and report the result to the user.
-
 If a reviewer successfully returns actionable findings:
 
 * Apply in-scope fixes directly in the single-writer parent without asking for
@@ -71,7 +64,7 @@ For ordinary implementation, use no more than:
 * One writer.
 * Two fresh, read-only reviewers.
 * One fix writer, when justified.
-* Two review rounds.
+* One review rounds.
 
 Ask the user before exceeding any of these limits.
 
@@ -182,8 +175,7 @@ Do not repeat a failed, expensive command until both of the following have occur
    cleanup plan.
 
    Run one guarded smoke case first. If it succeeds, continue with the approved
-   matrix without another confirmation gate. Abort on wrong-target input, placement
-   failure, focus failure, or cleanup failure.
+
 
 ## 3. Graphical Testing
 
