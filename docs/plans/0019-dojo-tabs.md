@@ -1,9 +1,35 @@
 # Plan 0019: Window-local Dojo tabs
 
-- **Status:** Proposed
+- **Status:** Implemented and validated in current product behavior; final Plan 0019 evidence consolidation and closure review remain
 - **Date:** 2026-08-04
+- **Reconciled:** 2026-08-09 against commits `9cc591f`, `2cc7d86`, `3ee2048`, and later Plan 0025/0028 validation
 - **Depends on:** [Plan 0017](0017-inline-session-picker-overlay.md), [Plan 0018](0018-lair-dojo-topology-migration.md)
 - **Architecture authority:** [ADR 0009](../adr/0009-topology-lair-dojo-migration.md)
+
+## Reconciliation record — 2026-08-09
+
+The original `Proposed` label became stale after `9cc591f` implemented the
+bounded client-local tab model and `2cc7d86` documented it. Commit `3ee2048`
+then extracted tab presentation and topology management without changing the
+contract. Current README, architecture, configuration, and PRD surfaces all
+identify Window-local Dojo tabs as implemented, and the client enforces the
+32-tab bound.
+
+Later guarded evidence exercises substantial Plan 0019 behavior. Plan 0025
+recorded inactive/active tab targeting, detached close-other semantics, exact
+captured identities, stale-pixel cleanup, and preservation of daemon-owned
+Dojos and Splints. Plan 0028 recorded physical creation and switching of a
+second Dojo/tab in local and remote native Windows. Current focused tests cover
+bounded insertion, duplicate activation, stable reorder/close selection,
+wrapped navigation, exact consumed shortcuts, tab-strip hit targets and compact
+layout, active-tab selection color, and controller acquisition on active resize.
+
+This reconciliation does not manufacture a historical completion claim. Before
+marking Plan 0019 complete, one closure artifact must map the retained Plan
+0025/0028 graphical evidence and current focused tests to all twelve acceptance
+criteria, identify any genuinely uncovered hidden-tab/resource case, and receive
+a fresh independent read-only closure review. A new graphical matrix is required
+only if that mapping finds a material acceptance gap.
 
 ## Goal
 

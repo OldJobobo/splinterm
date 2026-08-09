@@ -1,10 +1,31 @@
 # Plan 0021: product positioning and public documentation
 
-- **Status:** Proposed
+- **Status:** In progress — public narrative, README rewrite, PRD, and website content are implemented; repository-authoritative status/usage/CLI documents, metadata alignment audit, and final reviews remain
 - **Date:** 2026-08-04
+- **Reconciled:** 2026-08-09 against commits `1d8fa51` and `7a44e33`
 - **Product authority:** current implementation, retained validation evidence, and [Architecture](../architecture.md)
 - **Related status:** [Roadmap](../roadmap.md), [supported automation](../automation.md), and [private packaging](../packaging.md)
 - **Documentation scope:** public positioning, maturity language, README information architecture, and distribution metadata
+
+## Reconciliation record — 2026-08-09
+
+The original `Proposed` label became stale after `1d8fa51` rewrote the README
+around the accepted product sentence, persistence, bounded automation, validated
+platform, and advanced-private-prerelease maturity. Commit `7a44e33` added the
+PRD and a buildable public documentation site with status, installation,
+quickstart, sessions, configuration, troubleshooting, concepts, and development
+content. The current site passes Astro diagnostics/build and its local-link
+validator; desktop, AppStream, and PKGBUILD metadata syntax also pass their
+focused validators.
+
+Plan 0021 is not complete. Its explicit repository-authority contract still
+requires `docs/status.md`, `docs/usage.md`, and `docs/cli.md`; those files do not
+exist. The status truth table and one-authority-per-subject audit have not been
+retained as a closure artifact, synchronized package/desktop/Cargo wording has
+not been recorded against that table, and the required independent
+product/readability and technical-accuracy reviews are absent. Website copies do
+not silently replace these repository-authoritative files because Plan 0026
+owns publication while this plan owns source content and maturity authority.
 
 ## Decision
 
