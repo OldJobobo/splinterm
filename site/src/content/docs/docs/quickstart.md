@@ -17,7 +17,7 @@ Use the installed desktop entry or run:
 splinterm-xdg-terminal-exec
 ```
 
-The normal launch path creates a fresh **Lair**, one **Dojo**, and one **Splint**. If you provide a command or working directory through the XDG terminal contract, the launcher preserves those arguments without rebuilding them as shell text.
+A commandless launch creates a fresh persistent **Lair**, one **Dojo**, and one **Splint**. A working directory is preserved exactly. If another application supplies a command through the XDG terminal contract, Splinterm preserves its structured argv without rebuilding shell text and creates a transient client-bound Lair instead. That Lair and all its processes disappear when the command exits or the owning Window disconnects. Native `splinterm launch -- COMMAND...` remains persistent.
 
 ## 3. Leave the work running
 

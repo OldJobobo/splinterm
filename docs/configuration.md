@@ -205,8 +205,12 @@ remote-path, no-image, and disconnect behavior.
 
 ## Daily launch and session reopening
 
-The normal desktop/XDG command remains `splinterm-xdg-terminal-exec` and always
-creates a fresh Lair with one Dojo. Session reopening is deliberately separate:
+The normal desktop/XDG command remains `splinterm-xdg-terminal-exec`. Without a
+command it creates a fresh persistent Lair with one Dojo. When an application
+supplies `-- COMMAND...`, the same adapter creates a transient client-bound Lair
+that is removed when the command exits or its owning Window disconnects. Native
+`splinterm launch -- COMMAND...` remains persistent. Session reopening is
+deliberately separate, and transient XDG commands never enter Recent Sessions:
 
 ```text
 splinterm-sessions  → native Recent Sessions picker

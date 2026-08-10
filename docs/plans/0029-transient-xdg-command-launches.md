@@ -1,7 +1,8 @@
 # Plan 0029: transient XDG command launches
 
-- **Status:** Proposed hotfix
+- **Status:** Implemented and source-validated; release package not prepared
 - **Date:** 2026-08-07
+- **Implemented:** 2026-08-10
 - **Product authority:** Splinterm is a standalone terminal emulator; Foot is its behavioral origin and oracle, not a runtime dependency or fallback
 - **Integration authority:** `xdg-terminal-exec`, the installed Splinterm desktop entry, and Omarchy's command-bearing terminal launchers
 - **Depends on:** accepted persistent topology, trusted installed-client identity, daemon process ownership, and connection cleanup
@@ -142,32 +143,45 @@ The lifetime identifies cleanup and projection policy. It does not contain the o
 Compatibility rules:
 
 - existing schema-v2 and schema-v3 documents decode every untagged Lair as persistent;
-- persistent documents retain their existing representation where practical;
+- persistent documents retain their existing representation by defaulting a missing lifetime to `Persistent` and omitting the field when serializing that default;
 - new code never writes a transient Lair;
-- if an explicitly tagged transient Lair is encountered in metadata, discard it instead of restoring or relaunching it; and
+- filter transient Lairs in `TopologyDocument::from_topology` and independently discard explicitly tagged transient Lairs during decode/restoration, so neither ordinary saves nor crafted or previously written metadata can restore them;
+- an unrelated persistent mutation while transient Lairs are live must save every persistent Lair and no transient Lair while retaining a valid global topology revision; and
 - recent-Dojo documents need no migration because absent IDs are already harmless.
 
 No generated name, command name, app ID, or timestamp may be used to infer lifetime.
 
 ### 3. Owner-connection lease
 
-Add an in-memory daemon registry with both lookup directions:
+Add an in-memory daemon registry with both lookup directions over one shared lease record:
 
 ```text
-owner connection ID -> transient Lair ID
-transient Lair ID    -> owner connection ID
+TransientLairLease {
+    owner_connection_id,
+    lair_id,
+    initial_splint_id,
+    initial_incarnation,
+}
+
+owner connection ID -> TransientLairLease
+transient Lair ID    -> TransientLairLease
 ```
 
-One XDG adapter connection owns one transient Lair. Connection IDs are never serialized into the core model, topology snapshots, metadata, public JSON, or audit bodies.
+The initial Splint identity is required because later splits and Dojos add runtimes without changing Lair lifetime. Only natural exit of the exact initial Splint/incarnation retires the complete Lair. Exit of a later runtime follows the transient secondary-runtime policy below and must not spuriously retire the Lair.
+
+One XDG adapter connection owns one transient Lair. Connection IDs and lease provenance are never serialized into the core model, topology snapshots, metadata, public JSON, or audit bodies.
 
 Creation must be cancellation-safe against owner disconnect, peer-process death, or direct abortion of the in-flight handler future:
 
 1. Validate trusted identity, nonempty argv, bounds, name, and topology CAS.
-2. Allocate the Lair/Dojo/Splint identities and reserve the owner lease before the first cancellable process-spawn await.
-3. Spawn the runtime under a cleanup guard.
-4. Commit runtime registration, in-memory topology, and lease ownership coherently under the topology transaction boundary.
-5. Disarm the cleanup guard only after the complete commit is visible.
-6. On handler-future cancellation or any failure, terminate/reap the runtime and remove every reservation without publishing topology.
+2. Allocate the Lair/Dojo/Splint identities and reserve the owner lease, including the initial Splint identity, before the first cancellable process-spawn await.
+3. Spawn through a cancellation-safe runtime primitive that owns an armed child/session cleanup guard internally from the moment the blocking PTY spawn may succeed. A handler-level guard alone is insufficient because cancellation can occur before `LiveSplintRuntime::spawn` returns a runtime handle.
+4. Assign the initial incarnation to the reserved lease as soon as the cancellation-safe primitive exposes it.
+5. Commit runtime registration, in-memory topology, and lease ownership coherently under the topology transaction boundary.
+6. Disarm both spawn and transaction cleanup guards only after the complete commit is visible.
+7. On handler-future cancellation or any failure, terminate/reap the child and remove every reservation without publishing topology.
+
+`LiveSplintRuntime::spawn_inner` and the PTY-session ownership it wraps are part of this safety boundary. If `spawn_blocking` completes after its awaiting future is dropped, the produced session must still be killed and reaped rather than being dropped without lifecycle cleanup.
 
 `ClientFrame::Cancel` is not part of this hotfix's creation-cancellation contract: the daemon currently handles a request inline and cannot consume that frame concurrently. Adding concurrent protocol-request cancellation is a separate design change.
 
@@ -184,7 +198,9 @@ For transient XDG launch only:
 - drop the owner connection after the Window returns on success or error; and
 - do not modify `app/window.rs` merely to carry the lease.
 
-This avoids collision with the active unrelated `window.rs` work and gives daemon `cleanup_connection` one authoritative termination signal.
+The daemon must also observe owner transport loss while transient creation is in flight. `serve_authenticated` currently handles a request inline and cannot read EOF until that handler returns, so ordinary post-loop `cleanup_connection` is not sufficient for the creation race. Add a connection-lifetime/disconnect signal registered before dispatch and race or consult it from transient creation. This signal observes transport EOF, writer failure, connection-task abortion, and daemon connection teardown without adding concurrent `ClientFrame::Cancel` semantics or permitting a second outstanding request.
+
+This avoids collision with the active unrelated `window.rs` work and gives daemon `cleanup_connection` one authoritative post-creation termination signal while the in-flight disconnect signal protects the creation boundary.
 
 ### 5. Shared idempotent teardown
 
@@ -205,7 +221,9 @@ The operation must:
 
 Reusing `RuntimeChanged` is intentional for this hotfix. `TopologyChangeKind` has an exhaustive public automation projection; adding `LairRemoved` would expand the frozen event vocabulary and require a separate public-schema decision.
 
-Natural exit versus owner disconnect is an expected race. Whichever path obtains the transaction first owns cleanup; the loser must observe absence and finish without an internal error, duplicate publication, or leaked process.
+Natural exit of the leased initial Splint versus owner disconnect is an expected race. Whichever path obtains the transaction first owns cleanup; the loser must observe absence and finish without an internal error, duplicate publication, or leaked process.
+
+A later split or Dojo runtime inside a transient Lair is not the lifetime anchor. Its natural exit records `Exited` only in the live in-memory transient topology, publishes the ordinary runtime change, and never persists that state. It does not retire the Lair. When the initial leased runtime exits or the owner disconnects, retirement still reaps every remaining runtime and removes the complete Lair.
 
 Persistent process exit remains unchanged: it records `Exited`, persists durable launch metadata, and remains explicitly restorable.
 
@@ -286,6 +304,8 @@ Focused acceptance:
 - persistent topology round-trips unchanged in meaning;
 - a mixed topology encodes/restores only persistent Lairs;
 - explicitly tagged transient metadata is not restored;
+- a persistent mutation while a transient Lair is live writes all persistent Lairs and no transient Lair;
+- persistent schema-v3 encoding remains unchanged in representation by omitting the default lifetime field;
 - global topology revision remains valid when filtered transient activity occurred; and
 - no persistent Lair is dropped by the projection.
 
@@ -313,24 +333,47 @@ Focused acceptance:
 
 Stop if any non-trusted path can create a transient lease.
 
-### Milestone 3 — lease registration and transient creation
+### Milestone 2A — cancellation-safe runtime spawn primitive
 
-File:
+Files:
 
-- `crates/splinterd/src/main.rs`
+- `crates/splinterd/src/live.rs`
+- `crates/splinterm-pty/src/lib.rs` if PTY-session ownership must move below the runtime boundary
+- focused runtime and PTY tests
 
-Add the bidirectional lease registry, cancellation-safe reservation, transient create path, rollback guards, and resource-limit handling.
+Make process creation cancellation-safe before the transient handler depends on it. The primitive must retain recoverable ownership from the point the blocking backend may create a child until a complete `LiveSplintRuntime` is handed to the caller. Dropping or aborting the awaiting future at any point must trigger bounded kill and reap, including when `spawn_blocking` finishes after its join future was dropped.
 
 Focused acceptance:
 
-- successful creation owns exactly one transient Lair;
-- owner disconnect, peer death, or direct handler-future abortion during spawn leaves no lease, topology, runtime, or child PID;
+- abort before backend spawn creates no child;
+- abort while blocking spawn is pending reaps a child that appears afterward;
+- abort after session creation but before runtime handoff reaps the child;
+- reader clone, `AsyncFd`, and actor-start failures keep their existing cleanup guarantees;
+- successful spawn transfers ownership exactly once and preserves existing runtime behavior; and
+- no timeout or PTY signal policy is widened.
+
+Stop if any cancellation point can orphan a child or if the primitive requires detached best-effort cleanup without a bounded test oracle.
+
+### Milestone 3 — disconnect observation, lease registration, and transient creation
+
+Files:
+
+- `crates/splinterd/src/main.rs`
+- focused connection-state and handler-abortion tests
+
+Add the connection-lifetime signal, the bidirectional lease registry with initial Splint/incarnation provenance, cancellation-safe reservation, transient create path, rollback guards, and resource-limit handling. Register disconnect observation before request dispatch so transport EOF or writer failure can be observed while the inline transient handler is awaiting spawn; do not turn the general request loop into concurrent multi-request dispatch.
+
+Focused acceptance:
+
+- successful creation owns exactly one transient Lair and one lease naming its initial Splint/incarnation;
+- transport EOF, writer failure, connection-task abortion, peer death, or direct handler-future abortion during spawn leaves no lease, topology, runtime, or child PID;
+- owner transport loss is observable before the inline transient creation handler returns;
 - a later `ClientFrame::Cancel` is not misrepresented as supported concurrent cancellation;
 - spawn and runtime-registry failures leave no partial state;
 - transient insertion writes no metadata; and
 - persistent creation still performs its existing durable commit and rollback.
 
-Stop on any leaked PID, runtime, lease, or topology entry.
+Stop on any leaked PID, runtime, lease, or topology entry, or if disconnect observation requires concurrent handling of arbitrary protocol requests.
 
 ### Milestone 4 — exit and disconnect convergence
 
@@ -347,8 +390,9 @@ Focused acceptance:
 - dropping the owner connection terminates a sleeping child and removes the Lair;
 - dropping a non-owner attachment/controller/focus connection does not remove it;
 - after adding a split or second Dojo to a transient Lair, owner disconnect reaps every runtime and removes the complete Lair;
+- after adding a split or second Dojo, exit of a non-initial runtime leaves the transient Lair alive, records only in-memory `Exited` state, and writes no metadata;
 - after adding a split or second Dojo, initial-command exit applies the documented whole-Lair policy and reaps every runtime;
-- natural exit racing owner disconnect publishes one coherent `RuntimeChanged` snapshot with the Lair absent and leaks nothing;
+- initial-command exit racing owner disconnect publishes one coherent `RuntimeChanged` snapshot with the Lair absent and leaks nothing;
 - daemon restart never restores transient topology or command execution; and
 - persistent command exit remains exited and restorable.
 
@@ -373,7 +417,7 @@ Focused acceptance:
 - wrapper with only a working directory is persistent;
 - wrapper with `-- executable args...` is transient;
 - native `splinterm launch -- executable args...` remains persistent;
-- exact argv, empty arguments, spaces, and metacharacters survive without shell evaluation;
+- exact argv, empty arguments, spaces, metacharacters, and the `--` delimiter boundary survive without shell evaluation;
 - transient launch is not recorded as recent;
 - aliases `splinterm-sessions` and `splinterm-reopen` remain unchanged; and
 - incompatible packaged client/daemon versions still trigger the existing restart path; and
@@ -419,6 +463,7 @@ Run focused checks after each coherent milestone, then the complete non-graphica
 sh -n dist/bin/splinterm-xdg-terminal-exec
 cargo test -p splinterm-core
 cargo test -p splinterm-protocol
+cargo test -p splinterm-pty
 cargo test -p splinterd --bin splinterd
 cargo test -p splinterd --test end_to_end transient -- --test-threads=1
 cargo test -p splinterm
@@ -443,18 +488,22 @@ No graphical test is required or authorized. Owner-connection loss, command exit
 | XDG, cwd only | Persistent with exact cwd |
 | XDG, command | Transient with exact cwd/argv |
 | Native `launch`, command | Persistent |
-| Transient command exits | Window shutdown signal, runtime reaped, Lair removed |
-| Owner connection closes | Command terminated, runtime reaped, Lair removed |
+| Initial transient command exits | Window shutdown signal, every runtime reaped, complete Lair removed |
+| Secondary split/Dojo command exits | Lair remains live; only in-memory exited state changes; nothing is persisted |
+| Owner connection closes | Every command terminated, every runtime reaped, complete Lair removed |
+| Owner transport closes during spawn | Disconnect is observed before handler completion; no process, runtime, lease, or topology residue |
 | Non-owner connection closes | Transient command and Lair remain |
 | Pending stand-in Window future | Creation connection stays alive through success and error, then closes once |
-| Transient Lair gains split/second Dojo | Whole-Lair exit/disconnect cleanup reaps every runtime |
-| Exit/disconnect race | One idempotent `RuntimeChanged` removal snapshot, no leak |
-| Handler aborted during spawn | No process, runtime, lease, or topology residue |
+| Transient Lair gains split/second Dojo | Initial-command exit or owner disconnect reaps every runtime; secondary exit does not retire the Lair |
+| Initial-exit/disconnect race | One idempotent `RuntimeChanged` removal snapshot, no leak |
+| Handler aborted before, during, or after blocking spawn | Any child that appears is killed and reaped; no runtime, lease, or topology residue |
+| Unrelated persistent mutation while transient is live | Durable document retains every persistent Lair, omits every transient Lair, and has a valid revision |
 | Daemon restart | Transient absent; persistent topology restored |
 | Recent Sessions | Transient absent while live and after removal |
 | Automation request | Transient creation denied |
 | Spawn/create failure | No process, runtime, lease, or topology residue |
-| Existing metadata | Untagged Lairs remain persistent |
+| Existing metadata | Untagged Lairs remain persistent and default lifetime is omitted when re-encoded |
+| Explicitly tagged transient metadata | Discarded before restore or relaunch |
 
 ## Migration and existing-session policy
 
@@ -476,7 +525,9 @@ Stop implementation and report before continuing if:
 - old metadata no longer loads as persistent;
 - a transient Lair reaches durable metadata;
 - automation or a nonmatching executable can request transient trusted lifecycle;
-- owner disconnect, peer death, handler-future abortion, exit, or runtime-registry failure leaves a child PID or partial state;
+- owner disconnect, peer death, writer failure, handler-future abortion, exit, or runtime-registry failure leaves a child PID or partial state;
+- blocking PTY spawn can complete after cancellation without an armed owner that kills and reaps the resulting child;
+- the implementation cannot distinguish exit of the leased initial runtime from exit of a later split or Dojo runtime;
 - native `splinterm launch` changes from persistent to transient;
 - structured cwd or argv is rebuilt through a shell;
 - the hotfix overlaps any active unrelated worktree edit without first reconciling scope and writer ownership;
@@ -499,8 +550,9 @@ The product review must verify:
 The lifecycle review must verify:
 
 - trusted-only creation;
-- disconnect- and handler-abort-safe lease commit;
-- idempotent exit/disconnect teardown using the existing public-compatible topology event vocabulary;
+- disconnect- and handler-abort-safe lease commit, including cancellation inside blocking PTY spawn;
+- initial Splint/incarnation lease provenance and the non-retiring secondary-runtime exit policy;
+- idempotent initial-exit/disconnect teardown using the existing public-compatible topology event vocabulary;
 - complete resource cleanup;
 - durable exclusion;
 - migration safety; and
@@ -513,7 +565,9 @@ This hotfix is complete only when:
 - command-bearing `xdg-terminal-exec` launches use transient client-bound Lairs;
 - commandless XDG launches remain persistent;
 - native Splinterm launches remain persistent regardless of command presence;
-- command exit and owner disconnect both remove transient topology and reap the process;
+- exit of the leased initial command and owner disconnect both remove transient topology and reap every process in the Lair;
+- exit of a later split or Dojo runtime does not retire the Lair and never writes transient state to metadata;
+- owner transport loss is observable during in-flight creation, and cancellation at every spawn boundary reaps any child that appears;
 - transient Lairs are absent from durable metadata, restart restore, Recent Sessions, and `reopen`;
 - automation cannot mint transient trusted-client semantics;
 - exact cwd and argv transport is preserved;
@@ -521,3 +575,25 @@ This hotfix is complete only when:
 - focused lifecycle, security, migration, wrapper, picker, full workspace, site, and package validations pass;
 - recorded independent reviews have no unresolved blockers; and
 - no graphical testing, production installation, publication, or unrelated-worktree modification occurred without separate approval.
+
+## Implementation record
+
+Implemented on 2026-08-10 with the private protocol advanced to version 29.
+
+Recorded non-graphical validation:
+
+- `cargo test -p splinterm-core`;
+- `cargo test -p splinterm-protocol`;
+- focused `splinterd` cancellation, trusted-authority, owner-disconnect, initial-exit, secondary-exit, and automation-denial tests;
+- `cargo test -p splinterm`;
+- `cargo clippy --workspace --all-targets -- -D warnings`;
+- `cargo test --workspace`;
+- `cargo fmt --all --check`;
+- `sh -n dist/bin/splinterm-xdg-terminal-exec`;
+- extracted-layout `validate_launcher` coverage for commandless, cwd-only, and exact command argv routing;
+- `cd site && npm run validate`; and
+- `git diff --check`.
+
+Fresh product/compatibility and daemon-lifecycle/security reviews both approved the coherent validated implementation with no unresolved findings.
+
+A release package was intentionally not built or installed. The repository package builder archives a clean committed `HEAD`, so running it before this implementation is committed would validate the previous source rather than these changes. `pkgrel` therefore remains unchanged, as required when no release is being prepared.

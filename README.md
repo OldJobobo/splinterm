@@ -85,7 +85,7 @@ Open a fresh terminal from the installed desktop entry or the XDG terminal launc
 splinterm-xdg-terminal-exec
 ```
 
-The normal launch creates a new Lair with one Dojo and one Splint. Closing the window detaches the graphical client while `splinterd` keeps the session running.
+A commandless desktop/XDG launch creates a persistent Lair with one Dojo and one Splint. Closing its window detaches the graphical client while `splinterd` keeps the session running. When another application asks the XDG terminal to host a command, Splinterm instead creates a transient client-bound Lair: command exit or owner-window disconnect terminates its processes and removes it from topology. Native `splinterm launch -- COMMAND...` remains persistent.
 
 Return through the native session picker:
 

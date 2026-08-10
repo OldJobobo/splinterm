@@ -104,8 +104,9 @@ versioned immutable source URL and checksum.
   bounded `--graphical-stdio` modes), and `/usr/bin/splinterm-pty-child`;
 - optional split package `splinterm-mcp`, containing only the independently
   policy-authorized `/usr/bin/splinterm-mcp`, its setup guide, and notices;
-- `/usr/bin/splinterm-xdg-terminal-exec`, its `splinterm-sessions` and
-  `splinterm-reopen` session UX aliases, the public-CLI-only
+- `/usr/bin/splinterm-xdg-terminal-exec`, which preserves structured XDG argv
+  and selects persistent commandless or transient command-bearing launches, its
+  `splinterm-sessions` and `splinterm-reopen` session UX aliases, the public-CLI-only
   `/usr/bin/splinterm-session-picker` reference client, and the optional
   `/usr/bin/generate-omarchy-theme.py` JSON exporter;
 - desktop entry, AppStream metadata, scalable icon, and user service;

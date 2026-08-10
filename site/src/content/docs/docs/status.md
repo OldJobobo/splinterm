@@ -19,6 +19,7 @@ Splinterm is an **advanced private prerelease**. Substantial core behavior is im
 | --- | --- |
 | Native Wayland presentation | Keyboard, pointer, clipboard, IME, scaling, and damage-driven rendering validated on the documented Hyprland target |
 | Persistent sessions and explicit restore | Implemented and validated |
+| XDG command lifecycle | Commandless launches remain persistent; command-bearing launches use trusted client-bound transient Lairs |
 | Pane layouts and multiple Dojos | Implemented and validated |
 | Window-local Dojo tabs | Implemented and validated |
 | Multi-client controller transfer | Implemented and validated |
