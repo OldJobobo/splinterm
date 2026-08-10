@@ -12,7 +12,7 @@ use splinterm_core::{
     Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 28;
+pub const PROTOCOL_VERSION: u16 = 29;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -301,6 +301,11 @@ pub enum Request {
         launch: AutomationLaunch,
     },
     CreateLair {
+        expected_topology_revision: TopologyRevision,
+        name: String,
+        launch: LaunchParameters,
+    },
+    CreateTransientLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
@@ -2229,7 +2234,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 28);
+        assert_eq!(PROTOCOL_VERSION, 29);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -2372,6 +2377,23 @@ mod tests {
             serde_json::to_string(&request)
                 .unwrap()
                 .contains("split_splint")
+        );
+        let transient = Request::CreateTransientLair {
+            expected_topology_revision: TopologyRevision::new(7),
+            name: "xdg".into(),
+            launch: launch.clone(),
+        };
+        let encoded = serde_json::to_vec(&transient).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Request>(&encoded).unwrap(),
+            transient
+        );
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["type"], "create_transient_lair");
+        assert_eq!(value["launch"]["cwd"], "/tmp");
+        assert_eq!(
+            value["launch"]["command"],
+            serde_json::json!(["printf", "%s"])
         );
 
         let mut invalid = launch.clone();

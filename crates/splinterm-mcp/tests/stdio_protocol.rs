@@ -287,6 +287,7 @@ fn reviewed_topology() -> TopologySnapshot {
     let dojo = Lair {
         id: lair_id,
         name: "untrusted dojo".to_owned(),
+        lifetime: splinterm_core::LairLifetime::default(),
         dojos: vec![Dojo {
             id: dojo_id,
             name: "untrusted dojo".to_owned(),
@@ -422,6 +423,7 @@ fn adversarial_topology(payloads: &[&str; 4]) -> TopologySnapshot {
     let dojo = Lair {
         id: lair_id,
         name: payloads[0].to_owned(),
+        lifetime: splinterm_core::LairLifetime::default(),
         dojos: vec![Dojo {
             id: dojo_id,
             name: payloads[1].to_owned(),
@@ -4745,6 +4747,7 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                         lair: Lair {
                             id: new_lair,
                             name,
+                            lifetime: splinterm_core::LairLifetime::default(),
                             dojos: vec![Dojo {
                                 id: new_dojo,
                                 name: "dojo".to_owned(),

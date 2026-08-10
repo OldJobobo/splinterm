@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -32,8 +32,8 @@ use splinterd::{
     policy,
 };
 use splinterm_core::{
-    Dojo, DojoId, Lair, LairId, LayoutNode, Splint, SplintId, SplintLaunchMetadata, SplintState,
-    Topology, TopologyDocument, TopologyError, TopologyRevision,
+    Dojo, DojoId, Lair, LairId, LairLifetime, LayoutNode, Splint, SplintId, SplintLaunchMetadata,
+    SplintState, Topology, TopologyDocument, TopologyError, TopologyRevision,
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
@@ -65,7 +65,7 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
     signal,
-    sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc},
+    sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc, watch},
     task::JoinHandle,
     time,
 };
@@ -512,6 +512,19 @@ impl ControllerState {
         (leases, transfers)
     }
 
+    fn cancel_identity_transfer(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> Option<PendingControlTransfer> {
+        let transfer_id = self.transfer_by_splint.get(&splint_id).copied()?;
+        self.transfers
+            .get(&transfer_id)
+            .is_some_and(|transfer| transfer.incarnation == incarnation)
+            .then(|| self.expire_transfer(transfer_id))
+            .flatten()
+    }
+
     fn release_identity(
         &mut self,
         splint_id: SplintId,
@@ -536,6 +549,83 @@ struct Revocation {
 struct GraphicalFocusClaim {
     owner_connection_id: u64,
     splint_id: SplintId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TransientLairLease {
+    owner_connection_id: u64,
+    lair_id: LairId,
+    initial_splint_id: SplintId,
+    initial_incarnation: Option<u64>,
+}
+
+#[derive(Default)]
+struct TransientLeaseRegistry {
+    by_connection: HashMap<u64, LairId>,
+    by_lair: HashMap<LairId, TransientLairLease>,
+}
+
+impl TransientLeaseRegistry {
+    fn reserve(&mut self, owner_connection_id: u64, lair_id: LairId, splint_id: SplintId) -> bool {
+        if self.by_connection.contains_key(&owner_connection_id)
+            || self.by_lair.contains_key(&lair_id)
+        {
+            return false;
+        }
+        let lease = TransientLairLease {
+            owner_connection_id,
+            lair_id,
+            initial_splint_id: splint_id,
+            initial_incarnation: None,
+        };
+        self.by_connection.insert(owner_connection_id, lair_id);
+        self.by_lair.insert(lair_id, lease);
+        true
+    }
+
+    fn set_incarnation(&mut self, lair_id: LairId, incarnation: u64) -> bool {
+        let Some(lease) = self.by_lair.get_mut(&lair_id) else {
+            return false;
+        };
+        lease.initial_incarnation = Some(incarnation);
+        true
+    }
+
+    fn for_lair(&self, lair_id: LairId) -> Option<TransientLairLease> {
+        self.by_lair.get(&lair_id).copied()
+    }
+
+    fn for_connection(&self, connection_id: u64) -> Option<TransientLairLease> {
+        self.by_connection
+            .get(&connection_id)
+            .and_then(|lair_id| self.for_lair(*lair_id))
+    }
+
+    fn remove_lair(&mut self, lair_id: LairId) -> Option<TransientLairLease> {
+        let lease = self.by_lair.remove(&lair_id)?;
+        self.by_connection.remove(&lease.owner_connection_id);
+        Some(lease)
+    }
+}
+
+struct TransientLeaseReservation {
+    registry: Arc<StdMutex<TransientLeaseRegistry>>,
+    lair_id: LairId,
+    committed: bool,
+}
+
+impl TransientLeaseReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TransientLeaseReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.registry.lock().unwrap().remove_lair(self.lair_id);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -635,6 +725,7 @@ impl TopologyHub {
 struct DaemonState {
     topology: RwLock<Topology>,
     runtimes: Mutex<RuntimeRegistry>,
+    transient_leases: Arc<StdMutex<TransientLeaseRegistry>>,
     graphical_focus: Mutex<Option<GraphicalFocusClaim>>,
     topology_hub: Mutex<TopologyHub>,
     topology_transactions: Semaphore,
@@ -755,6 +846,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(DaemonState {
         topology: RwLock::new(lair),
         runtimes: Mutex::new(RuntimeRegistry::default()),
+        transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
         graphical_focus: Mutex::new(None),
         topology_hub: Mutex::new(TopologyHub::default()),
         topology_transactions: Semaphore::new(1),
@@ -915,7 +1007,7 @@ async fn main() -> Result<()> {
                 let state = Arc::clone(&state);
                 connection_tasks.spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = serve_client(stream, state).await {
+                    if let Err(error) = Box::pin(serve_client(stream, state)).await {
                         warn!(%error, "client connection closed");
                     }
                 });
@@ -1145,15 +1237,20 @@ async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()>
     let (reader, writer) = stream.into_split();
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE);
-    let writer_task = AbortOnDrop::new(tokio::spawn(write_frames(writer, outbound_rx, control_rx)));
-    let authenticated = serve_authenticated(
+    let (writer_closed_tx, writer_closed_rx) = watch::channel(false);
+    let writer_task = AbortOnDrop::new(tokio::spawn(async move {
+        write_frames(writer, outbound_rx, control_rx).await;
+        writer_closed_tx.send_replace(true);
+    }));
+    let authenticated = Box::pin(serve_authenticated(
         reader,
         &state,
         &peer,
         connection_id,
         &outbound_tx,
         &control_tx,
-    );
+        writer_closed_rx,
+    ));
     let result = if let Some(peer_monitor) = peer_monitor {
         tokio::select! {
             result = authenticated => result,
@@ -1245,6 +1342,7 @@ async fn append_daemon_splint_audit(
 }
 
 async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
+    retire_transient_lair_for_owner(state, connection_id).await;
     state
         .automation_connections
         .lock()
@@ -1304,6 +1402,7 @@ async fn serve_authenticated(
     connection_id: u64,
     outbound: &mpsc::Sender<ServerFrame>,
     control: &mpsc::Sender<ServerFrame>,
+    mut writer_closed: watch::Receiver<bool>,
 ) -> Result<()> {
     let hello = time::timeout(HANDSHAKE_TIMEOUT, read_frame(&mut reader))
         .await
@@ -1505,6 +1604,7 @@ async fn serve_authenticated(
                     send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
+                let transient_creation = matches!(request, Request::CreateTransientLair { .. });
                 let handled = handle_request(
                     request,
                     state,
@@ -1513,8 +1613,36 @@ async fn serve_authenticated(
                     subscriptions.len(),
                     trusted_ui_client,
                     remote_interactive_client,
-                )
-                .await;
+                );
+                let handled = if transient_creation {
+                    tokio::pin!(handled);
+                    tokio::select! {
+                        result = &mut handled => Some(result),
+                        frame = read_optional_frame(&mut reader) => {
+                            if frame?.is_some() {
+                                send_control(
+                                    control,
+                                    protocol_error(
+                                        None,
+                                        ErrorCode::InvalidFrame,
+                                        "another frame arrived while transient creation was in flight",
+                                    ),
+                                )
+                                .await?;
+                            }
+                            None
+                        }
+                        changed = writer_closed.changed() => {
+                            let _ = changed;
+                            None
+                        }
+                    }
+                } else {
+                    Some(handled.await)
+                };
+                let Some(handled) = handled else {
+                    break;
+                };
                 match handled {
                     Ok(Handled {
                         response,
@@ -1966,6 +2094,41 @@ fn splint_launch_context(topology: &Topology, splint_id: SplintId) -> Option<Spl
     None
 }
 
+struct RuntimeCreationGuard {
+    runtime: Option<LiveSplintRuntime>,
+    cleanup_tasks: TaskTracker,
+}
+
+impl RuntimeCreationGuard {
+    fn new(runtime: LiveSplintRuntime, cleanup_tasks: TaskTracker) -> Self {
+        Self {
+            runtime: Some(runtime),
+            cleanup_tasks,
+        }
+    }
+
+    fn handle(&self) -> LiveSplintHandle {
+        self.runtime
+            .as_ref()
+            .expect("guard owns runtime until commit")
+            .handle()
+    }
+
+    fn take(mut self) -> LiveSplintRuntime {
+        self.runtime.take().expect("runtime committed exactly once")
+    }
+}
+
+impl Drop for RuntimeCreationGuard {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            self.cleanup_tasks.spawn(async move {
+                let _ = runtime.shutdown().await;
+            });
+        }
+    }
+}
+
 async fn spawn_runtime(
     state: &DaemonState,
     context: SplintLaunchContext,
@@ -2180,6 +2343,150 @@ async fn restore_targets(
     (state.topology.read().await.revision(), results)
 }
 
+#[derive(Clone, Copy)]
+enum TransientRetirementTrigger {
+    OwnerDisconnect(u64),
+    InitialExit {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+}
+
+fn transient_trigger_matches(
+    lease: TransientLairLease,
+    trigger: TransientRetirementTrigger,
+) -> bool {
+    match trigger {
+        TransientRetirementTrigger::OwnerDisconnect(connection_id) => {
+            lease.owner_connection_id == connection_id
+        }
+        TransientRetirementTrigger::InitialExit {
+            splint_id,
+            incarnation,
+        } => lease.initial_splint_id == splint_id && lease.initial_incarnation == Some(incarnation),
+    }
+}
+
+async fn retire_transient_lair_under_transaction(
+    state: &DaemonState,
+    lair_id: LairId,
+    trigger: TransientRetirementTrigger,
+) -> bool {
+    let Some(lease) = state.transient_leases.lock().unwrap().for_lair(lair_id) else {
+        return false;
+    };
+    if !transient_trigger_matches(lease, trigger) {
+        return false;
+    }
+    let mut candidate = state.topology.read().await.clone();
+    let Some(lair) = candidate.lairs().find(|lair| lair.id == lair_id).cloned() else {
+        state.transient_leases.lock().unwrap().remove_lair(lair_id);
+        return false;
+    };
+    if lair.lifetime != LairLifetime::Transient {
+        return false;
+    }
+    let splint_ids = lair
+        .dojos
+        .iter()
+        .flat_map(|dojo| layout_splint_ids(&dojo.root))
+        .collect::<Vec<_>>();
+    let identities = {
+        let runtimes = state.runtimes.lock().await;
+        splint_ids
+            .iter()
+            .filter_map(|splint_id| {
+                runtimes
+                    .handle(*splint_id)
+                    .map(|handle| (*splint_id, handle.incarnation.value()))
+            })
+            .collect::<Vec<_>>()
+    };
+    if candidate.remove_lair(lair_id).is_none() {
+        return false;
+    }
+    let revision = candidate.revision();
+    let runtimes = {
+        let mut topology = state.topology.write().await;
+        let mut registry = state.runtimes.lock().await;
+        *topology = candidate;
+        splint_ids
+            .iter()
+            .filter_map(|splint_id| registry.remove(*splint_id))
+            .collect::<Vec<_>>()
+    };
+    state.transient_leases.lock().unwrap().remove_lair(lair_id);
+    {
+        let mut focus = state.graphical_focus.lock().await;
+        if focus
+            .as_ref()
+            .is_some_and(|claim| splint_ids.contains(&claim.splint_id))
+        {
+            *focus = None;
+        }
+    }
+    for (splint_id, incarnation) in identities {
+        let (controller, transfer) = {
+            let mut controllers = state.controller.lock().await;
+            (
+                controllers.release_identity(splint_id, incarnation),
+                controllers.cancel_identity_transfer(splint_id, incarnation),
+            )
+        };
+        if let Some(controller) = controller {
+            let _ = state.connection_revocations.send(controller.connection_id);
+        }
+        if let Some(transfer) = transfer {
+            let _ = state
+                .connection_revocations
+                .send(transfer.requester_connection_id);
+            publish_control_notice(
+                state,
+                ControlNotice::TransferResolved {
+                    transfer,
+                    outcome: ControlTransferOutcome::Cancelled,
+                    controller_id: None,
+                    excluded_connections: None,
+                },
+            );
+        }
+        publish_control_status(state, splint_id, incarnation).await;
+        let revoked = state.grants.lock().await.revoke_identity(
+            splint_id,
+            incarnation,
+            "transient Lair retired",
+        );
+        for grant_id in revoked {
+            let _ = state.revocations.send(Revocation { grant_id });
+        }
+    }
+    for runtime in runtimes {
+        let _ = runtime.shutdown().await;
+    }
+    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+    true
+}
+
+async fn retire_transient_lair_for_owner(state: &DaemonState, connection_id: u64) -> bool {
+    let Some(lease) = state
+        .transient_leases
+        .lock()
+        .unwrap()
+        .for_connection(connection_id)
+    else {
+        return false;
+    };
+    let Ok(_transaction) = state.topology_transactions.acquire().await else {
+        return false;
+    };
+    retire_transient_lair_under_transaction(
+        state,
+        lease.lair_id,
+        TransientRetirementTrigger::OwnerDisconnect(connection_id),
+    )
+    .await
+}
+
 async fn finalize_exit_if_current(
     state: &DaemonState,
     splint_id: SplintId,
@@ -2192,6 +2499,10 @@ async fn finalize_exit_if_current(
     finalize_exit_if_current_under_transaction(state, splint_id, incarnation, code).await
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "persistent and transient exit paths share one identity-checked transaction"
+)]
 async fn finalize_exit_if_current_under_transaction(
     state: &DaemonState,
     splint_id: SplintId,
@@ -2206,6 +2517,42 @@ async fn finalize_exit_if_current_under_transaction(
         .map(|handle| handle.incarnation.value());
     if current.is_some_and(|current| current != incarnation) {
         return false;
+    }
+    let transient_lair_id = {
+        let topology = state.topology.read().await;
+        topology
+            .lairs()
+            .find(|lair| {
+                lair.lifetime == LairLifetime::Transient
+                    && lair
+                        .dojos
+                        .iter()
+                        .any(|dojo| dojo.root.find_splint(splint_id).is_some())
+            })
+            .map(|lair| lair.id)
+    };
+    let initial_transient_exit = transient_lair_id.is_some_and(|lair_id| {
+        let registry = state.transient_leases.lock().unwrap();
+        registry.for_lair(lair_id).is_some_and(|lease| {
+            transient_trigger_matches(
+                lease,
+                TransientRetirementTrigger::InitialExit {
+                    splint_id,
+                    incarnation,
+                },
+            )
+        })
+    });
+    if initial_transient_exit {
+        return retire_transient_lair_under_transaction(
+            state,
+            transient_lair_id.expect("transient exit has a Lair"),
+            TransientRetirementTrigger::InitialExit {
+                splint_id,
+                incarnation,
+            },
+        )
+        .await;
     }
     let released = state
         .controller
@@ -2230,6 +2577,21 @@ async fn finalize_exit_if_current_under_transaction(
         return false;
     }
     let revision = candidate.revision();
+    if transient_lair_id.is_some() {
+        install_topology(state, candidate).await;
+        publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+        append_daemon_splint_audit(
+            state,
+            splinterm_protocol::AuditOperation::ProcessExit,
+            splint_id,
+            incarnation,
+            splinterm_protocol::AuditDecision::Allowed,
+            "transient_secondary_process_exit_reconciled",
+            splinterm_protocol::AuditOutcome::Succeeded,
+        )
+        .await;
+        return true;
+    }
     if persist_topology(state, &candidate).await.is_err() {
         error!(
             ?splint_id,
@@ -2317,6 +2679,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::RevokeAccess { .. }
             | Request::PrepareMutation { .. }
             | Request::CreateLair { .. }
+            | Request::CreateTransientLair { .. }
             | Request::CreateLairAutomation { .. }
             | Request::SplitSplint { .. }
             | Request::SplitSplintAutomation { .. }
@@ -2518,6 +2881,7 @@ fn requested_limits(request: &Request, active_subscriptions: usize) -> policy::R
         }
         Request::AuditInspect { max_records, .. } => limits.results = Some(*max_records),
         Request::CreateLair { .. }
+        | Request::CreateTransientLair { .. }
         | Request::CreateLairAutomation { .. }
         | Request::SplitSplint { .. }
         | Request::SplitSplintAutomation { .. }
@@ -2893,6 +3257,7 @@ async fn request_policy_resources(
         | Request::InspectTopology
         | Request::SubscribeTopology
         | Request::CreateLair { .. }
+        | Request::CreateTransientLair { .. }
         | Request::CreateLairAutomation { .. }
         | Request::PrepareMutation {
             mutation: splinterm_protocol::MutationPreflight::CreateLair,
@@ -3195,6 +3560,7 @@ fn spawn_audit_metadata(request: &Request) -> (Option<usize>, Option<String>) {
         return (Some(launch.argv.len().saturating_sub(1)), None);
     }
     let (Request::CreateLair { launch, .. }
+    | Request::CreateTransientLair { launch, .. }
     | Request::SplitSplint { launch, .. }
     | Request::RelaunchSplint { launch, .. }
     | Request::NewDojo { launch, .. }) = request
@@ -3974,6 +4340,105 @@ async fn handle_authorized_request(
                 dojo_id: containment.1,
                 authorization_revision: mutation.authorization_revision,
                 grant: mutation.grant,
+            }
+        }
+        Request::CreateTransientLair {
+            expected_topology_revision,
+            name,
+            launch,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            launch.validate()?;
+            if launch.command.is_empty() {
+                return Err(invalid("transient Lair requires a direct command"));
+            }
+            let current = state.topology.read().await.revision();
+            if current != expected_topology_revision {
+                return Err(model_error(TopologyError::StaleTopology {
+                    expected: expected_topology_revision,
+                    current,
+                }));
+            }
+            if name.len() > 128 {
+                return Err(invalid("dojo name exceeds protocol limits"));
+            }
+            let mut lair = Lair::transient(name, launch.cwd.clone());
+            let lair_id = lair.id;
+            let dojo_id = lair.dojos[0].id;
+            let LayoutNode::Leaf(splint) = &mut lair.dojos[0].root else {
+                unreachable!()
+            };
+            splint.command.clone_from(&launch.command);
+            *splint.launch = durable_launch(&launch);
+            let splint_id = splint.id;
+            let lease_registry = Arc::clone(&state.transient_leases);
+            if !lease_registry
+                .lock()
+                .unwrap()
+                .reserve(connection_id, lair_id, splint_id)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "connection already owns a transient Lair",
+                ));
+            }
+            let reservation = TransientLeaseReservation {
+                registry: Arc::clone(&lease_registry),
+                lair_id,
+                committed: false,
+            };
+            let context = SplintLaunchContext {
+                lair: lair_id,
+                dojo: dojo_id,
+                splint: splint_id,
+            };
+            let runtime = spawn_runtime(state, context, &launch).await?;
+            let runtime = RuntimeCreationGuard::new(runtime, state.exit_observers.clone());
+            let handle = runtime.handle();
+            let incarnation = handle.incarnation.value();
+            splint.last_incarnation = Some(incarnation);
+            splint.state = SplintState::Running;
+            if !lease_registry
+                .lock()
+                .unwrap()
+                .set_incarnation(lair_id, incarnation)
+            {
+                return Err(internal());
+            }
+            let mut candidate = state.topology.read().await.clone();
+            let topology_revision = candidate
+                .insert_lair_at(expected_topology_revision, lair.clone())
+                .map_err(model_error)?;
+            let runtime = runtime.take();
+            let rejected = {
+                let mut topology = state.topology.write().await;
+                let mut runtimes = state.runtimes.lock().await;
+                match runtimes.insert(runtime) {
+                    Ok(()) => {
+                        *topology = candidate;
+                        None
+                    }
+                    Err(runtime) => Some(runtime),
+                }
+            };
+            if let Some(runtime) = rejected {
+                let _ = runtime.shutdown().await;
+                return Err(ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "live Splint registry rejected the process",
+                ));
+            }
+            reservation.commit();
+            observe_process_exit(state, handle);
+            publish_topology(state, topology_revision, TopologyChangeKind::LairCreated).await;
+            Response::LairCreated {
+                lair,
+                incarnation,
+                topology_revision,
             }
         }
         Request::CreateLair {
@@ -7108,11 +7573,30 @@ mod tests {
     }
 
     fn test_state(development_terminal_access: bool) -> Arc<DaemonState> {
+        test_state_with_backend(
+            development_terminal_access,
+            LinuxPtyBackend::new("/missing/helper"),
+        )
+    }
+
+    fn test_pty_backend() -> LinuxPtyBackend {
+        let test_binary = std::env::current_exe().unwrap();
+        let debug_directory = test_binary.parent().unwrap().parent().unwrap();
+        let helper = debug_directory.join("splinterm-pty-child");
+        assert!(helper.is_file(), "missing PTY helper: {}", helper.display());
+        LinuxPtyBackend::new(helper)
+    }
+
+    fn test_state_with_backend(
+        development_terminal_access: bool,
+        pty_backend: LinuxPtyBackend,
+    ) -> Arc<DaemonState> {
         let (revocations, _) = broadcast::channel(32);
         let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
         Arc::new(DaemonState {
             topology: RwLock::new(Topology::new()),
             runtimes: Mutex::new(RuntimeRegistry::default()),
+            transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
             graphical_focus: Mutex::new(None),
             topology_hub: Mutex::new(TopologyHub::default()),
             topology_transactions: Semaphore::new(1),
@@ -7140,7 +7624,7 @@ mod tests {
             shared_kitty_upload_budget: SharedKittyUploadBudget::new(
                 DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
             ),
-            pty_backend: LinuxPtyBackend::new("/missing/helper"),
+            pty_backend,
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
         })
@@ -7153,6 +7637,192 @@ mod tests {
             .as_nanos();
         env::temp_dir().join(format!("splinterd-test-{}-{nonce}", std::process::id()))
     }
+
+    fn test_launch(command: &[&str]) -> splinterm_protocol::LaunchParameters {
+        splinterm_protocol::LaunchParameters {
+            cwd: PathBuf::from("/tmp"),
+            command: command.iter().map(|value| (*value).to_owned()).collect(),
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 1_000,
+        }
+    }
+
+    async fn trusted_request(
+        state: &Arc<DaemonState>,
+        connection_id: u64,
+        request: Request,
+    ) -> Result<Response, ProtocolError> {
+        handle_authorized_request(
+            request,
+            state,
+            &PeerIdentity::for_test(),
+            connection_id,
+            true,
+            false,
+            &RequestAuthorizationContext::default(),
+        )
+        .await
+        .map(|handled| handled.response)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_owner_disconnect_reaps_runtime_and_removes_complete_lair() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let connection_id = 41;
+        let response = trusted_request(
+            &state,
+            connection_id,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "transient".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+            },
+        )
+        .await
+        .unwrap();
+        let Response::LairCreated { lair, .. } = response else {
+            panic!("transient create response was not returned");
+        };
+        assert_eq!(lair.lifetime, LairLifetime::Transient);
+        let splint_id = lair.dojos[0].default_focus;
+        let child_pid = state
+            .runtimes
+            .lock()
+            .await
+            .handle(splint_id)
+            .unwrap()
+            .child_pid();
+        cleanup_connection(&state, connection_id + 1).await;
+        assert!(state.topology.read().await.find_splint(splint_id).is_some());
+        assert!(Path::new(&format!("/proc/{child_pid}")).exists());
+        cleanup_connection(&state, connection_id).await;
+        assert!(state.topology.read().await.lairs().next().is_none());
+        assert!(state.runtimes.lock().await.handle(splint_id).is_none());
+        assert!(
+            state
+                .transient_leases
+                .lock()
+                .unwrap()
+                .for_connection(connection_id)
+                .is_none()
+        );
+        assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded test proves secondary exit and initial retirement together"
+    )]
+    async fn initial_exit_retires_transient_but_secondary_exit_does_not() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let connection_id = 42;
+        let Response::LairCreated { lair, .. } = time::timeout(
+            Duration::from_secs(5),
+            trusted_request(
+                &state,
+                connection_id,
+                Request::CreateTransientLair {
+                    expected_topology_revision: TopologyRevision::default(),
+                    name: "transient-secondary".into(),
+                    launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                },
+            ),
+        )
+        .await
+        .expect("transient create timed out")
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let initial_splint = lair.dojos[0].default_focus;
+        let expected = state.topology.read().await.revision();
+        let Response::DojoStarted { splint_id, .. } = time::timeout(
+            Duration::from_secs(5),
+            trusted_request(
+                &state,
+                99,
+                Request::NewDojo {
+                    expected_topology_revision: expected,
+                    lair_id: lair.id,
+                    name: "secondary".into(),
+                    launch: test_launch(&["/bin/true"]),
+                },
+            ),
+        )
+        .await
+        .expect("secondary Dojo create timed out")
+        .unwrap() else {
+            panic!("secondary Dojo response was not returned");
+        };
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                let exited = state
+                    .topology
+                    .read()
+                    .await
+                    .find_splint(splint_id)
+                    .is_some_and(|splint| matches!(splint.state, SplintState::Exited(_)));
+                if exited {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            state
+                .topology
+                .read()
+                .await
+                .find_splint(initial_splint)
+                .is_some()
+        );
+        time::timeout(
+            Duration::from_secs(5),
+            cleanup_connection(&state, connection_id),
+        )
+        .await
+        .expect("owner cleanup timed out");
+        assert!(state.topology.read().await.lairs().next().is_none());
+
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated { lair, .. } = time::timeout(
+            Duration::from_secs(5),
+            trusted_request(
+                &state,
+                43,
+                Request::CreateTransientLair {
+                    expected_topology_revision: TopologyRevision::default(),
+                    name: "transient-exit".into(),
+                    launch: test_launch(&["/bin/true"]),
+                },
+            ),
+        )
+        .await
+        .expect("short transient create timed out")
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state
+                    .topology
+                    .read()
+                    .await
+                    .lairs()
+                    .all(|current| current.id != lair.id)
+                {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn human_roles_bypass_policy_only_for_their_supported_ui_surface() {
         assert!(policy_reload_disconnects(ClientRole::Automation));
@@ -8155,6 +8825,13 @@ mod tests {
         let pending = controllers.request_transfer(30, splint_id, 4).unwrap();
         assert_eq!(controllers.cancel_connection_transfers(30), vec![pending]);
         assert!(controllers.authorize(10, owner.id, splint_id, 4).is_ok());
+
+        let retired = controllers.request_transfer(32, splint_id, 4).unwrap();
+        assert_eq!(
+            controllers.cancel_identity_transfer(splint_id, 4),
+            Some(retired)
+        );
+        assert!(!controllers.transfer_by_splint.contains_key(&splint_id));
 
         let timed_out = controllers.request_transfer(31, splint_id, 4).unwrap();
         assert_eq!(controllers.expire_transfer(timed_out.id), Some(timed_out));

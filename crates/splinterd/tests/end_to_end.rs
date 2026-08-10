@@ -803,6 +803,27 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
             automation.request(Request::Ping).await,
             Response::Pong
         ));
+        let revision = automation.topology_revision().await;
+        let denied = automation
+            .request_result(Request::CreateTransientLair {
+                expected_topology_revision: revision,
+                name: "automation-must-not-own-transient".into(),
+                launch: LaunchParameters {
+                    cwd: daemon.runtime.clone(),
+                    command: vec!["/bin/true".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 1_000,
+                },
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, ErrorCode::Unauthorized);
+        let Response::Topology { snapshot } = automation.request(Request::InspectTopology).await
+        else {
+            panic!("topology response was not returned");
+        };
+        assert!(snapshot.topology.lairs().next().is_none());
         daemon.shutdown();
     })
     .await

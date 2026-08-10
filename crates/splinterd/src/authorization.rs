@@ -104,7 +104,9 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
 
     match request {
         Request::Ping | Request::ReadGraphicalFocus => RequestAuthorization::Authenticated,
-        Request::PublishGraphicalFocus { .. } => RequestAuthorization::TrustedUi,
+        Request::PublishGraphicalFocus { .. } | Request::CreateTransientLair { .. } => {
+            RequestAuthorization::TrustedUi
+        }
         Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }
@@ -194,8 +196,11 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
-    use splinterm_core::SplintId;
+    use splinterm_core::{SplintId, TopologyRevision};
+    use splinterm_protocol::LaunchParameters;
 
     #[test]
     fn scope_vocabulary_is_closed_unique_and_schema_sized() {
@@ -229,6 +234,24 @@ mod tests {
         assert_eq!(unique.len(), values.len());
         assert_eq!(values[0], "topology_metadata_read");
         assert_eq!(values[17], "audit_inspect");
+    }
+
+    #[test]
+    fn transient_creation_is_trusted_ui_only() {
+        assert_eq!(
+            for_request(&Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::new(0),
+                name: "transient".into(),
+                launch: LaunchParameters {
+                    cwd: PathBuf::from("/tmp"),
+                    command: vec!["/bin/true".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 1_000,
+                },
+            }),
+            RequestAuthorization::TrustedUi
+        );
     }
 
     #[test]

@@ -4105,6 +4105,7 @@ mod tests {
         let dojo = Lair {
             id: lair_id,
             name: "main".to_owned(),
+            lifetime: splinterm_core::LairLifetime::default(),
             dojos: vec![dojo],
         };
         let mut topology = Topology::new();

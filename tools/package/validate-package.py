@@ -51,7 +51,7 @@ MCP_REQUIRED = {
     "usr/share/licenses/splinterm-mcp/LICENSE",
     "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
 }
-PRIVATE_PROTOCOL_VERSION = 28
+PRIVATE_PROTOCOL_VERSION = 29
 
 EXECUTABLES = {
     "usr/bin/generate-omarchy-theme.py",
@@ -127,22 +127,42 @@ def validate_launcher(root: Path) -> None:
             SPLINTERM_TEST_STATE=str(state),
             SPLINTERM_TEST_RECORD=str(record),
         )
+        launcher = str(root / "usr/bin/splinterm-xdg-terminal-exec")
+        run([launcher], env=environment, timeout=10)
+        calls = (state / "systemctl").read_text(encoding="utf-8").splitlines()
+        assert calls == ["--user start splinterd.service", "--user restart splinterd.service"]
+        assert record.read_text(encoding="utf-8").splitlines() == ["xdg-launch"]
+
         run(
-            [str(root / "usr/bin/splinterm-xdg-terminal-exec"), "--working-directory", "/tmp/a b"],
+            [launcher, "--working-directory=/tmp/a b"],
             env=environment,
             timeout=10,
         )
-        calls = (state / "systemctl").read_text(encoding="utf-8").splitlines()
-        assert calls == ["--user start splinterd.service", "--user restart splinterd.service"]
-        launch = record.read_text(encoding="utf-8").splitlines()
-        assert launch[:3] == ["launch", "--new", "--name"]
-        name_parts = launch[3].split("-")
-        assert (
-            len(name_parts) == 3
-            and name_parts[0] == "terminal"
-            and all(part.isdigit() for part in name_parts[1:])
+        assert record.read_text(encoding="utf-8").splitlines() == [
+            "xdg-launch",
+            "--working-directory=/tmp/a b",
+        ]
+
+        run(
+            [
+                launcher,
+                "--working-directory=/tmp/a b",
+                "--",
+                "/usr/bin/printf",
+                "",
+                "$(must-not-run)",
+            ],
+            env=environment,
+            timeout=10,
         )
-        assert launch[4:] == ["--working-directory", "/tmp/a b"]
+        assert record.read_text(encoding="utf-8").splitlines() == [
+            "xdg-launch",
+            "--working-directory=/tmp/a b",
+            "--",
+            "/usr/bin/printf",
+            "",
+            "$(must-not-run)",
+        ]
 
         run([str(root / "usr/bin/splinterm-sessions")], env=environment, timeout=10)
         assert record.read_text(encoding="utf-8").splitlines() == ["sessions"]

@@ -1,5 +1,6 @@
 use std::{
     env,
+    future::Future,
     io::{self, IsTerminal, Write},
     path::PathBuf,
     sync::mpsc as std_mpsc,
@@ -20,7 +21,8 @@ use splinterm_protocol::{Request, Response};
 
 use super::{
     session_catalog::{
-        create_request, recent_dojo_ids, remember_dojo, select_dojo_from, session_picker_item,
+        create_request, launch_parameters, recent_dojo_ids, remember_dojo, select_dojo_from,
+        session_picker_item,
     },
     window::{run_live_multipane_window, run_live_window},
 };
@@ -270,6 +272,57 @@ fn fresh_dojo_name(now: SystemTime, process_id: u32) -> String {
     format!("terminal-{stamp}-{process_id}")
 }
 
+async fn keep_owner_until_complete<Owner, WindowFuture>(
+    owner: Owner,
+    window: WindowFuture,
+) -> WindowFuture::Output
+where
+    WindowFuture: Future,
+{
+    let result = window.await;
+    drop(owner);
+    result
+}
+
+pub(in crate::app) async fn xdg_launch(
+    cwd: PathBuf,
+    command: Vec<String>,
+    config: AppConfig,
+    factory: ConnectionFactory,
+) -> Result<()> {
+    if command.is_empty() {
+        return launch(None, Some(cwd), None, true, command, config, factory).await;
+    }
+    if !factory.is_local() {
+        bail!("transient XDG launch requires the local trusted client");
+    }
+    let mut owner = factory
+        .connect()
+        .await
+        .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
+    let expected = owner.topology_revision().await?;
+    let name = fresh_dojo_name(SystemTime::now(), std::process::id());
+    let Response::LairCreated { lair, .. } = owner
+        .request(Request::CreateTransientLair {
+            expected_topology_revision: expected,
+            name,
+            launch: launch_parameters(cwd, command, &config),
+        })
+        .await?
+    else {
+        bail!("splinterd did not create the transient terminal");
+    };
+    let dojo = lair
+        .dojos
+        .first()
+        .context("new transient Lair did not contain a Dojo")?
+        .clone();
+    if !matches!(&dojo.root, splinterm_core::LayoutNode::Leaf(_)) {
+        bail!("new transient Dojo did not contain exactly one Splint");
+    }
+    keep_owner_until_complete(owner, run_live_multipane_window(config, dojo, factory)).await
+}
+
 pub(in crate::app) async fn launch(
     name: Option<String>,
     cwd: Option<PathBuf>,
@@ -322,7 +375,43 @@ pub(in crate::app) async fn launch(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use super::*;
+
+    struct DropMarker(Arc<AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_is_kept_until_window_future_completes() {
+        for succeeds in [true, false] {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let (send, receive) = tokio::sync::oneshot::channel::<Result<(), &'static str>>();
+            let task = tokio::spawn(keep_owner_until_complete(
+                DropMarker(Arc::clone(&dropped)),
+                async move { receive.await.unwrap() },
+            ));
+            tokio::task::yield_now().await;
+            assert!(!dropped.load(Ordering::SeqCst));
+            let expected = if succeeds {
+                Ok(())
+            } else {
+                Err("window failed")
+            };
+            send.send(expected).unwrap();
+            let actual = task.await.unwrap();
+            assert_eq!(actual.is_ok(), succeeds);
+            assert!(dropped.load(Ordering::SeqCst));
+        }
+    }
 
     #[test]
     fn dojo_selection_uses_only_its_local_hint() {

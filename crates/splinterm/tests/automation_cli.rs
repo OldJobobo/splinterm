@@ -83,6 +83,7 @@ fn reviewed_topology() -> TopologySnapshot {
     let dojo = Lair {
         id: lair_id,
         name: "main".to_owned(),
+        lifetime: splinterm_core::LairLifetime::default(),
         dojos: vec![Dojo {
             id: dojo_id,
             name: "terminal".to_owned(),

@@ -58,9 +58,9 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
                 AuditOperation::SetDojoDefaultFocus
             }
         },
-        Request::CreateLair { .. } | Request::CreateLairAutomation { .. } => {
-            AuditOperation::CreateLair
-        }
+        Request::CreateLair { .. }
+        | Request::CreateTransientLair { .. }
+        | Request::CreateLairAutomation { .. } => AuditOperation::CreateLair,
         Request::SplitSplint { .. } | Request::SplitSplintAutomation { .. } => {
             AuditOperation::SplitSplint
         }

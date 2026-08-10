@@ -156,6 +156,15 @@ pub(in crate::app) enum Command {
         #[arg(last = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Private XDG terminal adapter entry point.
+    #[command(hide = true)]
+    XdgLaunch {
+        #[arg(long = "working-directory", alias = "dir")]
+        cwd: Option<PathBuf>,
+        /// Executable and arguments passed directly, never through a shell.
+        #[arg(last = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Create a fresh graphical Lair, or explicitly attach by Splint ID.
     Launch {
         #[arg(long = "working-directory", alias = "dir")]

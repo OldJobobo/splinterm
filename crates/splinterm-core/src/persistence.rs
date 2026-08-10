@@ -8,7 +8,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    Dojo, DojoId, Lair, LairId, LayoutNode, SplintId, SplintState, Topology, TopologyRevision,
+    Dojo, DojoId, Lair, LairId, LairLifetime, LayoutNode, SplintId, SplintState, Topology,
+    TopologyRevision,
 };
 
 const LEGACY_LAIR_SCHEMA_VERSION: u32 = 2;
@@ -71,6 +72,7 @@ impl LegacyLairDocumentV2 {
             .map(|legacy_lair| Lair {
                 id: LairId::from_uuid(legacy_lair.id),
                 name: legacy_lair.name,
+                lifetime: LairLifetime::Persistent,
                 dojos: legacy_lair
                     .windows
                     .into_iter()
@@ -98,7 +100,12 @@ impl TopologyDocument {
     ///
     /// Returns an error when the model cannot be represented as safe durable metadata.
     pub fn from_topology(topology: &Topology) -> Result<Self, PersistenceError> {
-        let mut lairs: Vec<_> = topology.lairs.values().cloned().collect();
+        let mut lairs: Vec<_> = topology
+            .lairs
+            .values()
+            .filter(|lair| lair.lifetime.is_persistent())
+            .cloned()
+            .collect();
         for lair in &mut lairs {
             for dojo in &mut lair.dojos {
                 mark_tree_restorable(&mut dojo.root);
@@ -165,7 +172,11 @@ impl TopologyDocument {
     }
 
     fn lair_map(self) -> BTreeMap<LairId, Lair> {
-        self.lairs.into_iter().map(|lair| (lair.id, lair)).collect()
+        self.lairs
+            .into_iter()
+            .filter(|lair| lair.lifetime.is_persistent())
+            .map(|lair| (lair.id, lair))
+            .collect()
     }
 
     fn validate(&self) -> Result<(), PersistenceError> {
@@ -415,6 +426,46 @@ mod tests {
         };
         assert_eq!(splint.state, SplintState::Exited(0));
         assert_eq!(splint.last_incarnation, Some(41));
+    }
+
+    #[test]
+    fn durable_projection_omits_transient_lairs_and_default_lifetime_field() {
+        let mut topology = Topology::new();
+        let persistent_id = topology
+            .create_lair("persistent", std::path::PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let transient = Lair::transient("transient", std::path::PathBuf::from("/var/tmp"));
+        let transient_id = transient.id;
+        topology
+            .insert_lair_at(topology.revision(), transient)
+            .unwrap();
+
+        let encoded = TopologyDocument::from_topology(&topology)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["revision"], json!(2));
+        assert_eq!(value["lairs"].as_array().unwrap().len(), 1);
+        assert_eq!(value["lairs"][0]["id"], json!(persistent_id));
+        assert!(value["lairs"][0].get("lifetime").is_none());
+
+        let restored = TopologyDocument::decode(&encoded)
+            .unwrap()
+            .into_topology()
+            .unwrap();
+        assert!(restored.lairs().any(|lair| lair.id == persistent_id));
+        assert!(!restored.lairs().any(|lair| lair.id == transient_id));
+    }
+
+    #[test]
+    fn explicitly_tagged_transient_metadata_is_discarded_on_restore() {
+        let mut value = valid_v3_document();
+        value["lairs"][0]["lifetime"] = json!("transient");
+        let restored = decode(&value).unwrap().into_topology().unwrap();
+        assert_eq!(restored.revision().get(), 7);
+        assert_eq!(restored.lairs().count(), 0);
     }
 
     #[test]

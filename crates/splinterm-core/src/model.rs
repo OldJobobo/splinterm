@@ -119,26 +119,54 @@ impl Dojo {
     }
 }
 
-/// A named persistent session containing Dojos.
+/// In-memory lifetime policy for a Lair.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LairLifetime {
+    #[default]
+    Persistent,
+    Transient,
+}
+
+impl LairLifetime {
+    #[must_use]
+    pub const fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent)
+    }
+}
+
+/// A named session containing Dojos.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lair {
     pub id: LairId,
     pub name: String,
+    #[serde(default, skip_serializing_if = "LairLifetime::is_persistent")]
+    pub lifetime: LairLifetime,
     pub dojos: Vec<Dojo>,
 }
 
 impl Lair {
     #[must_use]
     pub fn new(name: impl Into<String>, cwd: PathBuf) -> Self {
+        Self::with_lifetime(name, cwd, LairLifetime::Persistent)
+    }
+
+    #[must_use]
+    pub fn transient(name: impl Into<String>, cwd: PathBuf) -> Self {
+        Self::with_lifetime(name, cwd, LairLifetime::Transient)
+    }
+
+    fn with_lifetime(name: impl Into<String>, cwd: PathBuf, lifetime: LairLifetime) -> Self {
         Self {
             id: LairId::new(),
             name: name.into(),
+            lifetime,
             dojos: vec![Dojo::with_shell("terminal", cwd)],
         }
     }
 }
 
-/// The daemon-owned collection of persistent Lairs.
+/// The daemon-owned collection of live Lairs.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Topology {
     pub(crate) revision: TopologyRevision,

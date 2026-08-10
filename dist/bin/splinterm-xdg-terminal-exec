@@ -45,7 +45,6 @@ case ${0##*/} in
     ;;
 esac
 
-# Desktop/XDG launches remain fresh and non-interactive. The explicit aliases
-# above own session selection and reopening without changing terminal-exec.
-name="terminal-$(date +%s)-$$"
-exec splinterm launch --new --name "$name" "$@"
+# The private client entry point selects persistent interactive or transient
+# command-bearing behavior without parsing or rebuilding the argument vector.
+exec splinterm xdg-launch "$@"

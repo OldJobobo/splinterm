@@ -49,7 +49,7 @@ use super::{
     },
     remote_cli::run_remote_command,
     session_catalog::{automation_launch, create_request, launch_parameters, remember_dojo},
-    sessions::{launch, reopen_recent, run_sessions, select_dojo},
+    sessions::{launch, reopen_recent, run_sessions, select_dojo, xdg_launch},
 };
 
 #[allow(
@@ -75,6 +75,7 @@ pub(crate) async fn run() -> Result<()> {
             | Command::Reopen
             | Command::Window { .. }
             | Command::Launch { .. }
+            | Command::XdgLaunch { .. }
             | Command::Consent
             | Command::Config { .. }
             | Command::Keymap { .. }
@@ -150,6 +151,7 @@ pub(crate) async fn run() -> Result<()> {
                 | Command::Relay { .. }
                 | Command::Remote { .. }
                 | Command::Reset { .. }
+                | Command::XdgLaunch { .. }
         )
     {
         usage_error("--remote cannot select local service, relay, policy, or consent commands");
@@ -206,6 +208,14 @@ async fn run_configured_command(
             remember_dojo(&factory, dojo.id);
             run_live_multipane_window(config, dojo, factory).await
         }
+        Command::XdgLaunch { cwd, command } => {
+            if !factory.is_local() {
+                bail!("XDG launch is unavailable for remote endpoints");
+            }
+            let cwd =
+                cwd.unwrap_or(env::current_dir().context("failed to read current directory")?);
+            xdg_launch(cwd, command, config, factory).await
+        }
         Command::Launch {
             cwd,
             name,
@@ -261,6 +271,7 @@ async fn run_headless(
         | Command::Reopen
         | Command::Window { .. }
         | Command::Launch { .. }
+        | Command::XdgLaunch { .. }
         | Command::Consent
         | Command::Config { .. }
         | Command::Keymap { .. }
@@ -842,6 +853,26 @@ mod tests {
         assert!(splint_id.is_none());
         assert!(!new);
         assert!(command.is_empty());
+    }
+
+    #[test]
+    fn xdg_launch_parser_preserves_cwd_empty_arguments_and_metacharacters() {
+        let cli = Cli::try_parse_from([
+            "splinterm",
+            "xdg-launch",
+            "--working-directory=/tmp/a b",
+            "--",
+            "/usr/bin/printf",
+            "",
+            "$(must-not-run)",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::XdgLaunch { cwd: Some(cwd), command })
+                if cwd == std::path::Path::new("/tmp/a b")
+                    && command == ["/usr/bin/printf", "", "$(must-not-run)"]
+        ));
     }
 
     #[test]

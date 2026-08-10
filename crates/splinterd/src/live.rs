@@ -1904,6 +1904,27 @@ impl LiveSplintHandle {
     }
 }
 
+struct SpawnOutcome(Option<Result<LinuxPtySession, PtyError>>);
+
+impl SpawnOutcome {
+    fn new(result: Result<LinuxPtySession, PtyError>) -> Self {
+        Self(Some(result))
+    }
+
+    fn take(&mut self) -> Result<LinuxPtySession, PtyError> {
+        self.0.take().expect("spawn outcome consumed exactly once")
+    }
+}
+
+impl Drop for SpawnOutcome {
+    fn drop(&mut self) {
+        if let Some(Ok(mut session)) = self.0.take() {
+            let _ = session.signal_process_group(PtySignal::Kill);
+            let _ = session.wait();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct LiveSplintRuntime {
     handle: LiveSplintHandle,
@@ -1958,7 +1979,10 @@ impl LiveSplintRuntime {
             pixel_width: config.pixel_width,
             pixel_height: config.pixel_height,
         };
-        let session = tokio::task::spawn_blocking(move || backend.spawn(&command, size)).await??;
+        let mut spawned =
+            tokio::task::spawn_blocking(move || SpawnOutcome::new(backend.spawn(&command, size)))
+                .await?;
+        let session = spawned.take()?;
         let reader = match session.try_clone_reader() {
             Ok(reader) => reader,
             Err(error) => {
@@ -5130,6 +5154,24 @@ mod tests {
             exit_drain_timeout: Duration::from_millis(50),
             ..LiveSplintConfig::default()
         }
+    }
+
+    #[test]
+    fn dropped_spawn_outcome_kills_and_reaps_created_child() {
+        let session = backend()
+            .spawn(
+                &shell("trap '' HUP TERM; sleep 30"),
+                PtySize {
+                    columns: 40,
+                    rows: 6,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+            )
+            .unwrap();
+        let child_pid = session.child_id();
+        drop(SpawnOutcome::new(Ok(session)));
+        assert!(!std::path::Path::new(&format!("/proc/{child_pid}")).exists());
     }
 
     fn snapshot_text(snapshot: &LiveSnapshot) -> String {

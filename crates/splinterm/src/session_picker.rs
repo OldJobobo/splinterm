@@ -131,6 +131,9 @@ pub fn collect_sessions(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> 
         .collect();
     let mut entries = Vec::new();
     for lair in lairs {
+        if !lair.lifetime.is_persistent() {
+            continue;
+        }
         for dojo in &lair.dojos {
             let (running_panes, exited_panes) = pane_states(&dojo.root);
             let cwd = dojo
@@ -390,6 +393,18 @@ mod tests {
         assert_eq!(entries[0].dojo_id, recent);
         assert_eq!(entries[0].display_title(), "notes / terminal");
         assert_eq!(entries[0].working_directory(), "/notes");
+    }
+
+    #[test]
+    fn transient_lairs_are_never_collected_or_reopened() {
+        let persistent = running_dojo("persistent", "/tmp");
+        let mut transient = running_dojo("transient", "/var/tmp");
+        transient.lifetime = splinterm_core::LairLifetime::Transient;
+        let stale_recent = transient.dojos[0].id;
+        let entries = collect_sessions(&[transient, persistent], &[stale_recent]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].lair_name, "persistent");
+        assert_eq!(latest_reopenable(&entries).unwrap().lair_name, "persistent");
     }
 
     #[test]
