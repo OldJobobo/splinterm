@@ -1,10 +1,12 @@
 //! Platform-independent built-in command-palette state.
 
+use std::path::PathBuf;
+
 use splinterm_core::{Axis, DojoId, LairId, SplintId};
 
 use crate::keymap::{ActionId, ResolvedKeymap};
 
-use super::WindowTopologyCommand;
+use super::{LairPromptTarget, WindowTopologyCommand};
 
 const MAX_QUERY_BYTES: usize = 256;
 const MAX_QUERY_SCALARS: usize = 128;
@@ -144,12 +146,187 @@ impl TerminateDojoUi {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RenameLairUi {
+    target: LairPromptTarget,
+    input: String,
+    replace_on_edit: bool,
+}
+
+impl RenameLairUi {
+    pub(crate) fn new(target: LairPromptTarget) -> Self {
+        Self {
+            input: target.name.clone(),
+            target,
+            replace_on_edit: true,
+        }
+    }
+
+    pub(crate) const fn target(&self) -> &LairPromptTarget {
+        &self.target
+    }
+
+    pub(crate) fn input(&self) -> &str {
+        &self.input
+    }
+
+    pub(crate) fn append_text(&mut self, text: &str) -> bool {
+        let mut next = if self.replace_on_edit {
+            String::new()
+        } else {
+            self.input.clone()
+        };
+        let mut accepted = false;
+        for character in text.chars() {
+            if character.is_control() || is_bidi_formatting(character) {
+                continue;
+            }
+            if next.len().saturating_add(character.len_utf8()) > MAX_DOJO_NAME_BYTES {
+                break;
+            }
+            next.push(character);
+            accepted = true;
+        }
+        if !accepted {
+            return false;
+        }
+        self.input = next;
+        self.replace_on_edit = false;
+        true
+    }
+
+    pub(crate) fn backspace(&mut self) -> bool {
+        if self.replace_on_edit {
+            self.input.clear();
+            self.replace_on_edit = false;
+            return true;
+        }
+        self.input.pop().is_some()
+    }
+
+    pub(crate) fn command(&self) -> Option<WindowTopologyCommand> {
+        let name = self.input.trim();
+        (!name.is_empty() && name.len() <= MAX_DOJO_NAME_BYTES).then(|| {
+            WindowTopologyCommand::RenameLair {
+                lair_id: self.target.lair_id,
+                name: name.to_owned(),
+            }
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TerminateLairUi {
+    target: LairPromptTarget,
+    decision: TerminationDecision,
+}
+
+impl TerminateLairUi {
+    pub(crate) fn new(target: LairPromptTarget) -> Self {
+        Self {
+            target,
+            decision: TerminationDecision::Cancel,
+        }
+    }
+
+    pub(crate) const fn target(&self) -> &LairPromptTarget {
+        &self.target
+    }
+
+    pub(crate) const fn decision(&self) -> TerminationDecision {
+        self.decision
+    }
+
+    pub(crate) fn move_selection(&mut self) -> bool {
+        self.decision = match self.decision {
+            TerminationDecision::Cancel => TerminationDecision::Terminate,
+            TerminationDecision::Terminate => TerminationDecision::Cancel,
+        };
+        true
+    }
+
+    pub(crate) fn select(&mut self, decision: TerminationDecision) -> bool {
+        if self.decision == decision {
+            return false;
+        }
+        self.decision = decision;
+        true
+    }
+
+    pub(crate) fn command(&self) -> Option<WindowTopologyCommand> {
+        (self.decision == TerminationDecision::Terminate).then(|| {
+            WindowTopologyCommand::TerminateLair {
+                lair_id: self.target.lair_id,
+                targets: self.target.targets.clone(),
+            }
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DojoPromptUi {
     Rename(RenameDojoUi),
     Terminate(TerminateDojoUi),
+    RenameLair(RenameLairUi),
+    TerminateLair(TerminateLairUi),
 }
 
 impl DojoPromptUi {
+    pub(crate) const fn is_rename(&self) -> bool {
+        matches!(self, Self::Rename(_) | Self::RenameLair(_))
+    }
+
+    pub(crate) fn title_and_body(&self) -> (&'static str, String) {
+        match self {
+            Self::Rename(prompt) => ("RENAME TAB", format!("Name for ‘{}’", prompt.target().name)),
+            Self::Terminate(prompt) => (
+                "TERMINATE DOJO",
+                format!(
+                    "Terminate ‘{}’ and its {} pane{}?",
+                    prompt.target().name,
+                    prompt.target().pane_count,
+                    if prompt.target().pane_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+            ),
+            Self::RenameLair(prompt) => (
+                "RENAME LAIR",
+                format!("Name for ‘{}’", prompt.target().name),
+            ),
+            Self::TerminateLair(prompt) => (
+                "TERMINATE LAIR",
+                format!(
+                    "Terminate ‘{}’ and its {} captured pane{}?",
+                    prompt.target().name,
+                    prompt.target().targets.len(),
+                    if prompt.target().targets.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+            ),
+        }
+    }
+
+    pub(crate) fn input(&self) -> Option<&str> {
+        match self {
+            Self::Rename(prompt) => Some(prompt.input()),
+            Self::RenameLair(prompt) => Some(prompt.input()),
+            Self::Terminate(_) | Self::TerminateLair(_) => None,
+        }
+    }
+
+    pub(crate) const fn decision(&self) -> Option<TerminationDecision> {
+        match self {
+            Self::Terminate(prompt) => Some(prompt.decision()),
+            Self::TerminateLair(prompt) => Some(prompt.decision()),
+            Self::Rename(_) | Self::RenameLair(_) => None,
+        }
+    }
+
     pub(crate) fn rename(
         dojo_id: DojoId,
         name: String,
@@ -162,6 +339,14 @@ impl DojoPromptUi {
             pane_count,
             splints,
         }))
+    }
+
+    pub(crate) fn rename_lair(target: LairPromptTarget) -> Self {
+        Self::RenameLair(RenameLairUi::new(target))
+    }
+
+    pub(crate) fn terminate_lair(target: LairPromptTarget) -> Self {
+        Self::TerminateLair(TerminateLairUi::new(target))
     }
 
     pub(crate) fn terminate(
@@ -192,6 +377,7 @@ pub(crate) enum TabMenuActionId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TabMenuContext {
     pub(crate) lair_id: LairId,
+    pub(crate) focused_cwd: PathBuf,
     pub(crate) dojo_id: DojoId,
     pub(crate) dojo_name: String,
     pub(crate) pane_count: usize,
@@ -365,6 +551,7 @@ pub(crate) fn tab_menu_dispatch(
         TabMenuActionId::NewDojo => {
             Some(TabMenuDispatch::Topology(WindowTopologyCommand::NewDojo {
                 lair_id: context.lair_id,
+                cwd: context.focused_cwd.clone(),
             }))
         }
         TabMenuActionId::CloseTab => {
@@ -457,6 +644,7 @@ impl CommandCategory {
 )]
 pub(crate) struct CommandPaletteContext {
     pub(crate) lair_id: LairId,
+    pub(crate) focused_cwd: PathBuf,
     pub(crate) dojo_id: DojoId,
     pub(crate) dojo_name: String,
     pub(crate) pane_count: usize,
@@ -1038,7 +1226,9 @@ pub(crate) fn command_dispatch(
     let dispatch = match id {
         BuiltInCommandId::RecentSessions => BuiltInCommandDispatch::RecentSessions,
         BuiltInCommandId::NewSession => {
-            BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewLair)
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewLair {
+                cwd: context.focused_cwd.clone(),
+            })
         }
         BuiltInCommandId::RenameCurrentTab => {
             BuiltInCommandDispatch::Rename(context.action_target())
@@ -1046,6 +1236,7 @@ pub(crate) fn command_dispatch(
         BuiltInCommandId::NewDojo => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewDojo {
                 lair_id: context.lair_id,
+                cwd: context.focused_cwd.clone(),
             })
         }
         BuiltInCommandId::PreviousDojo => {
@@ -1175,6 +1366,7 @@ mod tests {
         let splint_id = SplintId::new();
         CommandPaletteUi::new(CommandPaletteContext {
             lair_id: LairId::new(),
+            focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "current".to_owned(),
             pane_count: 3,
@@ -1250,6 +1442,33 @@ mod tests {
     }
 
     #[test]
+    fn lair_termination_defaults_cancel_and_preserves_the_exact_capture() {
+        let lair_id = LairId::new();
+        let target = LairPromptTarget {
+            lair_id,
+            name: "work".to_owned(),
+            targets: vec![splinterm_protocol::MutationTarget {
+                lair_id,
+                dojo_id: DojoId::new(),
+                splint_id: SplintId::new(),
+                incarnation: 9,
+            }],
+        };
+        let mut confirmation = TerminateLairUi::new(target.clone());
+        assert_eq!(confirmation.target(), &target);
+        assert_eq!(confirmation.decision(), TerminationDecision::Cancel);
+        assert_eq!(confirmation.command(), None);
+        assert!(confirmation.move_selection());
+        assert_eq!(
+            confirmation.command(),
+            Some(WindowTopologyCommand::TerminateLair {
+                lair_id,
+                targets: target.targets,
+            })
+        );
+    }
+
+    #[test]
     fn right_press_retargets_only_visible_tabs_and_otherwise_dismisses() {
         let dojo_id = DojoId::new();
         assert_eq!(
@@ -1264,6 +1483,7 @@ mod tests {
         let other_dojo_ids = vec![DojoId::new(), DojoId::new()];
         let context = TabMenuContext {
             lair_id: LairId::new(),
+            focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "captured".to_owned(),
             pane_count: 3,
@@ -1462,6 +1682,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive stable-target dispatch table is easier to audit"
+    )]
     fn command_dispatch_keeps_exact_captured_identity_and_availability() {
         let context = palette().context();
         for descriptor in BUILT_IN_COMMANDS {
@@ -1499,10 +1723,19 @@ mod tests {
             })
         );
         assert_eq!(
+            command_dispatch(BuiltInCommandId::NewSession, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::NewLair {
+                    cwd: context.focused_cwd.clone(),
+                }
+            ))
+        );
+        assert_eq!(
             command_dispatch(BuiltInCommandId::NewDojo, &context),
             Some(BuiltInCommandDispatch::Topology(
                 WindowTopologyCommand::NewDojo {
-                    lair_id: context.lair_id
+                    lair_id: context.lair_id,
+                    cwd: context.focused_cwd.clone(),
                 }
             ))
         );

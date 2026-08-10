@@ -17,9 +17,9 @@ use splinterm_core::{
 use splinterm_protocol::{
     AccessScope, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
     ControlTransferDecision, ControlTransferOutcome, ErrorCode, LaunchParameters, MAX_FRAME_BYTES,
-    MAX_SUBSCRIPTIONS, MutationPreflight, PROTOCOL_VERSION, ProtocolError, Request, Response,
-    ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalProvenance, TerminalSnapshot,
-    TerminalUpdate, TopologyChangeKind, encode_frame,
+    MAX_SUBSCRIPTIONS, MutationPreflight, MutationTarget, PROTOCOL_VERSION, ProtocolError, Request,
+    Response, ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalProvenance,
+    TerminalSnapshot, TerminalUpdate, TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -2956,6 +2956,93 @@ async fn topology_cas_stream_and_complete_edits() {
     })
     .await
     .expect("topology CAS scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn atomic_lair_termination_rejects_drift_and_removes_exact_runtime_set() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut client = daemon.connect().await;
+        let launch = LaunchParameters {
+            cwd: std::env::current_dir().unwrap(),
+            command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let Response::LairCreated {
+            lair,
+            incarnation,
+            topology_revision,
+        } = client
+            .request(Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "terminate-exact".into(),
+                launch,
+            })
+            .await
+        else {
+            panic!("test Lair was not created");
+        };
+        let dojo_id = lair.dojos[0].id;
+        let splint_id = lair.dojos[0].default_focus;
+        let target = MutationTarget {
+            lair_id: lair.id,
+            dojo_id,
+            splint_id,
+            incarnation,
+        };
+        let mut stale = target.clone();
+        stale.incarnation = stale.incarnation.saturating_add(1);
+        let failure = client
+            .request_result(Request::TerminateLair {
+                expected_topology_revision: topology_revision,
+                lair_id: lair.id,
+                targets: vec![stale],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, ErrorCode::InvalidArgument);
+        let Response::Topology { snapshot } = client.request(Request::InspectTopology).await else {
+            panic!("topology inspection failed");
+        };
+        assert_eq!(snapshot.revision, topology_revision);
+        assert!(
+            snapshot
+                .topology
+                .lairs()
+                .any(|current| current.id == lair.id)
+        );
+        assert!(matches!(
+            client
+                .request(Request::TerminateLair {
+                    expected_topology_revision: topology_revision,
+                    lair_id: lair.id,
+                    targets: vec![target],
+                })
+                .await,
+            Response::TopologyCommitted { topology_revision: committed }
+                if committed.get() == topology_revision.get() + 1
+        ));
+        let Response::Topology { snapshot } = client.request(Request::InspectTopology).await else {
+            panic!("topology inspection failed");
+        };
+        assert!(
+            snapshot
+                .topology
+                .lairs()
+                .all(|current| current.id != lair.id)
+        );
+        assert!(
+            snapshot
+                .runtimes
+                .iter()
+                .all(|runtime| runtime.splint_id != splint_id)
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("atomic Lair termination scenario timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

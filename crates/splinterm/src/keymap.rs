@@ -26,6 +26,24 @@ pub enum ActionId {
     CloseCurrentTab,
     CloseOtherTabs,
     TerminateCurrentDojo,
+    DojoChooser,
+    SelectDojo1,
+    SelectDojo2,
+    SelectDojo3,
+    SelectDojo4,
+    SelectDojo5,
+    SelectDojo6,
+    SelectDojo7,
+    SelectDojo8,
+    SelectDojo9,
+    MoveDojoLeft,
+    MoveDojoRight,
+    RenameCurrentLair,
+    TerminateCurrentLair,
+    PreviousLair,
+    NextLair,
+    LairChooser,
+    DetachWindow,
     SplitHorizontal,
     SplitVertical,
     FocusLeft,
@@ -69,6 +87,27 @@ impl ActionId {
         Self::PreviousDojo,
         Self::NextDojo,
         Self::CloseCurrentTab,
+        Self::RenameCurrentTab,
+        Self::TerminateCurrentDojo,
+        Self::DojoChooser,
+        Self::SelectDojo1,
+        Self::SelectDojo2,
+        Self::SelectDojo3,
+        Self::SelectDojo4,
+        Self::SelectDojo5,
+        Self::SelectDojo6,
+        Self::SelectDojo7,
+        Self::SelectDojo8,
+        Self::SelectDojo9,
+        Self::MoveDojoLeft,
+        Self::MoveDojoRight,
+        Self::NewSession,
+        Self::RenameCurrentLair,
+        Self::TerminateCurrentLair,
+        Self::PreviousLair,
+        Self::NextLair,
+        Self::LairChooser,
+        Self::DetachWindow,
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::FocusLeft,
@@ -116,6 +155,24 @@ impl ActionId {
             Self::CloseCurrentTab => "dojo.close-tab",
             Self::CloseOtherTabs => "dojo.close-other-tabs",
             Self::TerminateCurrentDojo => "dojo.terminate-confirmed",
+            Self::DojoChooser => "dojo.choose",
+            Self::SelectDojo1 => "dojo.select-1",
+            Self::SelectDojo2 => "dojo.select-2",
+            Self::SelectDojo3 => "dojo.select-3",
+            Self::SelectDojo4 => "dojo.select-4",
+            Self::SelectDojo5 => "dojo.select-5",
+            Self::SelectDojo6 => "dojo.select-6",
+            Self::SelectDojo7 => "dojo.select-7",
+            Self::SelectDojo8 => "dojo.select-8",
+            Self::SelectDojo9 => "dojo.select-9",
+            Self::MoveDojoLeft => "dojo.move-left",
+            Self::MoveDojoRight => "dojo.move-right",
+            Self::RenameCurrentLair => "lair.rename",
+            Self::TerminateCurrentLair => "lair.terminate-confirmed",
+            Self::PreviousLair => "lair.previous",
+            Self::NextLair => "lair.next",
+            Self::LairChooser => "lair.choose",
+            Self::DetachWindow => "window.detach",
             Self::SplitHorizontal => "pane.split-below",
             Self::SplitVertical => "pane.split-right",
             Self::FocusLeft => "pane.focus-left",
@@ -220,6 +277,16 @@ pub enum KeyIdentity {
     Equal,
     Minus,
     Zero,
+    One,
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+    Seven,
+    Eight,
+    Nine,
+    Ampersand,
 }
 
 impl KeyIdentity {
@@ -245,6 +312,16 @@ impl KeyIdentity {
             Self::Equal => "Equal".to_owned(),
             Self::Minus => "Minus".to_owned(),
             Self::Zero => "0".to_owned(),
+            Self::One => "1".to_owned(),
+            Self::Two => "2".to_owned(),
+            Self::Three => "3".to_owned(),
+            Self::Four => "4".to_owned(),
+            Self::Five => "5".to_owned(),
+            Self::Six => "6".to_owned(),
+            Self::Seven => "7".to_owned(),
+            Self::Eight => "8".to_owned(),
+            Self::Nine => "9".to_owned(),
+            Self::Ampersand => "&".to_owned(),
         }
     }
 }
@@ -912,6 +989,151 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                         "Prefix Q",
                     ),
                     omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('c')),
+                        ActionId::NewDojo,
+                        "Prefix C",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('k')),
+                        ActionId::TerminateCurrentDojo,
+                        "Prefix K",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Ampersand),
+                        ActionId::TerminateCurrentDojo,
+                        "Prefix &",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('r')),
+                        ActionId::RenameCurrentTab,
+                        "Prefix R",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('w')),
+                        ActionId::DojoChooser,
+                        "Prefix W",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('p')),
+                        ActionId::PreviousDojo,
+                        "Prefix P",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('n')),
+                        ActionId::NextDojo,
+                        "Prefix N",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::One),
+                        ActionId::SelectDojo1,
+                        "Alt+1",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Two),
+                        ActionId::SelectDojo2,
+                        "Alt+2",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Three),
+                        ActionId::SelectDojo3,
+                        "Alt+3",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Four),
+                        ActionId::SelectDojo4,
+                        "Alt+4",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Five),
+                        ActionId::SelectDojo5,
+                        "Alt+5",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Six),
+                        ActionId::SelectDojo6,
+                        "Alt+6",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Seven),
+                        ActionId::SelectDojo7,
+                        "Alt+7",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Eight),
+                        ActionId::SelectDojo8,
+                        "Alt+8",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Nine),
+                        ActionId::SelectDojo9,
+                        "Alt+9",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Left),
+                        ActionId::PreviousDojo,
+                        "Alt+Left",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Right),
+                        ActionId::NextDojo,
+                        "Alt+Right",
+                    ),
+                    omarchy_binding(
+                        direct(false, true, true, KeyIdentity::Left),
+                        ActionId::MoveDojoLeft,
+                        "Alt+Shift+Left",
+                    ),
+                    omarchy_binding(
+                        direct(false, true, true, KeyIdentity::Right),
+                        ActionId::MoveDojoRight,
+                        "Alt+Shift+Right",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('c')),
+                        ActionId::NewSession,
+                        "Prefix Shift+C",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('k')),
+                        ActionId::TerminateCurrentLair,
+                        "Prefix Shift+K",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('r')),
+                        ActionId::RenameCurrentLair,
+                        "Prefix Shift+R",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('p')),
+                        ActionId::PreviousLair,
+                        "Prefix Shift+P",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('n')),
+                        ActionId::NextLair,
+                        "Prefix Shift+N",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Up),
+                        ActionId::PreviousLair,
+                        "Alt+Up",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Down),
+                        ActionId::NextLair,
+                        "Alt+Down",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('s')),
+                        ActionId::LairChooser,
+                        "Prefix S",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('d')),
+                        ActionId::DetachWindow,
+                        "Prefix D",
+                    ),
+                    omarchy_binding(
                         direct(false, false, true, KeyIdentity::Enter),
                         ActionId::SplitHorizontal,
                         "Alt+Enter",
@@ -1244,6 +1466,16 @@ fn parse_chord(value: &str) -> Result<NormalizedChord> {
         "equal" | "=" => KeyIdentity::Equal,
         "minus" | "-" => KeyIdentity::Minus,
         "0" | "kp_0" => KeyIdentity::Zero,
+        "1" => KeyIdentity::One,
+        "2" => KeyIdentity::Two,
+        "3" => KeyIdentity::Three,
+        "4" => KeyIdentity::Four,
+        "5" => KeyIdentity::Five,
+        "6" => KeyIdentity::Six,
+        "7" => KeyIdentity::Seven,
+        "8" => KeyIdentity::Eight,
+        "9" => KeyIdentity::Nine,
+        "&" | "ampersand" => KeyIdentity::Ampersand,
         name if name.chars().count() == 1 => {
             let character = name.chars().next().expect("one-character key");
             if character.is_ascii_alphabetic() {
@@ -1425,7 +1657,6 @@ mod tests {
             "Hyper+A",
             "Ctrl",
             "Ctrl+Shift+?",
-            "Ctrl+1",
             "Ctrl+F1",
         ] {
             assert!(parse_chord(input).is_err(), "{input} should fail");
@@ -1556,6 +1787,14 @@ action = "clipboard.paste"
             keymap.primary_shortcut(ActionId::SplitHorizontal),
             "Alt+Enter"
         );
+        assert_eq!(keymap.primary_shortcut(ActionId::SelectDojo1), "Alt+1");
+        assert_eq!(keymap.primary_shortcut(ActionId::DojoChooser), "Prefix W");
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::TerminateCurrentLair),
+            "Prefix Shift+K"
+        );
+        assert_eq!(keymap.primary_shortcut(ActionId::LairChooser), "Prefix S");
+        assert_eq!(keymap.primary_shortcut(ActionId::DetachWindow), "Prefix D");
     }
 
     #[test]

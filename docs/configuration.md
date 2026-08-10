@@ -105,10 +105,12 @@ bounds an armed prefix sequence. Packaged profiles are `splinterm` and
 `omarchy-tmux`; selecting an unknown profile is a startup error that lists both
 available names. The Omarchy profile provides `Ctrl+Space` and `Ctrl+B` prefixes,
 its direct and prefixed pane controls, exact five-cell directional resize,
-client-local pane zoom, generated-help guidance, and transactional config reload.
-`Prefix+[` is listed explicitly as unavailable rather than captured for another
-action; copy mode arrives in its later plan milestone. Dojo/Lair sequences also
-remain assigned to their later milestone.
+client-local pane zoom, Dojo/Lair creation and selection, numeric and reordered
+Window-local tabs, stable-ID trusted choosers, confirmed rename/termination,
+Lair navigation, clean Window detach, generated-help guidance, and transactional
+config reload. New Dojos and Lairs inherit the focused Splint cwd. `Prefix+[` is
+listed explicitly as unavailable rather than captured for another action; copy
+mode arrives in its later plan milestone.
 
 The overlay is versioned TOML and inherits one built-in profile:
 
@@ -129,8 +131,8 @@ Every table rejects unknown fields. A sequence contains one direct chord or
 Modifier names are `Ctrl`, `Shift`, `Alt`, and `Super` (`Control` and `Logo` are
 accepted aliases). Letter case never implies Shift. Supported keys are letters,
 Tab, Enter/KP_Enter, Escape, Space, slash/question, arrows, PageUp/PageDown, End,
-backslash, brackets, Plus/Equal/Minus, zero, and KP_0. Empty or duplicate
-modifiers and unsupported keys fail with source context.
+backslash, brackets, ampersand, Plus/Equal/Minus, digits 0–9, and KP_0. Empty or
+duplicate modifiers and unsupported keys fail with source context.
 
 An overlay applies unbinds before bindings. An unmatched unbind is a diagnostic;
 duplicate or semantically overlapping chords are errors naming both sources.
@@ -142,8 +144,18 @@ app.command-palette       session.recent
 clipboard.copy            clipboard.paste
 dojo.new                  dojo.previous
 dojo.next                 dojo.close-tab
-pane.split-below          pane.split-right
-pane.focus-left           pane.focus-right
+dojo.rename               dojo.terminate-confirmed
+dojo.choose               dojo.select-1
+dojo.select-2             dojo.select-3
+dojo.select-4             dojo.select-5
+dojo.select-6             dojo.select-7
+dojo.select-8             dojo.select-9
+dojo.move-left            dojo.move-right
+lair.new                  lair.rename
+lair.terminate-confirmed  lair.previous
+lair.next                 lair.choose
+window.detach             pane.split-below
+pane.split-right          pane.focus-left           pane.focus-right
 pane.focus-up             pane.focus-down
 pane.close                pane.resize-smaller
 pane.resize-larger        pane.resize-left-5

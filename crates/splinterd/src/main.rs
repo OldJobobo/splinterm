@@ -2367,6 +2367,38 @@ fn transient_trigger_matches(
     }
 }
 
+fn validate_lair_termination_capture(
+    lair: &Lair,
+    targets: &[splinterm_protocol::MutationTarget],
+) -> std::result::Result<Vec<SplintId>, ProtocolError> {
+    let expected_count = lair
+        .dojos
+        .iter()
+        .map(|dojo| dojo.root.splint_count())
+        .sum::<usize>();
+    if targets.len() != expected_count {
+        return Err(invalid("captured Lair pane set changed before termination"));
+    }
+    let mut unique = HashSet::with_capacity(targets.len());
+    for target in targets {
+        if target.lair_id != lair.id || !unique.insert(target.splint_id) {
+            return Err(invalid("captured Lair pane identity is invalid"));
+        }
+        let Some(dojo) = lair.dojos.iter().find(|dojo| dojo.id == target.dojo_id) else {
+            return Err(invalid("captured Lair Dojo changed before termination"));
+        };
+        let Some(splint) = dojo.root.find_splint(target.splint_id) else {
+            return Err(invalid("captured Lair pane disappeared before termination"));
+        };
+        if splint.last_incarnation != Some(target.incarnation) {
+            return Err(invalid(
+                "captured Lair pane incarnation changed before termination",
+            ));
+        }
+    }
+    Ok(targets.iter().map(|target| target.splint_id).collect())
+}
+
 async fn retire_transient_lair_under_transaction(
     state: &DaemonState,
     lair_id: LairId,
@@ -3356,7 +3388,9 @@ async fn request_policy_resources(
         Request::RestoreDojo { dojo_id, .. } | Request::CloseDojo { dojo_id, .. } => {
             dojo(*dojo_id, true)?
         }
-        Request::RestoreLair { lair_id, .. } => lair(*lair_id, true)?,
+        Request::RestoreLair { lair_id, .. } | Request::TerminateLair { lair_id, .. } => {
+            lair(*lair_id, true)?
+        }
         Request::NewDojo { lair_id, .. }
         | Request::NewDojoAutomation { lair_id, .. }
         | Request::RenameLair { lair_id, .. } => lair(*lair_id, false)?,
@@ -3386,7 +3420,10 @@ async fn request_policy_resources(
             }
             splinterm_protocol::MutationPreflight::RestoreDojo { dojo_id }
             | splinterm_protocol::MutationPreflight::CloseDojo { dojo_id } => dojo(*dojo_id, true)?,
-            splinterm_protocol::MutationPreflight::RestoreLair { lair_id } => lair(*lair_id, true)?,
+            splinterm_protocol::MutationPreflight::RestoreLair { lair_id }
+            | splinterm_protocol::MutationPreflight::TerminateLair { lair_id } => {
+                lair(*lair_id, true)?
+            }
             splinterm_protocol::MutationPreflight::NewDojo { lair_id }
             | splinterm_protocol::MutationPreflight::RenameLair { lair_id } => {
                 lair(*lair_id, false)?
@@ -3867,7 +3904,7 @@ fn prepare_mutation(
             preparation.dojo_id = Some(dojo_id);
             collect_preparation_targets(snapshot, &dojo.root, &mut preparation.targets)?;
         }
-        Preflight::RestoreLair { lair_id } => {
+        Preflight::RestoreLair { lair_id } | Preflight::TerminateLair { lair_id } => {
             let lair = snapshot
                 .topology
                 .lairs()
@@ -4884,6 +4921,111 @@ async fn handle_authorized_request(
                 runtime.shutdown().await.map_err(|_| internal())?;
             }
             publish_topology(state, topology_revision, TopologyChangeKind::DojoClosed).await;
+            Response::TopologyCommitted { topology_revision }
+        }
+        Request::TerminateLair {
+            expected_topology_revision,
+            lair_id,
+            targets,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let splint_ids = {
+                let topology = state.topology.read().await;
+                if topology.revision() != expected_topology_revision {
+                    return Err(model_error(TopologyError::StaleTopology {
+                        expected: expected_topology_revision,
+                        current: topology.revision(),
+                    }));
+                }
+                let lair = topology
+                    .lairs()
+                    .find(|lair| lair.id == lair_id)
+                    .ok_or_else(|| model_error(TopologyError::LairNotFound(lair_id)))?;
+                validate_lair_termination_capture(lair, &targets)?
+            };
+            let expected_incarnations = targets
+                .iter()
+                .map(|target| (target.splint_id, target.incarnation))
+                .collect::<HashMap<_, _>>();
+            {
+                let registry = state.runtimes.lock().await;
+                for splint_id in &splint_ids {
+                    if let Some(handle) = registry.handle(*splint_id)
+                        && expected_incarnations.get(splint_id).copied()
+                            != Some(handle.incarnation.value())
+                    {
+                        return Err(invalid(
+                            "captured Lair runtime incarnation changed before termination",
+                        ));
+                    }
+                }
+            }
+            let (candidate, topology_revision) = durable_topology_candidate(state, |topology| {
+                topology.terminate_lair_at(expected_topology_revision, lair_id)
+            })
+            .await?;
+            let runtimes = {
+                let mut topology = state.topology.write().await;
+                let mut registry = state.runtimes.lock().await;
+                *topology = candidate;
+                splint_ids
+                    .iter()
+                    .filter_map(|splint_id| registry.remove(*splint_id))
+                    .collect::<Vec<_>>()
+            };
+            state.transient_leases.lock().unwrap().remove_lair(lair_id);
+            {
+                let mut focus = state.graphical_focus.lock().await;
+                if focus
+                    .as_ref()
+                    .is_some_and(|claim| splint_ids.contains(&claim.splint_id))
+                {
+                    *focus = None;
+                }
+            }
+            for target in &targets {
+                let (controller, transfer) = {
+                    let mut controllers = state.controller.lock().await;
+                    (
+                        controllers.release_identity(target.splint_id, target.incarnation),
+                        controllers.cancel_identity_transfer(target.splint_id, target.incarnation),
+                    )
+                };
+                if let Some(controller) = controller {
+                    let _ = state.connection_revocations.send(controller.connection_id);
+                }
+                if let Some(transfer) = transfer {
+                    let _ = state
+                        .connection_revocations
+                        .send(transfer.requester_connection_id);
+                    publish_control_notice(
+                        state,
+                        ControlNotice::TransferResolved {
+                            transfer,
+                            outcome: ControlTransferOutcome::Cancelled,
+                            controller_id: None,
+                            excluded_connections: None,
+                        },
+                    );
+                }
+                publish_control_status(state, target.splint_id, target.incarnation).await;
+                let revoked = state.grants.lock().await.revoke_identity(
+                    target.splint_id,
+                    target.incarnation,
+                    "Lair terminated",
+                );
+                for grant_id in revoked {
+                    let _ = state.revocations.send(Revocation { grant_id });
+                }
+            }
+            for runtime in runtimes {
+                runtime.shutdown().await.map_err(|_| internal())?;
+            }
+            publish_topology(state, topology_revision, TopologyChangeKind::LairTerminated).await;
             Response::TopologyCommitted { topology_revision }
         }
         Request::RenameLair {
@@ -7004,6 +7146,35 @@ mod tests {
         assert_eq!(connections.available_permits(), 0);
         assert!(try_admit_connection(&connections).is_none());
         drop(replacement);
+    }
+
+    #[test]
+    fn lair_termination_capture_is_exact_and_rejects_membership_or_incarnation_drift() {
+        let mut lair = Lair::new("main", PathBuf::from("/tmp"));
+        let dojo_id = lair.dojos[0].id;
+        let splint_id = lair.dojos[0].default_focus;
+        lair.dojos[0]
+            .root
+            .find_splint_mut(splint_id)
+            .unwrap()
+            .last_incarnation = Some(7);
+        let target = splinterm_protocol::MutationTarget {
+            lair_id: lair.id,
+            dojo_id,
+            splint_id,
+            incarnation: 7,
+        };
+        assert_eq!(
+            validate_lair_termination_capture(&lair, std::slice::from_ref(&target)).unwrap(),
+            vec![splint_id]
+        );
+        assert!(validate_lair_termination_capture(&lair, &[]).is_err());
+        let mut stale = target.clone();
+        stale.incarnation = 8;
+        assert!(validate_lair_termination_capture(&lair, &[stale]).is_err());
+        let mut wrong_dojo = target;
+        wrong_dojo.dojo_id = DojoId::new();
+        assert!(validate_lair_termination_capture(&lair, &[wrong_dojo]).is_err());
     }
 
     #[test]

@@ -45,6 +45,9 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
                 AuditOperation::CloseSplint
             }
             splinterm_protocol::MutationPreflight::CloseDojo { .. } => AuditOperation::CloseDojo,
+            splinterm_protocol::MutationPreflight::TerminateLair { .. } => {
+                AuditOperation::TerminateLair
+            }
             splinterm_protocol::MutationPreflight::KillSplint { .. } => AuditOperation::KillSplint,
             splinterm_protocol::MutationPreflight::SetSplitRatio { .. } => {
                 AuditOperation::SetSplitRatio
@@ -74,6 +77,7 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::SetSplitRatio { .. } => AuditOperation::SetSplitRatio,
         Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => AuditOperation::NewDojo,
         Request::CloseDojo { .. } => AuditOperation::CloseDojo,
+        Request::TerminateLair { .. } => AuditOperation::TerminateLair,
         Request::RenameLair { .. } => AuditOperation::RenameLair,
         Request::RenameDojo { .. } => AuditOperation::RenameDojo,
         Request::SetDojoDefaultFocus { .. } => AuditOperation::SetDojoDefaultFocus,

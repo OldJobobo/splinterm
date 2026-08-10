@@ -987,9 +987,10 @@ pub(crate) fn dojo_prompt_layout(content: Rect, state: &DojoPromptUi) -> Option<
     }
     let margin = PROMPT_MARGIN.min(content.width / 4).min(content.height / 4);
     let width = PROMPT_MAX_WIDTH.min(content.width.saturating_sub(margin.saturating_mul(2)));
-    let controls_height = match state {
-        DojoPromptUi::Rename(_) => PROMPT_INPUT_HEIGHT,
-        DojoPromptUi::Terminate(_) => PROMPT_BUTTON_HEIGHT,
+    let controls_height = if state.is_rename() {
+        PROMPT_INPUT_HEIGHT
+    } else {
+        PROMPT_BUTTON_HEIGHT
     };
     let height = PROMPT_PADDING
         .saturating_mul(2)
@@ -1030,8 +1031,8 @@ pub(crate) fn dojo_prompt_layout(content: Rect, state: &DojoPromptUi) -> Option<
         .y
         .saturating_add(body.height)
         .saturating_add(PROMPT_GAP);
-    let (input, cancel, terminate) = match state {
-        DojoPromptUi::Rename(_) => (
+    let (input, cancel, terminate) = if state.is_rename() {
+        (
             Some(Rect {
                 x: title.x,
                 y: controls_y,
@@ -1040,28 +1041,27 @@ pub(crate) fn dojo_prompt_layout(content: Rect, state: &DojoPromptUi) -> Option<
             }),
             None,
             None,
-        ),
-        DojoPromptUi::Terminate(_) => {
-            let button_width = inner_width.saturating_sub(PROMPT_GAP) / 2;
-            (
-                None,
-                Some(Rect {
-                    x: title.x,
-                    y: controls_y,
-                    width: button_width,
-                    height: PROMPT_BUTTON_HEIGHT,
-                }),
-                Some(Rect {
-                    x: title
-                        .x
-                        .saturating_add(button_width)
-                        .saturating_add(PROMPT_GAP),
-                    y: controls_y,
-                    width: button_width,
-                    height: PROMPT_BUTTON_HEIGHT,
-                }),
-            )
-        }
+        )
+    } else {
+        let button_width = inner_width.saturating_sub(PROMPT_GAP) / 2;
+        (
+            None,
+            Some(Rect {
+                x: title.x,
+                y: controls_y,
+                width: button_width,
+                height: PROMPT_BUTTON_HEIGHT,
+            }),
+            Some(Rect {
+                x: title
+                    .x
+                    .saturating_add(button_width)
+                    .saturating_add(PROMPT_GAP),
+                y: controls_y,
+                width: button_width,
+                height: PROMPT_BUTTON_HEIGHT,
+            }),
+        )
     };
     Some(DojoPromptLayout {
         panel,
@@ -1150,24 +1150,7 @@ pub(crate) fn paint_dojo_prompt(
             rgba(frame),
         );
     }
-    let (title, body) = match state {
-        DojoPromptUi::Rename(prompt) => {
-            ("RENAME TAB", format!("Name for ‘{}’", prompt.target().name))
-        }
-        DojoPromptUi::Terminate(prompt) => (
-            "TERMINATE DOJO",
-            format!(
-                "Terminate ‘{}’ and its {} pane{}?",
-                prompt.target().name,
-                prompt.target().pane_count,
-                if prompt.target().pane_count == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            ),
-        ),
-    };
+    let (title, body) = state.title_and_body();
     paint_text(
         cache,
         context,
@@ -1196,87 +1179,85 @@ pub(crate) fn paint_dojo_prompt(
         palette.secondary,
         false,
     )?;
-    match state {
-        DojoPromptUi::Rename(prompt) => {
-            let input = buffer_rect(layout.input.expect("rename input exists"), scale_120);
+    if let Some(prompt_input) = state.input() {
+        let input = buffer_rect(layout.input.expect("rename input exists"), scale_120);
+        fill_rect(
+            canvas,
+            width,
+            height,
+            tuple(input),
+            rgba(palette.selected_fill),
+        );
+        let inset = 12_u32.saturating_mul(scale_120).div_ceil(120);
+        paint_text(
+            cache,
+            context,
+            canvas,
+            width,
+            height,
+            &format!("> {prompt_input}_"),
+            ChromeTextStyle::Regular,
+            scale_120,
+            renderer_generation,
+            Rect {
+                x: input.x.saturating_add(inset),
+                width: input.width.saturating_sub(inset.saturating_mul(2)),
+                ..input
+            },
+            palette.selected_primary,
+            false,
+        )?;
+    } else {
+        let selected_decision = state.decision().expect("termination decision exists");
+        for (decision, rect, label) in [
+            (
+                TerminationDecision::Cancel,
+                layout.cancel.expect("cancel exists"),
+                "Cancel",
+            ),
+            (
+                TerminationDecision::Terminate,
+                layout.terminate.expect("terminate exists"),
+                "Terminate",
+            ),
+        ] {
+            let rect = buffer_rect(rect, scale_120);
+            let selected = selected_decision == decision;
             fill_rect(
                 canvas,
                 width,
                 height,
-                tuple(input),
-                rgba(palette.selected_fill),
+                tuple(rect),
+                rgba(if selected {
+                    palette.selected_fill
+                } else {
+                    palette.panel
+                }),
             );
-            let inset = 12_u32.saturating_mul(scale_120).div_ceil(120);
             paint_text(
                 cache,
                 context,
                 canvas,
                 width,
                 height,
-                &format!("> {}_", prompt.input()),
-                ChromeTextStyle::Regular,
+                label,
+                if selected {
+                    ChromeTextStyle::Bold
+                } else {
+                    ChromeTextStyle::Regular
+                },
                 scale_120,
                 renderer_generation,
-                Rect {
-                    x: input.x.saturating_add(inset),
-                    width: input.width.saturating_sub(inset.saturating_mul(2)),
-                    ..input
+                rect,
+                if selected {
+                    palette.selected_primary
+                } else if decision == TerminationDecision::Terminate {
+                    palette.selected_rail
+                } else {
+                    palette.primary
                 },
-                palette.selected_primary,
                 false,
             )?;
-        }
-        DojoPromptUi::Terminate(prompt) => {
-            for (decision, rect, label) in [
-                (
-                    TerminationDecision::Cancel,
-                    layout.cancel.expect("cancel exists"),
-                    "Cancel",
-                ),
-                (
-                    TerminationDecision::Terminate,
-                    layout.terminate.expect("terminate exists"),
-                    "Terminate",
-                ),
-            ] {
-                let rect = buffer_rect(rect, scale_120);
-                let selected = prompt.decision() == decision;
-                fill_rect(
-                    canvas,
-                    width,
-                    height,
-                    tuple(rect),
-                    rgba(if selected {
-                        palette.selected_fill
-                    } else {
-                        palette.panel
-                    }),
-                );
-                paint_text(
-                    cache,
-                    context,
-                    canvas,
-                    width,
-                    height,
-                    label,
-                    if selected {
-                        ChromeTextStyle::Bold
-                    } else {
-                        ChromeTextStyle::Regular
-                    },
-                    scale_120,
-                    renderer_generation,
-                    rect,
-                    if selected {
-                        palette.selected_primary
-                    } else if decision == TerminationDecision::Terminate {
-                        palette.selected_rail
-                    } else {
-                        palette.primary
-                    },
-                    false,
-                )?;
-            }
         }
     }
     Ok(())
@@ -1520,6 +1501,7 @@ mod tests {
         let layout = tab_context_menu_layout(bounds, (240, 40)).unwrap();
         let mut state = TabContextMenuUi::new(crate::frontend::TabMenuContext {
             lair_id: LairId::new(),
+            focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "test".to_owned(),
             pane_count: 2,
@@ -1586,6 +1568,7 @@ mod tests {
         };
         let state = CommandPaletteUi::new(CommandPaletteContext {
             lair_id: LairId::new(),
+            focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "test".to_owned(),
             pane_count: 1,

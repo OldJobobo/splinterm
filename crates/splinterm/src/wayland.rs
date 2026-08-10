@@ -121,11 +121,11 @@ use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, Resol
 use crate::frontend::{
     AuthorityStatus, BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction,
     CommandHistoryAction, CommandPaletteContext, CommandPaletteUi, CommandZoomAction, DojoPromptUi,
-    PerfTraceCorrelation, SessionPickerDecision, SessionPickerItem, SessionPickerUi,
-    TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch, TabMenuRightPress,
-    TerminationDecision, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
-    WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
-    command_dispatch, tab_menu_dispatch, tab_menu_right_press,
+    LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind, SessionPickerDecision,
+    SessionPickerItem, SessionPickerUi, TabContextMenuUi, TabMenuActionId, TabMenuContext,
+    TabMenuDispatch, TabMenuRightPress, TerminationDecision, ThemeUpdate, TrustedConsentUi,
+    WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    WindowTopologyUpdate, WindowUpdate, command_dispatch, tab_menu_dispatch, tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -926,6 +926,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             tab_context_menu_retarget: None,
             tab_context_menu_text_cache: CommandPaletteTextCache::default(),
             session_picker,
+            selector_kind: None,
             session_picker_targets: Vec::new(),
             session_picker_layout: None,
             session_picker_pressed: None,
@@ -1809,6 +1810,7 @@ struct ModalState {
     tab_context_menu_retarget: Option<DojoId>,
     tab_context_menu_text_cache: CommandPaletteTextCache,
     session_picker: Option<SessionPickerUi>,
+    selector_kind: Option<SelectorKind>,
     session_picker_targets: Vec<(LairId, DojoId)>,
     session_picker_layout: Option<SessionPickerOverlayLayout>,
     session_picker_pressed: Option<PickerHitTarget>,
@@ -3890,6 +3892,19 @@ impl App {
             && self.input.divider_drag.is_none()
     }
 
+    fn focused_cwd(&self) -> Result<std::path::PathBuf> {
+        let focused = self
+            .panes
+            .focused_splint()
+            .context("focused cwd requires a focused Splint")?;
+        self.panes
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.find_splint(focused))
+            .map(|splint| splint.cwd.clone())
+            .context("focused Splint is absent from authoritative topology")
+    }
+
     fn show_command_palette(&mut self) -> Result<()> {
         self.input.prefix_state.clear();
         anyhow::ensure!(
@@ -3915,6 +3930,7 @@ impl App {
         let active_dojo_id = self.tab_state.active_dojo_id();
         self.modal.command_palette = Some(CommandPaletteUi::new(CommandPaletteContext {
             lair_id: self.tab_state.active_identity.lair_id,
+            focused_cwd: self.focused_cwd()?,
             dojo_id: active_dojo_id,
             dojo_name: self.tab_state.active_identity.dojo_name.clone(),
             pane_count: 1_usize.saturating_add(self.panes.inactive_panes.len()),
@@ -4276,6 +4292,7 @@ impl App {
         };
         self.modal.tab_context_menu = Some(TabContextMenuUi::new(TabMenuContext {
             lair_id: identity.lair_id,
+            focused_cwd: self.focused_cwd()?,
             dojo_id,
             dojo_name: identity.dojo_name,
             pane_count,
@@ -4346,11 +4363,33 @@ impl App {
         }
     }
 
+    fn show_current_dojo_prompt(&mut self, terminate: bool) {
+        let dojo_id = self.tab_state.active_dojo_id();
+        let splints = std::iter::once(&self.panes.pane)
+            .chain(self.panes.inactive_panes.iter())
+            .filter_map(|pane| {
+                pane.snapshot
+                    .as_ref()
+                    .map(|snapshot| (snapshot.splint_id, snapshot.incarnation))
+            })
+            .collect::<Vec<_>>();
+        let name = self.tab_state.active_identity.dojo_name.clone();
+        let pane_count = splints.len();
+        let prompt = if terminate {
+            DojoPromptUi::terminate(dojo_id, name, pane_count, splints)
+        } else {
+            DojoPromptUi::rename(dojo_id, name, pane_count, splints)
+        };
+        self.show_dojo_prompt(prompt);
+    }
+
     fn show_dojo_prompt(&mut self, prompt: DojoPromptUi) {
         self.input.prefix_state.clear();
         let title = match &prompt {
             DojoPromptUi::Rename(_) => "Splinterm — Rename Tab",
-            DojoPromptUi::Terminate(_) => "Splinterm — Confirm Termination",
+            DojoPromptUi::Terminate(_) => "Splinterm — Confirm Dojo Termination",
+            DojoPromptUi::RenameLair(_) => "Splinterm — Rename Lair",
+            DojoPromptUi::TerminateLair(_) => "Splinterm — Confirm Lair Termination",
         };
         self.modal.dojo_prompt = Some(prompt);
         self.modal.dojo_prompt_layout = None;
@@ -4377,13 +4416,16 @@ impl App {
         let command = match self.modal.dojo_prompt.as_ref() {
             Some(DojoPromptUi::Rename(prompt)) => prompt.command(),
             Some(DojoPromptUi::Terminate(prompt)) => prompt.command(),
+            Some(DojoPromptUi::RenameLair(prompt)) => prompt.command(),
+            Some(DojoPromptUi::TerminateLair(prompt)) => prompt.command(),
             None => None,
         };
         if command.is_none()
-            && matches!(
-                self.modal.dojo_prompt.as_ref(),
-                Some(DojoPromptUi::Rename(_))
-            )
+            && self
+                .modal
+                .dojo_prompt
+                .as_ref()
+                .is_some_and(DojoPromptUi::is_rename)
         {
             return;
         }
@@ -4409,6 +4451,7 @@ impl App {
         &mut self,
         items: Vec<SessionPickerItem>,
         targets: Vec<(LairId, DojoId)>,
+        selector_kind: Option<SelectorKind>,
     ) -> Result<()> {
         self.input.prefix_state.clear();
         anyhow::ensure!(
@@ -4431,6 +4474,7 @@ impl App {
         }
         self.clear_ime_preedit();
         self.modal.session_picker = Some(SessionPickerUi::inline(items));
+        self.modal.selector_kind = selector_kind;
         self.modal.session_picker_targets = targets;
         self.modal.session_picker_layout = None;
         self.modal.session_picker_pressed = None;
@@ -4439,7 +4483,11 @@ impl App {
         self.modal.session_picker_reconcile_pending = false;
         self.modal.session_picker_open_focus = Some(self.input.keyboard_focused);
         self.modal.session_picker_requested = false;
-        self.surface.window.set_title("Splinterm — Recent Sessions");
+        self.surface.window.set_title(match selector_kind {
+            Some(SelectorKind::Dojo) => "Splinterm — Dojos",
+            Some(SelectorKind::LairDojo) => "Splinterm — Lairs and Dojos",
+            None => "Splinterm — Recent Sessions",
+        });
         self.presentation.full_redraw = true;
         Ok(())
     }
@@ -4449,6 +4497,7 @@ impl App {
             return false;
         }
         self.modal.session_picker = None;
+        self.modal.selector_kind = None;
         self.modal.session_picker_targets.clear();
         self.modal.session_picker_layout = None;
         self.modal.session_picker_pressed = None;
@@ -4879,6 +4928,7 @@ impl App {
                         }
                         (BTN_LEFT, TabHitTarget::New) => Some(WindowTopologyCommand::NewDojo {
                             lair_id: self.tab_state.active_identity.lair_id,
+                            cwd: self.focused_cwd()?,
                         }),
                         _ => None,
                     };
@@ -4986,10 +5036,16 @@ impl App {
                         self.modal.dojo_prompt_pressed = target;
                         changed = true;
                     }
-                    if let (Some(decision), Some(DojoPromptUi::Terminate(confirmation))) =
-                        (target, self.modal.dojo_prompt.as_mut())
-                    {
-                        changed |= confirmation.select(decision);
+                    if let Some(decision) = target {
+                        match self.modal.dojo_prompt.as_mut() {
+                            Some(DojoPromptUi::Terminate(confirmation)) => {
+                                changed |= confirmation.select(decision);
+                            }
+                            Some(DojoPromptUi::TerminateLair(confirmation)) => {
+                                changed |= confirmation.select(decision);
+                            }
+                            Some(DojoPromptUi::Rename(_) | DojoPromptUi::RenameLair(_)) | None => {}
+                        }
                     }
                 } else {
                     changed |= self.close_dojo_prompt();
@@ -5184,8 +5240,26 @@ impl App {
 
     fn decide_session_picker(&mut self, decision: SessionPickerDecision) {
         if self.modal.inline_picker_open() {
+            let selector_kind = self.modal.selector_kind;
             let command = match decision {
-                SessionPickerDecision::New => WindowTopologyCommand::NewLair,
+                SessionPickerDecision::New => {
+                    let cwd = match self.focused_cwd() {
+                        Ok(cwd) => cwd,
+                        Err(error) => {
+                            self.scheduling.fail(error);
+                            return;
+                        }
+                    };
+                    match selector_kind {
+                        Some(SelectorKind::Dojo) => WindowTopologyCommand::NewDojo {
+                            lair_id: self.tab_state.active_identity.lair_id,
+                            cwd,
+                        },
+                        Some(SelectorKind::LairDojo) | None => {
+                            WindowTopologyCommand::NewLair { cwd }
+                        }
+                    }
+                }
                 SessionPickerDecision::Open(index) => {
                     let Some((lair_id, dojo_id)) =
                         self.modal.session_picker_targets.get(index).copied()
@@ -5323,6 +5397,25 @@ impl App {
                         _ => {}
                     },
                     DojoPromptUi::Terminate(confirmation) => match event.keysym {
+                        Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down | Keysym::Tab => {
+                            changed = confirmation.move_selection();
+                        }
+                        Keysym::Return | Keysym::KP_Enter => execute = true,
+                        Keysym::Escape => close = true,
+                        _ => {}
+                    },
+                    DojoPromptUi::RenameLair(rename) => match event.keysym {
+                        Keysym::Return | Keysym::KP_Enter => execute = true,
+                        Keysym::Escape => close = true,
+                        Keysym::BackSpace => changed = rename.backspace(),
+                        _ if !self.input.modifiers.ctrl && !self.input.modifiers.alt => {
+                            if let Some(text) = event.utf8.as_deref() {
+                                changed = rename.append_text(text);
+                            }
+                        }
+                        _ => {}
+                    },
+                    DojoPromptUi::TerminateLair(confirmation) => match event.keysym {
                         Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down | Keysym::Tab => {
                             changed = confirmation.move_selection();
                         }
@@ -6107,9 +6200,33 @@ impl App {
                         && !self.modal.session_picker_reconcile_pending
                         && !self.modal.command_palette_reconcile_pending
                     {
-                        self.show_embedded_session_picker(items, targets)?;
+                        self.show_embedded_session_picker(items, targets, None)?;
                         changed = true;
                     }
+                }
+                WindowTopologyUpdate::ShowSelector {
+                    kind,
+                    items,
+                    targets,
+                } => {
+                    if self.modal.session_picker_requested
+                        && self.modal.session_picker.is_none()
+                        && !self.tab_state.session_switch_pending
+                        && !self.modal.session_picker_reconcile_pending
+                        && !self.modal.command_palette_reconcile_pending
+                    {
+                        self.show_embedded_session_picker(items, targets, Some(kind))?;
+                        changed = true;
+                    }
+                }
+                WindowTopologyUpdate::ShowLairPrompt { kind, target } => {
+                    self.modal.session_picker_requested = false;
+                    let prompt = match kind {
+                        LairPromptKind::Rename => DojoPromptUi::rename_lair(target),
+                        LairPromptKind::Terminate => DojoPromptUi::terminate_lair(target),
+                    };
+                    self.show_dojo_prompt(prompt);
+                    changed = true;
                 }
                 WindowTopologyUpdate::SessionPickerFailed(message) => {
                     self.close_inline_session_picker();
@@ -10876,8 +10993,11 @@ mod tests {
             WindowTopologyCommand::RequestSessionPicker,
         )
         .expect("first topology command");
-        let error = try_topology_command(&topology_sender, WindowTopologyCommand::NewLair)
-            .expect_err("bounded topology overflow");
+        let error = try_topology_command(
+            &topology_sender,
+            WindowTopologyCommand::NewLair { cwd: "/tmp".into() },
+        )
+        .expect_err("bounded topology overflow");
         assert!(error.to_string().contains("full"));
         assert!(topology_receiver.try_recv().is_ok());
         drop(topology_receiver);
@@ -10897,7 +11017,11 @@ mod tests {
             pending: Some(pending),
         };
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        try_topology_command(&sender, WindowTopologyCommand::NewLair).unwrap();
+        try_topology_command(
+            &sender,
+            WindowTopologyCommand::NewLair { cwd: "/tmp".into() },
+        )
+        .unwrap();
         let mut rolled_back = None;
         let error = try_topology_command_with_rollback(
             Some(&sender),

@@ -131,6 +131,10 @@ fn keymap_list_is_small_and_machine_flags_are_rejected() {
     assert!(stdout.contains("Prefix ?"));
     assert!(stdout.contains("Prefix [ (unavailable)"));
     assert!(stdout.contains("copy-mode.unavailable"));
+    assert!(stdout.contains("Alt+1"));
+    assert!(stdout.contains("dojo.choose"));
+    assert!(stdout.contains("lair.terminate-confirmed"));
+    assert!(stdout.contains("window.detach"));
     assert!(stdout.contains("Ctrl+Alt+Shift+Left"));
 
     let rejected = output(binary().args(["--output", "json", "keymap", "list"]));

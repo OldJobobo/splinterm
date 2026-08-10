@@ -163,25 +163,73 @@ impl KeyboardHandler for App {
             ]) {
                 return;
             }
-            let target = match action {
-                TabShortcutAction::Next => self
-                    .tab_state
-                    .tabs
-                    .next()
-                    .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
-                TabShortcutAction::Previous => self
-                    .tab_state
-                    .tabs
-                    .previous()
-                    .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
-                TabShortcutAction::NewDojo => Some(WindowTopologyCommand::NewDojo {
-                    lair_id: self.tab_state.active_identity.lair_id,
-                }),
-                TabShortcutAction::Close => Some(WindowTopologyCommand::CloseTab {
-                    dojo_id: self.tab_state.active_dojo_id(),
-                }),
-                TabShortcutAction::Consume => None,
-            };
+            let target =
+                match action {
+                    TabShortcutAction::Next => self
+                        .tab_state
+                        .tabs
+                        .next()
+                        .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
+                    TabShortcutAction::Previous => self
+                        .tab_state
+                        .tabs
+                        .previous()
+                        .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
+                    TabShortcutAction::NewDojo => match self.focused_cwd() {
+                        Ok(cwd) => Some(WindowTopologyCommand::NewDojo {
+                            lair_id: self.tab_state.active_identity.lair_id,
+                            cwd,
+                        }),
+                        Err(error) => {
+                            self.scheduling.fail(error);
+                            None
+                        }
+                    },
+                    TabShortcutAction::Close => Some(WindowTopologyCommand::CloseTab {
+                        dojo_id: self.tab_state.active_dojo_id(),
+                    }),
+                    TabShortcutAction::Select(index) => self.tab_state.tabs.at(index).map(|tab| {
+                        WindowTopologyCommand::ActivateTab {
+                            dojo_id: tab.dojo_id,
+                        }
+                    }),
+                    TabShortcutAction::Move(delta) => {
+                        if self.tab_state.tabs.move_active(delta) {
+                            self.presentation.full_redraw = true;
+                            if let Err(error) = self.schedule_draw(queue_handle) {
+                                self.scheduling.fail(error);
+                            }
+                        }
+                        return;
+                    }
+                    TabShortcutAction::Rename => {
+                        self.show_current_dojo_prompt(false);
+                        if let Err(error) = self.schedule_draw(queue_handle) {
+                            self.scheduling.fail(error);
+                        }
+                        return;
+                    }
+                    TabShortcutAction::Terminate => {
+                        self.show_current_dojo_prompt(true);
+                        if let Err(error) = self.schedule_draw(queue_handle) {
+                            self.scheduling.fail(error);
+                        }
+                        return;
+                    }
+                    TabShortcutAction::Choose => {
+                        self.modal.session_picker_requested = true;
+                        let command = WindowTopologyCommand::RequestSelector {
+                            kind: super::super::SelectorKind::Dojo,
+                            lair_id: self.tab_state.active_identity.lair_id,
+                        };
+                        if let Err(error) = self.send_topology_command(command) {
+                            self.modal.session_picker_requested = false;
+                            self.scheduling.fail(error);
+                        }
+                        return;
+                    }
+                    TabShortcutAction::Consume => None,
+                };
             if let Some(target) = target
                 && let Err(error) = self.send_topology_command(target)
             {
@@ -214,7 +262,76 @@ impl KeyboardHandler for App {
             }
             return;
         }
+        if matches!(
+            shortcut,
+            Some(
+                ActionId::NewSession
+                    | ActionId::RenameCurrentLair
+                    | ActionId::TerminateCurrentLair
+                    | ActionId::PreviousLair
+                    | ActionId::NextLair
+                    | ActionId::LairChooser
+            )
+        ) {
+            if !tab_action_dispatch_allowed([
+                self.modal.session_picker.is_some(),
+                self.modal.trusted_consent.is_some(),
+                self.modal.session_picker_requested,
+                self.tab_state.session_switch_pending,
+                self.modal.session_picker_reconcile_pending,
+            ]) {
+                return;
+            }
+            let command = match shortcut.expect("matched Lair action") {
+                ActionId::NewSession => match self.focused_cwd() {
+                    Ok(cwd) => WindowTopologyCommand::NewLair { cwd },
+                    Err(error) => {
+                        self.scheduling.fail(error);
+                        return;
+                    }
+                },
+                ActionId::RenameCurrentLair => {
+                    self.modal.session_picker_requested = true;
+                    WindowTopologyCommand::RequestLairPrompt {
+                        lair_id: self.tab_state.active_identity.lair_id,
+                        kind: super::super::LairPromptKind::Rename,
+                    }
+                }
+                ActionId::TerminateCurrentLair => {
+                    self.modal.session_picker_requested = true;
+                    WindowTopologyCommand::RequestLairPrompt {
+                        lair_id: self.tab_state.active_identity.lair_id,
+                        kind: super::super::LairPromptKind::Terminate,
+                    }
+                }
+                ActionId::PreviousLair => WindowTopologyCommand::NavigateLair {
+                    current_lair_id: self.tab_state.active_identity.lair_id,
+                    direction: super::super::LairDirection::Previous,
+                },
+                ActionId::NextLair => WindowTopologyCommand::NavigateLair {
+                    current_lair_id: self.tab_state.active_identity.lair_id,
+                    direction: super::super::LairDirection::Next,
+                },
+                ActionId::LairChooser => {
+                    self.modal.session_picker_requested = true;
+                    WindowTopologyCommand::RequestSelector {
+                        kind: super::super::SelectorKind::LairDojo,
+                        lair_id: self.tab_state.active_identity.lair_id,
+                    }
+                }
+                _ => unreachable!("matched Lair action is exhaustive"),
+            };
+            if let Err(error) = self.send_topology_command(command) {
+                self.modal.session_picker_requested = false;
+                self.scheduling.fail(error);
+            }
+            return;
+        }
         match shortcut {
+            Some(ActionId::DetachWindow) => {
+                self.scheduling.exit = true;
+                return;
+            }
             Some(ActionId::BindingHelp) => {
                 eprintln!(
                     "splinterm key bindings: run `splinterm keymap show {}` for the generated binding list",

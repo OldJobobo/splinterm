@@ -1,6 +1,6 @@
 # Plan 0027: Configurable keymaps and Dojo presets
 
-- **Status:** Active — Milestones 1–3 complete; Milestone 4 next
+- **Status:** Active — Milestones 1–4 complete; Milestone 5 next
 - **Date:** 2026-08-07
 - **Depends on:** [Plan 0018](0018-lair-dojo-topology-migration.md), [Plan 0019](0019-dojo-tabs.md), [Plan 0025](0025-command-palette-and-tab-context-menus.md)
 - **Primary compatibility reference:** [Omarchy Tmux Reference](../omarchy-tmux-reference.md)
@@ -1027,6 +1027,24 @@ Gate:
 - pane geometry tests prove five-cell resize direction at multiple scales.
 
 ### Milestone 4 — Dojo/Lair bindings and trusted selectors
+
+**Status:** Complete
+
+Recorded evidence:
+
+- validation: `cargo test -p splinterm-core` (24 passed),
+  `cargo test -p splinterm-protocol` (18 passed), `cargo test -p splinterd`
+  (60 library, 58 daemon, and 18 end-to-end tests passed), the focused atomic
+  Lair-termination end-to-end test, `cargo test -p splinterm --lib`
+  (307 passed, 1 ignored), `cargo test -p splinterm --test keymap_cli`
+  (3 passed), the focused Lair-navigation test, workspace Clippy with
+  `-D warnings`, formatting, package-validator compilation, and
+  `git diff --check`;
+- review: one fresh read-only acceptance review returned **ACCEPT** with no
+  blocker or fix worth doing now; it confirmed stable-ID dispatch, focused-cwd
+  capture, typed selectors, Cancel-default destructive prompts, exact atomic
+  Lair cleanup, clean Window detach, protocol-version alignment, and no Plan
+  0030 diagnostics behavior.
 
 Work:
 

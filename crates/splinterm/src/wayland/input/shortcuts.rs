@@ -111,6 +111,11 @@ pub(in crate::wayland) enum TabShortcutAction {
     Previous,
     NewDojo,
     Close,
+    Select(usize),
+    Move(isize),
+    Rename,
+    Terminate,
+    Choose,
     Consume,
 }
 
@@ -127,6 +132,20 @@ pub(in crate::wayland) fn tab_shortcut_action(
         ActionId::PreviousDojo => TabShortcutAction::Previous,
         ActionId::NewDojo => TabShortcutAction::NewDojo,
         ActionId::CloseCurrentTab => TabShortcutAction::Close,
+        ActionId::SelectDojo1 => TabShortcutAction::Select(0),
+        ActionId::SelectDojo2 => TabShortcutAction::Select(1),
+        ActionId::SelectDojo3 => TabShortcutAction::Select(2),
+        ActionId::SelectDojo4 => TabShortcutAction::Select(3),
+        ActionId::SelectDojo5 => TabShortcutAction::Select(4),
+        ActionId::SelectDojo6 => TabShortcutAction::Select(5),
+        ActionId::SelectDojo7 => TabShortcutAction::Select(6),
+        ActionId::SelectDojo8 => TabShortcutAction::Select(7),
+        ActionId::SelectDojo9 => TabShortcutAction::Select(8),
+        ActionId::MoveDojoLeft => TabShortcutAction::Move(-1),
+        ActionId::MoveDojoRight => TabShortcutAction::Move(1),
+        ActionId::RenameCurrentTab => TabShortcutAction::Rename,
+        ActionId::TerminateCurrentDojo => TabShortcutAction::Terminate,
+        ActionId::DojoChooser => TabShortcutAction::Choose,
         _ => return None,
     };
     Some(if repeat {
@@ -267,6 +286,16 @@ fn key_identity(keysym: Keysym) -> Option<KeyIdentity> {
         Keysym::equal => KeyIdentity::Equal,
         Keysym::minus | Keysym::KP_Subtract => KeyIdentity::Minus,
         Keysym::_0 | Keysym::KP_0 => KeyIdentity::Zero,
+        Keysym::_1 => KeyIdentity::One,
+        Keysym::_2 => KeyIdentity::Two,
+        Keysym::_3 => KeyIdentity::Three,
+        Keysym::_4 => KeyIdentity::Four,
+        Keysym::_5 => KeyIdentity::Five,
+        Keysym::_6 => KeyIdentity::Six,
+        Keysym::_7 => KeyIdentity::Seven,
+        Keysym::_8 => KeyIdentity::Eight,
+        Keysym::_9 => KeyIdentity::Nine,
+        Keysym::ampersand => KeyIdentity::Ampersand,
         _ => return None,
     };
     Some(key)
@@ -378,6 +407,36 @@ mod tests {
             states[blocked] = true;
             assert!(!tab_action_dispatch_allowed(states));
         }
+    }
+
+    #[test]
+    fn omarchy_numeric_and_reorder_bindings_dispatch_typed_tab_actions() {
+        let keymap = crate::keymap::built_in_keymap(crate::keymap::KeymapProfile::OmarchyTmux);
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        let alt_shift = Modifiers {
+            alt: true,
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            tab_shortcut_action(shortcut_action_for(&keymap, Keysym::_1, alt), false, true,),
+            Some(TabShortcutAction::Select(0))
+        );
+        assert_eq!(
+            tab_shortcut_action(
+                shortcut_action_for(&keymap, Keysym::Right, alt_shift),
+                false,
+                true,
+            ),
+            Some(TabShortcutAction::Move(1))
+        );
+        assert_eq!(
+            shortcut_action_for(&keymap, Keysym::Down, alt),
+            Some(ActionId::NextLair)
+        );
     }
 
     #[test]

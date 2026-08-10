@@ -6,8 +6,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    SessionPickerItem, WindowDojoIdentity, WindowPaneOptions, WindowTopologyCommand,
-    WindowTopologyUpdate,
+    LairDirection, LairPromptTarget, SelectorKind, SessionPickerItem, WindowDojoIdentity,
+    WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate,
     automation::{Connection, SharedImageContentCache, protocol_error},
     config::AppConfig,
     endpoint::{ConnectionFactory, LaunchSemantics},
@@ -18,7 +18,7 @@ use splinterm_core::{
     Axis, DojoId, LairId, LayoutNode, SplintId, SplintState, SplitRatio, SplitSide,
     TopologyRevision,
 };
-use splinterm_protocol::{ErrorCode, Request, Response};
+use splinterm_protocol::{ErrorCode, MutationTarget, Request, Response};
 use tokio::sync::mpsc;
 
 use super::{
@@ -467,9 +467,14 @@ async fn apply_topology_command(
         }
         WindowTopologyCommand::Close { .. } => unreachable!("close handled above"),
         WindowTopologyCommand::RequestSessionPicker
+        | WindowTopologyCommand::RequestSelector { .. }
         | WindowTopologyCommand::OpenDojo { .. }
-        | WindowTopologyCommand::NewLair
+        | WindowTopologyCommand::NewLair { .. }
         | WindowTopologyCommand::NewDojo { .. }
+        | WindowTopologyCommand::NavigateLair { .. }
+        | WindowTopologyCommand::RequestLairPrompt { .. }
+        | WindowTopologyCommand::RenameLair { .. }
+        | WindowTopologyCommand::TerminateLair { .. }
         | WindowTopologyCommand::RenameDojo { .. }
         | WindowTopologyCommand::TerminateDojo { .. }
         | WindowTopologyCommand::ActivateTab { .. }
@@ -625,9 +630,10 @@ async fn reconcile_window_topology(
     Ok(true)
 }
 
-async fn session_picker_catalog(
+async fn selector_catalog(
     factory: &ConnectionFactory,
     connection: &mut Connection,
+    lair_filter: Option<LairId>,
 ) -> Result<(Vec<SessionPickerItem>, Vec<(LairId, DojoId)>)> {
     let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
         bail!("splinterd did not return its session list");
@@ -635,6 +641,7 @@ async fn session_picker_catalog(
     let entries = collect_sessions(&lairs, &recent_dojo_ids(factory))
         .into_iter()
         .filter(SessionEntry::reopenable)
+        .filter(|entry| lair_filter.is_none_or(|lair_id| entry.lair_id == lair_id))
         .collect::<Vec<_>>();
     let items = entries.iter().map(session_picker_item).collect();
     let targets = entries
@@ -682,6 +689,7 @@ async fn create_daily_dojo(
     factory: &ConnectionFactory,
     connection: &mut Connection,
     config: &AppConfig,
+    cwd: std::path::PathBuf,
 ) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -693,11 +701,7 @@ async fn create_daily_dojo(
             factory,
             expected,
             format!("terminal-{stamp}-{}", std::process::id()),
-            if factory.is_local() {
-                Some(env::current_dir().context("failed to read current directory")?)
-            } else {
-                None
-            },
+            Some(cwd),
             Vec::new(),
             config,
         )?)
@@ -718,6 +722,7 @@ async fn create_dojo_in_lair(
     connection: &mut Connection,
     config: &AppConfig,
     lair_id: LairId,
+    cwd: std::path::PathBuf,
 ) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
     let expected_topology_revision = connection.topology_revision().await?;
     let stamp = SystemTime::now()
@@ -729,23 +734,129 @@ async fn create_dojo_in_lair(
             expected_topology_revision,
             lair_id,
             name: format!("terminal-{stamp}"),
-            launch: launch_parameters(
-                env::current_dir().context("failed to read current directory")?,
-                Vec::new(),
-                config,
-            ),
+            launch: launch_parameters(cwd.clone(), Vec::new(), config),
         },
         LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
             expected_topology_revision,
             lair_id,
             name: format!("terminal-{stamp}"),
-            launch: automation_launch(None, Vec::new()),
+            launch: automation_launch(Some(cwd), Vec::new()),
         },
     };
     let Response::DojoStarted { dojo_id, .. } = connection.request(request).await? else {
         bail!("splinterd did not create the requested Dojo");
     };
     reopenable_dojo(connection, lair_id, dojo_id).await
+}
+
+fn collect_lair_targets(lair: &splinterm_core::Lair) -> Result<Vec<MutationTarget>> {
+    fn collect(
+        lair_id: LairId,
+        dojo_id: DojoId,
+        node: &LayoutNode,
+        targets: &mut Vec<MutationTarget>,
+    ) -> Result<()> {
+        match node {
+            LayoutNode::Leaf(splint) => targets.push(MutationTarget {
+                lair_id,
+                dojo_id,
+                splint_id: splint.id,
+                incarnation: splint
+                    .last_incarnation
+                    .context("captured Lair pane has no process incarnation")?,
+            }),
+            LayoutNode::Branch { first, second, .. } => {
+                collect(lair_id, dojo_id, first, targets)?;
+                collect(lair_id, dojo_id, second, targets)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut targets = Vec::new();
+    for dojo in &lair.dojos {
+        collect(lair.id, dojo.id, &dojo.root, &mut targets)?;
+    }
+    Ok(targets)
+}
+
+async fn lair_prompt_target(
+    connection: &mut Connection,
+    lair_id: LairId,
+) -> Result<LairPromptTarget> {
+    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+        bail!("splinterd did not return its Lair catalog");
+    };
+    let lair = lairs
+        .iter()
+        .find(|lair| lair.id == lair_id)
+        .context("captured Lair is absent")?;
+    Ok(LairPromptTarget {
+        lair_id,
+        name: lair.name.clone(),
+        targets: collect_lair_targets(lair)?,
+    })
+}
+
+fn lair_navigation_target<T>(
+    ordered: &[LairId],
+    entries: &[SessionEntry],
+    tabs: &WindowTabSet<T>,
+    current_lair_id: LairId,
+    direction: LairDirection,
+) -> Result<(LairId, DojoId)> {
+    anyhow::ensure!(!ordered.is_empty(), "no Lairs are available");
+    let current = ordered
+        .iter()
+        .position(|lair_id| *lair_id == current_lair_id)
+        .context("current Lair is absent from the captured catalog")?;
+    for distance in 1..=ordered.len() {
+        let index = match direction {
+            LairDirection::Previous => {
+                current
+                    .saturating_add(ordered.len())
+                    .saturating_sub(distance)
+                    % ordered.len()
+            }
+            LairDirection::Next => current.saturating_add(distance) % ordered.len(),
+        };
+        let target_lair = ordered[index];
+        let target_dojo = tabs.recent_in_lair(target_lair).or_else(|| {
+            entries
+                .iter()
+                .find(|entry| entry.lair_id == target_lair)
+                .map(|entry| entry.dojo_id)
+        });
+        if let Some(target_dojo) = target_dojo {
+            return Ok((target_lair, target_dojo));
+        }
+    }
+    bail!("captured Lair catalog has no reopenable Dojo")
+}
+
+async fn navigate_lair(
+    factory: &ConnectionFactory,
+    connection: &mut Connection,
+    tabs: &WindowTabSet<ManagedDojo>,
+    current_lair_id: LairId,
+    direction: LairDirection,
+) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
+    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+        bail!("splinterd did not return its Lair catalog");
+    };
+    let recent = recent_dojo_ids(factory);
+    let entries = collect_sessions(&lairs, &recent)
+        .into_iter()
+        .filter(SessionEntry::reopenable)
+        .collect::<Vec<_>>();
+    let ordered = lairs
+        .iter()
+        .filter(|lair| lair.lifetime.is_persistent())
+        .map(|lair| lair.id)
+        .collect::<Vec<_>>();
+    let (target_lair, target_dojo) =
+        lair_navigation_target(&ordered, &entries, tabs, current_lair_id, direction)?;
+    reopenable_dojo(connection, target_lair, target_dojo).await
 }
 
 struct ManagedDojo {
@@ -952,10 +1063,36 @@ async fn handle_session_manager_command(
 ) -> TopologyManagerCommandOutcome {
     match command {
         WindowTopologyCommand::RequestSessionPicker => {
-            match session_picker_catalog(factory, connection).await {
+            match selector_catalog(factory, connection, None).await {
                 Ok((items, targets)) => {
                     if updates
                         .send(WindowTopologyUpdate::ShowSessionPicker { items, targets })
+                        .await
+                        .is_err()
+                    {
+                        return TopologyManagerCommandOutcome::Stop;
+                    }
+                }
+                Err(error) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::SessionPickerFailed(format!(
+                            "{error:#}"
+                        )))
+                        .await;
+                }
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::RequestSelector { kind, lair_id } => {
+            let filter = (kind == SelectorKind::Dojo).then_some(lair_id);
+            match selector_catalog(factory, connection, filter).await {
+                Ok((items, targets)) => {
+                    if updates
+                        .send(WindowTopologyUpdate::ShowSelector {
+                            kind,
+                            items,
+                            targets,
+                        })
                         .await
                         .is_err()
                     {
@@ -979,7 +1116,7 @@ async fn handle_session_manager_command(
             let target = reopenable_dojo(connection, lair_id, target_id).await;
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
-        WindowTopologyCommand::NewLair => {
+        WindowTopologyCommand::NewLair { cwd } => {
             if !window_has_tab_capacity(state.tabs.len()) {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
@@ -992,10 +1129,10 @@ async fn handle_session_manager_command(
                     .await;
                 return TopologyManagerCommandOutcome::Continue;
             }
-            let target = create_daily_dojo(factory, connection, config).await;
+            let target = create_daily_dojo(factory, connection, config, cwd).await;
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
-        WindowTopologyCommand::NewDojo { lair_id } => {
+        WindowTopologyCommand::NewDojo { lair_id, cwd } => {
             if !window_has_tab_capacity(state.tabs.len()) {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
@@ -1008,8 +1145,115 @@ async fn handle_session_manager_command(
                     .await;
                 return TopologyManagerCommandOutcome::Continue;
             }
-            let target = create_dojo_in_lair(factory, connection, config, lair_id).await;
+            let target = create_dojo_in_lair(factory, connection, config, lair_id, cwd).await;
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
+        }
+        WindowTopologyCommand::NavigateLair {
+            current_lair_id,
+            direction,
+        } => {
+            let target =
+                navigate_lair(factory, connection, &state.tabs, current_lair_id, direction).await;
+            finish_managed_window_open(factory, target, state, config, image_cache, updates).await
+        }
+        WindowTopologyCommand::RequestLairPrompt { lair_id, kind } => {
+            match lair_prompt_target(connection, lair_id).await {
+                Ok(target) => {
+                    if updates
+                        .send(WindowTopologyUpdate::ShowLairPrompt { kind, target })
+                        .await
+                        .is_err()
+                    {
+                        return TopologyManagerCommandOutcome::Stop;
+                    }
+                }
+                Err(error) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::TabFailed {
+                            dojo_id: None,
+                            message: format!("{error:#}"),
+                        })
+                        .await;
+                }
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::RenameLair { lair_id, name } => {
+            let result = async {
+                anyhow::ensure!(
+                    state.tabs.iter().any(|tab| tab.lair_id == lair_id),
+                    "rename targeted a detached Lair"
+                );
+                let expected_topology_revision = connection.topology_revision().await?;
+                let response = connection
+                    .request(Request::RenameLair {
+                        expected_topology_revision,
+                        lair_id,
+                        name,
+                    })
+                    .await?;
+                anyhow::ensure!(
+                    matches!(response, Response::TopologyCommitted { .. }),
+                    "splinterd did not acknowledge Lair rename"
+                );
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: None,
+                        message: format!("{error:#}"),
+                    })
+                    .await;
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::TerminateLair { lair_id, targets } => {
+            let result = async {
+                let expected_topology_revision = connection.topology_revision().await?;
+                let response = connection
+                    .request(Request::TerminateLair {
+                        expected_topology_revision,
+                        lair_id,
+                        targets,
+                    })
+                    .await?;
+                anyhow::ensure!(
+                    matches!(response, Response::TopologyCommitted { .. }),
+                    "splinterd did not acknowledge Lair termination"
+                );
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: None,
+                        message: format!("{error:#}"),
+                    })
+                    .await;
+                return TopologyManagerCommandOutcome::Continue;
+            }
+            let dojo_ids = state
+                .tabs
+                .iter()
+                .filter_map(|tab| (tab.lair_id == lair_id).then_some(tab.dojo_id))
+                .collect::<Vec<_>>();
+            for dojo_id in dojo_ids {
+                if let Some(removed) = state.tabs.close(dojo_id) {
+                    let acknowledged = remove_frontend_tab(updates, dojo_id).await;
+                    cancel_pane_tasks(removed.value.pane_tasks).await;
+                    if !acknowledged {
+                        return TopologyManagerCommandOutcome::Stop;
+                    }
+                }
+            }
+            if state.tabs.is_empty() {
+                let _ = updates.send(WindowTopologyUpdate::Closed).await;
+                return TopologyManagerCommandOutcome::Stop;
+            }
+            TopologyManagerCommandOutcome::Continue
         }
         WindowTopologyCommand::RenameDojo { dojo_id, name } => {
             let result = async {
@@ -1503,10 +1747,11 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        Axis, CloseAction, DojoId, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
-        SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyManagerWake,
-        TopologyRevision, WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets,
-        close_action, close_other_tab_targets, command_has_pending_split,
+        Axis, CloseAction, DojoId, DojoTab, LairDirection, LairId, LayoutNode,
+        PendingTopologyFocus, RefreshedCloseState, Response, SessionEntry, SplintId, SplintState,
+        SplitRatio, TopologyCommandOutcome, TopologyManagerWake, TopologyRevision, WindowTabSet,
+        WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets, close_action,
+        close_other_tab_targets, command_has_pending_split, lair_navigation_target,
         next_topology_manager_wake, parent_ratio, pending_focus_for_observation,
         refreshed_close_state, topology_command_outcome, topology_identity_diff,
         validate_exited_close_target, window_has_tab_capacity,
@@ -1680,6 +1925,49 @@ mod tests {
                 vec![first; splinterm::tab::MAX_WINDOW_TABS + 1]
             ),
             None
+        );
+    }
+
+    #[test]
+    fn lair_navigation_prefers_most_recent_attached_dojo_by_stable_id() {
+        let first_lair = LairId::new();
+        let empty_lair = LairId::new();
+        let second_lair = LairId::new();
+        let first_dojo = DojoId::new();
+        let second_dojo = DojoId::new();
+        let recent_second_dojo = DojoId::new();
+        let mut tabs = WindowTabSet::new(DojoTab::new(first_lair, first_dojo, ()));
+        tabs.open_or_activate(DojoTab::new(second_lair, second_dojo, ()))
+            .unwrap();
+        tabs.open_or_activate(DojoTab::new(second_lair, recent_second_dojo, ()))
+            .unwrap();
+        assert!(tabs.activate(second_dojo));
+        assert!(tabs.activate(first_dojo));
+        let entry = |lair_id, dojo_id| SessionEntry {
+            lair_id,
+            dojo_id,
+            lair_name: "lair".to_owned(),
+            dojo_name: "dojo".to_owned(),
+            cwd: PathBuf::from("/tmp"),
+            pane_count: 1,
+            running_panes: 1,
+            exited_panes: 0,
+        };
+        let entries = vec![
+            entry(first_lair, first_dojo),
+            entry(second_lair, recent_second_dojo),
+            entry(second_lair, second_dojo),
+        ];
+        assert_eq!(
+            lair_navigation_target(
+                &[first_lair, empty_lair, second_lair],
+                &entries,
+                &tabs,
+                first_lair,
+                LairDirection::Next,
+            )
+            .unwrap(),
+            (second_lair, second_dojo)
         );
     }
 

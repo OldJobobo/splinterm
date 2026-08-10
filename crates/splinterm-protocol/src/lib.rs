@@ -12,7 +12,7 @@ use splinterm_core::{
     Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 29;
+pub const PROTOCOL_VERSION: u16 = 30;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -205,6 +205,9 @@ pub enum MutationPreflight {
     CloseDojo {
         dojo_id: DojoId,
     },
+    TerminateLair {
+        lair_id: LairId,
+    },
     KillSplint {
         splint_id: SplintId,
         incarnation: u64,
@@ -356,6 +359,12 @@ pub enum Request {
     CloseDojo {
         expected_topology_revision: TopologyRevision,
         dojo_id: DojoId,
+    },
+    TerminateLair {
+        expected_topology_revision: TopologyRevision,
+        lair_id: LairId,
+        /// Exact captured membership and process incarnations for drift rejection.
+        targets: Vec<MutationTarget>,
     },
     RenameLair {
         expected_topology_revision: TopologyRevision,
@@ -742,6 +751,7 @@ pub enum TopologyChangeKind {
     SplitRatioChanged,
     DojoCreated,
     DojoClosed,
+    LairTerminated,
     LairRenamed,
     DojoRenamed,
     DojoDefaultFocusChanged,
@@ -992,6 +1002,7 @@ pub enum AuditOperation {
     SetSplitRatio,
     NewDojo,
     CloseDojo,
+    TerminateLair,
     RenameLair,
     RenameDojo,
     SetDojoDefaultFocus,
@@ -2234,7 +2245,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 29);
+        assert_eq!(PROTOCOL_VERSION, 30);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -2353,6 +2364,34 @@ mod tests {
         assert!(limits.maximum_input_bytes < limits.maximum_frame_bytes);
         assert!(limits.maximum_outstanding_requests > 0);
         assert!(limits.maximum_subscriptions > 0);
+    }
+
+    #[test]
+    fn atomic_lair_termination_has_explicit_revision_and_exact_targets() {
+        let lair_id = LairId::new();
+        let target = MutationTarget {
+            lair_id,
+            dojo_id: DojoId::new(),
+            splint_id: SplintId::new(),
+            incarnation: 7,
+        };
+        let request = Request::TerminateLair {
+            expected_topology_revision: TopologyRevision::new(0),
+            lair_id,
+            targets: vec![target.clone()],
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["type"], "terminate_lair");
+        assert_eq!(value["lair_id"], lair_id.to_string());
+        assert_eq!(value["targets"][0]["incarnation"], 7);
+        assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+        assert_eq!(
+            MutationPreflight::TerminateLair { lair_id },
+            serde_json::from_value(
+                serde_json::to_value(MutationPreflight::TerminateLair { lair_id }).unwrap()
+            )
+            .unwrap()
+        );
     }
 
     #[test]

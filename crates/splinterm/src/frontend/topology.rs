@@ -1,6 +1,9 @@
 //! Window-local topology commands and updates shared across runtime boundaries.
 
+use std::path::PathBuf;
+
 use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplitRatio};
+use splinterm_protocol::MutationTarget;
 
 use super::{SessionPickerItem, ThemeUpdate, WindowPaneOptions};
 
@@ -10,6 +13,31 @@ pub struct WindowDojoIdentity {
     pub dojo_id: DojoId,
     pub lair_name: String,
     pub dojo_name: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectorKind {
+    Dojo,
+    LairDojo,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LairDirection {
+    Previous,
+    Next,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LairPromptKind {
+    Rename,
+    Terminate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LairPromptTarget {
+    pub lair_id: LairId,
+    pub name: String,
+    pub targets: Vec<MutationTarget>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,13 +65,36 @@ pub enum WindowTopologyCommand {
         ratio: SplitRatio,
     },
     RequestSessionPicker,
+    RequestSelector {
+        kind: SelectorKind,
+        lair_id: LairId,
+    },
     OpenDojo {
         lair_id: LairId,
         dojo_id: DojoId,
     },
-    NewLair,
+    NewLair {
+        cwd: PathBuf,
+    },
     NewDojo {
         lair_id: LairId,
+        cwd: PathBuf,
+    },
+    NavigateLair {
+        current_lair_id: LairId,
+        direction: LairDirection,
+    },
+    RequestLairPrompt {
+        lair_id: LairId,
+        kind: LairPromptKind,
+    },
+    RenameLair {
+        lair_id: LairId,
+        name: String,
+    },
+    TerminateLair {
+        lair_id: LairId,
+        targets: Vec<MutationTarget>,
     },
     RenameDojo {
         dojo_id: DojoId,
@@ -95,6 +146,15 @@ pub enum WindowTopologyUpdate {
     ShowSessionPicker {
         items: Vec<SessionPickerItem>,
         targets: Vec<(LairId, DojoId)>,
+    },
+    ShowSelector {
+        kind: SelectorKind,
+        items: Vec<SessionPickerItem>,
+        targets: Vec<(LairId, DojoId)>,
+    },
+    ShowLairPrompt {
+        kind: LairPromptKind,
+        target: LairPromptTarget,
     },
     SessionPickerFailed(String),
     Theme(ThemeUpdate),

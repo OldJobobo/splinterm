@@ -387,6 +387,19 @@ impl Topology {
         Ok(self.revision)
     }
 
+    pub fn terminate_lair_at(
+        &mut self,
+        expected: TopologyRevision,
+        lair_id: LairId,
+    ) -> Result<TopologyRevision, TopologyError> {
+        self.check_revision(expected)?;
+        self.lairs
+            .remove(&lair_id)
+            .ok_or(TopologyError::LairNotFound(lair_id))?;
+        self.advance_revision();
+        Ok(self.revision)
+    }
+
     pub fn rename_lair_at(
         &mut self,
         expected: TopologyRevision,
@@ -681,6 +694,25 @@ mod tests {
         assert!(topology.set_splint_state(splint_id, SplintState::Running));
         assert_eq!(topology.remove_lair(lair.id).unwrap().id, lair.id);
         assert_eq!(topology.lairs().count(), 0);
+    }
+
+    #[test]
+    fn atomic_lair_termination_checks_revision_and_removes_exact_lair() {
+        let mut topology = Topology::new();
+        let lair_id = topology
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let revision = topology.revision();
+        assert_eq!(
+            topology.terminate_lair_at(revision, lair_id).unwrap(),
+            TopologyRevision(revision.0 + 1)
+        );
+        assert!(topology.lairs().all(|lair| lair.id != lair_id));
+        assert!(matches!(
+            topology.terminate_lair_at(revision, lair_id),
+            Err(TopologyError::StaleTopology { .. })
+        ));
     }
 
     #[test]

@@ -26,8 +26,9 @@ pub mod viewport;
 pub mod wayland;
 
 pub use frontend::{
-    AuthorityStatus, PerfTraceCorrelation, SessionPickerDecision, SessionPickerItem,
-    SessionPickerUi, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
-    WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    AuthorityStatus, LairDirection, LairPromptKind, LairPromptTarget, PerfTraceCorrelation,
+    SelectorKind, SessionPickerDecision, SessionPickerItem, SessionPickerUi, ThemeUpdate,
+    TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
 };
 pub use wayland::run as run_window;

@@ -77,7 +77,8 @@ const fn preflight_authorization(
                 requirement: ConditionalRequirement::LiveProcessTermination,
             }
         }
-        splinterm_protocol::MutationPreflight::CloseDojo { .. } => {
+        splinterm_protocol::MutationPreflight::CloseDojo { .. }
+        | splinterm_protocol::MutationPreflight::TerminateLair { .. } => {
             RequestAuthorization::Conditional {
                 base: &[Scope::TopologyLayoutMutate],
                 requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
@@ -140,10 +141,12 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
             base: &[Scope::TopologyLayoutMutate],
             requirement: ConditionalRequirement::LiveProcessTermination,
         },
-        Request::CloseDojo { .. } => RequestAuthorization::Conditional {
-            base: &[Scope::TopologyLayoutMutate],
-            requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
-        },
+        Request::CloseDojo { .. } | Request::TerminateLair { .. } => {
+            RequestAuthorization::Conditional {
+                base: &[Scope::TopologyLayoutMutate],
+                requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
+            }
+        }
         Request::SetSplitRatio { .. } | Request::SetDojoDefaultFocus { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyLayoutMutate])
         }

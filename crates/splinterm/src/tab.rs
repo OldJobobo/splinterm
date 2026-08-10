@@ -85,13 +85,16 @@ impl std::error::Error for TabLimitReached {}
 pub struct WindowTabSet<T> {
     tabs: Vec<DojoTab<T>>,
     active: usize,
+    activation_history: Vec<DojoId>,
 }
 
 impl<T> WindowTabSet<T> {
     pub fn new(initial: DojoTab<T>) -> Self {
+        let dojo_id = initial.dojo_id;
         Self {
             tabs: vec![initial],
             active: 0,
+            activation_history: vec![dojo_id],
         }
     }
 
@@ -119,6 +122,18 @@ impl<T> WindowTabSet<T> {
         self.tabs.iter_mut().find(|tab| tab.dojo_id == dojo_id)
     }
 
+    pub fn at(&self, index: usize) -> Option<&DojoTab<T>> {
+        self.tabs.get(index)
+    }
+
+    pub fn recent_in_lair(&self, lair_id: LairId) -> Option<DojoId> {
+        self.activation_history
+            .iter()
+            .rev()
+            .copied()
+            .find(|dojo_id| self.get(*dojo_id).is_some_and(|tab| tab.lair_id == lair_id))
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &DojoTab<T>> {
         self.tabs.iter()
     }
@@ -130,13 +145,16 @@ impl<T> WindowTabSet<T> {
     pub fn open_or_activate(&mut self, tab: DojoTab<T>) -> Result<OpenTabOutcome, TabLimitReached> {
         if let Some(index) = self.index_of(tab.dojo_id) {
             self.active = index;
+            self.record_activation(tab.dojo_id);
             return Ok(OpenTabOutcome::ActivatedExisting);
         }
         if self.tabs.len() == MAX_WINDOW_TABS {
             return Err(TabLimitReached);
         }
+        let dojo_id = tab.dojo_id;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.record_activation(dojo_id);
         Ok(OpenTabOutcome::Opened)
     }
 
@@ -145,6 +163,7 @@ impl<T> WindowTabSet<T> {
             return false;
         };
         self.active = index;
+        self.record_activation(dojo_id);
         true
     }
 
@@ -195,6 +214,8 @@ impl<T> WindowTabSet<T> {
     pub fn close(&mut self, dojo_id: DojoId) -> Option<DojoTab<T>> {
         let index = self.index_of(dojo_id)?;
         let removed = self.tabs.remove(index);
+        self.activation_history
+            .retain(|candidate| *candidate != dojo_id);
         if self.tabs.is_empty() {
             self.active = 0;
         } else if index < self.active {
@@ -203,6 +224,21 @@ impl<T> WindowTabSet<T> {
             self.active = index.min(self.tabs.len() - 1);
         }
         Some(removed)
+    }
+
+    pub fn move_active(&mut self, delta: isize) -> bool {
+        if self.tabs.len() < 2 || delta == 0 {
+            return false;
+        }
+        let target = if delta.is_negative() {
+            self.active.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.active
+                .saturating_add(delta.unsigned_abs())
+                .min(self.tabs.len() - 1)
+        };
+        let dojo_id = self.tabs[self.active].dojo_id;
+        target != self.active && self.move_tab(dojo_id, target)
     }
 
     pub fn move_tab(&mut self, dojo_id: DojoId, target: usize) -> bool {
@@ -221,6 +257,12 @@ impl<T> WindowTabSet<T> {
                 .expect("active tab remains present after reordering");
         }
         true
+    }
+
+    fn record_activation(&mut self, dojo_id: DojoId) {
+        self.activation_history
+            .retain(|candidate| *candidate != dojo_id);
+        self.activation_history.push(dojo_id);
     }
 
     fn index_of(&self, dojo_id: DojoId) -> Option<usize> {
@@ -318,6 +360,28 @@ mod tests {
             sanitized_tab_label("\u{2066}\u{2069}", 128, 48),
             "Untitled Dojo"
         );
+    }
+
+    #[test]
+    fn lair_recency_and_numeric_order_keep_stable_ids() {
+        let first_lair = LairId::new();
+        let second_lair = LairId::new();
+        let first = DojoTab::new(first_lair, DojoId::new(), 1);
+        let first_id = first.dojo_id;
+        let mut tabs = WindowTabSet::new(first);
+        let second = DojoTab::new(second_lair, DojoId::new(), 2);
+        let second_id = second.dojo_id;
+        let third = DojoTab::new(second_lair, DojoId::new(), 3);
+        let third_id = third.dojo_id;
+        tabs.open_or_activate(second).unwrap();
+        tabs.open_or_activate(third).unwrap();
+        assert_eq!(tabs.recent_in_lair(second_lair), Some(third_id));
+        assert!(tabs.activate(second_id));
+        assert_eq!(tabs.recent_in_lair(second_lair), Some(second_id));
+        assert_eq!(tabs.at(0).map(|tab| tab.dojo_id), Some(first_id));
+        assert!(tabs.move_active(-1));
+        assert_eq!(tabs.at(0).map(|tab| tab.dojo_id), Some(second_id));
+        assert!(!tabs.move_active(-1));
     }
 
     #[test]

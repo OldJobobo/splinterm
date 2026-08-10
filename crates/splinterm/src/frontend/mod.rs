@@ -19,4 +19,7 @@ pub use message::{
 pub use options::{TrustedConsentUi, WindowOptions, WindowPaneOptions};
 pub(crate) use picker::PickerHitTarget;
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};
-pub use topology::{WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate};
+pub use topology::{
+    LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, WindowDojoIdentity,
+    WindowTopologyCommand, WindowTopologyUpdate,
+};
