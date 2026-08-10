@@ -8,6 +8,10 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use splinterm::{
     config::{AppConfig, ConfigLoad, load_default},
+    diagnostics::{
+        DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global as diagnostics_global,
+        initialize_graphical, install_termination_signal_task,
+    },
     endpoint::{ConnectionFactory, LaunchSemantics},
     remote::RemoteCatalog,
 };
@@ -77,6 +81,7 @@ pub(crate) async fn run() -> Result<()> {
             | Command::Launch { .. }
             | Command::XdgLaunch { .. }
             | Command::Consent
+            | Command::Diagnostics { .. }
             | Command::Config { .. }
             | Command::Keymap { .. }
             | Command::Policy { .. }
@@ -145,6 +150,7 @@ pub(crate) async fn run() -> Result<()> {
         && matches!(
             command,
             Command::Consent
+                | Command::Diagnostics { .. }
                 | Command::Config { .. }
                 | Command::Keymap { .. }
                 | Command::Policy { .. }
@@ -155,6 +161,13 @@ pub(crate) async fn run() -> Result<()> {
         )
     {
         usage_error("--remote cannot select local service, relay, policy, or consent commands");
+    }
+    if let Command::Diagnostics {
+        last_exit,
+        last_crash,
+    } = command
+    {
+        return super::diagnostics_cli::run(last_exit, last_crash);
     }
     if let Command::Config { command } = command {
         return run_config_command(command);
@@ -179,6 +192,14 @@ pub(crate) async fn run() -> Result<()> {
         return run_reset_command(yes);
     }
 
+    let graphical = graphical_command(&command);
+    if graphical {
+        initialize_graphical()
+            .map_err(|_| anyhow::anyhow!("graphical diagnostics initialization failed"))?
+            .begin_window(None, None);
+        install_termination_signal_task();
+    }
+
     let factory = if let Some(profile_name) = remote {
         let catalog = RemoteCatalog::load_default()?;
         ConnectionFactory::remote(catalog.get(&profile_name)?).await?
@@ -190,9 +211,32 @@ pub(crate) async fn run() -> Result<()> {
         diagnostics,
     } = load_default()?;
     for diagnostic in diagnostics {
-        eprintln!("splinterm config: {diagnostic}");
+        if graphical {
+            if let Some(client_diagnostics) = diagnostics_global() {
+                client_diagnostics.emit(
+                    DiagnosticLevel::Warn,
+                    DiagnosticEventCode::ConfigWarning,
+                    Some(DiagnosticErrorCode::Config),
+                );
+            }
+            eprintln!("splinterm configuration warning");
+        } else {
+            eprintln!("splinterm config: {diagnostic}");
+        }
     }
     run_configured_command(command, config, factory).await
+}
+
+fn graphical_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Sessions
+            | Command::Reopen
+            | Command::Window { .. }
+            | Command::Launch { .. }
+            | Command::XdgLaunch { .. }
+            | Command::Consent
+    )
 }
 
 async fn run_configured_command(
@@ -273,6 +317,7 @@ async fn run_headless(
         | Command::Launch { .. }
         | Command::XdgLaunch { .. }
         | Command::Consent
+        | Command::Diagnostics { .. }
         | Command::Config { .. }
         | Command::Keymap { .. }
         | Command::Policy { .. }

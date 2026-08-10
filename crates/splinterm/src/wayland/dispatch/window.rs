@@ -3,9 +3,9 @@ use splinterm_protocol::perf_trace::{
 };
 
 use super::super::{
-    App, CompositorHandler, Connection, QueueHandle, SCALE_DENOMINATOR, TerminalResizeCause,
-    WaylandSurface, Window, WindowConfigure, WindowHandler, note_output_enter, note_output_leave,
-    terminal_resize_allowed, viewport_destination, wl_output, wl_surface,
+    App, CompositorHandler, Connection, ExitClass, QueueHandle, SCALE_DENOMINATOR,
+    TerminalResizeCause, WaylandSurface, Window, WindowConfigure, WindowHandler, note_output_enter,
+    note_output_leave, terminal_resize_allowed, viewport_destination, wl_output, wl_surface,
 };
 
 impl CompositorHandler for App {
@@ -142,7 +142,8 @@ impl WindowHandler for App {
         if self.modal.trusted_consent.is_some() {
             self.decide_consent(false);
         } else {
-            self.scheduling.exit = true;
+            self.scheduling
+                .request_exit(ExitClass::CleanCompositorClose);
         }
     }
 

@@ -210,6 +210,9 @@ pub(in crate::app) async fn run_sessions(
     match decision {
         None => Ok(()),
         Some(SessionPickerDecision::New) => {
+            if let Some(diagnostics) = splinterm::diagnostics::global() {
+                diagnostics.begin_window(None, None);
+            }
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -231,6 +234,9 @@ pub(in crate::app) async fn run_sessions(
             .await
         }
         Some(SessionPickerDecision::Open(index)) => {
+            if let Some(diagnostics) = splinterm::diagnostics::global() {
+                diagnostics.begin_window(None, None);
+            }
             let selected = entries
                 .get(index)
                 .context("session picker returned an invalid selection")?;

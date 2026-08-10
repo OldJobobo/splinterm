@@ -1,6 +1,6 @@
 # Plan 0030: bounded client diagnostic logging
 
-- **Status:** Proposed
+- **Status:** Complete — non-graphical validation and read-only review passed (2026-08-10)
 - **Date:** 2026-08-10
 - **Revised:** 2026-08-10
 - **Scope:** graphical `splinterm` client diagnostics, daemon correlation, crash discovery, retention, and privacy boundaries

@@ -213,6 +213,7 @@ fn serve_history_response(search: bool, result: Response) -> (PathBuf, thread::J
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::InspectTopology
             }
@@ -227,6 +228,7 @@ fn serve_history_response(search: bool, result: Response) -> (PathBuf, thread::J
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 2,
                 request: splinterm_protocol::Request::Attach { .. }
             }
@@ -243,6 +245,7 @@ fn serve_history_response(search: bool, result: Response) -> (PathBuf, thread::J
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 3,
                 request: splinterm_protocol::Request::Detach { subscription_id: 7 }
             }
@@ -253,6 +256,7 @@ fn serve_history_response(search: bool, result: Response) -> (PathBuf, thread::J
             matches!(
                 request,
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 4,
                     request: splinterm_protocol::Request::SearchScrollback { .. }
                 }
@@ -261,6 +265,7 @@ fn serve_history_response(search: bool, result: Response) -> (PathBuf, thread::J
             matches!(
                 request,
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 4,
                     request: splinterm_protocol::Request::ScrollbackPage {
                         before_row_id: 2,
@@ -283,6 +288,7 @@ fn serve_authorization_status() -> (PathBuf, thread::JoinHandle<()>) {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::AuthorizationStatus {
                     incarnation: None,
@@ -320,6 +326,7 @@ fn serve_audit_page() -> (PathBuf, thread::JoinHandle<()>) {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::AuditInspect {
                     after_audit_id: Some(72),
@@ -365,6 +372,7 @@ fn serve_subscription(stream_kind: ExpectedSubscription) -> (PathBuf, thread::Jo
                 assert!(matches!(
                     read_client_frame(&mut stream),
                     ClientFrame::Request {
+                        diagnostic_correlation: _,
                         request_id: 1,
                         request: splinterm_protocol::Request::InspectSplint { .. }
                     }
@@ -388,6 +396,7 @@ fn serve_subscription(stream_kind: ExpectedSubscription) -> (PathBuf, thread::Jo
                 assert!(matches!(
                     read_client_frame(&mut stream),
                     ClientFrame::Request {
+                        diagnostic_correlation: _,
                         request_id: 2,
                         request: splinterm_protocol::Request::Attach { .. }
                     }
@@ -418,6 +427,7 @@ fn serve_subscription(stream_kind: ExpectedSubscription) -> (PathBuf, thread::Jo
                 assert!(matches!(
                     read_client_frame(&mut stream),
                     ClientFrame::Request {
+                        diagnostic_correlation: _,
                         request_id: 1,
                         request: splinterm_protocol::Request::SubscribeTopology
                     }
@@ -447,6 +457,7 @@ fn serve_subscription(stream_kind: ExpectedSubscription) -> (PathBuf, thread::Jo
                 assert!(matches!(
                     read_client_frame(&mut stream),
                     ClientFrame::Request {
+                        diagnostic_correlation: _,
                         request_id: 2,
                         request: splinterm_protocol::Request::SubscribeControl { .. }
                     }
@@ -505,6 +516,7 @@ fn serve_terminal_action(
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::InspectTopology
             }
@@ -519,6 +531,7 @@ fn serve_terminal_action(
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 2,
                 request: splinterm_protocol::Request::AcquireControl { .. }
             }
@@ -537,6 +550,7 @@ fn serve_terminal_action(
             matches!(
                 request,
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 3,
                     request: splinterm_protocol::Request::Input {
                         controller_id: 42,
@@ -548,6 +562,7 @@ fn serve_terminal_action(
             matches!(
                 request,
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 3,
                     request: splinterm_protocol::Request::Resize {
                         controller_id: 42,
@@ -573,6 +588,7 @@ fn serve_terminal_action(
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 4,
                 request: splinterm_protocol::Request::ReleaseControl { controller_id: 42 }
             }
@@ -603,6 +619,7 @@ fn serve_mutation(
             assert!(matches!(
                 read_client_frame(&mut stream),
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 1,
                     request: splinterm_protocol::Request::RevokeAccess { grant_id: 42 }
                 }
@@ -613,6 +630,7 @@ fn serve_mutation(
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::InspectTopology
             }
@@ -629,6 +647,7 @@ fn serve_mutation(
             ExpectedMutation::Ratio => matches!(
                 request,
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 2,
                     request: splinterm_protocol::Request::SetSplitRatio { .. }
                 }
@@ -636,6 +655,7 @@ fn serve_mutation(
             ExpectedMutation::Kill => matches!(
                 request,
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 2,
                     request: splinterm_protocol::Request::KillSplint { incarnation: 2, .. }
                 }
@@ -644,6 +664,7 @@ fn serve_mutation(
             ExpectedMutation::RestoreSplint => matches!(
                 request,
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 2,
                     request: splinterm_protocol::Request::RestoreSplint { .. }
                 }
@@ -651,6 +672,7 @@ fn serve_mutation(
             ExpectedMutation::RestoreDojo => matches!(
                 request,
                 ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id: 2,
                     request: splinterm_protocol::Request::RestoreDojo { .. }
                 }
@@ -669,6 +691,7 @@ fn serve_create() -> (PathBuf, thread::JoinHandle<()>) {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::InspectTopology
             }
@@ -688,6 +711,7 @@ fn serve_create() -> (PathBuf, thread::JoinHandle<()>) {
         assert!(matches!(
             request,
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 2,
                 request: splinterm_protocol::Request::CreateLair { .. }
             }
@@ -733,6 +757,7 @@ fn serve_one(result: Result<Response, ProtocolError>) -> (PathBuf, thread::JoinH
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::InspectTopology
             }
@@ -803,6 +828,7 @@ fn output_json_focus_uses_only_the_narrow_projection() {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::ReadGraphicalFocus,
             }
@@ -848,6 +874,7 @@ fn output_json_focus_rejects_invalid_daemon_projection_with_stable_error() {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::ReadGraphicalFocus,
             }
@@ -903,6 +930,7 @@ fn output_json_snapshot_uses_exact_provenance_and_detaches() {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::InspectTopology
             }
@@ -921,6 +949,7 @@ fn output_json_snapshot_uses_exact_provenance_and_detaches() {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 2,
                 request: splinterm_protocol::Request::Attach {
                     scrollback_rows: 0,
@@ -944,6 +973,7 @@ fn output_json_snapshot_uses_exact_provenance_and_detaches() {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 3,
                 request: splinterm_protocol::Request::Detach { subscription_id: 7 }
             }
@@ -1493,6 +1523,7 @@ fn output_json_ping_keeps_stdout_pristine() {
         assert!(matches!(
             read_client_frame(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id: 1,
                 request: splinterm_protocol::Request::Ping
             }

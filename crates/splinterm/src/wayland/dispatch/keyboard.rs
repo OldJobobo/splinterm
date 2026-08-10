@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use super::super::{
-    ActionId, App, CommandPaletteShortcutAction, Connection, KeyEvent, KeyboardHandler,
+    ActionId, App, CommandPaletteShortcutAction, Connection, ExitClass, KeyEvent, KeyboardHandler,
     KeymapPress, Keysym, Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle,
     RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
     WindowTopologyCommand, command_palette_shortcut_action, font_zoom_action, keymap_press_for,
@@ -142,8 +142,8 @@ impl KeyboardHandler for App {
                 .session_picker_consumed_keys
                 .insert(event.raw_code);
             if action == CommandPaletteShortcutAction::Open {
-                if let Err(error) = self.show_command_palette() {
-                    eprintln!("splinterm command palette: {error:#}");
+                if self.show_command_palette().is_err() {
+                    eprintln!("splinterm command palette unavailable");
                 } else if let Err(error) = self.schedule_draw(queue_handle) {
                     self.scheduling.fail(error);
                 }
@@ -250,11 +250,12 @@ impl KeyboardHandler for App {
             if action == SessionPickerShortcutAction::Request {
                 if self.tab_state.topology_commands.is_some() {
                     self.modal.session_picker_requested = true;
-                    if let Err(error) =
-                        self.send_topology_command(WindowTopologyCommand::RequestSessionPicker)
+                    if self
+                        .send_topology_command(WindowTopologyCommand::RequestSessionPicker)
+                        .is_err()
                     {
                         self.modal.session_picker_requested = false;
-                        eprintln!("splinterm session picker request: {error:#}");
+                        eprintln!("splinterm session picker request failed");
                     }
                 } else {
                     eprintln!("splinterm session picker is unavailable for this attachment");
@@ -329,7 +330,7 @@ impl KeyboardHandler for App {
         }
         match shortcut {
             Some(ActionId::DetachWindow) => {
-                self.scheduling.exit = true;
+                self.scheduling.request_exit(ExitClass::CleanUserClose);
                 return;
             }
             Some(ActionId::BindingHelp) => {
@@ -352,11 +353,11 @@ impl KeyboardHandler for App {
                         self.input.prefix_timeout =
                             std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
                         self.input.prefix_state.clear();
-                        for diagnostic in loaded.diagnostics {
-                            eprintln!("splinterm config reload: {diagnostic}");
+                        for _ in loaded.diagnostics {
+                            eprintln!("splinterm configuration warning");
                         }
                     }
-                    Err(error) => eprintln!("splinterm config reload rejected: {error:#}"),
+                    Err(_) => eprintln!("splinterm config reload rejected"),
                 }
                 return;
             }

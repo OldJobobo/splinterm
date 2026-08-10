@@ -1308,6 +1308,7 @@ mod tests {
             let ClientFrame::Request {
                 request_id,
                 request: Request::AcquireControl { .. },
+                ..
             } = read_frame(&mut cancelled_acquire)
             else {
                 panic!("expected cancelled acquisition")
@@ -1326,6 +1327,7 @@ mod tests {
             let ClientFrame::Request {
                 request_id,
                 request: Request::ReleaseControl { controller_id: 10 },
+                ..
             } = read_frame(&mut cancelled_acquire)
             else {
                 panic!("expected cancelled acquisition cleanup")
@@ -1342,6 +1344,7 @@ mod tests {
             let ClientFrame::Request {
                 request_id,
                 request: Request::AcquireControl { .. },
+                ..
             } = read_frame(&mut owner)
             else {
                 panic!("expected owner acquisition")
@@ -1361,6 +1364,7 @@ mod tests {
             let ClientFrame::Request {
                 request_id,
                 request: Request::RequestControlTransfer { .. },
+                ..
             } = read_frame(&mut requester)
             else {
                 panic!("expected cancelled transfer")
@@ -1381,6 +1385,7 @@ mod tests {
             let ClientFrame::Request {
                 request_id,
                 request: Request::ReleaseControl { controller_id: 20 },
+                ..
             } = read_frame(&mut owner)
             else {
                 panic!("expected owner shutdown")
@@ -1464,6 +1469,7 @@ mod tests {
             let ClientFrame::Request {
                 request_id,
                 request: Request::AcquireControl { .. },
+                ..
             } = read_frame(&mut owner)
             else {
                 panic!("expected owner acquisition")
@@ -1482,6 +1488,7 @@ mod tests {
             let ClientFrame::Request {
                 request_id,
                 request,
+                ..
             } = read_frame(&mut owner)
             else {
                 panic!("expected handled action")
@@ -1508,6 +1515,7 @@ mod tests {
             let ClientFrame::Request {
                 request_id,
                 request: Request::ReleaseControl { controller_id: 40 },
+                ..
             } = read_frame(&mut owner)
             else {
                 panic!("expected cancelled handled-action cleanup")

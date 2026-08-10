@@ -106,10 +106,16 @@ impl ConnectionFactory {
     /// Returns an error when the local socket or remote logical channel cannot be
     /// opened and negotiated.
     pub async fn connect(&self) -> Result<Connection> {
-        match self.endpoint.as_ref() {
-            EndpointKind::Local => Connection::connect().await,
-            EndpointKind::Remote(session) => session.connect_interactive().await,
+        let mut connection = match self.endpoint.as_ref() {
+            EndpointKind::Local => Connection::connect().await?,
+            EndpointKind::Remote(session) => session.connect_interactive().await?,
+        };
+        if let Some(correlation) = crate::diagnostics::global()
+            .and_then(crate::diagnostics::ClientDiagnostics::protocol_correlation)
+        {
+            connection.set_diagnostic_correlation(correlation);
         }
+        Ok(connection)
     }
 
     /// Returns the explicit endpoint behavior contract.

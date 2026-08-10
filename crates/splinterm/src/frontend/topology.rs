@@ -2,13 +2,14 @@
 
 use std::path::PathBuf;
 
-use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplitRatio};
+use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplitRatio, TopologyRevision};
 use splinterm_protocol::MutationTarget;
 
 use super::{SessionPickerItem, ThemeUpdate, WindowPaneOptions};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowDojoIdentity {
+    pub topology_revision: TopologyRevision,
     pub lair_id: LairId,
     pub dojo_id: DojoId,
     pub lair_name: String,
@@ -118,6 +119,7 @@ pub enum WindowTopologyCommand {
 
 pub enum WindowTopologyUpdate {
     Apply {
+        topology_revision: TopologyRevision,
         dojo_id: DojoId,
         layout: LayoutNode,
         added: Vec<WindowPaneOptions>,

@@ -623,6 +623,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                 },
             );
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request,
             } = read_private_frame(&mut stream)
@@ -986,6 +987,7 @@ fn terminal_tools_use_exact_scoped_requests_cursors_and_cleanup() {
                 },
             );
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request,
             } = read_private_frame(&mut stream)
@@ -1013,6 +1015,7 @@ fn terminal_tools_use_exact_scoped_requests_cursors_and_cleanup() {
                         },
                     );
                     let ClientFrame::Request {
+                        diagnostic_correlation: _,
                         request_id,
                         request: Request::Detach { subscription_id: 7 },
                     } = read_private_frame(&mut stream)
@@ -1402,6 +1405,7 @@ fn prompt_injection_values_remain_inert_untrusted_data() {
         for index in 0..4 {
             let mut stream = accept_automation(&listener);
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request,
             } = read_private_frame(&mut stream)
@@ -1448,6 +1452,7 @@ fn prompt_injection_values_remain_inert_untrusted_data() {
                         },
                     );
                     let ClientFrame::Request {
+                        diagnostic_correlation: _,
                         request_id,
                         request:
                             Request::Detach {
@@ -1742,6 +1747,7 @@ fn successful_output_size_is_checked_after_schema_validation() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::InspectTopology,
         } = read_private_frame(&mut stream)
@@ -1821,6 +1827,7 @@ fn daemon_deadline_returns_stable_timeout_and_disposes_connection() {
         assert!(matches!(
             read_private_frame::<ClientFrame>(&mut stream),
             ClientFrame::Request {
+                diagnostic_correlation: _,
                 request: Request::Attach {
                     incarnation: None,
                     scrollback_rows: 0,
@@ -1862,6 +1869,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
         // One-shot topology.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::InspectTopology,
         } = read_private_frame(&mut stream)
@@ -1881,6 +1889,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
         // One-shot terminal attach/project/detach.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::Attach {
@@ -1904,6 +1913,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 11,
@@ -1924,6 +1934,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
         let mut stream = accept_automation(&listener);
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::InspectSplint {
                 splint_id: requested,
@@ -1948,6 +1959,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::SubscribeControl {
@@ -1975,6 +1987,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 22,
@@ -1994,6 +2007,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
         // Live topology subscription, ordered update, explicit detach.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::SubscribeTopology,
         } = read_private_frame(&mut stream)
@@ -2043,6 +2057,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 44,
@@ -2062,6 +2077,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
         // Explicit resubscribe starts a fresh public sequence.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::SubscribeTopology,
         } = read_private_frame(&mut stream)
@@ -2079,6 +2095,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 45,
@@ -2098,6 +2115,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
         // Terminal update projection remains non-Wayland and bounded.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Attach {
                 scrollback_rows: 0, ..
@@ -2144,6 +2162,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 55,
@@ -2293,6 +2312,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         // publish one cleared final resync.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Attach { .. },
         } = read_private_frame(&mut stream)
@@ -2347,6 +2367,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 80,
@@ -2367,6 +2388,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         // resync clears it and closes the subscription.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Attach { .. },
         } = read_private_frame(&mut stream)
@@ -2410,6 +2432,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 81,
@@ -2442,6 +2465,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         ] {
             let mut stream = accept_automation(&listener);
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request: Request::Attach { .. },
             } = read_private_frame(&mut stream)
@@ -2469,6 +2493,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             );
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request:
                     Request::Detach {
@@ -2492,6 +2517,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         // identifiers. A cross-resource status closes with resync.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::InspectSplint { .. },
         } = read_private_frame(&mut stream)
@@ -2513,6 +2539,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::SubscribeControl { .. },
         } = read_private_frame(&mut stream)
@@ -2584,6 +2611,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             thread::sleep(Duration::from_millis(75));
         }
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 90,
@@ -2603,6 +2631,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         // Daemon EOF publishes a cleared topology resync rather than stale names.
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::SubscribeTopology,
         } = read_private_frame(&mut stream)
@@ -2761,6 +2790,7 @@ fn resource_registry_enforces_duplicate_and_sixteen_entry_boundaries() {
         for index in 1_u64..=16 {
             let mut stream = accept_automation(&listener);
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request:
                     Request::Attach {
@@ -2791,6 +2821,7 @@ fn resource_registry_enforces_duplicate_and_sixteen_entry_boundaries() {
         }
         for (offset, stream) in streams.iter_mut().enumerate() {
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request: Request::Detach { subscription_id },
             } = read_private_frame(stream)
@@ -2849,6 +2880,7 @@ fn raced_subscribe_unsubscribe_cannot_leave_a_live_entry() {
     let fake = thread::spawn(move || {
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::SubscribeTopology,
         } = read_private_frame(&mut stream)
@@ -2868,6 +2900,7 @@ fn raced_subscribe_unsubscribe_cannot_leave_a_live_entry() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 70,
@@ -2886,6 +2919,7 @@ fn raced_subscribe_unsubscribe_cannot_leave_a_live_entry() {
 
         let mut read = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::InspectTopology,
         } = read_private_frame(&mut read)
@@ -3291,6 +3325,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
     let daemon = thread::spawn(move || {
         let mut owner = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::AcquireControl {
@@ -3316,6 +3351,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::Input {
@@ -3347,6 +3383,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
 
         let mut denied_requester = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::RequestControlTransfer { .. },
         } = read_private_frame(&mut denied_requester)
@@ -3365,6 +3402,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::DecideControlTransfer {
@@ -3389,6 +3427,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
 
         let mut requester = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::RequestControlTransfer {
@@ -3414,6 +3453,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::DecideControlTransfer {
@@ -3435,6 +3475,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::ReleaseControl { controller_id: 202 },
         } = read_private_frame(&mut requester)
@@ -3451,6 +3492,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
 
         let mut atomic = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::AcquireControl {
@@ -3476,6 +3518,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::Resize {
@@ -3507,6 +3550,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::ReleaseControl { controller_id: 303 },
         } = read_private_frame(&mut atomic)
@@ -3692,6 +3736,7 @@ fn controller_daemon_loss_invalidates_handle_before_reuse() {
     let daemon = thread::spawn(move || {
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::AcquireControl { .. },
         } = read_private_frame(&mut stream)
@@ -3756,6 +3801,7 @@ fn controller_registry_enforces_combined_eight_handle_limit_and_eof_cleanup() {
         for private_id in 1..=8_u64 {
             let mut stream = accept_automation(&listener);
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request: Request::AcquireControl { .. },
             } = read_private_frame(&mut stream)
@@ -3775,6 +3821,7 @@ fn controller_registry_enforces_combined_eight_handle_limit_and_eof_cleanup() {
             );
             handlers.push(thread::spawn(move || {
                 let ClientFrame::Request {
+                    diagnostic_correlation: _,
                     request_id,
                     request: Request::ReleaseControl { controller_id },
                 } = read_private_frame(&mut stream)
@@ -3839,6 +3886,7 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
     let daemon = thread::spawn(move || {
         let mut subscription = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::InspectSplint {
                 splint_id: requested,
@@ -3863,6 +3911,7 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request:
                 Request::SubscribeControl {
@@ -3891,6 +3940,7 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
         );
         let mut controller = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::AcquireControl { modes, .. },
         } = read_private_frame(&mut controller)
@@ -3925,6 +3975,7 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::ReleaseControl { controller_id: 99 },
         } = read_private_frame(&mut controller)
@@ -3954,6 +4005,7 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 55,
@@ -4246,6 +4298,7 @@ fn broken_stdout_awaits_live_resource_cleanup() {
     let fake = thread::spawn(move || {
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::SubscribeTopology,
         } = read_private_frame(&mut stream)
@@ -4263,6 +4316,7 @@ fn broken_stdout_awaits_live_resource_cleanup() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::Detach {
                 subscription_id: 101,
@@ -4358,6 +4412,7 @@ fn broken_stdout_awaits_live_controller_cleanup() {
     let fake = thread::spawn(move || {
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::AcquireControl { .. },
         } = read_private_frame(&mut stream)
@@ -4376,6 +4431,7 @@ fn broken_stdout_awaits_live_controller_cleanup() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::ReleaseControl { controller_id: 404 },
         } = read_private_frame(&mut stream)
@@ -4564,6 +4620,7 @@ fn cancelled_mutation_discards_a_late_committed_result() {
     let daemon = thread::spawn(move || {
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::PrepareMutation { mutation },
         } = read_private_frame(&mut stream)
@@ -4580,6 +4637,7 @@ fn cancelled_mutation_discards_a_late_committed_result() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request,
         } = read_private_frame(&mut stream)
@@ -4637,6 +4695,7 @@ fn mutation_response_revision_mismatch_fails_closed() {
     let daemon = thread::spawn(move || {
         let mut stream = accept_automation(&listener);
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request: Request::PrepareMutation { mutation },
         } = read_private_frame(&mut stream)
@@ -4653,6 +4712,7 @@ fn mutation_response_revision_mismatch_fails_closed() {
             },
         );
         let ClientFrame::Request {
+            diagnostic_correlation: _,
             request_id,
             request,
         } = read_private_frame(&mut stream)
@@ -4709,6 +4769,7 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
         for _ in 0..15 {
             let mut stream = accept_automation(&listener);
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request: Request::PrepareMutation { mutation },
             } = read_private_frame(&mut stream)
@@ -4725,6 +4786,7 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                 },
             );
             let ClientFrame::Request {
+                diagnostic_correlation: _,
                 request_id,
                 request,
             } = read_private_frame(&mut stream)

@@ -58,8 +58,11 @@ fn spawn_graphical_focus_reporter(
     updates: watch::Receiver<Option<SplintId>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = run_graphical_focus_reporter(factory, updates).await {
-            eprintln!("splinterm graphical focus reporter: {error:#}");
+        if run_graphical_focus_reporter(factory, updates)
+            .await
+            .is_err()
+        {
+            eprintln!("splinterm graphical focus reporter failed");
         }
     })
 }
@@ -109,6 +112,9 @@ pub(super) async fn run_live_multipane_window(
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
 ) -> Result<()> {
+    if let Some(diagnostics) = splinterm::diagnostics::global() {
+        diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
+    }
     let initial_identity = initial_window_dojo_identity(&factory, dojo_model.id).await?;
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
@@ -219,6 +225,9 @@ pub(super) async fn run_live_window(
     splint_id: SplintId,
     factory: ConnectionFactory,
 ) -> Result<()> {
+    if let Some(diagnostics) = splinterm::diagnostics::global() {
+        diagnostics.ensure_window(None, Some(splint_id));
+    }
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),

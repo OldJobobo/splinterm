@@ -87,7 +87,9 @@ use wayland_protocols::ext::background_effect::v1::client::{
 };
 
 use splinterm_automation_client::ImageContentLeaseSet;
-use splinterm_core::{Axis, DojoId, LairId, LayoutNode, Splint, SplintId, SplitRatio};
+use splinterm_core::{
+    Axis, DojoId, LairId, LayoutNode, Splint, SplintId, SplitRatio, TopologyRevision,
+};
 use splinterm_protocol::{
     ActiveScreen, ControlTransferDecision, MouseTracking, SearchMatch, TerminalCell,
     TerminalInputModes, TerminalRow, TerminalSnapshot,
@@ -118,6 +120,9 @@ use crate::background_effect::{
     BackgroundEffectState, CommitReason as BackgroundCommitReason, EffectAction, EffectDiagnostic,
 };
 use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
+use crate::diagnostics::{
+    DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, global as diagnostics,
+};
 use crate::frontend::{
     AuthorityStatus, BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction,
     CommandHistoryAction, CommandPaletteContext, CommandPaletteUi, CommandZoomAction, DojoPromptUi,
@@ -600,6 +605,16 @@ impl WindowOptions {
     reason = "Wayland global binding and application state initialization form one startup transaction"
 )]
 pub fn run(mut options: WindowOptions) -> Result<()> {
+    if let Some(diagnostics) = diagnostics() {
+        let dojo_id = options
+            .initial_dojo
+            .as_ref()
+            .map(|identity| identity.dojo_id);
+        let splint_id = options
+            .active_splint
+            .or_else(|| options.snapshot.as_ref().map(|snapshot| snapshot.splint_id));
+        diagnostics.ensure_window(dojo_id, splint_id);
+    }
     let managed_tabs = options.initial_dojo.is_some();
     let render_context = RenderContext::new(options.theme.background_alpha);
     let inactive_options = options.activate_multi_pane_input()?;
@@ -733,11 +748,18 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         .initial_dojo
         .take()
         .unwrap_or_else(|| WindowDojoIdentity {
+            topology_revision: TopologyRevision::new(0),
             lair_id: LairId::new(),
             dojo_id: DojoId::new(),
             lair_name: String::new(),
             dojo_name: String::new(),
         });
+    if let Some(diagnostics) = diagnostics() {
+        diagnostics.update_topology(
+            initial_identity.topology_revision,
+            usize::from(managed_tabs),
+        );
+    }
     let initial_lair_id = initial_identity.lair_id;
     let initial_dojo_id = initial_identity.dojo_id;
     let background_effect_manager = globals
@@ -988,6 +1010,11 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         .roundtrip()
         .context("complete Wayland surface teardown")
         .map(|_| ());
+    if (event_loop_result.is_err() || teardown_result.is_err())
+        && let Some(diagnostics) = diagnostics()
+    {
+        diagnostics.request_exit(ExitClass::ErrorWaylandDispatch);
+    }
     event_loop_result?;
     if let Some(error) = failure {
         return Err(error);
@@ -1953,10 +1980,24 @@ impl ModalState {
 }
 
 impl SchedulingState {
-    fn fail(&mut self, error: anyhow::Error) {
-        eprintln!("Wayland client failure: {error:#}");
-        self.failure = Some(error);
+    fn request_exit(&mut self, exit_class: ExitClass) {
+        if let Some(diagnostics) = diagnostics() {
+            diagnostics.request_exit(exit_class);
+        }
         self.exit = true;
+    }
+
+    fn fail(&mut self, error: anyhow::Error) {
+        if let Some(diagnostics) = diagnostics() {
+            diagnostics.emit(
+                DiagnosticLevel::Error,
+                DiagnosticEventCode::WaylandFailure,
+                Some(DiagnosticErrorCode::WaylandDispatch),
+            );
+        }
+        eprintln!("splinterm Wayland client failed");
+        self.failure = Some(error);
+        self.request_exit(ExitClass::ErrorWaylandDispatch);
     }
 }
 
@@ -4196,8 +4237,8 @@ impl App {
                     .inspect_err(|_| self.modal.session_picker_requested = false)
             }
         };
-        if let Err(error) = result {
-            eprintln!("splinterm command palette: {error:#}");
+        if result.is_err() {
+            eprintln!("splinterm command palette action failed");
         }
     }
 
@@ -4358,8 +4399,8 @@ impl App {
                 Ok(())
             }
         };
-        if let Err(error) = result {
-            eprintln!("splinterm tab menu: {error:#}");
+        if result.is_err() {
+            eprintln!("splinterm tab menu action failed");
         }
     }
 
@@ -4431,9 +4472,9 @@ impl App {
         }
         self.close_dojo_prompt();
         if let Some(command) = command
-            && let Err(error) = self.send_topology_command(command)
+            && self.send_topology_command(command).is_err()
         {
-            eprintln!("splinterm Dojo prompt: {error:#}");
+            eprintln!("splinterm Dojo prompt action failed");
         }
     }
 
@@ -4759,7 +4800,7 @@ impl App {
         if let Some(consent) = self.modal.trusted_consent.take() {
             let _ = consent.decision.send(granted);
         }
-        self.scheduling.exit = true;
+        self.scheduling.request_exit(ExitClass::CleanUserClose);
     }
 
     fn refresh_session_picker(&mut self) -> Result<()> {
@@ -5147,8 +5188,8 @@ impl App {
             _ => {}
         }
         if let Some(dojo_id) = retarget {
-            if let Err(error) = self.show_tab_context_menu(dojo_id, event.position) {
-                eprintln!("splinterm tab menu retarget: {error:#}");
+            if self.show_tab_context_menu(dojo_id, event.position).is_err() {
+                eprintln!("splinterm tab menu retarget failed");
             }
             changed = true;
         } else if let Some(action) = execute {
@@ -5234,7 +5275,8 @@ impl App {
 
     fn cancel_session_picker(&mut self) {
         if !self.close_inline_session_picker() {
-            self.scheduling.exit = true;
+            self.scheduling
+                .request_exit(ExitClass::CleanSessionPickerDecision);
         }
     }
 
@@ -5273,9 +5315,9 @@ impl App {
             };
             self.close_inline_session_picker();
             self.tab_state.session_switch_pending = true;
-            if let Err(error) = self.send_topology_command(command) {
+            if self.send_topology_command(command).is_err() {
                 self.tab_state.session_switch_pending = false;
-                eprintln!("splinterm session switch: {error:#}");
+                eprintln!("splinterm session switch failed");
             }
             return;
         }
@@ -5287,7 +5329,8 @@ impl App {
         {
             let _ = sender.send(decision);
         }
-        self.scheduling.exit = true;
+        self.scheduling
+            .request_exit(ExitClass::CleanSessionPickerDecision);
     }
 
     fn update_window_title(&self) {
@@ -5690,7 +5733,7 @@ impl App {
         if self.presentation.evidence_close_shortcuts
             && matches!(event.keysym, Keysym::Escape | Keysym::q | Keysym::Q)
         {
-            self.scheduling.exit = true;
+            self.scheduling.request_exit(ExitClass::CleanUserClose);
             return;
         }
         let utf8 = if self.input.ime.composing()
@@ -6044,6 +6087,7 @@ impl App {
             }
             match update {
                 WindowTopologyUpdate::Apply {
+                    topology_revision,
                     dojo_id,
                     layout,
                     added,
@@ -6052,6 +6096,7 @@ impl App {
                 } => {
                     if self.modal.inline_picker_open() {
                         let update = WindowTopologyUpdate::Apply {
+                            topology_revision,
                             dojo_id,
                             layout,
                             added,
@@ -6079,6 +6124,10 @@ impl App {
                         changed |= self.apply_targeted_topology_replacement(
                             dojo_id, layout, added, removed, focused,
                         )?;
+                        if let Some(diagnostics) = diagnostics() {
+                            diagnostics
+                                .update_topology(topology_revision, self.tab_state.tabs.len());
+                        }
                     }
                 }
                 WindowTopologyUpdate::OpenTab {
@@ -6088,6 +6137,7 @@ impl App {
                     focused,
                     acknowledged,
                 } => {
+                    let topology_revision = identity.topology_revision;
                     let dojo_id = identity.dojo_id;
                     let lair_id = identity.lair_id;
                     let view = match DojoTabView::from_open(
@@ -6103,8 +6153,8 @@ impl App {
                         Err(error) => {
                             self.tab_state.session_switch_pending = false;
                             let message = format!("{error:#}");
-                            let _ = acknowledged.send(Err(message.clone()));
-                            eprintln!("splinterm Dojo tab {dojo_id}: {message}");
+                            let _ = acknowledged.send(Err(message));
+                            eprintln!("splinterm Dojo tab failed to open");
                             continue;
                         }
                     };
@@ -6119,6 +6169,9 @@ impl App {
                     );
                     self.tab_state.session_switch_pending = false;
                     changed |= self.activate_tab(dojo_id)?;
+                    if let Some(diagnostics) = diagnostics() {
+                        diagnostics.update_topology(topology_revision, self.tab_state.tabs.len());
+                    }
                     let _ = acknowledged.send(Ok(()));
                 }
                 WindowTopologyUpdate::ActivateTab { dojo_id } => {
@@ -6157,18 +6210,25 @@ impl App {
                     }
                     match removal_action {
                         FinalTabRemovalAction::Continue => {}
-                        FinalTabRemovalAction::Exit => self.scheduling.exit = true,
+                        FinalTabRemovalAction::Exit => self
+                            .scheduling
+                            .request_exit(ExitClass::CleanFinalTabRemoved),
                         FinalTabRemovalAction::ExitAndHandoffPicker => {
                             self.modal.session_picker_requested = false;
-                            if let Err(error) = spawn_session_picker_handoff() {
-                                eprintln!("splinterm session picker handoff: {error:#}");
+                            if spawn_session_picker_handoff().is_err() {
+                                eprintln!("splinterm session picker handoff failed");
                             }
-                            self.scheduling.exit = true;
+                            self.scheduling
+                                .request_exit(ExitClass::CleanFinalTabRemoved);
                         }
                     }
                     let _ = acknowledged.send(());
                 }
                 WindowTopologyUpdate::UpdateIdentity(identity) => {
+                    if let Some(diagnostics) = diagnostics() {
+                        diagnostics
+                            .update_topology(identity.topology_revision, self.tab_state.tabs.len());
+                    }
                     let dojo_id = identity.dojo_id;
                     if dojo_id == self.tab_state.active_dojo_id() {
                         self.tab_state.active_identity = identity;
@@ -6184,14 +6244,14 @@ impl App {
                     self.presentation.full_redraw = true;
                     changed = true;
                 }
-                WindowTopologyUpdate::TabFailed { dojo_id, message } => {
+                WindowTopologyUpdate::TabFailed {
+                    dojo_id: _,
+                    message: _,
+                } => {
                     self.close_inline_session_picker();
                     self.modal.session_picker_requested = false;
                     self.tab_state.session_switch_pending = false;
-                    eprintln!(
-                        "splinterm Dojo tab{}: {message}",
-                        dojo_id.map_or_else(String::new, |id| format!(" {id}"))
-                    );
+                    eprintln!("splinterm Dojo tab failed");
                 }
                 WindowTopologyUpdate::ShowSessionPicker { items, targets } => {
                     if self.modal.session_picker_requested
@@ -6228,11 +6288,11 @@ impl App {
                     self.show_dojo_prompt(prompt);
                     changed = true;
                 }
-                WindowTopologyUpdate::SessionPickerFailed(message) => {
+                WindowTopologyUpdate::SessionPickerFailed(_) => {
                     self.close_inline_session_picker();
                     self.modal.session_picker_requested = false;
                     self.tab_state.session_switch_pending = false;
-                    eprintln!("splinterm session picker: {message}");
+                    eprintln!("splinterm session picker failed");
                 }
                 WindowTopologyUpdate::Theme(update) => {
                     if self.modal.inline_picker_open() {
@@ -6241,9 +6301,20 @@ impl App {
                         retain_newest_theme(&mut next_theme, update);
                     }
                 }
-                WindowTopologyUpdate::Closed => self.scheduling.exit = true,
-                WindowTopologyUpdate::Shutdown(message) => {
-                    anyhow::bail!("topology manager stopped: {message}");
+                WindowTopologyUpdate::Closed => self
+                    .scheduling
+                    .request_exit(ExitClass::CleanFinalTabRemoved),
+                WindowTopologyUpdate::Shutdown(_) => {
+                    if let Some(diagnostics) = diagnostics() {
+                        diagnostics.emit(
+                            DiagnosticLevel::Error,
+                            DiagnosticEventCode::TopologyFailure,
+                            Some(DiagnosticErrorCode::TopologyManager),
+                        );
+                    }
+                    self.scheduling
+                        .request_exit(ExitClass::ErrorTopologyManager);
+                    anyhow::bail!("topology manager stopped");
                 }
             }
         }
@@ -6413,7 +6484,14 @@ impl App {
             disconnected = drained.disconnected;
         }
         if disconnected && !pane_stream_has_terminal_notice(&pending) {
-            self.scheduling.exit = true;
+            if let Some(diagnostics) = diagnostics() {
+                diagnostics.emit(
+                    DiagnosticLevel::Error,
+                    DiagnosticEventCode::PaneStreamFailure,
+                    Some(DiagnosticErrorCode::PaneStream),
+                );
+            }
+            self.scheduling.request_exit(ExitClass::ErrorPaneStream);
             return Ok(());
         }
         let receiver_batch_size = pending.len();
@@ -6822,7 +6900,8 @@ impl App {
                         focused_visual_changed = true;
                         self.presentation.full_redraw = true;
                     } else {
-                        self.scheduling.exit = true;
+                        self.scheduling
+                            .request_exit(ExitClass::CleanFinalTabRemoved);
                         return Ok(());
                     }
                 }
@@ -6836,7 +6915,7 @@ impl App {
                         focused_visual_changed = true;
                         self.presentation.full_redraw = true;
                     } else {
-                        self.scheduling.exit = true;
+                        self.scheduling.request_exit(ExitClass::ErrorPaneStream);
                         return Ok(());
                     }
                 }
@@ -8036,6 +8115,9 @@ impl App {
             .attach_to(self.surface.window.wl_surface())
             .context("attach SHM buffer")?;
         self.surface.window.commit();
+        if let Some(diagnostics) = diagnostics() {
+            diagnostics.mark_window_mapped();
+        }
         let draw_duration_ns = u64::try_from(draw_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let committed_monotonic_raw_ns = commit_sequence.map(|_| monotonic_raw_ns());
         if let (Some(commit_sequence), Some(committed_monotonic_raw_ns)) =
@@ -8961,6 +9043,7 @@ mod tests {
         let (commands, mut command_receiver) = tokio::sync::mpsc::channel(1);
         let mut view = DojoTabView::from_open(
             WindowDojoIdentity {
+                topology_revision: TopologyRevision::new(1),
                 lair_id: LairId::new(),
                 dojo_id: DojoId::new(),
                 lair_name: "hidden lair".to_owned(),
@@ -9020,6 +9103,7 @@ mod tests {
         let (second_commands, mut second_command_receiver) = tokio::sync::mpsc::channel(1);
         let mut view = DojoTabView::from_open(
             WindowDojoIdentity {
+                topology_revision: TopologyRevision::new(1),
                 lair_id: LairId::new(),
                 dojo_id: DojoId::new(),
                 lair_name: "hidden lair".to_owned(),
@@ -9095,6 +9179,7 @@ mod tests {
         let dojo_id = DojoId::new();
         let view = DojoTabView::from_open(
             WindowDojoIdentity {
+                topology_revision: TopologyRevision::new(1),
                 lair_id,
                 dojo_id,
                 lair_name: "image lair".to_owned(),
@@ -10006,6 +10091,7 @@ mod tests {
         let (commands, mut command_receiver) = tokio::sync::mpsc::channel(2);
         let view = DojoTabView::from_open(
             WindowDojoIdentity {
+                topology_revision: TopologyRevision::new(1),
                 lair_id: LairId::new(),
                 dojo_id: DojoId::new(),
                 lair_name: "test lair".to_owned(),

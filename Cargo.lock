@@ -1170,6 +1170,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fontdb",
+ "libc",
  "rustix",
  "serde",
  "serde_json",
@@ -1187,6 +1188,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "unicode-width",
+ "uuid",
  "wayland-client",
  "wayland-protocols",
 ]
@@ -1276,6 +1278,7 @@ dependencies = [
  "serde_json",
  "splinterm-core",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

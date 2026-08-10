@@ -245,6 +245,7 @@ impl Connection {
             &mut self.stream,
             &ClientFrame::Request {
                 request_id,
+                diagnostic_correlation: None,
                 request,
             },
         )

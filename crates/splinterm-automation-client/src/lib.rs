@@ -3007,6 +3007,7 @@ pub struct Connection {
     reader: Option<BoxedReader>,
     writer: Option<BoxedWriter>,
     next_request: u64,
+    diagnostic_correlation: Option<splinterm_protocol::DiagnosticCorrelation>,
     read_buffer: Vec<u8>,
     read_offset: usize,
     read_scratch: Box<[u8; READ_CHUNK_BYTES]>,
@@ -3169,6 +3170,7 @@ impl Connection {
             reader: Some(reader),
             writer: Some(writer),
             next_request: 1,
+            diagnostic_correlation: None,
             read_buffer: Vec::with_capacity(READ_CHUNK_BYTES),
             read_offset: 0,
             read_scratch: Box::new([0; READ_CHUNK_BYTES]),
@@ -3369,6 +3371,14 @@ impl Connection {
         result
     }
 
+    /// Associates request frames on this connection with one graphical client window.
+    pub fn set_diagnostic_correlation(
+        &mut self,
+        correlation: splinterm_protocol::DiagnosticCorrelation,
+    ) {
+        self.diagnostic_correlation = Some(correlation);
+    }
+
     fn reserve_request_id(&mut self) -> Result<u64> {
         self.ensure_usable()?;
         let request_id = self.next_request;
@@ -3383,6 +3393,7 @@ impl Connection {
         if let Err(error) = self
             .write_client_frame(&ClientFrame::Request {
                 request_id,
+                diagnostic_correlation: self.diagnostic_correlation,
                 request,
             })
             .await
@@ -3987,6 +3998,7 @@ mod tests {
             reader: Some(Box::new(reader)),
             writer: Some(Box::new(writer)),
             next_request: 1,
+            diagnostic_correlation: None,
             read_buffer: Vec::with_capacity(READ_CHUNK_BYTES),
             read_offset: 0,
             read_scratch: Box::new([0; READ_CHUNK_BYTES]),
@@ -5163,6 +5175,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graphical_correlation_is_carried_on_each_request_frame() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut connection = established(client);
+        let correlation = splinterm_protocol::DiagnosticCorrelation {
+            client_instance_id: "71d82a68-11e8-47c4-9193-dd83f4b03f1a".parse().unwrap(),
+            window_id: "727b26c3-2b28-4ea2-b94a-2bbfb8ce74f1".parse().unwrap(),
+        };
+        connection.set_diagnostic_correlation(correlation);
+        let server_task = tokio::spawn(async move {
+            assert!(matches!(
+                read_client_frame(&mut server).await,
+                ClientFrame::Request {
+                    request_id: 1,
+                    diagnostic_correlation: Some(observed),
+                    request: Request::Ping,
+                } if observed == correlation
+            ));
+            server
+                .write_all(
+                    &encode_frame(&ServerFrame::Response {
+                        request_id: 1,
+                        result: Response::Pong,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            connection.request(Request::Ping).await.unwrap(),
+            Response::Pong
+        );
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn dropped_request_future_closes_connection_owned_subscription() {
         let (client, mut server) = UnixStream::pair().unwrap();
         let mut connection = established(client);
@@ -5174,6 +5222,7 @@ mod tests {
                 ClientFrame::Request {
                     request_id: 1,
                     request: Request::SubscribeTopology,
+                    ..
                 }
             ));
             server

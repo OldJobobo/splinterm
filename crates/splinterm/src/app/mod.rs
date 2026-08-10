@@ -3,6 +3,7 @@
 mod cli;
 mod commands;
 mod consent;
+mod diagnostics_cli;
 mod human_output;
 mod keymap_cli;
 mod local_service;

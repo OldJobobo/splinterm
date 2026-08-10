@@ -77,6 +77,15 @@ pub(in crate::app) enum Command {
         dojo_id: Option<DojoId>,
     },
     Ping,
+    /// Inspect bounded local client, daemon, service, and crash diagnostics.
+    Diagnostics {
+        /// Read the authoritative last graphical client exit summary.
+        #[arg(long, conflicts_with = "last_crash")]
+        last_exit: bool,
+        /// Report the newest panic or externally inferred systemd crash.
+        #[arg(long, conflicts_with = "last_exit")]
+        last_crash: bool,
+    },
     /// Read only the keyboard-focused graphical Splint ID and current working directory.
     Focus,
     /// Stop the daemon, back up and clear every session, then restart cleanly.
@@ -383,4 +392,25 @@ pub(in crate::app) enum SubscribeCommand {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         expected_incarnation: Option<u64>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostics_modes_are_human_only_and_mutually_exclusive() {
+        let parsed = Cli::try_parse_from(["splinterm", "diagnostics", "--last-exit"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Diagnostics {
+                last_exit: true,
+                last_crash: false,
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["splinterm", "diagnostics", "--last-exit", "--last-crash"])
+                .is_err()
+        );
+    }
 }

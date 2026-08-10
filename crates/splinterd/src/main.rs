@@ -1391,6 +1391,105 @@ const fn connection_revocation_disconnects(role: ClientRole) -> bool {
     matches!(role, ClientRole::Automation)
 }
 
+const fn diagnostic_lifecycle_event(
+    request: &Request,
+) -> Option<splinterm_protocol::DaemonDiagnosticEventCode> {
+    use splinterm_protocol::DaemonDiagnosticEventCode as Event;
+    match request {
+        Request::CreateLair { .. }
+        | Request::CreateTransientLair { .. }
+        | Request::CreateLairAutomation { .. } => Some(Event::LairCreated),
+        Request::SplitSplint { .. } | Request::SplitSplintAutomation { .. } => {
+            Some(Event::SplintSplit)
+        }
+        Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => Some(Event::DojoCreated),
+        Request::CloseSplint { .. } => Some(Event::SplintClosed),
+        Request::CloseDojo { .. } => Some(Event::DojoClosed),
+        Request::TerminateLair { .. } => Some(Event::LairTerminated),
+        Request::RenameLair { .. } => Some(Event::LairRenamed),
+        Request::RenameDojo { .. } => Some(Event::DojoRenamed),
+        Request::RestoreSplint { .. }
+        | Request::RestoreDojo { .. }
+        | Request::RestoreLair { .. } => Some(Event::TopologyRestored),
+        _ => None,
+    }
+}
+
+fn trace_diagnostic_lifecycle(
+    correlation: splinterm_protocol::DiagnosticCorrelation,
+    event: splinterm_protocol::DaemonDiagnosticEventCode,
+    response: &Response,
+) {
+    let topology_revision = match response {
+        Response::Lairs {
+            topology_revision, ..
+        }
+        | Response::LairCreated {
+            topology_revision, ..
+        }
+        | Response::SplintStarted {
+            topology_revision, ..
+        }
+        | Response::DojoStarted {
+            topology_revision, ..
+        }
+        | Response::TopologyCommitted { topology_revision }
+        | Response::RestoreCompleted {
+            topology_revision, ..
+        } => Some(*topology_revision),
+        Response::Topology { snapshot } => Some(snapshot.revision),
+        _ => None,
+    };
+    let diagnostic = splinterm_protocol::DaemonDiagnosticEvent {
+        schema_version: 1,
+        timestamp_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            }),
+        component: splinterm_protocol::DaemonDiagnosticComponent::Splinterd,
+        event,
+        level: splinterm_protocol::DaemonDiagnosticLevel::Info,
+        pid: std::process::id(),
+        client_instance_id: correlation.client_instance_id,
+        window_id: correlation.window_id,
+        topology_revision,
+        build_version: env!("CARGO_PKG_VERSION").to_owned(),
+        build_commit: option_env!("SPLINTERM_BUILD_COMMIT").map(str::to_owned),
+    };
+    submit_daemon_diagnostic(&diagnostic);
+    info!(
+        component = "splinterd",
+        event = ?event,
+        level = "info",
+        pid = std::process::id(),
+        client_instance_id = %correlation.client_instance_id,
+        window_id = %correlation.window_id,
+        topology_revision = topology_revision.map_or(0, TopologyRevision::get),
+        "graphical lifecycle request completed"
+    );
+}
+
+fn submit_daemon_diagnostic(event: &splinterm_protocol::DaemonDiagnosticEvent) {
+    use std::os::unix::net::UnixDatagram;
+
+    let Ok(encoded) = serde_json::to_vec(event) else {
+        return;
+    };
+    let Ok(socket) = UnixDatagram::unbound() else {
+        return;
+    };
+    if socket.connect("/run/systemd/journal/socket").is_err() {
+        return;
+    }
+    let payload = [
+        b"PRIORITY=6\nSYSLOG_IDENTIFIER=splinterd\nMESSAGE=".as_slice(),
+        encoded.as_slice(),
+    ]
+    .concat();
+    let _ = socket.send(&payload);
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the connection state machine keeps handshake and request-id enforcement together"
@@ -1532,6 +1631,7 @@ async fn serve_authenticated(
             }
             ClientFrame::Request {
                 request_id,
+                diagnostic_correlation,
                 request,
             } => {
                 if request_id == 0 {
@@ -1559,6 +1659,21 @@ async fn serve_authenticated(
                     continue;
                 }
                 last_request_id = request_id;
+                if diagnostic_correlation.is_some()
+                    && !trusted_ui_client
+                    && !remote_interactive_client
+                {
+                    send_response(
+                        outbound,
+                        request_id,
+                        Err(ProtocolError::new(
+                            ErrorCode::Unauthorized,
+                            "diagnostic correlation requires a graphical client",
+                        )),
+                    )
+                    .await?;
+                    continue;
+                }
                 if let Request::Detach { subscription_id } = &request {
                     let authorization = RequestAuthorizationContext::default();
                     let Some(task) = subscriptions.remove(subscription_id) else {
@@ -1604,6 +1719,7 @@ async fn serve_authenticated(
                     send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
+                let diagnostic_event = diagnostic_lifecycle_event(&request);
                 let transient_creation = matches!(request, Request::CreateTransientLair { .. });
                 let handled = handle_request(
                     request,
@@ -1648,6 +1764,11 @@ async fn serve_authenticated(
                         response,
                         subscription,
                     }) => {
+                        if let (Some(correlation), Some(event)) =
+                            (diagnostic_correlation, diagnostic_event)
+                        {
+                            trace_diagnostic_lifecycle(correlation, event, &response);
+                        }
                         if let Some(subscription) = subscription {
                             if subscriptions.len() >= MAX_SUBSCRIPTIONS {
                                 send_response(
@@ -8513,6 +8634,7 @@ mod tests {
             .write_all(
                 &encode_frame(&ClientFrame::Request {
                     request_id: 1,
+                    diagnostic_correlation: None,
                     request: Request::Ping,
                 })
                 .unwrap(),

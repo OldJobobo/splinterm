@@ -64,6 +64,55 @@ pub enum ClientRole {
     Automation,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticCorrelation {
+    pub client_instance_id: uuid::Uuid,
+    pub window_id: uuid::Uuid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonDiagnosticComponent {
+    Splinterd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonDiagnosticLevel {
+    Info,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonDiagnosticEventCode {
+    LairCreated,
+    SplintSplit,
+    DojoCreated,
+    SplintClosed,
+    DojoClosed,
+    LairTerminated,
+    LairRenamed,
+    DojoRenamed,
+    TopologyRestored,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonDiagnosticEvent {
+    pub schema_version: u16,
+    pub timestamp_unix_ms: u64,
+    pub component: DaemonDiagnosticComponent,
+    pub event: DaemonDiagnosticEventCode,
+    pub level: DaemonDiagnosticLevel,
+    pub pid: u32,
+    pub client_instance_id: uuid::Uuid,
+    pub window_id: uuid::Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topology_revision: Option<TopologyRevision>,
+    pub build_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_commit: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
@@ -74,6 +123,8 @@ pub enum ClientFrame {
     },
     Request {
         request_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic_correlation: Option<DiagnosticCorrelation>,
         request: Request,
     },
     Cancel {
@@ -2208,6 +2259,63 @@ mod tests {
                 .unwrap()
                 .contains("\"role\":\"remote_interactive\"")
         );
+    }
+
+    #[test]
+    fn request_correlation_is_optional_and_backward_readable() {
+        let legacy = serde_json::json!({
+            "type": "request",
+            "request_id": 7,
+            "request": { "type": "ping" }
+        });
+        assert!(matches!(
+            serde_json::from_value::<ClientFrame>(legacy).unwrap(),
+            ClientFrame::Request {
+                request_id: 7,
+                diagnostic_correlation: None,
+                request: Request::Ping,
+            }
+        ));
+
+        let correlation = DiagnosticCorrelation {
+            client_instance_id: "71d82a68-11e8-47c4-9193-dd83f4b03f1a".parse().unwrap(),
+            window_id: "727b26c3-2b28-4ea2-b94a-2bbfb8ce74f1".parse().unwrap(),
+        };
+        let frame = ClientFrame::Request {
+            request_id: 8,
+            diagnostic_correlation: Some(correlation),
+            request: Request::Ping,
+        };
+        assert_eq!(
+            serde_json::from_value::<ClientFrame>(serde_json::to_value(frame).unwrap()).unwrap(),
+            ClientFrame::Request {
+                request_id: 8,
+                diagnostic_correlation: Some(correlation),
+                request: Request::Ping,
+            }
+        );
+    }
+
+    #[test]
+    fn daemon_diagnostic_schema_is_typed_and_contains_no_free_form_error_fields() {
+        let event = DaemonDiagnosticEvent {
+            schema_version: 1,
+            timestamp_unix_ms: 42,
+            component: DaemonDiagnosticComponent::Splinterd,
+            event: DaemonDiagnosticEventCode::SplintClosed,
+            level: DaemonDiagnosticLevel::Info,
+            pid: 7,
+            client_instance_id: "71d82a68-11e8-47c4-9193-dd83f4b03f1a".parse().unwrap(),
+            window_id: "727b26c3-2b28-4ea2-b94a-2bbfb8ce74f1".parse().unwrap(),
+            topology_revision: None,
+            build_version: "test".to_owned(),
+            build_commit: None,
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert!(value.get("error").is_none());
+        assert!(value.get("message").is_none());
+        assert!(value.get("name").is_none());
+        assert!(value.get("path").is_none());
     }
 
     #[test]

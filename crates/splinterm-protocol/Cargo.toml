@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 splinterm-core = { path = "../splinterm-core" }
 thiserror.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

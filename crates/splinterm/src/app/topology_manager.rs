@@ -557,6 +557,7 @@ async fn reconcile_window_topology(
     factory: &ConnectionFactory,
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
+    topology_revision: TopologyRevision,
     dojo_id: DojoId,
     root: &mut LayoutNode,
     next: LayoutNode,
@@ -571,6 +572,7 @@ async fn reconcile_window_topology(
         };
         return Ok(updates
             .send(WindowTopologyUpdate::Apply {
+                topology_revision,
                 dojo_id,
                 layout: next,
                 added: Vec::new(),
@@ -606,6 +608,7 @@ async fn reconcile_window_topology(
     }
     if updates
         .send(WindowTopologyUpdate::Apply {
+            topology_revision,
             dojo_id,
             layout: next.clone(),
             added,
@@ -624,7 +627,7 @@ async fn reconcile_window_topology(
             removed_tasks.insert(*removed_id, task);
         }
     }
-    cancel_pane_tasks(removed_tasks).await;
+    retire_pane_tasks(removed_tasks);
     pane_tasks.extend(new_tasks);
     *root = next;
     Ok(true)
@@ -652,10 +655,12 @@ async fn selector_catalog(
 }
 
 fn window_dojo_identity(
+    topology_revision: TopologyRevision,
     lair: &splinterm_core::Lair,
     dojo: &splinterm_core::Dojo,
 ) -> WindowDojoIdentity {
     WindowDojoIdentity {
+        topology_revision,
         lair_id: lair.id,
         dojo_id: dojo.id,
         lair_name: lair.name.clone(),
@@ -668,7 +673,11 @@ async fn reopenable_dojo(
     lair_id: LairId,
     dojo_id: DojoId,
 ) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
-    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+    let Response::Lairs {
+        lairs,
+        topology_revision,
+    } = connection.request(Request::ListLairs).await?
+    else {
         bail!("splinterd did not return its session list");
     };
     let lair = lairs
@@ -682,7 +691,7 @@ async fn reopenable_dojo(
             .any(|entry| entry.dojo_id == dojo_id && entry.reopenable()),
         "selected session no longer has a fully running pane layout"
     );
-    Ok((window_dojo_identity(lair, &dojo), dojo))
+    Ok((window_dojo_identity(topology_revision, lair, &dojo), dojo))
 }
 
 async fn create_daily_dojo(
@@ -696,7 +705,11 @@ async fn create_daily_dojo(
         .unwrap_or_default()
         .as_secs();
     let expected = connection.topology_revision().await?;
-    let Response::LairCreated { lair, .. } = connection
+    let Response::LairCreated {
+        lair,
+        topology_revision,
+        ..
+    } = connection
         .request(create_request(
             factory,
             expected,
@@ -714,7 +727,7 @@ async fn create_daily_dojo(
         .first()
         .cloned()
         .context("new Lair did not contain a Dojo")?;
-    Ok((window_dojo_identity(&lair, &dojo), dojo))
+    Ok((window_dojo_identity(topology_revision, &lair, &dojo), dojo))
 }
 
 async fn create_dojo_in_lair(
@@ -874,6 +887,13 @@ async fn cancel_pane_tasks(pane_tasks: HashMap<SplintId, PaneTask>) {
     for task in tasks {
         let _ = task.task.await;
     }
+}
+
+fn retire_pane_tasks(pane_tasks: HashMap<SplintId, PaneTask>) {
+    if pane_tasks.is_empty() {
+        return;
+    }
+    tokio::spawn(cancel_pane_tasks(pane_tasks));
 }
 
 struct PreparedManagedDojo {
@@ -1243,7 +1263,7 @@ async fn handle_session_manager_command(
             for dojo_id in dojo_ids {
                 if let Some(removed) = state.tabs.close(dojo_id) {
                     let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                    cancel_pane_tasks(removed.value.pane_tasks).await;
+                    retire_pane_tasks(removed.value.pane_tasks);
                     if !acknowledged {
                         return TopologyManagerCommandOutcome::Stop;
                     }
@@ -1299,7 +1319,7 @@ async fn handle_session_manager_command(
                 Ok(()) => {
                     if let Some(removed) = state.tabs.close(dojo_id) {
                         let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                        cancel_pane_tasks(removed.value.pane_tasks).await;
+                        retire_pane_tasks(removed.value.pane_tasks);
                         if !acknowledged {
                             return TopologyManagerCommandOutcome::Stop;
                         }
@@ -1334,7 +1354,7 @@ async fn handle_session_manager_command(
         WindowTopologyCommand::CloseTab { dojo_id } => {
             if let Some(removed) = state.tabs.close(dojo_id) {
                 let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                cancel_pane_tasks(removed.value.pane_tasks).await;
+                retire_pane_tasks(removed.value.pane_tasks);
                 if !acknowledged {
                     return TopologyManagerCommandOutcome::Stop;
                 }
@@ -1359,7 +1379,7 @@ async fn handle_session_manager_command(
             for dojo_id in dojo_ids {
                 if let Some(removed) = state.tabs.close(dojo_id) {
                     let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                    cancel_pane_tasks(removed.value.pane_tasks).await;
+                    retire_pane_tasks(removed.value.pane_tasks);
                     if !acknowledged {
                         return TopologyManagerCommandOutcome::Stop;
                     }
@@ -1403,7 +1423,10 @@ async fn reconcile_managed_topology(
             lair.dojos.iter().map(move |dojo| {
                 (
                     dojo.id,
-                    (window_dojo_identity(lair, dojo), dojo.root.clone()),
+                    (
+                        window_dojo_identity(snapshot.revision, lair, dojo),
+                        dojo.root.clone(),
+                    ),
                 )
             })
         })
@@ -1413,7 +1436,7 @@ async fn reconcile_managed_topology(
         let Some((identity, root)) = authoritative.get(&dojo_id).cloned() else {
             if let Some(removed) = state.tabs.close(dojo_id) {
                 let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                cancel_pane_tasks(removed.value.pane_tasks).await;
+                retire_pane_tasks(removed.value.pane_tasks);
                 if !acknowledged {
                     return Ok(false);
                 }
@@ -1442,6 +1465,7 @@ async fn reconcile_managed_topology(
             factory,
             config,
             image_cache,
+            snapshot.revision,
             dojo_id,
             &mut managed.root,
             root,
@@ -1639,7 +1663,7 @@ pub(in crate::app) async fn run_topology_manager(
             Ok(TopologyCommandOutcome::WindowClosed) => {
                 let removed = state.tabs.close(dojo_id).expect("edited tab remains");
                 let acknowledged = remove_frontend_tab(&updates, dojo_id).await;
-                cancel_pane_tasks(removed.value.pane_tasks).await;
+                retire_pane_tasks(removed.value.pane_tasks);
                 if !acknowledged || state.tabs.is_empty() {
                     break;
                 }
@@ -1648,6 +1672,7 @@ pub(in crate::app) async fn run_topology_manager(
                 if let Some((target, pending)) = pending_split {
                     let _ = updates
                         .send(WindowTopologyUpdate::Apply {
+                            topology_revision: snapshot.revision,
                             dojo_id,
                             layout: managed.root.clone(),
                             added: Vec::new(),
@@ -1663,7 +1688,8 @@ pub(in crate::app) async fn run_topology_manager(
                         message: message.clone(),
                     })
                     .await;
-                eprintln!("splinterm topology edit rejected: {message}");
+                let _ = message;
+                eprintln!("splinterm topology edit rejected");
             }
         }
     }
@@ -1720,12 +1746,16 @@ pub(in crate::app) async fn initial_window_dojo_identity(
     dojo_id: DojoId,
 ) -> Result<WindowDojoIdentity> {
     let mut connection = factory.connect().await?;
-    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+    let Response::Lairs {
+        lairs,
+        topology_revision,
+    } = connection.request(Request::ListLairs).await?
+    else {
         bail!("splinterd did not return its Lairs for Window identity");
     };
     for lair in &lairs {
         if let Some(dojo) = lair.dojos.iter().find(|dojo| dojo.id == dojo_id) {
-            return Ok(window_dojo_identity(lair, dojo));
+            return Ok(window_dojo_identity(topology_revision, lair, dojo));
         }
     }
     bail!("initial Dojo is absent from daemon topology")
@@ -1895,6 +1925,25 @@ mod tests {
         cancel_pane_tasks(tasks).await;
 
         assert_eq!(completed.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn uncooperative_retired_tab_task_does_not_block_topology_work() {
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            task_cancellation.cancelled().await;
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let abort = task.abort_handle();
+        let tasks = HashMap::from([(SplintId::new(), PaneTask { cancellation, task })]);
+
+        super::retire_pane_tasks(tasks);
+        tokio::task::yield_now().await;
+
+        assert!(!abort.is_finished());
+        abort.abort();
     }
 
     #[test]
