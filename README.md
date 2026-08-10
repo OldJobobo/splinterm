@@ -213,6 +213,10 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [development guide](https://sp
 
 Splinterm's emulator half is derived from Foot's architecture and behavior. Translated or adapted code records its source provenance and retains the relevant MIT attribution. See [`docs/adr/0001-foot-rust-port.md`](docs/adr/0001-foot-rust-port.md), [`THIRD_PARTY.md`](THIRD_PARTY.md), and [`docs/pre-planning-research.md`](docs/pre-planning-research.md).
 
+## Support Splinterm
+
+If Splinterm is useful to you, you can [support its continued development on Ko-fi](https://ko-fi.com/oldjobobo).
+
 ## License
 
 Splinterm is available under the [MIT License](LICENSE).
