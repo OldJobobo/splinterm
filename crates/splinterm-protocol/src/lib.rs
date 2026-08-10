@@ -12,7 +12,7 @@ use splinterm_core::{
     Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 31;
+pub const PROTOCOL_VERSION: u16 = 32;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -26,6 +26,12 @@ pub const MAX_LAUNCH_ARGUMENTS: usize = 256;
 pub const MAX_LAUNCH_ARGUMENT_BYTES: usize = 4096;
 pub const MAX_CWD_BYTES: usize = 4096;
 pub const MAX_SCROLLBACK_LINES: usize = 1_000_000;
+pub const MAX_PRESET_DOJOS: usize = 32;
+pub const MAX_PRESET_PANES_PER_DOJO: usize = 32;
+pub const MAX_PRESET_TOTAL_PANES: usize = 128;
+pub const MAX_PRESET_DEPTH: usize = 32;
+pub const MAX_PRESET_KEY_BYTES: usize = 64;
+pub const MAX_PRESET_LABEL_BYTES: usize = 128;
 pub const MAX_COLUMNS: u16 = 240;
 pub const MAX_ROWS: u16 = 80;
 pub const MAX_OUTSTANDING_REQUESTS: usize = 1;
@@ -88,6 +94,7 @@ pub enum DaemonDiagnosticEventCode {
     LairCreated,
     SplintSplit,
     DojoCreated,
+    PresetMaterialized,
     SplintClosed,
     DojoClosed,
     LairTerminated,
@@ -303,6 +310,50 @@ pub struct MutationPreparation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+pub enum PresetTarget {
+    NewLair {
+        name: String,
+    },
+    ExistingLair {
+        lair_id: LairId,
+        rename: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PresetLayoutLaunch {
+    Pane {
+        key: String,
+        title: String,
+        launch: LaunchParameters,
+    },
+    Split {
+        axis: Axis,
+        ratio: SplitRatio,
+        first: Box<Self>,
+        second: Box<Self>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresetDojoLaunch {
+    pub name: String,
+    pub focus_key: String,
+    pub root: PresetLayoutLaunch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresetPaneIdentity {
+    pub dojo_id: DojoId,
+    pub key: String,
+    pub splint_id: SplintId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Ping,
     ListLairs,
@@ -410,6 +461,11 @@ pub enum Request {
         lair_id: LairId,
         name: String,
         launch: LaunchParameters,
+    },
+    MaterializePreset {
+        expected_topology_revision: TopologyRevision,
+        target: PresetTarget,
+        dojos: Vec<PresetDojoLaunch>,
     },
     CloseDojo {
         expected_topology_revision: TopologyRevision,
@@ -560,6 +616,12 @@ pub enum Response {
         dojo_id: DojoId,
         splint_id: SplintId,
         incarnation: u64,
+        topology_revision: TopologyRevision,
+    },
+    PresetMaterialized {
+        lair_id: LairId,
+        dojo_ids: Vec<DojoId>,
+        panes: Vec<PresetPaneIdentity>,
         topology_revision: TopologyRevision,
     },
     TopologyCommitted {
@@ -816,6 +878,7 @@ pub enum TopologyChangeKind {
     SplintClosed,
     SplitRatioChanged,
     DojoCreated,
+    PresetMaterialized,
     DojoClosed,
     LairTerminated,
     LairRenamed,
@@ -892,10 +955,11 @@ impl LaunchParameters {
                 .first()
                 .is_none_or(|program| !program.is_empty())
             && command_bytes.is_some_and(|bytes| bytes <= MAX_INPUT_BYTES)
-            && self
-                .shell
-                .as_ref()
-                .is_none_or(|shell| !shell.is_empty() && shell.len() <= MAX_LAUNCH_ARGUMENT_BYTES)
+            && self.shell.as_ref().is_none_or(|shell| {
+                !shell.is_empty()
+                    && !shell.contains('\0')
+                    && shell.len() <= MAX_LAUNCH_ARGUMENT_BYTES
+            })
             && self.scrollback_lines <= MAX_SCROLLBACK_LINES;
         if !valid {
             return Err(ProtocolError::new(
@@ -905,6 +969,191 @@ impl LaunchParameters {
         }
         Ok(())
     }
+}
+
+fn valid_preset_label(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.len() <= maximum
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_preset_key(value: &str) -> bool {
+    valid_preset_label(value, MAX_PRESET_KEY_BYTES)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+impl PresetLayoutLaunch {
+    fn validate_into(
+        &self,
+        depth: usize,
+        keys: &mut std::collections::HashSet<String>,
+    ) -> Result<usize, ProtocolError> {
+        if depth > MAX_PRESET_DEPTH {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "preset layout exceeds depth limit",
+            ));
+        }
+        match self {
+            Self::Pane { key, title, launch } => {
+                if !valid_preset_key(key) || !valid_preset_label(title, MAX_PRESET_LABEL_BYTES) {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "preset pane key or title is invalid",
+                    ));
+                }
+                if !keys.insert(key.clone()) {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "preset pane keys must be unique within a Dojo",
+                    ));
+                }
+                launch.validate()?;
+                if !launch.cwd.is_absolute() {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "preset pane cwd must be absolute",
+                    ));
+                }
+                Ok(1)
+            }
+            Self::Split { first, second, .. } => {
+                let first_count = first.validate_into(depth + 1, keys)?;
+                let second_count = second.validate_into(depth + 1, keys)?;
+                first_count.checked_add(second_count).ok_or_else(|| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "preset pane count overflow")
+                })
+            }
+        }
+    }
+}
+
+impl PresetDojoLaunch {
+    /// Validates one bounded neutral launch tree before daemon materialization.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for malformed labels, keys, launches, or bounds.
+    pub fn validate(&self) -> Result<usize, ProtocolError> {
+        if !valid_preset_label(&self.name, MAX_PRESET_LABEL_BYTES)
+            || !valid_preset_key(&self.focus_key)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "preset Dojo name or focus key is invalid",
+            ));
+        }
+        let mut keys = std::collections::HashSet::new();
+        let pane_count = self.root.validate_into(0, &mut keys)?;
+        if pane_count > MAX_PRESET_PANES_PER_DOJO || !keys.contains(&self.focus_key) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "preset Dojo pane count or focus key is invalid",
+            ));
+        }
+        Ok(pane_count)
+    }
+}
+
+impl PresetTarget {
+    /// Validates bounded target naming without resolving daemon topology.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for an invalid new or replacement Lair name.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let valid = match self {
+            Self::NewLair { name } => valid_preset_label(name, MAX_PRESET_LABEL_BYTES),
+            Self::ExistingLair { rename, .. } => rename
+                .as_ref()
+                .is_none_or(|name| valid_preset_label(name, MAX_PRESET_LABEL_BYTES)),
+        };
+        if !valid {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "preset target name is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Validates one complete atomic preset request before topology mutation.
+///
+/// # Errors
+/// Returns `InvalidArgument` when request-level Dojo or pane bounds are exceeded.
+pub fn validate_preset_materialization(
+    target: &PresetTarget,
+    dojos: &[PresetDojoLaunch],
+) -> Result<(), ProtocolError> {
+    target.validate()?;
+    if dojos.is_empty() || dojos.len() > MAX_PRESET_DOJOS {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "preset Dojo count is invalid",
+        ));
+    }
+    let pane_count = dojos.iter().try_fold(0_usize, |total, dojo| {
+        total.checked_add(dojo.validate()?).ok_or_else(|| {
+            ProtocolError::new(ErrorCode::InvalidArgument, "preset pane count overflow")
+        })
+    })?;
+    if pane_count > MAX_PRESET_TOTAL_PANES {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "preset total pane count exceeds limit",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates stable pane mappings returned by one atomic preset transaction.
+///
+/// # Errors
+/// Returns `InvalidArgument` for duplicate, missing, or out-of-scope identities.
+pub fn validate_preset_materialized(
+    dojo_ids: &[DojoId],
+    panes: &[PresetPaneIdentity],
+) -> Result<(), ProtocolError> {
+    if dojo_ids.is_empty()
+        || dojo_ids.len() > MAX_PRESET_DOJOS
+        || panes.is_empty()
+        || panes.len() > MAX_PRESET_TOTAL_PANES
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "preset materialization response cardinality is invalid",
+        ));
+    }
+    let dojo_count = dojo_ids.len();
+    let dojo_ids = dojo_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    if dojo_ids.len() != dojo_count {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "preset materialization repeats Dojo identities",
+        ));
+    }
+    let mut pane_keys = std::collections::HashSet::new();
+    let mut splint_ids = std::collections::HashSet::new();
+    if panes.iter().any(|pane| {
+        !dojo_ids.contains(&pane.dojo_id)
+            || !valid_preset_key(&pane.key)
+            || !pane_keys.insert((pane.dojo_id, pane.key.clone()))
+            || !splint_ids.insert(pane.splint_id)
+    }) || dojo_ids
+        .iter()
+        .any(|dojo_id| !panes.iter().any(|pane| pane.dojo_id == *dojo_id))
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "preset materialization pane mappings are invalid",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1068,6 +1317,7 @@ pub enum AuditOperation {
     CloseSplint,
     SetSplitRatio,
     NewDojo,
+    MaterializePreset,
     CloseDojo,
     TerminateLair,
     RenameLair,
@@ -2407,6 +2657,123 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one protocol fixture covers request, response, mapping, and launch bounds"
+    )]
+    fn atomic_preset_materialization_is_typed_and_bounded() {
+        let lair_id = LairId::new();
+        let dojo_id = DojoId::new();
+        let splint_id = SplintId::new();
+        let dojo = PresetDojoLaunch {
+            name: "review".into(),
+            focus_key: "editor".into(),
+            root: PresetLayoutLaunch::Split {
+                axis: Axis::Horizontal,
+                ratio: SplitRatio::new(650).unwrap(),
+                first: Box::new(PresetLayoutLaunch::Pane {
+                    key: "editor".into(),
+                    title: "editor".into(),
+                    launch: LaunchParameters {
+                        cwd: PathBuf::from("/tmp"),
+                        command: vec!["printf".into(), "$HOME;literal".into()],
+                        shell: None,
+                        login_shell: false,
+                        scrollback_lines: 1000,
+                    },
+                }),
+                second: Box::new(PresetLayoutLaunch::Pane {
+                    key: "shell".into(),
+                    title: "shell".into(),
+                    launch: LaunchParameters {
+                        cwd: PathBuf::from("/tmp"),
+                        command: Vec::new(),
+                        shell: Some("/bin/sh".into()),
+                        login_shell: true,
+                        scrollback_lines: 1000,
+                    },
+                }),
+            },
+        };
+        let target = PresetTarget::ExistingLair {
+            lair_id,
+            rename: None,
+        };
+        assert!(validate_preset_materialization(&target, std::slice::from_ref(&dojo)).is_ok());
+        let request = Request::MaterializePreset {
+            expected_topology_revision: TopologyRevision::new(7),
+            target,
+            dojos: vec![dojo.clone()],
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["type"], "materialize_preset");
+        assert_eq!(serde_json::from_value::<Request>(encoded).unwrap(), request);
+
+        let response = Response::PresetMaterialized {
+            lair_id,
+            dojo_ids: vec![dojo_id],
+            panes: vec![PresetPaneIdentity {
+                dojo_id,
+                key: "editor".into(),
+                splint_id,
+            }],
+            topology_revision: TopologyRevision::new(8),
+        };
+        assert_eq!(
+            serde_json::from_value::<Response>(serde_json::to_value(&response).unwrap()).unwrap(),
+            response
+        );
+        assert!(
+            validate_preset_materialized(
+                &[dojo_id],
+                &[PresetPaneIdentity {
+                    dojo_id,
+                    key: "editor".into(),
+                    splint_id,
+                }]
+            )
+            .is_ok()
+        );
+        assert!(validate_preset_materialized(&[dojo_id, dojo_id], &[]).is_err());
+
+        let mut invalid = dojo;
+        invalid.focus_key = "missing".into();
+        assert!(
+            validate_preset_materialization(
+                &PresetTarget::NewLair { name: "new".into() },
+                &[invalid]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_preset_materialization(&PresetTarget::NewLair { name: "new".into() }, &[])
+                .is_err()
+        );
+        assert!(
+            LaunchParameters {
+                cwd: PathBuf::from("/tmp/\0invalid"),
+                command: Vec::new(),
+                shell: Some("/bin/sh".into()),
+                login_shell: true,
+                scrollback_lines: 1_000,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            LaunchParameters {
+                cwd: PathBuf::from("/tmp"),
+                command: Vec::new(),
+                shell: Some("/bin/\0sh".into()),
+                login_shell: true,
+                scrollback_lines: 1_000,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
     fn default_terminal_cells_use_compact_backward_readable_json() {
         let empty = TerminalCell {
             content: String::new(),
@@ -2441,7 +2808,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

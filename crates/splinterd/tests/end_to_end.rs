@@ -820,6 +820,17 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
             .await
             .unwrap_err();
         assert_eq!(denied.code, ErrorCode::Unauthorized);
+        let denied = automation
+            .request_result(Request::MaterializePreset {
+                expected_topology_revision: revision,
+                target: splinterm_protocol::PresetTarget::NewLair {
+                    name: "automation-must-not-materialize-preset".into(),
+                },
+                dojos: Vec::new(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, ErrorCode::Unauthorized);
         let Response::Topology { snapshot } = automation.request(Request::InspectTopology).await
         else {
             panic!("topology response was not returned");

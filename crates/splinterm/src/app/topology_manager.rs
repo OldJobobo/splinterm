@@ -18,7 +18,9 @@ use splinterm_core::{
     Axis, DojoId, LairId, LayoutNode, SplintId, SplintState, SplitRatio, SplitSide,
     TopologyRevision,
 };
-use splinterm_protocol::{ErrorCode, MutationTarget, Request, Response};
+use splinterm_protocol::{
+    ErrorCode, MutationTarget, Request, Response, validate_preset_materialized,
+};
 use tokio::sync::mpsc;
 
 use super::{
@@ -471,6 +473,7 @@ async fn apply_topology_command(
         | WindowTopologyCommand::OpenDojo { .. }
         | WindowTopologyCommand::NewLair { .. }
         | WindowTopologyCommand::NewDojo { .. }
+        | WindowTopologyCommand::MaterializePreset { .. }
         | WindowTopologyCommand::NavigateLair { .. }
         | WindowTopologyCommand::RequestLairPrompt { .. }
         | WindowTopologyCommand::RenameLair { .. }
@@ -666,6 +669,45 @@ fn window_dojo_identity(
         lair_name: lair.name.clone(),
         dojo_name: dojo.name.clone(),
     }
+}
+
+fn materialized_dojo_targets(
+    lairs: &[splinterm_core::Lair],
+    topology_revision: TopologyRevision,
+    lair_id: LairId,
+    dojo_ids: &[DojoId],
+    panes: &[splinterm_protocol::PresetPaneIdentity],
+) -> Result<Vec<(WindowDojoIdentity, splinterm_core::Dojo)>> {
+    validate_preset_materialized(dojo_ids, panes)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let lair = lairs
+        .iter()
+        .find(|lair| lair.id == lair_id)
+        .context("materialized Lair is absent from committed topology")?;
+    let mut targets = Vec::with_capacity(dojo_ids.len());
+    for dojo_id in dojo_ids {
+        let dojo = lair
+            .dojos
+            .iter()
+            .find(|dojo| dojo.id == *dojo_id)
+            .context("materialized Dojo is absent from committed topology")?;
+        let mapped = panes
+            .iter()
+            .filter(|pane| pane.dojo_id == *dojo_id)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            mapped.len() == dojo.root.splint_count()
+                && mapped
+                    .iter()
+                    .all(|pane| dojo.root.find_splint(pane.splint_id).is_some()),
+            "preset pane mapping disagrees with committed Dojo"
+        );
+        targets.push((
+            window_dojo_identity(topology_revision, lair, dojo),
+            dojo.clone(),
+        ));
+    }
+    Ok(targets)
 }
 
 async fn reopenable_dojo(
@@ -1155,6 +1197,97 @@ async fn handle_session_manager_command(
             }
             let target = create_daily_dojo(factory, connection, config, cwd).await;
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
+        }
+        WindowTopologyCommand::MaterializePreset { target, dojos } => {
+            if !factory.is_local() {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: None,
+                        message:
+                            "preset materialization is available only to the trusted local client"
+                                .into(),
+                    })
+                    .await;
+                return TopologyManagerCommandOutcome::Continue;
+            }
+            if dojos.is_empty()
+                || state.tabs.len().saturating_add(dojos.len()) > splinterm::tab::MAX_WINDOW_TABS
+            {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: None,
+                        message: format!(
+                            "a Window may contain at most {} Dojo tabs",
+                            splinterm::tab::MAX_WINDOW_TABS
+                        ),
+                    })
+                    .await;
+                return TopologyManagerCommandOutcome::Continue;
+            }
+            let materialized = async {
+                let expected = connection.topology_revision().await?;
+                let Response::PresetMaterialized {
+                    lair_id,
+                    dojo_ids,
+                    panes,
+                    topology_revision,
+                } = connection
+                    .request(Request::MaterializePreset {
+                        expected_topology_revision: expected,
+                        target,
+                        dojos,
+                    })
+                    .await?
+                else {
+                    bail!("splinterd did not return preset materialization metadata");
+                };
+                anyhow::ensure!(
+                    dojo_ids.len() <= splinterm::tab::MAX_WINDOW_TABS,
+                    "preset response exceeds Window tab capacity"
+                );
+                let Response::Lairs {
+                    lairs,
+                    topology_revision: inspected_revision,
+                } = connection.request(Request::ListLairs).await?
+                else {
+                    bail!("splinterd did not return sessions after preset materialization");
+                };
+                anyhow::ensure!(
+                    inspected_revision == topology_revision,
+                    "preset topology revision drifted before Window reconciliation"
+                );
+                materialized_dojo_targets(&lairs, topology_revision, lair_id, &dojo_ids, &panes)
+            }
+            .await;
+            let targets = match materialized {
+                Ok(targets) => targets,
+                Err(error) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::TabFailed {
+                            dojo_id: None,
+                            message: format!("{error:#}"),
+                        })
+                        .await;
+                    return TopologyManagerCommandOutcome::Continue;
+                }
+            };
+            for target in targets {
+                if matches!(
+                    finish_managed_window_open(
+                        factory,
+                        Ok(target),
+                        state,
+                        config,
+                        image_cache,
+                        updates,
+                    )
+                    .await,
+                    TopologyManagerCommandOutcome::Stop
+                ) {
+                    return TopologyManagerCommandOutcome::Stop;
+                }
+            }
+            TopologyManagerCommandOutcome::Continue
         }
         WindowTopologyCommand::NewDojo { lair_id, cwd } => {
             if !window_has_tab_capacity(state.tabs.len()) {
@@ -1784,9 +1917,10 @@ mod tests {
         SplitRatio, TopologyCommandOutcome, TopologyManagerWake, TopologyRevision, WindowTabSet,
         WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets, close_action,
         close_other_tab_targets, command_has_pending_split, lair_navigation_target,
-        next_topology_manager_wake, parent_ratio, pending_focus_for_observation,
-        refreshed_close_state, topology_command_outcome, topology_edit_target,
-        topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
+        materialized_dojo_targets, next_topology_manager_wake, parent_ratio,
+        pending_focus_for_observation, refreshed_close_state, topology_command_outcome,
+        topology_edit_target, topology_identity_diff, validate_exited_close_target,
+        window_has_tab_capacity,
     };
     use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
 
@@ -1963,6 +2097,59 @@ mod tests {
         assert!(window_has_tab_capacity(0));
         assert!(window_has_tab_capacity(splinterm::tab::MAX_WINDOW_TABS - 1));
         assert!(!window_has_tab_capacity(splinterm::tab::MAX_WINDOW_TABS));
+    }
+
+    #[test]
+    fn preset_reconciliation_requires_every_stable_pane_before_opening() {
+        let lair_id = LairId::new();
+        let dojo_id = DojoId::new();
+        let first = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let first_id = first.id;
+        let second = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let second_id = second.id;
+        let dojo = splinterm_core::Dojo {
+            id: dojo_id,
+            name: "preset".into(),
+            default_focus: second_id,
+            root: LayoutNode::Branch {
+                axis: Axis::Horizontal,
+                ratio: SplitRatio::new(500).unwrap(),
+                first: Box::new(LayoutNode::Leaf(first)),
+                second: Box::new(LayoutNode::Leaf(second)),
+            },
+        };
+        let lair = splinterm_core::Lair {
+            id: lair_id,
+            name: "main".into(),
+            lifetime: splinterm_core::LairLifetime::Persistent,
+            dojos: vec![dojo],
+        };
+        let pane = |key: &str, splint_id| splinterm_protocol::PresetPaneIdentity {
+            dojo_id,
+            key: key.into(),
+            splint_id,
+        };
+        let targets = materialized_dojo_targets(
+            std::slice::from_ref(&lair),
+            TopologyRevision::new(8),
+            lair_id,
+            &[dojo_id],
+            &[pane("first", first_id), pane("second", second_id)],
+        )
+        .unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0.topology_revision, TopologyRevision::new(8));
+        assert_eq!(targets[0].1.default_focus, second_id);
+        assert!(
+            materialized_dojo_targets(
+                &[lair],
+                TopologyRevision::new(8),
+                lair_id,
+                &[dojo_id],
+                &[pane("first", first_id)],
+            )
+            .is_err()
+        );
     }
 
     #[test]

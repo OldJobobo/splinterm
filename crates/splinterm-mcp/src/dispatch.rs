@@ -1901,6 +1901,7 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
         AuditOperation::CloseSplint => "close_splint",
         AuditOperation::SetSplitRatio => "set_split_ratio",
         AuditOperation::NewDojo => "new_dojo",
+        AuditOperation::MaterializePreset => "materialize_preset",
         AuditOperation::CloseDojo => "close_dojo",
         AuditOperation::TerminateLair => "terminate_lair",
         AuditOperation::RenameLair => "rename_lair",

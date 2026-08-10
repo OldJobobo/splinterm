@@ -1,6 +1,6 @@
 # Plan 0027: Configurable keymaps and Dojo presets
 
-- **Status:** Active — Milestones 1–5 complete; Milestone 6 next
+- **Status:** Active — Milestones 1–6 complete; Milestone 7 next
 - **Date:** 2026-08-07
 - **Depends on:** [Plan 0018](0018-lair-dojo-topology-migration.md), [Plan 0019](0019-dojo-tabs.md), [Plan 0025](0025-command-palette-and-tab-context-menus.md)
 - **Primary compatibility reference:** [Omarchy Tmux Reference](../omarchy-tmux-reference.md)
@@ -1093,6 +1093,27 @@ Gate:
   the stricter closed lexer and reject them.
 
 ### Milestone 6 — atomic preset protocol and daemon materialization
+
+**Status:** Complete
+
+Recorded evidence:
+
+- validation: the serialized full workspace suite passed with 60 daemon library,
+  64 daemon binary, 19 daemon end-to-end, 335 Splinterm library, 67 Splinterm
+  binary, and all integration/remaining workspace tests passing; after review,
+  the focused post-commit persistence-failure and preset materialization tests
+  passed, along with workspace Clippy using `-D warnings`, formatting, workspace
+  check, package-validator compilation, and `git diff --check`;
+- review: one fresh read-only acceptance review confirmed trusted-local-only
+  authorization, remote/development exclusion, bounded wire trees, pre-commit
+  validation and persistence ordering, stable-ID reconciliation, exact context
+  capture, and privacy-preserving audit metadata. It identified one post-commit
+  persistence failure that could leave a cleaned-up leaf marked `Starting`; the
+  path now shuts down the unregistered runtime, retries a durable `Exited(127)`
+  transition, installs the exited state even if storage remains unavailable,
+  audits the bounded failure, and continues with the committed mapping. A
+  one-shot persistence fault test proves the failed leaf exits, its sibling
+  remains running, and no second topology revision is created.
 
 Files likely include:
 

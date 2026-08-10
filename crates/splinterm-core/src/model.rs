@@ -363,6 +363,70 @@ impl Topology {
         Ok(self.revision)
     }
 
+    /// Atomically appends a complete bounded Dojo set and optionally renames its Lair.
+    pub fn materialize_dojos_at(
+        &mut self,
+        expected: TopologyRevision,
+        lair_id: LairId,
+        rename: Option<String>,
+        dojos: Vec<Dojo>,
+    ) -> Result<TopologyRevision, TopologyError> {
+        self.check_revision(expected)?;
+        if dojos.is_empty() {
+            return Err(TopologyError::EmptyDojoSet);
+        }
+        self.validate_new_dojos(&dojos)?;
+        let rename = rename.map(|name| normalized_name(&name)).transpose()?;
+        if let Some(name) = rename.as_ref()
+            && self
+                .lairs
+                .values()
+                .any(|lair| lair.id != lair_id && lair.name == *name)
+        {
+            return Err(TopologyError::DuplicateLairName(name.clone()));
+        }
+        let lair = self
+            .lairs
+            .get_mut(&lair_id)
+            .ok_or(TopologyError::LairNotFound(lair_id))?;
+        if let Some(rename) = rename {
+            lair.name = rename;
+        }
+        lair.dojos.extend(dojos);
+        self.advance_revision();
+        Ok(self.revision)
+    }
+
+    /// Atomically inserts a new Lair containing only the supplied complete Dojos.
+    pub fn materialize_lair_at(
+        &mut self,
+        expected: TopologyRevision,
+        name: impl Into<String>,
+        dojos: Vec<Dojo>,
+    ) -> Result<(LairId, TopologyRevision), TopologyError> {
+        self.check_revision(expected)?;
+        if dojos.is_empty() {
+            return Err(TopologyError::EmptyDojoSet);
+        }
+        let name = normalized_name(&name.into())?;
+        if self.lairs.values().any(|lair| lair.name == name) {
+            return Err(TopologyError::DuplicateLairName(name));
+        }
+        self.validate_new_dojos(&dojos)?;
+        let lair_id = LairId::new();
+        self.lairs.insert(
+            lair_id,
+            Lair {
+                id: lair_id,
+                name,
+                lifetime: LairLifetime::Persistent,
+                dojos,
+            },
+        );
+        self.advance_revision();
+        Ok((lair_id, self.revision))
+    }
+
     pub fn close_dojo_at(
         &mut self,
         expected: TopologyRevision,
@@ -655,6 +719,8 @@ pub enum TopologyError {
     DuplicateLairId(LairId),
     #[error("Dojo {0:?} does not exist")]
     DojoNotFound(DojoId),
+    #[error("preset materialization requires at least one Dojo")]
+    EmptyDojoSet,
     #[error("Dojo {0:?} already exists")]
     DuplicateDojoId(DojoId),
     #[error("Dojo {0:?} still contains a live Splint")]
@@ -736,6 +802,51 @@ mod tests {
             .new_dojo_at(topology.revision(), first, duplicate_name)
             .unwrap();
         assert_eq!(topology.find_lair(first).unwrap().dojos.len(), 2);
+    }
+
+    #[test]
+    fn preset_materialization_commits_complete_dojo_sets_once() {
+        let mut topology = Topology::new();
+        let lair_id = topology
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let before = topology.revision();
+        let first = Dojo::with_shell("first", PathBuf::from("/tmp"));
+        let first_id = first.id;
+        let second = Dojo::with_shell("second", PathBuf::from("/var/tmp"));
+        let second_id = second.id;
+        assert_eq!(
+            topology
+                .materialize_dojos_at(before, lair_id, Some("renamed".into()), vec![first, second],)
+                .unwrap()
+                .get(),
+            before.get() + 1
+        );
+        let lair = topology.find_lair(lair_id).unwrap();
+        assert_eq!(lair.name, "renamed");
+        assert!(lair.dojos.iter().any(|dojo| dojo.id == first_id));
+        assert!(lair.dojos.iter().any(|dojo| dojo.id == second_id));
+
+        let unchanged = topology.clone();
+        let duplicate = unchanged.find_dojo(first_id).unwrap().clone();
+        assert_eq!(
+            topology.materialize_dojos_at(topology.revision(), lair_id, None, vec![duplicate]),
+            Err(TopologyError::DuplicateDojoId(first_id))
+        );
+        assert_eq!(topology, unchanged);
+
+        let revision = topology.revision();
+        let dojo = Dojo::with_shell("new", PathBuf::from("/tmp"));
+        let dojo_id = dojo.id;
+        let (new_lair_id, committed) = topology
+            .materialize_lair_at(revision, "new-lair", vec![dojo])
+            .unwrap();
+        assert_eq!(committed.get(), revision.get() + 1);
+        assert_eq!(
+            topology.find_lair(new_lair_id).unwrap().dojos[0].id,
+            dojo_id
+        );
     }
 
     #[test]

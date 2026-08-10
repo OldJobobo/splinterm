@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplitRatio, TopologyRevision};
-use splinterm_protocol::MutationTarget;
+use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
 use super::{SessionPickerItem, ThemeUpdate, WindowPaneOptions};
 
@@ -80,6 +80,10 @@ pub enum WindowTopologyCommand {
     NewDojo {
         lair_id: LairId,
         cwd: PathBuf,
+    },
+    MaterializePreset {
+        target: PresetTarget,
+        dojos: Vec<PresetDojoLaunch>,
     },
     NavigateLair {
         current_lair_id: LairId,

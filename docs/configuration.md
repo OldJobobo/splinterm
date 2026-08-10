@@ -211,14 +211,17 @@ splinterm preset list
 splinterm preset show NAME
 splinterm preset check [PATH]
 splinterm preset run NAME --cwd PATH --dry-run
+splinterm preset run NAME --cwd PATH
 ```
 
-These commands are local and do not connect to `splinterd`. Dry-run compilation
-checks final cwd directories and launch bounds and prints a topology preview
-without showing full argv. Non-dry-run materialization remains unavailable until
-the atomic preset protocol milestone; Splinterm does not emulate it with a
-sequence of partial splits. See [Dojo presets](presets.md) for the complete
-static schema and direct-execution rules.
+Inspection and dry-run are local and do not connect to `splinterd`. Dry-run
+compilation checks final cwd directories and launch bounds and prints a topology
+preview without showing full argv. A non-dry run verifies its exact invoking or
+focused Splint context, then sends one trusted-local atomic preset request; it
+never emulates a preset with a sequence of partial splits. Remote, automation,
+and MCP clients cannot invoke this private materialization request. See
+[Dojo presets](presets.md) for the complete static schema, direct-execution
+rules, and failure semantics.
 
 ## Remote profile configuration
 

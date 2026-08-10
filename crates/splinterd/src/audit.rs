@@ -77,6 +77,7 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::CloseSplint { .. } => AuditOperation::CloseSplint,
         Request::SetSplitRatio { .. } => AuditOperation::SetSplitRatio,
         Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => AuditOperation::NewDojo,
+        Request::MaterializePreset { .. } => AuditOperation::MaterializePreset,
         Request::CloseDojo { .. } => AuditOperation::CloseDojo,
         Request::TerminateLair { .. } => AuditOperation::TerminateLair,
         Request::RenameLair { .. } => AuditOperation::RenameLair,

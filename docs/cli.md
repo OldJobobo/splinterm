@@ -74,6 +74,7 @@ paths. With no focused Splinterm Window, its two projection fields are null.
 | --- | --- |
 | `new NAME [--cwd DIR] [-- ARGV...]` | Create a persistent Lair, one Dojo, and one live Splint. |
 | `new-dojo LAIR_ID [--name NAME] [--cwd DIR] [-- ARGV...]` | Add a persistent Dojo with one live Splint. |
+| `preset run NAME [--cwd DIR]` | Atomically add one complete configured Dojo preset to the exact invoking/focused Lair. |
 | `split TARGET_SPLINT_ID --axis horizontal|vertical --side first|second [--ratio N] [--cwd DIR] [-- ARGV...]` | Split a leaf and launch its sibling. |
 | `ratio TARGET_SPLINT_ID RATIO` | Set the selected leaf's parent split ratio in thousandths. |
 | `rename-lair LAIR_ID NAME` | Rename a Lair. |
@@ -88,9 +89,15 @@ argv, creation uses the configured shell.
 splinterm new project --cwd "$HOME/src/project"
 splinterm new build -- /usr/bin/ninja -C /tmp/build
 splinterm new-dojo LAIR_ID --name logs -- /usr/bin/journalctl -f
+splinterm preset run personal-review --cwd "$HOME/src/project"
 splinterm split SPLINT_ID --axis vertical --side second --ratio 600
 splinterm ratio SPLINT_ID 500
 ```
+
+Non-dry preset runs are private trusted-local human operations. The client
+compiles direct argv locally, verifies exact managed-Splint context, and asks the
+daemon to persist the complete tree in one revision before any process launch.
+Use `--dry-run` for side-effect-free inspection. See [Dojo presets](presets.md).
 
 The ratio range is 1–999; it is the share assigned to the first child.
 In-Splint automation should add `--expected-incarnation N` where offered so a

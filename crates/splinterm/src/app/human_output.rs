@@ -181,6 +181,17 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
         }
         Response::Lairs { lairs, .. } => print_lairs(&lairs, true),
         Response::LairCreated { lair, .. } => println!("Created Lair '{}'.", lair.name),
+        Response::PresetMaterialized {
+            lair_id,
+            dojo_ids,
+            panes,
+            topology_revision,
+        } => println!(
+            "Materialized {} Dojo(s) and {} pane(s) in Lair {lair_id} at topology revision {}.",
+            dojo_ids.len(),
+            panes.len(),
+            topology_revision.get()
+        ),
         Response::Topology { snapshot } => println!(
             "Topology revision {}: {} Lair(s), {} Splint(s)",
             snapshot.revision.get(),

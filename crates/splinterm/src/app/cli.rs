@@ -29,7 +29,7 @@ use {
     tokio::sync::mpsc,
 };
 
-use super::commands::{Cli, Command, OutputMode};
+use super::commands::{Cli, Command, OutputMode, PresetCommand};
 #[cfg(test)]
 use super::commands::{NewSplintSide, SplitAxis};
 use super::window::run_live_multipane_window;
@@ -51,7 +51,7 @@ use super::{
         machine_exit_code, require_expected_incarnation, require_incarnation, run_machine_command,
         run_machine_subscription,
     },
-    presets::run_preset_command,
+    presets::{materialize_preset, run_preset_command},
     remote_cli::run_remote_command,
     session_catalog::{automation_launch, create_request, launch_parameters, remember_dojo},
     sessions::{launch, reopen_recent, run_sessions, select_dojo, xdg_launch},
@@ -178,7 +178,13 @@ pub(crate) async fn run() -> Result<()> {
     if let Command::Keymap { command } = command {
         return run_keymap_command(command);
     }
-    if let Command::Preset { command } = command {
+    let materializes_preset = matches!(
+        &command,
+        Command::Preset {
+            command: PresetCommand::Run { dry_run: false, .. }
+        }
+    );
+    if !materializes_preset && let Command::Preset { command } = command {
         return run_preset_command(command);
     }
     if let Command::Policy { command } = command {
@@ -285,6 +291,14 @@ async fn run_configured_command(
         Command::Consent => tokio::task::spawn_blocking(run_consent_client)
             .await
             .context("trusted consent task failed")?,
+        Command::Preset {
+            command:
+                PresetCommand::Run {
+                    name,
+                    cwd,
+                    dry_run: false,
+                },
+        } => materialize_preset(name, cwd, &config, &factory).await,
         command => run_headless(command, &config, &factory).await,
     }
 }

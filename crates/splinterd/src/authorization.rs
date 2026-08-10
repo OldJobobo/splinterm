@@ -106,9 +106,9 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
 
     match request {
         Request::Ping | Request::ReadGraphicalFocus => RequestAuthorization::Authenticated,
-        Request::PublishGraphicalFocus { .. } | Request::CreateTransientLair { .. } => {
-            RequestAuthorization::TrustedUi
-        }
+        Request::PublishGraphicalFocus { .. }
+        | Request::CreateTransientLair { .. }
+        | Request::MaterializePreset { .. } => RequestAuthorization::TrustedUi,
         Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }
@@ -258,6 +258,16 @@ mod tests {
                     login_shell: false,
                     scrollback_lines: 1_000,
                 },
+            }),
+            RequestAuthorization::TrustedUi
+        );
+        assert_eq!(
+            for_request(&Request::MaterializePreset {
+                expected_topology_revision: TopologyRevision::new(0),
+                target: splinterm_protocol::PresetTarget::NewLair {
+                    name: "preset".into(),
+                },
+                dojos: Vec::new(),
             }),
             RequestAuthorization::TrustedUi
         );

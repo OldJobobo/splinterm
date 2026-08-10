@@ -42,8 +42,9 @@ use splinterm_protocol::{
     MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS,
     MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
     MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MAX_UPDATE_SCROLLS,
-    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, ProcessExitStatus, ProtocolError,
-    Request, Response, RestoreLeafResult, ScrollDirection as WireScrollDirection,
+    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, PresetDojoLaunch, PresetLayoutLaunch,
+    PresetPaneIdentity, PresetTarget, ProcessExitStatus, ProtocolError, Request, Response,
+    RestoreLeafResult, ScrollDirection as WireScrollDirection,
     ScrollbackPage as WireScrollbackPage, SearchMatch as WireSearchMatch,
     SearchPage as WireSearchPage, ServerFrame, ServerLimits, SplintLifecycle, SplintRuntimeSummary,
     SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalProvenance,
@@ -735,6 +736,8 @@ struct DaemonState {
     topology_transactions: Semaphore,
     exit_observers: TaskTracker,
     metadata: Option<MetadataStore>,
+    #[cfg(test)]
+    topology_save_failure_countdown: AtomicU64,
     policy: Mutex<policy::PolicyStore>,
     audit: Mutex<audit::AuditStore>,
     daemon_audit_peer: splinterm_protocol::AuditPeer,
@@ -856,6 +859,8 @@ async fn main() -> Result<()> {
         topology_transactions: Semaphore::new(1),
         exit_observers: TaskTracker::new(),
         metadata: Some(metadata),
+        #[cfg(test)]
+        topology_save_failure_countdown: AtomicU64::new(u64::MAX),
         policy: Mutex::new(policy),
         audit: Mutex::new(audit::AuditStore::default()),
         daemon_audit_peer,
@@ -1345,6 +1350,49 @@ async fn append_daemon_splint_audit(
     });
 }
 
+async fn append_preset_leaf_audit(state: &DaemonState, splint_id: SplintId, succeeded: bool) {
+    let resource = {
+        let topology = state.topology.read().await;
+        topology.lairs().find_map(|lair| {
+            lair.dojos.iter().find_map(|dojo| {
+                dojo.root
+                    .find_splint(splint_id)
+                    .map(|_| splinterm_protocol::AuditResource {
+                        lair_id: Some(lair.id),
+                        dojo_id: Some(dojo.id),
+                        splint_id: Some(splint_id),
+                        incarnation: None,
+                    })
+            })
+        })
+    };
+    state.audit.lock().await.record(audit::AuditDraft {
+        unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        policy_generation: None,
+        policy_rule_id: None,
+        peer: state.daemon_audit_peer.clone(),
+        operation: splinterm_protocol::AuditOperation::MaterializePreset,
+        resource,
+        requested_scopes: Vec::new(),
+        decision: splinterm_protocol::AuditDecision::Allowed,
+        reason: if succeeded {
+            "preset_leaf_started"
+        } else {
+            "preset_leaf_spawn_failed"
+        },
+        outcome: Some(if succeeded {
+            splinterm_protocol::AuditOutcome::Succeeded
+        } else {
+            splinterm_protocol::AuditOutcome::Failed
+        }),
+        argument_count: None,
+        executable_basename: None,
+    });
+}
+
 async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
     retire_transient_lair_for_owner(state, connection_id).await;
     state
@@ -1407,6 +1455,7 @@ const fn diagnostic_lifecycle_event(
             Some(Event::SplintSplit)
         }
         Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => Some(Event::DojoCreated),
+        Request::MaterializePreset { .. } => Some(Event::PresetMaterialized),
         Request::CloseSplint { .. } => Some(Event::SplintClosed),
         Request::CloseDojo { .. } => Some(Event::DojoClosed),
         Request::TerminateLair { .. } => Some(Event::LairTerminated),
@@ -1435,6 +1484,9 @@ fn trace_diagnostic_lifecycle(
             topology_revision, ..
         }
         | Response::DojoStarted {
+            topology_revision, ..
+        }
+        | Response::PresetMaterialized {
             topology_revision, ..
         }
         | Response::TopologyCommitted { topology_revision }
@@ -2149,6 +2201,21 @@ fn model_error(error: TopologyError) -> ProtocolError {
 }
 
 async fn persist_topology(state: &DaemonState, topology: &Topology) -> Result<(), ProtocolError> {
+    #[cfg(test)]
+    {
+        let remaining = state.topology_save_failure_countdown.load(Ordering::SeqCst);
+        if remaining == 0 {
+            state
+                .topology_save_failure_countdown
+                .store(u64::MAX, Ordering::SeqCst);
+            return Err(internal());
+        }
+        if remaining != u64::MAX {
+            state
+                .topology_save_failure_countdown
+                .fetch_sub(1, Ordering::SeqCst);
+        }
+    }
     if let Some(metadata) = &state.metadata {
         let document = TopologyDocument::from_topology(topology).map_err(|error| {
             error!(%error, "refusing invalid durable Topology candidate");
@@ -2306,6 +2373,146 @@ async fn spawn_runtime_with_size(
         error!(%error, splint_id = ?context.splint, "failed to spawn live Splint");
         internal()
     })
+}
+
+#[derive(Debug)]
+struct PreparedPresetLeaf {
+    dojo_id: DojoId,
+    splint_id: SplintId,
+    launch: splinterm_protocol::LaunchParameters,
+}
+
+fn prepare_preset_layout(
+    dojo_id: DojoId,
+    node: PresetLayoutLaunch,
+    leaves: &mut Vec<PreparedPresetLeaf>,
+    identities: &mut Vec<PresetPaneIdentity>,
+) -> LayoutNode {
+    match node {
+        PresetLayoutLaunch::Pane { key, title, launch } => {
+            let splint_id = SplintId::new();
+            identities.push(PresetPaneIdentity {
+                dojo_id,
+                key,
+                splint_id,
+            });
+            let splint = Splint {
+                id: splint_id,
+                title,
+                cwd: launch.cwd.clone(),
+                command: launch.command.clone(),
+                launch: Box::new(durable_launch(&launch)),
+                last_incarnation: None,
+                state: SplintState::Starting,
+            };
+            leaves.push(PreparedPresetLeaf {
+                dojo_id,
+                splint_id,
+                launch,
+            });
+            LayoutNode::Leaf(splint)
+        }
+        PresetLayoutLaunch::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => LayoutNode::Branch {
+            axis,
+            ratio,
+            first: Box::new(prepare_preset_layout(dojo_id, *first, leaves, identities)),
+            second: Box::new(prepare_preset_layout(dojo_id, *second, leaves, identities)),
+        },
+    }
+}
+
+struct PreparedPreset {
+    dojos: Vec<Dojo>,
+    leaves: Vec<PreparedPresetLeaf>,
+    panes: Vec<PresetPaneIdentity>,
+}
+
+fn prepare_preset_dojos(launches: Vec<PresetDojoLaunch>) -> Result<PreparedPreset, ProtocolError> {
+    let mut dojos = Vec::with_capacity(launches.len());
+    let mut leaves = Vec::new();
+    let mut identities = Vec::new();
+    for launch in launches {
+        let dojo_id = DojoId::new();
+        let root = prepare_preset_layout(dojo_id, launch.root, &mut leaves, &mut identities);
+        let default_focus = identities
+            .iter()
+            .rev()
+            .find(|identity| identity.dojo_id == dojo_id && identity.key == launch.focus_key)
+            .map(|identity| identity.splint_id)
+            .ok_or_else(|| invalid("preset focus key is absent after validation"))?;
+        dojos.push(Dojo {
+            id: dojo_id,
+            name: launch.name,
+            default_focus,
+            root,
+        });
+    }
+    Ok(PreparedPreset {
+        dojos,
+        leaves,
+        panes: identities,
+    })
+}
+
+fn collect_preset_launches<'a>(
+    node: &'a PresetLayoutLaunch,
+    launches: &mut Vec<&'a splinterm_protocol::LaunchParameters>,
+) {
+    match node {
+        PresetLayoutLaunch::Pane { launch, .. } => launches.push(launch),
+        PresetLayoutLaunch::Split { first, second, .. } => {
+            collect_preset_launches(first, launches);
+            collect_preset_launches(second, launches);
+        }
+    }
+}
+
+async fn validate_preset_working_directories(
+    dojos: &[PresetDojoLaunch],
+) -> Result<(), ProtocolError> {
+    let mut launches = Vec::new();
+    for dojo in dojos {
+        collect_preset_launches(&dojo.root, &mut launches);
+    }
+    for launch in launches {
+        let metadata = fs::metadata(&launch.cwd)
+            .await
+            .map_err(|_| invalid("preset pane cwd is unavailable"))?;
+        if !metadata.is_dir() {
+            return Err(invalid("preset pane cwd is not a directory"));
+        }
+    }
+    Ok(())
+}
+
+async fn mark_materialized_leaf_failed(
+    state: &DaemonState,
+    splint_id: SplintId,
+    incarnation: Option<u64>,
+) -> Result<TopologyRevision, ProtocolError> {
+    let mut candidate = state.topology.read().await.clone();
+    if let Some(incarnation) = incarnation
+        && !candidate.set_splint_last_incarnation(splint_id, incarnation)
+    {
+        return Err(not_found());
+    }
+    if !candidate.set_splint_state(splint_id, SplintState::Exited(127)) {
+        return Err(not_found());
+    }
+    let revision = candidate.revision();
+    if persist_topology(state, &candidate).await.is_err() {
+        error!(
+            ?splint_id,
+            "failed to persist exited preset leaf after post-commit launch failure"
+        );
+    }
+    install_topology(state, candidate).await;
+    Ok(revision)
 }
 
 fn durable_launch(launch: &splinterm_protocol::LaunchParameters) -> SplintLaunchMetadata {
@@ -2855,6 +3062,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::SetSplitRatio { .. }
             | Request::NewDojo { .. }
             | Request::NewDojoAutomation { .. }
+            | Request::MaterializePreset { .. }
             | Request::CloseDojo { .. }
             | Request::RenameLair { .. }
             | Request::RenameDojo { .. }
@@ -2894,6 +3102,7 @@ fn interactive_bypass(
             Request::PublishGraphicalFocus { .. }
                 | Request::RequestImageContent { .. }
                 | Request::ForceControlTransfer { .. }
+                | Request::MaterializePreset { .. }
         );
     trusted_local || remote_human
 }
@@ -3620,6 +3829,10 @@ async fn request_policy_resources(
         Request::RestoreLair { lair_id, .. } | Request::TerminateLair { lair_id, .. } => {
             lair(*lair_id, true)?
         }
+        Request::MaterializePreset { target, .. } => match target {
+            PresetTarget::NewLair { .. } => vec![policy::PolicyResource::Daemon],
+            PresetTarget::ExistingLair { lair_id, .. } => lair(*lair_id, false)?,
+        },
         Request::NewDojo { lair_id, .. }
         | Request::NewDojoAutomation { lair_id, .. }
         | Request::RenameLair { lair_id, .. } => lair(*lair_id, false)?,
@@ -3886,6 +4099,25 @@ fn audit_resource(resource: policy::PolicyResource) -> Option<splinterm_protocol
 }
 
 fn spawn_audit_metadata(request: &Request) -> (Option<usize>, Option<String>) {
+    if let Request::MaterializePreset { dojos, .. } = request {
+        fn panes(node: &PresetLayoutLaunch) -> usize {
+            match node {
+                PresetLayoutLaunch::Pane { .. } => 1,
+                PresetLayoutLaunch::Split { first, second, .. } => {
+                    panes(first).saturating_add(panes(second))
+                }
+            }
+        }
+        return (
+            Some(
+                dojos
+                    .iter()
+                    .map(|dojo| panes(&dojo.root))
+                    .fold(0_usize, usize::saturating_add),
+            ),
+            None,
+        );
+    }
     if let Request::CreateLairAutomation { launch, .. }
     | Request::SplitSplintAutomation { launch, .. }
     | Request::RelaunchSplintAutomation { launch, .. }
@@ -5297,6 +5529,122 @@ async fn handle_authorized_request(
                 dojo_id,
                 splint_id,
                 incarnation,
+                topology_revision,
+            }
+        }
+        Request::MaterializePreset {
+            expected_topology_revision,
+            target,
+            dojos,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            splinterm_protocol::validate_preset_materialization(&target, &dojos)?;
+            validate_preset_working_directories(&dojos).await?;
+            let PreparedPreset {
+                dojos: prepared_dojos,
+                leaves,
+                panes,
+            } = prepare_preset_dojos(dojos)?;
+            let dojo_ids = prepared_dojos
+                .iter()
+                .map(|dojo| dojo.id)
+                .collect::<Vec<_>>();
+            let (candidate, (lair_id, topology_revision)) =
+                durable_topology_candidate(state, |topology| match target {
+                    PresetTarget::NewLair { name } => topology.materialize_lair_at(
+                        expected_topology_revision,
+                        name,
+                        prepared_dojos,
+                    ),
+                    PresetTarget::ExistingLair { lair_id, rename } => topology
+                        .materialize_dojos_at(
+                            expected_topology_revision,
+                            lair_id,
+                            rename,
+                            prepared_dojos,
+                        )
+                        .map(|revision| (lair_id, revision)),
+                })
+                .await?;
+            install_topology(state, candidate).await;
+            publish_topology(
+                state,
+                topology_revision,
+                TopologyChangeKind::PresetMaterialized,
+            )
+            .await;
+
+            for leaf in leaves {
+                let context = SplintLaunchContext {
+                    lair: lair_id,
+                    dojo: leaf.dojo_id,
+                    splint: leaf.splint_id,
+                };
+                let Ok(runtime) = spawn_runtime(state, context, &leaf.launch).await else {
+                    let revision =
+                        mark_materialized_leaf_failed(state, leaf.splint_id, None).await?;
+                    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+                    append_preset_leaf_audit(state, leaf.splint_id, false).await;
+                    continue;
+                };
+                let runtime = RuntimeCreationGuard::new(runtime, state.exit_observers.clone());
+                let handle = runtime.handle();
+                let incarnation = handle.incarnation.value();
+                let mut running_candidate = state.topology.read().await.clone();
+                if !running_candidate.set_splint_last_incarnation(leaf.splint_id, incarnation)
+                    || !running_candidate.set_splint_state(leaf.splint_id, SplintState::Running)
+                {
+                    drop(runtime);
+                    return Err(not_found());
+                }
+                if persist_topology(state, &running_candidate).await.is_err() {
+                    error!(
+                        ?leaf.splint_id,
+                        "failed to persist running preset leaf after topology commit"
+                    );
+                    let runtime = runtime.take();
+                    let _ = runtime.shutdown().await;
+                    let revision =
+                        mark_materialized_leaf_failed(state, leaf.splint_id, Some(incarnation))
+                            .await?;
+                    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+                    append_preset_leaf_audit(state, leaf.splint_id, false).await;
+                    continue;
+                }
+                let runtime = runtime.take();
+                let rejected = {
+                    let mut topology = state.topology.write().await;
+                    let mut runtimes = state.runtimes.lock().await;
+                    match runtimes.insert(runtime) {
+                        Ok(()) => {
+                            *topology = running_candidate;
+                            None
+                        }
+                        Err(runtime) => Some(runtime),
+                    }
+                };
+                if let Some(runtime) = rejected {
+                    let _ = runtime.shutdown().await;
+                    let revision =
+                        mark_materialized_leaf_failed(state, leaf.splint_id, Some(incarnation))
+                            .await?;
+                    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+                    append_preset_leaf_audit(state, leaf.splint_id, false).await;
+                    continue;
+                }
+                observe_process_exit(state, handle);
+                publish_topology(state, topology_revision, TopologyChangeKind::RuntimeChanged)
+                    .await;
+                append_preset_leaf_audit(state, leaf.splint_id, true).await;
+            }
+            Response::PresetMaterialized {
+                lair_id,
+                dojo_ids,
+                panes,
                 topology_revision,
             }
         }
@@ -8194,6 +8542,14 @@ mod tests {
         development_terminal_access: bool,
         pty_backend: LinuxPtyBackend,
     ) -> Arc<DaemonState> {
+        test_state_with_backend_and_metadata(development_terminal_access, pty_backend, None)
+    }
+
+    fn test_state_with_backend_and_metadata(
+        development_terminal_access: bool,
+        pty_backend: LinuxPtyBackend,
+        metadata: Option<MetadataStore>,
+    ) -> Arc<DaemonState> {
         let (revocations, _) = broadcast::channel(32);
         let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
         Arc::new(DaemonState {
@@ -8204,7 +8560,8 @@ mod tests {
             topology_hub: Mutex::new(TopologyHub::default()),
             topology_transactions: Semaphore::new(1),
             exit_observers: TaskTracker::new(),
-            metadata: None,
+            metadata,
+            topology_save_failure_countdown: AtomicU64::new(u64::MAX),
             policy: Mutex::new(policy::PolicyStore::default()),
             audit: Mutex::new(audit::AuditStore::default()),
             daemon_audit_peer: splinterm_protocol::AuditPeer {
@@ -8251,6 +8608,43 @@ mod tests {
         }
     }
 
+    fn preset_request(
+        expected_topology_revision: TopologyRevision,
+        lair_id: LairId,
+        cwd: &Path,
+        first_command: &[&str],
+        second_command: &[&str],
+    ) -> Request {
+        let pane = |key: &str, command: &[&str]| PresetLayoutLaunch::Pane {
+            key: key.into(),
+            title: key.into(),
+            launch: splinterm_protocol::LaunchParameters {
+                cwd: cwd.to_path_buf(),
+                command: command.iter().map(|value| (*value).to_owned()).collect(),
+                shell: None,
+                login_shell: false,
+                scrollback_lines: 1_000,
+            },
+        };
+        Request::MaterializePreset {
+            expected_topology_revision,
+            target: PresetTarget::ExistingLair {
+                lair_id,
+                rename: None,
+            },
+            dojos: vec![PresetDojoLaunch {
+                name: "preset".into(),
+                focus_key: "first".into(),
+                root: PresetLayoutLaunch::Split {
+                    axis: splinterm_core::Axis::Horizontal,
+                    ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                    first: Box::new(pane("first", first_command)),
+                    second: Box::new(pane("second", second_command)),
+                },
+            }],
+        }
+    }
+
     async fn trusted_request(
         state: &Arc<DaemonState>,
         connection_id: u64,
@@ -8267,6 +8661,266 @@ mod tests {
         )
         .await
         .map(|handled| handled.response)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preset_materialization_commits_once_and_preserves_failed_leaf() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let lair_id = state
+            .topology
+            .write()
+            .await
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let expected = state.topology.read().await.revision();
+        let response = time::timeout(
+            Duration::from_secs(5),
+            trusted_request(
+                &state,
+                71,
+                preset_request(
+                    expected,
+                    lair_id,
+                    Path::new("/tmp"),
+                    &["/bin/sh", "-c", "sleep 30"],
+                    &["/definitely/missing-splinterm-preset-command"],
+                ),
+            ),
+        )
+        .await
+        .expect("preset materialization timed out")
+        .unwrap();
+        let Response::PresetMaterialized {
+            dojo_ids,
+            panes,
+            topology_revision,
+            ..
+        } = response
+        else {
+            panic!("preset materialization response was not returned");
+        };
+        assert_eq!(topology_revision.get(), expected.get() + 1);
+        assert_eq!(dojo_ids.len(), 1);
+        assert_eq!(panes.len(), 2);
+        let first = panes.iter().find(|pane| pane.key == "first").unwrap();
+        let second = panes.iter().find(|pane| pane.key == "second").unwrap();
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                let topology = state.topology.read().await;
+                if matches!(
+                    topology
+                        .find_splint(second.splint_id)
+                        .map(|splint| splint.state),
+                    Some(SplintState::Exited(_))
+                ) {
+                    break;
+                }
+                drop(topology);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed preset leaf did not become exited");
+        let topology = state.topology.read().await;
+        let dojo = topology.find_dojo(dojo_ids[0]).unwrap();
+        assert_eq!(dojo.root.splint_count(), 2);
+        assert_eq!(dojo.default_focus, first.splint_id);
+        assert_eq!(topology.revision(), topology_revision);
+        assert!(matches!(
+            topology.find_splint(second.splint_id).unwrap().state,
+            SplintState::Exited(_)
+        ));
+        drop(topology);
+        let audit = state.audit.lock().await.page(None, 16);
+        let leaf_records = audit
+            .records
+            .iter()
+            .filter(|record| {
+                record.operation == splinterm_protocol::AuditOperation::MaterializePreset
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(leaf_records.len(), 2);
+        assert!(leaf_records.iter().all(|record| {
+            record
+                .resource
+                .as_ref()
+                .and_then(|resource| resource.splint_id)
+                .is_some()
+                && record.argument_count.is_none()
+                && record.executable_basename.is_none()
+        }));
+        if let Some(runtime) = state.runtimes.lock().await.remove(first.splint_id) {
+            runtime.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postcommit_leaf_persistence_failure_never_leaves_starting_state() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let lair_id = state
+            .topology
+            .write()
+            .await
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let expected = state.topology.read().await.revision();
+        state
+            .topology_save_failure_countdown
+            .store(1, Ordering::SeqCst);
+        let response = trusted_request(
+            &state,
+            78,
+            preset_request(
+                expected,
+                lair_id,
+                Path::new("/tmp"),
+                &["/bin/sh", "-c", "sleep 30"],
+                &["/bin/sh", "-c", "sleep 30"],
+            ),
+        )
+        .await
+        .unwrap();
+        let Response::PresetMaterialized {
+            panes,
+            topology_revision,
+            ..
+        } = response
+        else {
+            panic!("preset materialization response was not returned");
+        };
+        let first = panes.iter().find(|pane| pane.key == "first").unwrap();
+        let second = panes.iter().find(|pane| pane.key == "second").unwrap();
+        let topology = state.topology.read().await;
+        assert_eq!(topology.revision(), topology_revision);
+        assert_eq!(
+            topology.find_splint(first.splint_id).unwrap().state,
+            SplintState::Exited(127)
+        );
+        assert_eq!(
+            topology.find_splint(second.splint_id).unwrap().state,
+            SplintState::Running
+        );
+        assert!(!matches!(
+            topology.find_splint(first.splint_id).unwrap().state,
+            SplintState::Starting
+        ));
+        drop(topology);
+        assert!(
+            state
+                .runtimes
+                .lock()
+                .await
+                .handle(first.splint_id)
+                .is_none()
+        );
+        if let Some(runtime) = state.runtimes.lock().await.remove(second.splint_id) {
+            runtime.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_preset_changes_no_topology_and_spawns_no_process() {
+        let state = test_state(false);
+        let lair_id = state
+            .topology
+            .write()
+            .await
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let unchanged = state.topology.read().await.clone();
+        let error = trusted_request(
+            &state,
+            72,
+            preset_request(
+                unchanged.revision(),
+                lair_id,
+                Path::new("relative"),
+                &["/bin/true"],
+                &["/bin/true"],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(*state.topology.read().await, unchanged);
+        assert!(state.runtimes.lock().await.handles().is_empty());
+        for (connection_id, cwd) in [
+            (75, PathBuf::from("/definitely/missing-preset-directory")),
+            (76, PathBuf::from("/dev/null")),
+            (77, PathBuf::from(format!("/{}", "x".repeat(MAX_CWD_BYTES)))),
+        ] {
+            let error = trusted_request(
+                &state,
+                connection_id,
+                preset_request(
+                    unchanged.revision(),
+                    lair_id,
+                    &cwd,
+                    &["/bin/true"],
+                    &["/bin/true"],
+                ),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+            assert_eq!(*state.topology.read().await, unchanged);
+            assert!(state.runtimes.lock().await.handles().is_empty());
+        }
+
+        let error = trusted_request(
+            &state,
+            73,
+            preset_request(
+                TopologyRevision::default(),
+                lair_id,
+                Path::new("/tmp"),
+                &["/bin/true"],
+                &["/bin/true"],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleTopology);
+        assert_eq!(*state.topology.read().await, unchanged);
+        assert!(state.runtimes.lock().await.handles().is_empty());
+
+        let base = temp_dir();
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(base.join("splinterm"), b"blocks metadata directory").unwrap();
+        let failing = test_state_with_backend_and_metadata(
+            false,
+            LinuxPtyBackend::new("/missing/helper"),
+            Some(MetadataStore::from_base(&base)),
+        );
+        let failing_lair = failing
+            .topology
+            .write()
+            .await
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let failing_unchanged = failing.topology.read().await.clone();
+        let error = trusted_request(
+            &failing,
+            74,
+            preset_request(
+                failing_unchanged.revision(),
+                failing_lair,
+                Path::new("/tmp"),
+                &["/bin/true"],
+                &["/bin/true"],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(*failing.topology.read().await, failing_unchanged);
+        assert!(failing.runtimes.lock().await.handles().is_empty());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8465,6 +9119,15 @@ mod tests {
                 focused_splint_id: None,
             }
         ));
+        let preset = Request::MaterializePreset {
+            expected_topology_revision: TopologyRevision::default(),
+            target: PresetTarget::NewLair {
+                name: "preset".into(),
+            },
+            dojos: Vec::new(),
+        };
+        assert!(interactive_bypass(true, true, false, &preset));
+        assert!(!interactive_bypass(false, false, true, &preset));
         assert!(!intrinsically_authorized(
             &authorization::RequestAuthorization::TrustedUi,
             true,
