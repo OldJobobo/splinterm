@@ -24,6 +24,7 @@ export default defineConfig({
             { label: 'Installation', slug: 'docs/install' },
             { label: 'Quickstart', slug: 'docs/quickstart' },
             { label: 'Core concepts', slug: 'docs/concepts' },
+            { label: 'Why native Wayland?', slug: 'docs/wayland' },
           ],
         },
         {
@@ -32,6 +33,13 @@ export default defineConfig({
             { label: 'Sessions and persistence', slug: 'docs/sessions' },
             { label: 'Configuration', slug: 'docs/configure/configuration' },
             { label: 'Troubleshooting', slug: 'docs/troubleshooting' },
+          ],
+        },
+        {
+          label: 'Automation and integrations',
+          items: [
+            { label: 'Bounded automation', slug: 'docs/automation' },
+            { label: 'MCP adapter', slug: 'docs/mcp' },
           ],
         },
         {

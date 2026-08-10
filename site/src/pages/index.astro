@@ -49,8 +49,44 @@ const capabilities = [
     </ol>
   </section>
 
+  <section class="wayland-section shell-section" aria-labelledby="wayland-title">
+    <div class="section-index" aria-hidden="true">02 / Native presentation</div>
+    <div class="wayland-heading">
+      <p class="eyebrow">No XWayland in the middle</p>
+      <h2 id="wayland-title">Native where you look.<br />Persistent where you work.</h2>
+      <p>
+        Splinterm speaks directly to the Wayland compositor for input, scaling, clipboard,
+        IME, and frame timing. The window stays lightweight and disposable; the work remains
+        with <code>splinterd</code> below it.
+      </p>
+      <a class="text-link" href="/docs/wayland/">Why native Wayland matters <span aria-hidden="true">→</span></a>
+    </div>
+
+    <div class="wayland-path" aria-label="Splinterm presentation and persistence architecture">
+      <div><span>01</span><small>Compositor</small><strong>Hyprland / Wayland</strong></div>
+      <i aria-hidden="true">↓</i>
+      <div><span>02</span><small>Disposable view</small><strong>splinterm window</strong></div>
+      <i aria-hidden="true">↓</i>
+      <div><span>03</span><small>Persistent owner</small><strong>splinterd topology</strong></div>
+      <i aria-hidden="true">↓</i>
+      <div><span>04</span><small>Living work</small><strong>shells · layouts · scrollback</strong></div>
+    </div>
+
+    <div class="wayland-benefits">
+      <article><span>Scale</span><h3>Follow the output</h3><p>Compositor-aware geometry and fractional scaling across Wayland outputs.</p></article>
+      <article><span>Input</span><h3>Meet text where it enters</h3><p>Native keyboard, pointer, clipboard, compose, and IME/preedit handling.</p></article>
+      <article><span>Frames</span><h3>Draw only what changed</h3><p>Damage-driven rendering and compositor frame scheduling avoid blind full-window redraws.</p></article>
+      <article><span>Lifecycle</span><h3>Close the glass, not the work</h3><p>The Wayland client can disappear while daemon-owned sessions continue below it.</p></article>
+    </div>
+
+    <p class="wayland-boundary">
+      Native does not mean GPU-rendered or universally compatible. Splinterm currently uses
+      CPU/Wayland-SHM composition and is validated for the documented Omarchy/Arch and Hyprland target.
+    </p>
+  </section>
+
   <section class="control-section shell-section" aria-labelledby="control-title">
-    <div class="section-index" aria-hidden="true">02 / Shared substrate</div>
+    <div class="section-index" aria-hidden="true">03 / Shared substrate</div>
     <div class="control-heading">
       <h2 id="control-title">One Lair.<br />Two deliberate ways in.</h2>
       <p>Human hands and bounded automation can enter the same topology without inheriting the same authority.</p>
@@ -80,8 +116,65 @@ const capabilities = [
     <p class="boundary-note"><span aria-hidden="true">◆</span> Discipline is structural: terminal output remains data, never authority or automatic instruction.</p>
   </section>
 
+  <section class="automation-section shell-section" aria-labelledby="automation-title">
+    <div class="section-index" aria-hidden="true">04 / Bounded automation</div>
+    <div class="automation-heading">
+      <p class="eyebrow">One topology, closed authority</p>
+      <h2 id="automation-title">Useful enough to act.<br />Narrow enough to revoke.</h2>
+      <p>
+        Tools can inspect and operate the same Lairs, Dojos, and Splints visible to people—without
+        inheriting human graphical trust. Policy-controlled machine operations meet explicit identity,
+        scope, resource, and limit checks at the daemon.
+      </p>
+      <div class="automation-actions">
+        <a class="button primary" href="/docs/automation/">Understand bounded automation</a>
+        <a class="text-link" href="/docs/mcp/">Configure MCP <span aria-hidden="true">→</span></a>
+      </div>
+    </div>
+
+    <div class="automation-stack" aria-label="Automation authority flow">
+      <div class="automation-entry">
+        <span>Client</span>
+        <strong>MCP host · JSON/NDJSON · SSH relay</strong>
+      </div>
+      <i aria-hidden="true">↓</i>
+      <div class="automation-entry accent-entry">
+        <span>Policy identity</span>
+        <strong>exact executable path + digest where required</strong>
+      </div>
+      <i aria-hidden="true">↓</i>
+      <div class="automation-gate">
+        <span>Policy-controlled operations</span>
+        <ul>
+          <li>exact path + SHA-256</li>
+          <li>closed operation scopes</li>
+          <li>explicit resources</li>
+          <li>deadlines + result limits</li>
+        </ul>
+      </div>
+      <i aria-hidden="true">↓</i>
+      <div class="automation-entry">
+        <span>Authorized surface</span>
+        <strong>topology · terminal · control</strong>
+      </div>
+    </div>
+
+    <div class="automation-capabilities" aria-label="Automation capabilities">
+      <article><span>Inspect</span><strong>Read bounded state</strong><p>Discover topology, snapshots, scrollback, search results, authorization, and body-free audit metadata.</p></article>
+      <article><span>Operate</span><strong>Mutate explicitly</strong><p>Create, split, launch, input, resize, restore, rename, or close only when the exact operation is authorized.</p></article>
+      <article><span>Observe</span><strong>Subscribe and reconcile</strong><p>Follow topology, terminal, and control streams; stop and fetch fresh state when a resync is required.</p></article>
+    </div>
+
+    <div class="automation-facts" aria-label="MCP and automation boundaries">
+      <div><strong>32</strong><span>fixed MCP tools</span></div>
+      <div><strong>18</strong><span>closed policy scopes</span></div>
+      <div><strong>0</strong><span>daemon network listeners by default</span></div>
+      <p>Terminal output is untrusted data. It cannot grant authority, approve consent, alter policy, or become an instruction to call another tool.</p>
+    </div>
+  </section>
+
   <section class="performance-section shell-section" aria-labelledby="performance-title">
-    <div class="section-index" aria-hidden="true">03 / Measured footprint</div>
+    <div class="section-index" aria-hidden="true">05 / Measured footprint</div>
     <div class="performance-heading">
       <p class="eyebrow">Measured, not mythologized</p>
       <h2 id="performance-title">Foot-class light.<br />Built to multiply.</h2>
@@ -122,7 +215,7 @@ const capabilities = [
   </section>
 
   <section class="status-section shell-section" aria-labelledby="status-title">
-    <div class="section-index" aria-hidden="true">04 / Current state</div>
+    <div class="section-index" aria-hidden="true">06 / Current state</div>
     <div class="status-intro">
       <h2 id="status-title">Forged in private.<br />Not ready for daylight.</h2>
       <p>
@@ -165,6 +258,9 @@ const capabilities = [
       <a href="/docs/quickstart/"><span>Start using Splinterm</span><small>Install, launch, detach, and return.</small><i>↗</i></a>
       <a href="/docs/configure/configuration/"><span>Configure the terminal</span><small>Fonts, sizing, theme, panes, and migration.</small><i>↗</i></a>
       <a href="/docs/sessions/"><span>Understand persistence</span><small>Lairs, Dojos, Splints, windows, and lifecycle.</small><i>↗</i></a>
+      <a href="/docs/wayland/"><span>Why native Wayland</span><small>Direct compositor integration, practical benefits, and honest limits.</small><i>↗</i></a>
+      <a href="/docs/automation/"><span>Automate safely</span><small>Machine contracts, policy gates, controller ownership, and untrusted output.</small><i>↗</i></a>
+      <a href="/docs/mcp/"><span>Connect an MCP host</span><small>Install the adapter, authorize only what it needs, validate, and revoke.</small><i>↗</i></a>
       <a href="/docs/development/"><span>Develop and contribute</span><small>Workspace structure, checks, and architecture.</small><i>↗</i></a>
     </div>
   </section>

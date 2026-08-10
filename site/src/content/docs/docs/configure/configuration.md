@@ -57,6 +57,12 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `multiplexer.divider-style` | `line`, `frame`, or `none` | `line` |
 | `multiplexer.frame-title` | `splint` or `none` | `splint` |
 
+## Font sizing and Wayland scale
+
+The default `main.font-sizing-policy=output-scale` follows Wayland compositor output geometry, including fractional output scale. Choose `physical-dpi` when point-sized fonts should instead follow the output's reported mode and physical-size DPI.
+
+`main.font-pixelsize` and `main.font-point-size` are mutually exclusive. Pixel-sized fonts remain fixed according to the selected sizing policy; point-sized fonts are converted from the effective DPI. See [Why native Wayland?](/docs/wayland/) for how scaling fits into the native client.
+
 ## Omarchy theme integration
 
 With `main.theme` unset, Splinterm reads the active Omarchy theme from `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective `foot.ini` supplies terminal colors, selection, alpha, and blur; `colors.toml` supplies the Omarchy UI accent.
@@ -81,3 +87,5 @@ Copy supported values rather than copying a complete `foot.ini`:
 - Foot `shell`, scrollback lines, cursor style, alpha, and blur have bounded mappings.
 
 Arbitrary bindings, notifications, server mode, URL modes, and advanced rendering controls are not currently supported through Splinterm configuration.
+
+Theme alpha and blur are native Wayland presentation features. Blur is requested only when translucency is active, the theme enables it, and the compositor advertises compatible protocol support. Unsupported compositors continue without blur.

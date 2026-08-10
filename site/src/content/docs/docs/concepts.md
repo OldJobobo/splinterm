@@ -37,7 +37,7 @@ An individual terminal pane. It has a stable ID, terminal state, launch metadata
 
 ### Window
 
-A native Wayland toplevel managed by the compositor. A window displays one or more Dojos but does not own their process lifetime.
+A native Wayland toplevel managed by the compositor. It receives compositor scaling, input, clipboard, IME, and frame lifecycle events directly. A window displays one or more Dojos but does not own their process lifetime. See [Why native Wayland?](/docs/wayland/) for the practical benefits and current limits.
 
 ### Tab
 

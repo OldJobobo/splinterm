@@ -39,8 +39,26 @@ hero:
     <span class="route-meta">Configuration</span>
     <span class="route-arrow" aria-hidden="true">↗</span>
   </a>
-  <a href="/docs/development/">
+  <a href="/docs/wayland/">
     <span class="route-index">04</span>
+    <span class="route-copy"><strong>Understand the native client</strong><small>See what direct Wayland integration improves, how it differs, and where its limits are.</small></span>
+    <span class="route-meta">Native Wayland</span>
+    <span class="route-arrow" aria-hidden="true">↗</span>
+  </a>
+  <a href="/docs/automation/">
+    <span class="route-index">05</span>
+    <span class="route-copy"><strong>Automate safely</strong><small>Understand machine contracts, policy gates, controller ownership, audit, and untrusted output.</small></span>
+    <span class="route-meta">Automation</span>
+    <span class="route-arrow" aria-hidden="true">↗</span>
+  </a>
+  <a href="/docs/mcp/">
+    <span class="route-index">06</span>
+    <span class="route-copy"><strong>Connect an MCP host</strong><small>Install the adapter, authorize the minimum surface, validate it, and revoke it cleanly.</small></span>
+    <span class="route-meta">MCP adapter</span>
+    <span class="route-arrow" aria-hidden="true">↗</span>
+  </a>
+  <a href="/docs/development/">
+    <span class="route-index">07</span>
     <span class="route-copy"><strong>Work on the system</strong><small>Find architecture, contributor checks, and integration contracts.</small></span>
     <span class="route-meta">Development</span>
     <span class="route-arrow" aria-hidden="true">↗</span>

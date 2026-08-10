@@ -101,7 +101,7 @@ a:focus-visible { outline: 2px solid var(--signal); outline-offset: 4px; }
 .topology-scene figcaption strong { color: var(--ink); font-weight: 400; }
 
 .section-index { color: var(--dim); font: 400 .64rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
-.manifesto, .control-section, .performance-section, .status-section { border-top: 1px solid var(--line); padding-block: clamp(5rem, 9vw, 9rem); }
+.manifesto, .wayland-section, .control-section, .automation-section, .performance-section, .status-section { border-top: 1px solid var(--line); padding-block: clamp(5rem, 9vw, 9rem); }
 .manifesto { display: grid; grid-template-columns: .36fr 1.05fr 1fr; gap: 4vw; }
 h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter-spacing: -.06em; font-weight: 500; }
 .manifesto-copy p, .control-heading p, .status-intro p { max-width: 650px; margin: 1.8rem 0 0; color: var(--muted); font-size: 1rem; line-height: 1.75; }
@@ -110,6 +110,30 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
 .sequence li { display: grid; grid-template-columns: 42px 90px 1fr; gap: .8rem; align-items: baseline; padding: 1.3rem 0; border-bottom: 1px solid var(--line); }
 .sequence span, .sequence small { color: var(--dim); font: 300 .67rem/1.5 var(--mono); }
 .sequence strong { font-size: .9rem; font-weight: 600; }
+
+.wayland-section {
+  display: grid;
+  grid-template-columns: .36fr .82fr 1.18fr;
+  gap: 4vw;
+  background: linear-gradient(110deg, transparent 0 57%, rgb(218 147 54 / .04) 57% 100%);
+}
+.wayland-heading { grid-column: 2; }
+.wayland-heading .eyebrow { color: var(--signal); }
+.wayland-heading p:not(.eyebrow) { max-width: 630px; margin: 1.8rem 0 0; color: var(--muted); line-height: 1.75; }
+.wayland-heading code { padding: .1em .35em; color: var(--signal); background: var(--signal-dark); }
+.wayland-path { position: relative; grid-column: 3; grid-row: 1 / span 2; align-self: start; border: 1px solid var(--line-hot); background: #171719; box-shadow: 18px 18px 0 #191719, 18px 18px 0 1px var(--line); }
+.wayland-path div { position: relative; display: grid; grid-template-columns: 2.3rem 1fr; gap: .1rem 1rem; align-items: center; min-height: 82px; padding: 1rem 1.4rem; border-bottom: 1px solid var(--line); }
+.wayland-path div:last-child { border-bottom: 0; }
+.wayland-path div span { grid-row: 1 / span 2; color: var(--signal); font: 400 .62rem var(--mono); }
+.wayland-path div small { color: var(--dim); font: 400 .58rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.wayland-path div strong { font: 500 clamp(.85rem, 1.3vw, 1.05rem) var(--mono); }
+.wayland-path i { position: absolute; left: calc(50% - .7rem); z-index: 2; display: grid; width: 1.4rem; height: 1.4rem; place-items: center; margin-top: -.7rem; border: 1px solid var(--line-hot); color: var(--signal); background: var(--ground); font: normal .62rem var(--mono); }
+.wayland-benefits { grid-column: 2 / 4; display: grid; grid-template-columns: repeat(4, 1fr); margin-top: clamp(3rem, 6vw, 5.5rem); border-top: 1px solid var(--line-hot); border-left: 1px solid var(--line); }
+.wayland-benefits article { min-height: 250px; padding: 1.5rem; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.wayland-benefits span { color: var(--signal); font: 400 .61rem var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+.wayland-benefits h3 { max-width: 220px; margin: 4.5rem 0 .8rem; font-size: 1.25rem; line-height: 1.1; letter-spacing: -.035em; }
+.wayland-benefits p { margin: 0; color: var(--muted); font-size: .82rem; line-height: 1.65; }
+.wayland-boundary { grid-column: 2 / 4; max-width: 920px; margin: 1.2rem 0 0; color: var(--dim); font: 300 .66rem/1.65 var(--mono); }
 
 .control-section { display: grid; grid-template-columns: .36fr 1.64fr; gap: 4vw; }
 .control-heading { display: grid; grid-template-columns: 1.15fr .85fr; gap: 5vw; align-items: end; grid-column: 2; }
@@ -126,6 +150,42 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
 .control-card li::before { content: '+ '; color: var(--signal); }
 .boundary-note { grid-column: 2; margin: 1rem 0 0; color: var(--dim); font: 300 .68rem var(--mono); }
 .boundary-note span { color: var(--ember); }
+
+.automation-section {
+  display: grid;
+  grid-template-columns: .36fr .9fr 1.1fr;
+  gap: 4vw;
+  background:
+    linear-gradient(rgb(218 147 54 / .035) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(218 147 54 / .035) 1px, transparent 1px),
+    #171719;
+  background-size: 42px 42px;
+}
+.automation-heading { grid-column: 2; }
+.automation-heading .eyebrow { color: var(--signal); }
+.automation-heading > p:not(.eyebrow) { max-width: 660px; margin: 1.8rem 0 0; color: var(--muted); line-height: 1.75; }
+.automation-actions { display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; align-items: center; margin-top: 2.2rem; }
+.automation-actions .text-link { margin-top: 0; }
+.automation-stack { grid-column: 3; grid-row: 1 / span 2; align-self: start; padding: 1rem; border: 1px solid var(--line-hot); background: var(--ground); box-shadow: 18px 18px 0 rgb(14 14 16 / .7); }
+.automation-stack > i { display: block; height: 1.5rem; padding-left: 1.35rem; color: var(--signal); font: normal .62rem/1.5rem var(--mono); }
+.automation-entry, .automation-gate { padding: 1.25rem 1.4rem; border: 1px solid var(--line); background: var(--panel); }
+.automation-entry span, .automation-gate > span { display: block; margin-bottom: .45rem; color: var(--dim); font: 400 .58rem var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+.automation-entry strong { font: 500 clamp(.78rem, 1.2vw, .95rem)/1.5 var(--mono); }
+.automation-entry.accent-entry { border-left: 3px solid var(--signal); background: linear-gradient(90deg, var(--signal-dark), var(--panel) 42%); }
+.automation-gate { border-color: var(--signal); }
+.automation-gate ul { display: grid; grid-template-columns: 1fr 1fr; gap: .55rem 1rem; margin: 1rem 0 0; padding: 0; list-style: none; }
+.automation-gate li { color: var(--muted); font: 300 .64rem/1.5 var(--mono); }
+.automation-gate li::before { content: '+ '; color: var(--signal); }
+.automation-capabilities { grid-column: 2 / 4; display: grid; grid-template-columns: repeat(3, 1fr); margin-top: clamp(3rem, 6vw, 5.5rem); border-top: 1px solid var(--line-hot); border-left: 1px solid var(--line); }
+.automation-capabilities article { min-height: 240px; padding: 1.5rem; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--ground) 88%, transparent); }
+.automation-capabilities article > span { color: var(--signal); font: 400 .61rem var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+.automation-capabilities article > strong { display: block; margin-top: 4.5rem; font-size: 1.25rem; letter-spacing: -.035em; }
+.automation-capabilities article > p { margin: .8rem 0 0; color: var(--muted); font-size: .82rem; line-height: 1.65; }
+.automation-facts { grid-column: 2 / 4; display: grid; grid-template-columns: repeat(3, minmax(110px, .35fr)) minmax(280px, 1fr); gap: 1rem; align-items: stretch; margin-top: 1rem; }
+.automation-facts > div, .automation-facts > p { min-height: 108px; margin: 0; padding: 1rem; border: 1px solid var(--line); background: var(--ground); }
+.automation-facts > div strong { display: block; color: var(--signal); font-size: 2rem; line-height: 1; letter-spacing: -.06em; }
+.automation-facts > div span { display: block; margin-top: .65rem; color: var(--dim); font: 300 .59rem/1.45 var(--mono); text-transform: uppercase; }
+.automation-facts > p { display: flex; align-items: center; color: var(--muted); font: 300 .66rem/1.65 var(--mono); }
 
 .performance-section {
   display: grid;
@@ -201,13 +261,25 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
 @media (max-width: 960px) {
   .hero { grid-template-columns: 1fr; }
   .topology-scene { margin: 1rem 0 2rem; }
-  .manifesto, .performance-section, .status-section { grid-template-columns: 1fr; }
+  .manifesto, .wayland-section, .automation-section, .performance-section, .status-section { grid-template-columns: 1fr; }
+  .wayland-heading, .wayland-path, .wayland-benefits, .wayland-boundary { grid-column: 1; }
+  .wayland-path { grid-row: auto; margin-top: 2rem; }
+  .wayland-benefits { grid-template-columns: 1fr 1fr; }
   .control-section { grid-template-columns: 1fr; }
   .control-heading, .control-grid, .boundary-note { grid-column: 1; }
+  .automation-heading, .automation-stack, .automation-capabilities, .automation-facts { grid-column: 1; }
+  .automation-stack { grid-row: auto; margin-top: 2rem; }
+  .automation-facts { grid-template-columns: repeat(3, 1fr); }
+  .automation-facts > p { grid-column: 1 / 4; }
   .performance-heading, .performance-feature, .benchmark-grid, .benchmark-note { grid-column: 1; }
   .performance-feature { grid-row: auto; margin-top: 2rem; }
   .control-heading { grid-template-columns: 1fr; }
   .first-workflow, .docs-gateway { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .automation-facts { grid-template-columns: 1fr; }
+  .automation-facts > p { grid-column: 1; }
 }
 
 @media (max-width: 680px) {
@@ -219,7 +291,13 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
   .topology-canvas { min-height: 390px; }
   .window { width: 155px; }
   .topology-scene figcaption { grid-template-columns: 1fr; }
-  .control-grid, .benchmark-grid { grid-template-columns: 1fr; }
+  .control-grid, .benchmark-grid, .wayland-benefits, .automation-capabilities, .automation-facts { grid-template-columns: 1fr; }
+  .automation-gate ul { grid-template-columns: 1fr; }
+  .automation-capabilities article { min-height: 210px; }
+  .automation-capabilities article > strong { margin-top: 3rem; }
+  .automation-facts > p { grid-column: 1; }
+  .wayland-benefits article { min-height: 210px; }
+  .wayland-benefits h3 { margin-top: 3rem; }
   .control-card { min-height: 340px; }
   .performance-feature { min-height: 320px; }
   .performance-feature > strong { margin-top: 4rem; font-size: clamp(4.2rem, 20vw, 6.5rem); }

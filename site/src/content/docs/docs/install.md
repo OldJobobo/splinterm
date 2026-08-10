@@ -48,4 +48,4 @@ The installer does not:
 - enable persistent systemd user lingering; or
 - opt a fresh installation into the optional MCP package.
 
-Continue to the [quickstart](/docs/quickstart/) after installation.
+Continue to the [quickstart](/docs/quickstart/) after installation. If an MCP host needs bounded access, follow the separate [MCP adapter setup](/docs/mcp/); installing the adapter alone grants no authority.
