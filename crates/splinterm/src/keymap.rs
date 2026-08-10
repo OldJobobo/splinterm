@@ -6,12 +6,13 @@
 use std::{
     fmt, fs,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-pub const BUILT_IN_PROFILE_NAMES: &[&str] = &["splinterm"];
+pub const BUILT_IN_PROFILE_NAMES: &[&str] = &["splinterm", "omarchy-tmux"];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ActionId {
@@ -34,6 +35,15 @@ pub enum ActionId {
     CloseFocusedPane,
     ResizePaneSmaller,
     ResizePaneLarger,
+    ResizePaneLeftFive,
+    ResizePaneRightFive,
+    ResizePaneUpFive,
+    ResizePaneDownFive,
+    TogglePaneZoom,
+    BindingHelp,
+    CopyModeUnavailable,
+    ConfigReload,
+    SendPrefix,
     SearchScrollback,
     PageUp,
     PageDown,
@@ -68,6 +78,14 @@ impl ActionId {
         Self::CloseFocusedPane,
         Self::ResizePaneSmaller,
         Self::ResizePaneLarger,
+        Self::ResizePaneLeftFive,
+        Self::ResizePaneRightFive,
+        Self::ResizePaneUpFive,
+        Self::ResizePaneDownFive,
+        Self::TogglePaneZoom,
+        Self::BindingHelp,
+        Self::ConfigReload,
+        Self::SendPrefix,
         Self::SearchScrollback,
         Self::PageUp,
         Self::PageDown,
@@ -107,6 +125,15 @@ impl ActionId {
             Self::CloseFocusedPane => "pane.close",
             Self::ResizePaneSmaller => "pane.resize-smaller",
             Self::ResizePaneLarger => "pane.resize-larger",
+            Self::ResizePaneLeftFive => "pane.resize-left-5",
+            Self::ResizePaneRightFive => "pane.resize-right-5",
+            Self::ResizePaneUpFive => "pane.resize-up-5",
+            Self::ResizePaneDownFive => "pane.resize-down-5",
+            Self::TogglePaneZoom => "pane.zoom-toggle",
+            Self::BindingHelp => "app.binding-help",
+            Self::CopyModeUnavailable => "copy-mode.unavailable",
+            Self::ConfigReload => "app.config-reload",
+            Self::SendPrefix => "terminal.send-prefix",
             Self::SearchScrollback => "history.search",
             Self::PageUp => "history.page-up",
             Self::PageDown => "history.page-down",
@@ -143,6 +170,7 @@ impl ActionId {
 pub enum KeymapProfile {
     #[default]
     Splinterm,
+    OmarchyTmux,
 }
 
 impl KeymapProfile {
@@ -153,6 +181,7 @@ impl KeymapProfile {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "splinterm" => Ok(Self::Splinterm),
+            "omarchy-tmux" => Ok(Self::OmarchyTmux),
             _ => bail!(
                 "unknown keymap profile '{value}'; available profiles: {}",
                 BUILT_IN_PROFILE_NAMES.join(", ")
@@ -164,6 +193,7 @@ impl KeymapProfile {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Splinterm => "splinterm",
+            Self::OmarchyTmux => "omarchy-tmux",
         }
     }
 }
@@ -173,6 +203,9 @@ pub enum KeyIdentity {
     Character(char),
     Tab,
     Enter,
+    Escape,
+    Space,
+    Slash,
     Backslash,
     BracketLeft,
     BracketRight,
@@ -195,6 +228,9 @@ impl KeyIdentity {
             Self::Character(character) => character.to_ascii_uppercase().to_string(),
             Self::Tab => "Tab".to_owned(),
             Self::Enter => "Enter".to_owned(),
+            Self::Escape => "Escape".to_owned(),
+            Self::Space => "Space".to_owned(),
+            Self::Slash => "Slash".to_owned(),
             Self::Backslash => "Backslash".to_owned(),
             Self::BracketLeft => "BracketLeft".to_owned(),
             Self::BracketRight => "BracketRight".to_owned(),
@@ -339,10 +375,26 @@ impl fmt::Display for BindingSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NormalizedSequence {
+    Direct(NormalizedChord),
+    Prefix(NormalizedChord),
+}
+
+impl NormalizedSequence {
+    #[must_use]
+    pub fn display(self) -> String {
+        match self {
+            Self::Direct(chord) => chord.display(),
+            Self::Prefix(chord) => format!("Prefix {}", chord.display()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedBinding {
     chord: KeyChord,
-    normalized: NormalizedChord,
+    sequence: NormalizedSequence,
     action: ActionId,
     display: String,
     source: BindingSource,
@@ -365,14 +417,43 @@ impl ResolvedBinding {
     }
 
     #[must_use]
-    pub const fn normalized(&self) -> NormalizedChord {
-        self.normalized
+    pub const fn normalized(&self) -> NormalizedSequence {
+        self.sequence
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PrefixState {
+    #[default]
+    Idle,
+    Armed {
+        raw_code: u32,
+        deadline: Instant,
+    },
+}
+
+impl PrefixState {
+    pub fn clear(&mut self) {
+        *self = Self::Idle;
+    }
+
+    #[must_use]
+    pub fn is_armed(self) -> bool {
+        matches!(self, Self::Armed { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeymapPress {
+    PassThrough,
+    PrefixModifier,
+    Consumed(Option<ActionId>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedKeymap {
     profile: KeymapProfile,
+    prefixes: Vec<NormalizedChord>,
     bindings: Vec<ResolvedBinding>,
 }
 
@@ -387,8 +468,51 @@ impl ResolvedKeymap {
     pub fn action(&self, key: KeyIdentity, modifiers: ActiveModifiers) -> Option<ActionId> {
         self.bindings
             .iter()
+            .filter(|binding| matches!(binding.sequence, NormalizedSequence::Direct(_)))
             .find(|binding| binding.chord.key == key && binding.chord.modifiers.matches(modifiers))
             .map(|binding| binding.action)
+    }
+
+    #[must_use]
+    pub fn press(
+        &self,
+        state: &mut PrefixState,
+        key: KeyIdentity,
+        modifiers: ActiveModifiers,
+        raw_code: u32,
+        now: Instant,
+        timeout: Duration,
+    ) -> KeymapPress {
+        if matches!(*state, PrefixState::Armed { deadline, .. } if now >= deadline) {
+            state.clear();
+        }
+        if state.is_armed() {
+            state.clear();
+            let action = self
+                .bindings
+                .iter()
+                .filter(|binding| matches!(binding.sequence, NormalizedSequence::Prefix(_)))
+                .find(|binding| {
+                    binding.chord.key == key && binding.chord.modifiers.matches(modifiers)
+                })
+                .map(|binding| binding.action);
+            return KeymapPress::Consumed(action);
+        }
+        if self
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.key == key && prefix.modifiers == modifiers)
+        {
+            *state = PrefixState::Armed {
+                raw_code,
+                deadline: now + timeout,
+            };
+            return KeymapPress::Consumed(None);
+        }
+        self.action(key, modifiers)
+            .map_or(KeymapPress::PassThrough, |action| {
+                KeymapPress::Consumed(Some(action))
+            })
     }
 
     #[must_use]
@@ -402,6 +526,11 @@ impl ResolvedKeymap {
     #[must_use]
     pub const fn profile(&self) -> KeymapProfile {
         self.profile
+    }
+
+    #[must_use]
+    pub fn prefixes(&self) -> &[NormalizedChord] {
+        &self.prefixes
     }
 
     #[must_use]
@@ -460,7 +589,7 @@ fn built_in_binding(
 ) -> ResolvedBinding {
     ResolvedBinding {
         chord: KeyChord { modifiers, key },
-        normalized,
+        sequence: NormalizedSequence::Direct(normalized),
         action,
         display: display.to_owned(),
         source: BindingSource::BuiltIn {
@@ -469,16 +598,42 @@ fn built_in_binding(
     }
 }
 
+fn omarchy_binding(
+    sequence: NormalizedSequence,
+    action: ActionId,
+    display: &str,
+) -> ResolvedBinding {
+    let normalized = match sequence {
+        NormalizedSequence::Direct(chord) | NormalizedSequence::Prefix(chord) => chord,
+    };
+    ResolvedBinding {
+        chord: KeyChord {
+            modifiers: ModifierPattern::exact(normalized.modifiers),
+            key: normalized.key,
+        },
+        sequence,
+        action,
+        display: display.to_owned(),
+        source: BindingSource::BuiltIn {
+            profile: "omarchy-tmux",
+        },
+    }
+}
+
 fn normalized(ctrl: bool, shift: bool, key: KeyIdentity) -> NormalizedChord {
-    NormalizedChord {
-        modifiers: ActiveModifiers {
+    normalized_with(
+        ActiveModifiers {
             ctrl,
             shift,
             alt: false,
             logo: false,
         },
         key,
-    }
+    )
+}
+
+const fn normalized_with(modifiers: ActiveModifiers, key: KeyIdentity) -> NormalizedChord {
+    NormalizedChord { modifiers, key }
 }
 
 #[must_use]
@@ -490,6 +645,7 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
     match profile {
         KeymapProfile::Splinterm => ResolvedKeymap {
             profile,
+            prefixes: Vec::new(),
             bindings: vec![
                 built_in_binding(
                     CTRL_SHIFT_NO_ALT_LOGO,
@@ -710,6 +866,130 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                 ),
             ],
         },
+        KeymapProfile::OmarchyTmux => {
+            let mut keymap = built_in_keymap(KeymapProfile::Splinterm);
+            keymap.profile = profile;
+            let chord = |ctrl, shift, alt, key| {
+                normalized_with(
+                    ActiveModifiers {
+                        ctrl,
+                        shift,
+                        alt,
+                        logo: false,
+                    },
+                    key,
+                )
+            };
+            keymap.prefixes = vec![
+                chord(true, false, false, KeyIdentity::Space),
+                chord(true, false, false, KeyIdentity::Character('b')),
+            ];
+            let direct =
+                |ctrl, shift, alt, key| NormalizedSequence::Direct(chord(ctrl, shift, alt, key));
+            let prefixed =
+                |ctrl, shift, key| NormalizedSequence::Prefix(chord(ctrl, shift, false, key));
+            keymap.bindings.splice(
+                0..0,
+                [
+                    omarchy_binding(
+                        prefixed(true, false, KeyIdentity::Space),
+                        ActionId::SendPrefix,
+                        "Prefix Ctrl+Space",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Slash),
+                        ActionId::BindingHelp,
+                        "Prefix ?",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::BracketLeft),
+                        ActionId::CopyModeUnavailable,
+                        "Prefix [ (unavailable)",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('q')),
+                        ActionId::ConfigReload,
+                        "Prefix Q",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Enter),
+                        ActionId::SplitHorizontal,
+                        "Alt+Enter",
+                    ),
+                    omarchy_binding(
+                        direct(false, true, true, KeyIdentity::Enter),
+                        ActionId::SplitVertical,
+                        "Alt+Shift+Enter",
+                    ),
+                    omarchy_binding(
+                        direct(false, false, true, KeyIdentity::Escape),
+                        ActionId::CloseFocusedPane,
+                        "Alt+Escape",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('h')),
+                        ActionId::SplitHorizontal,
+                        "Prefix H",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('v')),
+                        ActionId::SplitVertical,
+                        "Prefix V",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('x')),
+                        ActionId::CloseFocusedPane,
+                        "Prefix X",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('z')),
+                        ActionId::TogglePaneZoom,
+                        "Prefix Z",
+                    ),
+                    omarchy_binding(
+                        direct(true, false, true, KeyIdentity::Left),
+                        ActionId::FocusLeft,
+                        "Ctrl+Alt+Left",
+                    ),
+                    omarchy_binding(
+                        direct(true, false, true, KeyIdentity::Right),
+                        ActionId::FocusRight,
+                        "Ctrl+Alt+Right",
+                    ),
+                    omarchy_binding(
+                        direct(true, false, true, KeyIdentity::Up),
+                        ActionId::FocusUp,
+                        "Ctrl+Alt+Up",
+                    ),
+                    omarchy_binding(
+                        direct(true, false, true, KeyIdentity::Down),
+                        ActionId::FocusDown,
+                        "Ctrl+Alt+Down",
+                    ),
+                    omarchy_binding(
+                        direct(true, true, true, KeyIdentity::Left),
+                        ActionId::ResizePaneLeftFive,
+                        "Ctrl+Alt+Shift+Left",
+                    ),
+                    omarchy_binding(
+                        direct(true, true, true, KeyIdentity::Right),
+                        ActionId::ResizePaneRightFive,
+                        "Ctrl+Alt+Shift+Right",
+                    ),
+                    omarchy_binding(
+                        direct(true, true, true, KeyIdentity::Up),
+                        ActionId::ResizePaneUpFive,
+                        "Ctrl+Alt+Shift+Up",
+                    ),
+                    omarchy_binding(
+                        direct(true, true, true, KeyIdentity::Down),
+                        ActionId::ResizePaneDownFive,
+                        "Ctrl+Alt+Shift+Down",
+                    ),
+                ],
+            );
+            keymap
+        }
     }
 }
 
@@ -781,7 +1061,9 @@ pub(crate) fn resolve_keymap_text(
             selected_profile.name()
         );
     }
-    let mut bindings = built_in_keymap(inherited_profile).bindings;
+    let inherited = built_in_keymap(inherited_profile);
+    let prefixes = inherited.prefixes;
+    let mut bindings = inherited.bindings;
     let mut diagnostics = Vec::new();
     let mut validation_errors = Vec::new();
     for unbind in document.unbind {
@@ -798,7 +1080,7 @@ pub(crate) fn resolve_keymap_text(
             }
         };
         let before = bindings.len();
-        bindings.retain(|binding| binding.normalized != chord);
+        bindings.retain(|binding| binding.sequence != chord);
         if bindings.len() == before {
             diagnostics.push(format!(
                 "{}:{line}: unbind {} matched no inherited binding",
@@ -827,14 +1109,35 @@ pub(crate) fn resolve_keymap_text(
                 continue;
             }
         };
-        let chord = KeyChord {
-            modifiers: ModifierPattern::exact(normalized.modifiers),
-            key: normalized.key,
+        if matches!(normalized, NormalizedSequence::Prefix(_)) && prefixes.is_empty() {
+            validation_errors.push(format!(
+                "{}:{line}: profile '{}' defines no prefix chords",
+                path.display(),
+                inherited_profile.name()
+            ));
+            continue;
+        }
+        let normalized_chord = match normalized {
+            NormalizedSequence::Direct(chord) | NormalizedSequence::Prefix(chord) => chord,
         };
-        if let Some(existing) = bindings
-            .iter()
-            .find(|existing| chords_overlap(existing.chord, chord))
+        let chord = KeyChord {
+            modifiers: ModifierPattern::exact(normalized_chord.modifiers),
+            key: normalized_chord.key,
+        };
+        if matches!(normalized, NormalizedSequence::Direct(_))
+            && prefixes.contains(&normalized_chord)
         {
+            validation_errors.push(format!(
+                "{}:{line}: direct chord {} is reserved as a profile prefix",
+                path.display(),
+                normalized.display()
+            ));
+            continue;
+        }
+        if let Some(existing) = bindings.iter().find(|existing| {
+            std::mem::discriminant(&existing.sequence) == std::mem::discriminant(&normalized)
+                && chords_overlap(existing.chord, chord)
+        }) {
             validation_errors.push(format!(
                 "{}:{line}: chord {} for {} conflicts with {} from {}",
                 path.display(),
@@ -847,7 +1150,7 @@ pub(crate) fn resolve_keymap_text(
         }
         bindings.push(ResolvedBinding {
             chord,
-            normalized,
+            sequence: normalized,
             action,
             display: normalized.display(),
             source: BindingSource::User {
@@ -865,6 +1168,7 @@ pub(crate) fn resolve_keymap_text(
     Ok(KeymapResolution {
         keymap: ResolvedKeymap {
             profile: inherited_profile,
+            prefixes,
             bindings,
         },
         diagnostics,
@@ -879,14 +1183,15 @@ fn line_at_byte(text: &str, byte: usize) -> usize {
         + 1
 }
 
-fn parse_sequence(sequence: &[String]) -> Result<NormalizedChord> {
-    if sequence.len() != 1 {
-        if sequence.first().is_some_and(|part| part == "Prefix") {
-            bail!("prefix sequences are not available until the prefix-key milestone");
+fn parse_sequence(sequence: &[String]) -> Result<NormalizedSequence> {
+    match sequence {
+        [chord] => Ok(NormalizedSequence::Direct(parse_chord(chord)?)),
+        [prefix, chord] if prefix.eq_ignore_ascii_case("Prefix") => {
+            Ok(NormalizedSequence::Prefix(parse_chord(chord)?))
         }
-        bail!("sequence must contain exactly one direct chord");
+        [prefix, _] => bail!("unknown sequence start '{prefix}'; expected Prefix"),
+        _ => bail!("sequence must contain one direct chord or Prefix plus one chord"),
     }
-    parse_chord(&sequence[0])
 }
 
 fn parse_chord(value: &str) -> Result<NormalizedChord> {
@@ -915,6 +1220,16 @@ fn parse_chord(value: &str) -> Result<NormalizedChord> {
     let key = match key_name.to_ascii_lowercase().as_str() {
         "tab" => KeyIdentity::Tab,
         "enter" | "return" | "kp_enter" => KeyIdentity::Enter,
+        "escape" | "esc" => KeyIdentity::Escape,
+        "space" => KeyIdentity::Space,
+        "slash" | "/" => KeyIdentity::Slash,
+        "?" => {
+            if active.shift {
+                bail!("duplicate modifier 'Shift' for '?' alias");
+            }
+            active.shift = true;
+            KeyIdentity::Slash
+        }
         "backslash" | "\\" => KeyIdentity::Backslash,
         "bracketleft" | "[" => KeyIdentity::BracketLeft,
         "bracketright" | "]" => KeyIdentity::BracketRight,
@@ -979,12 +1294,15 @@ mod tests {
         }
         for (index, left) in keymap.bindings().iter().enumerate() {
             for right in &keymap.bindings()[index + 1..] {
-                assert!(
-                    !chords_overlap(left.chord, right.chord),
-                    "overlapping chords: {} and {}",
-                    left.display,
-                    right.display
-                );
+                if std::mem::discriminant(&left.sequence) == std::mem::discriminant(&right.sequence)
+                {
+                    assert!(
+                        !chords_overlap(left.chord, right.chord),
+                        "overlapping chords: {} and {}",
+                        left.display,
+                        right.display
+                    );
+                }
             }
         }
     }
@@ -1006,7 +1324,11 @@ mod tests {
         assert!(parse_chord("Ctrl+Ctrl+P").is_err());
         assert!(parse_chord("Ctrl++").is_err());
         assert!(parse_chord("Hyper+P").is_err());
-        assert!(parse_chord("Ctrl+?").is_err());
+        assert_eq!(
+            parse_chord("Ctrl+?").unwrap(),
+            parse_chord("Ctrl+Shift+Slash").unwrap()
+        );
+        assert!(parse_chord("Ctrl+Shift+?").is_err());
     }
 
     #[test]
@@ -1102,7 +1424,7 @@ mod tests {
             "Super+Logo+A",
             "Hyper+A",
             "Ctrl",
-            "Ctrl+?",
+            "Ctrl+Shift+?",
             "Ctrl+1",
             "Ctrl+F1",
         ] {
@@ -1179,7 +1501,7 @@ action = "clipboard.paste"
         );
         let multiple = resolve_keymap_text(
             KeymapProfile::Splinterm,
-            "version = 1\n[[binding]]\nsequence = [\"Ctrl+?\"]\naction = \"dojo.new\"\n[[binding]]\nsequence = [\"Ctrl+A\"]\naction = \"shell.run\"",
+            "version = 1\n[[binding]]\nsequence = [\"Ctrl+*\"]\naction = \"dojo.new\"\n[[binding]]\nsequence = [\"Ctrl+A\"]\naction = \"shell.run\"",
             path,
         )
         .unwrap_err()
@@ -1189,7 +1511,7 @@ action = "clipboard.paste"
     }
 
     #[test]
-    fn unmatched_unbind_is_a_diagnostic_and_prefix_is_not_silently_accepted() {
+    fn unmatched_unbind_is_a_diagnostic_and_prefix_requires_a_profile_prefix() {
         let path = Path::new("keybindings.toml");
         let unmatched = "version = 1\n[[unbind]]\nsequence = [\"Ctrl+A\"]";
         let resolved = resolve_keymap_text(KeymapProfile::Splinterm, unmatched, path).unwrap();
@@ -1197,5 +1519,144 @@ action = "clipboard.paste"
         let prefix =
             "version = 1\n[[binding]]\nsequence = [\"Prefix\", \"c\"]\naction = \"dojo.new\"";
         assert!(resolve_keymap_text(KeymapProfile::Splinterm, prefix, path).is_err());
+    }
+
+    #[test]
+    fn omarchy_profile_has_two_prefixes_and_direct_pane_bindings() {
+        let keymap = built_in_keymap(KeymapProfile::OmarchyTmux);
+        assert_eq!(keymap.prefixes().len(), 2);
+        assert_eq!(
+            keymap.action(
+                KeyIdentity::Enter,
+                ActiveModifiers {
+                    alt: true,
+                    ..ActiveModifiers::default()
+                }
+            ),
+            Some(ActionId::SplitHorizontal)
+        );
+        assert_eq!(
+            keymap.action(
+                KeyIdentity::Left,
+                ActiveModifiers {
+                    ctrl: true,
+                    shift: true,
+                    alt: true,
+                    ..ActiveModifiers::default()
+                }
+            ),
+            Some(ActionId::ResizePaneLeftFive)
+        );
+        assert_eq!(keymap.primary_shortcut(ActionId::BindingHelp), "Prefix ?");
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::CopyModeUnavailable),
+            "Prefix [ (unavailable)"
+        );
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::SplitHorizontal),
+            "Alt+Enter"
+        );
+    }
+
+    #[test]
+    fn prefix_press_timeout_unknown_key_and_send_prefix_are_bounded() {
+        let keymap = built_in_keymap(KeymapProfile::OmarchyTmux);
+        let mut state = PrefixState::Idle;
+        let now = Instant::now();
+        let timeout = Duration::from_millis(750);
+        assert_eq!(
+            keymap.press(
+                &mut state,
+                KeyIdentity::Space,
+                ActiveModifiers {
+                    ctrl: true,
+                    ..ActiveModifiers::default()
+                },
+                10,
+                now,
+                timeout,
+            ),
+            KeymapPress::Consumed(None)
+        );
+        assert!(state.is_armed());
+        assert_eq!(
+            keymap.press(
+                &mut state,
+                KeyIdentity::Space,
+                ActiveModifiers {
+                    ctrl: true,
+                    ..ActiveModifiers::default()
+                },
+                11,
+                now + Duration::from_millis(1),
+                timeout,
+            ),
+            KeymapPress::Consumed(Some(ActionId::SendPrefix))
+        );
+        assert!(!state.is_armed());
+
+        let _ = keymap.press(
+            &mut state,
+            KeyIdentity::Character('b'),
+            ActiveModifiers {
+                ctrl: true,
+                ..ActiveModifiers::default()
+            },
+            12,
+            now,
+            timeout,
+        );
+        assert_eq!(
+            keymap.press(
+                &mut state,
+                KeyIdentity::Character('a'),
+                ActiveModifiers::default(),
+                13,
+                now + Duration::from_millis(751),
+                timeout,
+            ),
+            KeymapPress::PassThrough
+        );
+
+        let _ = keymap.press(
+            &mut state,
+            KeyIdentity::Space,
+            ActiveModifiers {
+                ctrl: true,
+                ..ActiveModifiers::default()
+            },
+            14,
+            now,
+            timeout,
+        );
+        assert_eq!(
+            keymap.press(
+                &mut state,
+                KeyIdentity::Character('a'),
+                ActiveModifiers::default(),
+                15,
+                now + Duration::from_millis(1),
+                timeout,
+            ),
+            KeymapPress::Consumed(None)
+        );
+    }
+
+    #[test]
+    fn omarchy_overlay_can_replace_a_prefix_sequence() {
+        let path = Path::new("keybindings.toml");
+        let text = r#"
+version = 1
+inherits = "omarchy-tmux"
+[[unbind]]
+sequence = ["Prefix", "x"]
+[[binding]]
+sequence = ["Prefix", "x"]
+action = "pane.zoom-toggle"
+"#;
+        let resolved = resolve_keymap_text(KeymapProfile::OmarchyTmux, text, path).unwrap();
+        assert!(resolved.keymap.bindings().iter().any(|binding| {
+            binding.action() == ActionId::TogglePaneZoom && binding.display() == "Prefix X"
+        }));
     }
 }

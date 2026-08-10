@@ -1,7 +1,9 @@
 //! Pure shortcut resolution before adapter-side effects.
 
+use std::time::{Duration, Instant};
+
 use crate::{
-    keymap::{ActionId, ActiveModifiers, KeyIdentity, ResolvedKeymap},
+    keymap::{ActionId, ActiveModifiers, KeyIdentity, KeymapPress, PrefixState, ResolvedKeymap},
     pane::FocusDirection,
 };
 use smithay_client_toolkit::seat::keyboard::{Keysym, Modifiers};
@@ -11,6 +13,7 @@ pub(in crate::wayland) enum PaneTopologyAction {
     Split(splinterm_core::Axis),
     Close,
     AdjustRatio(i16),
+    ResizeCells(FocusDirection, u16),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,20 +22,49 @@ pub(in crate::wayland) enum CommandPaletteShortcutAction {
     Consume,
 }
 
+fn active_modifiers(modifiers: Modifiers) -> ActiveModifiers {
+    ActiveModifiers {
+        ctrl: modifiers.ctrl,
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        logo: modifiers.logo,
+    }
+}
+
 pub(in crate::wayland) fn shortcut_action_for(
     keymap: &ResolvedKeymap,
     keysym: Keysym,
     modifiers: Modifiers,
 ) -> Option<ActionId> {
-    let key = key_identity(keysym)?;
-    keymap.action(
+    keymap.action(key_identity(keysym)?, active_modifiers(modifiers))
+}
+
+pub(in crate::wayland) fn keymap_press_for(
+    keymap: &ResolvedKeymap,
+    prefix_state: &mut PrefixState,
+    keysym: Keysym,
+    modifiers: Modifiers,
+    raw_code: u32,
+    now: Instant,
+    timeout: Duration,
+) -> KeymapPress {
+    let Some(key) = key_identity(keysym) else {
+        if prefix_state.is_armed() {
+            if is_modifier_key(keysym) {
+                return KeymapPress::PrefixModifier;
+            }
+            prefix_state.clear();
+            return KeymapPress::Consumed(None);
+        }
+        return KeymapPress::PassThrough;
+    };
+    keymap.press(
+        prefix_state,
         key,
-        ActiveModifiers {
-            ctrl: modifiers.ctrl,
-            shift: modifiers.shift,
-            alt: modifiers.alt,
-            logo: modifiers.logo,
-        },
+        active_modifiers(modifiers),
+        raw_code,
+        now,
+        timeout,
     )
 }
 
@@ -123,6 +155,16 @@ pub(in crate::wayland) fn pane_topology_action(
         ActionId::CloseFocusedPane => Some(PaneTopologyAction::Close),
         ActionId::ResizePaneSmaller => Some(PaneTopologyAction::AdjustRatio(-50)),
         ActionId::ResizePaneLarger => Some(PaneTopologyAction::AdjustRatio(50)),
+        ActionId::ResizePaneLeftFive => {
+            Some(PaneTopologyAction::ResizeCells(FocusDirection::Left, 5))
+        }
+        ActionId::ResizePaneRightFive => {
+            Some(PaneTopologyAction::ResizeCells(FocusDirection::Right, 5))
+        }
+        ActionId::ResizePaneUpFive => Some(PaneTopologyAction::ResizeCells(FocusDirection::Up, 5)),
+        ActionId::ResizePaneDownFive => {
+            Some(PaneTopologyAction::ResizeCells(FocusDirection::Down, 5))
+        }
         _ => None,
     }
 }
@@ -159,6 +201,25 @@ pub(in crate::wayland) fn font_zoom_action(action: Option<ActionId>) -> Option<F
     }
 }
 
+fn is_modifier_key(keysym: Keysym) -> bool {
+    matches!(
+        keysym,
+        Keysym::Shift_L
+            | Keysym::Shift_R
+            | Keysym::Control_L
+            | Keysym::Control_R
+            | Keysym::Alt_L
+            | Keysym::Alt_R
+            | Keysym::Super_L
+            | Keysym::Super_R
+            | Keysym::Meta_L
+            | Keysym::Meta_R
+            | Keysym::ISO_Level3_Shift
+            | Keysym::Caps_Lock
+            | Keysym::Num_Lock
+    )
+}
+
 fn key_identity(keysym: Keysym) -> Option<KeyIdentity> {
     let key = match keysym {
         Keysym::a | Keysym::A => KeyIdentity::Character('a'),
@@ -189,6 +250,9 @@ fn key_identity(keysym: Keysym) -> Option<KeyIdentity> {
         Keysym::z | Keysym::Z => KeyIdentity::Character('z'),
         Keysym::Tab | Keysym::ISO_Left_Tab => KeyIdentity::Tab,
         Keysym::Return | Keysym::KP_Enter => KeyIdentity::Enter,
+        Keysym::Escape => KeyIdentity::Escape,
+        Keysym::space => KeyIdentity::Space,
+        Keysym::slash | Keysym::question => KeyIdentity::Slash,
         Keysym::backslash | Keysym::bar => KeyIdentity::Backslash,
         Keysym::bracketleft | Keysym::braceleft => KeyIdentity::BracketLeft,
         Keysym::bracketright | Keysym::braceright => KeyIdentity::BracketRight,
@@ -403,6 +467,78 @@ action = "app.command-palette"
         assert_eq!(
             shortcut_action_for(&resolved.keymap, Keysym::p, ctrl_shift()),
             None
+        );
+    }
+
+    #[test]
+    fn omarchy_prefix_resolution_uses_xkb_keys_and_consumes_unknown_seconds() {
+        let keymap = crate::keymap::built_in_keymap(crate::keymap::KeymapProfile::OmarchyTmux);
+        let mut state = PrefixState::Idle;
+        let control = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        let now = Instant::now();
+        assert_eq!(
+            keymap_press_for(
+                &keymap,
+                &mut state,
+                Keysym::space,
+                control,
+                1,
+                now,
+                Duration::from_secs(1),
+            ),
+            KeymapPress::Consumed(None)
+        );
+        assert_eq!(
+            keymap_press_for(
+                &keymap,
+                &mut state,
+                Keysym::Shift_L,
+                Modifiers::default(),
+                2,
+                now,
+                Duration::from_secs(1),
+            ),
+            KeymapPress::PrefixModifier
+        );
+        assert!(state.is_armed());
+        assert_eq!(
+            keymap_press_for(
+                &keymap,
+                &mut state,
+                Keysym::question,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+                5,
+                now,
+                Duration::from_secs(1),
+            ),
+            KeymapPress::Consumed(Some(ActionId::BindingHelp))
+        );
+        let _ = keymap_press_for(
+            &keymap,
+            &mut state,
+            Keysym::b,
+            control,
+            3,
+            now,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            keymap_press_for(
+                &keymap,
+                &mut state,
+                Keysym::F1,
+                Modifiers::default(),
+                4,
+                now,
+                Duration::from_secs(1),
+            ),
+            KeymapPress::Consumed(None)
         );
     }
 

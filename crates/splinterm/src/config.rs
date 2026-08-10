@@ -1034,6 +1034,9 @@ mod tests {
         assert_eq!(loaded.config.prefix_timeout_ms, 750);
         assert_eq!(loaded.diagnostics.len(), 1);
         assert!(loaded.diagnostics[0].contains("key-bindings.unknown"));
+        let omarchy = parse("[key-bindings]\nprofile=omarchy-tmux\n").unwrap();
+        assert_eq!(omarchy.config.keymap.profile(), KeymapProfile::OmarchyTmux);
+        assert_eq!(omarchy.config.keymap.prefixes().len(), 2);
         assert!(parse("[key-bindings]\nprofile=missing\n").is_err());
         assert!(parse("[key-bindings]\nprefix-timeout-ms=249\n").is_err());
         assert!(parse("[key-bindings]\nprefix-timeout-ms=5001\n").is_err());

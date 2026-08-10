@@ -101,9 +101,14 @@ prefix-timeout-ms=1000
 
 `file` is optional. Relative paths resolve beside the selected `config.ini`;
 `~/` paths resolve through `HOME`. The timeout accepts 250–5000 milliseconds and
-is reserved for the prefix state machine implemented in the next milestone.
-Only `splinterm` is packaged in this milestone; selecting an unknown profile is
-a startup error that lists available names.
+bounds an armed prefix sequence. Packaged profiles are `splinterm` and
+`omarchy-tmux`; selecting an unknown profile is a startup error that lists both
+available names. The Omarchy profile provides `Ctrl+Space` and `Ctrl+B` prefixes,
+its direct and prefixed pane controls, exact five-cell directional resize,
+client-local pane zoom, generated-help guidance, and transactional config reload.
+`Prefix+[` is listed explicitly as unavailable rather than captured for another
+action; copy mode arrives in its later plan milestone. Dojo/Lair sequences also
+remain assigned to their later milestone.
 
 The overlay is versioned TOML and inherits one built-in profile:
 
@@ -119,13 +124,13 @@ sequence = ["Ctrl+Alt+P"]
 action = "app.command-palette"
 ```
 
-Every table rejects unknown fields. A sequence currently contains exactly one
-direct chord; prefix sequences fail explicitly until the prefix-key milestone.
+Every table rejects unknown fields. A sequence contains one direct chord or
+`["Prefix", "CHORD"]`; prefix sequences require a profile that defines prefixes.
 Modifier names are `Ctrl`, `Shift`, `Alt`, and `Super` (`Control` and `Logo` are
 accepted aliases). Letter case never implies Shift. Supported keys are letters,
-Tab, Enter/KP_Enter, arrows, PageUp/PageDown, End, backslash, brackets,
-Plus/Equal/Minus, zero, and KP_0. Empty or duplicate modifiers and unsupported
-keys fail with source context.
+Tab, Enter/KP_Enter, Escape, Space, slash/question, arrows, PageUp/PageDown, End,
+backslash, brackets, Plus/Equal/Minus, zero, and KP_0. Empty or duplicate
+modifiers and unsupported keys fail with source context.
 
 An overlay applies unbinds before bindings. An unmatched unbind is a diagnostic;
 duplicate or semantically overlapping chords are errors naming both sources.
@@ -141,8 +146,12 @@ pane.split-below          pane.split-right
 pane.focus-left           pane.focus-right
 pane.focus-up             pane.focus-down
 pane.close                pane.resize-smaller
-pane.resize-larger        history.search
-history.page-up            history.page-down
+pane.resize-larger        pane.resize-left-5
+pane.resize-right-5       pane.resize-up-5
+pane.resize-down-5        pane.zoom-toggle
+app.binding-help          app.config-reload
+terminal.send-prefix      history.search
+history.page-up           history.page-down
 history.return-live       view.zoom-in
 view.zoom-out              view.zoom-reset
 control.request           control.release
@@ -155,7 +164,7 @@ Local inspection never contacts `splinterd`:
 ```text
 splinterm config check
 splinterm keymap list
-splinterm keymap show [splinterm]
+splinterm keymap show [splinterm|omarchy-tmux]
 splinterm keymap conflicts
 ```
 

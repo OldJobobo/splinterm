@@ -48,6 +48,14 @@ pub enum PaneChrome {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneResizeMetrics {
+    pub cell_width: u32,
+    pub cell_height: u32,
+    pub minimum_width: u32,
+    pub minimum_height: u32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaneLayout {
     pub panes: Vec<PaneGeometry>,
@@ -365,6 +373,88 @@ pub fn split_ratio_at(
         .clamp(f64::from(minimum_extent), f64::from(maximum_first));
     let ratio = (desired as u64 * 1000 / u64::from(available)).clamp(1, 999);
     SplitRatio::new(u16::try_from(ratio).ok()?).ok()
+}
+
+#[must_use]
+pub fn directional_resize_ratio(
+    root: &LayoutNode,
+    layout: &PaneLayout,
+    current: SplintId,
+    direction: FocusDirection,
+    cells: u16,
+    metrics: PaneResizeMetrics,
+) -> Option<(SplintId, u16, SplitRatio)> {
+    fn contains(outer: Rect, inner: Rect) -> bool {
+        let Some(outer_right) = outer.x.checked_add(outer.width) else {
+            return false;
+        };
+        let Some(outer_bottom) = outer.y.checked_add(outer.height) else {
+            return false;
+        };
+        let Some(inner_right) = inner.x.checked_add(inner.width) else {
+            return false;
+        };
+        let Some(inner_bottom) = inner.y.checked_add(inner.height) else {
+            return false;
+        };
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner_right <= outer_right
+            && inner_bottom <= outer_bottom
+    }
+
+    let pane = layout.panes.iter().find(|pane| pane.splint_id == current)?;
+    let right = pane.allocation.x.checked_add(pane.allocation.width)?;
+    let bottom = pane.allocation.y.checked_add(pane.allocation.height)?;
+    let ancestors = layout
+        .splits
+        .iter()
+        .filter(|split| contains(split.area, pane.allocation));
+    let split = match direction {
+        FocusDirection::Left => ancestors
+            .filter(|split| split.axis == Axis::Horizontal && split.boundary <= pane.allocation.x)
+            .max_by_key(|split| split.boundary),
+        FocusDirection::Right => ancestors
+            .filter(|split| split.axis == Axis::Horizontal && split.boundary >= right)
+            .min_by_key(|split| split.boundary),
+        FocusDirection::Up => ancestors
+            .filter(|split| split.axis == Axis::Vertical && split.boundary <= pane.allocation.y)
+            .max_by_key(|split| split.boundary),
+        FocusDirection::Down => ancestors
+            .filter(|split| split.axis == Axis::Vertical && split.boundary >= bottom)
+            .min_by_key(|split| split.boundary),
+    }
+    .copied()?;
+    let (cell_extent, delta_sign, minimum_extent) = match direction {
+        FocusDirection::Left => (metrics.cell_width, -1_i64, metrics.minimum_width),
+        FocusDirection::Right => (metrics.cell_width, 1_i64, metrics.minimum_width),
+        FocusDirection::Up => (metrics.cell_height, -1_i64, metrics.minimum_height),
+        FocusDirection::Down => (metrics.cell_height, 1_i64, metrics.minimum_height),
+    };
+    let delta = i64::from(cell_extent)
+        .checked_mul(i64::from(cells))?
+        .checked_mul(delta_sign)?;
+    let center = i64::from(split.boundary) + i64::from(split.separator) / 2;
+    let coordinate = i32::try_from(center.checked_add(delta)?).ok()?;
+    let position = match split.axis {
+        Axis::Horizontal => (f64::from(coordinate), f64::from(split.area.y)),
+        Axis::Vertical => (f64::from(split.area.x), f64::from(coordinate)),
+    };
+    let ratio = split_ratio_at(split, position, minimum_extent)?;
+    let mut candidate = root.clone();
+    if !apply_preview_ratio(&mut candidate, split.target, split.ancestor, ratio) {
+        return None;
+    }
+    let root_area = layout.splits.first()?.area;
+    PaneLayout::compute_with_chrome(
+        &candidate,
+        root_area,
+        layout.chrome,
+        metrics.minimum_width,
+        metrics.minimum_height,
+    )
+    .ok()?;
+    Some((split.target, split.ancestor, ratio))
 }
 
 pub fn apply_preview_ratio(
@@ -853,5 +943,192 @@ mod tests {
             Some(left_id)
         );
         assert_eq!(layout.directional(left_id, FocusDirection::Left), None);
+    }
+
+    #[test]
+    fn directional_resize_moves_the_authoritative_boundary_by_exact_cells() {
+        let (left, left_id) = leaf();
+        let (right, right_id) = leaf();
+        let root = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(left),
+            second: Box::new(right),
+        };
+        let layout = PaneLayout::compute(
+            &root,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1_000,
+                height: 400,
+            },
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            directional_resize_ratio(
+                &root,
+                &layout,
+                left_id,
+                FocusDirection::Right,
+                5,
+                PaneResizeMetrics {
+                    cell_width: 10,
+                    cell_height: 20,
+                    minimum_width: 20,
+                    minimum_height: 40,
+                },
+            ),
+            Some((left_id, 0, SplitRatio::new(550).unwrap()))
+        );
+        assert_eq!(
+            directional_resize_ratio(
+                &root,
+                &layout,
+                left_id,
+                FocusDirection::Right,
+                5,
+                PaneResizeMetrics {
+                    cell_width: 20,
+                    cell_height: 40,
+                    minimum_width: 40,
+                    minimum_height: 80,
+                },
+            ),
+            Some((left_id, 0, SplitRatio::new(600).unwrap()))
+        );
+        assert_eq!(
+            directional_resize_ratio(
+                &root,
+                &layout,
+                right_id,
+                FocusDirection::Left,
+                5,
+                PaneResizeMetrics {
+                    cell_width: 10,
+                    cell_height: 20,
+                    minimum_width: 20,
+                    minimum_height: 40,
+                },
+            ),
+            Some((left_id, 0, SplitRatio::new(450).unwrap()))
+        );
+        assert_eq!(
+            directional_resize_ratio(
+                &root,
+                &layout,
+                left_id,
+                FocusDirection::Left,
+                5,
+                PaneResizeMetrics {
+                    cell_width: 10,
+                    cell_height: 20,
+                    minimum_width: 20,
+                    minimum_height: 40,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn directional_resize_stays_on_the_focus_path_and_rejects_unsafe_descendants() {
+        let (top_left, top_left_id) = leaf();
+        let (top_right, _) = leaf();
+        let (bottom_left, bottom_left_id) = leaf();
+        let (bottom_right, _) = leaf();
+        let disjoint = LayoutNode::Branch {
+            axis: Axis::Vertical,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Branch {
+                axis: Axis::Horizontal,
+                ratio: SplitRatio::new(700).unwrap(),
+                first: Box::new(top_left),
+                second: Box::new(top_right),
+            }),
+            second: Box::new(LayoutNode::Branch {
+                axis: Axis::Horizontal,
+                ratio: SplitRatio::new(700).unwrap(),
+                first: Box::new(bottom_left),
+                second: Box::new(bottom_right),
+            }),
+        };
+        let layout = PaneLayout::compute(
+            &disjoint,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1_000,
+                height: 400,
+            },
+            0,
+            20,
+            40,
+        )
+        .unwrap();
+        let (target, ancestor, ratio) = directional_resize_ratio(
+            &disjoint,
+            &layout,
+            top_left_id,
+            FocusDirection::Right,
+            5,
+            PaneResizeMetrics {
+                cell_width: 10,
+                cell_height: 20,
+                minimum_width: 20,
+                minimum_height: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!((target, ancestor), (top_left_id, 0));
+        assert_eq!(ratio, SplitRatio::new(750).unwrap());
+        assert_ne!(target, bottom_left_id);
+
+        let (nested_left, _) = leaf();
+        let (nested_right, _) = leaf();
+        let (outer_right, outer_right_id) = leaf();
+        let constrained = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(667).unwrap(),
+            first: Box::new(LayoutNode::Branch {
+                axis: Axis::Horizontal,
+                ratio: SplitRatio::new(500).unwrap(),
+                first: Box::new(nested_left),
+                second: Box::new(nested_right),
+            }),
+            second: Box::new(outer_right),
+        };
+        let constrained_layout = PaneLayout::compute(
+            &constrained,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 200,
+            },
+            0,
+            100,
+            40,
+        )
+        .unwrap();
+        assert_eq!(
+            directional_resize_ratio(
+                &constrained,
+                &constrained_layout,
+                outer_right_id,
+                FocusDirection::Left,
+                5,
+                PaneResizeMetrics {
+                    cell_width: 10,
+                    cell_height: 20,
+                    minimum_width: 100,
+                    minimum_height: 40,
+                },
+            ),
+            None
+        );
     }
 }

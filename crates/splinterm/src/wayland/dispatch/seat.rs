@@ -81,6 +81,7 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard && self.input.keyboard_seat.as_ref() == Some(&seat) {
+            self.input.prefix_state.clear();
             if let Some(keyboard) = self.input.keyboard.take() {
                 keyboard.release();
             }
@@ -114,6 +115,7 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
     ) {
         if self.input.keyboard_seat.as_ref() == Some(&seat) {
+            self.input.prefix_state.clear();
             if let Some(keyboard) = self.input.keyboard.take() {
                 keyboard.release();
             }

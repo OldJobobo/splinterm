@@ -1,6 +1,6 @@
 # Plan 0027: Configurable keymaps and Dojo presets
 
-- **Status:** Proposed
+- **Status:** Active — Milestones 1–3 complete; Milestone 4 next
 - **Date:** 2026-08-07
 - **Depends on:** [Plan 0018](0018-lair-dojo-topology-migration.md), [Plan 0019](0019-dojo-tabs.md), [Plan 0025](0025-command-palette-and-tab-context-menus.md)
 - **Primary compatibility reference:** [Omarchy Tmux Reference](../omarchy-tmux-reference.md)
@@ -954,6 +954,8 @@ unavailable.
 
 ### Milestone 1 — action registry and current-profile parity
 
+**Status:** Complete (`7abd969`)
+
 Files:
 
 - `crates/splinterm/src/keymap.rs` (new);
@@ -980,6 +982,8 @@ Gate:
 
 ### Milestone 2 — strict custom keymap and inspection CLI
 
+**Status:** Complete (`7abd969`)
+
 Work:
 
 - add TOML dependency at the narrow owning crate;
@@ -995,6 +999,18 @@ Gate:
 - old `config.ini` continues to load without diagnostics about missing files.
 
 ### Milestone 3 — prefix engine and Omarchy direct/pane bindings
+
+**Status:** Complete
+
+Recorded evidence:
+
+- validation: `cargo test -p splinterm --lib --no-fail-fast` (303 passed,
+  1 ignored), `cargo test -p splinterm --test keymap_cli --no-fail-fast`
+  (3 passed), Clippy with `-D warnings`, formatting, and `git diff --check`;
+- review: one fresh read-only review identified unsafe nested directional
+  resize selection, modifier cancellation, and missing `Prefix+[` unavailable
+  guidance; all three findings were corrected and the full validation gate was
+  rerun.
 
 Work:
 

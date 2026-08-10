@@ -1,9 +1,11 @@
+use std::time::Instant;
+
 use super::super::{
-    ActionId, App, CommandPaletteShortcutAction, Connection, KeyEvent, KeyboardHandler, Keysym,
-    Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle, RawModifiers,
-    SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
-    WindowTopologyCommand, command_palette_shortcut_action, font_zoom_action, pane_focus_action,
-    pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
+    ActionId, App, CommandPaletteShortcutAction, Connection, KeyEvent, KeyboardHandler,
+    KeymapPress, Keysym, Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle,
+    RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
+    WindowTopologyCommand, command_palette_shortcut_action, font_zoom_action, keymap_press_for,
+    pane_focus_action, pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
     tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
 };
 
@@ -40,6 +42,7 @@ impl KeyboardHandler for App {
         _serial: u32,
     ) {
         if surface == self.surface.window.wl_surface() {
+            self.input.prefix_state.clear();
             self.set_ime_focus(false);
             self.presentation.full_redraw = true;
             if self.panes.input_modes().focus_reporting && !self.modal.input_modal_open() {
@@ -64,6 +67,9 @@ impl KeyboardHandler for App {
         serial: u32,
         event: KeyEvent,
     ) {
+        if self.modal.input_modal_open() {
+            self.input.prefix_state.clear();
+        }
         if self.modal.command_palette.is_some()
             || self.modal.dojo_prompt.is_some()
             || self.modal.tab_context_menu.is_some()
@@ -79,12 +85,53 @@ impl KeyboardHandler for App {
             }
             return;
         }
-        if self.modal.session_picker.is_some() {
+        if self.modal.session_picker.is_some() || self.modal.trusted_consent.is_some() {
             self.modal
                 .session_picker_consumed_keys
                 .insert(event.raw_code);
+            self.handle_key(&event, queue_handle);
+            if (self.presentation.full_redraw || self.modal.session_picker_redraw)
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.scheduling.fail(error);
+            }
+            return;
         }
-        let shortcut = shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers);
+        let prefix_was_armed = self.input.prefix_state.is_armed();
+        let shortcut = match keymap_press_for(
+            &self.input.keymap,
+            &mut self.input.prefix_state,
+            event.keysym,
+            self.input.modifiers,
+            event.raw_code,
+            Instant::now(),
+            self.input.prefix_timeout,
+        ) {
+            KeymapPress::PassThrough => None,
+            KeymapPress::PrefixModifier => {
+                self.modal
+                    .session_picker_consumed_keys
+                    .insert(event.raw_code);
+                return;
+            }
+            KeymapPress::Consumed(None) => {
+                self.modal
+                    .session_picker_consumed_keys
+                    .insert(event.raw_code);
+                if prefix_was_armed {
+                    eprintln!("splinterm keymap: unknown prefix sequence");
+                }
+                return;
+            }
+            KeymapPress::Consumed(Some(action)) => {
+                if !matches!(action, ActionId::ZoomIn | ActionId::ZoomOut) {
+                    self.modal
+                        .session_picker_consumed_keys
+                        .insert(event.raw_code);
+                }
+                Some(action)
+            }
+        };
         if let Some(action) = command_palette_shortcut_action(
             shortcut,
             false,
@@ -167,14 +214,48 @@ impl KeyboardHandler for App {
             }
             return;
         }
-        if self.modal.session_picker.is_some() || self.modal.trusted_consent.is_some() {
-            self.handle_key(&event, queue_handle);
-            if (self.presentation.full_redraw || self.modal.session_picker_redraw)
-                && let Err(error) = self.schedule_draw(queue_handle)
-            {
-                self.scheduling.fail(error);
+        match shortcut {
+            Some(ActionId::BindingHelp) => {
+                eprintln!(
+                    "splinterm key bindings: run `splinterm keymap show {}` for the generated binding list",
+                    self.input.keymap.profile().name()
+                );
+                return;
             }
-            return;
+            Some(ActionId::CopyModeUnavailable) => {
+                eprintln!(
+                    "splinterm keymap: Prefix+[ is unavailable until copy mode is implemented"
+                );
+                return;
+            }
+            Some(ActionId::ConfigReload) => {
+                match crate::config::load_default() {
+                    Ok(loaded) => {
+                        self.input.keymap = loaded.config.keymap;
+                        self.input.prefix_timeout =
+                            std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
+                        self.input.prefix_state.clear();
+                        for diagnostic in loaded.diagnostics {
+                            eprintln!("splinterm config reload: {diagnostic}");
+                        }
+                    }
+                    Err(error) => eprintln!("splinterm config reload rejected: {error:#}"),
+                }
+                return;
+            }
+            Some(ActionId::SendPrefix) => {
+                self.send_command(WindowCommand::Input(vec![0]));
+                return;
+            }
+            Some(ActionId::TogglePaneZoom) => {
+                if self.toggle_pane_zoom()
+                    && let Err(error) = self.schedule_draw(queue_handle)
+                {
+                    self.scheduling.fail(error);
+                }
+                return;
+            }
+            _ => {}
         }
         if self.tab_state.topology_commands.is_some()
             && let Some(action) = pane_topology_action(shortcut)
@@ -212,6 +293,16 @@ impl KeyboardHandler for App {
                         target,
                         delta,
                     },
+                    PaneTopologyAction::ResizeCells(direction, cells) => {
+                        match self.directional_resize_command(direction, cells) {
+                            Ok(Some(command)) => command,
+                            Ok(None) => return,
+                            Err(error) => {
+                                self.scheduling.fail(error);
+                                return;
+                            }
+                        }
+                    }
                 };
                 if let Err(error) = self.send_topology_command(command) {
                     self.scheduling.fail(error);

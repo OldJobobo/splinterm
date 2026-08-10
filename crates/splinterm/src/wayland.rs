@@ -8,7 +8,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     os::fd::OwnedFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     process::Command,
     sync::{
@@ -134,7 +134,8 @@ use crate::geometry::{
 #[cfg(test)]
 use crate::pane::PaneDivider;
 use crate::pane::{
-    FocusDirection, PaneChrome, PaneLayout, PaneSplit, apply_preview_ratio, split_ratio_at,
+    FocusDirection, PaneChrome, PaneLayout, PaneResizeMetrics, PaneSplit, apply_preview_ratio,
+    directional_resize_ratio, split_ratio_at,
 };
 #[cfg(test)]
 use crate::renderer::paint_box_drawing_cell;
@@ -152,7 +153,7 @@ use crate::renderer::{
     write_ppm,
 };
 use crate::{
-    keymap::{ActionId, ResolvedKeymap},
+    keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
     tab::{DojoTab, WindowTabSet, sanitized_tab_label},
     viewport::ScrollbackViewport,
 };
@@ -184,7 +185,7 @@ use input::{
     SessionPickerShortcutAction, TabShortcutAction, WheelAccumulator, WheelOutcome,
     application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
     font_zoom_action, history_overlay_status, history_return_to_live_hit, key_input,
-    local_selection_owner, mouse_report, pane_focus_action, pane_topology_action,
+    keymap_press_for, local_selection_owner, mouse_report, pane_focus_action, pane_topology_action,
     pending_selection_drag_anchor, picker_ime_reconcile, picker_release_activation,
     pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
     shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
@@ -249,6 +250,41 @@ fn translate_picker_layout(
         row.metadata_clip = translated_rect(row.metadata_clip, origin);
     }
     layout
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinalTabRemovalAction {
+    Continue,
+    Exit,
+    ExitAndHandoffPicker,
+}
+
+const fn final_tab_removal_action(
+    tab_removed: bool,
+    remaining_tabs: usize,
+    picker_requested: bool,
+) -> FinalTabRemovalAction {
+    if !tab_removed || remaining_tabs != 0 {
+        FinalTabRemovalAction::Continue
+    } else if picker_requested {
+        FinalTabRemovalAction::ExitAndHandoffPicker
+    } else {
+        FinalTabRemovalAction::Exit
+    }
+}
+
+fn session_picker_handoff_command(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command.arg("sessions");
+    command
+}
+
+fn spawn_session_picker_handoff() -> Result<()> {
+    let executable = std::env::current_exe().context("locate the running Splinterm client")?;
+    session_picker_handoff_command(&executable)
+        .spawn()
+        .context("launch the Recent Sessions picker after final-tab removal")?;
+    Ok(())
 }
 
 fn rect_contains(rect: Rect, position: (f64, f64)) -> bool {
@@ -772,12 +808,15 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             frame_titles: HashMap::new(),
             evidence_close_shortcuts: options.evidence_close_shortcuts,
             font_zoom_steps: 0,
+            zoomed_splint: None,
             capture: options.capture,
             capture_scale: options.capture_scale,
             full_redraw: true,
         },
         input: InputState {
             keymap: options.keymap,
+            prefix_state: PrefixState::Idle,
+            prefix_timeout: Duration::from_millis(options.prefix_timeout_ms),
             text_input: None,
             text_input_seat: None,
             ime: ImeState::default(),
@@ -1680,6 +1719,7 @@ struct PresentationState {
     frame_titles: HashMap<SplintId, CachedFrameTitle>,
     evidence_close_shortcuts: bool,
     font_zoom_steps: i16,
+    zoomed_splint: Option<SplintId>,
     capture: Option<PathBuf>,
     capture_scale: Option<u32>,
     full_redraw: bool,
@@ -1697,6 +1737,8 @@ struct DividerDrag {
 )]
 struct InputState {
     keymap: ResolvedKeymap,
+    prefix_state: PrefixState,
+    prefix_timeout: Duration,
     text_input: Option<ZwpTextInputV3>,
     text_input_seat: Option<wl_seat::WlSeat>,
     ime: ImeState,
@@ -2575,6 +2617,8 @@ impl App {
             "activated Dojo tab has no hidden frontend"
         );
         self.settle_terminal_presses_for_picker();
+        self.input.prefix_state.clear();
+        self.presentation.zoomed_splint = None;
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         if self.input.terminal_focus_reported {
             Self::request_pane_focus_report(&mut self.panes.pane, false);
@@ -2818,6 +2862,10 @@ impl App {
         }) else {
             return false;
         };
+        if self.presentation.zoomed_splint.is_some() {
+            self.presentation.zoomed_splint = None;
+            self.panes.restored_frontend_needs_resize = true;
+        }
         std::mem::swap(&mut self.panes.pane, &mut self.panes.inactive_panes[index]);
         self.panes.pane.pointer_cell = None;
         self.panes.pane.hovered_url = None;
@@ -2848,8 +2896,70 @@ impl App {
     }
 
     fn focus_direction(&mut self, direction: FocusDirection) -> bool {
+        if self.presentation.zoomed_splint.is_some() {
+            return false;
+        }
         self.directional_splint(direction)
             .is_some_and(|next| self.focus_splint(next))
+    }
+
+    fn toggle_pane_zoom(&mut self) -> bool {
+        let Some(focused) = self.panes.focused_splint() else {
+            return false;
+        };
+        self.presentation.zoomed_splint = if self.presentation.zoomed_splint == Some(focused) {
+            None
+        } else {
+            Some(focused)
+        };
+        self.panes.restored_frontend_needs_resize = true;
+        self.presentation.full_redraw = true;
+        self.update_ime_cursor_rectangle();
+        true
+    }
+
+    fn directional_resize_command(
+        &self,
+        direction: FocusDirection,
+        cells: u16,
+    ) -> Result<Option<WindowTopologyCommand>> {
+        let (Some(root), Some(layout), Some(current), Some(frame)) = (
+            self.panes.layout.as_ref(),
+            self.computed_pane_layout()?,
+            self.panes.focused_splint(),
+            self.panes.pane.snapshot_frame.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        let cell_width = buffer_to_logical_ceil(frame.cell_width(), self.surface.scale_120)?;
+        let cell_height = buffer_to_logical_ceil(frame.cell_height(), self.surface.scale_120)?;
+        let minimum_width = cell_width
+            .checked_mul(2)
+            .context("minimum pane width overflow")?;
+        let minimum_height = cell_height
+            .checked_mul(2)
+            .context("minimum pane height overflow")?;
+        let Some((target, ancestor, ratio)) = directional_resize_ratio(
+            root,
+            &layout,
+            current,
+            direction,
+            cells,
+            PaneResizeMetrics {
+                cell_width,
+                cell_height,
+                minimum_width,
+                minimum_height,
+            },
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(WindowTopologyCommand::SetRatio {
+            dojo_id: self.tab_state.active_dojo_id(),
+            target,
+            ancestor,
+            ratio,
+        }))
     }
 
     fn prepare_frame_titles(
@@ -2920,46 +3030,48 @@ impl App {
     }
 
     fn computed_pane_layout(&self) -> Result<Option<PaneLayout>> {
-        self.panes
-            .layout
+        let Some(topology) = self.panes.layout.as_ref() else {
+            return Ok(None);
+        };
+        let zoomed = self
+            .presentation
+            .zoomed_splint
+            .and_then(|splint_id| topology.find_splint(splint_id).cloned())
+            .map(LayoutNode::Leaf);
+        let layout = zoomed.as_ref().unwrap_or(topology);
+        let frame = self
+            .panes
+            .pane
+            .snapshot_frame
             .as_ref()
-            .map(|layout| {
-                let frame = self
-                    .panes
-                    .pane
-                    .snapshot_frame
-                    .as_ref()
-                    .context("multi-pane layout requires an active snapshot frame")?;
-                let cell_width =
-                    buffer_to_logical_ceil(frame.cell_width(), self.surface.scale_120)?;
-                let cell_height =
-                    buffer_to_logical_ceil(frame.cell_height(), self.surface.scale_120)?;
-                let chrome = match self.presentation.pane_divider_style {
-                    PaneDividerStyle::None => PaneChrome::None,
-                    PaneDividerStyle::Line => PaneChrome::Line {
-                        vertical_width: cell_width,
-                        horizontal_height: cell_height,
-                    },
-                    PaneDividerStyle::Frame => PaneChrome::Frame {
-                        vertical_width: cell_width,
-                        horizontal_height: cell_height,
-                    },
-                };
-                let minimum_width = cell_width
-                    .checked_mul(2)
-                    .context("minimum pane width overflow")?;
-                let minimum_height = cell_height
-                    .checked_mul(2)
-                    .context("minimum pane height overflow")?;
-                PaneLayout::compute_with_chrome(
-                    layout,
-                    self.content_rect(),
-                    chrome,
-                    minimum_width,
-                    minimum_height,
-                )
-            })
-            .transpose()
+            .context("multi-pane layout requires an active snapshot frame")?;
+        let cell_width = buffer_to_logical_ceil(frame.cell_width(), self.surface.scale_120)?;
+        let cell_height = buffer_to_logical_ceil(frame.cell_height(), self.surface.scale_120)?;
+        let chrome = match self.presentation.pane_divider_style {
+            PaneDividerStyle::None => PaneChrome::None,
+            PaneDividerStyle::Line => PaneChrome::Line {
+                vertical_width: cell_width,
+                horizontal_height: cell_height,
+            },
+            PaneDividerStyle::Frame => PaneChrome::Frame {
+                vertical_width: cell_width,
+                horizontal_height: cell_height,
+            },
+        };
+        let minimum_width = cell_width
+            .checked_mul(2)
+            .context("minimum pane width overflow")?;
+        let minimum_height = cell_height
+            .checked_mul(2)
+            .context("minimum pane height overflow")?;
+        PaneLayout::compute_with_chrome(
+            layout,
+            self.content_rect(),
+            chrome,
+            minimum_width,
+            minimum_height,
+        )
+        .map(Some)
     }
 
     fn buffer_rect(rect: Rect, scale_120: u32) -> Result<Rect> {
@@ -3779,6 +3891,7 @@ impl App {
     }
 
     fn show_command_palette(&mut self) -> Result<()> {
+        self.input.prefix_state.clear();
         anyhow::ensure!(
             self.command_palette_available(),
             "command palette is unavailable"
@@ -4083,6 +4196,7 @@ impl App {
         reason = "finite pointer coordinates are clamped to the logical surface"
     )]
     fn show_tab_context_menu(&mut self, dojo_id: DojoId, anchor: (f64, f64)) -> Result<()> {
+        self.input.prefix_state.clear();
         anyhow::ensure!(
             self.tab_state.managed_tabs,
             "tab menu requires managed tabs"
@@ -4233,6 +4347,7 @@ impl App {
     }
 
     fn show_dojo_prompt(&mut self, prompt: DojoPromptUi) {
+        self.input.prefix_state.clear();
         let title = match &prompt {
             DojoPromptUi::Rename(_) => "Splinterm — Rename Tab",
             DojoPromptUi::Terminate(_) => "Splinterm — Confirm Termination",
@@ -4295,6 +4410,7 @@ impl App {
         items: Vec<SessionPickerItem>,
         targets: Vec<(LairId, DojoId)>,
     ) -> Result<()> {
+        self.input.prefix_state.clear();
         anyhow::ensure!(
             self.modal.session_picker.is_none(),
             "session picker is already open"
@@ -5932,14 +6048,28 @@ impl App {
                             }
                         }
                     }
-                    if let Some(mut removed) = self.tab_state.tabs.close(dojo_id) {
+                    let mut removed = self.tab_state.tabs.close(dojo_id);
+                    let removal_action = final_tab_removal_action(
+                        removed.is_some(),
+                        self.tab_state.tabs.len(),
+                        self.modal.session_picker_requested,
+                    );
+                    if let Some(removed) = removed.as_mut() {
                         if let Some(view) = removed.value.as_mut() {
                             Self::release_tab_controllers(view);
                         }
                         self.tab_state.tab_label_cache.clear();
                         self.presentation.full_redraw = true;
                         changed = true;
-                        if self.tab_state.tabs.is_empty() {
+                    }
+                    match removal_action {
+                        FinalTabRemovalAction::Continue => {}
+                        FinalTabRemovalAction::Exit => self.scheduling.exit = true,
+                        FinalTabRemovalAction::ExitAndHandoffPicker => {
+                            self.modal.session_picker_requested = false;
+                            if let Err(error) = spawn_session_picker_handoff() {
+                                eprintln!("splinterm session picker handoff: {error:#}");
+                            }
                             self.scheduling.exit = true;
                         }
                     }
@@ -7915,6 +8045,30 @@ mod tests {
             .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
+    }
+
+    #[test]
+    fn final_tab_removal_hands_off_one_pending_picker_request() {
+        assert_eq!(
+            final_tab_removal_action(true, 0, true),
+            FinalTabRemovalAction::ExitAndHandoffPicker
+        );
+        assert_eq!(
+            final_tab_removal_action(true, 0, false),
+            FinalTabRemovalAction::Exit
+        );
+        assert_eq!(
+            final_tab_removal_action(true, 1, true),
+            FinalTabRemovalAction::Continue
+        );
+        assert_eq!(
+            final_tab_removal_action(false, 0, true),
+            FinalTabRemovalAction::Continue
+        );
+
+        let command = session_picker_handoff_command(Path::new("/opt/splinterm"));
+        assert_eq!(command.get_program(), "/opt/splinterm");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["sessions"]);
     }
 
     #[test]

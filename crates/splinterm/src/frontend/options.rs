@@ -74,6 +74,8 @@ pub struct WindowOptions {
     pub frame_title_mode: FrameTitleMode,
     /// Fully validated client-local keymap for this Window.
     pub keymap: ResolvedKeymap,
+    /// Prefix sequence timeout from the validated client configuration.
+    pub prefix_timeout_ms: u64,
     /// Multi-pane input. Empty retains the legacy one-pane fields above.
     pub panes: Vec<WindowPaneOptions>,
     pub layout: Option<LayoutNode>,
@@ -114,6 +116,7 @@ impl Default for WindowOptions {
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
             keymap: ResolvedKeymap::default(),
+            prefix_timeout_ms: 1_000,
             panes: Vec::new(),
             layout: None,
             active_splint: None,

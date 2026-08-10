@@ -103,7 +103,7 @@ fn render_keymap(keymap: &ResolvedKeymap) -> String {
         writeln!(
             output,
             "  {:<24}  {:<30}  {}",
-            binding.normalized().display(),
+            binding.display(),
             binding.action().config_name(),
             binding.source().short_label()
         )

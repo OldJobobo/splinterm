@@ -100,6 +100,10 @@ fn finish_topology_manager(
         .context("topology manager stopped")
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "multi-pane startup keeps renderer, topology, theme, and input authorities in one lifecycle"
+)]
 pub(super) async fn run_live_multipane_window(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
@@ -192,6 +196,7 @@ pub(super) async fn run_live_multipane_window(
             pane_divider_style: window_config.pane_divider_style,
             frame_title_mode: window_config.frame_title_mode,
             keymap: window_config.keymap,
+            prefix_timeout_ms: window_config.prefix_timeout_ms,
             ..WindowOptions::default()
         })
     })
@@ -318,6 +323,7 @@ pub(super) async fn run_live_window(
             pane_divider_style: window_config.pane_divider_style,
             frame_title_mode: window_config.frame_title_mode,
             keymap: window_config.keymap,
+            prefix_timeout_ms: window_config.prefix_timeout_ms,
             ..WindowOptions::default()
         })
     });

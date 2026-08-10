@@ -121,8 +121,17 @@ fn keymap_list_is_small_and_machine_flags_are_rejected() {
     assert!(listed.status.success(), "{:?}", listed.stderr);
     assert_eq!(
         String::from_utf8(listed.stdout).unwrap(),
-        "Built-in keymaps\n  splinterm (default)\n"
+        "Built-in keymaps\n  splinterm (default)\n  omarchy-tmux\n"
     );
+
+    let shown = output(binary().args(["keymap", "show", "omarchy-tmux"]));
+    assert!(shown.status.success(), "{:?}", shown.stderr);
+    let stdout = String::from_utf8(shown.stdout).unwrap();
+    assert!(stdout.contains("Keymap  omarchy-tmux"));
+    assert!(stdout.contains("Prefix ?"));
+    assert!(stdout.contains("Prefix [ (unavailable)"));
+    assert!(stdout.contains("copy-mode.unavailable"));
+    assert!(stdout.contains("Ctrl+Alt+Shift+Left"));
 
     let rejected = output(binary().args(["--output", "json", "keymap", "list"]));
     assert!(!rejected.status.success());

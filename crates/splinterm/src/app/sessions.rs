@@ -158,6 +158,7 @@ fn choose_recent_session(
         cursor_blink: false,
         theme,
         keymap: config.keymap.clone(),
+        prefix_timeout_ms: config.prefix_timeout_ms,
         ..WindowOptions::default()
     })?;
     Ok(receiver.try_recv().ok())
