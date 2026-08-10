@@ -73,6 +73,16 @@ fn render_config_check(loaded: &ConfigLoad) -> String {
         loaded.config.prefix_timeout_ms
     )
     .expect("writing to String cannot fail");
+    writeln!(
+        output,
+        "  Presets          {}",
+        loaded
+            .config
+            .preset_catalog
+            .as_ref()
+            .map_or(0, |catalog| catalog.names().count())
+    )
+    .expect("writing to String cannot fail");
     if loaded.diagnostics.is_empty() {
         writeln!(output, "  Diagnostics      none").expect("writing to String cannot fail");
     } else {
@@ -127,6 +137,7 @@ mod tests {
         let rendered = render_config_check(&loaded);
         assert!(rendered.starts_with("Configuration OK\n"));
         assert!(rendered.contains("Keymap   splinterm"));
+        assert!(rendered.contains("Presets          0"));
         assert!(rendered.contains("Diagnostics (1)"));
         assert!(rendered.contains("unsupported option example"));
     }

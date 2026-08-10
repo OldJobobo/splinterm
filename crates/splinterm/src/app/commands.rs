@@ -133,6 +133,11 @@ pub(in crate::app) enum Command {
         #[command(subcommand)]
         command: KeymapCommand,
     },
+    /// Validate and inspect client-local Dojo presets.
+    Preset {
+        #[command(subcommand)]
+        command: PresetCommand,
+    },
     /// Validate, inspect, or reload the local persistent policy.
     Policy {
         #[command(subcommand)]
@@ -354,6 +359,26 @@ pub(in crate::app) enum KeymapCommand {
     Show { profile: Option<String> },
     /// Validate that the effective keymap has no overlapping chords.
     Conflicts,
+}
+
+#[derive(Debug, Subcommand)]
+pub(in crate::app) enum PresetCommand {
+    /// List configured static presets.
+    List,
+    /// Show one configured preset definition.
+    Show { name: String },
+    /// Validate the configured catalog or an explicit path.
+    Check { path: Option<PathBuf> },
+    /// Compile and preview one preset without daemon mutation.
+    Run {
+        name: String,
+        /// Override the captured invocation working directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Validate and preview without connecting to the daemon.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

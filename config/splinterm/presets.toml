@@ -1,0 +1,36 @@
+version = 1
+
+[commands.editor]
+kind = "editor-env"
+fallback = ["nvim"]
+append = ["."]
+
+[commands.review]
+kind = "argv"
+argv = ["codex", "-a", "on-request"]
+
+[presets.personal-review]
+kind = "dojo"
+display-name = "Review workspace"
+name = "{cwd.basename}"
+root = "main"
+focus = "editor"
+
+[presets.personal-review.nodes.main]
+type = "split"
+orientation = "columns"
+ratio = 650
+first = "editor"
+second = "review"
+
+[presets.personal-review.nodes.editor]
+type = "pane"
+command = "editor"
+cwd = "{cwd}"
+title = "editor"
+
+[presets.personal-review.nodes.review]
+type = "pane"
+command = "review"
+cwd = "{cwd}"
+title = "review"

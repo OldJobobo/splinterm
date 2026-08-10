@@ -51,6 +51,7 @@ use super::{
         machine_exit_code, require_expected_incarnation, require_incarnation, run_machine_command,
         run_machine_subscription,
     },
+    presets::run_preset_command,
     remote_cli::run_remote_command,
     session_catalog::{automation_launch, create_request, launch_parameters, remember_dojo},
     sessions::{launch, reopen_recent, run_sessions, select_dojo, xdg_launch},
@@ -84,6 +85,7 @@ pub(crate) async fn run() -> Result<()> {
             | Command::Diagnostics { .. }
             | Command::Config { .. }
             | Command::Keymap { .. }
+            | Command::Preset { .. }
             | Command::Policy { .. }
             | Command::Relay { .. }
             | Command::Remote { .. }
@@ -153,6 +155,7 @@ pub(crate) async fn run() -> Result<()> {
                 | Command::Diagnostics { .. }
                 | Command::Config { .. }
                 | Command::Keymap { .. }
+                | Command::Preset { .. }
                 | Command::Policy { .. }
                 | Command::Relay { .. }
                 | Command::Remote { .. }
@@ -174,6 +177,9 @@ pub(crate) async fn run() -> Result<()> {
     }
     if let Command::Keymap { command } = command {
         return run_keymap_command(command);
+    }
+    if let Command::Preset { command } = command {
+        return run_preset_command(command);
     }
     if let Command::Policy { command } = command {
         return run_policy_command(command);
@@ -320,6 +326,7 @@ async fn run_headless(
         | Command::Diagnostics { .. }
         | Command::Config { .. }
         | Command::Keymap { .. }
+        | Command::Preset { .. }
         | Command::Policy { .. }
         | Command::Relay { .. }
         | Command::Remote { .. }

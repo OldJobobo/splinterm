@@ -17,6 +17,7 @@ pub mod frontend;
 pub mod geometry;
 pub mod keymap;
 pub mod pane;
+pub mod preset;
 pub mod remote;
 pub mod remote_session;
 pub mod renderer;

@@ -185,6 +185,41 @@ a name displays the effective keymap with source locations; with a name it shows
 the packaged profile. Invalid configuration is never partially applied: Window
 startup fails before mapping rather than falling back to a half-resolved keymap.
 
+## Static Dojo presets
+
+Select an optional strict preset catalog beside `config.ini`:
+
+```ini
+[presets]
+file=presets.toml
+allow-unrestricted-commands=no
+```
+
+A configured file must be readable and valid; it is never silently ignored.
+Relative paths resolve beside `config.ini`. No file means an empty catalog.
+`allow-unrestricted-commands` is reserved for the later built-in Omarchy preset
+milestone and defaults to `no`.
+
+Static version-1 catalogs define direct command aliases and one bounded named
+binary node tree per Dojo. `columns` means left/right; `rows` means top/bottom.
+Ratios are the first child's thousandths in `1..=999`. Each pane sets exactly
+one of `command` or `shell=true`. Trees reject cycles, reused children, orphaned
+nodes, non-pane focus targets, depths over 32, and more than 32 panes.
+
+```text
+splinterm preset list
+splinterm preset show NAME
+splinterm preset check [PATH]
+splinterm preset run NAME --cwd PATH --dry-run
+```
+
+These commands are local and do not connect to `splinterd`. Dry-run compilation
+checks final cwd directories and launch bounds and prints a topology preview
+without showing full argv. Non-dry-run materialization remains unavailable until
+the atomic preset protocol milestone; Splinterm does not emulate it with a
+sequence of partial splits. See [Dojo presets](presets.md) for the complete
+static schema and direct-execution rules.
+
 ## Remote profile configuration
 
 Remote SSH endpoints use a separate strict TOML file rather than the

@@ -22,6 +22,7 @@ use serde::Deserialize;
 use crate::{
     geometry::{FontSize, FontSizingPolicy, TerminalPadding},
     keymap::{KeymapProfile, ResolvedKeymap, resolve_keymap},
+    preset::PresetCatalog,
 };
 
 pub const APP_ID: &str = "com.oldjobobo.splinterm";
@@ -58,6 +59,10 @@ pub struct AppConfig {
     pub keymap_profile: KeymapProfile,
     pub keymap_path: Option<PathBuf>,
     pub prefix_timeout_ms: u64,
+    /// Explicit client-local static preset catalog, resolved relative to config.ini.
+    pub preset_path: Option<PathBuf>,
+    pub preset_catalog: Option<PresetCatalog>,
+    pub allow_unrestricted_commands: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -108,6 +113,9 @@ impl Default for AppConfig {
             keymap_profile: KeymapProfile::Splinterm,
             keymap_path: None,
             prefix_timeout_ms: 1_000,
+            preset_path: None,
+            preset_catalog: None,
+            allow_unrestricted_commands: false,
         }
     }
 }
@@ -202,7 +210,13 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
             section = line[1..line.len() - 1].trim().to_ascii_lowercase();
             if !matches!(
                 section.as_str(),
-                "main" | "scrollback" | "cursor" | "colors" | "key-bindings" | "multiplexer"
+                "main"
+                    | "scrollback"
+                    | "cursor"
+                    | "colors"
+                    | "key-bindings"
+                    | "presets"
+                    | "multiplexer"
             ) {
                 diagnostics.push(format!(
                     "line {}: unsupported section [{section}]",
@@ -405,6 +419,15 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 config.prefix_timeout_ms = parse_range(value, 250, 5_000, index)?;
                 false
             }
+            "presets.file" => {
+                let value = nonempty(value, index)?;
+                config.preset_path = Some(expand_relative_path(&value, config_dir));
+                false
+            }
+            "presets.allow-unrestricted-commands" => {
+                config.allow_unrestricted_commands = parse_bool(value, index)?;
+                false
+            }
             key if key.starts_with("colors.") => {
                 diagnostics.push(format!(
                     "line {}: colors come from the active Omarchy theme or explicit main.theme JSON; {key} ignored",
@@ -426,6 +449,11 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
     let keymap = resolve_keymap(config.keymap_profile, config.keymap_path.as_deref())?;
     config.keymap = keymap.keymap;
     diagnostics.extend(keymap.diagnostics);
+    config.preset_catalog = config
+        .preset_path
+        .as_deref()
+        .map(PresetCatalog::load)
+        .transpose()?;
     Ok(ConfigLoad {
         config,
         diagnostics,
@@ -912,6 +940,9 @@ mod tests {
         assert_eq!(defaults.keymap_profile, KeymapProfile::Splinterm);
         assert_eq!(defaults.keymap.bindings().len(), 31);
         assert_eq!(defaults.prefix_timeout_ms, 1_000);
+        assert_eq!(defaults.preset_path, None);
+        assert_eq!(defaults.preset_catalog, None);
+        assert!(!defaults.allow_unrestricted_commands);
     }
 
     #[test]
@@ -1041,6 +1072,41 @@ mod tests {
         assert!(parse("[key-bindings]\nprefix-timeout-ms=249\n").is_err());
         assert!(parse("[key-bindings]\nprefix-timeout-ms=5001\n").is_err());
     }
+    #[test]
+    fn preset_selection_resolves_relative_paths_and_validates_explicit_files() {
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-preset-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("presets.toml"),
+            "version=1\n[commands.run]\nkind=\"argv\"\nargv=[\"true\"]\n[presets.one]\nkind=\"dojo\"\nname=\"one\"\nroot=\"pane\"\nfocus=\"pane\"\n[presets.one.nodes.pane]\ntype=\"pane\"\ncommand=\"run\"\n",
+        )
+        .unwrap();
+        let loaded = parse_with_base(
+            "[presets]\nfile=presets.toml\nallow-unrestricted-commands=yes\n",
+            &root,
+        )
+        .unwrap();
+        assert_eq!(loaded.config.preset_path, Some(root.join("presets.toml")));
+        assert!(
+            loaded
+                .config
+                .preset_catalog
+                .as_ref()
+                .unwrap()
+                .contains("one")
+        );
+        assert!(loaded.config.allow_unrestricted_commands);
+        assert!(parse_with_base("[presets]\nfile=missing.toml\n", &root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn pane_divider_configuration_is_explicit_and_bounded() {
         let defaults = parse("").unwrap().config;

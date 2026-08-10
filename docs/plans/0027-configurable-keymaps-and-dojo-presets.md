@@ -1,6 +1,6 @@
 # Plan 0027: Configurable keymaps and Dojo presets
 
-- **Status:** Active — Milestones 1–4 complete; Milestone 5 next
+- **Status:** Active — Milestones 1–5 complete; Milestone 6 next
 - **Date:** 2026-08-07
 - **Depends on:** [Plan 0018](0018-lair-dojo-topology-migration.md), [Plan 0019](0019-dojo-tabs.md), [Plan 0025](0025-command-palette-and-tab-context-menus.md)
 - **Primary compatibility reference:** [Omarchy Tmux Reference](../omarchy-tmux-reference.md)
@@ -1061,6 +1061,22 @@ Gate:
 - closing/detaching never kills durable topology accidentally.
 
 ### Milestone 5 — static preset schema and compiler
+
+**Status:** Complete
+
+Recorded evidence:
+
+- validation: workspace tests passed except two unrelated timing flakes
+  (`remote_session` fake-SSH `ETXTBSY` and one MCP cancellation response), both
+  of which passed on exact rerun; the final focused gate passed 12 preset library
+  tests, 2 preset CLI integration tests, and 2 binary preset tests; workspace
+  Clippy passed with `-D warnings`, along with formatting and `git diff --check`;
+- review: one fresh read-only review confirmed strict schema/tree validation,
+  direct argv and closed compatibility-lexer behavior, cwd containment, local
+  side-effect-free dry-run routing, diagnostics coexistence, and Milestone 6
+  deferral. It identified missing catalog-level byte/count bounds and then a
+  bounded-read allocation concern; both were corrected with a 256 KiB capped
+  read buffer, 64-alias/64-preset limits, boundary tests, and matching docs.
 
 Work:
 
