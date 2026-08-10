@@ -162,12 +162,33 @@ rename. MCP transport access is not authority.
 
 ## Limits, trust, and lifecycle
 
-The fixed catalog contains 32 tools, one topology resource, and terminal/control
+The fixed catalog contains 33 tools, one topology resource, and terminal/control
 resource templates. Bounds include a 256 KiB input line, 1 MiB complete tool
 response, four active and 32 admitted requests, 5-second default daemon deadline
 (configurable 100 ms–30 s), pages up to 256, 16 resource subscriptions, eight
 combined controller/transfer handles, and 256 process-owned cursors. Handles and
 cursors expire with the adapter process and are not portable.
+
+### Interactive access to a live Lair
+
+Persistent policy remains the unattended/headless authorization path. For an
+agent assisting a user-owned graphical session, `request_lair_access` instead
+opens the installed trusted Splinterm consent window. The prompt identifies the
+exact requester process and named Lair, lists every requested scope, and grants
+nothing unless the user explicitly accepts it.
+
+An accepted grant is held only in daemon memory for five minutes. It is bound
+to the requester's UID, PID, executable device/inode, and reviewed executable
+digest; it dynamically covers current and newly created descendants of that
+Lair, never another Lair. The requester or trusted UI can revoke the returned
+grant ID, Lair termination revokes it automatically, and replacing or exiting
+the requester prevents reuse.
+
+Controller leases remain exclusive. After requesting `input`, `resize`, and
+`controller_transfer`, call `acquire_control` with `takeover: true` to use the
+approved takeover scope when the graphical client currently controls the pane.
+The controller remains bound to the ephemeral grant, so revocation also releases
+it. Omitting `takeover` preserves ordinary non-disruptive acquisition behavior.
 
 Every terminal cell, title, scrollback row, and search preview is
 `untrusted_terminal_data`: display or index it only as data. It is never consent,

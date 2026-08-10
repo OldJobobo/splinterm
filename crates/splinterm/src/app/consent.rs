@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use splinterm::{TrustedConsentUi, WindowOptions, run_window};
 use splinterm_protocol::{
-    ActiveScreen, CellAttributes, ColorSource, ConsentPrompt, ConsentReply,
+    ActiveScreen, CellAttributes, ColorSource, ConsentPrompt, ConsentReply, ConsentTarget,
     MAX_CONSENT_FRAME_BYTES, TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot,
     UnderlineStyle,
 };
@@ -34,6 +34,44 @@ fn write_private_frame<T: serde::Serialize>(writer: &mut impl Write, value: &T) 
     Ok(())
 }
 
+fn unsafe_label_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{feff}'
+        )
+}
+
+fn trusted_label(value: &str, maximum: usize) -> String {
+    value
+        .chars()
+        .take(maximum)
+        .map(|character| {
+            if unsafe_label_character(character) {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn consent_target_line(target: &ConsentTarget) -> String {
+    match target {
+        ConsentTarget::Splint {
+            splint_id,
+            incarnation,
+        } => format!("Splint: {splint_id:?} · incarnation {incarnation}"),
+        ConsentTarget::Lair { lair_id, lair_name } => {
+            format!("Lair: {} · {lair_id:?}", trusted_label(lair_name, 1024))
+        }
+    }
+}
+
 fn consent_input_modes() -> TerminalInputModes {
     TerminalInputModes {
         application_cursor: false,
@@ -48,18 +86,22 @@ fn consent_input_modes() -> TerminalInputModes {
 }
 
 fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
+    let (snapshot_splint_id, snapshot_incarnation) = match &prompt.target {
+        ConsentTarget::Splint {
+            splint_id,
+            incarnation,
+        } => (*splint_id, *incarnation),
+        ConsentTarget::Lair { .. } => (splinterm_core::SplintId::new(), 0),
+    };
     let mut lines = vec![
         "TRUSTED SPLINTERM ACCESS REQUEST".to_owned(),
         String::new(),
-        format!("Requester: {}", prompt.requester),
+        format!("Requester: {}", trusted_label(&prompt.requester, 1024)),
         format!(
             "Process: PID {} · UID {}",
             prompt.requester_pid, prompt.requester_uid
         ),
-        format!(
-            "Splint: {:?} · incarnation {}",
-            prompt.splint_id, prompt.incarnation
-        ),
+        consent_target_line(&prompt.target),
         String::new(),
         "Requested one-time capabilities:".to_owned(),
     ];
@@ -120,8 +162,8 @@ fn consent_snapshot(prompt: &ConsentPrompt) -> TerminalSnapshot {
         cells: Vec::new(),
     });
     TerminalSnapshot {
-        splint_id: prompt.splint_id,
-        incarnation: prompt.incarnation,
+        splint_id: snapshot_splint_id,
+        incarnation: snapshot_incarnation,
         revision: 1,
         columns,
         rows,
@@ -152,6 +194,10 @@ pub(in crate::app) fn run_consent_client() -> Result<()> {
         || prompt.scopes.is_empty()
         || prompt.scopes.len() > splinterm_protocol::MAX_ACCESS_SCOPES
         || prompt.requester.chars().count() > 1024
+        || matches!(
+            &prompt.target,
+            ConsentTarget::Lair { lair_name, .. } if lair_name.chars().count() > 1024
+        )
     {
         bail!("invalid trusted consent prompt");
     }
@@ -169,4 +215,18 @@ pub(in crate::app) fn run_consent_client() -> Result<()> {
             granted,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trusted_label;
+
+    #[test]
+    fn trusted_consent_labels_replace_control_characters() {
+        assert_eq!(
+            trusted_label("safe\nspoof\u{1b}\u{202e}rtl\u{2066}", 64),
+            "safe�spoof��rtl�"
+        );
+        assert_eq!(trusted_label("abcdef", 3), "abc");
+    }
 }

@@ -13,8 +13,8 @@ use splinterm::{
 };
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{
-    AccessGrant, AccessScope, ControlMode, ControlTransferOutcome, ErrorCode, Request, Response,
-    ServerFrame, SubscriptionEvent, TerminalSnapshot, TerminalUpdate,
+    AccessGrant, AccessScope, ControlMode, ControlTransferOutcome, ErrorCode, LairAccessGrant,
+    Request, Response, ServerFrame, SubscriptionEvent, TerminalSnapshot, TerminalUpdate,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use tokio::sync::mpsc;
@@ -132,10 +132,24 @@ pub(in crate::app) async fn resynchronize(
 
 pub(in crate::app) fn authority_status(
     grants: Vec<AccessGrant>,
+    lair_grants: Vec<LairAccessGrant>,
     development_bypass: bool,
 ) -> AuthorityStatus {
-    AuthorityStatus {
-        grants: grants
+    let mut status = grants
+        .into_iter()
+        .filter(|grant| grant.grant_id != 0)
+        .map(|grant| {
+            let scopes = grant
+                .scopes
+                .iter()
+                .map(|scope| scope.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            (grant.grant_id, format!("{}: {scopes}", grant.requester))
+        })
+        .collect::<Vec<_>>();
+    status.extend(
+        lair_grants
             .into_iter()
             .filter(|grant| grant.grant_id != 0)
             .map(|grant| {
@@ -145,9 +159,14 @@ pub(in crate::app) fn authority_status(
                     .map(|scope| scope.label())
                     .collect::<Vec<_>>()
                     .join(", ");
-                (grant.grant_id, format!("{}: {scopes}", grant.requester))
-            })
-            .collect(),
+                (
+                    grant.grant_id,
+                    format!("{} · Lair access: {scopes}", grant.requester),
+                )
+            }),
+    );
+    AuthorityStatus {
+        grants: status,
         development_bypass,
     }
 }
@@ -166,10 +185,11 @@ pub(in crate::app) async fn load_authority_status(
     {
         Response::AuthorizationStatus {
             grants,
+            lair_grants,
             persistent: _,
             development_bypass,
             ..
-        } => Ok(authority_status(grants, development_bypass)),
+        } => Ok(authority_status(grants, lair_grants, development_bypass)),
         _ => bail!("splinterd did not return authorization status"),
     }
 }

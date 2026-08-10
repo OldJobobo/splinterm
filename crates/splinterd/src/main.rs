@@ -176,6 +176,7 @@ struct PendingControlTransfer {
     requester_connection_id: u64,
     splint_id: SplintId,
     incarnation: u64,
+    grant_id: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -316,6 +317,7 @@ impl ControllerState {
         requester_connection_id: u64,
         splint_id: SplintId,
         incarnation: u64,
+        grant_id: Option<u64>,
     ) -> Result<PendingControlTransfer, ProtocolError> {
         if self.by_connection.contains_key(&requester_connection_id)
             || self.transfer_by_splint.contains_key(&splint_id)
@@ -349,6 +351,7 @@ impl ControllerState {
             requester_connection_id,
             splint_id,
             incarnation,
+            grant_id,
         };
         self.transfers.insert(id, transfer);
         self.transfer_by_splint.insert(splint_id, id);
@@ -419,7 +422,7 @@ impl ControllerState {
             transfer.requester_connection_id,
             transfer.splint_id,
             transfer.incarnation,
-            None,
+            transfer.grant_id,
         )?;
         Ok((transfer, ControlTransferOutcome::Granted, Some(lease)))
     }
@@ -429,6 +432,7 @@ impl ControllerState {
         requester_connection_id: u64,
         splint_id: SplintId,
         incarnation: u64,
+        grant_id: Option<u64>,
     ) -> Result<ControllerLease, ProtocolError> {
         if self.by_connection.contains_key(&requester_connection_id) {
             return Err(ProtocolError::new(
@@ -452,7 +456,7 @@ impl ControllerState {
             ProtocolError::new(ErrorCode::ResourceLimit, "controller ID space exhausted")
         })?;
         self.release(current.id);
-        self.acquire(requester_connection_id, splint_id, incarnation, None)
+        self.acquire(requester_connection_id, splint_id, incarnation, grant_id)
     }
 
     fn cancel_connection_transfers(&mut self, connection_id: u64) -> Vec<PendingControlTransfer> {
@@ -2786,6 +2790,7 @@ fn observe_process_exit(state: &Arc<DaemonState>, handle: LiveSplintHandle) {
 #[derive(Debug, Default)]
 struct RequestAuthorizationContext {
     policy_match: Option<policy::PolicyMatch>,
+    ephemeral_grant_id: Option<u64>,
     interactive_bypass: bool,
 }
 
@@ -2797,7 +2802,11 @@ impl RequestAuthorizationContext {
     }
 
     fn requires_terminate_scope_authorization(&self) -> bool {
-        !self.interactive_bypass && !self.policy_authorized()
+        !self.interactive_bypass && !self.policy_authorized() && self.ephemeral_grant_id.is_none()
+    }
+
+    fn authorized_grant_id(&self) -> Option<u64> {
+        self.ephemeral_grant_id
     }
 
     fn may_manage_authorization(
@@ -2807,6 +2816,7 @@ impl RequestAuthorizationContext {
     ) -> bool {
         self.interactive_bypass
             || self.policy_authorized()
+            || self.ephemeral_grant_id.is_some()
             || development_terminal_access
             || matching_splinterm_executable
     }
@@ -2933,6 +2943,7 @@ fn consent_capable_request(request: &Request) -> bool {
     matches!(
         request,
         Request::RequestAccess { .. }
+            | Request::RequestLairAccess { .. }
             | Request::Attach { .. }
             | Request::StartScrollbackPage { .. }
             | Request::ScrollbackPage { .. }
@@ -2960,9 +2971,12 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
             let mut scopes = base.to_vec();
             match requirement {
                 ConditionalRequirement::RequestedAccessScopes => {
-                    let Request::RequestAccess {
+                    let (Request::RequestAccess {
                         scopes: requested, ..
-                    } = request
+                    }
+                    | Request::RequestLairAccess {
+                        scopes: requested, ..
+                    }) = request
                     else {
                         return None;
                     };
@@ -2973,9 +2987,15 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                             AccessScope::Input => Scope::Input,
                             AccessScope::Resize => Scope::Resize,
                             AccessScope::Terminate => Scope::ProcessTerminate,
-                            AccessScope::ClipboardRead
-                            | AccessScope::ClipboardWrite
-                            | AccessScope::ControlTakeover => return None,
+                            AccessScope::ControlTakeover => Scope::ControllerTransfer,
+                            AccessScope::TopologyObserve => Scope::TopologyMetadataRead,
+                            AccessScope::TopologyLayout => Scope::TopologyLayoutMutate,
+                            AccessScope::TopologyName => Scope::TopologyNameMutate,
+                            AccessScope::ProcessSpawn => Scope::ProcessSpawn,
+                            AccessScope::ProcessRestore => Scope::ProcessRestore,
+                            AccessScope::ClipboardRead | AccessScope::ClipboardWrite => {
+                                return None;
+                            }
                         });
                     }
                 }
@@ -3001,7 +3021,8 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                         scopes.push(Scope::ScrollbackRead);
                     }
                 }
-                ConditionalRequirement::LiveProcessTermination
+                ConditionalRequirement::RequestedControlTakeover
+                | ConditionalRequirement::LiveProcessTermination
                 | ConditionalRequirement::ExpandedLiveProcessTermination => {}
             }
             scopes
@@ -3214,6 +3235,80 @@ fn access_granted_response(
     }
 }
 
+fn lair_access_response(
+    topology_revision: TopologyRevision,
+    mutation: consent::LairAuthorizationMutation,
+) -> Response {
+    Response::LairAccessGranted {
+        topology_revision,
+        authorization_revision: mutation.authorization_revision,
+        grant: mutation.grant,
+    }
+}
+
+fn schedule_lair_grant_expiry(state: &Arc<DaemonState>, grant_id: u64) {
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        tokio::time::sleep(consent::GRANT_LIFETIME).await;
+        let expired = state.grants.lock().await.revoke_lair_if_expired(grant_id);
+        if expired.is_some() {
+            revoke_grant_controllers(&state, grant_id).await;
+            let _ = state.revocations.send(Revocation { grant_id });
+        }
+    });
+}
+
+async fn grant_lair_access_response(
+    state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
+    lair_id: LairId,
+    scopes: Vec<AccessScope>,
+) -> Result<Response, ProtocolError> {
+    let topology_revision = state.topology.read().await.revision();
+    let mutation = state.grants.lock().await.grant_lair(peer, lair_id, scopes);
+    schedule_lair_grant_expiry(state, mutation.grant.grant_id);
+    Ok(lair_access_response(topology_revision, mutation))
+}
+
+async fn existing_lair_access_response(
+    state: &DaemonState,
+    grant_id: u64,
+    lair_id: LairId,
+) -> Result<Response, ProtocolError> {
+    let topology_revision = state.topology.read().await.revision();
+    let mutation = state
+        .grants
+        .lock()
+        .await
+        .lair_grant_with_revision(grant_id)
+        .filter(|mutation| mutation.grant.lair_id == lair_id)
+        .ok_or_else(not_found)?;
+    Ok(lair_access_response(topology_revision, mutation))
+}
+
+async fn nonstored_lair_access_response(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    lair_id: LairId,
+    scopes: Vec<AccessScope>,
+    source: splinterm_protocol::AccessGrantSource,
+) -> Result<Response, ProtocolError> {
+    let topology_revision = state.topology.read().await.revision();
+    let authorization_revision = state.grants.lock().await.authorization_revision();
+    Ok(Response::LairAccessGranted {
+        topology_revision,
+        authorization_revision,
+        grant: splinterm_protocol::LairAccessGrant {
+            grant_id: 0,
+            source,
+            lair_id,
+            scopes,
+            requester: peer.requester_label(),
+            expires_at_unix_seconds: 0,
+        },
+    })
+}
+
 async fn access_containment(
     state: &DaemonState,
     splint_id: SplintId,
@@ -3404,8 +3499,7 @@ async fn request_policy_resources(
         | Request::PublishGraphicalFocus { .. }
         | Request::DecideControlTransfer { .. }
         | Request::ReleaseControl { .. }
-        | Request::Detach { .. }
-        | Request::ForceControlTransfer { .. } => Vec::new(),
+        | Request::Detach { .. } => Vec::new(),
         Request::ListLairs
         | Request::InspectTopology
         | Request::SubscribeTopology
@@ -3417,8 +3511,15 @@ async fn request_policy_resources(
         }
         | Request::AuditInspect { .. } => vec![policy::PolicyResource::Daemon],
         Request::RevokeAccess { grant_id } => {
-            let (splint_id, incarnation) = state.grants.lock().await.grant_resource(*grant_id)?;
-            vec![splint(splint_id, Some(incarnation))?]
+            match state.grants.lock().await.grant_resource(*grant_id)? {
+                consent::GrantResource::Splint {
+                    splint_id,
+                    incarnation,
+                } => vec![splint(splint_id, Some(incarnation))?],
+                consent::GrantResource::Lair { lair_id } => {
+                    vec![policy::PolicyResource::Lair { lair_id }]
+                }
+            }
         }
         Request::InspectSplint { splint_id }
         | Request::RelaunchSplint { splint_id, .. }
@@ -3430,6 +3531,9 @@ async fn request_policy_resources(
             target_splint_id: splint_id,
             ..
         } => vec![splint(*splint_id, None)?],
+        Request::RequestLairAccess { lair_id, .. } => {
+            vec![policy::PolicyResource::Lair { lair_id: *lair_id }]
+        }
         Request::RequestAccess {
             splint_id,
             incarnation,
@@ -3457,6 +3561,10 @@ async fn request_policy_resources(
             splint_id,
             incarnation,
             ..
+        }
+        | Request::ForceControlTransfer {
+            splint_id,
+            incarnation,
         }
         | Request::SubscribeControl {
             splint_id,
@@ -3557,6 +3665,52 @@ async fn request_policy_resources(
             }
         },
     })
+}
+
+fn ephemeral_access_scopes(required: &[authorization::OperationScope]) -> Option<Vec<AccessScope>> {
+    use authorization::OperationScope as Scope;
+
+    let mut scopes = Vec::new();
+    for required in required {
+        let scope = match required {
+            Scope::TopologyMetadataRead | Scope::TopologySubscribe => AccessScope::TopologyObserve,
+            Scope::TerminalVisibleRead | Scope::TerminalSubscribe => AccessScope::Observe,
+            Scope::ScrollbackRead | Scope::ScrollbackSearch => AccessScope::Scrollback,
+            Scope::ControllerAcquire => continue,
+            Scope::ControllerTransfer => AccessScope::ControlTakeover,
+            Scope::Input => AccessScope::Input,
+            Scope::Resize => AccessScope::Resize,
+            Scope::ProcessSpawn => AccessScope::ProcessSpawn,
+            Scope::ProcessRestore => AccessScope::ProcessRestore,
+            Scope::ProcessTerminate => AccessScope::Terminate,
+            Scope::TopologyLayoutMutate => AccessScope::TopologyLayout,
+            Scope::TopologyNameMutate => AccessScope::TopologyName,
+            Scope::AuthorizationInspect | Scope::AuthorizationRevoke | Scope::AuditInspect => {
+                return None;
+            }
+        };
+        scopes.push(scope);
+    }
+    scopes.sort_unstable();
+    scopes.dedup();
+    Some(scopes)
+}
+
+fn common_lair_resource(resources: &[policy::PolicyResource]) -> Option<LairId> {
+    let mut selected = None;
+    for resource in resources {
+        let lair_id = match resource {
+            policy::PolicyResource::Daemon => return None,
+            policy::PolicyResource::Lair { lair_id }
+            | policy::PolicyResource::Dojo { lair_id, .. }
+            | policy::PolicyResource::Splint { lair_id, .. } => *lair_id,
+        };
+        if selected.is_some_and(|selected| selected != lair_id) {
+            return None;
+        }
+        selected = Some(lair_id);
+    }
+    selected
 }
 
 #[allow(
@@ -3665,6 +3819,28 @@ async fn authorize_request(
     if let Some(policy_match) = matched {
         return Ok(RequestAuthorizationContext {
             policy_match: Some(policy_match),
+            ..RequestAuthorizationContext::default()
+        });
+    }
+    if let Request::RevokeAccess { grant_id } = request
+        && state.grants.lock().await.owns_lair_grant(peer, *grant_id)
+    {
+        return Ok(RequestAuthorizationContext {
+            ephemeral_grant_id: Some(*grant_id),
+            ..RequestAuthorizationContext::default()
+        });
+    }
+    if let (Some(lair_id), Some(scopes)) = (
+        common_lair_resource(&resources),
+        ephemeral_access_scopes(&required_scopes),
+    ) && let Some(grant_id) = state
+        .grants
+        .lock()
+        .await
+        .authorize_lair(peer, lair_id, &scopes)
+    {
+        return Ok(RequestAuthorizationContext {
+            ephemeral_grant_id: Some(grant_id),
             ..RequestAuthorizationContext::default()
         });
     }
@@ -4337,8 +4513,22 @@ async fn handle_authorized_request(
         } => {
             let _ = current_handle(state, splint_id, incarnation).await?;
             let canonical: std::collections::BTreeSet<_> = scopes.into_iter().collect();
-            if canonical.is_empty() || canonical.len() > splinterm_protocol::MAX_ACCESS_SCOPES {
-                return Err(invalid("access scopes are empty or exceed limits"));
+            if canonical.is_empty()
+                || canonical.len() > splinterm_protocol::MAX_ACCESS_SCOPES
+                || canonical.iter().any(|scope| {
+                    matches!(
+                        scope,
+                        AccessScope::TopologyObserve
+                            | AccessScope::TopologyLayout
+                            | AccessScope::TopologyName
+                            | AccessScope::ProcessSpawn
+                            | AccessScope::ProcessRestore
+                    )
+                })
+            {
+                return Err(invalid(
+                    "Splint access scopes are empty, unsupported, or exceed limits",
+                ));
             }
             let scopes: Vec<_> = canonical.into_iter().collect();
             if authorization.policy_authorized() {
@@ -4390,6 +4580,79 @@ async fn handle_authorized_request(
                 grant_access_response(state, peer, splint_id, incarnation, scopes).await?
             }
         }
+        Request::RequestLairAccess { lair_id, scopes } => {
+            let canonical: std::collections::BTreeSet<_> = scopes.into_iter().collect();
+            if canonical.is_empty()
+                || canonical.len() > splinterm_protocol::MAX_ACCESS_SCOPES
+                || canonical.iter().any(|scope| {
+                    matches!(
+                        scope,
+                        AccessScope::ClipboardRead | AccessScope::ClipboardWrite
+                    )
+                })
+            {
+                return Err(invalid(
+                    "Lair access scopes are empty, unsupported, or exceed limits",
+                ));
+            }
+            let scopes: Vec<_> = canonical.into_iter().collect();
+            let lair_name = {
+                let topology = state.topology.read().await;
+                topology
+                    .lairs()
+                    .find(|lair| lair.id == lair_id)
+                    .map(|lair| lair.name.clone())
+                    .ok_or_else(not_found)?
+            };
+            if authorization.policy_authorized() {
+                nonstored_lair_access_response(
+                    state,
+                    peer,
+                    lair_id,
+                    scopes,
+                    splinterm_protocol::AccessGrantSource::PersistentPolicy,
+                )
+                .await?
+            } else if state.development_terminal_access {
+                nonstored_lair_access_response(
+                    state,
+                    peer,
+                    lair_id,
+                    scopes,
+                    splinterm_protocol::AccessGrantSource::Development,
+                )
+                .await?
+            } else if let Some(grant_id) = state
+                .grants
+                .lock()
+                .await
+                .authorize_lair(peer, lair_id, &scopes)
+            {
+                existing_lair_access_response(state, grant_id, lair_id).await?
+            } else {
+                let granted =
+                    match consent::prompt_lair(peer, lair_id, lair_name, scopes.clone()).await {
+                        Ok(granted) => granted,
+                        Err(error) => {
+                            warn!(%error, "trusted Lair consent client failed closed");
+                            false
+                        }
+                    };
+                if !granted {
+                    state.grants.lock().await.deny_lair(
+                        peer,
+                        lair_id,
+                        &scopes,
+                        "denied or consent client unavailable",
+                    );
+                    return Err(ProtocolError::new(
+                        ErrorCode::ConsentDenied,
+                        "Lair access was denied",
+                    ));
+                }
+                grant_lair_access_response(state, peer, lair_id, scopes).await?
+            }
+        }
         Request::AuthorizationStatus {
             splint_id,
             incarnation: requested_incarnation,
@@ -4421,7 +4684,13 @@ async fn handle_authorized_request(
             let (lair_id, dojo_id, _) =
                 splint_containment(&lair, splint_id).ok_or_else(not_found)?;
             drop(lair);
-            let grants = state.grants.lock().await.status(splint_id, incarnation);
+            let (grants, lair_grants) = {
+                let mut grants = state.grants.lock().await;
+                (
+                    grants.status(splint_id, incarnation),
+                    grants.lair_status(lair_id),
+                )
+            };
             let resource = request_policy_resources(
                 &Request::AuthorizationStatus {
                     splint_id,
@@ -4451,15 +4720,19 @@ async fn handle_authorized_request(
                 topology_revision,
                 policy_generation,
                 grants,
+                lair_grants,
                 persistent,
                 development_bypass: state.development_terminal_access,
             }
         }
         Request::RevokeAccess { grant_id } => {
-            if !authorization.may_manage_authorization(
-                state.development_terminal_access,
-                peer.is_matching_splinterm(),
-            ) {
+            let owns_lair_grant = state.grants.lock().await.owns_lair_grant(peer, grant_id);
+            if !owns_lair_grant
+                && !authorization.may_manage_authorization(
+                    state.development_terminal_access,
+                    peer.is_matching_splinterm(),
+                )
+            {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
                     "revocation requires trusted UI or exact policy",
@@ -4470,34 +4743,49 @@ async fn handle_authorized_request(
                 .acquire()
                 .await
                 .map_err(|_| internal())?;
-            let (splint_id, _incarnation) = state
+            let resource = state
                 .grants
                 .lock()
                 .await
                 .grant_resource(grant_id)
                 .ok_or_else(not_found)?;
-            let containment = splint_containment(&*state.topology.read().await, splint_id)
-                .ok_or_else(not_found)?;
-            let mutation = state
+            let revoked = state
                 .grants
                 .lock()
                 .await
-                .revoke(grant_id)
+                .revoke_any(grant_id)
                 .ok_or_else(not_found)?;
             drop(transaction);
             revoke_grant_controllers(state, grant_id).await;
             let _ = state.revocations.send(Revocation { grant_id });
-            info!(
-                grant_id,
-                splint_id = ?mutation.grant.splint_id,
-                incarnation = mutation.grant.incarnation,
-                "terminal access grant revoked"
-            );
-            Response::AccessRevoked {
-                lair_id: containment.0,
-                dojo_id: containment.1,
-                authorization_revision: mutation.authorization_revision,
-                grant: mutation.grant,
+            match (resource, revoked) {
+                (
+                    consent::GrantResource::Splint { splint_id, .. },
+                    consent::RevokedAuthorization::Splint(mutation),
+                ) => {
+                    let containment = splint_containment(&*state.topology.read().await, splint_id)
+                        .ok_or_else(not_found)?;
+                    info!(grant_id, splint_id = ?mutation.grant.splint_id, "terminal access grant revoked");
+                    Response::AccessRevoked {
+                        lair_id: containment.0,
+                        dojo_id: containment.1,
+                        authorization_revision: mutation.authorization_revision,
+                        grant: mutation.grant,
+                    }
+                }
+                (
+                    consent::GrantResource::Lair { lair_id },
+                    consent::RevokedAuthorization::Lair(mutation),
+                ) => {
+                    let topology_revision = state.topology.read().await.revision();
+                    info!(grant_id, %lair_id, "Lair access grant revoked");
+                    Response::LairAccessRevoked {
+                        topology_revision,
+                        authorization_revision: mutation.authorization_revision,
+                        grant: mutation.grant,
+                    }
+                }
+                _ => return Err(internal()),
             }
         }
         Request::CreateTransientLair {
@@ -5143,6 +5431,15 @@ async fn handle_authorized_request(
                     let _ = state.revocations.send(Revocation { grant_id });
                 }
             }
+            let lair_grants = state
+                .grants
+                .lock()
+                .await
+                .revoke_lair(lair_id, "Lair terminated");
+            for grant_id in lair_grants {
+                revoke_grant_controllers(state, grant_id).await;
+                let _ = state.revocations.send(Revocation { grant_id });
+            }
             for runtime in runtimes {
                 runtime.shutdown().await.map_err(|_| internal())?;
             }
@@ -5241,6 +5538,8 @@ async fn handle_authorized_request(
             };
             let grant_id = if authorization.policy_authorized() {
                 None
+            } else if let Some(grant_id) = authorization.authorized_grant_id() {
+                Some(grant_id)
             } else {
                 authorize_scope(
                     state,
@@ -5465,6 +5764,8 @@ async fn handle_authorized_request(
                     &[AccessScope::Input, AccessScope::Resize],
                 ) {
                 None
+            } else if let Some(grant_id) = authorization.authorized_grant_id() {
+                Some(grant_id)
             } else {
                 let required = modes
                     .iter()
@@ -5508,6 +5809,7 @@ async fn handle_authorized_request(
             incarnation,
         } => {
             if !authorization.policy_authorized()
+                && authorization.authorized_grant_id().is_none()
                 && !state.development_terminal_access
                 && !first_party_human_ui(
                     trusted_ui_client,
@@ -5551,6 +5853,7 @@ async fn handle_authorized_request(
         } => {
             splinterm_protocol::validate_control_modes(&modes)?;
             if !authorization.policy_authorized()
+                && authorization.authorized_grant_id().is_none()
                 && !state.development_terminal_access
                 && !first_party_human_ui(
                     trusted_ui_client,
@@ -5561,7 +5864,7 @@ async fn handle_authorized_request(
             {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
-                    "control transfer is restricted to the trusted first-party UI",
+                    "control transfer requires trusted UI, policy, or ephemeral Lair access",
                 ));
             }
             let _ = current_handle(state, splint_id, incarnation).await?;
@@ -5569,6 +5872,7 @@ async fn handle_authorized_request(
                 connection_id,
                 splint_id,
                 incarnation,
+                authorization.authorized_grant_id(),
             )?;
             publish_control_notice(state, ControlNotice::TransferRequested(transfer));
             schedule_transfer_timeout(Arc::clone(state), transfer);
@@ -5611,37 +5915,44 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
         } => {
-            if !trusted_ui_client || !peer.is_matching_splinterm() {
+            let trusted_local = trusted_ui_client && peer.is_matching_splinterm();
+            if !trusted_local
+                && !authorization.policy_authorized()
+                && authorization.authorized_grant_id().is_none()
+            {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
-                    "forced transfer is restricted to the trusted first-party UI",
+                    "forced transfer requires trusted confirmation, policy, or an ephemeral grant",
                 ));
             }
             let _ = current_handle(state, splint_id, incarnation).await?;
-            let confirmed = consent::prompt(
-                peer,
-                splint_id,
-                incarnation,
-                vec![AccessScope::ControlTakeover],
-            )
-            .await
-            .map_err(|error| {
-                warn!(%error, "trusted forced-control confirmation failed closed");
-                ProtocolError::new(
-                    ErrorCode::ConsentUnavailable,
-                    "trusted confirmation unavailable",
+            if trusted_local {
+                let confirmed = consent::prompt(
+                    peer,
+                    splint_id,
+                    incarnation,
+                    vec![AccessScope::ControlTakeover],
                 )
-            })?;
-            if !confirmed {
-                return Err(ProtocolError::new(
-                    ErrorCode::ConsentDenied,
-                    "forced control transfer denied",
-                ));
+                .await
+                .map_err(|error| {
+                    warn!(%error, "trusted forced-control confirmation failed closed");
+                    ProtocolError::new(
+                        ErrorCode::ConsentUnavailable,
+                        "trusted confirmation unavailable",
+                    )
+                })?;
+                if !confirmed {
+                    return Err(ProtocolError::new(
+                        ErrorCode::ConsentDenied,
+                        "forced control transfer denied",
+                    ));
+                }
             }
             let lease = state.controller.lock().await.force_transfer(
                 connection_id,
                 splint_id,
                 incarnation,
+                authorization.authorized_grant_id(),
             )?;
             publish_control_status(state, splint_id, incarnation).await;
             let (lair_id, dojo_id, _) =
@@ -5674,7 +5985,7 @@ async fn handle_authorized_request(
             incarnation,
             bytes,
         } => {
-            if !authorization.policy_authorized() {
+            if !authorization.policy_authorized() && authorization.authorized_grant_id().is_none() {
                 let _ = authorize_scope(
                     state,
                     peer,
@@ -5704,7 +6015,7 @@ async fn handle_authorized_request(
             pixel_width,
             pixel_height,
         } => {
-            if !authorization.policy_authorized() {
+            if !authorization.policy_authorized() && authorization.authorized_grant_id().is_none() {
                 let _ = authorize_scope(
                     state,
                     peer,
@@ -8223,6 +8534,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ephemeral_lair_grant_authorizes_descendants_but_not_another_lair() {
+        let state = test_state(false);
+        let peer = PeerIdentity::for_test();
+        let first = Lair::new("approved", PathBuf::from("/tmp"));
+        let first_lair_id = first.id;
+        let first_dojo_id = first.dojos[0].id;
+        let second = Lair::new("unrelated", PathBuf::from("/tmp"));
+        let second_dojo_id = second.dojos[0].id;
+        {
+            let mut topology = state.topology.write().await;
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, first).unwrap();
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, second).unwrap();
+        }
+        let grant = state.grants.lock().await.grant_lair(
+            &peer,
+            first_lair_id,
+            vec![AccessScope::TopologyName],
+        );
+        let revision = state.topology.read().await.revision();
+
+        let allowed = authorize_request(
+            &Request::RenameDojo {
+                expected_topology_revision: revision,
+                dojo_id: first_dojo_id,
+                name: "renamed".to_owned(),
+            },
+            &state,
+            &peer,
+            0,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(allowed.authorized_grant_id(), Some(grant.grant.grant_id));
+
+        let denied = authorize_request(
+            &Request::RenameDojo {
+                expected_topology_revision: revision,
+                dojo_id: second_dojo_id,
+                name: "denied".to_owned(),
+            },
+            &state,
+            &peer,
+            0,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.code, ErrorCode::Unauthorized);
+    }
+
+    #[tokio::test]
     async fn remote_interactive_role_uses_human_terminal_authority_without_policy() {
         let state = test_state(false);
         let peer = PeerIdentity::for_test();
@@ -8235,7 +8602,6 @@ mod tests {
                 splint_id,
                 incarnation: Some(1),
             },
-            Request::RevokeAccess { grant_id: 1 },
             Request::CreateLairAutomation {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "remote".to_owned(),
@@ -8581,6 +8947,16 @@ mod tests {
                 splinterm_protocol::AutomationScope::ControllerTransfer,
                 splinterm_protocol::AutomationScope::Input,
                 splinterm_protocol::AutomationScope::Resize,
+            ])
+        );
+        assert_eq!(
+            requested_operation_scopes(&Request::ForceControlTransfer {
+                splint_id,
+                incarnation: 1,
+            }),
+            Some(vec![
+                splinterm_protocol::AutomationScope::ControllerAcquire,
+                splinterm_protocol::AutomationScope::ControllerTransfer,
             ])
         );
         assert!(
@@ -9001,6 +9377,28 @@ mod tests {
     }
 
     #[test]
+    fn approved_force_transfer_remains_bound_to_its_ephemeral_grant() {
+        let splint_id = SplintId::new();
+        let mut controllers = ControllerState::default();
+        let original = controllers.acquire(10, splint_id, 4, None).unwrap();
+        let replacement = controllers
+            .force_transfer(20, splint_id, 4, Some(77))
+            .unwrap();
+
+        assert!(
+            controllers
+                .authorize(original.connection_id, original.id, splint_id, 4)
+                .is_err()
+        );
+        assert!(
+            controllers
+                .authorize(replacement.connection_id, replacement.id, splint_id, 4)
+                .is_ok()
+        );
+        assert_eq!(controllers.release_grant(77), vec![replacement]);
+    }
+
+    #[test]
     fn policy_reload_revokes_only_automation_owned_control_and_topology_subscriptions() {
         let mut controllers = ControllerState::default();
         let automation_splint = SplintId::new();
@@ -9008,9 +9406,11 @@ mod tests {
         let automation_lease = controllers.acquire(10, automation_splint, 4, None).unwrap();
         let human_lease = controllers.acquire(20, human_splint, 5, None).unwrap();
         let automation_transfer = controllers
-            .request_transfer(11, automation_splint, 4)
+            .request_transfer(11, automation_splint, 4, None)
             .unwrap();
-        let human_transfer = controllers.request_transfer(21, human_splint, 5).unwrap();
+        let human_transfer = controllers
+            .request_transfer(21, human_splint, 5, None)
+            .unwrap();
         let automation_connections = HashSet::from([10, 11]);
 
         let (leases, transfers) = controllers.release_connections(&automation_connections);
@@ -9071,7 +9471,7 @@ mod tests {
             .controller
             .lock()
             .await
-            .request_transfer(20, splint_id, 3)
+            .request_transfer(20, splint_id, 3, None)
             .unwrap();
         let expired = state
             .controller
@@ -9096,7 +9496,9 @@ mod tests {
         let splint_id = SplintId::new();
         let mut controllers = ControllerState::default();
         let owner = controllers.acquire(10, splint_id, 4, None).unwrap();
-        let denied = controllers.request_transfer(20, splint_id, 4).unwrap();
+        let denied = controllers
+            .request_transfer(20, splint_id, 4, None)
+            .unwrap();
         let (_, outcome, lease) = controllers
             .decide_transfer(10, denied.id, ControlTransferDecision::Deny)
             .unwrap();
@@ -9104,7 +9506,9 @@ mod tests {
         assert!(lease.is_none());
         assert!(controllers.authorize(10, owner.id, splint_id, 4).is_ok());
 
-        let accepted = controllers.request_transfer(20, splint_id, 4).unwrap();
+        let accepted = controllers
+            .request_transfer(20, splint_id, 4, None)
+            .unwrap();
         let (_, outcome, lease) = controllers
             .decide_transfer(10, accepted.id, ControlTransferDecision::Accept)
             .unwrap();
@@ -9115,18 +9519,24 @@ mod tests {
 
         controllers.release_connection(20);
         let owner = controllers.acquire(10, splint_id, 4, None).unwrap();
-        let pending = controllers.request_transfer(30, splint_id, 4).unwrap();
+        let pending = controllers
+            .request_transfer(30, splint_id, 4, None)
+            .unwrap();
         assert_eq!(controllers.cancel_connection_transfers(30), vec![pending]);
         assert!(controllers.authorize(10, owner.id, splint_id, 4).is_ok());
 
-        let retired = controllers.request_transfer(32, splint_id, 4).unwrap();
+        let retired = controllers
+            .request_transfer(32, splint_id, 4, None)
+            .unwrap();
         assert_eq!(
             controllers.cancel_identity_transfer(splint_id, 4),
             Some(retired)
         );
         assert!(!controllers.transfer_by_splint.contains_key(&splint_id));
 
-        let timed_out = controllers.request_transfer(31, splint_id, 4).unwrap();
+        let timed_out = controllers
+            .request_transfer(31, splint_id, 4, None)
+            .unwrap();
         assert_eq!(controllers.expire_transfer(timed_out.id), Some(timed_out));
         assert_eq!(
             controllers

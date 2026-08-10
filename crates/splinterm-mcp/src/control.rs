@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use splinterm_automation_client::Connection;
 use splinterm_core::{DojoId, LairId, SplintId};
 use splinterm_protocol::{
-    ControlMode, ControlTransferDecision, ControlTransferOutcome, Request, Response,
-    validate_control_modes,
+    ControlMode, ControlTransferDecision, ControlTransferOutcome, Request, Response, ServerFrame,
+    SubscriptionEvent, validate_control_modes,
 };
 #[cfg(test)]
 use tokio::sync::Notify;
@@ -263,17 +263,24 @@ impl ControlRegistry {
         let splint_id = parse_splint(arguments)?;
         let incarnation = parse_incarnation(arguments)?;
         let modes = parse_modes(arguments)?;
+        let takeover = arguments
+            .get("takeover")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let mut connection = self.connect(cancellation).await?;
-        let response = request(
-            &mut connection,
+        let control_request = if takeover {
+            Request::ForceControlTransfer {
+                splint_id,
+                incarnation,
+            }
+        } else {
             Request::AcquireControl {
                 splint_id,
                 incarnation,
                 modes: modes.clone(),
-            },
-            cancellation,
-        )
-        .await?;
+            }
+        };
+        let response = request(&mut connection, control_request, cancellation).await?;
         let Response::ControlGranted {
             controller_id,
             lair_id,
@@ -325,23 +332,31 @@ impl ControlRegistry {
         let modes = parse_modes(arguments)?;
         let owner_handle = {
             let state = self.0.state.lock().await;
-            state
-                .controllers
-                .iter()
-                .find_map(|(handle, entry)| {
-                    (entry.metadata.splint_id == splint_id
-                        && entry.metadata.incarnation == incarnation)
-                        .then(|| handle.clone())
-                })
-                .ok_or_else(|| {
-                    dispatch::DispatchFailure::new(
-                        "control_transfer_unavailable",
-                        "control transfer is unavailable",
-                        true,
-                    )
-                })?
+            state.controllers.iter().find_map(|(handle, entry)| {
+                (entry.metadata.splint_id == splint_id && entry.metadata.incarnation == incarnation)
+                    .then(|| handle.clone())
+            })
         };
         let mut requester = self.connect(cancellation).await?;
+        let external_subscription = if owner_handle.is_none() {
+            match request(
+                &mut requester,
+                Request::SubscribeControl {
+                    splint_id,
+                    incarnation,
+                },
+                cancellation,
+            )
+            .await?
+            {
+                Response::ControlSubscribed {
+                    subscription_id, ..
+                } if subscription_id != 0 => Some(subscription_id),
+                _ => return Err(dispatch::DispatchFailure::internal()),
+            }
+        } else {
+            None
+        };
         let response = request(
             &mut requester,
             Request::RequestControlTransfer {
@@ -370,6 +385,18 @@ impl ControlRegistry {
             incarnation,
             modes,
         };
+        if let Some(subscription_id) = external_subscription {
+            return self
+                .complete_external_transfer(
+                    requester,
+                    subscription_id,
+                    transfer_id,
+                    metadata,
+                    cancellation,
+                )
+                .await;
+        }
+        let owner_handle = owner_handle.expect("internal transfer has an MCP owner");
         let handle = self
             .insert_transfer(requester, transfer_id, owner_handle, metadata.clone())
             .await?;
@@ -383,6 +410,81 @@ impl ControlRegistry {
             json!({
                 "committed": true,
                 "transfer_handle": handle,
+                "modes": mode_names(&metadata.modes),
+            }),
+        );
+        registration.disarm();
+        Ok(output)
+    }
+
+    async fn complete_external_transfer(
+        &self,
+        mut requester: Connection,
+        subscription_id: u64,
+        transfer_id: u64,
+        metadata: Metadata,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, dispatch::DispatchFailure> {
+        let resolution = tokio::time::timeout(TRANSFER_LIFETIME, async {
+            loop {
+                let frame = tokio::select! {
+                    () = cancellation.cancelled() => {
+                        return Err(dispatch::DispatchFailure::new(
+                            "cancelled",
+                            "the tool call was cancelled",
+                            true,
+                        ));
+                    }
+                    frame = requester.next_server_frame() => frame
+                        .map_err(|error| dispatch::map_client_error(&error))?,
+                };
+                if let ServerFrame::Event {
+                    subscription_id: event_subscription,
+                    event:
+                        SubscriptionEvent::ControlTransferResolved {
+                            transfer_id: resolved,
+                            outcome,
+                            controller_id,
+                        },
+                    ..
+                } = frame
+                    && event_subscription == subscription_id
+                    && resolved == transfer_id
+                {
+                    return Ok((outcome, controller_id));
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            dispatch::DispatchFailure::new(
+                "timeout",
+                "the control transfer decision timed out",
+                true,
+            )
+        })??;
+        let (ControlTransferOutcome::Granted, Some(controller_id)) = resolution else {
+            return Err(dispatch::DispatchFailure::new(
+                "control_transfer_unavailable",
+                "the graphical controller denied or cancelled the transfer",
+                true,
+            ));
+        };
+        let handle = self
+            .insert_controller(requester, controller_id, metadata.clone())
+            .await?;
+        let mut registration =
+            RegistrationGuard::new(&self.0, handle.clone(), RegisteredKind::Controller);
+        self.observe_post_commit_cancellation(cancellation).await?;
+        self.publish_modes(&metadata).await;
+        let revision = self.revision().await?;
+        let output = success(
+            "splinterm.request_control_transfer",
+            resource(&metadata, revision),
+            json!({
+                "committed": true,
+                "controller_handle": handle,
+                "outcome": "granted",
                 "modes": mode_names(&metadata.modes),
             }),
         );
@@ -1562,6 +1664,176 @@ mod tests {
         let failure = task.await.unwrap().unwrap_err();
         assert_eq!(failure.code, "cancelled");
         registry.clear_post_commit_hook();
+        registry.shutdown().await;
+        resources.shutdown().await;
+        join(daemon).await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_graphical_owner_can_grant_a_requested_transfer() {
+        let (directory, socket) = socket("external-transfer");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (lair_id, dojo_id, splint_id) = ids();
+        let daemon = thread::spawn(move || {
+            let mut requester = accept(&listener);
+            let ClientFrame::Request {
+                request_id,
+                request: Request::SubscribeControl { .. },
+                ..
+            } = read_frame(&mut requester)
+            else {
+                panic!("expected control subscription")
+            };
+            write_frame(
+                &mut requester,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlSubscribed {
+                        subscription_id: 7,
+                        status: splinterm_protocol::ControlStatus {
+                            splint_id,
+                            incarnation: 2,
+                            controlled: true,
+                            locally_owned: false,
+                        },
+                    },
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request: Request::RequestControlTransfer { .. },
+                ..
+            } = read_frame(&mut requester)
+            else {
+                panic!("expected external transfer request")
+            };
+            write_frame(
+                &mut requester,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlTransferPending {
+                        transfer_id: 9,
+                        lair_id,
+                        dojo_id,
+                    },
+                },
+            );
+            write_frame(
+                &mut requester,
+                &ServerFrame::Event {
+                    subscription_id: 7,
+                    sequence: 1,
+                    event: SubscriptionEvent::ControlTransferResolved {
+                        transfer_id: 9,
+                        outcome: ControlTransferOutcome::Granted,
+                        controller_id: Some(60),
+                    },
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request: Request::ReleaseControl { controller_id: 60 },
+                ..
+            } = read_frame(&mut requester)
+            else {
+                panic!("expected transferred controller cleanup")
+            };
+            write_frame(
+                &mut requester,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::Acknowledged,
+                },
+            );
+        });
+
+        let resources = Arc::new(ResourceRegistry::default());
+        let registry = ControlRegistry::new_at(Arc::clone(&resources), &socket);
+        let transferred = registry
+            .dispatch(
+                "splinterm.request_control_transfer",
+                &json!({
+                    "splint_id": splint_id.to_string(),
+                    "incarnation": 2,
+                    "modes": ["input"]
+                }),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(transferred["data"]["outcome"], "granted");
+        assert!(transferred["data"]["controller_handle"].as_str().is_some());
+        registry.shutdown().await;
+        resources.shutdown().await;
+        join(daemon).await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approved_takeover_uses_the_explicit_force_transfer_request() {
+        let (directory, socket) = socket("approved-takeover");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (lair_id, dojo_id, splint_id) = ids();
+        let daemon = thread::spawn(move || {
+            let mut requester = accept(&listener);
+            let ClientFrame::Request {
+                request_id,
+                request:
+                    Request::ForceControlTransfer {
+                        splint_id: requested_splint,
+                        incarnation: 2,
+                    },
+                ..
+            } = read_frame(&mut requester)
+            else {
+                panic!("expected approved takeover request")
+            };
+            assert_eq!(requested_splint, splint_id);
+            write_frame(
+                &mut requester,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlGranted {
+                        controller_id: 50,
+                        lair_id,
+                        dojo_id,
+                    },
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request: Request::ReleaseControl { controller_id: 50 },
+                ..
+            } = read_frame(&mut requester)
+            else {
+                panic!("expected takeover cleanup")
+            };
+            write_frame(
+                &mut requester,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::Acknowledged,
+                },
+            );
+        });
+
+        let resources = Arc::new(ResourceRegistry::default());
+        let registry = ControlRegistry::new_at(Arc::clone(&resources), &socket);
+        let acquired = registry
+            .dispatch(
+                "splinterm.acquire_control",
+                &json!({
+                    "splint_id": splint_id.to_string(),
+                    "incarnation": 2,
+                    "modes": ["input"],
+                    "takeover": true
+                }),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(acquired["data"]["controller_handle"].as_str().is_some());
         registry.shutdown().await;
         resources.shutdown().await;
         join(daemon).await;

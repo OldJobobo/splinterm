@@ -30,7 +30,14 @@
           "const": false
         },
         "resource": {
-          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/authorization_resource"
+          "oneOf": [
+            {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/authorization_resource"
+            },
+            {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/lair_authorization_resource"
+            }
+          ]
         }
       }
     }

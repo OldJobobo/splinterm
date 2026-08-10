@@ -24,6 +24,7 @@ const TOOLS: &[&str] = &[
     "rename_dojo",
     "request_access",
     "request_control_transfer",
+    "request_lair_access",
     "resize",
     "restore_lair",
     "restore_splint",
@@ -58,14 +59,14 @@ const ERROR_CODES: &[&str] = &[
 ];
 
 const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
-    ("common.schema.json", 0x52c9_d943_f4ca_eb7f),
+    ("common.schema.json", 0x106d_950e_50ab_948e),
     ("error.schema.json", 0x9dd2_e2af_f101_25fe),
     ("resources/control.schema.json", 0xd4f3_1fbc_06b2_5c2b),
     ("resources/terminal.schema.json", 0x20c0_6b33_9e25_c903),
     ("resources/topology.schema.json", 0x9997_f7e0_b8cc_8fec),
     (
         "tools/acquire_control.input.schema.json",
-        0x1861_1b1a_19c6_d82d,
+        0x2ca3_3fb5_40b3_2b83,
     ),
     (
         "tools/acquire_control.output.schema.json",
@@ -191,11 +192,19 @@ const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
     ),
     (
         "tools/request_access.input.schema.json",
-        0x405c_dc0e_5d8b_a4c3,
+        0xb4af_1008_7282_c553,
     ),
     (
         "tools/request_access.output.schema.json",
         0x3e63_a65e_b3a0_5e83,
+    ),
+    (
+        "tools/request_lair_access.input.schema.json",
+        0xfb70_9d8d_5c59_cbf6,
+    ),
+    (
+        "tools/request_lair_access.output.schema.json",
+        0x11a1_9ada_4b2d_bff9,
     ),
     (
         "tools/request_control_transfer.input.schema.json",
@@ -203,7 +212,7 @@ const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
     ),
     (
         "tools/request_control_transfer.output.schema.json",
-        0x560a_70c0_8457_3ff0,
+        0x170a_ac8c_e6e5_59a3,
     ),
     ("tools/resize.input.schema.json", 0x1a8c_b25e_4606_a63f),
     ("tools/resize.output.schema.json", 0x0e4a_3a70_7d47_3460),
@@ -237,7 +246,7 @@ const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
     ),
     (
         "tools/revoke_access.output.schema.json",
-        0x20bb_32dc_6ebc_6a6c,
+        0xd1e0_3c0f_daee_fffe,
     ),
     (
         "tools/search_scrollback.input.schema.json",
@@ -336,13 +345,13 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 #[test]
-fn schema_inventory_is_exactly_32_tools_and_three_resources() {
+fn schema_inventory_is_exactly_33_tools_and_three_resources() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let schema_root = root.join("dist/schemas/mcp/v2");
     let tools = schema_root.join("tools");
     let resources = schema_root.join("resources");
 
-    assert_eq!(TOOLS.len(), 32);
+    assert_eq!(TOOLS.len(), 33);
     let expected_tools = TOOLS
         .iter()
         .map(|tool| (*tool).to_owned())
@@ -373,7 +382,7 @@ fn schema_inventory_is_exactly_32_tools_and_three_resources() {
         .collect::<Vec<_>>();
     assert_eq!(actual_error_codes, ERROR_CODES);
 
-    assert_eq!(REVIEWED_SCHEMA_FNV64.len(), 69);
+    assert_eq!(REVIEWED_SCHEMA_FNV64.len(), 71);
     for (relative_path, expected_hash) in REVIEWED_SCHEMA_FNV64 {
         let path = schema_root.join(relative_path);
         let schema: serde_json::Value = serde_json::from_slice(

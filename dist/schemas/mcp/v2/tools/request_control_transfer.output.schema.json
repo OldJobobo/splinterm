@@ -15,24 +15,37 @@
           "const": "trusted_metadata"
         },
         "data": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "committed",
-            "transfer_handle",
-            "modes"
-          ],
-          "properties": {
-            "committed": {
-              "const": true
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["committed", "transfer_handle", "modes"],
+              "properties": {
+                "committed": {"const": true},
+                "transfer_handle": {
+                  "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/transfer_handle"
+                },
+                "modes": {
+                  "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/modes"
+                }
+              }
             },
-            "transfer_handle": {
-              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/transfer_handle"
-            },
-            "modes": {
-              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/modes"
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["committed", "controller_handle", "outcome", "modes"],
+              "properties": {
+                "committed": {"const": true},
+                "controller_handle": {
+                  "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/controller_handle"
+                },
+                "outcome": {"const": "granted"},
+                "modes": {
+                  "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/modes"
+                }
+              }
             }
-          }
+          ]
         },
         "truncated": {
           "const": false

@@ -12,7 +12,7 @@ use splinterm_core::{
     Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 30;
+pub const PROTOCOL_VERSION: u16 = 31;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -34,7 +34,7 @@ pub const MAX_UPDATE_ROW_PATCHES: usize = MAX_ROWS as usize;
 pub const MAX_UPDATE_SCROLLS: usize = MAX_ROWS as usize;
 pub const MAX_CONSENT_FRAME_BYTES: usize = 16 * 1024;
 pub const CONSENT_CAPABILITY_BYTES: usize = 32;
-pub const MAX_ACCESS_SCOPES: usize = 8;
+pub const MAX_ACCESS_SCOPES: usize = 16;
 pub const MAX_IMAGE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES_PER_SPLINT: usize = 32 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES_PER_DAEMON: usize = 64 * 1024 * 1024;
@@ -320,6 +320,10 @@ pub enum Request {
         incarnation: u64,
         scopes: Vec<AccessScope>,
     },
+    RequestLairAccess {
+        lair_id: LairId,
+        scopes: Vec<AccessScope>,
+    },
     AuthorizationStatus {
         splint_id: SplintId,
         incarnation: Option<u64>,
@@ -589,11 +593,21 @@ pub enum Response {
         authorization_revision: u64,
         grant: AccessGrant,
     },
+    LairAccessGranted {
+        topology_revision: TopologyRevision,
+        authorization_revision: u64,
+        grant: LairAccessGrant,
+    },
     AccessRevoked {
         lair_id: LairId,
         dojo_id: DojoId,
         authorization_revision: u64,
         grant: AccessGrant,
+    },
+    LairAccessRevoked {
+        topology_revision: TopologyRevision,
+        authorization_revision: u64,
+        grant: LairAccessGrant,
     },
     AuthorizationStatus {
         lair_id: LairId,
@@ -602,6 +616,7 @@ pub enum Response {
         topology_revision: TopologyRevision,
         policy_generation: u64,
         grants: Vec<AccessGrant>,
+        lair_grants: Vec<LairAccessGrant>,
         persistent: Vec<PersistentAuthorizationStatus>,
         development_bypass: bool,
     },
@@ -1035,6 +1050,7 @@ pub enum AutomationScope {
 pub enum AuditOperation {
     Ping,
     RequestAccess,
+    RequestLairAccess,
     AuthorizationStatus,
     RevokeAccess,
     ListLairs,
@@ -1163,6 +1179,11 @@ pub enum AccessScope {
     ClipboardWrite,
     Terminate,
     ControlTakeover,
+    TopologyObserve,
+    TopologyLayout,
+    TopologyName,
+    ProcessSpawn,
+    ProcessRestore,
 }
 
 impl AccessScope {
@@ -1177,8 +1198,26 @@ impl AccessScope {
             Self::ClipboardWrite => "write clipboard metadata",
             Self::Terminate => "terminate process",
             Self::ControlTakeover => "take over terminal control",
+            Self::TopologyObserve => "inspect this Lair topology",
+            Self::TopologyLayout => "change this Lair layout",
+            Self::TopologyName => "rename this Lair and its sessions",
+            Self::ProcessSpawn => "start processes in this Lair",
+            Self::ProcessRestore => "restore processes in this Lair",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConsentTarget {
+    Splint {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+    Lair {
+        lair_id: LairId,
+        lair_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1187,8 +1226,7 @@ pub struct ConsentPrompt {
     pub requester: String,
     pub requester_pid: u32,
     pub requester_uid: u32,
-    pub splint_id: SplintId,
-    pub incarnation: u64,
+    pub target: ConsentTarget,
     pub scopes: Vec<AccessScope>,
 }
 
@@ -1203,6 +1241,24 @@ pub struct AccessGrant {
     pub grant_id: u64,
     pub splint_id: SplintId,
     pub incarnation: u64,
+    pub scopes: Vec<AccessScope>,
+    pub requester: String,
+    pub expires_at_unix_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessGrantSource {
+    Ephemeral,
+    PersistentPolicy,
+    Development,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LairAccessGrant {
+    pub grant_id: u64,
+    pub source: AccessGrantSource,
+    pub lair_id: LairId,
     pub scopes: Vec<AccessScope>,
     pub requester: String,
     pub expires_at_unix_seconds: u64,
@@ -2319,6 +2375,38 @@ mod tests {
     }
 
     #[test]
+    fn lair_access_request_and_grant_are_typed_and_bounded() {
+        let lair_id = LairId::new();
+        let request = Request::RequestLairAccess {
+            lair_id,
+            scopes: vec![
+                AccessScope::Input,
+                AccessScope::ControlTakeover,
+                AccessScope::TopologyLayout,
+            ],
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["type"], "request_lair_access");
+        assert_eq!(serde_json::from_value::<Request>(encoded).unwrap(), request);
+
+        let grant = LairAccessGrant {
+            grant_id: 7,
+            source: AccessGrantSource::Ephemeral,
+            lair_id,
+            scopes: vec![AccessScope::Input, AccessScope::ControlTakeover],
+            requester: "/usr/bin/splinterm-mcp".to_owned(),
+            expires_at_unix_seconds: 42,
+        };
+        let encoded = serde_json::to_value(&grant).unwrap();
+        assert_eq!(encoded["lair_id"], lair_id.to_string());
+        assert!(encoded.get("splint_id").is_none());
+        assert_eq!(
+            serde_json::from_value::<LairAccessGrant>(encoded).unwrap(),
+            grant
+        );
+    }
+
+    #[test]
     fn default_terminal_cells_use_compact_backward_readable_json() {
         let empty = TerminalCell {
             content: String::new(),
@@ -2353,7 +2441,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

@@ -19,14 +19,15 @@ use splinterm_core::{
 };
 use splinterm_mcp::MAXIMUM_LINE_BYTES;
 use splinterm_protocol::{
-    AccessGrant, AccessScope, ActiveScreen, AuditPage, AutomationScope, CellAttributes,
-    ClientFrame, ClientRole, ColorSource, ControlMode, ControlStatus, ControlTransferDecision,
-    ControlTransferOutcome, ErrorCode, MouseTracking, MutationPreflight, MutationPreparation,
-    MutationTarget, PersistentAuthorizationStatus, ProtocolError, Request, Response,
-    RestoreLeafResult, ScrollbackPage, SearchMatch, SearchPage, ServerFrame, ServerLimits,
-    SplintLifecycle, SplintRuntimeSummary, SubscriptionEvent, TerminalCell, TerminalInputModes,
-    TerminalProvenance, TerminalRow, TerminalRowPatch, TerminalSnapshot, TerminalUpdate,
-    TopologyChange, TopologyChangeKind, TopologySnapshot, UnderlineStyle, encode_frame,
+    AccessGrant, AccessGrantSource, AccessScope, ActiveScreen, AuditPage, AutomationScope,
+    CellAttributes, ClientFrame, ClientRole, ColorSource, ControlMode, ControlStatus,
+    ControlTransferDecision, ControlTransferOutcome, ErrorCode, LairAccessGrant, MouseTracking,
+    MutationPreflight, MutationPreparation, MutationTarget, PersistentAuthorizationStatus,
+    ProtocolError, Request, Response, RestoreLeafResult, ScrollbackPage, SearchMatch, SearchPage,
+    ServerFrame, ServerLimits, SplintLifecycle, SplintRuntimeSummary, SubscriptionEvent,
+    TerminalCell, TerminalInputModes, TerminalProvenance, TerminalRow, TerminalRowPatch,
+    TerminalSnapshot, TerminalUpdate, TopologyChange, TopologyChangeKind, TopologySnapshot,
+    UnderlineStyle, encode_frame,
 };
 
 const SERVER: &str = env!("CARGO_BIN_EXE_splinterm-mcp");
@@ -679,6 +680,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                     topology_revision: topology.revision,
                     policy_generation: 3,
                     grants: Vec::new(),
+                    lair_grants: Vec::new(),
                     persistent: vec![PersistentAuthorizationStatus {
                         policy_rule_id: "slice4-test".to_owned(),
                         scopes: vec![AutomationScope::AuthorizationInspect],
@@ -951,6 +953,98 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
         "internal"
     );
     assert!(!schema_mismatch.to_string().contains(&"x".repeat(1_025)));
+
+    server.close_input();
+    assert!(server.wait().success());
+    fake.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn lair_access_tool_requests_one_typed_ephemeral_grant() {
+    let (directory, socket) = isolated_socket("lair-access");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let fake = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        assert!(matches!(
+            read_private_frame::<ClientFrame>(&mut stream),
+            ClientFrame::Hello {
+                role: ClientRole::Automation,
+                ..
+            }
+        ));
+        write_private_frame(
+            &mut stream,
+            &ServerFrame::Hello {
+                version: splinterm_protocol::PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+            },
+        );
+        let ClientFrame::Request {
+            request_id,
+            request:
+                Request::RequestLairAccess {
+                    lair_id: requested,
+                    scopes,
+                },
+            ..
+        } = read_private_frame(&mut stream)
+        else {
+            panic!("mock daemon expected a Lair access request");
+        };
+        assert_eq!(requested, lair_id);
+        assert_eq!(
+            scopes,
+            [
+                AccessScope::Input,
+                AccessScope::ControlTakeover,
+                AccessScope::TopologyLayout,
+            ]
+        );
+        write_private_frame(
+            &mut stream,
+            &ServerFrame::Response {
+                request_id,
+                result: Response::LairAccessGranted {
+                    topology_revision: TopologyRevision::new(9),
+                    authorization_revision: 4,
+                    grant: LairAccessGrant {
+                        grant_id: 17,
+                        source: AccessGrantSource::Ephemeral,
+                        lair_id,
+                        scopes,
+                        requester: "/private/requester".to_owned(),
+                        expires_at_unix_seconds: 100,
+                    },
+                },
+            },
+        );
+    });
+
+    let mut server = Harness::spawn_with_socket(&socket, None);
+    server.initialize();
+    server.initialized();
+    let response = call_tool(
+        &mut server,
+        25,
+        "splinterm.request_lair_access",
+        json!({
+            "lair_id": lair_id.to_string(),
+            "scopes": ["input", "controller_transfer", "topology_layout_mutate"]
+        }),
+    );
+    assert_eq!(
+        response["structuredContent"]["data"]["grant_id"], "17",
+        "{response}"
+    );
+    assert_eq!(response["structuredContent"]["data"]["source"], "ephemeral");
+    assert_eq!(
+        response["structuredContent"]["resource"]["topology_revision"],
+        9
+    );
+    assert!(!response.to_string().contains("/private/requester"));
 
     server.close_input();
     assert!(server.wait().success());
@@ -1616,7 +1710,7 @@ fn prompt_injection_values_remain_inert_untrusted_data() {
 
     server.send(&request(204, "tools/list", json!({})));
     let catalog = server.receive_id(204);
-    assert_eq!(catalog["result"]["tools"].as_array().unwrap().len(), 32);
+    assert_eq!(catalog["result"]["tools"].as_array().unwrap().len(), 33);
     for tool in catalog["result"]["tools"].as_array().unwrap() {
         assert!(
             !PAYLOADS
@@ -1666,14 +1760,14 @@ fn every_frozen_tool_is_routed_and_capability_surface_stays_closed() {
     server.send(&request(300, "tools/list", json!({})));
     let listed = server.receive_id(300);
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 32);
+    assert_eq!(tools.len(), 33);
     let mut names = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     names.sort();
     names.dedup();
-    assert_eq!(names.len(), 32);
+    assert_eq!(names.len(), 33);
     assert!(
         tools
             .iter()
@@ -3014,6 +3108,7 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
         "read_scrollback",
         "search_scrollback",
         "request_access",
+        "request_lair_access",
         "authorization_status",
         "revoke_access",
         "inspect_audit",
@@ -3251,7 +3346,7 @@ fn duplicate_initialize_is_rejected_without_disrupting_the_session() {
             .as_array()
             .unwrap()
             .len(),
-        32
+        33
     );
     server.close_input();
     assert!(server.wait().success());
@@ -4201,7 +4296,7 @@ fn notifications_cancellation_response_ids_and_eof_are_protocol_clean() {
         response["id"] == "string-response-id"
             && response["result"]["tools"]
                 .as_array()
-                .is_some_and(|tools| tools.len() == 32)
+                .is_some_and(|tools| tools.len() == 33)
     }));
     assert!(responses.iter().any(|response| {
         response["id"] == 22

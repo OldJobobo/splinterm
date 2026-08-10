@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v2/tools/request_lair_access.output.schema.json",
+  "title": "splinterm.request_lair_access successful output",
+  "allOf": [
+    {
+      "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/success_envelope"
+    },
+    {
+      "properties": {
+        "tool": {"const": "splinterm.request_lair_access"},
+        "content_trust": {"const": "trusted_metadata"},
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["committed", "source", "grant_id", "granted_scopes", "expires_at"],
+          "properties": {
+            "committed": {"const": true},
+            "source": {
+              "enum": ["ephemeral", "persistent_policy", "development"]
+            },
+            "grant_id": {
+              "oneOf": [
+                {
+                  "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/grant_id"
+                },
+                {"type": "null"}
+              ]
+            },
+            "granted_scopes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/scope"
+              }
+            },
+            "expires_at": {
+              "oneOf": [
+                {"type": "string", "maxLength": 64},
+                {"type": "null"}
+              ]
+            }
+          }
+        },
+        "truncated": {"const": false},
+        "resource": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/lair_authorization_resource"
+        }
+      }
+    }
+  ]
+}

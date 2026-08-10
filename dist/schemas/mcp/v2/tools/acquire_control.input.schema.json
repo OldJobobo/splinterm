@@ -20,6 +20,11 @@
         },
         "modes": {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/modes"
+        },
+        "takeover": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use a previously approved takeover grant to replace an existing controller."
         }
       }
     }

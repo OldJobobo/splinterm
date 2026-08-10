@@ -121,6 +121,9 @@
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/authorization_resource"
         },
         {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/lair_authorization_resource"
+        },
+        {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/audit_resource"
         },
         {
@@ -184,6 +187,7 @@
         "splinterm.read_scrollback",
         "splinterm.search_scrollback",
         "splinterm.request_access",
+        "splinterm.request_lair_access",
         "splinterm.authorization_status",
         "splinterm.revoke_access",
         "splinterm.inspect_audit",
@@ -695,6 +699,30 @@
           "items": {
             "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/topology_lair"
           }
+        }
+      }
+    },
+    "lair_authorization_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "lair_id",
+        "topology_revision",
+        "authorization_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "lair"
+        },
+        "lair_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/uuid"
+        },
+        "topology_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/revision"
+        },
+        "authorization_revision": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/revision"
         }
       }
     }

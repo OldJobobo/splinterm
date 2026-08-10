@@ -94,6 +94,13 @@ const DEFINITIONS: &[ToolDefinition] = &[
         false
     ),
     tool_definition!(
+        "request_lair_access",
+        "Requests one trusted, five-minute automation grant for a Lair and its descendants.",
+        false,
+        false,
+        false
+    ),
+    tool_definition!(
         "authorization_status",
         "Inspects bounded authorization status for one Splint.",
         true,
@@ -215,14 +222,14 @@ const DEFINITIONS: &[ToolDefinition] = &[
     ),
     tool_definition!(
         "acquire_control",
-        "Acquires bounded controller modes for one exact Splint incarnation.",
+        "Acquires bounded controller modes, optionally using a previously approved takeover grant.",
         false,
         false,
         false
     ),
     tool_definition!(
         "request_control_transfer",
-        "Requests bounded controller transfer for one exact Splint incarnation.",
+        "Requests transfer from an MCP or external graphical controller and waits for the owner decision.",
         false,
         false,
         false
@@ -704,7 +711,7 @@ mod tests {
     #[test]
     fn catalog_is_exact_and_closed() {
         let tools = catalog();
-        assert_eq!(tools.len(), 32);
+        assert_eq!(tools.len(), 33);
         assert!(tools.iter().all(|tool| tool.name.starts_with("splinterm.")));
         assert_eq!(
             tools
@@ -852,6 +859,73 @@ mod tests {
         assert_eq!(
             validate_arguments("splinterm.input", &input("é".repeat(40_000))),
             Err(ValidationError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn lair_access_output_accepts_only_typed_grant_metadata() {
+        let output = json!({
+            "schema": "splinterm.mcp.v2",
+            "tool": "splinterm.request_lair_access",
+            "ok": true,
+            "resource": {
+                "kind": "lair",
+                "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+                "topology_revision": 9,
+                "authorization_revision": 4
+            },
+            "data": {
+                "committed": true,
+                "source": "ephemeral",
+                "grant_id": "17",
+                "granted_scopes": ["input", "controller_transfer", "topology_layout_mutate"],
+                "expires_at": "100"
+            },
+            "truncated": false,
+            "content_trust": "trusted_metadata"
+        });
+        let catalog = catalog_cache();
+        assert_eq!(
+            validate_schema(
+                &catalog.common_schema["$defs"]["lair_authorization_resource"],
+                &output["resource"],
+                &catalog.common_schema,
+                0,
+            ),
+            Ok(()),
+            "Lair authorization resource"
+        );
+        assert_eq!(
+            validate_schema(
+                &catalog.common_schema["$defs"]["resource"],
+                &output["resource"],
+                &catalog.common_schema,
+                0,
+            ),
+            Ok(()),
+            "common resource union"
+        );
+        let schema =
+            &catalog.output_schemas[definition_index("splinterm.request_lair_access").unwrap()];
+        for (index, child) in schema["allOf"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(
+                validate_schema(child, &output, &catalog.common_schema, 0),
+                Ok(()),
+                "allOf child {index}"
+            );
+        }
+        assert_eq!(
+            validate_output("splinterm.request_lair_access", &output),
+            Ok(())
+        );
+
+        let mut nonstored = output;
+        nonstored["data"]["source"] = json!("persistent_policy");
+        nonstored["data"]["grant_id"] = Value::Null;
+        nonstored["data"]["expires_at"] = Value::Null;
+        assert_eq!(
+            validate_output("splinterm.request_lair_access", &nonstored),
+            Ok(())
         );
     }
 

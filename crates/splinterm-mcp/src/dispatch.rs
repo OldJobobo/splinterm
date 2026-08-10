@@ -14,11 +14,11 @@ use splinterm_automation_client::{
 };
 use splinterm_core::{Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
-    AccessGrant, AccessScope, AuditDecision, AuditOperation, AuditOutcome, AutomationLaunch,
-    ErrorCode, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
-    MutationPreflight, MutationPreparation, Request, Response, RestoreLeafResult, ScrollbackPage,
-    SearchPage, SplintLifecycle, SplintRuntimeSummary, TerminalProvenance, TerminalSnapshot,
-    TopologySnapshot,
+    AccessGrant, AccessGrantSource, AccessScope, AuditDecision, AuditOperation, AuditOutcome,
+    AutomationLaunch, ErrorCode, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_QUERY_BYTES,
+    MAX_SEARCH_RESULTS, MutationPreflight, MutationPreparation, Request, Response,
+    RestoreLeafResult, ScrollbackPage, SearchPage, SplintLifecycle, SplintRuntimeSummary,
+    TerminalProvenance, TerminalSnapshot, TopologySnapshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -456,6 +456,11 @@ fn scope_from_name(value: &str) -> Option<AccessScope> {
         "resize" => Some(AccessScope::Resize),
         "process_terminate" => Some(AccessScope::Terminate),
         "controller_transfer" => Some(AccessScope::ControlTakeover),
+        "topology_metadata_read" => Some(AccessScope::TopologyObserve),
+        "topology_layout_mutate" => Some(AccessScope::TopologyLayout),
+        "topology_name_mutate" => Some(AccessScope::TopologyName),
+        "process_spawn" => Some(AccessScope::ProcessSpawn),
+        "process_restore" => Some(AccessScope::ProcessRestore),
         _ => None,
     }
 }
@@ -468,6 +473,11 @@ fn access_scope_name(scope: AccessScope) -> Option<&'static str> {
         AccessScope::Resize => Some("resize"),
         AccessScope::Terminate => Some("process_terminate"),
         AccessScope::ControlTakeover => Some("controller_transfer"),
+        AccessScope::TopologyObserve => Some("topology_metadata_read"),
+        AccessScope::TopologyLayout => Some("topology_layout_mutate"),
+        AccessScope::TopologyName => Some("topology_name_mutate"),
+        AccessScope::ProcessSpawn => Some("process_spawn"),
+        AccessScope::ProcessRestore => Some("process_restore"),
         AccessScope::ClipboardRead | AccessScope::ClipboardWrite => None,
     }
 }
@@ -1873,6 +1883,7 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
     match operation {
         AuditOperation::Ping => "ping",
         AuditOperation::RequestAccess => "request_access",
+        AuditOperation::RequestLairAccess => "request_lair_access",
         AuditOperation::AuthorizationStatus => "authorization_status",
         AuditOperation::RevokeAccess => "revoke_access",
         AuditOperation::ListLairs => "list_lairs",
@@ -2080,6 +2091,72 @@ pub(crate) async fn dispatch(
                 _ => Err(DispatchFailure::internal()),
             }
         }
+        "splinterm.request_lair_access" => {
+            let lair_id = parse_lair(arguments)?;
+            let scopes = arguments["scopes"]
+                .as_array()
+                .ok_or_else(DispatchFailure::internal)?
+                .iter()
+                .map(|scope| scope.as_str().and_then(scope_from_name))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    DispatchFailure::new(
+                        "invalid_argument",
+                        "request_lair_access contains an unsupported scope",
+                        false,
+                    )
+                })?;
+            match daemon_request(Request::RequestLairAccess { lair_id, scopes }, cancellation)
+                .await?
+            {
+                Response::LairAccessGranted {
+                    topology_revision,
+                    authorization_revision,
+                    grant,
+                } if grant.lair_id == lair_id => {
+                    let granted_scopes = grant
+                        .scopes
+                        .iter()
+                        .copied()
+                        .map(access_scope_name)
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(DispatchFailure::internal)?;
+                    let (source, grant_id, expires_at) = match grant.source {
+                        AccessGrantSource::Ephemeral if grant.grant_id != 0 => (
+                            "ephemeral",
+                            Some(grant.grant_id.to_string()),
+                            Some(grant.expires_at_unix_seconds.to_string()),
+                        ),
+                        AccessGrantSource::PersistentPolicy if grant.grant_id == 0 => {
+                            ("persistent_policy", None, None)
+                        }
+                        AccessGrantSource::Development if grant.grant_id == 0 => {
+                            ("development", None, None)
+                        }
+                        _ => return Err(DispatchFailure::internal()),
+                    };
+                    Ok(success(
+                        tool,
+                        json!({
+                            "kind": "lair",
+                            "lair_id": lair_id.to_string(),
+                            "topology_revision": topology_revision.get(),
+                            "authorization_revision": authorization_revision,
+                        }),
+                        json!({
+                            "committed": true,
+                            "source": source,
+                            "grant_id": grant_id,
+                            "granted_scopes": granted_scopes,
+                            "expires_at": expires_at,
+                        }),
+                        false,
+                        "trusted_metadata",
+                    ))
+                }
+                _ => Err(DispatchFailure::internal()),
+            }
+        }
         "splinterm.authorization_status" => {
             let splint_id = parse_splint(arguments)?;
             match daemon_request(
@@ -2098,12 +2175,19 @@ pub(crate) async fn dispatch(
                     topology_revision,
                     policy_generation,
                     grants,
+                    lair_grants,
                     persistent,
                     development_bypass,
                 } if incarnation > 0 => {
                     let mut scopes = BTreeSet::new();
                     for grant in grants {
                         if grant.splint_id != splint_id || grant.incarnation != incarnation {
+                            return Err(DispatchFailure::internal());
+                        }
+                        scopes.extend(grant.scopes.into_iter().filter_map(access_scope_name));
+                    }
+                    for grant in lair_grants {
+                        if grant.lair_id != lair_id {
                             return Err(DispatchFailure::internal());
                         }
                         scopes.extend(grant.scopes.into_iter().filter_map(access_scope_name));
@@ -2144,6 +2228,22 @@ pub(crate) async fn dispatch(
                 } if grant.grant_id == grant_id => Ok(success(
                     tool,
                     authorization_resource(lair_id, dojo_id, &grant, authorization_revision)?,
+                    json!({"committed": true}),
+                    false,
+                    "trusted_metadata",
+                )),
+                Response::LairAccessRevoked {
+                    topology_revision,
+                    authorization_revision,
+                    grant,
+                } if grant.grant_id == grant_id => Ok(success(
+                    tool,
+                    json!({
+                        "kind": "lair",
+                        "lair_id": grant.lair_id.to_string(),
+                        "topology_revision": topology_revision.get(),
+                        "authorization_revision": authorization_revision,
+                    }),
                     json!({"committed": true}),
                     false,
                     "trusted_metadata",

@@ -245,15 +245,22 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
         Response::AccessRevoked { grant, .. } => {
             println!("Access grant {} revoked.", grant.grant_id);
         }
+        Response::LairAccessGranted { grant, .. } => {
+            println!("Lair access grant {} issued.", grant.grant_id);
+        }
+        Response::LairAccessRevoked { grant, .. } => {
+            println!("Lair access grant {} revoked.", grant.grant_id);
+        }
         Response::AuthorizationStatus {
             grants,
+            lair_grants,
             persistent,
             development_bypass,
             ..
         } => {
             println!(
                 "{} active grant(s), {} persistent rule(s); development bypass={development_bypass}",
-                grants.len(),
+                grants.len() + lair_grants.len(),
                 persistent.len()
             );
         }

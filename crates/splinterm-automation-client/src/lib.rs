@@ -1246,6 +1246,11 @@ fn access_scope_name(scope: AccessScope) -> Option<&'static str> {
         AccessScope::Resize => Some("resize"),
         AccessScope::Terminate => Some("process_terminate"),
         AccessScope::ControlTakeover => Some("controller_transfer"),
+        AccessScope::TopologyObserve => Some("topology_metadata_read"),
+        AccessScope::TopologyLayout => Some("topology_layout_mutate"),
+        AccessScope::TopologyName => Some("topology_name_mutate"),
+        AccessScope::ProcessSpawn => Some("process_spawn"),
+        AccessScope::ProcessRestore => Some("process_restore"),
         AccessScope::ClipboardRead | AccessScope::ClipboardWrite => None,
     }
 }
@@ -1379,6 +1384,7 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
     match operation {
         AuditOperation::Ping => "ping",
         AuditOperation::RequestAccess => "request_access",
+        AuditOperation::RequestLairAccess => "request_lair_access",
         AuditOperation::AuthorizationStatus => "authorization_status",
         AuditOperation::RevokeAccess => "revoke_access",
         AuditOperation::ListLairs => "list_lairs",

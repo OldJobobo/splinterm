@@ -282,6 +282,7 @@ impl ServerHandler for SplintermServer {
                 | "splinterm.rename_splint"
                 | "splinterm.set_dojo_default_focus"
                 | "splinterm.request_access"
+                | "splinterm.request_lair_access"
                 | "splinterm.authorization_status"
                 | "splinterm.revoke_access"
                 | "splinterm.inspect_audit"

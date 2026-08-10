@@ -22,10 +22,11 @@ use nix::{
     poll::{PollFd, PollFlags, PollTimeout, poll},
     sys::socket::{getsockopt, sockopt::PeerPidfd},
 };
-use splinterm_core::SplintId;
+use splinterm_core::{LairId, SplintId};
 use splinterm_protocol::{
-    AccessGrant, AccessScope, AuditPeer, CONSENT_CAPABILITY_BYTES, ConsentPrompt, ConsentReply,
-    MAX_ACCESS_SCOPES, MAX_CONSENT_FRAME_BYTES,
+    AccessGrant, AccessGrantSource, AccessScope, AuditPeer, CONSENT_CAPABILITY_BYTES,
+    ConsentPrompt, ConsentReply, ConsentTarget, LairAccessGrant, MAX_ACCESS_SCOPES,
+    MAX_CONSENT_FRAME_BYTES,
 };
 use tokio::{io::unix::AsyncFd, net::UnixStream};
 
@@ -244,6 +245,40 @@ impl Grant {
     }
 }
 
+#[derive(Clone, Debug)]
+struct LairGrant {
+    id: u64,
+    peer: PeerIdentity,
+    lair_id: LairId,
+    scopes: BTreeSet<AccessScope>,
+    expires: Instant,
+    expires_at_unix_seconds: u64,
+}
+
+impl LairGrant {
+    fn wire(&self) -> LairAccessGrant {
+        LairAccessGrant {
+            grant_id: self.id,
+            source: AccessGrantSource::Ephemeral,
+            lair_id: self.lair_id,
+            scopes: self.scopes.iter().copied().collect(),
+            requester: self.peer.requester_label(),
+            expires_at_unix_seconds: self.expires_at_unix_seconds,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrantResource {
+    Splint {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
+    Lair {
+        lair_id: LairId,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuditDecision {
     Granted,
@@ -262,8 +297,9 @@ pub struct AuditRecord {
     pub peer_uid: u32,
     pub peer_pid: u32,
     pub requester: String,
-    pub splint_id: SplintId,
-    pub incarnation: u64,
+    pub lair_id: Option<LairId>,
+    pub splint_id: Option<SplintId>,
+    pub incarnation: Option<u64>,
     pub scopes: Vec<AccessScope>,
     pub decision: AuditDecision,
     pub reason: &'static str,
@@ -275,12 +311,25 @@ pub struct AuthorizationMutation {
     pub authorization_revision: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LairAuthorizationMutation {
+    pub grant: LairAccessGrant,
+    pub authorization_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevokedAuthorization {
+    Splint(AuthorizationMutation),
+    Lair(LairAuthorizationMutation),
+}
+
 #[derive(Debug, Default)]
 pub struct GrantStore {
     next_id: u64,
     next_audit_order: u64,
     authorization_revision: u64,
     grants: Vec<Grant>,
+    lair_grants: Vec<LairGrant>,
     audit: VecDeque<AuditRecord>,
 }
 
@@ -312,12 +361,38 @@ impl GrantStore {
         })
     }
 
+    pub fn authorize_lair(
+        &mut self,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        required: &[AccessScope],
+    ) -> Option<u64> {
+        self.remove_expired();
+        let required: BTreeSet<_> = required.iter().copied().collect();
+        self.lair_grants.iter().find_map(|grant| {
+            (grant.peer == *peer
+                && grant.lair_id == lair_id
+                && grant.expires > Instant::now()
+                && required.is_subset(&grant.scopes))
+            .then_some(grant.id)
+        })
+    }
+
     pub fn status(&mut self, splint_id: SplintId, incarnation: u64) -> Vec<AccessGrant> {
         self.remove_expired();
         self.grants
             .iter()
             .filter(|grant| grant.splint_id == splint_id && grant.incarnation == incarnation)
             .map(Grant::wire)
+            .collect()
+    }
+
+    pub fn lair_status(&mut self, lair_id: LairId) -> Vec<LairAccessGrant> {
+        self.remove_expired();
+        self.lair_grants
+            .iter()
+            .filter(|grant| grant.lair_id == lair_id && grant.expires > Instant::now())
+            .map(LairGrant::wire)
             .collect()
     }
 
@@ -381,6 +456,80 @@ impl GrantStore {
         }
     }
 
+    pub fn grant_lair(
+        &mut self,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        scopes: Vec<AccessScope>,
+    ) -> LairAuthorizationMutation {
+        self.remove_expired();
+        let scopes: BTreeSet<_> = scopes.into_iter().collect();
+        if let Some(index) = self
+            .lair_grants
+            .iter()
+            .position(|grant| grant.peer == *peer && grant.lair_id == lair_id)
+        {
+            let wire = {
+                let grant = &mut self.lair_grants[index];
+                grant.scopes.extend(scopes.iter().copied());
+                grant.expires = Instant::now() + GRANT_LIFETIME;
+                grant.expires_at_unix_seconds = unix_seconds() + GRANT_LIFETIME.as_secs();
+                grant.wire()
+            };
+            self.advance_authorization_revision();
+            self.record_lair(
+                peer,
+                lair_id,
+                scopes,
+                AuditDecision::Granted,
+                "grant Lair once",
+            );
+            return LairAuthorizationMutation {
+                grant: wire,
+                authorization_revision: self.authorization_revision,
+            };
+        }
+        self.next_id = self.next_id.saturating_add(1).max(1);
+        let grant = LairGrant {
+            id: self.next_id,
+            peer: peer.clone(),
+            lair_id,
+            scopes: scopes.clone(),
+            expires: Instant::now() + GRANT_LIFETIME,
+            expires_at_unix_seconds: unix_seconds() + GRANT_LIFETIME.as_secs(),
+        };
+        let wire = grant.wire();
+        self.lair_grants.push(grant);
+        self.advance_authorization_revision();
+        self.record_lair(
+            peer,
+            lair_id,
+            scopes,
+            AuditDecision::Granted,
+            "grant Lair once",
+        );
+        LairAuthorizationMutation {
+            grant: wire,
+            authorization_revision: self.authorization_revision,
+        }
+    }
+
+    pub fn deny_lair(
+        &mut self,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        scopes: &[AccessScope],
+        reason: &'static str,
+    ) {
+        self.record_lair(
+            peer,
+            lair_id,
+            scopes.iter().copied().collect(),
+            AuditDecision::Denied,
+            reason,
+        );
+    }
+
     pub fn deny(
         &mut self,
         peer: &PeerIdentity,
@@ -399,11 +548,28 @@ impl GrantStore {
         );
     }
 
-    pub fn grant_resource(&self, grant_id: u64) -> Option<(SplintId, u64)> {
+    pub fn owns_lair_grant(&self, peer: &PeerIdentity, grant_id: u64) -> bool {
+        self.lair_grants.iter().any(|grant| {
+            grant.id == grant_id && grant.peer == *peer && grant.expires > Instant::now()
+        })
+    }
+
+    pub fn grant_resource(&self, grant_id: u64) -> Option<GrantResource> {
         self.grants
             .iter()
             .find(|grant| grant.id == grant_id)
-            .map(|grant| (grant.splint_id, grant.incarnation))
+            .map(|grant| GrantResource::Splint {
+                splint_id: grant.splint_id,
+                incarnation: grant.incarnation,
+            })
+            .or_else(|| {
+                self.lair_grants
+                    .iter()
+                    .find(|grant| grant.id == grant_id)
+                    .map(|grant| GrantResource::Lair {
+                        lair_id: grant.lair_id,
+                    })
+            })
     }
 
     pub fn revoke(&mut self, grant_id: u64) -> Option<AuthorizationMutation> {
@@ -425,6 +591,62 @@ impl GrantStore {
         })
     }
 
+    pub fn revoke_any(&mut self, grant_id: u64) -> Option<RevokedAuthorization> {
+        if let Some(revoked) = self.revoke(grant_id) {
+            return Some(RevokedAuthorization::Splint(revoked));
+        }
+        let index = self
+            .lair_grants
+            .iter()
+            .position(|grant| grant.id == grant_id)?;
+        let grant = self.lair_grants.remove(index);
+        let wire = grant.wire();
+        self.advance_authorization_revision();
+        self.record_lair(
+            &grant.peer,
+            grant.lair_id,
+            grant.scopes,
+            AuditDecision::Revoked,
+            "explicit local revocation",
+        );
+        Some(RevokedAuthorization::Lair(LairAuthorizationMutation {
+            grant: wire,
+            authorization_revision: self.authorization_revision,
+        }))
+    }
+
+    pub fn revoke_lair_if_expired(&mut self, grant_id: u64) -> Option<LairAuthorizationMutation> {
+        let index = self
+            .lair_grants
+            .iter()
+            .position(|grant| grant.id == grant_id && grant.expires <= Instant::now())?;
+        let grant = self.lair_grants.remove(index);
+        let wire = grant.wire();
+        self.advance_authorization_revision();
+        self.record_lair(
+            &grant.peer,
+            grant.lair_id,
+            grant.scopes,
+            AuditDecision::Revoked,
+            "grant expired",
+        );
+        Some(LairAuthorizationMutation {
+            grant: wire,
+            authorization_revision: self.authorization_revision,
+        })
+    }
+
+    pub fn lair_grant_with_revision(&mut self, grant_id: u64) -> Option<LairAuthorizationMutation> {
+        self.remove_expired();
+        self.lair_grants
+            .iter()
+            .find(|grant| grant.id == grant_id)
+            .map(|grant| LairAuthorizationMutation {
+                grant: grant.wire(),
+                authorization_revision: self.authorization_revision,
+            })
+    }
+
     pub fn grant_with_revision(&mut self, grant_id: u64) -> Option<AuthorizationMutation> {
         self.remove_expired();
         self.grants
@@ -434,6 +656,32 @@ impl GrantStore {
                 grant: grant.wire(),
                 authorization_revision: self.authorization_revision,
             })
+    }
+
+    pub fn revoke_lair(&mut self, lair_id: LairId, reason: &'static str) -> Vec<u64> {
+        let mut removed = Vec::new();
+        self.lair_grants.retain(|grant| {
+            if grant.lair_id == lair_id {
+                removed.push(grant.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let ids = removed.iter().map(|grant| grant.id).collect();
+        if !removed.is_empty() {
+            self.advance_authorization_revision();
+        }
+        for grant in removed {
+            self.record_lair(
+                &grant.peer,
+                lair_id,
+                grant.scopes,
+                AuditDecision::Revoked,
+                reason,
+            );
+        }
+        ids
     }
 
     pub fn revoke_identity(
@@ -495,8 +743,36 @@ impl GrantStore {
             peer_uid: peer.uid,
             peer_pid: peer.pid,
             requester: peer.requester_label(),
-            splint_id,
-            incarnation,
+            lair_id: None,
+            splint_id: Some(splint_id),
+            incarnation: Some(incarnation),
+            scopes: scopes.into_iter().collect(),
+            decision,
+            reason,
+        });
+    }
+
+    fn record_lair(
+        &mut self,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        scopes: BTreeSet<AccessScope>,
+        decision: AuditDecision,
+        reason: &'static str,
+    ) {
+        self.next_audit_order = self.next_audit_order.saturating_add(1);
+        if self.audit.len() == MAX_AUDIT_RECORDS {
+            self.audit.pop_front();
+        }
+        self.audit.push_back(AuditRecord {
+            order: self.next_audit_order,
+            unix_seconds: unix_seconds(),
+            peer_uid: peer.uid,
+            peer_pid: peer.pid,
+            requester: peer.requester_label(),
+            lair_id: Some(lair_id),
+            splint_id: None,
+            incarnation: None,
             scopes: scopes.into_iter().collect(),
             decision,
             reason,
@@ -510,19 +786,43 @@ pub async fn prompt(
     incarnation: u64,
     scopes: Vec<AccessScope>,
 ) -> Result<bool> {
+    prompt_target(
+        peer,
+        ConsentTarget::Splint {
+            splint_id,
+            incarnation,
+        },
+        scopes,
+    )
+    .await
+}
+
+pub async fn prompt_lair(
+    peer: &PeerIdentity,
+    lair_id: LairId,
+    lair_name: String,
+    scopes: Vec<AccessScope>,
+) -> Result<bool> {
+    prompt_target(peer, ConsentTarget::Lair { lair_id, lair_name }, scopes).await
+}
+
+async fn prompt_target(
+    peer: &PeerIdentity,
+    target: ConsentTarget,
+    scopes: Vec<AccessScope>,
+) -> Result<bool> {
     if scopes.is_empty() || scopes.len() > MAX_ACCESS_SCOPES {
         bail!("invalid consent scope count");
     }
     let peer = peer.clone();
-    tokio::task::spawn_blocking(move || prompt_blocking(&peer, splint_id, incarnation, scopes))
+    tokio::task::spawn_blocking(move || prompt_blocking(&peer, target, scopes))
         .await
         .context("consent broker task failed")?
 }
 
 fn prompt_blocking(
     peer: &PeerIdentity,
-    splint_id: SplintId,
-    incarnation: u64,
+    target: ConsentTarget,
     scopes: Vec<AccessScope>,
 ) -> Result<bool> {
     let mut capability = vec![0_u8; CONSENT_CAPABILITY_BYTES];
@@ -555,8 +855,7 @@ fn prompt_blocking(
         requester: peer.requester_label(),
         requester_pid: peer.pid,
         requester_uid: peer.uid,
-        splint_id,
-        incarnation,
+        target,
         scopes,
     };
     write_bounded(&mut daemon, &prompt)?;
@@ -676,6 +975,61 @@ mod tests {
             store.authorize(&peer, splint, 8, &[AccessScope::Observe]),
             None
         );
+    }
+
+    #[test]
+    fn lair_grants_are_peer_bound_dynamic_and_unrelated_lairs_fail_closed() {
+        let peer = PeerIdentity::for_test();
+        let other_peer = PeerIdentity {
+            pid: peer.pid.saturating_add(1),
+            ..peer.clone()
+        };
+        let lair_id = LairId::new();
+        let other_lair = LairId::new();
+        let mut store = GrantStore::default();
+        let grant = store.grant_lair(
+            &peer,
+            lair_id,
+            vec![AccessScope::Input, AccessScope::TopologyLayout],
+        );
+
+        assert_eq!(
+            store.authorize_lair(&peer, lair_id, &[AccessScope::Input]),
+            Some(grant.grant.grant_id)
+        );
+        assert_eq!(
+            store.authorize_lair(&peer, lair_id, &[AccessScope::Resize]),
+            None
+        );
+        assert_eq!(
+            store.authorize_lair(&other_peer, lair_id, &[AccessScope::Input]),
+            None
+        );
+        assert_eq!(
+            store.authorize_lair(&peer, other_lair, &[AccessScope::Input]),
+            None
+        );
+
+        let revoked = store.revoke_any(grant.grant.grant_id).unwrap();
+        assert!(matches!(revoked, RevokedAuthorization::Lair(_)));
+        assert_eq!(
+            store.authorize_lair(&peer, lair_id, &[AccessScope::Input]),
+            None
+        );
+    }
+
+    #[test]
+    fn expired_lair_grant_is_revoked_with_its_exact_identity() {
+        let peer = PeerIdentity::for_test();
+        let lair_id = LairId::new();
+        let mut store = GrantStore::default();
+        let grant = store.grant_lair(&peer, lair_id, vec![AccessScope::Input]);
+        store.lair_grants[0].expires = Instant::now();
+
+        let revoked = store.revoke_lair_if_expired(grant.grant.grant_id).unwrap();
+        assert_eq!(revoked.grant, grant.grant);
+        assert_eq!(revoked.authorization_revision, 2);
+        assert!(store.lair_grants.is_empty());
     }
 
     #[test]

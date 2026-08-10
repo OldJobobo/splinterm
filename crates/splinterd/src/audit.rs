@@ -21,6 +21,7 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::ReadGraphicalFocus => AuditOperation::ReadGraphicalFocus,
         Request::PublishGraphicalFocus { .. } => AuditOperation::PublishGraphicalFocus,
         Request::RequestAccess { .. } => AuditOperation::RequestAccess,
+        Request::RequestLairAccess { .. } => AuditOperation::RequestLairAccess,
         Request::AuthorizationStatus { .. } => AuditOperation::AuthorizationStatus,
         Request::RevokeAccess { .. } => AuditOperation::RevokeAccess,
         Request::PrepareMutation { mutation } => match mutation {

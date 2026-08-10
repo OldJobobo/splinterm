@@ -306,6 +306,7 @@ fn serve_authorization_status() -> (PathBuf, thread::JoinHandle<()>) {
                 topology_revision: TopologyRevision::new(1),
                 policy_generation: 1,
                 grants: Vec::new(),
+                lair_grants: Vec::new(),
                 persistent: vec![PersistentAuthorizationStatus {
                     policy_rule_id: "editor".to_owned(),
                     scopes: vec![AutomationScope::TerminalVisibleRead],

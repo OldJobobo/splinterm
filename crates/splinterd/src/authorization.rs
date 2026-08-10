@@ -18,6 +18,7 @@ pub enum OwnedAuthority {
 pub enum ConditionalRequirement {
     RequestedAccessScopes,
     RequestedControlModes,
+    RequestedControlTakeover,
     AttachScrollback,
     LiveProcessTermination,
     ExpandedLiveProcessTermination,
@@ -114,10 +115,12 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         Request::SubscribeTopology => {
             RequestAuthorization::policy(&[Scope::TopologySubscribe, Scope::TopologyMetadataRead])
         }
-        Request::RequestAccess { .. } => RequestAuthorization::Conditional {
-            base: &[],
-            requirement: ConditionalRequirement::RequestedAccessScopes,
-        },
+        Request::RequestAccess { .. } | Request::RequestLairAccess { .. } => {
+            RequestAuthorization::Conditional {
+                base: &[],
+                requirement: ConditionalRequirement::RequestedAccessScopes,
+            }
+        }
         Request::AuthorizationStatus { .. } => {
             RequestAuthorization::policy(&[Scope::AuthorizationInspect])
         }
@@ -181,7 +184,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         Request::DecideControlTransfer { .. } => {
             RequestAuthorization::Owned(OwnedAuthority::PendingTransfer)
         }
-        Request::ForceControlTransfer { .. } => RequestAuthorization::TrustedUiConsent,
+        Request::ForceControlTransfer { .. } => RequestAuthorization::Conditional {
+            base: &[Scope::ControllerAcquire, Scope::ControllerTransfer],
+            requirement: ConditionalRequirement::RequestedControlTakeover,
+        },
         Request::ReleaseControl { .. } => RequestAuthorization::Owned(OwnedAuthority::Controller),
         Request::Input { .. } => RequestAuthorization::PolicyAndOwned {
             required: &[Scope::Input],
@@ -258,6 +264,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exhaustive sensitive-request matrix is intentionally reviewed together"
+    )]
     fn sensitive_matrix_keeps_policy_ownership_and_trusted_ui_distinct() {
         let splint_id = SplintId::new();
         assert_eq!(
@@ -354,7 +364,13 @@ mod tests {
                 splint_id,
                 incarnation: 1,
             }),
-            RequestAuthorization::TrustedUiConsent
+            RequestAuthorization::Conditional {
+                base: &[
+                    OperationScope::ControllerAcquire,
+                    OperationScope::ControllerTransfer,
+                ],
+                requirement: ConditionalRequirement::RequestedControlTakeover,
+            }
         );
     }
 }
