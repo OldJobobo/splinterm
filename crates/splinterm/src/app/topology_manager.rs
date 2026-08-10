@@ -952,6 +952,10 @@ const fn window_has_tab_capacity(tab_count: usize) -> bool {
     tab_count < splinterm::tab::MAX_WINDOW_TABS
 }
 
+fn topology_edit_target<T>(tabs: &mut WindowTabSet<T>, dojo_id: DojoId) -> Option<&mut T> {
+    tabs.get_mut(dojo_id).map(|tab| &mut tab.value)
+}
+
 async fn finish_managed_window_open(
     factory: &ConnectionFactory,
     target: Result<(WindowDojoIdentity, splinterm_core::Dojo)>,
@@ -1641,11 +1645,9 @@ pub(in crate::app) async fn run_topology_manager(
             } => Some((*target, *pending)),
             _ => None,
         };
-        let managed = &mut state
-            .tabs
-            .get_mut(dojo_id)
-            .context("topology command targeted a closed Dojo tab")?
-            .value;
+        let Some(managed) = topology_edit_target(&mut state.tabs, dojo_id) else {
+            continue;
+        };
         match apply_topology_command(
             &factory,
             &mut connection,
@@ -1783,8 +1785,8 @@ mod tests {
         WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets, close_action,
         close_other_tab_targets, command_has_pending_split, lair_navigation_target,
         next_topology_manager_wake, parent_ratio, pending_focus_for_observation,
-        refreshed_close_state, topology_command_outcome, topology_identity_diff,
-        validate_exited_close_target, window_has_tab_capacity,
+        refreshed_close_state, topology_command_outcome, topology_edit_target,
+        topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
 
@@ -1944,6 +1946,16 @@ mod tests {
 
         assert!(!abort.is_finished());
         abort.abort();
+    }
+
+    #[test]
+    fn closed_dojo_topology_edits_are_stale_instead_of_fatal() {
+        let dojo_id = DojoId::new();
+        let mut tabs = WindowTabSet::new(DojoTab::new(LairId::new(), dojo_id, 7));
+        assert_eq!(topology_edit_target(&mut tabs, dojo_id).copied(), Some(7));
+
+        assert!(tabs.close(dojo_id).is_some());
+        assert_eq!(topology_edit_target(&mut tabs, dojo_id), None);
     }
 
     #[test]
