@@ -1,0 +1,33 @@
+Keymap  splinterm
+Bindings  31
+  Ctrl+Shift+P              app.command-palette             built-in profile splinterm
+  Ctrl+Shift+S              session.recent                  built-in profile splinterm
+  Ctrl+Tab                  dojo.next                       built-in profile splinterm
+  Ctrl+Shift+Tab            dojo.previous                   built-in profile splinterm
+  Ctrl+Shift+D              dojo.new                        built-in profile splinterm
+  Ctrl+Shift+Q              dojo.close-tab                  built-in profile splinterm
+  Ctrl+Shift+Enter          pane.split-below                built-in profile splinterm
+  Ctrl+Shift+Backslash      pane.split-right                built-in profile splinterm
+  Ctrl+Shift+W              pane.close                      built-in profile splinterm
+  Ctrl+Shift+BracketLeft    pane.resize-smaller             built-in profile splinterm
+  Ctrl+Shift+BracketRight   pane.resize-larger              built-in profile splinterm
+  Ctrl+Shift+Left           pane.focus-left                 built-in profile splinterm
+  Ctrl+Shift+Right          pane.focus-right                built-in profile splinterm
+  Ctrl+Shift+Up             pane.focus-up                   built-in profile splinterm
+  Ctrl+Shift+Down           pane.focus-down                 built-in profile splinterm
+  Ctrl+Plus                 view.zoom-in                    built-in profile splinterm
+  Ctrl+Equal                view.zoom-in                    built-in profile splinterm
+  Ctrl+Minus                view.zoom-out                   built-in profile splinterm
+  Ctrl+0                    view.zoom-reset                 built-in profile splinterm
+  Ctrl+Shift+C              clipboard.copy                  built-in profile splinterm
+  Ctrl+Shift+V              clipboard.paste                 built-in profile splinterm
+  Ctrl+Shift+F              history.search                  built-in profile splinterm
+  Shift+PageUp              history.page-up                 built-in profile splinterm
+  Shift+PageDown            history.page-down               built-in profile splinterm
+  Shift+End                 history.return-live             built-in profile splinterm
+  Ctrl+Shift+T              control.request                 built-in profile splinterm
+  Ctrl+Shift+L              control.release                 built-in profile splinterm
+  Ctrl+Shift+U              control.force                   built-in profile splinterm
+  Ctrl+Shift+R              access.revoke-all               built-in profile splinterm
+  Ctrl+Shift+Y              control.accept-transfer         built-in profile splinterm
+  Ctrl+Shift+N              control.deny-transfer           built-in profile splinterm

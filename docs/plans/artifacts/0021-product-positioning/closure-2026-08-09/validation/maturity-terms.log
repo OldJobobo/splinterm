@@ -1,0 +1,7 @@
+site/src/pages/index.astro:222:        Splinterm is an advanced private prerelease. Core terminal, persistence, multiplexing,
+site/src/content/docs/docs/status.md:6:Splinterm is an **advanced private prerelease**. Substantial core behavior is implemented and validated, while public distribution, compatibility guarantees, and a support policy remain unreleased.
+docs/roadmap.md:4:> from advanced private prerelease to public distribution. It is a completion
+docs/status.md:10:**Splinterm is an advanced private prerelease.**
+CONTRIBUTING.md:3:Splinterm is an **advanced private prerelease**. Keep changes small, preserve
+README.md:17:> **Status: advanced private prerelease.** Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated. The currently validated target is x86_64 Omarchy/Arch Linux. Public distribution, compatibility guarantees, and a support policy have not yet been released.
+PASS: no stale current-surface maturity or metadata wording

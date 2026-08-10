@@ -33,7 +33,7 @@ check() {
 }
 
 package_splinterm() {
-  pkgdesc='Persistent Omarchy-native Wayland terminal (private prerelease)'
+  pkgdesc='Persistent Wayland terminal for humans and bounded automation'
   depends=(
     'fontconfig'
     'freetype2'

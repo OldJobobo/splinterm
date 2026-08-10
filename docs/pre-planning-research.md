@@ -1,5 +1,10 @@
 # Pre-planning research
 
+> **Historical pre-implementation research.** Current product and architecture
+> status are documented in [`README.md`](../README.md), [`status.md`](status.md),
+> and [`architecture.md`](architecture.md). “Proposed” language below describes
+> its original planning context, not current product maturity.
+
 This document records research directions and provisional decisions for
 Splinterm before implementation planning. It covers a Rust evolution of Foot,
 persistent multiplexing, platform priorities, and a secure automation surface.

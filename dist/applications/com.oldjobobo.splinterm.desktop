@@ -2,7 +2,7 @@
 Type=Application
 Name=Splinterm
 GenericName=Terminal
-Comment=Persistent Omarchy-native Wayland terminal
+Comment=Persistent Wayland terminal for humans and bounded automation
 TryExec=splinterm-xdg-terminal-exec
 Exec=splinterm-xdg-terminal-exec
 Icon=com.oldjobobo.splinterm

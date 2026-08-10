@@ -1,6 +1,6 @@
 [package]
 name = "splinterm"
-description = "Wayland terminal emulator and client for Splinterm"
+description = "Persistent Wayland terminal for humans and bounded automation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

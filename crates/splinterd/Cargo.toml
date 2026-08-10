@@ -1,6 +1,6 @@
 [package]
 name = "splinterd"
-description = "Persistent background server for Splinterm"
+description = "Persistent terminal topology daemon for Splinterm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

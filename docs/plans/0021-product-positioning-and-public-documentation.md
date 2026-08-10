@@ -1,8 +1,8 @@
 # Plan 0021: product positioning and public documentation
 
-- **Status:** In progress — public narrative, README rewrite, PRD, and website content are implemented; repository-authoritative status/usage/CLI documents, metadata alignment audit, and final reviews remain
+- **Status:** Complete — repository authority, human usage, CLI, contributor workflow, history framing, metadata alignment, focused validation, and two independent reviews pass
 - **Date:** 2026-08-04
-- **Reconciled:** 2026-08-09 against commits `1d8fa51` and `7a44e33`
+- **Reconciled:** 2026-08-09 against commits `1d8fa51`, `7a44e33`, `1e0a4ad`, and current closure work
 - **Product authority:** current implementation, retained validation evidence, and [Architecture](../architecture.md)
 - **Related status:** [Roadmap](../roadmap.md), [supported automation](../automation.md), and [private packaging](../packaging.md)
 - **Documentation scope:** public positioning, maturity language, README information architecture, and distribution metadata
@@ -18,14 +18,25 @@ content. The current site passes Astro diagnostics/build and its local-link
 validator; desktop, AppStream, and PKGBUILD metadata syntax also pass their
 focused validators.
 
-Plan 0021 is not complete. Its explicit repository-authority contract still
-requires `docs/status.md`, `docs/usage.md`, and `docs/cli.md`; those files do not
-exist. The status truth table and one-authority-per-subject audit have not been
-retained as a closure artifact, synchronized package/desktop/Cargo wording has
-not been recorded against that table, and the required independent
-product/readability and technical-accuracy reviews are absent. Website copies do
-not silently replace these repository-authoritative files because Plan 0026
-owns publication while this plan owns source content and maturity authority.
+The closure work establishes [`docs/status.md`](../status.md) as the repository
+maturity authority with a verified capability truth table, limitations, release
+gates, validated environment, and one-authority-per-subject map. Detailed human
+operation and CLI references now live in [`docs/usage.md`](../usage.md) and
+[`docs/cli.md`](../cli.md); contributor documentation covers isolated daemons,
+validation, benchmarks, the pinned Foot oracle, fuzzing, graphical guardrails,
+and packaging safety.
+
+README links now lead to repository authority, the roadmap and pre-planning
+research have current/archival framing, and package/desktop/AppStream/selected
+Cargo descriptions use the approved short product sentence. The PRD no longer
+calls the implemented website proposed and names the current authority files.
+Website copies remain summaries rather than silently replacing repository
+sources. Focused validation passes. Product/readability reviewer `93d8c0d2`
+concluded **may mark complete** without a finding. Technical reviewer `fb9f72d9`
+identified one inaccurate blanket prompt claim; the usage/CLI authorities now
+match the dispatcher contract exactly, post-review validation passes, and the
+[review disposition](artifacts/0021-product-positioning/closure-2026-08-09/review/disposition.md)
+records no remaining blocker.
 
 ## Decision
 

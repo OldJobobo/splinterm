@@ -1,0 +1,1057 @@
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 14f52fd..02982bd 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -1,15 +1,189 @@
+ # Contributing
+
+-Splinterm is pre-alpha. Keep changes small, preserve crate boundaries, and add
+-tests for domain or protocol behavior.
++Splinterm is an **advanced private prerelease**. Keep changes small, preserve
++crate and authority boundaries, and add focused tests for domain, protocol,
++terminal, renderer, or lifecycle behavior.
+
+-Before submitting a change, run:
++Read [`docs/status.md`](docs/status.md) for current product scope and
++[`docs/architecture.md`](docs/architecture.md) before changing ownership or
++protocol boundaries. Plans, spikes, benchmarks, and retained artifacts are
++historical evidence; do not rewrite them merely to match current marketing.
++
++## Standard validation
++
++Run from the repository root:
+
+ ```bash
+ cargo fmt --all --check
+ cargo clippy --workspace --all-targets -- -D warnings
+ cargo test --workspace
++git diff --check
++```
++
++Use serialized execution (`-- --test-threads=1`) for suites that own process,
++socket, signal, or service state. Run the nearest focused package/test first,
++then the workspace boundary when the change is coherent.
++
++Documentation or packaging changes also use:
++
++```bash
++desktop-file-validate dist/applications/com.oldjobobo.splinterm.desktop
++appstreamcli validate --no-net dist/metainfo/com.oldjobobo.splinterm.metainfo.xml
++(cd packaging && makepkg --printsrcinfo -p PKGBUILD >/dev/null)
++(
++  cd site
++  npm run validate
++)
++```
++
++## Isolated daemon and client development
++
++Never debug routine source changes against the packaged production daemon or its
++state. The repository helper builds development binaries and uses its own socket,
++state, and configuration:
++
++```bash
++./splinterm-test          # build, start/reuse the isolated daemon, open a client
++./splinterm-test restart  # rebuild and restart after daemon/protocol changes
++./splinterm-test ping     # build and verify the isolated daemon
++./splinterm-test stop     # stop the exact isolated daemon
++```
++
++For custom harnesses, create a unique short temporary root and set at least
++`SPLINTERM_SOCKET`, `XDG_STATE_HOME`, and `SPLINTERM_CONFIG` for every daemon and
++client process. Record exact PIDs/paths and clean only the namespace the harness
++created. Do not point development clients at production topology.
++
++The daemon owns child shells. Stopping it ends those processes. Never run
++`splinterm reset`, terminate a production daemon, replace `/usr/bin` binaries, or
++install a package as an incidental test step.
++
++## Focused test areas
++
++- Rust package/unit/integration tests: `cargo test -p PACKAGE ...`
++- Serialized daemon end-to-end:
++  `cargo test -p splinterd --test end_to_end -- --test-threads=1`
++- Session picker/reference client:
++  `python -m pytest -q tools/automation/test_session_picker.py`
++- Public contract fixtures:
++  `python tools/automation/validate-contract-fixtures.py`
++- Benchmark harness tests:
++  `python -m pytest -q tools/benchmark/test_benchmark.py`
++
++Use the exact commands named by the accepted plan that owns a changed subsystem.
++Do not broaden tolerances or regenerate accepted references silently.
++
++## Foot oracle and provenance
++
++Foot 1.27.0 commit
++`3c5b584b0eafa772eb4376fb6eaf6643399e190e` is the terminal-behavior oracle.
++The canonical checkout and accepted comparison images are read-only authorities.
++Do not modify the checkout, translate comparison images, broadly widen pixel or
++semantic tolerances, or regenerate references without an explicit reviewed plan.
++
++Oracle tooling and provenance live under [`tools/foot-oracle/`](tools/foot-oracle/).
++Start with its README and verify provenance before comparison work:
++
++```bash
++python tools/foot-oracle/check-provenance.py
++python -m pytest -q tools/foot-oracle/test_*.py
+ ```
+
++Run only the bounded oracle command appropriate to the changed behavior. Keep
++exact environment, font, scale, source commit, command, and result metadata with
++new evidence.
++
+ When adapting code from Foot or another project, verify license compatibility,
+-preserve required notices, and update `THIRD_PARTY.md` with exact provenance.
++preserve required notices, annotate translated source where the project pattern
++requires it, and update [`THIRD_PARTY.md`](THIRD_PARTY.md) with exact provenance.
++
++## Benchmarks
++
++Benchmark runners and schemas live under [`tools/benchmark/`](tools/benchmark/);
++performance analysis helpers live under `tools/performance/`. Validate harnesses
++before trusting product results:
++
++```bash
++python -m pytest -q tools/benchmark/test_benchmark.py
++python tools/benchmark/run.py --help
++```
++
++Use release binaries for product comparisons, preserve host/software manifests,
++and keep workload, warmup, sample count, cleanup, and schema fixed. A benchmark
++failure is evidence to diagnose, not permission to shrink the workload, widen a
++gate, or delete an unfavorable result. Graphical benchmark runners are subject to
++the graphical-test rules below.
++
++## Fuzzing
++
++Fuzz targets require the `cargo-fuzz` toolchain and belong to explicit accepted
++boundaries. List targets before running one:
++
++```bash
++cargo +nightly fuzz list
++```
++
++Use a bounded duration and retain target, source identity, sanitizer/toolchain,
++execution count, and findings. A typical accepted-plan invocation is:
++
++```bash
++cargo +nightly fuzz run terminal-advance -- -max_total_time=60
++```
++
++Do not claim fuzz coverage for code paths the target does not reach. Diagnose a
++crash or timeout before retrying, minimize retained reproducers without changing
++the failure, and never discard a corpus/finding to make a gate pass.
++
++## Graphical test guardrails
++
++Graphical testing requires separate explicit approval for the complete bounded
++sequence. Non-graphical implementation authorization does not imply permission
++to map, focus, move, resize, capture, or send input to a Window.
++
++Approved tests must:
++
++- use an isolated test Window on workspace 8 / DP-2 unless the user explicitly
++  names an existing active Window;
++- record the target address, PID, workspace, monitor, geometry, original focus,
++  cursor, scale, and transform before input;
++- target the exact fresh address and abort if identity, focus, placement, or
++  cleanup differs;
++- use private daemon/socket/state/config paths and development binaries;
++- run one guarded smoke before any approved matrix;
++- preserve unrelated Windows and user processes; and
++- restore focus, cursor, monitor state, an empty workspace 8, processes, and
++  private paths after every case.
++
++Do not close a user Window, terminate its shell/daemon, enter commands into it,
++or manipulate production topology unless that exact action was separately
++approved. A failed expensive or graphical command must be diagnosed before a
++bounded retry.
++
++## Packaging and installation
++
++`./install.sh` packages a clean committed `HEAD`; it cannot install uncommitted
++work. Building is not authorization to replace a Pacman-owned binary. Read
++[`docs/packaging.md`](docs/packaging.md) before package work.
++
++For local source packaging without installation:
++
++```bash
++tools/package/build-local-package.sh
++```
++
++Publishing, pushing, release creation, system installation, and `/usr/bin`
++replacement require the authority appropriate to those actions.
++
++## Review and evidence
++
++At a coherent milestone:
++
++1. run focused tests and the required non-graphical boundary;
++2. inspect the actual diff and cleanup/error paths;
++3. retain exact commands and outputs required by the owning plan;
++4. run `git diff --check`; and
++5. obtain the independent reviews required by that plan.
++
++Do not claim a milestone complete without recorded validation and recorded
++review. Keep generated evidence body-free where security contracts require it;
++terminal content must not leak into audit, trace, or machine-contract artifacts.
+diff --git a/README.md b/README.md
+index 3feac9b..b4245e5 100644
+--- a/README.md
++++ b/README.md
+@@ -5,7 +5,7 @@
+
+ **A persistent, security-conscious terminal substrate for humans and bounded automation.**
+
+-[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Current status](https://splinterm.com/docs/status/)
++[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Current status](docs/status.md)
+
+ </div>
+
+@@ -16,7 +16,7 @@ Humans use that persistent topology through native windows, tabs, and panes. Aut
+ > [!IMPORTANT]
+ > **Status: advanced private prerelease.** Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated. The currently validated target is x86_64 Omarchy/Arch Linux. Public distribution, compatibility guarantees, and a support policy have not yet been released.
+ >
+-> See the [current status](https://splinterm.com/docs/status/) for the exact capability and availability boundaries.
++> See the repository-authoritative [current status](docs/status.md) for the exact capability and availability boundaries.
+
+ ## Why Splinterm
+
+@@ -53,7 +53,7 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
+ | Public distribution | Not released |
+ | Nix and broader distributions | Planned |
+
+-For limitations and release gates, read [Current status](https://splinterm.com/docs/status/). Exact image support is documented in [`docs/images.md`](docs/images.md).
++For limitations and release gates, read [Current status](docs/status.md). Exact image support is documented in [`docs/images.md`](docs/images.md).
+
+ ## Install
+
+@@ -111,7 +111,7 @@ Inside a managed Splinterm window, these controls cover the essential workflow:
+
+ Reopening attaches to processes that are still running. Starting an exited process again from saved launch metadata is an explicit **restore** operation.
+
+-Continue with the [quickstart](https://splinterm.com/docs/quickstart/) or [sessions and persistence](https://splinterm.com/docs/sessions/).
++Continue with the [quickstart](https://splinterm.com/docs/quickstart/), repository [human usage guide](docs/usage.md), or website [sessions and persistence](https://splinterm.com/docs/sessions/).
+
+ ## How it works
+
+@@ -180,9 +180,11 @@ See the [configuration guide](https://splinterm.com/docs/configure/configuration
+ | Understand Lairs, Dojos, Splints, and windows | [Core concepts](https://splinterm.com/docs/concepts/) |
+ | Manage persistence, restore, and reset | [Sessions and persistence](https://splinterm.com/docs/sessions/) |
+ | Configure the terminal | [Configuration](https://splinterm.com/docs/configure/configuration/) |
+-| Check maturity and availability | [Current status](https://splinterm.com/docs/status/) |
++| Check maturity and availability | [Current status](docs/status.md) |
++| Use windows, tabs, panes, and restore safely | [Human usage](docs/usage.md) |
++| Find CLI commands and machine-output boundaries | [CLI reference](docs/cli.md) |
+ | Troubleshoot an installation | [Troubleshooting](https://splinterm.com/docs/troubleshooting/) |
+-| Contribute to the project | [Development guide](https://splinterm.com/docs/development/) |
++| Contribute to the project | [Contributing](CONTRIBUTING.md) |
+
+ Specialist contracts and design records remain in [`docs/`](docs/). Plans, spikes, benchmarks, and retained artifacts are development history and evidence—not the primary user guide.
+
+diff --git a/crates/splinterd/Cargo.toml b/crates/splinterd/Cargo.toml
+index 0b67a05..2d569ce 100644
+--- a/crates/splinterd/Cargo.toml
++++ b/crates/splinterd/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "splinterd"
+-description = "Persistent background server for Splinterm"
++description = "Persistent terminal topology daemon for Splinterm"
+ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+diff --git a/crates/splinterm/Cargo.toml b/crates/splinterm/Cargo.toml
+index de0dce0..30b9c5d 100644
+--- a/crates/splinterm/Cargo.toml
++++ b/crates/splinterm/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "splinterm"
+-description = "Wayland terminal emulator and client for Splinterm"
++description = "Persistent Wayland terminal for humans and bounded automation"
+ version.workspace = true
+ edition.workspace = true
+ rust-version.workspace = true
+diff --git a/dist/applications/com.oldjobobo.splinterm.desktop b/dist/applications/com.oldjobobo.splinterm.desktop
+index fab6ad0..920225a 100644
+--- a/dist/applications/com.oldjobobo.splinterm.desktop
++++ b/dist/applications/com.oldjobobo.splinterm.desktop
+@@ -2,7 +2,7 @@
+ Type=Application
+ Name=Splinterm
+ GenericName=Terminal
+-Comment=Persistent Omarchy-native Wayland terminal
++Comment=Persistent Wayland terminal for humans and bounded automation
+ TryExec=splinterm-xdg-terminal-exec
+ Exec=splinterm-xdg-terminal-exec
+ Icon=com.oldjobobo.splinterm
+diff --git a/dist/metainfo/com.oldjobobo.splinterm.metainfo.xml b/dist/metainfo/com.oldjobobo.splinterm.metainfo.xml
+index 912f641..1fe4b95 100644
+--- a/dist/metainfo/com.oldjobobo.splinterm.metainfo.xml
++++ b/dist/metainfo/com.oldjobobo.splinterm.metainfo.xml
+@@ -2,14 +2,14 @@
+ <component type="desktop-application">
+   <id>com.oldjobobo.splinterm</id>
+   <name>Splinterm</name>
+-  <summary>Persistent Omarchy-native Wayland terminal</summary>
++  <summary>Persistent Wayland terminal for humans and bounded automation</summary>
+   <metadata_license>CC0-1.0</metadata_license>
+   <project_license>MIT</project_license>
+   <developer id="com.oldjobobo"><name>OldJobobo</name></developer>
+   <content_rating type="oars-1.1"/>
+   <launchable type="desktop-id">com.oldjobobo.splinterm.desktop</launchable>
+   <provides><binary>splinterm</binary></provides>
+-  <description><p>A native Wayland terminal whose daemon keeps the shell alive when graphical clients close.</p></description>
++  <description><p>A native Wayland terminal with a headless daemon that keeps shells, layouts, and scrollback alive for human clients and explicitly bounded automation.</p></description>
+   <url type="homepage">https://github.com/oldjobobo/splinterm</url>
+   <releases><release version="0.1.0" date="2026-07-18" type="development"/></releases>
+ </component>
+diff --git a/docs/PRD.md b/docs/PRD.md
+index b9b9a22..0044340 100644
+--- a/docs/PRD.md
++++ b/docs/PRD.md
+@@ -4,7 +4,8 @@
+ - **Product maturity:** Advanced private prerelease
+ - **As of:** 2026-08-07
+ - **Product authority:** Current implementation, accepted plans, retained validation evidence, and [Architecture](architecture.md)
+-- **Related documents:** [Roadmap](roadmap.md), [Product positioning](plans/0021-product-positioning-and-public-documentation.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
++- **Current maturity authority:** [Status](status.md)
++- **Related documents:** [Roadmap](roadmap.md), [Product positioning](plans/0021-product-positioning-and-public-documentation.md), [Usage](usage.md), [CLI](cli.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
+
+ ## 1. Purpose
+
+@@ -156,7 +157,7 @@ The following table summarizes the current repository state. “Validated” mea
+ | Arch/Omarchy package and edge installer | Private prerelease package and installation path implemented and validated. |
+ | Public distribution and support policy | Not released. |
+ | Nix and broader distribution | Planned. |
+-| Public product/documentation website | Proposed and in active repository work; not a released product surface. |
++| Public product/documentation website | Implemented and build/link validated; it is an informational surface, not a public product release or the repository status authority. |
+
+ ## 8. Goals
+
+@@ -454,7 +455,10 @@ Each material decision should receive an ADR or a scoped product/implementation
+ | Subject | Authority |
+ |---|---|
+ | Product requirements and priorities | This PRD after review and acceptance |
+-| Current maturity and availability | Planned `docs/status.md`; until then, accepted plans plus current implementation |
++| Current maturity and availability | [status.md](status.md) |
++| Product entry point | [README.md](../README.md) |
++| Human operation and controls | [usage.md](usage.md) |
++| Human and machine command inventory | [cli.md](cli.md) |
+ | Architecture and ownership | [architecture.md](architecture.md) |
+ | Architecture decisions | [docs/adr/](adr/) |
+ | Roadmap and future phases | [roadmap.md](roadmap.md) |
+@@ -503,5 +507,5 @@ Before accepting this PRD, reviewers should decide:
+ 6. Does any automation language imply trusted graphical or compositor authority?
+ 7. Are any current capabilities missing, or are implementation details incorrectly elevated to product requirements?
+ 8. Which public-release gates require a product decision rather than more implementation?
+-9. Should `docs/status.md` be created before this PRD is accepted as an authority?
++9. Which remaining PRD draft questions require a later product decision beyond the accepted current status authority?
+ 10. Which success criteria should gain quantitative thresholds before public release?
+diff --git a/docs/plans/0021-product-positioning-and-public-documentation.md b/docs/plans/0021-product-positioning-and-public-documentation.md
+index 26d47c4..02bf3bb 100644
+--- a/docs/plans/0021-product-positioning-and-public-documentation.md
++++ b/docs/plans/0021-product-positioning-and-public-documentation.md
+@@ -1,8 +1,8 @@
+ # Plan 0021: product positioning and public documentation
+
+-- **Status:** In progress — public narrative, README rewrite, PRD, and website content are implemented; repository-authoritative status/usage/CLI documents, metadata alignment audit, and final reviews remain
++- **Status:** Complete — repository authority, human usage, CLI, contributor workflow, history framing, metadata alignment, focused validation, and two independent reviews pass
+ - **Date:** 2026-08-04
+-- **Reconciled:** 2026-08-09 against commits `1d8fa51` and `7a44e33`
++- **Reconciled:** 2026-08-09 against commits `1d8fa51`, `7a44e33`, `1e0a4ad`, and current closure work
+ - **Product authority:** current implementation, retained validation evidence, and [Architecture](../architecture.md)
+ - **Related status:** [Roadmap](../roadmap.md), [supported automation](../automation.md), and [private packaging](../packaging.md)
+ - **Documentation scope:** public positioning, maturity language, README information architecture, and distribution metadata
+@@ -18,14 +18,25 @@ content. The current site passes Astro diagnostics/build and its local-link
+ validator; desktop, AppStream, and PKGBUILD metadata syntax also pass their
+ focused validators.
+
+-Plan 0021 is not complete. Its explicit repository-authority contract still
+-requires `docs/status.md`, `docs/usage.md`, and `docs/cli.md`; those files do not
+-exist. The status truth table and one-authority-per-subject audit have not been
+-retained as a closure artifact, synchronized package/desktop/Cargo wording has
+-not been recorded against that table, and the required independent
+-product/readability and technical-accuracy reviews are absent. Website copies do
+-not silently replace these repository-authoritative files because Plan 0026
+-owns publication while this plan owns source content and maturity authority.
++The closure work establishes [`docs/status.md`](../status.md) as the repository
++maturity authority with a verified capability truth table, limitations, release
++gates, validated environment, and one-authority-per-subject map. Detailed human
++operation and CLI references now live in [`docs/usage.md`](../usage.md) and
++[`docs/cli.md`](../cli.md); contributor documentation covers isolated daemons,
++validation, benchmarks, the pinned Foot oracle, fuzzing, graphical guardrails,
++and packaging safety.
++
++README links now lead to repository authority, the roadmap and pre-planning
++research have current/archival framing, and package/desktop/AppStream/selected
++Cargo descriptions use the approved short product sentence. The PRD no longer
++calls the implemented website proposed and names the current authority files.
++Website copies remain summaries rather than silently replacing repository
++sources. Focused validation passes. Product/readability reviewer `93d8c0d2`
++concluded **may mark complete** without a finding. Technical reviewer `fb9f72d9`
++identified one inaccurate blanket prompt claim; the usage/CLI authorities now
++match the dispatcher contract exactly, post-review validation passes, and the
++[review disposition](artifacts/0021-product-positioning/closure-2026-08-09/review/disposition.md)
++records no remaining blocker.
+
+ ## Decision
+
+diff --git a/docs/pre-planning-research.md b/docs/pre-planning-research.md
+index c9a03e9..169a664 100644
+--- a/docs/pre-planning-research.md
++++ b/docs/pre-planning-research.md
+@@ -1,5 +1,10 @@
+ # Pre-planning research
+
++> **Historical pre-implementation research.** Current product and architecture
++> status are documented in [`README.md`](../README.md), [`status.md`](status.md),
++> and [`architecture.md`](architecture.md). “Proposed” language below describes
++> its original planning context, not current product maturity.
++
+ This document records research directions and provisional decisions for
+ Splinterm before implementation planning. It covers a Rust evolution of Foot,
+ persistent multiplexing, platform priorities, and a secure automation surface.
+diff --git a/docs/roadmap.md b/docs/roadmap.md
+index fe55f2a..1d49111 100644
+--- a/docs/roadmap.md
++++ b/docs/roadmap.md
+@@ -1,9 +1,11 @@
+ # Roadmap
+
+-> This is an early roadmap, not a frozen implementation plan. The research in
+-> [`pre-planning-research.md`](pre-planning-research.md) makes Omarchy part of
+-> the first usable vertical slice and moves protocol security foundations ahead
+-> of terminal streaming.
++> This roadmap records completed implementation phases and the remaining path
++> from advanced private prerelease to public distribution. It is a completion
++> ledger and forward plan, not a compatibility or release promise. Current
++> maturity and validated scope are authoritative in [`status.md`](status.md);
++> [`pre-planning-research.md`](pre-planning-research.md) preserves historical
++> pre-implementation reasoning.
+
+ ## Phase 0 — skeleton and research (complete)
+
+diff --git a/packaging/PKGBUILD b/packaging/PKGBUILD
+index 4e4a984..68abccd 100644
+--- a/packaging/PKGBUILD
++++ b/packaging/PKGBUILD
+@@ -33,7 +33,7 @@ check() {
+ }
+
+ package_splinterm() {
+-  pkgdesc='Persistent Omarchy-native Wayland terminal (private prerelease)'
++  pkgdesc='Persistent Wayland terminal for humans and bounded automation'
+   depends=(
+     'fontconfig'
+     'freetype2'
+diff --git a/docs/status.md b/docs/status.md
+new file mode 100644
+index 0000000..66965b7
+--- /dev/null
++++ b/docs/status.md
+@@ -0,0 +1,123 @@
++# Current product status
++
++This document is the repository authority for Splinterm's current maturity,
++validated product scope, availability, and release gates. Historical plans and
++evidence explain how a capability was accepted; the roadmap owns future work;
++this page owns what the product is today.
++
++## Maturity
++
++**Splinterm is an advanced private prerelease.**
++
++Core terminal emulation, daemon-owned persistence, multiplexing, native Wayland
++presentation, Arch packaging, and bounded automation workflows are implemented
++and validated in the scopes named below. This describes implementation maturity,
++not public availability: public distribution, broad compatibility guarantees,
++and a support policy have not been released.
++
++Splinterm is **security-conscious**, not absolutely secure. Automation is
++constrained by exact executable identity, explicit scopes, resource and message
++bounds, exclusive controller ownership, consent, revocation, and body-free audit
++metadata. Terminal output remains untrusted data and cannot grant authority or
++become an automatic instruction.
++
++## Validated environment
++
++The current product target is:
++
++- x86_64 Omarchy/Arch Linux;
++- native Wayland under the documented Hyprland environment;
++- Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
++  as the terminal-behavior oracle; and
++- a private `0.1.0.pre` Arch package built from clean committed source.
++
++Other Linux distributions, compositors, architectures, and package formats are
++not current compatibility promises. Headless `splinterd` does not require a
++graphical environment, but its packaged and remote workflows remain private-
++prerelease interfaces on the documented platform.
++
++## Capability truth table
++
++| Area | Classification | Current boundary and evidence |
++| --- | --- | --- |
++| Native Wayland presentation | Implemented and validated | Keyboard, pointer, selection, clipboard, IME, scaling, damage-driven SHM rendering, and guarded Hyprland matrices are accepted within the documented target. See [Architecture](architecture.md) and [Plan 0002](plans/0002-omarchy-terminal-mvp.md). |
++| Native blur | Implemented and validated | Optional, compositor-capability-gated blur for translucent themes; unsupported protocol capability falls back to ordinary transparency. See [Plan 0013](plans/0013-native-background-blur.md). |
++| Persistent sessions and explicit restore | Implemented and validated | `splinterd` owns shells, terminal state, layouts, and metadata. Client detachment does not end them; exited processes restart only through explicit restore. See [Architecture](architecture.md) and [Headless operation](headless.md). |
++| Panes and multiple Dojos | Implemented and validated | Persistent split trees, focus, ratios, lifecycle operations, search, and multiple simultaneous clients are accepted. See [Roadmap](roadmap.md). |
++| Window-local Dojo tabs | Implemented and validated | Up to 32 client-local tabs may span Lairs; closing a tab detaches the view and does not close daemon topology. See [Plan 0019 closure evidence](plans/artifacts/0019-dojo-tabs/closure-2026-08-09/EVIDENCE.md). |
++| Multi-client control | Implemented and validated | Exclusive controller ownership, transfer, denial, trusted forced takeover, disconnect cleanup, and observer fallback are bounded. See [Automation](automation.md). |
++| JSON/NDJSON automation | Implemented and validated | Versioned schema-major-2 one-shot and subscription contracts with stable exit categories and checked-in schemas. See [Automation](automation.md) and [CLI reference](cli.md). |
++| SSH relay | Implemented and validated | Policy-scoped stdio automation relay and private human graphical relay; no daemon network listener. See [Remote access](remote.md). |
++| Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Plan 0028](plans/0028-remote-graphical-client.md). |
++| MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
++| Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
++| Arch/Omarchy packaging | Private prerelease package validated | Split Pacman package, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
++| Public distribution and support | Unreleased | No public package channel, compatibility window, support duration, or support/security-reporting policy is promised. |
++| Nix and broader distribution | Planned | Not current product behavior or support. |
++
++**Classification meanings:** implemented means present in current code; validated
++means required recorded evidence exists for the named scope; supported means a
++documented compatibility contract exists; proposed and planned mean not current
++behavior; deferred means intentionally outside the present product.
++
++## Important limitations
++
++- A graphical Window is a disposable view. Topology commands do not map, focus,
++  move, resize, or assign compositor windows.
++- Native Wayland does not imply GPU rendering, universal compositor support, or
++  automatic performance superiority. The renderer currently uses CPU composition
++  and Wayland shared-memory buffers.
++- Persistence follows the daemon lifetime. Stopping or upgrading an incompatible
++  daemon ends its child processes; saved launch metadata is never executed
++  automatically.
++- Machine clients do not inherit human graphical authority. Raw daemon frames and
++  Rust protocol types are private interfaces.
++- Controller leases are exclusive and connection-owned. Observers may read only
++  within their granted scope and do not implicitly gain input authority.
++- Remote graphical sessions currently exclude terminal image transfer.
++- Image compatibility is deliberately narrower than full Kitty graphics; external
++  file and shared-memory media are rejected.
++- Configuration is focused rather than arbitrary `foot.ini` compatibility.
++- Current benchmark gates document remaining performance work. In particular,
++  [Plan 0011](plans/0011-burst-output-memory-retention.md) retains its final
++  client-performance no-go and [Plan 0012](plans/0012-bounded-compact-publication-frames.md)
++  remains blocked on a sparse bounded-frame ownership redesign.
++
++## Public-release gates
++
++Before Splinterm can claim a supported public release, maintainers must make and
++validate explicit decisions about:
++
++- release channels, signed/immutable source publication, upgrades, and rollback;
++- supported architectures, distributions, compositor versions, and compatibility
++  duration;
++- support and security-reporting processes;
++- completion or explicit disposition of release-blocking performance gates;
++- public installation and recovery testing outside the private collaborator
++  workflow; and
++- any promised Nix, sandboxed package, or broader Linux support.
++
++None of those unresolved decisions weakens the accepted private-prerelease
++capabilities above; none may be inferred as a promise.
++
++## Documentation authority
++
++| Subject | Authority |
++| --- | --- |
++| Current maturity, availability, validated scope, and release gates | This document |
++| Product entry point and first workflow | [`README.md`](../README.md) |
++| Human operation and controls | [Usage](usage.md) |
++| Human and machine command inventory | [CLI reference](cli.md) |
++| Ownership and system boundaries | [Architecture](architecture.md) |
++| Configuration and Foot migration | [Configuration](configuration.md) |
++| JSON/NDJSON policy, schemas, limits, and exit behavior | [Automation](automation.md) |
++| SSH and native remote workflows | [Remote access](remote.md) |
++| MCP integration | [MCP](mcp.md) |
++| Image compatibility | [Images](images.md) |
++| Service, persistence, policy, backup, and reset | [Headless operation](headless.md) |
++| Private package installation and upgrades | [Packaging](packaging.md) |
++| Completed phases and future work | [Roadmap](roadmap.md) |
++| Development workflow and test guardrails | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
++
++The public website may summarize these sources for readers, but it does not
++replace repository authority.
+diff --git a/docs/usage.md b/docs/usage.md
+new file mode 100644
+index 0000000..26632ad
+--- /dev/null
++++ b/docs/usage.md
+@@ -0,0 +1,237 @@
++# Human usage
++
++This is the repository authority for operating Splinterm as a person: opening,
++detaching, returning to, arranging, and deliberately ending persistent terminal
++work. See [CLI reference](cli.md) for the complete command inventory and
++[Automation](automation.md) for machine contracts.
++
++## The four persistent concepts
++
++- **Lair** — a named project or persistent session.
++- **Dojo** — one persistent terminal layout inside a Lair.
++- **Splint** — one terminal pane and process lifecycle inside a Dojo.
++- **Window** — a disposable native Wayland view. It may display up to 32 Dojos as
++  client-local tabs, including Dojos from different Lairs.
++
++`splinterd` owns Lairs, Dojos, Splints, shells, layouts, terminal state, and
++scrollback. `splinterm` displays and controls that state. Closing a Window or tab
++detaches a view; it does not terminate the corresponding daemon resources.
++
++## Start, detach, and return
++
++Open a fresh terminal through the installed desktop entry or XDG launcher:
++
++```bash
++splinterm-xdg-terminal-exec
++```
++
++The normal launch creates a fresh Lair with one Dojo and one live Splint. Closing
++the Window leaves the work running in `splinterd`.
++
++Return through the native recent-session workflow:
++
++```bash
++splinterm sessions
++splinterm reopen
++```
++
++`sessions` opens the trusted Recent Sessions picker. Select a running Dojo or
++choose New Terminal. `reopen` attaches the most recently remembered Dojo whose
++complete layout is still running. Neither command silently restores an exited
++process.
++
++To inspect sessions without mapping a Window:
++
++```bash
++splinterm list
++splinterm list --all
++```
++
++`list` emphasizes active Lairs; `--all` includes exited-only history and complete
++topology. Stable IDs from list/topology output can select an exact attachment:
++
++```bash
++splinterm launch --splint-id SPLINT_ID
++splinterm window --lair-id LAIR_ID --dojo-id DOJO_ID
++```
++
++A normal `splinterm launch` creates a fresh graphical Lair. `window` requires the
++explicit Lair/Dojo pair and renders that saved layout.
++
++## Windows, tabs, and the session picker
++
++A Window holds an ordered, client-local set of distinct Dojo tabs:
++
++- `Ctrl+Shift+D` creates a Dojo in the active tab's Lair and opens it;
++- `Ctrl+Tab` and `Ctrl+Shift+Tab` move through tabs;
++- `Ctrl+Shift+Q` detaches the active tab and closes the Window if it was last;
++- `Ctrl+Shift+S` opens Recent Sessions inside the same Window;
++- choosing an already-open Dojo activates its tab rather than duplicating it;
++- choosing another running Dojo adds it without changing daemon topology; and
++- choosing New Terminal creates a fresh Lair and opens its initial Dojo.
++
++The trusted tab strip provides activation, a close target, and a `+` picker
++action. Right-clicking a visible tab opens a tab-targeted menu for Rename Tab,
++Activate Tab, New Dojo, detach-only Close Tab, detach-only Close Other Tabs, and
++confirmed Terminate Dojo. Opening the menu does not first activate its tab.
++
++**Detach and terminate are different operations.** Closing tabs or Windows is
++client-local. Terminating a Dojo is a named, confirmed daemon mutation and ends
++its pane processes.
++
++## Panes and layouts
++
++The built-in application controls are:
++
++| Action | Default control |
++| --- | --- |
++| Command palette | `Ctrl+Shift+P` |
++| Recent Sessions | `Ctrl+Shift+S` |
++| Split below | `Ctrl+Shift+Enter` |
++| Split right | `Ctrl+Shift+\` |
++| Focus pane | `Ctrl+Shift+Arrow` |
++| Close focused managed pane | `Ctrl+Shift+W` |
++| Resize pane smaller/larger | Command palette |
++| New Dojo tab | `Ctrl+Shift+D` |
++| Previous/next Dojo tab | `Ctrl+Shift+Tab` / `Ctrl+Tab` |
++| Detach active tab | `Ctrl+Shift+Q` |
++| Search scrollback | `Ctrl+Shift+F` |
++| Page history | `Shift+PageUp` / `Shift+PageDown` |
++| Return to live output | `Shift+End` |
++| Copy / paste | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
++| Release control | `Ctrl+Shift+L` |
++| Request control transfer | `Ctrl+Shift+T` |
++| Accept / deny transfer | `Ctrl+Shift+Y` / `Ctrl+Shift+N` |
++| Open forced-takeover confirmation | `Ctrl+Shift+U` |
++| Revoke active access | `Ctrl+Shift+R` |
++| Zoom in / out / reset | `Ctrl++` / `Ctrl+-` / `Ctrl+0` |
++
++Application-owned chords are consumed rather than forwarded to the PTY. In a
++legacy direct single-Splint attachment, `Ctrl+Shift+W` remains terminal input;
++it closes only a focused Splint in a managed multi-pane Window.
++
++The command palette exposes the same typed action registry used by keyboard
++bindings and labels unavailable actions rather than guessing a target. Type to
++filter, use arrows to navigate, Enter to run, and Escape to close.
++
++See [Configuration](configuration.md#keymap-configuration) for the strict built-in
++profile and TOML overlay. Configuration can bind only closed application actions;
++it cannot register shell commands or callbacks.
++
++## Pointer, selection, clipboard, and URLs
++
++- Click a pane to focus it; click a tab to activate it.
++- Drag terminal text to select. Selection is client-local presentation state.
++- `Ctrl+Shift+C` copies the active selection and `Ctrl+Shift+V` pastes clipboard
++  text through the controlled terminal input path.
++- Primary selection, URL recognition/activation, and pointer reporting follow the
++  implemented Foot-derived terminal behavior and current control ownership.
++- Right-clicking trusted tab chrome opens the tab menu; terminal-controlled
++  content cannot paint or activate trusted chrome.
++
++Clipboard and primary-selection contents are terminal data, not authority.
++Pasting requires the graphical client to hold terminal input control.
++
++## Scrollback and search
++
++`Ctrl+Shift+F` opens local literal scrollback search. Enter submits, `Ctrl+N` and
++`Ctrl+P` navigate matches, and Escape closes the trusted search surface. Search
++queries are not injected into the terminal. History paging remains bounded and
++preserves follow-live behavior when returning with `Shift+End`.
++
++The CLI can also read bounded history pages and search without mapping a Window:
++
++```bash
++splinterm scrollback SPLINT_ID --max-rows 32
++splinterm search SPLINT_ID 'literal text'
++```
++
++Use opaque continuation cursors returned by machine output rather than inventing
++positions. See [CLI reference](cli.md#terminal-observation-and-input).
++
++## Control ownership
++
++Only one connection controls a live Splint at a time. Other Windows may remain
++observers. Request/release/accept/deny operations are explicit, and forced
++takeover is a separate trusted-local confirmation. A remote graphical Window may
++request normal control but cannot use trusted-only forced takeover.
++
++Closing a controlling Window releases its connection-owned lease. A later client
++must acquire control explicitly; observation never silently becomes input
++authority.
++
++## Exit, restore, and relaunch
++
++A Splint has a stable ID across process exits. Each new process under that leaf
++has a new positive **incarnation**. This prevents stale clients from silently
++retargeting a replacement process.
++
++- `kill SPLINT_ID` ends a live process but retains its Splint leaf.
++- `restore SPLINT_ID` starts an exited Splint from saved launch metadata.
++- `restore-dojo DOJO_ID` and `restore-lair LAIR_ID` restore all exited leaves in
++  the selected saved scope.
++- `relaunch SPLINT_ID [-- ARGV...]` starts a new incarnation, optionally with new
++  direct argv.
++- `close SPLINT_ID` removes an exited leaf and collapses its layout branch.
++- `close-dojo DOJO_ID` removes a Dojo only after every Splint has exited.
++
++Restore is never automatic. Saved commands are inert metadata until a person or
++properly authorized tool requests restoration. Human `kill` prompts unless
++`--yes` is supplied; `close` and `close-dojo` remove only already-exited topology
++without another interactive prompt. Machine forms require `--yes` for all three.
++Use `--yes` only for an already-approved unattended operation, not as a substitute
++for intent.
++
++## Reset and daemon lifetime
++
++The daemon owns all running shells. Stopping it, installing a private-protocol-
++incompatible version, or resetting it ends those processes. To back up and clear
++every session in one guarded workflow:
++
++```bash
++splinterm reset
++```
++
++The command confirms, stops the daemon, moves persistent session state to a
++reported backup, and restarts cleanly. It does not remove policy or user
++configuration. Read [Headless operation](headless.md) before service, backup,
++policy, or recovery work.
++
++## Remote human use
++
++Remote profiles are strict local TOML records. Inspect and probe one without
++mapping a Window:
++
++```bash
++splinterm remote list
++splinterm remote inspect PROFILE
++splinterm remote check PROFILE
++```
++
++Open the profile's native picker or an explicit workflow with:
++
++```bash
++splinterm --remote PROFILE
++splinterm --remote PROFILE sessions
++splinterm --remote PROFILE reopen
++```
++
++OpenSSH authenticates the human account. The graphical relay does not create a
++public daemon listener, and machine automation remains separately policy-scoped.
++Remote images and trusted-only forced takeover are intentionally unavailable.
++See [Remote access](remote.md).
++
++## Configuration and troubleshooting
++
++The normal configuration path is
++`${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`. Validate it and the selected
++keymap without contacting the daemon:
++
++```bash
++splinterm config check
++splinterm keymap conflicts
++```
++
++Use [Configuration](configuration.md) for supported keys and Omarchy theme
++integration, [Headless operation](headless.md) for daemon/service failures, and
++[Current status](status.md) for validated environment and compatibility limits.
+diff --git a/docs/cli.md b/docs/cli.md
+new file mode 100644
+index 0000000..5a0c6e9
+--- /dev/null
++++ b/docs/cli.md
+@@ -0,0 +1,230 @@
++# Command-line reference
++
++This page is the repository authority for the human command inventory and common
++CLI workflows. The executable's `--help` is authoritative for exact flags in the
++current build. The stable JSON/NDJSON schema, policy, limits, cancellation, and
++exit contracts are owned by [Automation](automation.md).
++
++## Invocation and output modes
++
++```text
++splinterm [OPTIONS] [COMMAND]
++```
++
++Global options accepted by command parsing are:
++
++```text
++--output human|json|ndjson
++--schema-major MAJOR
++--timeout-ms MILLISECONDS
++--remote PROFILE
++```
++
++Human output is the default. `--output json` emits one versioned machine
++document for supported one-shot operations. `--output ndjson` is reserved for
++subscriptions. Human-only graphical and local-administration commands reject
++machine-contract combinations at execution rather than pretending their output
++is stable automation.
++
++Machine stdout is reserved for protocol records; diagnostics go to stderr. Use
++schema major 2 unless a later checked-in contract is explicitly documented.
++
++## First human workflows
++
++```bash
++splinterm sessions                 # trusted recent-session picker
++splinterm reopen                   # most recent still-running Dojo
++splinterm list                     # active Lairs
++splinterm list --all               # include exited-only history
++splinterm launch                   # fresh graphical Lair
++splinterm launch --splint-id ID    # attach an exact Splint
++splinterm window --lair-id L --dojo-id D
++```
++
++`sessions`, `reopen`, `window`, and `launch` are graphical human workflows. A
++Window is disposable and may hold multiple client-local Dojo tabs; these commands
++do not make compositor operations part of the machine API.
++
++## Topology inspection
++
++| Command | Purpose |
++| --- | --- |
++| `ping` | Check daemon reachability. |
++| `list [--all]` | Summarize active Lairs, optionally including complete exited history. |
++| `topology` | Inspect reviewed metadata for every Lair, Dojo, and Splint. |
++| `inspect SPLINT_ID` | Inspect one stable Splint and its lifecycle metadata. |
++| `focus` | Machine-only narrow projection of the keyboard-focused graphical Splint ID and safe current working directory. |
++
++Examples:
++
++```bash
++splinterm ping
++splinterm topology
++splinterm inspect SPLINT_ID
++splinterm --output json topology
++splinterm --output json focus
++```
++
++`focus` never exposes terminal content, commands, PIDs, titles, or private state
++paths. With no focused Splinterm Window, its two projection fields are null.
++
++## Creation and layout mutation
++
++| Command | Purpose |
++| --- | --- |
++| `new NAME [--cwd DIR] [-- ARGV...]` | Create a persistent Lair, one Dojo, and one live Splint. |
++| `new-dojo LAIR_ID [--name NAME] [--cwd DIR] [-- ARGV...]` | Add a persistent Dojo with one live Splint. |
++| `split TARGET_SPLINT_ID --axis horizontal|vertical --side first|second [--ratio N] [--cwd DIR] [-- ARGV...]` | Split a leaf and launch its sibling. |
++| `ratio TARGET_SPLINT_ID RATIO` | Set the selected leaf's parent split ratio in thousandths. |
++| `rename-lair LAIR_ID NAME` | Rename a Lair. |
++| `rename-dojo DOJO_ID NAME` | Rename a Dojo. |
++| `rename-splint SPLINT_ID TITLE` | Rename a Splint title. |
++| `dojo-focus-hint DOJO_ID SPLINT_ID` | Persist a presentation hint; it does not focus a client or Window. |
++
++`ARGV` after `--` is executed directly, never through a shell. With no explicit
++argv, creation uses the configured shell.
++
++```bash
++splinterm new project --cwd "$HOME/src/project"
++splinterm new build -- /usr/bin/ninja -C /tmp/build
++splinterm new-dojo LAIR_ID --name logs -- /usr/bin/journalctl -f
++splinterm split SPLINT_ID --axis vertical --side second --ratio 600
++splinterm ratio SPLINT_ID 500
++```
++
++The ratio range is 1–999; it is the share assigned to the first child.
++In-Splint automation should add `--expected-incarnation N` where offered so a
++concurrent relaunch cannot silently retarget the operation.
++
++## Process and topology lifecycle
++
++| Command | Purpose |
++| --- | --- |
++| `kill SPLINT_ID` | End the live process while retaining its Splint leaf. |
++| `restore SPLINT_ID` | Start one exited Splint from saved launch metadata. |
++| `restore-dojo DOJO_ID` | Restore every exited Splint in a saved Dojo. |
++| `restore-lair LAIR_ID` | Restore every exited Splint in a saved Lair. |
++| `relaunch SPLINT_ID [--cwd DIR] [-- ARGV...]` | Relaunch an exited Splint as a new incarnation. |
++| `close SPLINT_ID` | Remove an exited leaf and collapse its parent branch. |
++| `close-dojo DOJO_ID` | Remove a Dojo only when all its Splints have exited. |
++| `reset` | Stop the daemon, move all session state to a backup, and restart cleanly. |
++
++Human `kill` and `reset` prompt unless `--yes` is supplied. Human `close` and
++`close-dojo` remove only already-exited topology and do not add another
++interactive prompt. Machine `kill`, `close`, and `close-dojo` require `--yes`;
++`reset` is local human administration and has no stable machine output contract.
++Restore operations are explicit—saved argv is never executed automatically.
++
++A stable Splint ID names the persistent leaf. Every process start increments its
++positive **incarnation**. Machine clients use incarnation preconditions to reject
++stale targets rather than acting on a replacement process.
++
++## Terminal observation and input
++
++| Command | Purpose |
++| --- | --- |
++| `snapshot SPLINT_ID` | Read one bounded live semantic terminal snapshot. Development mode only. |
++| `scrollback SPLINT_ID [--max-rows N] [--cursor CURSOR]` | Read one bounded history page. |
++| `search SPLINT_ID QUERY [--case-sensitive] [--max-results N] [--cursor CURSOR]` | Search history without echoing the query in machine output. |
++| `send SPLINT_ID TEXT` | Send literal UTF-8 through an atomic controller workflow. Development mode only. |
++| `resize SPLINT_ID COLUMNS ROWS` | Resize through an atomic controller workflow. Development mode only. |
++
++```bash
++splinterm snapshot SPLINT_ID
++splinterm scrollback SPLINT_ID --max-rows 32
++splinterm search SPLINT_ID 'failed' --max-results 20
++splinterm send SPLINT_ID $'printf "ready\\n"\n'
++splinterm resize SPLINT_ID 120 40
++```
++
++Terminal reads carry exact Splint, incarnation, terminal revision, and history
++generation. Continuation cursors are opaque. Public machine records contain
++semantic Unicode cells, not raw daemon frames. Input and search bodies are never
++copied into bounded audit metadata.
++
++## Subscriptions
++
++Subscriptions require NDJSON:
++
++```bash
++splinterm subscribe terminal SPLINT_ID --output ndjson
++splinterm subscribe topology --output ndjson
++splinterm subscribe control SPLINT_ID --output ndjson
++```
++
++Terminal and control subscriptions accept an expected-incarnation precondition.
++Each stream begins with a current-state record. Sequence gaps, replaced history,
++or a stalled client emit a bounded `resync_required` record and terminate; the
++caller must explicitly resubscribe.
++
++## Authorization, policy, and audit
++
++| Command | Purpose |
++| --- | --- |
++| `authorization status SPLINT_ID` | Inspect effective authority for one Splint. |
++| `authorization revoke GRANT_ID` | Revoke an ephemeral grant. |
++| `policy validate PATH` | Validate a policy through the daemon's secure loader without publishing it. |
++| `policy inspect PATH` | Print normalized validated policy. |
++| `policy reload` | Request reload through the canonical user service. |
++| `audit [--after ID] [--max-records N]` | Read bounded daemon-lifetime body-free audit metadata. |
++
++Persistent policy commands are local administration rather than a remote machine
++surface. A missing policy grants no third-party persistent authority. Policy
++reload is atomic, disconnects automation-role clients, and fails closed to a new
++deny-all generation if the configured document is rejected. Read
++[Automation](automation.md) and [Headless operation](headless.md) before changing
++policy.
++
++## Configuration, keymaps, and remotes
++
++Local inspection does not contact the daemon:
++
++```bash
++splinterm config check
++splinterm keymap list
++splinterm keymap show
++splinterm keymap show splinterm
++splinterm keymap conflicts
++splinterm remote list
++splinterm remote inspect PROFILE
++```
++
++`remote check PROFILE` additionally starts bounded SSH/relay/daemon read-only
++probes but does not map a Window. `--remote PROFILE` binds compatible graphical
++or CLI operations to that configured endpoint:
++
++```bash
++splinterm remote check server
++splinterm --remote server sessions
++splinterm --remote server --output json topology
++```
++
++See [Configuration](configuration.md) for strict INI/keymap/profile schemas and
++[Remote access](remote.md) for authentication and authority boundaries.
++
++## Relay and service-facing commands
++
++`relay --stdio` is the byte-transparent policy-scoped SSH automation transport.
++`relay --graphical-stdio` is the bounded private graphical multiplexer. They are
++fixed transport entry points, not interactive shell commands and not public JSON
++schemas. `splinterd` itself exposes no network listener.
++
++Service startup, persistence, backups, upgrades, and recovery are documented in
++[Headless operation](headless.md) and [Packaging](packaging.md).
++
++## Machine-operation summary
++
++The supported schema-major-2 one-shot operation inventory is frozen in
++[Automation](automation.md#one-shot-command-and-operation-inventory). Important
++rules:
++
++- JSON one-shots emit exactly one envelope; NDJSON is subscription-only.
++- Syntax errors produce no machine stdout and exit 2.
++- Parsed failures use stable categories: authorization 3, connection/schema 4,
++  invalid/stale/resource 5, timeout/cancellation 6, unexpected internal 70.
++- Machine mode never prompts; required confirmations use explicit `--yes`.
++- Raw private protocol versions, request IDs, controller IDs, and Rust DTOs are
++  not compatibility promises.
++- `--remote` changes transport, not the public schema or authority required.
++
++Checked-in public schemas live under [`dist/schemas/v2/`](../dist/schemas/v2/).

@@ -1,9 +1,11 @@
 # Roadmap
 
-> This is an early roadmap, not a frozen implementation plan. The research in
-> [`pre-planning-research.md`](pre-planning-research.md) makes Omarchy part of
-> the first usable vertical slice and moves protocol security foundations ahead
-> of terminal streaming.
+> This roadmap records completed implementation phases and the remaining path
+> from advanced private prerelease to public distribution. It is a completion
+> ledger and forward plan, not a compatibility or release promise. Current
+> maturity and validated scope are authoritative in [`status.md`](status.md);
+> [`pre-planning-research.md`](pre-planning-research.md) preserves historical
+> pre-implementation reasoning.
 
 ## Phase 0 — skeleton and research (complete)
 

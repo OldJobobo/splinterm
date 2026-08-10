@@ -4,7 +4,8 @@
 - **Product maturity:** Advanced private prerelease
 - **As of:** 2026-08-07
 - **Product authority:** Current implementation, accepted plans, retained validation evidence, and [Architecture](architecture.md)
-- **Related documents:** [Roadmap](roadmap.md), [Product positioning](plans/0021-product-positioning-and-public-documentation.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
+- **Current maturity authority:** [Status](status.md)
+- **Related documents:** [Roadmap](roadmap.md), [Product positioning](plans/0021-product-positioning-and-public-documentation.md), [Usage](usage.md), [CLI](cli.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
 
 ## 1. Purpose
 
@@ -156,7 +157,7 @@ The following table summarizes the current repository state. “Validated” mea
 | Arch/Omarchy package and edge installer | Private prerelease package and installation path implemented and validated. |
 | Public distribution and support policy | Not released. |
 | Nix and broader distribution | Planned. |
-| Public product/documentation website | Proposed and in active repository work; not a released product surface. |
+| Public product/documentation website | Implemented and build/link validated; it is an informational surface, not a public product release or the repository status authority. |
 
 ## 8. Goals
 
@@ -454,7 +455,10 @@ Each material decision should receive an ADR or a scoped product/implementation 
 | Subject | Authority |
 |---|---|
 | Product requirements and priorities | This PRD after review and acceptance |
-| Current maturity and availability | Planned `docs/status.md`; until then, accepted plans plus current implementation |
+| Current maturity and availability | [status.md](status.md) |
+| Product entry point | [README.md](../README.md) |
+| Human operation and controls | [usage.md](usage.md) |
+| Human and machine command inventory | [cli.md](cli.md) |
 | Architecture and ownership | [architecture.md](architecture.md) |
 | Architecture decisions | [docs/adr/](adr/) |
 | Roadmap and future phases | [roadmap.md](roadmap.md) |
@@ -503,5 +507,5 @@ Before accepting this PRD, reviewers should decide:
 6. Does any automation language imply trusted graphical or compositor authority?
 7. Are any current capabilities missing, or are implementation details incorrectly elevated to product requirements?
 8. Which public-release gates require a product decision rather than more implementation?
-9. Should `docs/status.md` be created before this PRD is accepted as an authority?
+9. Which remaining PRD draft questions require a later product decision beyond the accepted current status authority?
 10. Which success criteria should gain quantitative thresholds before public release?

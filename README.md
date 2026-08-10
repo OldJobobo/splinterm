@@ -5,7 +5,7 @@
 
 **A persistent, security-conscious terminal substrate for humans and bounded automation.**
 
-[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Current status](https://splinterm.com/docs/status/)
+[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Current status](docs/status.md)
 
 </div>
 
@@ -16,7 +16,7 @@ Humans use that persistent topology through native windows, tabs, and panes. Aut
 > [!IMPORTANT]
 > **Status: advanced private prerelease.** Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated. The currently validated target is x86_64 Omarchy/Arch Linux. Public distribution, compatibility guarantees, and a support policy have not yet been released.
 >
-> See the [current status](https://splinterm.com/docs/status/) for the exact capability and availability boundaries.
+> See the repository-authoritative [current status](docs/status.md) for the exact capability and availability boundaries.
 
 ## Why Splinterm
 
@@ -53,7 +53,7 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Public distribution | Not released |
 | Nix and broader distributions | Planned |
 
-For limitations and release gates, read [Current status](https://splinterm.com/docs/status/). Exact image support is documented in [`docs/images.md`](docs/images.md).
+For limitations and release gates, read [Current status](docs/status.md). Exact image support is documented in [`docs/images.md`](docs/images.md).
 
 ## Install
 
@@ -111,7 +111,7 @@ Inside a managed Splinterm window, these controls cover the essential workflow:
 
 Reopening attaches to processes that are still running. Starting an exited process again from saved launch metadata is an explicit **restore** operation.
 
-Continue with the [quickstart](https://splinterm.com/docs/quickstart/) or [sessions and persistence](https://splinterm.com/docs/sessions/).
+Continue with the [quickstart](https://splinterm.com/docs/quickstart/), repository [human usage guide](docs/usage.md), or website [sessions and persistence](https://splinterm.com/docs/sessions/).
 
 ## How it works
 
@@ -180,9 +180,11 @@ See the [configuration guide](https://splinterm.com/docs/configure/configuration
 | Understand Lairs, Dojos, Splints, and windows | [Core concepts](https://splinterm.com/docs/concepts/) |
 | Manage persistence, restore, and reset | [Sessions and persistence](https://splinterm.com/docs/sessions/) |
 | Configure the terminal | [Configuration](https://splinterm.com/docs/configure/configuration/) |
-| Check maturity and availability | [Current status](https://splinterm.com/docs/status/) |
+| Check maturity and availability | [Current status](docs/status.md) |
+| Use windows, tabs, panes, and restore safely | [Human usage](docs/usage.md) |
+| Find CLI commands and machine-output boundaries | [CLI reference](docs/cli.md) |
 | Troubleshoot an installation | [Troubleshooting](https://splinterm.com/docs/troubleshooting/) |
-| Contribute to the project | [Development guide](https://splinterm.com/docs/development/) |
+| Contribute to the project | [Contributing](CONTRIBUTING.md) |
 
 Specialist contracts and design records remain in [`docs/`](docs/). Plans, spikes, benchmarks, and retained artifacts are development history and evidence—not the primary user guide.
 

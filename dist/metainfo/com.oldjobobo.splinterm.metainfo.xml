@@ -2,14 +2,14 @@
 <component type="desktop-application">
   <id>com.oldjobobo.splinterm</id>
   <name>Splinterm</name>
-  <summary>Persistent Omarchy-native Wayland terminal</summary>
+  <summary>Persistent Wayland terminal for humans and bounded automation</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <developer id="com.oldjobobo"><name>OldJobobo</name></developer>
   <content_rating type="oars-1.1"/>
   <launchable type="desktop-id">com.oldjobobo.splinterm.desktop</launchable>
   <provides><binary>splinterm</binary></provides>
-  <description><p>A native Wayland terminal whose daemon keeps the shell alive when graphical clients close.</p></description>
+  <description><p>A native Wayland terminal with a headless daemon that keeps shells, layouts, and scrollback alive for human clients and explicitly bounded automation.</p></description>
   <url type="homepage">https://github.com/oldjobobo/splinterm</url>
   <releases><release version="0.1.0" date="2026-07-18" type="development"/></releases>
 </component>
