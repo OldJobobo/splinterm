@@ -73,7 +73,10 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-const CONNECTION_LIMIT: usize = 32;
+// One graphical Splint currently retains independent observation and control
+// connections. Keep enough bounded capacity for one 32-tab Window plus its
+// topology/theme channels, transient human inspection, and cleanup headroom.
+const CONNECTION_LIMIT: usize = 128;
 const IMAGE_CONTENT_CONNECTION_LIMIT: usize = 8;
 const IMAGE_CONTENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const IMAGE_CONTENT_HEADER_BYTES: usize = 53;
@@ -905,7 +908,7 @@ async fn main() -> Result<()> {
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("failed to accept client")?;
-                let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                let Some(permit) = try_admit_connection(&connections) else {
                     warn!("connection limit reached");
                     continue;
                 };
@@ -6512,10 +6515,31 @@ fn socket_path() -> Result<PathBuf> {
     Ok(runtime.join("splinterm/splinterd.sock"))
 }
 
+fn try_admit_connection(connections: &Arc<Semaphore>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    Arc::clone(connections).try_acquire_owned().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn graphical_connection_budget_is_bounded_and_recovers_after_release() {
+        assert_eq!(CONNECTION_LIMIT, 128);
+        let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
+        let mut permits = (0..CONNECTION_LIMIT)
+            .map(|_| try_admit_connection(&connections).expect("capacity permit"))
+            .collect::<Vec<_>>();
+        assert!(try_admit_connection(&connections).is_none());
+
+        drop(permits.pop());
+        assert_eq!(connections.available_permits(), 1);
+        let replacement = try_admit_connection(&connections).expect("released capacity");
+        assert_eq!(connections.available_permits(), 0);
+        assert!(try_admit_connection(&connections).is_none());
+        drop(replacement);
+    }
 
     #[test]
     fn public_live_row_materializes_unchanged_wire_content() {

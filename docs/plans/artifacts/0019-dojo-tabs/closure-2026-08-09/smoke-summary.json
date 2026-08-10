@@ -1,0 +1,101 @@
+{
+  "schema": "splinterm.plan0019.smoke.v1",
+  "exact": true,
+  "git_head": "1e0a4adbe5c6875cc547d56acdbf546398c31b1b",
+  "dirty_diff_sha256": "f573768c140d889a0ff7ed2a7b917077ac62293918761ae5db8eba3b35616d24",
+  "binary_sha256": "eb9452ad9fc70d9dcc94584907f8f6c68d5c15718d17df1dd95c8c730b00134b",
+  "daemon_sha256": "289548b27de3fa7a3627ddfa3de0f36cdd7fb8cb45e053b35ccdda287bfc9c75",
+  "window": {
+    "address": "0x55a31a477530",
+    "pid": 2596683,
+    "workspace": {
+      "id": 8,
+      "name": "8"
+    },
+    "monitor": 1,
+    "at": [
+      960,
+      -918
+    ],
+    "size": [
+      960,
+      600
+    ]
+  },
+  "scale": 1.2,
+  "initial_focus_preserved": true,
+  "captures": [
+    {
+      "file": "01-one-tab.png",
+      "sha256": "6982792598e17ec8484c973f4e1be14575a07ed6177476ac787c6a6969a450c5"
+    },
+    {
+      "file": "02-two-tabs.png",
+      "sha256": "5f74bacb2b04f37a934c37250d2c8960c2b5d803fb13e03ad974f6342014b9e3"
+    },
+    {
+      "file": "03-picker-existing-session.png",
+      "sha256": "a3c85e0236667d9188df8aa3be35d0f58b9c3f48b68b8b862bbfeaff22f34fe7"
+    },
+    {
+      "file": "04-hidden-burst-activated.png",
+      "sha256": "4458b579e13dcc418d2581bd421524f625220f4c6a50c6cab6cf34040a594c8f"
+    },
+    {
+      "file": "05-pointer-activated-second.png",
+      "sha256": "9aadc9ac74e695c93a20894519287a990a23dbfdd17b95937489c9fd1f2e6463"
+    },
+    {
+      "file": "06-pointer-closed-second-tab.png",
+      "sha256": "1488bc101ef6d6f1920374216cc5cb4b5426051799d10746e7eaa5423f0cdd1a"
+    }
+  ],
+  "keyboard_create_switch_previous": true,
+  "picker_open_or_activate_no_topology_growth": true,
+  "hidden_burst_drained": true,
+  "active_responsive_during_hidden_burst": true,
+  "pointer_activation_close": true,
+  "pointer_close_topology_unchanged": true,
+  "final_tab_closed_window": true,
+  "final_daemon_topology": {
+    "dojos": [
+      {
+        "dojo_id": "f03a7d17-f67a-4ea0-b59f-d59be3f461f0",
+        "lair_id": "10e5f154-1b3b-499d-8549-513f3c68c157",
+        "name": "terminal"
+      },
+      {
+        "dojo_id": "f511be34-5b08-4d1e-8348-fd8d44b5fedc",
+        "lair_id": "10e5f154-1b3b-499d-8549-513f3c68c157",
+        "name": "terminal-1786324054"
+      }
+    ],
+    "lairs": [
+      {
+        "dojo_count": 2,
+        "lair_id": "10e5f154-1b3b-499d-8549-513f3c68c157",
+        "name": "plan0019-smoke"
+      }
+    ],
+    "splints": [
+      {
+        "current_incarnation": 1,
+        "dojo_id": "f03a7d17-f67a-4ea0-b59f-d59be3f461f0",
+        "lair_id": "10e5f154-1b3b-499d-8549-513f3c68c157",
+        "last_incarnation": 1,
+        "lifecycle": "running",
+        "splint_id": "ba404cea-41e1-4c81-9e87-6c6691808575",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 2,
+        "dojo_id": "f511be34-5b08-4d1e-8348-fd8d44b5fedc",
+        "lair_id": "10e5f154-1b3b-499d-8549-513f3c68c157",
+        "last_incarnation": 2,
+        "lifecycle": "running",
+        "splint_id": "1a5feaa6-ee46-4636-b2dd-e0a64a28f700",
+        "title": "shell"
+      }
+    ]
+  }
+}

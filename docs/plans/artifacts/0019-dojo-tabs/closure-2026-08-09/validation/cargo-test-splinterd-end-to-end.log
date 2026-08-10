@@ -1,0 +1,25 @@
+   Compiling splinterd v0.1.0 (/home/oldjobobo/Projects/splinterm/crates/splinterd)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.07s
+     Running tests/end_to_end.rs (target/debug/deps/end_to_end-c028b61c57f79c99)
+
+running 18 tests
+test automation_client_preserves_accepted_and_rejected_reload_diagnostics ... ok
+test bounded_scrollback_search_pages_and_invalidates_stale_cursors ... ok
+test explicit_restore_scopes_report_per_leaf_results ... ok
+test first_history_pages_need_no_topology_or_subscription_scope ... ok
+test headless_policy_reload_fails_closed_and_cleans_up ... ok
+test human_roles_require_their_exact_installed_graphical_processes ... ok
+test mcp_controller_registry_owns_handled_and_atomic_actions ... ok
+test mutation_preflight_preserves_exact_scope_cas_and_descendant_denial ... ok
+test new_dojo_and_restore_inject_exact_current_context ... ok
+test parent_policy_snapshot_excludes_new_splint_until_reload ... ok
+test phase8_detach_reattach_overflow_resync_and_cleanup ... ok
+test restart_restores_ids_without_running_saved_commands ... ok
+test runtime_relaunch_and_restore_preserve_topology_revision ... ok
+test scoped_authorization_status_needs_no_topology_permission ... ok
+test shutdown_reaps_signal_resistant_child_and_removes_socket ... ok
+test simultaneous_clients_transfer_control_explicitly ... ok
+test topology_cas_stream_and_complete_edits ... ok
+test two_splints_spawn_and_preserve_independent_output ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 321.49s

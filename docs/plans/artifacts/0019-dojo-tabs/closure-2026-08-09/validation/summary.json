@@ -1,0 +1,49 @@
+{
+  "schema": "splinterm.plan0019.validation.v1",
+  "exact": true,
+  "commands": [
+    {
+      "command": "cargo test --workspace -- --test-threads=1",
+      "status": "passed",
+      "log": "cargo-test-workspace.log",
+      "splinterm_library": "296 passed, 1 ignored manual timing harness",
+      "splinterm_binary": "50 passed",
+      "splinterd_library": "58 passed",
+      "splinterd_binary": "55 passed",
+      "splinterd_end_to_end": "18 passed"
+    },
+    {
+      "command": "cargo test -p splinterd --test end_to_end -- --test-threads=1",
+      "status": "passed",
+      "result": "18 passed",
+      "log": "cargo-test-splinterd-end-to-end.log"
+    },
+    {
+      "command": "python -m pytest -q tools/automation/test_session_picker.py",
+      "status": "passed",
+      "result": "14 passed, 6 subtests passed",
+      "log": "pytest-session-picker.log"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "status": "passed",
+      "log": "cargo-clippy-workspace.log"
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "status": "passed",
+      "log": "cargo-fmt-check.log"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed",
+      "log": "git-diff-check.log"
+    },
+    {
+      "command": "git diff --cached --quiet",
+      "status": "passed",
+      "result": "index contains no staged changes",
+      "log": "git-diff-cached-quiet.log"
+    }
+  ]
+}

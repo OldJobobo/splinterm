@@ -7900,8 +7900,12 @@ mod tests {
     use std::{env, fs, path::PathBuf};
 
     use super::*;
+    use sha2::{Digest, Sha256};
+    use splinterm_automation_client::{ImageContentSource, SharedImageContentCache};
     use splinterm_core::{Axis, Splint, SplitRatio};
-    use splinterm_protocol::ActiveScreen;
+    use splinterm_protocol::{
+        ActiveScreen, ImageAlphaMode, ImageContentMetadata, ImageRetention, ImageSourceFormat,
+    };
 
     fn update_test_waker() -> (EventLoop<'static, usize>, Waker) {
         let event_loop = EventLoop::<usize>::try_new().unwrap();
@@ -8675,6 +8679,195 @@ mod tests {
             controlled: false,
             image_sources: ImageContentLeaseSet::default(),
         }
+    }
+
+    #[test]
+    fn hidden_tab_updates_cache_without_rebuild_resize_or_control_claim() {
+        let (_event_loop, waker) = update_test_waker();
+        let splint = Splint::shell(PathBuf::from("/tmp"));
+        let splint_id = splint.id;
+        let (updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut view = DojoTabView::from_open(
+            WindowDojoIdentity {
+                lair_id: LairId::new(),
+                dojo_id: DojoId::new(),
+                lair_name: "hidden lair".to_owned(),
+                dojo_name: "hidden dojo".to_owned(),
+            },
+            LayoutNode::Leaf(splint),
+            vec![WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            }],
+            splint_id,
+            ResolvedTheme::default(),
+            SCALE_DENOMINATOR,
+            &RenderContext::new(u16::MAX),
+        )
+        .unwrap();
+        view.pane.snapshot_frame = None;
+        let mut revised = valid_snapshot(splint_id);
+        revised.revision = 2;
+        revised.visible_rows[0].cells[0].content = "hidden update".to_owned();
+        updates
+            .try_send(WindowUpdate::Snapshot {
+                snapshot: revised,
+                image_sources: ImageContentLeaseSet::default(),
+                authoritative: false,
+            })
+            .unwrap();
+
+        view.drain_hidden_updates(&waker, ResolvedTheme::default())
+            .unwrap();
+
+        assert_eq!(view.pane.snapshot.as_ref().unwrap().revision, 2);
+        assert!(view.dirty_inactive_panes.contains(&splint_id));
+        assert!(view.pane.snapshot_frame.is_none());
+        assert!(command_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn hidden_tab_controller_release_covers_every_pane() {
+        let first = Splint::shell(PathBuf::from("/tmp"));
+        let first_id = first.id;
+        let second = Splint::shell(PathBuf::from("/tmp"));
+        let second_id = second.id;
+        let layout = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Leaf(first)),
+            second: Box::new(LayoutNode::Leaf(second)),
+        };
+        let (_first_updates, first_update_receiver) = tokio::sync::mpsc::channel(1);
+        let (first_commands, mut first_command_receiver) = tokio::sync::mpsc::channel(1);
+        let (_second_updates, second_update_receiver) = tokio::sync::mpsc::channel(1);
+        let (second_commands, mut second_command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut view = DojoTabView::from_open(
+            WindowDojoIdentity {
+                lair_id: LairId::new(),
+                dojo_id: DojoId::new(),
+                lair_name: "hidden lair".to_owned(),
+                dojo_name: "hidden dojo".to_owned(),
+            },
+            layout,
+            vec![
+                WindowPaneOptions {
+                    snapshot: valid_snapshot(first_id),
+                    updates: first_update_receiver,
+                    commands: first_commands,
+                    authority: AuthorityStatus::default(),
+                    controlled: true,
+                    image_sources: ImageContentLeaseSet::default(),
+                },
+                WindowPaneOptions {
+                    snapshot: valid_snapshot(second_id),
+                    updates: second_update_receiver,
+                    commands: second_commands,
+                    authority: AuthorityStatus::default(),
+                    controlled: true,
+                    image_sources: ImageContentLeaseSet::default(),
+                },
+            ],
+            first_id,
+            ResolvedTheme::default(),
+            SCALE_DENOMINATOR,
+            &RenderContext::new(u16::MAX),
+        )
+        .unwrap();
+
+        App::release_tab_controllers(&mut view);
+
+        assert!(!view.pane.controller_active);
+        assert!(
+            view.inactive_panes
+                .iter()
+                .all(|pane| !pane.controller_active)
+        );
+        assert_eq!(
+            first_command_receiver.try_recv().unwrap(),
+            WindowCommand::ReleaseControl
+        );
+        assert_eq!(
+            second_command_receiver.try_recv().unwrap(),
+            WindowCommand::ReleaseControl
+        );
+    }
+
+    #[test]
+    fn closed_tab_drops_renderer_image_leases() {
+        let pixels = vec![1_u8, 2, 3, 255];
+        let metadata = ImageContentMetadata {
+            content_id: 1,
+            generation: 1,
+            width: 1,
+            height: 1,
+            source_format: ImageSourceFormat::Sixel,
+            alpha_mode: ImageAlphaMode::Opaque,
+            digest: Sha256::digest(&pixels).into(),
+            byte_length: pixels.len(),
+            retention: ImageRetention::WhilePlaced,
+        };
+        let cache = SharedImageContentCache::with_maximum_bytes(4).unwrap();
+        cache
+            .insert_source(&metadata, ImageContentSource::Buffered(Arc::from(pixels)))
+            .unwrap();
+        let splint = Splint::shell(PathBuf::from("/tmp"));
+        let splint_id = splint.id;
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+        let lair_id = LairId::new();
+        let dojo_id = DojoId::new();
+        let view = DojoTabView::from_open(
+            WindowDojoIdentity {
+                lair_id,
+                dojo_id,
+                lair_name: "image lair".to_owned(),
+                dojo_name: "image dojo".to_owned(),
+            },
+            LayoutNode::Leaf(splint),
+            vec![WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: cache.lease(std::slice::from_ref(&metadata)).unwrap(),
+            }],
+            splint_id,
+            ResolvedTheme::default(),
+            SCALE_DENOMINATOR,
+            &RenderContext::new(u16::MAX),
+        )
+        .unwrap();
+        let mut tabs = WindowTabSet::new(DojoTab::new(lair_id, dojo_id, Some(view)));
+        let replacement_pixels = vec![4_u8, 5, 6, 255];
+        let mut replacement = metadata.clone();
+        replacement.content_id = 2;
+        replacement.digest = Sha256::digest(&replacement_pixels).into();
+        assert!(
+            cache
+                .insert_source(
+                    &replacement,
+                    ImageContentSource::Buffered(Arc::from(replacement_pixels.clone())),
+                )
+                .is_err()
+        );
+
+        drop(tabs.close(dojo_id));
+
+        cache
+            .insert_source(
+                &replacement,
+                ImageContentSource::Buffered(Arc::from(replacement_pixels)),
+            )
+            .unwrap();
+        assert!(!cache.contains(&metadata).unwrap());
+        assert!(cache.contains(&replacement).unwrap());
     }
 
     #[derive(Clone, Copy)]

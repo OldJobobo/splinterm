@@ -1489,20 +1489,29 @@ pub(in crate::app) async fn initial_window_dojo_identity(
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     use super::{
         Axis, CloseAction, DojoId, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
         SplintId, SplintState, SplitRatio, TopologyCommandOutcome, TopologyManagerWake,
-        TopologyRevision, WindowTopologyCommand, captured_dojo_kill_targets, close_action,
-        close_other_tab_targets, command_has_pending_split, next_topology_manager_wake,
-        parent_ratio, pending_focus_for_observation, refreshed_close_state,
-        topology_command_outcome, topology_identity_diff, validate_exited_close_target,
-        window_has_tab_capacity,
+        TopologyRevision, WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets,
+        close_action, close_other_tab_targets, command_has_pending_split,
+        next_topology_manager_wake, parent_ratio, pending_focus_for_observation,
+        refreshed_close_state, topology_command_outcome, topology_identity_diff,
+        validate_exited_close_target, window_has_tab_capacity,
     };
-    use crate::app::pane_bridge::pane_claims_initial_control;
+    use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
 
     #[tokio::test]
     async fn closed_window_command_channel_stops_before_another_topology_poll() {
@@ -1615,6 +1624,32 @@ mod tests {
         let missing_incarnation = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
         let missing_id = missing_incarnation.id;
         assert!(close_action(&LayoutNode::Leaf(missing_incarnation), missing_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn closed_tab_tasks_are_cancelled_and_joined_before_cleanup_returns() {
+        let completed = Arc::new(AtomicUsize::new(0));
+        let mut tasks = HashMap::new();
+        for _ in 0..3 {
+            let cancellation = CancellationToken::new();
+            let task_cancellation = cancellation.clone();
+            let task_completed = Arc::clone(&completed);
+            tasks.insert(
+                SplintId::new(),
+                PaneTask {
+                    cancellation,
+                    task: tokio::spawn(async move {
+                        task_cancellation.cancelled().await;
+                        task_completed.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }),
+                },
+            );
+        }
+
+        cancel_pane_tasks(tasks).await;
+
+        assert_eq!(completed.load(Ordering::SeqCst), 3);
     }
 
     #[test]

@@ -1,0 +1,822 @@
+{
+  "schema": "splinterm.plan0019.matrix.v1",
+  "exact": true,
+  "git_head": "1e0a4adbe5c6875cc547d56acdbf546398c31b1b",
+  "dirty_diff_sha256": "13e089f00fbde6a05e521d87cbe10c77f6a0194cdf8396cab525d6999786147c",
+  "binary_sha256": "eb9452ad9fc70d9dcc94584907f8f6c68d5c15718d17df1dd95c8c730b00134b",
+  "daemon_sha256": "289548b27de3fa7a3627ddfa3de0f36cdd7fb8cb45e053b35ccdda287bfc9c75",
+  "window": {
+    "address": "0x55a318816300",
+    "pid": 2414779,
+    "workspace": {
+      "id": 8,
+      "name": "8"
+    },
+    "monitor": 1,
+    "at": [
+      960,
+      -918
+    ],
+    "size": [
+      960,
+      600
+    ]
+  },
+  "captures": [
+    {
+      "file": "01-one-tab-dark-opaque-normal-scale120.png",
+      "sha256": "16af15a12e725fba0d816654c565514f8c74f8992c46834473781eda94912663"
+    },
+    {
+      "file": "02-two-tabs-cross-lair-light-translucent-compact-scale150.png",
+      "sha256": "f42800b4261fbcfc473d5d95e3bc4956fdc710c48125b3afae018cf376ee9316"
+    },
+    {
+      "file": "03-sixteen-tabs-light-translucent-compact-scale150.png",
+      "sha256": "57c86901cab9045e577320dc5e7892c7de30d7d191744253cb582b903dffc305"
+    },
+    {
+      "file": "04-thirty-two-tabs-dark-translucent-minimal-scale240.png",
+      "sha256": "68d450f322f78fefdaa16b45311050b6a3092fe67c67a2ee192607b8265f6fcf"
+    },
+    {
+      "file": "05-tab-limit-32-preserved.png",
+      "sha256": "0706e4311e9cae4ba833f81b580cfb7df0ab402728c0a0118b3087b1c898f807"
+    },
+    {
+      "file": "06-active-tab-removed-topology-retained.png",
+      "sha256": "232f3dfc806cb79a9675b5702862fb1e26f53d20f8f3dd853663062384624cad"
+    },
+    {
+      "file": "07-one-tab-after-client-local-closes.png",
+      "sha256": "f2e32af81af660848a4310c7a26393e3d81606ab929f5c3a1f985156b7838d8d"
+    }
+  ],
+  "resource_samples": [
+    {
+      "tabs": 1,
+      "rss_kib": 36496,
+      "idle_seconds": 2.009183304035105,
+      "idle_cpu_ticks": 0,
+      "threads": 4,
+      "fds": 20
+    },
+    {
+      "tabs": 2,
+      "rss_kib": 44744,
+      "idle_seconds": 2.008612663950771,
+      "idle_cpu_ticks": 0,
+      "threads": 4,
+      "fds": 22
+    },
+    {
+      "tabs": 16,
+      "rss_kib": 47916,
+      "idle_seconds": 2.0094546069740318,
+      "idle_cpu_ticks": 0,
+      "threads": 4,
+      "fds": 50
+    },
+    {
+      "tabs": 32,
+      "rss_kib": 56592,
+      "idle_seconds": 2.009420032030903,
+      "idle_cpu_ticks": 0,
+      "threads": 4,
+      "fds": 82
+    }
+  ],
+  "wall_switch_samples": [
+    {
+      "tabs": 2,
+      "wall_ns": [
+        202328450,
+        199345368,
+        201338909,
+        200671972,
+        202813300,
+        209181831,
+        211001322,
+        199768687,
+        199375815,
+        200656744,
+        200308295,
+        198850383
+      ]
+    },
+    {
+      "tabs": 16,
+      "wall_ns": [
+        201809749,
+        202538635,
+        200692044,
+        201129891,
+        202393987,
+        202369472,
+        200878734,
+        201986519,
+        200735344,
+        203211222,
+        199245654,
+        201724046
+      ]
+    },
+    {
+      "tabs": 32,
+      "wall_ns": [
+        201260382,
+        199945790,
+        200740955,
+        201199546,
+        202182172,
+        201412988,
+        201473751,
+        201008383,
+        209108538,
+        210110371,
+        202636013,
+        200531912
+      ]
+    }
+  ],
+  "trace_tab_switch_ns": {
+    "2": {
+      "samples": 14,
+      "median_ns": 3187862,
+      "p95_ns": 5057360,
+      "max_ns": 5057360
+    },
+    "3": {
+      "samples": 2,
+      "median_ns": 3388556,
+      "p95_ns": 4088839,
+      "max_ns": 4088839
+    },
+    "4": {
+      "samples": 2,
+      "median_ns": 2766705,
+      "p95_ns": 3265805,
+      "max_ns": 3265805
+    },
+    "5": {
+      "samples": 2,
+      "median_ns": 2503710,
+      "p95_ns": 2713693,
+      "max_ns": 2713693
+    },
+    "6": {
+      "samples": 2,
+      "median_ns": 3052155,
+      "p95_ns": 3763788,
+      "max_ns": 3763788
+    },
+    "7": {
+      "samples": 2,
+      "median_ns": 3162577,
+      "p95_ns": 3656998,
+      "max_ns": 3656998
+    },
+    "8": {
+      "samples": 2,
+      "median_ns": 3072969,
+      "p95_ns": 3349548,
+      "max_ns": 3349548
+    },
+    "9": {
+      "samples": 2,
+      "median_ns": 3361981,
+      "p95_ns": 3588205,
+      "max_ns": 3588205
+    },
+    "10": {
+      "samples": 2,
+      "median_ns": 3092315,
+      "p95_ns": 3542594,
+      "max_ns": 3542594
+    },
+    "11": {
+      "samples": 2,
+      "median_ns": 2518832,
+      "p95_ns": 2640778,
+      "max_ns": 2640778
+    },
+    "12": {
+      "samples": 2,
+      "median_ns": 2815735,
+      "p95_ns": 3076949,
+      "max_ns": 3076949
+    },
+    "13": {
+      "samples": 2,
+      "median_ns": 2695360,
+      "p95_ns": 2947529,
+      "max_ns": 2947529
+    },
+    "14": {
+      "samples": 2,
+      "median_ns": 2471512,
+      "p95_ns": 2642453,
+      "max_ns": 2642453
+    },
+    "15": {
+      "samples": 2,
+      "median_ns": 2716523,
+      "p95_ns": 2826212,
+      "max_ns": 2826212
+    },
+    "16": {
+      "samples": 14,
+      "median_ns": 3019295,
+      "p95_ns": 4211906,
+      "max_ns": 4211906
+    },
+    "17": {
+      "samples": 2,
+      "median_ns": 2579770,
+      "p95_ns": 2800020,
+      "max_ns": 2800020
+    },
+    "18": {
+      "samples": 2,
+      "median_ns": 3058371,
+      "p95_ns": 3686472,
+      "max_ns": 3686472
+    },
+    "19": {
+      "samples": 2,
+      "median_ns": 2489392,
+      "p95_ns": 2525326,
+      "max_ns": 2525326
+    },
+    "20": {
+      "samples": 2,
+      "median_ns": 2518063,
+      "p95_ns": 2659077,
+      "max_ns": 2659077
+    },
+    "21": {
+      "samples": 2,
+      "median_ns": 2562518,
+      "p95_ns": 2702729,
+      "max_ns": 2702729
+    },
+    "22": {
+      "samples": 2,
+      "median_ns": 2883972,
+      "p95_ns": 3235773,
+      "max_ns": 3235773
+    },
+    "23": {
+      "samples": 2,
+      "median_ns": 2482059,
+      "p95_ns": 2524907,
+      "max_ns": 2524907
+    },
+    "24": {
+      "samples": 2,
+      "median_ns": 2855825,
+      "p95_ns": 3277679,
+      "max_ns": 3277679
+    },
+    "25": {
+      "samples": 2,
+      "median_ns": 2548759,
+      "p95_ns": 2638613,
+      "max_ns": 2638613
+    },
+    "26": {
+      "samples": 2,
+      "median_ns": 2772642,
+      "p95_ns": 2913306,
+      "max_ns": 2913306
+    },
+    "27": {
+      "samples": 2,
+      "median_ns": 3325836,
+      "p95_ns": 4044700,
+      "max_ns": 4044700
+    },
+    "28": {
+      "samples": 2,
+      "median_ns": 3047790,
+      "p95_ns": 3516753,
+      "max_ns": 3516753
+    },
+    "29": {
+      "samples": 2,
+      "median_ns": 2751095,
+      "p95_ns": 3083306,
+      "max_ns": 3083306
+    },
+    "30": {
+      "samples": 2,
+      "median_ns": 2457927,
+      "p95_ns": 2488030,
+      "max_ns": 2488030
+    },
+    "31": {
+      "samples": 2,
+      "median_ns": 2459324,
+      "p95_ns": 2571702,
+      "max_ns": 2571702
+    },
+    "32": {
+      "samples": 14,
+      "median_ns": 3151612,
+      "p95_ns": 4890084,
+      "max_ns": 4890084
+    }
+  },
+  "cross_lair_attachment": true,
+  "beta_splint_id": "bab881f1-7284-4786-9cf4-5aba60fd350a",
+  "tab_33_rejected_without_topology_mutation": true,
+  "active_tab_close_topology_unchanged": true,
+  "last_tab_closed_window": true,
+  "final_daemon_topology": {
+    "dojos": [
+      {
+        "dojo_id": "87964caf-3204-4666-949b-e1b19a10308b",
+        "lair_id": "27313b90-f36d-40af-bfa6-c5c9f1013574",
+        "name": "terminal"
+      },
+      {
+        "dojo_id": "2cdcc614-8c18-4261-8bc5-bcf1ffe65ab5",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal"
+      },
+      {
+        "dojo_id": "37f03ccc-5071-45ed-bb2b-5bf7cfba8e2d",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322797"
+      },
+      {
+        "dojo_id": "1008a459-1ca6-45ec-88f9-bbbd2eccb484",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322798"
+      },
+      {
+        "dojo_id": "3d61ed6d-388e-4e8a-ae87-24b9b2d1a79a",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322799"
+      },
+      {
+        "dojo_id": "c251d504-a610-45e6-b3ee-0ac9417ae26d",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322800"
+      },
+      {
+        "dojo_id": "768b711d-a7c0-408d-babb-8ae168920be1",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322801"
+      },
+      {
+        "dojo_id": "637bffad-8840-42d9-9812-1ae9519fa75b",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322802"
+      },
+      {
+        "dojo_id": "1e2988cc-0c4f-4cf2-a31c-530c85abca6d",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322803"
+      },
+      {
+        "dojo_id": "e20f42de-ddc5-4206-abd3-eabb3345a335",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322804"
+      },
+      {
+        "dojo_id": "e7ab32e6-2c63-44f3-90dd-8dae5301fc30",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322805"
+      },
+      {
+        "dojo_id": "a5153d21-8dc3-48a8-9732-4c965c6230a6",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322806"
+      },
+      {
+        "dojo_id": "a36fefc2-ed4c-4ecf-942f-f88bb2e306cb",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322807"
+      },
+      {
+        "dojo_id": "ef0bdb2d-71a8-44a8-8da2-ff36081bb5c5",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322808"
+      },
+      {
+        "dojo_id": "d904989b-cc23-4e8c-90a8-c06b823bb654",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322809"
+      },
+      {
+        "dojo_id": "326dfb6a-d066-4fd8-9c67-7efbae8f0a44",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322810"
+      },
+      {
+        "dojo_id": "804b55d4-1c6f-40ac-aa23-274aba395aff",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322816"
+      },
+      {
+        "dojo_id": "851b76a8-e35d-4ae8-bb97-bf6243bc5e85",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322817"
+      },
+      {
+        "dojo_id": "087d6464-3a4b-4ec0-a8ae-84e8781d4c3f",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322818"
+      },
+      {
+        "dojo_id": "b29c4dd0-632d-4751-925d-16b46b2cf0cc",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322819"
+      },
+      {
+        "dojo_id": "fd71734a-3c4d-4e8e-a6fb-d8860be5c330",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322820"
+      },
+      {
+        "dojo_id": "e3223437-3215-44ed-8a0a-1a8575068dc1",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322821"
+      },
+      {
+        "dojo_id": "004248c3-c606-4c22-afb1-b696094bf8f2",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322822"
+      },
+      {
+        "dojo_id": "86c494e7-878c-4cd4-b8d0-f91456ac70a5",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322823"
+      },
+      {
+        "dojo_id": "f1d7be39-5e5f-43a2-8de2-db2b875782be",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322824"
+      },
+      {
+        "dojo_id": "32c49f0d-1469-4ef2-a367-bf30a4f2b590",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322825"
+      },
+      {
+        "dojo_id": "b962db5e-46df-4d3d-a3f9-88c32f680c65",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322826"
+      },
+      {
+        "dojo_id": "2d278439-b08c-4728-a7a6-f4dab5b0bc69",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322827"
+      },
+      {
+        "dojo_id": "f0300699-b23e-4008-bf5f-880f82c92f35",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322828"
+      },
+      {
+        "dojo_id": "f60c3cce-4666-4c8c-90f8-f8cf9f1ce0ae",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322829"
+      },
+      {
+        "dojo_id": "c86d5700-351b-4426-82ea-0bb1a1901f77",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322830"
+      },
+      {
+        "dojo_id": "6906050a-3450-4847-b508-3a7c48ab529c",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "terminal-1786322830"
+      }
+    ],
+    "lairs": [
+      {
+        "dojo_count": 1,
+        "lair_id": "27313b90-f36d-40af-bfa6-c5c9f1013574",
+        "name": "Plan0019-Alpha"
+      },
+      {
+        "dojo_count": 31,
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "name": "Plan0019-Beta"
+      }
+    ],
+    "splints": [
+      {
+        "current_incarnation": 1,
+        "dojo_id": "87964caf-3204-4666-949b-e1b19a10308b",
+        "lair_id": "27313b90-f36d-40af-bfa6-c5c9f1013574",
+        "last_incarnation": 1,
+        "lifecycle": "running",
+        "splint_id": "bbcf070d-e9b8-41e9-b396-6e7bcaec5955",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 2,
+        "dojo_id": "2cdcc614-8c18-4261-8bc5-bcf1ffe65ab5",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 2,
+        "lifecycle": "running",
+        "splint_id": "bab881f1-7284-4786-9cf4-5aba60fd350a",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 3,
+        "dojo_id": "37f03ccc-5071-45ed-bb2b-5bf7cfba8e2d",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 3,
+        "lifecycle": "running",
+        "splint_id": "13f9539a-a1d8-4786-8b6b-241df2e434a5",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 4,
+        "dojo_id": "1008a459-1ca6-45ec-88f9-bbbd2eccb484",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 4,
+        "lifecycle": "running",
+        "splint_id": "ad75ae79-e912-4c60-ae4b-7fdb894390a9",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 5,
+        "dojo_id": "3d61ed6d-388e-4e8a-ae87-24b9b2d1a79a",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 5,
+        "lifecycle": "running",
+        "splint_id": "563893de-4494-4d2d-8c18-99e8444c2bf7",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 6,
+        "dojo_id": "c251d504-a610-45e6-b3ee-0ac9417ae26d",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 6,
+        "lifecycle": "running",
+        "splint_id": "4ca0ef90-9c44-45a6-98f0-8cb6493b5f58",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 7,
+        "dojo_id": "768b711d-a7c0-408d-babb-8ae168920be1",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 7,
+        "lifecycle": "running",
+        "splint_id": "96dae673-d1c7-40b1-83df-735f334e0249",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 8,
+        "dojo_id": "637bffad-8840-42d9-9812-1ae9519fa75b",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 8,
+        "lifecycle": "running",
+        "splint_id": "966dc545-caa4-4aa5-8531-7fbcc869a9c9",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 9,
+        "dojo_id": "1e2988cc-0c4f-4cf2-a31c-530c85abca6d",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 9,
+        "lifecycle": "running",
+        "splint_id": "dcf35fee-b5b2-4834-994b-b68f8226a4fe",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 10,
+        "dojo_id": "e20f42de-ddc5-4206-abd3-eabb3345a335",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 10,
+        "lifecycle": "running",
+        "splint_id": "ab5ffb70-ace0-4a8f-9d47-18c14a48ccd1",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 11,
+        "dojo_id": "e7ab32e6-2c63-44f3-90dd-8dae5301fc30",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 11,
+        "lifecycle": "running",
+        "splint_id": "9868e1f2-6156-446e-b38c-24f649f07f21",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 12,
+        "dojo_id": "a5153d21-8dc3-48a8-9732-4c965c6230a6",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 12,
+        "lifecycle": "running",
+        "splint_id": "9e246763-7ccf-43c1-9439-0fbf33f599e9",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 13,
+        "dojo_id": "a36fefc2-ed4c-4ecf-942f-f88bb2e306cb",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 13,
+        "lifecycle": "running",
+        "splint_id": "9cece725-84cb-45e4-ae1f-ee6771cee792",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 14,
+        "dojo_id": "ef0bdb2d-71a8-44a8-8da2-ff36081bb5c5",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 14,
+        "lifecycle": "running",
+        "splint_id": "d7ed5756-3940-4b59-81e2-76b5aba18170",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 15,
+        "dojo_id": "d904989b-cc23-4e8c-90a8-c06b823bb654",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 15,
+        "lifecycle": "running",
+        "splint_id": "ac2ed676-0bd1-4f27-8e13-60f53e6631b5",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 16,
+        "dojo_id": "326dfb6a-d066-4fd8-9c67-7efbae8f0a44",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 16,
+        "lifecycle": "running",
+        "splint_id": "85c8080b-e419-469e-bc58-d520aaa6dce4",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 17,
+        "dojo_id": "804b55d4-1c6f-40ac-aa23-274aba395aff",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 17,
+        "lifecycle": "running",
+        "splint_id": "8d745a0f-2a76-4957-bc9e-3234092e4124",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 18,
+        "dojo_id": "851b76a8-e35d-4ae8-bb97-bf6243bc5e85",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 18,
+        "lifecycle": "running",
+        "splint_id": "c3697dab-d51c-4d62-9283-e4709fce230c",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 19,
+        "dojo_id": "087d6464-3a4b-4ec0-a8ae-84e8781d4c3f",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 19,
+        "lifecycle": "running",
+        "splint_id": "62e0dada-0168-4680-b99f-9b49c38abb9e",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 20,
+        "dojo_id": "b29c4dd0-632d-4751-925d-16b46b2cf0cc",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 20,
+        "lifecycle": "running",
+        "splint_id": "9e20a8d7-cb13-425f-bed3-8c21a6160e18",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 21,
+        "dojo_id": "fd71734a-3c4d-4e8e-a6fb-d8860be5c330",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 21,
+        "lifecycle": "running",
+        "splint_id": "313a6e75-9ce6-4e61-a57c-0a5ecf805637",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 22,
+        "dojo_id": "e3223437-3215-44ed-8a0a-1a8575068dc1",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 22,
+        "lifecycle": "running",
+        "splint_id": "9fac58b6-b0da-438b-9514-441673de4403",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 23,
+        "dojo_id": "004248c3-c606-4c22-afb1-b696094bf8f2",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 23,
+        "lifecycle": "running",
+        "splint_id": "66e90992-3a84-4b41-919c-16a283003ed5",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 24,
+        "dojo_id": "86c494e7-878c-4cd4-b8d0-f91456ac70a5",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 24,
+        "lifecycle": "running",
+        "splint_id": "0ad694ca-7750-475d-9316-0984cc0e45dd",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 25,
+        "dojo_id": "f1d7be39-5e5f-43a2-8de2-db2b875782be",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 25,
+        "lifecycle": "running",
+        "splint_id": "cbec960b-b17b-4001-8c63-1f8480db6453",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 26,
+        "dojo_id": "32c49f0d-1469-4ef2-a367-bf30a4f2b590",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 26,
+        "lifecycle": "running",
+        "splint_id": "6e8f43e6-732e-40b1-9502-29f9fb0de2fc",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 27,
+        "dojo_id": "b962db5e-46df-4d3d-a3f9-88c32f680c65",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 27,
+        "lifecycle": "running",
+        "splint_id": "96d9aab6-a173-4049-9073-ce70a9c5155a",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 28,
+        "dojo_id": "2d278439-b08c-4728-a7a6-f4dab5b0bc69",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 28,
+        "lifecycle": "running",
+        "splint_id": "7d4f9128-a691-4702-bed2-cdf21ee4661f",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 29,
+        "dojo_id": "f0300699-b23e-4008-bf5f-880f82c92f35",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 29,
+        "lifecycle": "running",
+        "splint_id": "92c918b6-881b-480d-a87c-70b5577c5fd8",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 30,
+        "dojo_id": "f60c3cce-4666-4c8c-90f8-f8cf9f1ce0ae",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 30,
+        "lifecycle": "running",
+        "splint_id": "bd805deb-e07c-4e26-805f-d4f4fb69da1d",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 31,
+        "dojo_id": "c86d5700-351b-4426-82ea-0bb1a1901f77",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 31,
+        "lifecycle": "running",
+        "splint_id": "d7e5b999-c201-4659-85d2-97bb5a1d753a",
+        "title": "shell"
+      },
+      {
+        "current_incarnation": 32,
+        "dojo_id": "6906050a-3450-4847-b508-3a7c48ab529c",
+        "lair_id": "ecf12992-a20a-47dc-8f58-c870b260556d",
+        "last_incarnation": 32,
+        "lifecycle": "running",
+        "splint_id": "959e67eb-145e-42b7-a74f-5c70ca315f05",
+        "title": "shell"
+      }
+    ]
+  },
+  "themes": [
+    "dark-opaque",
+    "light-translucent",
+    "dark-translucent"
+  ],
+  "scales": [
+    1.2,
+    1.5,
+    2.4
+  ],
+  "sizes": [
+    "normal",
+    "compact",
+    "minimal"
+  ],
+  "tab_counts": [
+    1,
+    2,
+    16,
+    32
+  ]
+}

@@ -90,6 +90,15 @@ closing the referenced Dojo or Splints. The tab strip is trusted application
 chrome, and one content rectangle below it is authoritative for pane layout,
 terminal geometry, input mapping, overlays, IME, and damage.
 
+The local daemon admits at most 128 simultaneous private protocol connections.
+This remains a hard resource bound while accommodating the current graphical
+model's independent observation and control connections for one 32-tab Window,
+its topology/theme channels, transient human inspection, and cleanup headroom.
+Image-body transport retains its separate eight-connection limit. Connection
+pooling or protocol-channel multiplexing may reduce this footprint later; the
+higher bounded admission ceiling does not expand authorization or per-connection
+subscription, frame, queue, controller, or image budgets.
+
 Terminal images remain sparse protocol-independent content and placement
 records in the daemon-owned terminal state. Trusted UI snapshots carry bounded
 metadata only; immutable pixel bodies are fetched on demand through sealed

@@ -1,8 +1,8 @@
 # Plan 0019: Window-local Dojo tabs
 
-- **Status:** Implemented and validated in current product behavior; final Plan 0019 evidence consolidation and closure review remain
+- **Status:** Complete — implementation, full non-graphical validation, approved graphical matrix, bounded resource evidence, exact cleanup, and independent review pass
 - **Date:** 2026-08-04
-- **Reconciled:** 2026-08-09 against commits `9cc591f`, `2cc7d86`, `3ee2048`, and later Plan 0025/0028 validation
+- **Reconciled:** 2026-08-09 against commits `9cc591f`, `2cc7d86`, `3ee2048`, later Plan 0017/0025/0028 evidence, and [`artifacts/0019-dojo-tabs/closure-2026-08-09/`](artifacts/0019-dojo-tabs/closure-2026-08-09/)
 - **Depends on:** [Plan 0017](0017-inline-session-picker-overlay.md), [Plan 0018](0018-lair-dojo-topology-migration.md)
 - **Architecture authority:** [ADR 0009](../adr/0009-topology-lair-dojo-migration.md)
 
@@ -24,12 +24,32 @@ bounded insertion, duplicate activation, stable reorder/close selection,
 wrapped navigation, exact consumed shortcuts, tab-strip hit targets and compact
 layout, active-tab selection color, and controller acquisition on active resize.
 
-This reconciliation does not manufacture a historical completion claim. Before
-marking Plan 0019 complete, one closure artifact must map the retained Plan
-0025/0028 graphical evidence and current focused tests to all twelve acceptance
-criteria, identify any genuinely uncovered hidden-tab/resource case, and receive
-a fresh independent read-only closure review. A new graphical matrix is required
-only if that mapping finds a material acceptance gap.
+This reconciliation does not manufacture a historical completion claim. The
+closure audit found genuine hidden-tab/resource and 32-tab capacity gaps. The
+implementation now directly tests hidden semantic caching without frame rebuild
+or resize/control commands, all-pane controller release, pane-task cancellation
+and join, renderer image-lease release, transactional tab bounds, and bounded
+connection saturation/recovery.
+
+The approved guarded smoke and matrix pass 1/2/16/32 tabs, cross-Lair labels,
+dark/light and opaque/translucent themes, normal/compact/minimal layouts, scales
+1.2/1.5/2.4, hidden burst responsiveness, keyboard/pointer/picker actions, active
+and final tab closure, tab-33 rejection, retained topology, memory/CPU/FD/thread
+samples, and warm switch latency. Exact evidence and diagnostics are retained in
+[`EVIDENCE.md`](artifacts/0019-dojo-tabs/closure-2026-08-09/EVIDENCE.md). Fresh
+read-only reviewer `d4898b93` found two evidence blockers: initial frames taken
+before first composition and a missing explicit clean-index record. The complete
+smoke was rerun with committed terminal output before capture, exact cleanup
+passed again, the early matrix frame is excluded from positive evidence, and
+`git diff --cached --quiet` is retained. The review disposition records no
+remaining blocker.
+
+The matrix exposed that the daemon's old 32-connection admission limit made the
+advertised 32-tab Window impossible because each graphical Splint currently
+retains independent observation and control channels. With explicit user
+approval, the still-hard limit is now 128; authorization and every
+per-connection/per-resource bound remain unchanged. The independent reviewer
+accepted this bounded connection/resource boundary.
 
 ## Goal
 
