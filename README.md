@@ -5,7 +5,7 @@
 
 **A persistent, security-conscious terminal substrate for humans and bounded automation.**
 
-[Website](https://splinterm.com/) · [Documentation](https://preview.splinterm.com/docs/) · [Quickstart](https://preview.splinterm.com/docs/quickstart/) · [Current status](docs/status.md)
+[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Current status](docs/status.md)
 
 </div>
 
@@ -82,7 +82,7 @@ Add `--check` to run the complete package test suite. The installer deliberately
 
 Installation does **not** change your default terminal, edit Omarchy or Hyprland configuration, enable systemd user lingering, or install the optional MCP package on a fresh system. Trusted graphical authority requires the client to be the exact device/inode sibling adjacent to the running `/usr/bin/splinterd`. After an upgrade replaces `/usr/bin/splinterm`, close and reopen every existing Splinterm window: an already-running client retains the old inode and is no longer the trusted sibling.
 
-Read the complete [installation guide](https://preview.splinterm.com/docs/install/).
+Read the complete [installation guide](https://splinterm.com/docs/install/).
 
 ## Start using it
 
@@ -130,7 +130,7 @@ Splinterm's separate `s*` shell namespace.
 
 Reopening attaches to processes that are still running. Starting an exited process again from saved launch metadata is an explicit **restore** operation.
 
-Continue with the [quickstart](https://preview.splinterm.com/docs/quickstart/), repository [human usage guide](docs/usage.md), or website [Dojos and persistence](https://preview.splinterm.com/docs/sessions/).
+Continue with the [quickstart](https://splinterm.com/docs/quickstart/), repository [human usage guide](docs/usage.md), or website [Dojos and persistence](https://splinterm.com/docs/sessions/).
 
 ## How it works
 
@@ -161,7 +161,7 @@ Topology
 
 Window and tab lifetimes are separate from Dojo and Splint lifetimes. Closing a view detaches it; terminating a process is an explicit, guarded action.
 
-Read [Core concepts](https://preview.splinterm.com/docs/concepts/) for the user model or [`docs/architecture.md`](docs/architecture.md) for system ownership and boundaries.
+Read [Core concepts](https://splinterm.com/docs/concepts/) for the user model or [`docs/architecture.md`](docs/architecture.md) for system ownership and boundaries.
 
 ## Automation and remote access
 
@@ -188,21 +188,21 @@ Splinterm uses `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini` for its focu
 
 On Omarchy, Splinterm can read the active theme's effective `foot.ini` and `colors.toml` directly and safely reload valid palette changes without restarting the daemon or shell.
 
-See the [configuration guide](https://preview.splinterm.com/docs/configure/configuration/) for supported keys, keymap inspection, Omarchy integration, and Foot migration.
+See the [configuration guide](https://splinterm.com/docs/configure/configuration/) for supported keys, keymap inspection, Omarchy integration, and Foot migration.
 
 ## Documentation
 
 | If you want to… | Start here |
 | --- | --- |
-| Install and evaluate Splinterm | [Installation](https://preview.splinterm.com/docs/install/) |
-| Open, detach, and return to work | [Quickstart](https://preview.splinterm.com/docs/quickstart/) |
-| Understand Lairs, Dojos, Splints, and windows | [Core concepts](https://preview.splinterm.com/docs/concepts/) |
-| Manage persistence, restore, and reset | [Dojos and persistence](https://preview.splinterm.com/docs/sessions/) |
-| Configure the terminal | [Configuration](https://preview.splinterm.com/docs/configure/configuration/) |
+| Install and evaluate Splinterm | [Installation](https://splinterm.com/docs/install/) |
+| Open, detach, and return to work | [Quickstart](https://splinterm.com/docs/quickstart/) |
+| Understand Lairs, Dojos, Splints, and windows | [Core concepts](https://splinterm.com/docs/concepts/) |
+| Manage persistence, restore, and reset | [Dojos and persistence](https://splinterm.com/docs/sessions/) |
+| Configure the terminal | [Configuration](https://splinterm.com/docs/configure/configuration/) |
 | Check maturity and availability | [Current status](docs/status.md) |
 | Use windows, tabs, panes, and restore safely | [Human usage](docs/usage.md) |
 | Find CLI commands and machine-output boundaries | [CLI reference](docs/cli.md) |
-| Troubleshoot an installation | [Troubleshooting](https://preview.splinterm.com/docs/troubleshooting/) |
+| Troubleshoot an installation | [Troubleshooting](https://splinterm.com/docs/troubleshooting/) |
 | Contribute to the project | [Contributing](CONTRIBUTING.md) |
 
 Specialist contracts and design records remain in [`docs/`](docs/). Plans, spikes, benchmarks, and retained artifacts are development history and evidence—not the primary user guide.
@@ -226,7 +226,7 @@ For an isolated development daemon and client:
 ./splinterm-test stop     # stop the isolated daemon
 ```
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [development guide](https://preview.splinterm.com/docs/development/) before changing domain, protocol, renderer, or Foot-derived behavior.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [development guide](https://splinterm.com/docs/development/) before changing domain, protocol, renderer, or Foot-derived behavior.
 
 ## Design authority and lineage
 

@@ -16,11 +16,20 @@ const capabilities = [
   title="Splinterm — persistent terminal sessions, bounded automation"
   description="Splinterm is a persistent, security-conscious terminal substrate for humans and bounded automation."
 >
-  <section class="hero shell-section">
+  <section class="intro-hero" aria-labelledby="intro-title">
+    <img class="intro-mark" src="/logo.png" alt="" width="768" height="768" />
+    <h1 id="intro-title" class="intro-wordmark">splinterm</h1>
+    <p class="intro-status">Public alpha</p>
+    <div class="intro-actions">
+      <a class="intro-link" href="#product">Enter the Lair <span aria-hidden="true">↓</span></a>
+      <a class="intro-link intro-link-muted" href="/docs/">Read the docs <span aria-hidden="true">↗</span></a>
+    </div>
+  </section>
+
+  <section id="product" class="hero shell-section" aria-labelledby="product-title">
     <div class="hero-copy">
-      <img class="hero-mark" src="/favicon.svg" alt="" width="112" height="112" />
       <p class="eyebrow"><span>Public alpha</span> · Enter the Lair</p>
-      <h1>Your shell should outlive its <em>window.</em></h1>
+      <h2 id="product-title">Your shell should outlive its <em>window.</em></h2>
       <p class="hero-lede">
         Splinterm keeps your work below the surface: Lairs hold projects, Dojos hold working
         sessions, and Splints keep their shells alive when graphical clients disappear.
