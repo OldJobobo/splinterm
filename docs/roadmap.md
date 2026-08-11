@@ -45,8 +45,8 @@ Part 8.1 parity, scrollback, performance, and Hyprland/Omarchy sign-off are
 complete with durable evidence. Phase 9 produced and isolated-validated a
 initial private Arch prerelease package with coherent binaries, service,
 desktop/theme integration, upgrade handling, documentation, and licenses. The
-repository and commit-bound edge channel are now public alpha surfaces; AUR
-publication and stable-support commitments remain post-milestone work.
+repository, versioned AUR package, and commit-bound edge channel are now public
+alpha surfaces; stable-support commitments remain post-milestone work.
 
 ## Phase 3 — multiplexing (complete)
 

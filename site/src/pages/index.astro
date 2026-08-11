@@ -8,7 +8,7 @@ const capabilities = [
   ['Panes, tabs, and restore', 'Validated'],
   ['Bounded automation', 'Validated'],
   ['Public source + edge builds', 'Available'],
-  ['AUR alpha package', 'Preparing'],
+  ['AUR alpha package', 'Available'],
 ];
 ---
 
@@ -229,8 +229,8 @@ const capabilities = [
     <div class="status-intro">
       <h2 id="status-title">The doors are open.<br />The edges stay marked.</h2>
       <p>
-        Splinterm is a public alpha. Source, documentation, and verified edge packages are open;
-        the supported target remains narrow and stable compatibility guarantees do not exist yet.
+        Splinterm is a public alpha. Source, documentation, the versioned AUR package, and verified
+        edge packages are open; the supported target remains narrow and stable compatibility guarantees do not exist yet.
       </p>
       <a class="text-link" href="/docs/status/">Read the complete status and limits <span aria-hidden="true">→</span></a>
     </div>
@@ -249,11 +249,11 @@ const capabilities = [
     <div>
       <p class="eyebrow">The ordinary path into the Lair</p>
       <h2 id="workflow-title">Leave the window.<br />Return to the Dojo.</h2>
-      <p>Install the current public alpha edge package, open a Splint, then use the Dojo picker whenever you want the running work back.</p>
+      <p>Install the current public alpha from the AUR, open a Splint, then use the Dojo picker whenever you want the running work back.</p>
       <a class="button primary" href="/docs/quickstart/">Follow the local quickstart</a>
     </div>
     <div class="command-stack" aria-label="Example Splinterm commands">
-      <div><span>$</span><code>./install.sh</code></div>
+      <div><span>$</span><code>yay -S splinterm</code></div>
       <div><span>$</span><code>splinterm sessions</code><small>choose a running Dojo</small></div>
       <div><span>$</span><code>splinterm reopen</code><small>return to the last one</small></div>
     </div>

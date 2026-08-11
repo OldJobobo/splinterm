@@ -5,9 +5,25 @@ description: Install or update the current Splinterm public alpha on Arch Linux 
 
 The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is a public alpha, not a supported stable release; upgrades may change interfaces and end daemon-owned shells.
 
+## Install the versioned AUR package
+
+Install the main package from the [splinterm AUR package page](https://aur.archlinux.org/packages/splinterm) with an AUR helper, which also resolves its `xdg-terminal-exec` AUR dependency:
+
+```bash
+yay -S splinterm
+```
+
+The optional policy-scoped MCP adapter is a separate exact-version split package:
+
+```bash
+yay -S splinterm-mcp
+```
+
+`paru` may be used instead of `yay`. AUR availability does not expand the supported target or create stable compatibility and support-duration guarantees.
+
 ## Install the current edge package
 
-Clone the public repository and run the edge installer:
+For the newest successfully validated commit-bound package, clone the public repository and run the edge installer:
 
 ```bash
 git clone https://github.com/OldJobobo/splinterm.git

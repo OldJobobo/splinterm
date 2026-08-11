@@ -230,6 +230,7 @@ Troubleshooting checklist:
    to retry blindly or broaden policy.
 5. Keep stdout reserved for MCP frames; bounded diagnostics appear on stderr.
 
-AUR packaging is being prepared. Nix/Home Manager, non-SSH gateways, broader
-editor plugins, durable terminal bodies, HTTP/OAuth transport, and write-capable MCP defaults
-remain deferred.
+The optional adapter is available from the AUR as `splinterm-mcp` and retains an
+exact-version dependency on `splinterm`. Nix/Home Manager, non-SSH gateways,
+broader editor plugins, durable terminal bodies, HTTP/OAuth transport, and
+write-capable MCP defaults remain deferred.

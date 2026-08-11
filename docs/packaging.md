@@ -1,13 +1,32 @@
 # Public alpha Arch packaging
 
 Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.1alpha1` split
-package. It is the repository's clean-source package authority, but it is not yet
-the AUR publication recipe: its local source archive and `SKIP` checksum are
-valid only for reviewed local and CI builds. Immutable public GitHub commit
-releases plus the rolling `edge-channel` Git ref publish verified edge packages;
-AUR publication will use a versioned public source URL and checksum.
+package for reviewed local and CI builds. Its local source archive and `SKIP`
+checksum are valid only in that workflow. The published AUR authority is
+`packaging/aur/PKGBUILD`, which uses the immutable `v0.1.1-alpha.1` release
+asset, reviewed SHA-256 checksums, and a test-only clean-chroot stabilization
+patch. The public package base is [splinterm](https://aur.archlinux.org/packages/splinterm).
 
-## One-command prebuilt installation
+## Versioned AUR installation
+
+Use an AUR helper to resolve the `xdg-terminal-exec` AUR dependency and install
+the main package:
+
+```bash
+yay -S splinterm
+```
+
+The optional exact-version MCP split package is installed separately:
+
+```bash
+yay -S splinterm-mcp
+```
+
+`paru` may be used instead of `yay`. AUR availability does not expand the
+validated target beyond x86_64 Arch/Omarchy with native Wayland/Hyprland or add
+a stable compatibility and support-duration promise.
+
+## One-command prebuilt edge installation
 
 On an x86_64 Arch/Omarchy machine, a clone installs or updates to the newest
 successfully built `main` commit without compiling locally:
@@ -99,9 +118,9 @@ namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 
 The local archive checksum is intentionally `SKIP`: the archive is generated
 from the reviewed local Git commit, is never downloaded, and the package's
-`.BUILDINFO`/`.PKGINFO` record the actual build. The future AUR recipe requires
-a versioned immutable public source URL and checksum and will be published
-separately from this local-build source entry.
+`.BUILDINFO`/`.PKGINFO` record the actual build. The separate checked-in AUR
+recipe uses the immutable versioned release asset and real SHA-256 checksums; do
+not submit the local-build recipe to the AUR.
 
 ## Installed layout
 

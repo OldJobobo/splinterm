@@ -9,8 +9,8 @@ this page owns what the product is today.
 
 **Splinterm is a public alpha.**
 
-Source, documentation, and commit-bound Arch edge packages are publicly
-available. Core terminal emulation, daemon-owned persistence, multiplexing,
+Source, documentation, the versioned AUR package, and commit-bound Arch edge
+packages are publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
 native Wayland presentation, Arch packaging, and bounded automation workflows
 are implemented and validated in the scopes named below. Public availability is
 not a stable-support promise: alpha interfaces may change, the validated target
@@ -52,8 +52,9 @@ interfaces on the documented platform.
 | Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Plan 0028](plans/0028-remote-graphical-client.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
-| Arch/Omarchy packaging | Public alpha edge package validated | Public commit-bound split Pacman packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| Public source and edge channel | Available | The repository, documentation, immutable edge releases, and rolling verified installer channel are public. AUR publication is being prepared. |
+| Arch/Omarchy packaging | Public alpha packages validated | Versioned AUR and commit-bound edge split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
+| AUR package | Available | [`splinterm` `0.1.1alpha1-1`](https://aur.archlinux.org/packages/splinterm) publishes the main package and optional exact-version `splinterm-mcp` split package from an immutable checksummed source release. |
+| Public source and edge channel | Available | The repository, documentation, immutable edge releases, and rolling verified installer channel are public. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
 
