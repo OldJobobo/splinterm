@@ -5611,7 +5611,9 @@ impl App {
                     execute = pressed;
                 }
             }
-            _ => {}
+            PointerEventKind::Press { .. }
+            | PointerEventKind::Release { .. }
+            | PointerEventKind::Axis { .. } => {}
         }
         if let Some(dojo_id) = retarget {
             if self.show_tab_context_menu(dojo_id, event.position).is_err() {

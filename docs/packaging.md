@@ -1,6 +1,6 @@
 # Public alpha Arch packaging
 
-Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.0.pre` split
+Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.1alpha1` split
 package. It is the repository's clean-source package authority, but it is not yet
 the AUR publication recipe: its local source archive and `SKIP` checksum are
 valid only for reviewed local and CI builds. Immutable public GitHub commit
@@ -79,8 +79,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0.pre/ \
-  -o packaging/splinterm-0.1.0.pre.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.1alpha1/ \
+  -o packaging/splinterm-0.1.1alpha1.tar.gz HEAD
 (
   cd packaging
   makepkg --cleanbuild --syncdeps --noconfirm
@@ -92,8 +92,8 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0.pre-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.1alpha1-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.1alpha1-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
@@ -195,7 +195,7 @@ The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.1alpha1-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -203,7 +203,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0.pre-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.1alpha1-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional

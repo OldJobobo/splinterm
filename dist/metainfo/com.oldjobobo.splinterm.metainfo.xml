@@ -11,5 +11,5 @@
   <provides><binary>splinterm</binary></provides>
   <description><p>A native Wayland terminal with a headless daemon that keeps shells, layouts, and scrollback alive for human clients and explicitly bounded automation.</p></description>
   <url type="homepage">https://github.com/oldjobobo/splinterm</url>
-  <releases><release version="0.1.0" date="2026-07-18" type="development"/></releases>
+  <releases><release version="0.1.1-alpha.1" date="2026-08-11" type="development"/></releases>
 </component>

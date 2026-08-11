@@ -30,7 +30,7 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle; and
-- a public alpha `0.1.0.pre` Arch edge package built from clean committed source.
+- a public alpha `0.1.1alpha1` Arch package built from clean committed source.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
