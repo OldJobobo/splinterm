@@ -3678,7 +3678,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .input(
                 splint_id,
                 incarnation,
-                b"i=0; while [ $i -lt 3000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'overflow-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.05; done; printf 'overflow-finished\\n'\n",
+                b"i=0; while [ $i -lt 30000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'overflow-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.005; done; printf 'overflow-finished\\n'\n",
             )
             .await;
         let _completion_snapshot = snapshot_until(
@@ -3688,7 +3688,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             "overflow-finished",
         )
         .await;
-        time::timeout(Duration::from_secs(10), fast_drain)
+        time::timeout(Duration::from_secs(30), fast_drain)
             .await
             .expect("drained subscriber did not observe the overflow marker")
             .expect("drained subscriber task failed");
