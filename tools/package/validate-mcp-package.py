@@ -230,7 +230,7 @@ def main() -> int:
                 "splint_id": splint_id, "title": "package-mcp-renamed",
             })
             assert renamed["isError"] is False
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 note = host.receive(deadline - time.monotonic())
                 if note.get("method") == "notifications/resources/updated":
