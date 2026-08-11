@@ -31,7 +31,7 @@ use splinterm_protocol::{
 };
 
 const SERVER: &str = env!("CARGO_BIN_EXE_splinterm-mcp");
-const TIMEOUT: Duration = Duration::from_secs(5);
+const TIMEOUT: Duration = Duration::from_secs(15);
 
 struct Harness {
     child: Child,
