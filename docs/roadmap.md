@@ -1,7 +1,7 @@
 # Roadmap
 
 > This roadmap records completed implementation phases and the remaining path
-> from advanced private prerelease to public distribution. It is a completion
+> from public alpha to a supported stable release. It is a completion
 > ledger and forward plan, not a compatibility or release promise. Current
 > maturity and validated scope are authoritative in [`status.md`](status.md);
 > [`pre-planning-research.md`](pre-planning-research.md) preserves historical
@@ -43,9 +43,10 @@ Detailed plans: [`plans/0002-omarchy-terminal-mvp.md`](plans/0002-omarchy-termin
 
 Part 8.1 parity, scrollback, performance, and Hyprland/Omarchy sign-off are
 complete with durable evidence. Phase 9 produced and isolated-validated a
-private Arch prerelease package with coherent binaries, service, desktop/theme
-integration, upgrade handling, documentation, and licenses. Installation and
-public/AUR publication remain optional post-milestone decisions.
+initial private Arch prerelease package with coherent binaries, service,
+desktop/theme integration, upgrade handling, documentation, and licenses. The
+repository and commit-bound edge channel are now public alpha surfaces; AUR
+publication and stable-support commitments remain post-milestone work.
 
 ## Phase 3 — multiplexing (complete)
 

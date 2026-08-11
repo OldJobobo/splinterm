@@ -230,6 +230,6 @@ Troubleshooting checklist:
    to retry blindly or broaden policy.
 5. Keep stdout reserved for MCP frames; bounded diagnostics appear on stderr.
 
-Public distribution, Nix/Home Manager, non-SSH gateways, broader editor plugins,
-durable terminal bodies, HTTP/OAuth transport, and write-capable MCP defaults
+AUR packaging is being prepared. Nix/Home Manager, non-SSH gateways, broader
+editor plugins, durable terminal bodies, HTTP/OAuth transport, and write-capable MCP defaults
 remain deferred.

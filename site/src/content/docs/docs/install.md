@@ -1,28 +1,26 @@
 ---
 title: Installation
-description: Install or update the current Splinterm private prerelease on Arch Linux and Omarchy.
+description: Install or update the current Splinterm public alpha on Arch Linux and Omarchy.
 ---
 
-The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is not yet a supported public release.
+The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is a public alpha, not a supported stable release; upgrades may change interfaces and end daemon-owned shells.
 
-## Install the current committed package
+## Install the current edge package
 
-From a Splinterm repository checkout:
+Clone the public repository and run the edge installer:
 
 ```bash
+git clone https://github.com/OldJobobo/splinterm.git
+cd splinterm
 ./install.sh
 ```
 
-The installer obtains the newest successfully built package for committed `main`, verifies its manifest and checksums, preserves a rollback copy, warns before stopping a running daemon, installs through Pacman, and verifies the packaged client identity.
+The installer obtains the newest successfully built package for committed `main`, verifies its manifest and checksums, preserves an emergency binary snapshot, warns before stopping a running daemon, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback.
 
-Private-repository collaborators must authenticate GitHub CLI once:
-
-```bash
-gh auth login
-```
+The repository, channel manifest, and edge release assets are public. GitHub CLI authentication is optional; the installer falls back to anonymous verified downloads.
 
 :::caution
-The installer operates on a clean committed `HEAD`. It does not package uncommitted worktree changes. Review the current worktree before installing.
+The default installer downloads the newest successfully validated public `main` edge package. Source mode operates on a clean committed `HEAD` and does not package uncommitted worktree changes. Review the current worktree before using source mode.
 :::
 
 ## Build from committed source

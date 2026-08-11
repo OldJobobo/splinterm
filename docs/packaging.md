@@ -1,9 +1,11 @@
-# Private Arch prerelease packaging
+# Public alpha Arch packaging
 
-Splinterm's `packaging/PKGBUILD` produces the private `0.1.0.pre` split package.
-It is not an AUR publication recipe. Immutable GitHub commit releases plus the
-rolling `edge-channel` Git ref publish CI-built packages for trusted testers;
-local source packaging remains available separately.
+Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.0.pre` split
+package. It is the repository's clean-source package authority, but it is not yet
+the AUR publication recipe: its local source archive and `SKIP` checksum are
+valid only for reviewed local and CI builds. Immutable public GitHub commit
+releases plus the rolling `edge-channel` Git ref publish verified edge packages;
+AUR publication will use a versioned public source URL and checksum.
 
 ## One-command prebuilt installation
 
@@ -26,12 +28,9 @@ names, and SHA-256 digests. An interrupted publication therefore leaves either
 the prior channel commit or the complete new one rather than exposing a mixed
 package set.
 
-The installer prefers an authenticated GitHub CLI session and falls back to
-public `curl` downloads. A collaborator on a private repository must first run:
-
-```bash
-gh auth login
-```
+The installer uses an authenticated GitHub CLI session when one is already
+available and otherwise downloads the public channel manifest and release assets
+with `curl`. Authentication is not required for ordinary public alpha installs.
 
 Before Pacman installation, the script validates the closed manifest shape,
 commit-bound release and asset names, checksums, architecture, and matching
@@ -100,8 +99,9 @@ namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 
 The local archive checksum is intentionally `SKIP`: the archive is generated
 from the reviewed local Git commit, is never downloaded, and the package's
-`.BUILDINFO`/`.PKGINFO` record the actual build. Public distribution requires a
-versioned immutable source URL and checksum.
+`.BUILDINFO`/`.PKGINFO` record the actual build. The future AUR recipe requires
+a versioned immutable public source URL and checksum and will be published
+separately from this local-build source entry.
 
 ## Installed layout
 

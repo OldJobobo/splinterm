@@ -1,15 +1,15 @@
 # Splinterm Product Requirements Document
 
 - **Status:** Draft
-- **Product maturity:** Advanced private prerelease
-- **As of:** 2026-08-07
+- **Product maturity:** Public alpha
+- **As of:** 2026-08-11
 - **Product authority:** Current implementation, accepted plans, retained validation evidence, and [Architecture](architecture.md)
 - **Current maturity authority:** [Status](status.md)
 - **Related documents:** [Roadmap](roadmap.md), [Product positioning](plans/0021-product-positioning-and-public-documentation.md), [Usage](usage.md), [CLI](cli.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
 
 ## 1. Purpose
 
-This document consolidates Splinterm's product intent and requirements from the current implementation and repository documentation. It defines what the product is for, whom it serves, which outcomes it must preserve, what is implemented today, and what remains before a public release.
+This document consolidates Splinterm's product intent and requirements from the current implementation and repository documentation. It defines what the product is for, whom it serves, which outcomes it must preserve, what is implemented today, and what remains before a supported stable release.
 
 This PRD is not an implementation plan or architecture decision log:
 
@@ -143,21 +143,23 @@ The following table summarizes the current repository state. “Validated” mea
 | Multi-pane graphical layouts | Implemented and validated. |
 | Window-local Dojo tabs | Implemented; a Window supports up to 32 distinct Dojo attachments and may mix Lairs. |
 | Recent Dojos picker and reopen-last workflow | Implemented. |
-| Searchable 31-command palette and trusted tab context menu | Implemented, packaged, installed, reviewed, and validated by Plan 0025. |
+| Searchable 32-command palette and trusted tab context menu | Implemented, packaged, installed, reviewed, and validated. |
 | Multi-client observation and exclusive control transfer | Implemented and validated. |
 | Scrollback, literal search, selection, clipboard, IME, and scaling | Implemented within the documented contracts. |
 | Omarchy theme discovery and live reload | Implemented. |
 | Sixel | Supported Foot-compatible bounded implementation. |
 | Kitty graphics | Supported practical static-image subset; not full Kitty compatibility. |
 | iTerm2 inline images | Supported bounded inline-PNG subset. |
-| JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; this does not imply public product availability. |
+| JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; alpha compatibility remains versioned and may change between releases. |
 | SSH stdio relay | Implemented and validated; no daemon network listener. |
 | Native remote graphical transport | Implemented and validated through Plan 0028: strict profiles, one-authentication multiplexer, endpoint-bound human-interactive workflow, remote-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, authentication, failure handling, persistence, and reviewed real-host graphical evidence. |
 | MCP adapter | Implemented and validated as an optional separately identified package. |
-| Arch/Omarchy package and edge installer | Private prerelease package and installation path implemented and validated. |
-| Public distribution and support policy | Not released. |
+| Arch/Omarchy package and edge installer | Public alpha commit-bound package channel and installation path implemented and validated. |
+| Public source and documentation | Available. |
+| AUR package | Preparing for alpha publication. |
+| Stable support policy | Not released. |
 | Nix and broader distribution | Planned. |
-| Public product/documentation website | Implemented and build/link validated; it is an informational surface, not a public product release or the repository status authority. |
+| Public product/documentation website | Implemented and build/link validated; repository `docs/status.md` remains the maturity authority. |
 
 ## 8. Goals
 
@@ -171,12 +173,12 @@ The following table summarizes the current repository state. “Validated” mea
 - Keep human consent, trusted UI, automation policy, and control ownership visibly distinct.
 - Preserve Foot-derived behavior with reproducible differential evidence.
 - Keep ordinary text-only terminal use efficient and ensure optional image support has bounded resource cost.
-- Package and upgrade the private prerelease without silently changing user-owned desktop configuration.
-- Establish clear current-status, usage, CLI, security, and release documentation before public distribution.
+- Package and upgrade the public alpha without silently changing user-owned desktop configuration.
+- Keep current-status, usage, CLI, security, and release documentation explicit throughout the alpha.
 
-### 8.2 Public-release goals
+### 8.2 Stable-release goals
 
-A public release should let a supported user:
+A supported stable release should let a user:
 
 1. understand the product and maturity before installation;
 2. install from a versioned, immutable, verifiable artifact;
@@ -192,7 +194,7 @@ A public release should let a supported user:
 
 The current product does not promise:
 
-- production readiness, stability, or public support;
+- production readiness, stability, or guaranteed support during alpha;
 - transparent process continuity across daemon crash, package upgrade, logout, reboot, or host failure;
 - restoration of process memory, kernel PTYs, or arbitrary unpersisted state;
 - full Foot configuration compatibility;
@@ -295,11 +297,11 @@ Priority meanings:
 
 | ID | Priority | Requirement | Current state |
 |---|---:|---|---|
-| `FR-PKG-01` | P0 | Private packages must contain coherent adjacent runtime executables so trusted graphical identity checks cannot be bypassed by a shadowing client. | Implemented and validated |
+| `FR-PKG-01` | P0 | Packaged releases must contain coherent adjacent runtime executables so trusted graphical identity checks cannot be bypassed by a shadowing client. | Implemented and validated |
 | `FR-PKG-02` | P0 | Installation and upgrade must verify exact artifacts, warn before ending daemon-owned shells, and report the lack of cross-version process continuity. | Implemented |
 | `FR-PKG-03` | P0 | Packaging must not edit user homes, default terminal preference, Omarchy-owned files, SSH policy, or service lingering without an explicit separate action. | Implemented |
 | `FR-PKG-04` | P1 | The MCP adapter must remain an optional exact-version split package and installation alone must grant no authority. | Implemented |
-| `FR-PKG-05` | P0 | Public distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Not yet released |
+| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public alpha edge artifacts are immutable and checksummed; versioned AUR source and stable support policy remain pending |
 
 ## 11. Security and privacy requirements
 
@@ -393,9 +395,10 @@ Splinterm meets its defining product promise when:
 - Foot-derived behavior and intentional divergences remain reproducible and documented; and
 - optional capabilities remain bounded and do not regress ordinary terminal use.
 
-### 14.2 Public-release readiness
+### 14.2 Stable-release readiness
 
-Public release is blocked until all of the following are true:
+Graduation from public alpha to a supported stable release is blocked until all
+of the following are true:
 
 1. a current status document defines supported environments, validated capabilities, known limitations, deferred work, and open gates;
 2. product, usage, CLI, installation, configuration, security, troubleshooting, and automation documentation have clear authoritative homes;
@@ -416,7 +419,7 @@ A new evaluator should be able to answer within one minute:
 - Why does daemon-owned persistence matter?
 - How do humans and bounded automation share one topology?
 - Which environment and capabilities are validated?
-- Why is it still a private prerelease?
+- Why is it a public alpha rather than a stable release?
 - What is the first safe workflow?
 
 ## 15. Risks and mitigations
@@ -430,14 +433,14 @@ A new evaluator should be able to answer within one minute:
 | Multiplexer concepts become harder than tmux | Primary workflow becomes inaccessible | Lead with user outcomes, native controls, clear vocabulary, and discoverable trusted menus. |
 | Optional images or history regress ordinary use | Core terminal responsiveness and memory suffer | Preserve explicit budgets, no-image gates, event-driven expiry, and benchmark matrices. |
 | Trusted UI and terminal content blur together | Spoofing or accidental authority | Keep trusted chrome visually distinct and input-isolated; never derive authority from terminal content. |
-| Private packaging is mistaken for public support | Unsupported users depend on unstable upgrade behavior | Keep advanced-private-prerelease labeling prominent until release gates are met. |
+| Public alpha packaging is mistaken for stable support | Users depend on compatibility the alpha does not promise | Keep public-alpha labeling and upgrade/lifetime warnings prominent until stable-release gates are met. |
 | Platform expansion dilutes the validated Omarchy path | More environments than the project can test | Require separate evidence and support decisions for each platform. |
 
 ## 16. Open product decisions
 
 These decisions remain outside the current accepted product baseline:
 
-1. public release versioning, channels, and support duration;
+1. stable release versioning, channels, and support duration;
 2. exact public compatibility guarantees beyond current machine schemas and documented subsets;
 3. Nix, Home Manager, and tertiary-distribution scope;
 4. compositor support beyond the validated Hyprland/Omarchy environment;
@@ -492,7 +495,7 @@ This draft synthesizes the current implementation and, principally:
 - [Plan 0026: public website and documentation site](plans/0026-public-website-and-documentation-site.md)
 - [Supported automation contracts](automation.md)
 - [Configuration and Foot migration](configuration.md)
-- [Private packaging](packaging.md)
+- [Public alpha packaging](packaging.md)
 - [Terminal image compatibility](images.md)
 
 ## 19. Draft review questions
@@ -506,6 +509,6 @@ Before accepting this PRD, reviewers should decide:
 5. Does any requirement accidentally promise daemon-crash, reboot, or upgrade continuity?
 6. Does any automation language imply trusted graphical or compositor authority?
 7. Are any current capabilities missing, or are implementation details incorrectly elevated to product requirements?
-8. Which public-release gates require a product decision rather than more implementation?
+8. Which stable-release gates require a product decision rather than more implementation?
 9. Which remaining PRD draft questions require a later product decision beyond the accepted current status authority?
-10. Which success criteria should gain quantitative thresholds before public release?
+10. Which success criteria should gain quantitative thresholds before stable release?

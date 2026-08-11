@@ -11,7 +11,8 @@
         color-scheme: dark;
         --background: #201e1f;
         --foreground: #f2e6d8;
-        --muted: #807669;
+        --muted: #94887a;
+        --accent: #d8a06f;
       }
 
       * { box-sizing: border-box; }
@@ -56,8 +57,37 @@
         color: var(--muted);
         font-size: clamp(12px, 1.4vw, 15px);
         font-weight: 650;
-        letter-spacing: 0.34em;
+        letter-spacing: 0.26em;
         text-transform: uppercase;
+      }
+
+      a {
+        margin-top: 22px;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.7em;
+        padding: 12px 16px 11px;
+        border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
+        color: var(--foreground);
+        font-size: 14px;
+        font-weight: 650;
+        letter-spacing: 0.04em;
+        text-decoration: none;
+        transition: border-color 160ms ease, color 160ms ease, transform 160ms ease;
+      }
+
+      a span { color: var(--accent); }
+
+      a:hover, a:focus-visible {
+        border-color: var(--accent);
+        color: var(--accent);
+        transform: translateY(-2px);
+      }
+
+      a:focus-visible { outline: 2px solid var(--foreground); outline-offset: 4px; }
+
+      @media (prefers-reduced-motion: reduce) {
+        a { transition: none; }
       }
     </style>
   </head>
@@ -65,7 +95,8 @@
     <main>
       <img src="/logo.png?v=2" alt="Splinterm" width="768" height="768" />
       <h1>splinterm</h1>
-      <p>Coming soon</p>
+      <p>Public alpha · full site coming soon</p>
+      <a href="https://preview.splinterm.com/docs/">Read the documentation <span aria-hidden="true">↗</span></a>
     </main>
   </body>
 </html>

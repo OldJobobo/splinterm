@@ -3,12 +3,12 @@ title: MCP adapter
 description: Install the optional Splinterm MCP adapter, connect a supported host, authorize the minimum required surface, and revoke it safely.
 ---
 
-`splinterm-mcp` is a local, bounded MCP `2025-11-25` stdio server. It presents a fixed catalog of 32 tools plus topology and terminal/control resources over the same daemon-owned topology used by the native client.
+`splinterm-mcp` is a local, bounded MCP `2025-11-25` stdio server. It presents a fixed catalog of 33 tools plus topology and terminal/control resources over the same daemon-owned topology used by the native client.
 
 The adapter is an optional, separately identified third-party client—not a trusted part of `splinterd`. Installing or launching it grants nothing until an owner-controlled policy authorizes its exact executable identity, operations, resources, and limits.
 
 :::note
-The MCP adapter is part of the advanced private prerelease. The host examples below document the currently validated local environment, not broad host compatibility.
+The MCP adapter is part of the public alpha. The host examples below document the currently validated local environment, not broad host compatibility or a stable API promise.
 :::
 
 ## 1. Verify the installed identity

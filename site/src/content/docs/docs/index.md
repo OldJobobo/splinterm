@@ -66,7 +66,7 @@ hero:
 </nav>
 
 <div class="docs-home-footer">
-  <p><span>Private prerelease</span> The current environment and installation path are intentionally narrow.</p>
+  <p><span>Public alpha</span> The source is open; the validated environment and compatibility promise remain intentionally narrow.</p>
   <div>
     <a href="/docs/status/">Read current status</a>
     <a href="/docs/troubleshooting/">Troubleshooting</a>

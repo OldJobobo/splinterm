@@ -1,15 +1,15 @@
 # Splinterm site
 
-This directory contains the Astro and Starlight prerelease site for Splinterm plus the public coming-soon page.
+This directory contains the public Astro/Starlight alpha site for Splinterm plus the public coming-soon landing page.
 
 ## Surfaces
 
 | Surface | Source/build output | Cloudflare Pages project | Hostname |
 | --- | --- | --- | --- |
 | Public placeholder | `coming-soon/` | `splinterm-coming-soon` | `splinterm.com`, `www.splinterm.com` |
-| Private preview | `dist/` from Astro | `splinterm-preview` | `preview.splinterm.com` |
+| Public alpha site and docs | `dist/` from Astro | `splinterm-preview` | `preview.splinterm.com` |
 
-The private preview and its `splinterm-preview.pages.dev` fallback are protected by the **Splinterm private preview** Cloudflare Access application. Access uses an email one-time code and an explicit email allowlist. Do not remove the Access application or attach another public hostname to the preview project without adding it to the Access application first.
+The alpha site, its documentation routes, and the `splinterm-preview.pages.dev` fallback are public. The previous Cloudflare Access email allowlist was removed when the repository entered public alpha.
 
 ## Run locally
 
@@ -43,4 +43,4 @@ npm run deploy:coming-soon
 npm run deploy:preview
 ```
 
-The first command uploads `coming-soon/` to the public Pages project. The second validates and builds the full Astro site before uploading `dist/` to the Access-gated preview project.
+The first command uploads `coming-soon/` to the public Pages project. The second validates and builds the full public alpha site before uploading `dist/` to its Pages project.

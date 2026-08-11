@@ -3,15 +3,15 @@ title: Current status
 description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
 ---
 
-Splinterm is an **advanced private prerelease**. Substantial core behavior is implemented and validated, while public distribution, compatibility guarantees, and a support policy remain unreleased.
+Splinterm is a **public alpha**. Source, documentation, and verified commit-bound edge packages are public. Substantial core behavior is implemented and validated, while the supported target remains narrow and stable compatibility guarantees have not been released.
 
 ## What that means
 
 - The product runs and has a normal graphical daily-use path.
 - Core terminal, persistence, multiplexing, packaging, and automation milestones have recorded validation.
 - The current target is narrow: x86_64 Omarchy/Arch Linux with native Wayland.
-- Installation currently uses private prerelease packages or a committed source checkout.
-- Broader distribution and long-term compatibility promises have not been released.
+- Installation uses public alpha edge packages or a committed source checkout.
+- AUR publication is being prepared; broader distribution and long-term compatibility promises have not been released.
 
 ## Capability summary
 
@@ -27,8 +27,10 @@ Splinterm is an **advanced private prerelease**. Substantial core behavior is im
 | SSH stdio relay | Implemented and validated |
 | [MCP adapter](/docs/mcp/) | Implemented and validated as an optional, separately policy-identified package |
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
-| Arch/Omarchy package | Private prerelease package validated |
-| Public distribution | Not released |
+| Arch/Omarchy package | Public alpha edge package validated |
+| Public source and edge builds | Available |
+| AUR package | Preparing for alpha publication |
+| Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 
 ## Important boundaries
@@ -39,4 +41,4 @@ Persistent topology is also separate from graphical presentation. Creating or mu
 
 ## Before depending on it
 
-Review the repository roadmap and the exact specialist documentation for the feature you intend to use. This local site is an initial reorganization, not a new compatibility guarantee.
+Review the repository roadmap and the exact specialist documentation for the feature you intend to use. Public alpha availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.

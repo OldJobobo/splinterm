@@ -241,7 +241,7 @@ in-Splint agent but are not credentials and are never accepted as proof of
 resource authority. Relaunch replaces the incarnation, and supported clients
 reconcile every hint against current public topology before selection.
 
-## Private prerelease deployment
+## Public alpha deployment
 
 The main Arch package installs four adjacent runtime executables—`splinterm`,
 `splinterd`, `splinterm-relay`, and `splinterm-pty-child`—plus the public-CLI-only

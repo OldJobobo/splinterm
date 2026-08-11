@@ -2,7 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'http://localhost:4321',
+  site: 'https://preview.splinterm.com',
   output: 'static',
   integrations: [
     starlight({

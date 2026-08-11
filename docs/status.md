@@ -7,13 +7,14 @@ this page owns what the product is today.
 
 ## Maturity
 
-**Splinterm is an advanced private prerelease.**
+**Splinterm is a public alpha.**
 
-Core terminal emulation, daemon-owned persistence, multiplexing, native Wayland
-presentation, Arch packaging, and bounded automation workflows are implemented
-and validated in the scopes named below. This describes implementation maturity,
-not public availability: public distribution, broad compatibility guarantees,
-and a support policy have not been released.
+Source, documentation, and commit-bound Arch edge packages are publicly
+available. Core terminal emulation, daemon-owned persistence, multiplexing,
+native Wayland presentation, Arch packaging, and bounded automation workflows
+are implemented and validated in the scopes named below. Public availability is
+not a stable-support promise: alpha interfaces may change, the validated target
+remains narrow, and broader compatibility guarantees have not been released.
 
 Splinterm is **security-conscious**, not absolutely secure. Automation is
 constrained by exact executable identity, explicit scopes, resource and message
@@ -29,12 +30,12 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle; and
-- a private `0.1.0.pre` Arch package built from clean committed source.
+- a public alpha `0.1.0.pre` Arch edge package built from clean committed source.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
-graphical environment, but its packaged and remote workflows remain private-
-prerelease interfaces on the documented platform.
+graphical environment, but its packaged and remote workflows remain alpha
+interfaces on the documented platform.
 
 ## Capability truth table
 
@@ -51,8 +52,9 @@ prerelease interfaces on the documented platform.
 | Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Plan 0028](plans/0028-remote-graphical-client.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
-| Arch/Omarchy packaging | Private prerelease package validated | Split Pacman package, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| Public distribution and support | Unreleased | No public package channel, compatibility window, support duration, or support/security-reporting policy is promised. |
+| Arch/Omarchy packaging | Public alpha edge package validated | Public commit-bound split Pacman packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
+| Public source and edge channel | Available | The repository, documentation, immutable edge releases, and rolling verified installer channel are public. AUR publication is being prepared. |
+| Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
 
 **Classification meanings:** implemented means present in current code; validated
@@ -83,22 +85,21 @@ behavior; deferred means intentionally outside the present product.
   client-performance no-go and [Plan 0012](plans/0012-bounded-compact-publication-frames.md)
   remains blocked on a sparse bounded-frame ownership redesign.
 
-## Public-release gates
+## Stable-release gates
 
-Before Splinterm can claim a supported public release, maintainers must make and
-validate explicit decisions about:
+Before Splinterm can graduate from public alpha to a supported stable release,
+maintainers must make and validate explicit decisions about:
 
 - release channels, signed/immutable source publication, upgrades, and rollback;
 - supported architectures, distributions, compositor versions, and compatibility
   duration;
 - support and security-reporting processes;
 - completion or explicit disposition of release-blocking performance gates;
-- public installation and recovery testing outside the private collaborator
-  workflow; and
+- public installation and recovery testing beyond the maintainer workflow; and
 - any promised Nix, sandboxed package, or broader Linux support.
 
-None of those unresolved decisions weakens the accepted private-prerelease
-capabilities above; none may be inferred as a promise.
+None of those unresolved decisions weakens the accepted public-alpha
+capabilities above; none may be inferred as a stable-support promise.
 
 ## Documentation authority
 
@@ -115,7 +116,7 @@ capabilities above; none may be inferred as a promise.
 | MCP integration | [MCP](mcp.md) |
 | Image compatibility | [Images](images.md) |
 | Service, persistence, policy, backup, and reset | [Headless operation](headless.md) |
-| Private package installation and upgrades | [Packaging](packaging.md) |
+| Public alpha package installation and upgrades | [Packaging](packaging.md) |
 | Completed phases and future work | [Roadmap](roadmap.md) |
 | Development workflow and test guardrails | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 

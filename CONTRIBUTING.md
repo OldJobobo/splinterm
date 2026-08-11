@@ -1,6 +1,6 @@
 # Contributing
 
-Splinterm is an **advanced private prerelease**. Keep changes small, preserve
+Splinterm is a **public alpha**. Keep changes small, preserve
 crate and authority boundaries, and add focused tests for domain, protocol,
 terminal, renderer, or lifecycle behavior.
 
