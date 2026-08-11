@@ -268,6 +268,7 @@ mod tests {
                     name: "preset".into(),
                 },
                 dojos: Vec::new(),
+                directory_identities: Vec::new(),
             }),
             RequestAuthorization::TrustedUi
         );

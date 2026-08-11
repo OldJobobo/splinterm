@@ -25,6 +25,9 @@ const MAX_IDENTIFIER_BYTES: usize = 64;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_PRESET_DEPTH: usize = 32;
 const MAX_PRESET_PANES: usize = 32;
+const MAX_PRESET_PARAMETERS: usize = 16;
+const MAX_PARAMETER_VALUE_BYTES: usize = 4 * 1024;
+const BUNDLED_OMARCHY_PRESETS: &str = include_str!("presets/omarchy.toml");
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PresetPaneKey(String);
@@ -87,6 +90,7 @@ pub struct DojoLaunchSpec {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PresetCatalog {
     source: PresetFile,
+    bundled: Option<PresetFile>,
 }
 
 impl PresetCatalog {
@@ -100,14 +104,18 @@ impl PresetCatalog {
             text.len() <= MAX_CATALOG_BYTES,
             "preset catalog exceeds maximum size of {MAX_CATALOG_BYTES} bytes"
         );
-        let source: PresetFile = toml::from_str(text).context("parse presets.toml")?;
+        let source = parse_preset_file(text)?;
         ensure!(
-            source.version == PRESET_VERSION,
-            "unsupported presets.toml version {}; expected {PRESET_VERSION}",
-            source.version
+            source
+                .presets
+                .values()
+                .all(|preset| preset.kind == PresetKind::Dojo),
+            "user preset catalogs cannot define packaged workflow kinds"
         );
-        validate_catalog(&source)?;
-        Ok(Self { source })
+        Ok(Self {
+            source,
+            bundled: None,
+        })
     }
 
     /// Loads and validates one explicitly configured catalog path.
@@ -115,22 +123,76 @@ impl PresetCatalog {
     /// # Errors
     /// Returns an error when the file is unreadable or invalid.
     pub fn load(path: &Path) -> Result<Self> {
-        let file = fs::File::open(path)
-            .with_context(|| format!("open preset catalog {}", path.display()))?;
-        let mut text = String::with_capacity(MAX_CATALOG_BYTES + 1);
-        file.take((MAX_CATALOG_BYTES + 1) as u64)
-            .read_to_string(&mut text)
-            .with_context(|| format!("read preset catalog {}", path.display()))?;
+        let text = read_catalog(path)?;
         Self::parse(&text).with_context(|| format!("validate preset catalog {}", path.display()))
     }
 
+    /// Loads one user overlay while allowing it to reference packaged aliases.
+    /// User aliases shadow packaged aliases only for user-owned presets.
+    ///
+    /// # Errors
+    /// Returns an error when the file is unreadable or the effective user scope
+    /// is invalid.
+    pub fn load_user_overlay(path: &Path) -> Result<Self> {
+        let text = read_catalog(path)?;
+        ensure!(
+            text.len() <= MAX_CATALOG_BYTES,
+            "preset catalog exceeds maximum size of {MAX_CATALOG_BYTES} bytes"
+        );
+        let source: PresetFile = toml::from_str(&text).context("parse presets.toml")?;
+        ensure!(
+            source.version == PRESET_VERSION,
+            "unsupported presets.toml version {}; expected {PRESET_VERSION}",
+            source.version
+        );
+        let bundled = Self::bundled().source;
+        let mut commands = bundled.commands.clone();
+        commands.extend(source.commands.clone());
+        ensure!(
+            source
+                .presets
+                .values()
+                .all(|preset| preset.kind == PresetKind::Dojo),
+            "user preset catalogs cannot define packaged workflow kinds"
+        );
+        validate_catalog_with_commands(&source, &commands)?;
+        Ok(Self {
+            source,
+            bundled: Some(bundled),
+        })
+    }
+
+    /// Returns the packaged Omarchy catalog with no user overlay.
+    ///
+    /// # Panics
+    /// Panics only when the checked-in bundled catalog violates its own schema.
+    #[must_use]
+    pub fn bundled() -> Self {
+        let source = parse_preset_file(BUNDLED_OMARCHY_PRESETS)
+            .expect("bundled Omarchy presets must remain valid");
+        Self {
+            source,
+            bundled: None,
+        }
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.source.presets.keys().map(String::as_str)
+        self.source.presets.keys().map(String::as_str).chain(
+            self.bundled
+                .iter()
+                .flat_map(|file| file.presets.keys())
+                .filter(|name| !self.source.presets.contains_key(*name))
+                .map(String::as_str),
+        )
     }
 
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.source.presets.contains_key(name)
+            || self
+                .bundled
+                .as_ref()
+                .is_some_and(|file| file.presets.contains_key(name))
     }
 
     /// Compiles one static Dojo preset against an exact invocation context.
@@ -144,33 +206,129 @@ impl PresetCatalog {
         name: &str,
         context: &PresetCompileContext<'_>,
     ) -> Result<DojoLaunchSpec> {
-        let preset = self
-            .source
-            .presets
-            .get(name)
-            .with_context(|| format!("unknown preset {name:?}"))?;
+        self.compile_with_parameters(name, context, &[], false)
+    }
+
+    /// Compiles one preset with bounded typed parameters and command-risk policy.
+    ///
+    /// # Errors
+    /// Returns an error for unknown, duplicate, missing, malformed, out-of-range,
+    /// or disabled unrestricted parameters before producing a launch tree.
+    pub fn compile_with_parameters(
+        &self,
+        name: &str,
+        context: &PresetCompileContext<'_>,
+        supplied: &[String],
+        allow_unrestricted_commands: bool,
+    ) -> Result<DojoLaunchSpec> {
+        let (preset, commands) = self.resolve(name)?;
+        ensure!(
+            preset.kind == PresetKind::Dojo,
+            "preset {name:?} is a workflow and must be run through the Splinterm client"
+        );
         validate_root_cwd(context.root_cwd)?;
+        let parameters = resolve_parameters(
+            &preset.parameter,
+            supplied,
+            &commands,
+            context,
+            allow_unrestricted_commands,
+        )?;
         let compiled_name =
             expand_placeholders(&preset.name, context.root_cwd).context("expand preset name")?;
         validate_label("compiled Dojo name", &compiled_name)?;
-        let root = compile_node(&preset.root, preset, &self.source.commands, context, 1)?;
+        let root = compile_node(
+            &preset.root,
+            preset,
+            &commands,
+            &parameters,
+            context,
+            allow_unrestricted_commands,
+            1,
+        )?
+        .context("preset parameters removed every pane")?;
+        ensure!(
+            root.pane_count() <= MAX_PRESET_PANES,
+            "compiled preset contains too many panes"
+        );
+        let focus = PresetPaneKey(preset.focus.clone());
+        ensure!(
+            layout_contains_key(&root, &focus),
+            "preset focus {:?} was removed or was not generated",
+            preset.focus
+        );
         Ok(DojoLaunchSpec {
             name: compiled_name,
-            focus: PresetPaneKey(preset.focus.clone()),
+            focus,
             root,
         })
     }
 
+    fn resolve(
+        &self,
+        name: &str,
+    ) -> Result<(&PresetDefinition, BTreeMap<String, CommandDefinition>)> {
+        if let Some(preset) = self.source.presets.get(name) {
+            let mut commands = self
+                .bundled
+                .as_ref()
+                .map_or_else(BTreeMap::new, |file| file.commands.clone());
+            commands.extend(self.source.commands.clone());
+            return Ok((preset, commands));
+        }
+        let bundled = self
+            .bundled
+            .as_ref()
+            .with_context(|| format!("unknown preset {name:?}"))?;
+        Ok((
+            bundled
+                .presets
+                .get(name)
+                .with_context(|| format!("unknown preset {name:?}"))?,
+            bundled.commands.clone(),
+        ))
+    }
+
+    #[must_use]
+    pub fn workflow(&self, name: &str) -> Option<PresetWorkflow> {
+        let preset = self
+            .source
+            .presets
+            .get(name)
+            .or_else(|| self.bundled.as_ref()?.presets.get(name))?;
+        match preset.kind {
+            PresetKind::Dojo => None,
+            PresetKind::Attach => Some(PresetWorkflow::Attach),
+            PresetKind::DirectorySet => Some(PresetWorkflow::DirectorySet),
+        }
+    }
+
     #[must_use]
     pub fn summary(&self, name: &str) -> Option<PresetSummary<'_>> {
-        let (catalog_name, preset) = self.source.presets.get_key_value(name)?;
+        let (catalog_name, preset) = self.source.presets.get_key_value(name).or_else(|| {
+            self.bundled
+                .as_ref()
+                .and_then(|file| file.presets.get_key_value(name))
+        })?;
         Some(PresetSummary {
             name: catalog_name,
             display_name: preset.display_name.as_deref().unwrap_or(catalog_name),
-            panes: count_panes(&preset.root, &preset.nodes),
+            panes: count_panes(&preset.root, &preset.nodes, &preset.parameter),
             focus: &preset.focus,
+            parameterized: !preset.parameter.is_empty(),
+            workflow: match preset.kind {
+                PresetKind::Dojo => None,
+                PresetKind::Attach => Some(PresetWorkflow::Attach),
+                PresetKind::DirectorySet => Some(PresetWorkflow::DirectorySet),
+            },
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresetWorkflow {
+    Attach,
+    DirectorySet,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,6 +337,8 @@ pub struct PresetSummary<'a> {
     pub display_name: &'a str,
     pub panes: usize,
     pub focus: &'a str,
+    pub parameterized: bool,
+    pub workflow: Option<PresetWorkflow>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -205,12 +365,24 @@ struct PresetFile {
 enum CommandDefinition {
     Argv {
         argv: Vec<String>,
+        #[serde(default)]
+        unrestricted: bool,
     },
     EditorEnv {
         fallback: Vec<String>,
         #[serde(default)]
         append: Vec<String>,
+        #[serde(default)]
+        unrestricted: bool,
     },
+}
+
+impl CommandDefinition {
+    const fn unrestricted(&self) -> bool {
+        match self {
+            Self::Argv { unrestricted, .. } | Self::EditorEnv { unrestricted, .. } => *unrestricted,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -219,9 +391,15 @@ struct PresetDefinition {
     kind: PresetKind,
     #[serde(rename = "display-name")]
     display_name: Option<String>,
+    #[serde(default)]
     name: String,
+    #[serde(default)]
     root: String,
+    #[serde(default)]
     focus: String,
+    #[serde(default)]
+    parameter: Vec<ParameterDefinition>,
+    #[serde(default)]
     nodes: BTreeMap<String, NodeDefinition>,
 }
 
@@ -229,6 +407,33 @@ struct PresetDefinition {
 #[serde(rename_all = "kebab-case")]
 enum PresetKind {
     Dojo,
+    Attach,
+    DirectorySet,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParameterDefinition {
+    name: String,
+    #[serde(rename = "type")]
+    kind: ParameterKind,
+    min: Option<u16>,
+    max: Option<u16>,
+    #[serde(default)]
+    required: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ParameterKind {
+    Integer,
+    Command,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ResolvedParameter {
+    Integer(u16),
+    Command(Vec<String>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -242,8 +447,19 @@ enum NodeDefinition {
     },
     Pane {
         command: Option<String>,
+        #[serde(rename = "parameter-command")]
+        parameter_command: Option<String>,
         #[serde(default)]
         shell: bool,
+        cwd: Option<String>,
+        title: Option<String>,
+        #[serde(rename = "when-parameter")]
+        when_parameter: Option<String>,
+    },
+    Grid {
+        count: String,
+        #[serde(rename = "pane-command")]
+        pane_command: String,
         cwd: Option<String>,
         title: Option<String>,
     },
@@ -265,7 +481,35 @@ impl From<OrientationDefinition> for PresetOrientation {
     }
 }
 
+fn read_catalog(path: &Path) -> Result<String> {
+    let file =
+        fs::File::open(path).with_context(|| format!("open preset catalog {}", path.display()))?;
+    let mut text = String::with_capacity(MAX_CATALOG_BYTES + 1);
+    file.take((MAX_CATALOG_BYTES + 1) as u64)
+        .read_to_string(&mut text)
+        .with_context(|| format!("read preset catalog {}", path.display()))?;
+    Ok(text)
+}
+
+fn parse_preset_file(text: &str) -> Result<PresetFile> {
+    let source: PresetFile = toml::from_str(text).context("parse presets.toml")?;
+    ensure!(
+        source.version == PRESET_VERSION,
+        "unsupported presets.toml version {}; expected {PRESET_VERSION}",
+        source.version
+    );
+    validate_catalog(&source)?;
+    Ok(source)
+}
+
 fn validate_catalog(file: &PresetFile) -> Result<()> {
+    validate_catalog_with_commands(file, &file.commands)
+}
+
+fn validate_catalog_with_commands(
+    file: &PresetFile,
+    effective_commands: &BTreeMap<String, CommandDefinition>,
+) -> Result<()> {
     ensure!(
         file.commands.len() <= MAX_CATALOG_COMMANDS,
         "preset catalog contains {} command aliases; maximum is {MAX_CATALOG_COMMANDS}",
@@ -283,8 +527,10 @@ fn validate_catalog(file: &PresetFile) -> Result<()> {
     for (name, command) in &file.commands {
         validate_identifier("command alias", name)?;
         match command {
-            CommandDefinition::Argv { argv } => validate_direct_argv(argv, "command alias")?,
-            CommandDefinition::EditorEnv { fallback, append } => {
+            CommandDefinition::Argv { argv, .. } => validate_direct_argv(argv, "command alias")?,
+            CommandDefinition::EditorEnv {
+                fallback, append, ..
+            } => {
                 validate_direct_argv(fallback, "editor fallback")?;
                 validate_argv_items(append, true, "editor append arguments")?;
                 let mut combined = fallback.clone();
@@ -295,29 +541,63 @@ fn validate_catalog(file: &PresetFile) -> Result<()> {
     }
     for (name, preset) in &file.presets {
         validate_identifier("preset", name)?;
-        let _ = preset.kind;
         validate_label(
             "preset display name",
             preset.display_name.as_deref().unwrap_or(name),
         )?;
         ensure!(
-            !preset.name.is_empty(),
-            "preset {name:?} name must not be empty"
+            preset.parameter.len() <= MAX_PRESET_PARAMETERS,
+            "preset {name:?} contains too many parameters"
         );
-        validate_template("preset name", &preset.name)?;
-        if !preset.name.contains("{cwd") {
-            validate_label("preset name", &preset.name)?;
+        let mut parameter_names = HashSet::new();
+        for parameter in &preset.parameter {
+            validate_identifier("preset parameter", &parameter.name)?;
+            ensure!(
+                parameter_names.insert(parameter.name.as_str()),
+                "preset {name:?} repeats parameter {:?}",
+                parameter.name
+            );
+            match parameter.kind {
+                ParameterKind::Integer => {
+                    let min = parameter.min.unwrap_or(0);
+                    let max = parameter.max.unwrap_or(u16::MAX);
+                    ensure!(min <= max, "preset parameter range is inverted");
+                }
+                ParameterKind::Command => ensure!(
+                    parameter.min.is_none() && parameter.max.is_none(),
+                    "command parameter {:?} cannot have integer bounds",
+                    parameter.name
+                ),
+            }
         }
-        validate_identifier("preset root", &preset.root)?;
-        validate_identifier("preset focus", &preset.focus)?;
-        ensure!(
-            !preset.nodes.is_empty(),
-            "preset {name:?} contains no nodes"
-        );
-        for node_name in preset.nodes.keys() {
-            validate_identifier("node", node_name)?;
+        if preset.kind == PresetKind::Dojo {
+            ensure!(
+                !preset.name.is_empty(),
+                "preset {name:?} name must not be empty"
+            );
+            validate_template("preset name", &preset.name)?;
+            if !preset.name.contains("{cwd") {
+                validate_label("preset name", &preset.name)?;
+            }
+            validate_identifier("preset root", &preset.root)?;
+            validate_identifier("preset focus", &preset.focus)?;
+            ensure!(
+                !preset.nodes.is_empty(),
+                "preset {name:?} contains no nodes"
+            );
+            for node_name in preset.nodes.keys() {
+                validate_identifier("node", node_name)?;
+            }
+            validate_preset_tree(name, preset, effective_commands)?;
+        } else {
+            ensure!(
+                preset.name.is_empty()
+                    && preset.root.is_empty()
+                    && preset.focus.is_empty()
+                    && preset.nodes.is_empty(),
+                "workflow preset {name:?} cannot define a static layout"
+            );
         }
-        validate_preset_tree(name, preset, &file.commands)?;
     }
     Ok(())
 }
@@ -364,14 +644,22 @@ fn validate_preset_tree(
         matches!(
             preset.nodes.get(&preset.focus),
             Some(NodeDefinition::Pane { .. })
-        ),
-        "preset {preset_name:?} focus {:?} must name a pane",
+        ) || preset
+            .nodes
+            .iter()
+            .any(|(name, node)| matches!(node, NodeDefinition::Grid { .. })
+                && preset.focus == format!("{name}.0")),
+        "preset {preset_name:?} focus {:?} must name a pane or first generated grid pane",
         preset.focus
     );
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one recursive validator keeps node-type invariants and graph bookkeeping adjacent"
+)]
 fn walk_node(
     node_name: &str,
     preset_name: &str,
@@ -431,19 +719,40 @@ fn walk_node(
         }
         NodeDefinition::Pane {
             command,
+            parameter_command,
             shell,
             cwd,
             title,
+            when_parameter,
         } => {
             ensure!(
-                command.is_some() ^ *shell,
-                "preset {preset_name:?} pane {node_name:?} must set exactly one of command or shell=true"
+                usize::from(command.is_some())
+                    + usize::from(parameter_command.is_some())
+                    + usize::from(*shell)
+                    == 1,
+                "preset {preset_name:?} pane {node_name:?} must set exactly one command source"
             );
             if let Some(alias) = command {
                 validate_identifier("pane command alias", alias)?;
                 ensure!(
                     commands.contains_key(alias),
                     "preset {preset_name:?} pane {node_name:?} references unknown command alias {alias:?}"
+                );
+            }
+            for parameter in parameter_command.iter().chain(when_parameter.iter()) {
+                validate_identifier("pane parameter", parameter)?;
+                ensure!(
+                    preset.parameter.iter().any(|item| item.name == *parameter),
+                    "preset {preset_name:?} pane {node_name:?} references unknown parameter {parameter:?}"
+                );
+            }
+            if let Some(parameter) = parameter_command {
+                ensure!(
+                    preset
+                        .parameter
+                        .iter()
+                        .any(|item| item.name == *parameter && item.kind == ParameterKind::Command),
+                    "preset pane parameter-command must name a command parameter"
                 );
             }
             if let Some(cwd) = cwd {
@@ -464,6 +773,46 @@ fn walk_node(
                 }
             }
             *panes += 1;
+        }
+        NodeDefinition::Grid {
+            count,
+            pane_command,
+            cwd,
+            title,
+        } => {
+            let count_name = parameter_placeholder(count, "grid count")?;
+            let command_name = parameter_placeholder(pane_command, "grid pane-command")?;
+            let count_parameter = preset
+                .parameter
+                .iter()
+                .find(|item| item.name == count_name)
+                .context("grid count references unknown parameter")?;
+            ensure!(
+                count_parameter.kind == ParameterKind::Integer,
+                "grid count must reference an integer parameter"
+            );
+            ensure!(
+                count_parameter.min.unwrap_or(0) >= 1,
+                "grid integer parameter minimum must be at least 1"
+            );
+            ensure!(
+                usize::from(count_parameter.max.unwrap_or(u16::MAX)) <= MAX_PRESET_PANES,
+                "grid integer parameter maximum exceeds {MAX_PRESET_PANES} panes"
+            );
+            ensure!(
+                preset
+                    .parameter
+                    .iter()
+                    .any(|item| item.name == command_name && item.kind == ParameterKind::Command),
+                "grid pane-command must reference a command parameter"
+            );
+            if let Some(cwd) = cwd {
+                validate_template("grid cwd", cwd)?;
+            }
+            if let Some(title) = title {
+                validate_template("grid title", title)?;
+            }
+            *panes += usize::from(count_parameter.max.unwrap_or(0));
         }
     }
     visiting.remove(node_name);
@@ -518,13 +867,102 @@ fn validate_root_cwd(root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn resolve_parameters(
+    definitions: &[ParameterDefinition],
+    supplied: &[String],
+    commands: &BTreeMap<String, CommandDefinition>,
+    context: &PresetCompileContext<'_>,
+    allow_unrestricted_commands: bool,
+) -> Result<BTreeMap<String, ResolvedParameter>> {
+    ensure!(
+        supplied.len() <= MAX_PRESET_PARAMETERS,
+        "too many preset parameters"
+    );
+    let mut raw = BTreeMap::new();
+    for item in supplied {
+        ensure!(
+            item.len() <= MAX_PARAMETER_VALUE_BYTES + MAX_IDENTIFIER_BYTES + 1,
+            "preset parameter exceeds maximum size"
+        );
+        let (name, value) = item
+            .split_once('=')
+            .context("preset parameters must use NAME=VALUE")?;
+        validate_identifier("preset parameter", name)?;
+        ensure!(!value.is_empty(), "preset parameter {name:?} is empty");
+        ensure!(
+            raw.insert(name.to_owned(), value.to_owned()).is_none(),
+            "preset parameter {name:?} was supplied more than once"
+        );
+    }
+    ensure!(
+        raw.keys().all(|name| definitions
+            .iter()
+            .any(|definition| definition.name == *name)),
+        "unknown preset parameter was supplied"
+    );
+    let mut resolved = BTreeMap::new();
+    for definition in definitions {
+        let Some(value) = raw.get(&definition.name) else {
+            ensure!(
+                !definition.required,
+                "required preset parameter {:?} is missing",
+                definition.name
+            );
+            continue;
+        };
+        let value = match definition.kind {
+            ParameterKind::Integer => {
+                let value = value.parse::<u16>().with_context(|| {
+                    format!("preset parameter {:?} must be an integer", definition.name)
+                })?;
+                ensure!(
+                    definition.min.is_none_or(|minimum| value >= minimum)
+                        && definition.max.is_none_or(|maximum| value <= maximum),
+                    "preset parameter {:?} is outside its allowed range",
+                    definition.name
+                );
+                ResolvedParameter::Integer(value)
+            }
+            ParameterKind::Command => {
+                let argv = if let Some(command) = commands.get(value) {
+                    compile_command(command, context, allow_unrestricted_commands)?
+                } else {
+                    let argv =
+                        parse_compatibility_command(value).context("parse command parameter")?;
+                    validate_direct_argv(&argv, "command parameter")?;
+                    argv
+                };
+                ResolvedParameter::Command(argv)
+            }
+        };
+        resolved.insert(definition.name.clone(), value);
+    }
+    Ok(resolved)
+}
+
+fn parameter_placeholder<'a>(value: &'a str, kind: &str) -> Result<&'a str> {
+    let name = value
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .with_context(|| format!("{kind} must be one parameter placeholder"))?;
+    validate_identifier(kind, name)?;
+    Ok(name)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one recursive compiler keeps pruning, command resolution, and grid expansion adjacent"
+)]
 fn compile_node(
     node_name: &str,
     preset: &PresetDefinition,
     commands: &BTreeMap<String, CommandDefinition>,
+    parameters: &BTreeMap<String, ResolvedParameter>,
     context: &PresetCompileContext<'_>,
+    allow_unrestricted_commands: bool,
     depth: usize,
-) -> Result<PresetLayoutLaunch> {
+) -> Result<Option<PresetLayoutLaunch>> {
     ensure!(depth <= MAX_PRESET_DEPTH, "preset compiler depth exceeded");
     let node = preset
         .nodes
@@ -536,22 +974,60 @@ fn compile_node(
             ratio,
             first,
             second,
-        } => Ok(PresetLayoutLaunch::Split {
-            orientation: (*orientation).into(),
-            ratio: SplitRatio::new(*ratio).map_err(|_| anyhow::anyhow!("invalid split ratio"))?,
-            first: Box::new(compile_node(first, preset, commands, context, depth + 1)?),
-            second: Box::new(compile_node(second, preset, commands, context, depth + 1)?),
-        }),
+        } => {
+            let first = compile_node(
+                first,
+                preset,
+                commands,
+                parameters,
+                context,
+                allow_unrestricted_commands,
+                depth + 1,
+            )?;
+            let second = compile_node(
+                second,
+                preset,
+                commands,
+                parameters,
+                context,
+                allow_unrestricted_commands,
+                depth + 1,
+            )?;
+            Ok(match (first, second) {
+                (Some(first), Some(second)) => Some(PresetLayoutLaunch::Split {
+                    orientation: (*orientation).into(),
+                    ratio: SplitRatio::new(*ratio)
+                        .map_err(|_| anyhow::anyhow!("invalid split ratio"))?,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(node), None) | (None, Some(node)) => Some(node),
+                (None, None) => None,
+            })
+        }
         NodeDefinition::Pane {
             command,
+            parameter_command,
             shell,
             cwd,
             title,
+            when_parameter,
         } => {
+            if when_parameter
+                .as_ref()
+                .is_some_and(|name| !parameters.contains_key(name))
+            {
+                return Ok(None);
+            }
             let cwd = compile_cwd(cwd.as_deref(), context.root_cwd)
                 .with_context(|| format!("compile cwd for pane {node_name:?}"))?;
             let command = if *shell {
                 Vec::new()
+            } else if let Some(name) = parameter_command {
+                let Some(ResolvedParameter::Command(argv)) = parameters.get(name) else {
+                    bail!("required command parameter {name:?} is absent");
+                };
+                argv.clone()
             } else {
                 compile_command(
                     commands
@@ -562,27 +1038,143 @@ fn compile_node(
                         )
                         .context("validated command alias disappeared")?,
                     context,
+                    allow_unrestricted_commands,
                 )?
             };
             let title =
                 expand_placeholders(title.as_deref().unwrap_or(node_name), context.root_cwd)
                     .with_context(|| format!("expand title for pane {node_name:?}"))?;
-            validate_label("compiled pane title", &title)?;
-            let launch = LaunchParameters {
+            Ok(Some(compile_pane(
+                PresetPaneKey(node_name.to_owned()),
+                title,
                 cwd,
                 command,
-                shell: context.shell.map(str::to_owned),
-                login_shell: context.login_shell,
-                scrollback_lines: context.scrollback_lines,
+                context,
+            )?))
+        }
+        NodeDefinition::Grid {
+            count,
+            pane_command,
+            cwd,
+            title,
+        } => {
+            let count_name = parameter_placeholder(count, "grid count")?;
+            let command_name = parameter_placeholder(pane_command, "grid pane-command")?;
+            let Some(ResolvedParameter::Integer(count)) = parameters.get(count_name) else {
+                bail!("required grid count parameter {count_name:?} is absent");
             };
-            launch
-                .validate()
-                .map_err(|error| anyhow::anyhow!(error.message))?;
-            Ok(PresetLayoutLaunch::Pane {
-                key: PresetPaneKey(node_name.to_owned()),
-                title,
-                launch,
-            })
+            let Some(ResolvedParameter::Command(command)) = parameters.get(command_name) else {
+                bail!("required grid command parameter {command_name:?} is absent");
+            };
+            let cwd = compile_cwd(cwd.as_deref(), context.root_cwd)
+                .with_context(|| format!("compile cwd for grid {node_name:?}"))?;
+            let mut panes = Vec::with_capacity(usize::from(*count));
+            for index in 0..usize::from(*count) {
+                let key = PresetPaneKey(format!("{node_name}.{index}"));
+                let title = if let Some(title) = title.as_deref() {
+                    format!(
+                        "{} {}",
+                        expand_placeholders(title, context.root_cwd)?,
+                        index + 1
+                    )
+                } else {
+                    key.as_str().to_owned()
+                };
+                panes.push(compile_pane(
+                    key,
+                    title,
+                    cwd.clone(),
+                    command.clone(),
+                    context,
+                )?);
+            }
+            Ok(Some(compile_grid(&panes)?))
+        }
+    }
+}
+
+fn compile_pane(
+    key: PresetPaneKey,
+    title: String,
+    cwd: PathBuf,
+    command: Vec<String>,
+    context: &PresetCompileContext<'_>,
+) -> Result<PresetLayoutLaunch> {
+    validate_label("compiled pane title", &title)?;
+    let launch = LaunchParameters {
+        cwd,
+        command,
+        shell: context.shell.map(str::to_owned),
+        login_shell: context.login_shell,
+        scrollback_lines: context.scrollback_lines,
+    };
+    launch
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    Ok(PresetLayoutLaunch::Pane { key, title, launch })
+}
+
+#[derive(Clone)]
+struct WeightedLayout {
+    node: PresetLayoutLaunch,
+    occupied_panes: usize,
+}
+
+fn compile_grid(panes: &[PresetLayoutLaunch]) -> Result<PresetLayoutLaunch> {
+    ensure!(!panes.is_empty(), "grid must contain at least one pane");
+    let mut columns = 1;
+    while columns * columns < panes.len() {
+        columns += 1;
+    }
+    let rows = panes
+        .chunks(columns)
+        .map(|row| {
+            combine_balanced(
+                row.iter()
+                    .cloned()
+                    .map(|node| WeightedLayout {
+                        node,
+                        occupied_panes: 1,
+                    })
+                    .collect(),
+                PresetOrientation::Columns,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(combine_balanced(rows, PresetOrientation::Rows)?.node)
+}
+
+fn combine_balanced(
+    mut nodes: Vec<WeightedLayout>,
+    orientation: PresetOrientation,
+) -> Result<WeightedLayout> {
+    ensure!(!nodes.is_empty(), "cannot combine an empty layout");
+    if nodes.len() == 1 {
+        return Ok(nodes.remove(0));
+    }
+    let midpoint = nodes.len().div_ceil(2);
+    let second = nodes.split_off(midpoint);
+    let first = combine_balanced(nodes, orientation)?;
+    let second = combine_balanced(second, orientation)?;
+    let occupied_panes = first.occupied_panes + second.occupied_panes;
+    let ratio = u16::try_from((first.occupied_panes * 1_000 + occupied_panes / 2) / occupied_panes)
+        .context("grid ratio overflow")?;
+    Ok(WeightedLayout {
+        node: PresetLayoutLaunch::Split {
+            orientation,
+            ratio: SplitRatio::new(ratio).map_err(|_| anyhow::anyhow!("invalid grid ratio"))?,
+            first: Box::new(first.node),
+            second: Box::new(second.node),
+        },
+        occupied_panes,
+    })
+}
+
+fn layout_contains_key(layout: &PresetLayoutLaunch, key: &PresetPaneKey) -> bool {
+    match layout {
+        PresetLayoutLaunch::Pane { key: candidate, .. } => candidate == key,
+        PresetLayoutLaunch::Split { first, second, .. } => {
+            layout_contains_key(first, key) || layout_contains_key(second, key)
         }
     }
 }
@@ -628,10 +1220,17 @@ fn compile_cwd(template: Option<&str>, root: &Path) -> Result<PathBuf> {
 fn compile_command(
     command: &CommandDefinition,
     context: &PresetCompileContext<'_>,
+    allow_unrestricted_commands: bool,
 ) -> Result<Vec<String>> {
+    ensure!(
+        allow_unrestricted_commands || !command.unrestricted(),
+        "preset command is unrestricted; set [presets] allow-unrestricted-commands=yes to opt in"
+    );
     let argv = match command {
-        CommandDefinition::Argv { argv } => argv.clone(),
-        CommandDefinition::EditorEnv { fallback, append } => {
+        CommandDefinition::Argv { argv, .. } => argv.clone(),
+        CommandDefinition::EditorEnv {
+            fallback, append, ..
+        } => {
             let mut argv = match context.editor.filter(|editor| {
                 editor
                     .as_encoded_bytes()
@@ -699,11 +1298,20 @@ fn validate_argv_items(argv: &[String], allow_empty: bool, kind: &str) -> Result
     Ok(())
 }
 
-fn count_panes(root: &str, nodes: &BTreeMap<String, NodeDefinition>) -> usize {
+fn count_panes(
+    root: &str,
+    nodes: &BTreeMap<String, NodeDefinition>,
+    parameters: &[ParameterDefinition],
+) -> usize {
     match nodes.get(root) {
         Some(NodeDefinition::Pane { .. }) => 1,
+        Some(NodeDefinition::Grid { count, .. }) => parameter_placeholder(count, "grid count")
+            .ok()
+            .and_then(|name| parameters.iter().find(|item| item.name == name))
+            .and_then(|parameter| parameter.max)
+            .map_or(0, usize::from),
         Some(NodeDefinition::Split { first, second, .. }) => {
-            count_panes(first, nodes) + count_panes(second, nodes)
+            count_panes(first, nodes, parameters) + count_panes(second, nodes, parameters)
         }
         None => 0,
     }
@@ -1384,6 +1992,302 @@ title = "review"
             )
             .contains("not a directory")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn layout_signature(layout: &PresetLayoutLaunch) -> String {
+        match layout {
+            PresetLayoutLaunch::Pane { key, .. } => format!("P{}", key.as_str()),
+            PresetLayoutLaunch::Split {
+                orientation,
+                ratio,
+                first,
+                second,
+            } => format!(
+                "{}{}({},{})",
+                match orientation {
+                    PresetOrientation::Columns => "C",
+                    PresetOrientation::Rows => "R",
+                },
+                ratio.get(),
+                layout_signature(first),
+                layout_signature(second)
+            ),
+        }
+    }
+
+    fn collect_panes<'a>(layout: &'a PresetLayoutLaunch, panes: &mut Vec<(&'a str, &'a [String])>) {
+        match layout {
+            PresetLayoutLaunch::Pane { key, launch, .. } => {
+                panes.push((key.as_str(), &launch.command));
+            }
+            PresetLayoutLaunch::Split { first, second, .. } => {
+                collect_panes(first, panes);
+                collect_panes(second, panes);
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_tdl_golden_collapses_optional_ai_and_keeps_editor_focus() {
+        let root = test_root();
+        let catalog = PresetCatalog::bundled();
+        let compiled = catalog
+            .compile_with_parameters(
+                "omarchy.tdl",
+                &context(&root),
+                &["ai=opencode".into()],
+                false,
+            )
+            .unwrap();
+        assert_eq!(compiled.focus.as_str(), "editor");
+        assert_eq!(compiled.root.pane_count(), 3);
+        assert_eq!(
+            layout_signature(&compiled.root),
+            "R850(C650(Peditor,Pai1),Pterminal)"
+        );
+        let PresetLayoutLaunch::Split {
+            orientation: PresetOrientation::Rows,
+            ratio,
+            first,
+            second,
+        } = &compiled.root
+        else {
+            panic!("tdl root must be an 85/15 row split");
+        };
+        assert_eq!(ratio.get(), 850);
+        assert!(matches!(
+            first.as_ref(),
+            PresetLayoutLaunch::Split {
+                orientation: PresetOrientation::Columns,
+                ratio,
+                ..
+            } if ratio.get() == 650
+        ));
+        assert!(matches!(
+            second.as_ref(),
+            PresetLayoutLaunch::Pane { key, .. } if key.as_str() == "terminal"
+        ));
+        let mut panes = Vec::new();
+        collect_panes(&compiled.root, &mut panes);
+        assert_eq!(
+            panes.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            ["editor", "ai1", "terminal"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bundled_tdl_two_ai_and_tds_match_reference_trees() {
+        let root = test_root();
+        let catalog = PresetCatalog::bundled();
+        let tdl = catalog
+            .compile_with_parameters(
+                "omarchy.tdl",
+                &context(&root),
+                &["ai=opencode".into(), "ai2=codex".into()],
+                false,
+            )
+            .unwrap();
+        assert_eq!(tdl.root.pane_count(), 4);
+        assert_eq!(
+            layout_signature(&tdl.root),
+            "R850(C650(Peditor,R500(Pai1,Pai2)),Pterminal)"
+        );
+        let mut panes = Vec::new();
+        collect_panes(&tdl.root, &mut panes);
+        assert_eq!(
+            panes.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            ["editor", "ai1", "ai2", "terminal"]
+        );
+        assert!(
+            panes
+                .iter()
+                .any(|(key, argv)| { *key == "ai2" && *argv == ["codex"] })
+        );
+
+        let tds = catalog.compile("omarchy.tds", &context(&root)).unwrap();
+        assert_eq!(tds.focus.as_str(), "editor");
+        assert_eq!(
+            layout_signature(&tds.root),
+            "R500(C500(Peditor,Pdiff),C500(Pterminal,Pai))"
+        );
+        let mut panes = Vec::new();
+        collect_panes(&tds.root, &mut panes);
+        assert_eq!(
+            panes.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            ["editor", "diff", "terminal", "ai"]
+        );
+        assert!(
+            panes
+                .iter()
+                .any(|(key, argv)| { *key == "diff" && *argv == ["hunk", "diff", "--watch"] })
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deterministic_swarm_grid_covers_every_count_and_bound() {
+        let root = test_root();
+        let catalog = PresetCatalog::bundled();
+        let mut signatures = BTreeMap::new();
+        for count in 1..=16 {
+            let params = [format!("count={count}"), "command=printf worker".into()];
+            let first = catalog
+                .compile_with_parameters("omarchy.tsl", &context(&root), &params, false)
+                .unwrap();
+            let second = catalog
+                .compile_with_parameters("omarchy.tsl", &context(&root), &params, false)
+                .unwrap();
+            assert_eq!(first, second);
+            assert_eq!(first.root.pane_count(), count);
+            assert_eq!(first.focus.as_str(), "root.0");
+            signatures.insert(count, layout_signature(&first.root));
+            let mut panes = Vec::new();
+            collect_panes(&first.root, &mut panes);
+            assert_eq!(panes.len(), count);
+            for (index, (key, argv)) in panes.iter().enumerate() {
+                assert_eq!(*key, format!("root.{index}"));
+                assert_eq!(*argv, ["printf", "worker"]);
+            }
+        }
+        assert_eq!(signatures[&1], "Proot.0");
+        assert_eq!(signatures[&2], "C500(Proot.0,Proot.1)");
+        assert_eq!(signatures[&3], "R667(C500(Proot.0,Proot.1),Proot.2)");
+        assert_eq!(
+            signatures[&4],
+            "R500(C500(Proot.0,Proot.1),C500(Proot.2,Proot.3))"
+        );
+        assert_eq!(
+            signatures[&5],
+            "R600(C667(C500(Proot.0,Proot.1),Proot.2),C500(Proot.3,Proot.4))"
+        );
+        let error = catalog
+            .compile_with_parameters(
+                "omarchy.tsl",
+                &context(&root),
+                &["count=17".into(), "command=printf".into()],
+                false,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("outside its allowed range"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parameter_errors_are_bounded_and_optional_focus_cannot_disappear() {
+        let root = test_root();
+        let catalog = PresetCatalog::bundled();
+        for params in [
+            vec![],
+            vec!["ai=opencode".into(), "ai=codex".into()],
+            vec!["unknown=value".into(), "ai=opencode".into()],
+        ] {
+            assert!(
+                catalog
+                    .compile_with_parameters("omarchy.tdl", &context(&root), &params, false)
+                    .is_err()
+            );
+        }
+        let optional_focus = PresetCatalog::parse(
+            r#"version=1
+[commands.tool]
+kind="argv"
+argv=["tool"]
+[presets.optional]
+kind="dojo"
+name="optional"
+root="pane"
+focus="pane"
+[[presets.optional.parameter]]
+name="enabled"
+type="command"
+[presets.optional.nodes.pane]
+type="pane"
+command="tool"
+when-parameter="enabled"
+"#,
+        )
+        .unwrap();
+        assert!(
+            optional_focus
+                .compile("optional", &context(&root))
+                .unwrap_err()
+                .to_string()
+                .contains("removed every pane")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrestricted_aliases_require_opt_in_and_user_aliases_stay_scoped() {
+        let root = test_root();
+        let bundled = PresetCatalog::bundled();
+        for alias in ["c", "cx", "cy"] {
+            let params = [format!("ai={alias}")];
+            assert!(
+                bundled
+                    .compile_with_parameters("omarchy.tdl", &context(&root), &params, false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("allow-unrestricted-commands=yes")
+            );
+        }
+        let params = ["ai=c".to_owned()];
+        let allowed = bundled
+            .compile_with_parameters("omarchy.tdl", &context(&root), &params, true)
+            .unwrap();
+        let mut panes = Vec::new();
+        collect_panes(&allowed.root, &mut panes);
+        assert!(
+            panes
+                .iter()
+                .any(|(key, argv)| { *key == "ai1" && *argv == ["opencode", "--auto"] })
+        );
+
+        let user_path = root.join("user.toml");
+        fs::write(
+            &user_path,
+            r#"version=1
+[commands.c]
+kind="argv"
+argv=["printf", "safe"]
+[presets.mine]
+kind="dojo"
+name="mine"
+root="pane"
+focus="pane"
+[presets.mine.nodes.pane]
+type="pane"
+command="c"
+"#,
+        )
+        .unwrap();
+        let effective = PresetCatalog::load_user_overlay(&user_path).unwrap();
+        assert!(effective.compile("mine", &context(&root)).is_ok());
+        assert!(
+            effective
+                .compile_with_parameters("omarchy.tdl", &context(&root), &params, false)
+                .is_err()
+        );
+
+        let overlay_path = root.join("overlay.toml");
+        fs::write(
+            &overlay_path,
+            r#"version=1
+[presets.uses-bundled]
+kind="dojo"
+name="uses-bundled"
+root="pane"
+focus="pane"
+[presets.uses-bundled.nodes.pane]
+type="pane"
+command="editor"
+"#,
+        )
+        .unwrap();
+        let overlay = PresetCatalog::load_user_overlay(&overlay_path).unwrap();
+        assert!(overlay.compile("uses-bundled", &context(&root)).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 

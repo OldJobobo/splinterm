@@ -827,6 +827,7 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
                     name: "automation-must-not-materialize-preset".into(),
                 },
                 dojos: Vec::new(),
+                directory_identities: Vec::new(),
             })
             .await
             .unwrap_err();

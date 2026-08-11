@@ -137,7 +137,7 @@ mod tests {
         let rendered = render_config_check(&loaded);
         assert!(rendered.starts_with("Configuration OK\n"));
         assert!(rendered.contains("Keymap   splinterm"));
-        assert!(rendered.contains("Presets          0"));
+        assert!(rendered.contains("Presets          5"));
         assert!(rendered.contains("Diagnostics (1)"));
         assert!(rendered.contains("unsupported option example"));
     }

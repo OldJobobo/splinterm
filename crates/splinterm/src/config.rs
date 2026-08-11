@@ -114,7 +114,7 @@ impl Default for AppConfig {
             keymap_path: None,
             prefix_timeout_ms: 1_000,
             preset_path: None,
-            preset_catalog: None,
+            preset_catalog: Some(PresetCatalog::bundled()),
             allow_unrestricted_commands: false,
         }
     }
@@ -449,11 +449,11 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
     let keymap = resolve_keymap(config.keymap_profile, config.keymap_path.as_deref())?;
     config.keymap = keymap.keymap;
     diagnostics.extend(keymap.diagnostics);
-    config.preset_catalog = config
-        .preset_path
-        .as_deref()
-        .map(PresetCatalog::load)
-        .transpose()?;
+    config.preset_catalog = Some(if let Some(path) = config.preset_path.as_deref() {
+        PresetCatalog::load_user_overlay(path)?
+    } else {
+        PresetCatalog::bundled()
+    });
     Ok(ConfigLoad {
         config,
         diagnostics,
@@ -941,7 +941,12 @@ mod tests {
         assert_eq!(defaults.keymap.bindings().len(), 31);
         assert_eq!(defaults.prefix_timeout_ms, 1_000);
         assert_eq!(defaults.preset_path, None);
-        assert_eq!(defaults.preset_catalog, None);
+        assert!(
+            defaults
+                .preset_catalog
+                .as_ref()
+                .is_some_and(|catalog| catalog.contains("omarchy.tdl"))
+        );
         assert!(!defaults.allow_unrestricted_commands);
     }
 

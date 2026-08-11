@@ -2474,6 +2474,7 @@ fn collect_preset_launches<'a>(
 
 async fn validate_preset_working_directories(
     dojos: &[PresetDojoLaunch],
+    directory_identities: &[splinterm_protocol::PresetDirectoryIdentity],
 ) -> Result<(), ProtocolError> {
     let mut launches = Vec::new();
     for dojo in dojos {
@@ -2485,6 +2486,18 @@ async fn validate_preset_working_directories(
             .map_err(|_| invalid("preset pane cwd is unavailable"))?;
         if !metadata.is_dir() {
             return Err(invalid("preset pane cwd is not a directory"));
+        }
+    }
+    for identity in directory_identities {
+        let metadata = fs::symlink_metadata(&identity.path)
+            .await
+            .map_err(|_| invalid("preset directory identity is unavailable"))?;
+        if !metadata.file_type().is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.dev() != identity.device
+            || metadata.ino() != identity.inode
+        {
+            return Err(invalid("preset directory identity changed"));
         }
     }
     Ok(())
@@ -5536,14 +5549,19 @@ async fn handle_authorized_request(
             expected_topology_revision,
             target,
             dojos,
+            directory_identities,
         } => {
             let _transaction = state
                 .topology_transactions
                 .acquire()
                 .await
                 .map_err(|_| internal())?;
-            splinterm_protocol::validate_preset_materialization(&target, &dojos)?;
-            validate_preset_working_directories(&dojos).await?;
+            splinterm_protocol::validate_preset_materialization(
+                &target,
+                &dojos,
+                &directory_identities,
+            )?;
+            validate_preset_working_directories(&dojos, &directory_identities).await?;
             let PreparedPreset {
                 dojos: prepared_dojos,
                 leaves,
@@ -8642,6 +8660,7 @@ mod tests {
                     second: Box::new(pane("second", second_command)),
                 },
             }],
+            directory_identities: Vec::new(),
         }
     }
 
@@ -8818,6 +8837,42 @@ mod tests {
         if let Some(runtime) = state.runtimes.lock().await.remove(second.splint_id) {
             runtime.shutdown().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn preset_directory_identity_rejects_no_follow_replacement() {
+        let root = temp_dir();
+        std::fs::create_dir(&root).unwrap();
+        let child = root.join("child");
+        let replacement = root.join("replacement");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::create_dir(&replacement).unwrap();
+        let metadata = std::fs::symlink_metadata(&child).unwrap();
+        let identity = splinterm_protocol::PresetDirectoryIdentity {
+            path: child.clone(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let Request::MaterializePreset { dojos, .. } = preset_request(
+            TopologyRevision::default(),
+            LairId::new(),
+            &child,
+            &["/bin/true"],
+            &["/bin/true"],
+        ) else {
+            unreachable!("preset helper returned another request")
+        };
+        validate_preset_working_directories(&dojos, std::slice::from_ref(&identity))
+            .await
+            .unwrap();
+        std::fs::remove_dir(&child).unwrap();
+        std::os::unix::fs::symlink(&replacement, &child).unwrap();
+        assert!(
+            validate_preset_working_directories(&dojos, &[identity])
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -9125,6 +9180,7 @@ mod tests {
                 name: "preset".into(),
             },
             dojos: Vec::new(),
+            directory_identities: Vec::new(),
         };
         assert!(interactive_bypass(true, true, false, &preset));
         assert!(!interactive_bypass(false, false, true, &preset));

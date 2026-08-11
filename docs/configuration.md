@@ -185,9 +185,11 @@ a name displays the effective keymap with source locations; with a name it shows
 the packaged profile. Invalid configuration is never partially applied: Window
 startup fails before mapping rather than falling back to a half-resolved keymap.
 
-## Static Dojo presets
+## Dojo presets
 
-Select an optional strict preset catalog beside `config.ini`:
+Splinterm always includes the bounded `omarchy.t`, `omarchy.tdl`, `omarchy.tds`,
+`omarchy.tdlm`, and `omarchy.tsl` catalog. Select an optional strict user overlay
+beside `config.ini`:
 
 ```ini
 [presets]
@@ -196,32 +198,54 @@ allow-unrestricted-commands=no
 ```
 
 A configured file must be readable and valid; it is never silently ignored.
-Relative paths resolve beside `config.ini`. No file means an empty catalog.
-`allow-unrestricted-commands` is reserved for the later built-in Omarchy preset
-milestone and defaults to `no`.
+Relative paths resolve beside `config.ini`. User preset names shadow packaged
+names. User command aliases shadow packaged aliases only inside user-owned
+presets; they cannot rewrite bundled Omarchy layouts.
 
-Static version-1 catalogs define direct command aliases and one bounded named
-binary node tree per Dojo. `columns` means left/right; `rows` means top/bottom.
-Ratios are the first child's thousandths in `1..=999`. Each pane sets exactly
-one of `command` or `shell=true`. Trees reject cycles, reused children, orphaned
-nodes, non-pane focus targets, depths over 32, and more than 32 panes.
+`allow-unrestricted-commands` defaults to `no`. Setting it to `yes` explicitly
+enables only the packaged `c`, `cx`, and `cy` aliases, whose full direct argv is
+documented in [Dojo presets](presets.md). It never enables shell evaluation.
+
+Version-1 catalogs define direct command aliases and bounded named node trees.
+`columns` means left/right; `rows` means top/bottom. Ratios are the first child's
+thousandths in `1..=999`. Panes may use a static alias, a typed command parameter,
+or `shell=true`. Optional panes collapse their unary parent branch. A bounded
+`grid` expands deterministically after integer/command parameter validation.
+Trees reject cycles, reuse, orphans, invalid focus, depths over 32, and more than
+32 final panes.
 
 ```text
 splinterm preset list
 splinterm preset show NAME
 splinterm preset check [PATH]
-splinterm preset run NAME --cwd PATH --dry-run
-splinterm preset run NAME --cwd PATH
+splinterm preset run NAME --cwd PATH [--param NAME=VALUE]... --dry-run
+splinterm preset run NAME --cwd PATH [--param NAME=VALUE]... [--no-open]
 ```
+
+The optional Bash integration is generated from the packaged presets rather
+than selected by another INI field:
+
+```text
+splinterm preset shell-init omarchy --shell bash
+splinterm preset shell-install omarchy --shell bash
+```
+
+The installer uses
+`${XDG_CONFIG_HOME:-$HOME/.config}/splinterm/shell/omarchy.bash`, creates it only
+when absent, and never edits `.bashrc` or another startup file. The generated
+file must be sourced explicitly and refuses to define any function when `s`,
+`sdl`, `sds`, `sdlm`, or `ssl` already resolves to an alias, function, builtin,
+or executable. It does not define or replace Omarchy's tmux shell names.
 
 Inspection and dry-run are local and do not connect to `splinterd`. Dry-run
 compilation checks final cwd directories and launch bounds and prints a topology
 preview without showing full argv. A non-dry run verifies its exact invoking or
 focused Splint context, then sends one trusted-local atomic preset request; it
-never emulates a preset with a sequence of partial splits. Remote, automation,
+never emulates a preset with a sequence of partial splits. Successful runs open
+the first committed Dojo by stable ID unless `--no-open` is explicit. Remote, automation,
 and MCP clients cannot invoke this private materialization request. See
-[Dojo presets](presets.md) for the complete static schema, direct-execution
-rules, and failure semantics.
+[Dojo presets](presets.md) for the complete schema, bundled layouts,
+parameter rules, direct-execution rules, and failure semantics.
 
 ## Remote profile configuration
 

@@ -12,7 +12,7 @@ use splinterm_core::{
     Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 32;
+pub const PROTOCOL_VERSION: u16 = 33;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -29,6 +29,7 @@ pub const MAX_SCROLLBACK_LINES: usize = 1_000_000;
 pub const MAX_PRESET_DOJOS: usize = 32;
 pub const MAX_PRESET_PANES_PER_DOJO: usize = 32;
 pub const MAX_PRESET_TOTAL_PANES: usize = 128;
+pub const MAX_PRESET_DIRECTORY_IDENTITIES: usize = 32;
 pub const MAX_PRESET_DEPTH: usize = 32;
 pub const MAX_PRESET_KEY_BYTES: usize = 64;
 pub const MAX_PRESET_LABEL_BYTES: usize = 128;
@@ -346,6 +347,14 @@ pub struct PresetDojoLaunch {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PresetDirectoryIdentity {
+    pub path: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PresetPaneIdentity {
     pub dojo_id: DojoId,
     pub key: String,
@@ -466,6 +475,7 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         target: PresetTarget,
         dojos: Vec<PresetDojoLaunch>,
+        directory_identities: Vec<PresetDirectoryIdentity>,
     },
     CloseDojo {
         expected_topology_revision: TopologyRevision,
@@ -1057,6 +1067,41 @@ impl PresetDojoLaunch {
     }
 }
 
+impl PresetDirectoryIdentity {
+    /// Validates one no-follow directory identity without reading the filesystem.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for an unsafe or unbounded path or zero identity.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let path = self.path.as_os_str().as_encoded_bytes();
+        if !self.path.is_absolute()
+            || self.path.to_str().is_none()
+            || path.is_empty()
+            || path.len() > MAX_INPUT_BYTES
+            || path.contains(&0)
+            || self.device == 0
+            || self.inode == 0
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "preset directory identity is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl PresetLayoutLaunch {
+    fn contains_cwd(&self, path: &Path) -> bool {
+        match self {
+            Self::Pane { launch, .. } => launch.cwd == path,
+            Self::Split { first, second, .. } => {
+                first.contains_cwd(path) || second.contains_cwd(path)
+            }
+        }
+    }
+}
+
 impl PresetTarget {
     /// Validates bounded target naming without resolving daemon topology.
     ///
@@ -1086,6 +1131,7 @@ impl PresetTarget {
 pub fn validate_preset_materialization(
     target: &PresetTarget,
     dojos: &[PresetDojoLaunch],
+    directory_identities: &[PresetDirectoryIdentity],
 ) -> Result<(), ProtocolError> {
     target.validate()?;
     if dojos.is_empty() || dojos.len() > MAX_PRESET_DOJOS {
@@ -1099,6 +1145,26 @@ pub fn validate_preset_materialization(
             ProtocolError::new(ErrorCode::InvalidArgument, "preset pane count overflow")
         })
     })?;
+    if directory_identities.len() > MAX_PRESET_DIRECTORY_IDENTITIES {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "preset directory identity count exceeds limit",
+        ));
+    }
+    let mut identity_paths = std::collections::HashSet::new();
+    for identity in directory_identities {
+        identity.validate()?;
+        if !identity_paths.insert(identity.path.clone())
+            || !dojos
+                .iter()
+                .any(|dojo| dojo.root.contains_cwd(&identity.path))
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "preset directory identities are inconsistent",
+            ));
+        }
+    }
     if pane_count > MAX_PRESET_TOTAL_PANES {
         return Err(ProtocolError::new(
             ErrorCode::InvalidArgument,
@@ -2699,11 +2765,33 @@ mod tests {
             lair_id,
             rename: None,
         };
-        assert!(validate_preset_materialization(&target, std::slice::from_ref(&dojo)).is_ok());
+        assert!(validate_preset_materialization(&target, std::slice::from_ref(&dojo), &[]).is_ok());
+        let directory = PresetDirectoryIdentity {
+            path: PathBuf::from("/tmp"),
+            device: 1,
+            inode: 2,
+        };
+        assert!(
+            validate_preset_materialization(
+                &target,
+                std::slice::from_ref(&dojo),
+                std::slice::from_ref(&directory),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_preset_materialization(
+                &target,
+                std::slice::from_ref(&dojo),
+                &[directory.clone(), directory.clone()],
+            )
+            .is_err()
+        );
         let request = Request::MaterializePreset {
             expected_topology_revision: TopologyRevision::new(7),
             target,
             dojos: vec![dojo.clone()],
+            directory_identities: Vec::new(),
         };
         let encoded = serde_json::to_value(&request).unwrap();
         assert_eq!(encoded["type"], "materialize_preset");
@@ -2741,13 +2829,18 @@ mod tests {
         assert!(
             validate_preset_materialization(
                 &PresetTarget::NewLair { name: "new".into() },
-                &[invalid]
+                &[invalid],
+                &[]
             )
             .is_err()
         );
         assert!(
-            validate_preset_materialization(&PresetTarget::NewLair { name: "new".into() }, &[])
-                .is_err()
+            validate_preset_materialization(
+                &PresetTarget::NewLair { name: "new".into() },
+                &[],
+                &[]
+            )
+            .is_err()
         );
         assert!(
             LaunchParameters {
@@ -2808,7 +2901,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

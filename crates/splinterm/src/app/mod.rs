@@ -13,6 +13,7 @@ mod presets;
 mod remote_cli;
 mod session_catalog;
 mod sessions;
+mod shell_integration;
 mod theme_watch;
 mod topology_manager;
 mod window;

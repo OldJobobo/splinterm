@@ -248,6 +248,15 @@ fn graphical_command(command: &Command) -> bool {
             | Command::Launch { .. }
             | Command::XdgLaunch { .. }
             | Command::Consent
+    ) || matches!(
+        command,
+        Command::Preset {
+            command: PresetCommand::Run {
+                dry_run: false,
+                no_open: false,
+                ..
+            }
+        }
     )
 }
 
@@ -296,9 +305,11 @@ async fn run_configured_command(
                 PresetCommand::Run {
                     name,
                     cwd,
+                    params,
+                    no_open,
                     dry_run: false,
                 },
-        } => materialize_preset(name, cwd, &config, &factory).await,
+        } => materialize_preset(name, cwd, params, !no_open, &config, &factory).await,
         command => run_headless(command, &config, &factory).await,
     }
 }
@@ -710,6 +721,16 @@ mod tests {
             .expect("a selected remote may omit the sessions subcommand");
         assert_eq!(remote_default.remote.as_deref(), Some("wintermute"));
         assert!(remote_default.command.is_none());
+
+        let preset = Cli::try_parse_from(["splinterm", "preset", "run", "omarchy.tds"]).unwrap();
+        assert!(graphical_command(preset.command.as_ref().unwrap()));
+        let detached =
+            Cli::try_parse_from(["splinterm", "preset", "run", "omarchy.tds", "--no-open"])
+                .unwrap();
+        assert!(!graphical_command(detached.command.as_ref().unwrap()));
+        let dry = Cli::try_parse_from(["splinterm", "preset", "run", "omarchy.tds", "--dry-run"])
+            .unwrap();
+        assert!(!graphical_command(dry.command.as_ref().unwrap()));
     }
 
     #[test]

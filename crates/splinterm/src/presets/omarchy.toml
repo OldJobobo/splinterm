@@ -1,0 +1,190 @@
+version = 1
+
+[commands.editor]
+kind = "editor-env"
+fallback = ["nvim"]
+append = ["."]
+
+[commands.nvim]
+kind = "argv"
+argv = ["nvim", "."]
+
+[commands.opencode]
+kind = "argv"
+argv = ["opencode"]
+
+[commands.hunk-watch]
+kind = "argv"
+argv = ["hunk", "diff", "--watch"]
+
+[commands.c]
+kind = "argv"
+argv = ["opencode", "--auto"]
+unrestricted = true
+
+[commands.cx]
+kind = "argv"
+argv = ["claude", "--permission-mode", "bypassPermissions"]
+unrestricted = true
+
+[commands.cy]
+kind = "argv"
+argv = ["codex", "-s", "danger-full-access", "-a", "never"]
+unrestricted = true
+
+[presets."omarchy.t"]
+kind = "attach"
+display-name = "Attach or create Work"
+
+[presets."omarchy.tdl"]
+kind = "dojo"
+display-name = "Development layout"
+name = "{cwd.basename}"
+root = "root"
+focus = "editor"
+
+[[presets."omarchy.tdl".parameter]]
+name = "ai"
+type = "command"
+required = true
+
+[[presets."omarchy.tdl".parameter]]
+name = "ai2"
+type = "command"
+
+[presets."omarchy.tdl".nodes.root]
+type = "split"
+orientation = "rows"
+ratio = 850
+first = "work"
+second = "terminal"
+
+[presets."omarchy.tdl".nodes.work]
+type = "split"
+orientation = "columns"
+ratio = 650
+first = "editor"
+second = "ai-column"
+
+[presets."omarchy.tdl".nodes.ai-column]
+type = "split"
+orientation = "rows"
+ratio = 500
+first = "ai1"
+second = "ai2"
+
+[presets."omarchy.tdl".nodes.editor]
+type = "pane"
+command = "editor"
+cwd = "{cwd}"
+title = "editor"
+
+[presets."omarchy.tdl".nodes.ai1]
+type = "pane"
+parameter-command = "ai"
+cwd = "{cwd}"
+title = "ai"
+
+[presets."omarchy.tdl".nodes.ai2]
+type = "pane"
+parameter-command = "ai2"
+when-parameter = "ai2"
+cwd = "{cwd}"
+title = "ai 2"
+
+[presets."omarchy.tdl".nodes.terminal]
+type = "pane"
+shell = true
+cwd = "{cwd}"
+title = "terminal"
+
+[presets."omarchy.tds"]
+kind = "dojo"
+display-name = "Square development layout"
+name = "{cwd.basename}"
+root = "root"
+focus = "editor"
+
+[presets."omarchy.tds".nodes.root]
+type = "split"
+orientation = "rows"
+ratio = 500
+first = "top"
+second = "bottom"
+
+[presets."omarchy.tds".nodes.top]
+type = "split"
+orientation = "columns"
+ratio = 500
+first = "editor"
+second = "diff"
+
+[presets."omarchy.tds".nodes.bottom]
+type = "split"
+orientation = "columns"
+ratio = 500
+first = "terminal"
+second = "ai"
+
+[presets."omarchy.tds".nodes.editor]
+type = "pane"
+command = "nvim"
+cwd = "{cwd}"
+title = "editor"
+
+[presets."omarchy.tds".nodes.diff]
+type = "pane"
+command = "hunk-watch"
+cwd = "{cwd}"
+title = "diff"
+
+[presets."omarchy.tds".nodes.terminal]
+type = "pane"
+shell = true
+cwd = "{cwd}"
+title = "terminal"
+
+[presets."omarchy.tds".nodes.ai]
+type = "pane"
+command = "opencode"
+cwd = "{cwd}"
+title = "ai"
+
+[presets."omarchy.tdlm"]
+kind = "directory-set"
+display-name = "Development layouts for child directories"
+
+[[presets."omarchy.tdlm".parameter]]
+name = "ai"
+type = "command"
+required = true
+
+[[presets."omarchy.tdlm".parameter]]
+name = "ai2"
+type = "command"
+
+[presets."omarchy.tsl"]
+kind = "dojo"
+display-name = "Command swarm"
+name = "{cwd.basename}-swarm"
+root = "root"
+focus = "root.0"
+
+[[presets."omarchy.tsl".parameter]]
+name = "count"
+type = "integer"
+min = 1
+max = 16
+required = true
+
+[[presets."omarchy.tsl".parameter]]
+name = "command"
+type = "command"
+required = true
+
+[presets."omarchy.tsl".nodes.root]
+type = "grid"
+count = "{count}"
+pane-command = "{command}"
+cwd = "{cwd}"
+title = "worker"

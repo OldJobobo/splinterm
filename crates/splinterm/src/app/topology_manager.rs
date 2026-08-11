@@ -1236,6 +1236,7 @@ async fn handle_session_manager_command(
                         expected_topology_revision: expected,
                         target,
                         dojos,
+                        directory_identities: Vec::new(),
                     })
                     .await?
                 else {

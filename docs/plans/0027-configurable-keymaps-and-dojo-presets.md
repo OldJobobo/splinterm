@@ -1,6 +1,6 @@
 # Plan 0027: Configurable keymaps and Dojo presets
 
-- **Status:** Active — Milestones 1–6 complete; Milestone 7 next
+- **Status:** Active — Milestones 1–8 complete; Milestone 9 next
 - **Date:** 2026-08-07
 - **Depends on:** [Plan 0018](0018-lair-dojo-topology-migration.md), [Plan 0019](0019-dojo-tabs.md), [Plan 0025](0025-command-palette-and-tab-context-menus.md)
 - **Primary compatibility reference:** [Omarchy Tmux Reference](../omarchy-tmux-reference.md)
@@ -18,8 +18,9 @@ This plan delivers three related systems:
 2. **Dojo presets** that create complete, named, persistent pane layouts from
    built-in or user-authored definitions without a chain of partially committed
    splits.
-3. **Optional shell compatibility functions** for `t`, `tdl`, `tds`, `tdlm`,
-   `tsl`, `ic`, `ix`, and `icx`, backed by Splinterm presets rather than tmux.
+3. **Optional shell integration functions** for `s`, `sdl`, `sds`, `sdlm`,
+   and `ssl`, backed by Splinterm presets without conflicting with Omarchy's
+   existing tmux functions and aliases.
 
 The intended result is that a DHH/Omarchy user can enable one profile, retain the
 important Splinterm-specific commands, use familiar pane/window/session muscle
@@ -66,8 +67,8 @@ The plan is complete when all of the following are true:
   split failed.
 - Existing daemon authority, automation roles, stable IDs, and direct-argv
   launch validation remain intact.
-- Shell compatibility aliases/functions are opt-in and never overwrite an
-  existing user alias or function silently.
+- Shell integration is opt-in, uses only the proposed Splinterm `s*` names,
+  and never overwrites an existing user alias or function.
 
 ## Non-goals
 
@@ -886,7 +887,7 @@ Normal successful execution remains concise. `--dry-run` validates and previews
 without connecting for mutation. Destructive replacement is not part of v1;
 there is no confirmation for additive new-Dojo creation.
 
-### Shell compatibility
+### Shell integration
 
 Package, but do not auto-source, a Bash integration generated from stable preset
 commands. Provide:
@@ -897,17 +898,20 @@ splinterm preset shell-init omarchy --shell bash
 
 It prints functions for:
 
-- `t` → `omarchy.t`;
-- `tdl`, `tds`, `tdlm`, `tsl` → corresponding preset commands;
-- `ic`, `ix`, `icx` → `tdl c`, `tdl cx`, `tdl c cx`.
+- `s` → `omarchy.t`;
+- `sdl`, `sds`, `sdlm`, and `ssl` → `omarchy.tdl`, `omarchy.tds`,
+  `omarchy.tdlm`, and `omarchy.tsl`, respectively.
 
 Rules:
 
 - The installer may offer an explicit opt-in to write a dedicated
   `~/.config/splinterm/shell/omarchy.bash` file.
 - It does not edit `.bashrc` automatically in the first release.
-- It checks and reports existing functions/aliases named `t`, `tdl`, `tds`,
-  `tdlm`, `tsl`, `ic`, `ix`, or `icx` before installation.
+- The generated file checks and reports any existing command, function, or alias
+  named `s`, `sdl`, `sds`, `sdlm`, or `ssl` before defining anything; a conflict
+  leaves every existing name untouched and defines none of the new functions.
+- Splinterm does not define or replace Omarchy's existing `t`, `tdl`, `tds`,
+  `tdlm`, `tsl`, `ic`, `ix`, or `icx` shell names.
 - Global `c`, `cx`, and `cy` aliases are not installed by Splinterm. Those names
   remain preset-local command aliases to avoid commandeering common shell names.
 - Generated functions preserve argument boundaries and use `command splinterm`
@@ -1140,6 +1144,28 @@ Gate:
 
 ### Milestone 7 — built-in Omarchy layouts
 
+**Status:** Complete
+
+Recorded evidence:
+
+- validation: the final serialized full workspace suite passed with 60 daemon
+  library, 66 daemon binary, 19 daemon end-to-end, 340 Splinterm library (one
+  manual timing harness ignored), 73 Splinterm binary, and every integration,
+  protocol, core, MCP, automation, remote, PTY, relay, and terminal suite
+  passing. Workspace formatting, check, Clippy with `-D warnings`, package
+  validator compilation, and `git diff --check` also passed;
+- review: one fresh read-only acceptance review confirmed closed-lexer direct
+  command parameters, bundled/user alias isolation, argv-free previews, and the
+  exact `tdl`/`tds` ratios and focus. It found three issues: incomplete swarm
+  rows were weighted equally, successful CLI runs did not open the committed
+  Dojo, and `tdlm` could accept a child changed to a symlink after enumeration.
+  All were corrected. Grid ratios now use rounded occupied-pane weights;
+  successful runs validate every stable mapping and open the first committed
+  Dojo by ID (with explicit reconciled `--no-open` support); and protocol v33
+  carries bounded no-follow directory device/inode identities that are checked
+  by the client and again at the daemon pre-commit boundary. Focused regressions
+  and the complete final validation gate pass after those fixes.
+
 Work:
 
 - define `omarchy.t`, `tdl`, `tds`, `tdlm`, and `tsl`;
@@ -1156,9 +1182,29 @@ Gate:
 
 ### Milestone 8 — shell integration
 
+**Status:** Complete
+
+Recorded evidence:
+
+- validation: the final serialized full workspace suite passed with 60 daemon
+  library, 66 daemon binary, 19 daemon end-to-end, 340 Splinterm library (one
+  manual timing harness ignored), 74 Splinterm binary, and every integration,
+  protocol, core, MCP, automation, remote, PTY, relay, and terminal suite
+  passing. The five-case Bash subprocess suite proves exact one/two-AI and
+  quoted-swarm argv boundaries, all-or-none alias/function/executable conflict
+  handling, usage rejection without launch, fixed-path create-new installation,
+  owner-only mode, and unchanged startup files. Generated Bash passes
+  `shellcheck`; workspace formatting, check, Clippy with `-D warnings`, package
+  validator compilation, and `git diff --check` also pass;
+- review: one fresh read-only acceptance/security review found no functional or
+  security blocker. It confirmed direct quoted argv, source-time all-name
+  preflight before any definition, and create-new owner-only installation with
+  no startup-file edits. Its only low-severity finding was to mark this
+  milestone complete and record its evidence, corrected here.
+
 Work:
 
-- generate Bash compatibility functions;
+- generate Bash integration functions;
 - add conflict inspection and opt-in installer path;
 - document exact differences from tmux behavior.
 

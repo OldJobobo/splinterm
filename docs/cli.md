@@ -74,7 +74,9 @@ paths. With no focused Splinterm Window, its two projection fields are null.
 | --- | --- |
 | `new NAME [--cwd DIR] [-- ARGV...]` | Create a persistent Lair, one Dojo, and one live Splint. |
 | `new-dojo LAIR_ID [--name NAME] [--cwd DIR] [-- ARGV...]` | Add a persistent Dojo with one live Splint. |
-| `preset run NAME [--cwd DIR]` | Atomically add one complete configured Dojo preset to the exact invoking/focused Lair. |
+| `preset run NAME [--cwd DIR] [--param NAME=VALUE]... [--no-open]` | Run a packaged or user preset using one exact invoking/focused context and atomic topology transaction. |
+| `preset shell-init omarchy --shell bash` | Print guarded `s*` Bash functions without writing or sourcing anything. |
+| `preset shell-install omarchy --shell bash` | Create the dedicated integration file without replacing it or editing shell startup files. |
 | `split TARGET_SPLINT_ID --axis horizontal|vertical --side first|second [--ratio N] [--cwd DIR] [-- ARGV...]` | Split a leaf and launch its sibling. |
 | `ratio TARGET_SPLINT_ID RATIO` | Set the selected leaf's parent split ratio in thousandths. |
 | `rename-lair LAIR_ID NAME` | Rename a Lair. |
@@ -90,6 +92,9 @@ splinterm new project --cwd "$HOME/src/project"
 splinterm new build -- /usr/bin/ninja -C /tmp/build
 splinterm new-dojo LAIR_ID --name logs -- /usr/bin/journalctl -f
 splinterm preset run personal-review --cwd "$HOME/src/project"
+splinterm preset run omarchy.tdl --param ai=opencode
+splinterm preset run omarchy.tdl --param ai=c --param ai2=cx
+splinterm preset run omarchy.tsl --param count=4 --param command='codex -a never'
 splinterm split SPLINT_ID --axis vertical --side second --ratio 600
 splinterm ratio SPLINT_ID 500
 ```
@@ -97,7 +102,29 @@ splinterm ratio SPLINT_ID 500
 Non-dry preset runs are private trusted-local human operations. The client
 compiles direct argv locally, verifies exact managed-Splint context, and asks the
 daemon to persist the complete tree in one revision before any process launch.
-Use `--dry-run` for side-effect-free inspection. See [Dojo presets](presets.md).
+Successful non-dry runs open the first created Dojo in a new native Window and
+use its committed default-focus identity. `--no-open` keeps the operation
+headless after full response reconciliation; `omarchy.t` always opens and rejects
+that option. Use `--dry-run` for side-effect-free inspection. Packaged unrestricted aliases
+`c`, `cx`, and `cy` fail before mutation unless
+`[presets] allow-unrestricted-commands=yes` is set. See
+[Dojo presets](presets.md).
+
+Optional Bash integration uses `s`, `sdl`, `sds`, `sdlm`, and `ssl`, leaving
+Omarchy's existing tmux names untouched. Generate it for inspection or install a
+new dedicated file:
+
+```bash
+splinterm preset shell-init omarchy --shell bash
+splinterm preset shell-install omarchy --shell bash
+source "${XDG_CONFIG_HOME:-$HOME/.config}/splinterm/shell/omarchy.bash"
+```
+
+Installation never edits `.bashrc` and refuses an existing destination. Sourcing
+performs one all-name preflight and defines none of the functions if any proposed
+name is already an alias, function, builtin, or executable command. See
+[Dojo presets](presets.md#optional-bash-integration) for mappings and argument
+rules.
 
 The ratio range is 1–999; it is the share assigned to the first child.
 In-Splint automation should add `--expected-incarnation N` where offered so a

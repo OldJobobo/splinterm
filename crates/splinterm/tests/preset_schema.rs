@@ -113,7 +113,7 @@ fn preset_inspection_and_dry_run_are_local_and_side_effect_free() {
     assert!(checked.status.success(), "{:?}", checked.stderr);
     assert_eq!(
         String::from_utf8(checked.stdout).unwrap(),
-        "Preset catalog OK\n  Presets  1\n"
+        "Preset catalog OK\n  Presets  6\n"
     );
 
     let listed = output(
@@ -162,7 +162,7 @@ fn preset_inspection_and_dry_run_are_local_and_side_effect_free() {
         binary()
             .env("SPLINTERM_CONFIG", &config)
             .env("SPLINTERM_SOCKET", directory.join("missing.sock"))
-            .args(["preset", "run", "review"]),
+            .args(["preset", "run", "review", "--no-open"]),
     );
     assert!(!unavailable.status.success());
     assert!(unavailable.stdout.is_empty());
@@ -308,6 +308,7 @@ fn preset_run_sends_one_atomic_tree_and_reconciles_stable_mappings() {
                     expected_topology_revision,
                     target,
                     dojos,
+                    directory_identities,
                 },
             ..
         } = read_frame(&mut stream)
@@ -323,6 +324,7 @@ fn preset_run_sends_one_atomic_tree_and_reconciles_stable_mappings() {
             } if target == lair_id
         ));
         assert_eq!(dojos.len(), 1);
+        assert!(directory_identities.is_empty());
         let PresetLayoutLaunch::Split {
             ratio,
             first,
@@ -395,6 +397,7 @@ fn preset_run_sends_one_atomic_tree_and_reconciles_stable_mappings() {
                 "review",
                 "--cwd",
                 directory.to_str().unwrap(),
+                "--no-open",
             ]),
     );
     assert!(
@@ -408,6 +411,107 @@ fn preset_run_sends_one_atomic_tree_and_reconciles_stable_mappings() {
     assert!(!stdout.contains("Dry run OK"));
     assert!(!stdout.contains("literal;$HOME"));
     server.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn bundled_omarchy_presets_are_available_and_unrestricted_aliases_are_opt_in() {
+    let directory = test_directory();
+    let config = directory.join("config.ini");
+    fs::write(&config, "").unwrap();
+
+    let listed = output(
+        binary()
+            .env("SPLINTERM_CONFIG", &config)
+            .args(["preset", "list"]),
+    );
+    assert!(listed.status.success(), "{:?}", listed.stderr);
+    let stdout = String::from_utf8(listed.stdout).unwrap();
+    for name in [
+        "omarchy.t",
+        "omarchy.tdl",
+        "omarchy.tds",
+        "omarchy.tdlm",
+        "omarchy.tsl",
+    ] {
+        assert!(stdout.contains(name), "{name} missing from {stdout}");
+    }
+
+    let tdl = output(
+        binary()
+            .env("SPLINTERM_CONFIG", &config)
+            .env_remove("EDITOR")
+            .args([
+                "preset",
+                "run",
+                "omarchy.tdl",
+                "--cwd",
+                directory.to_str().unwrap(),
+                "--param",
+                "ai=opencode",
+                "--dry-run",
+            ]),
+    );
+    assert!(
+        tdl.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tdl.stderr)
+    );
+    let stdout = String::from_utf8(tdl.stdout).unwrap();
+    assert!(stdout.contains("rows 850/150"));
+    assert!(stdout.contains("columns 650/350"));
+    assert!(stdout.contains("Focus    editor"));
+    assert!(stdout.contains("Panes    3"));
+
+    let restricted = output(
+        binary()
+            .env("SPLINTERM_CONFIG", &config)
+            .env_remove("EDITOR")
+            .args([
+                "preset",
+                "run",
+                "omarchy.tdl",
+                "--cwd",
+                directory.to_str().unwrap(),
+                "--param",
+                "ai=c",
+                "--dry-run",
+            ]),
+    );
+    assert!(!restricted.status.success());
+    assert!(
+        String::from_utf8(restricted.stderr)
+            .unwrap()
+            .contains("allow-unrestricted-commands=yes")
+    );
+
+    let enabled = directory.join("enabled.ini");
+    fs::write(&enabled, "[presets]\nallow-unrestricted-commands=yes\n").unwrap();
+    let unrestricted = output(
+        binary()
+            .env("SPLINTERM_CONFIG", &enabled)
+            .env_remove("EDITOR")
+            .args([
+                "preset",
+                "run",
+                "omarchy.tdl",
+                "--cwd",
+                directory.to_str().unwrap(),
+                "--param",
+                "ai=c",
+                "--dry-run",
+            ]),
+    );
+    assert!(
+        unrestricted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unrestricted.stderr)
+    );
+    assert!(
+        !String::from_utf8(unrestricted.stdout)
+            .unwrap()
+            .contains("--auto")
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 

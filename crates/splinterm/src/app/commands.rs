@@ -369,16 +369,46 @@ pub(in crate::app) enum PresetCommand {
     Show { name: String },
     /// Validate the configured catalog or an explicit path.
     Check { path: Option<PathBuf> },
+    /// Print guarded shell functions without installing or sourcing them.
+    ShellInit {
+        integration: ShellIntegration,
+        /// Select the generated shell syntax.
+        #[arg(long, value_enum)]
+        shell: IntegrationShell,
+    },
+    /// Install one guarded integration to its new dedicated XDG file.
+    ShellInstall {
+        integration: ShellIntegration,
+        /// Select the generated shell syntax.
+        #[arg(long, value_enum)]
+        shell: IntegrationShell,
+    },
     /// Compile and preview one preset without daemon mutation.
     Run {
         name: String,
         /// Override the captured invocation working directory.
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Supply one bounded typed preset parameter as NAME=VALUE.
+        #[arg(long = "param", value_name = "NAME=VALUE")]
+        params: Vec<String>,
+        /// Materialize without opening the first created Dojo in a new Window.
+        #[arg(long)]
+        no_open: bool,
         /// Validate and preview without connecting to the daemon.
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(in crate::app) enum ShellIntegration {
+    Omarchy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(in crate::app) enum IntegrationShell {
+    Bash,
 }
 
 #[derive(Debug, Subcommand)]
