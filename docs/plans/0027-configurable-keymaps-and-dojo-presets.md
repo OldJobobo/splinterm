@@ -1310,6 +1310,41 @@ Recorded evidence:
   Splinterm test Window remains, the temporary command wrapper is absent, and
   the recorded Foot focus/workspace/monitor/geometry were restored.
 
+Post-release desktop-launch correction:
+
+- root cause: the installed desktop entry and `gtk-launch` path were correct,
+  but durable metadata had reached the bounded limit of 64 persistent Lairs.
+  With 63 inactive Lairs and one active Lair, every fresh menu launch was
+  rejected before mapping with `metadata contains too many Lairs`;
+- implementation: commit `1cf79d6` makes persistent creation atomically replace
+  the least-recently-active fully exited persistent Lair at one topology
+  revision. Active and transient Lairs are never eviction candidates. Runtime
+  admission now precedes durable commit, and persistence failure removes and
+  shuts down the unpublished runtime without compensating metadata rollback;
+- validation: 26 core, 68 daemon-binary, 60 daemon-library, and 19 serialized
+  daemon end-to-end tests pass, along with the full package check, strict Clippy,
+  formatting, and `git diff --check`. The capacity regression uses a real
+  metadata store at exactly 64 Lairs, injects a save failure, and proves memory
+  and durable reload both retain the retired Lair;
+- review: one fresh read-only reviewer approved active/transient protection,
+  least-recent selection, one-revision replacement, and publication semantics.
+  Its durability-ordering finding was fixed and covered before packaging;
+- installation: the reviewed main and MCP packages were installed from external
+  Foot. Pacman reports zero altered files; archive and installed client/daemon
+  hashes match; the running daemon and installed daemon device/inode match; and
+  the adjacent client is `/usr/bin/splinterm`. Rollback snapshot:
+  `~/.local/state/splinterm/rollback/20260810-231932-pre-source-1cf79d68b29f`;
+- graphical acceptance: the exact Omarchy sequence `menu`, type `splinterm`,
+  Enter, Enter mapped one native window at `0x55a31aa85cd0` (PID `2262740`).
+  Its sole daemon child was `bash` PID `2262753`; no tmux descendant existed.
+  Capacity compacted from 64 inactive Lairs to 63 inactive plus the new active
+  Lair. The exact test window closed, its test shell exited, and final topology
+  returned to 64 inactive Lairs with no active Lairs;
+- graphical cleanup restored Foot address `0x55a31a9c0140`, workspace, monitor,
+  focus, position, and size exactly. Hyprland 0.56 exposed no working bounded
+  cursor-position dispatcher, so the pointer ended at `(912,829)` rather than
+  its recorded `(466,1329)`; no unrelated window was moved or closed.
+
 Work:
 
 - package examples, built-in profile docs, preset schema, and optional shell
