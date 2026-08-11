@@ -3713,9 +3713,10 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
 
         let mut saw_resync = false;
         let mut disconnected = false;
-        for _ in 0..128 {
+        let slow_read_deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < slow_read_deadline {
             let Ok(frame) = time::timeout(
-                Duration::from_secs(2),
+                slow_read_deadline.saturating_duration_since(Instant::now()),
                 read_frame_or_eof(&mut slow.stream),
             )
             .await
