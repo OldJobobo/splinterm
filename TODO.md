@@ -44,6 +44,18 @@ until this lifecycle design is implemented and reviewed.
 - [ ] Test spaces, quotes, Unicode, multiple files, file URIs, unsupported or
   remote sources, clipboard image formats, and cancelled or failed saves.
 
+## Theme palette fidelity
+
+- [ ] Preserve theme-provided selection RGB roles verbatim; themes own hue and
+  Splinterm may vary alpha only in explicitly defined presentation cases.
+- [ ] Replace the current selection `blend_rect` path, which bakes the overlay
+  into the completed framebuffer and derives a different RGB color, with a
+  distinct theme-color-plus-alpha composition layer.
+- [ ] Keep selection composition from tinting already-rendered glyph colors;
+  render selected text as a separate foreground layer.
+- [ ] Add renderer tests proving that selection alpha never mutates the resolved
+  theme RGB role, including the Sakura Mochi `#f23888` selection color.
+
 ## Omarchy integration
 
 - [ ] Implement [Plan 0032](docs/plans/0032-omarchy-screensaver-integration.md)
