@@ -29,7 +29,7 @@ check() {
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
   cargo test --frozen --workspace -- --test-threads=1
-  python -m unittest tools/automation/test_session_picker.py
+  python -m unittest tools/automation/test_dojo_picker.py
   python -m unittest tools/package/test_installer_safety.py
 }
 
@@ -62,11 +62,13 @@ package_splinterm() {
   install -Dm755 target/release/splinterm-relay "$pkgdir/usr/bin/splinterm-relay"
   install -Dm755 target/release/splinterm-pty-child "$pkgdir/usr/bin/splinterm-pty-child"
   install -Dm755 dist/bin/splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-xdg-terminal-exec"
+  ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-dojos"
   ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-sessions"
   ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-reopen"
   install -Dm755 tools/generate-omarchy-theme.py "$pkgdir/usr/bin/generate-omarchy-theme.py"
-  install -Dm755 tools/automation/splinterm-session-picker.py \
-    "$pkgdir/usr/bin/splinterm-session-picker"
+  install -Dm755 tools/automation/splinterm-dojo-picker.py \
+    "$pkgdir/usr/bin/splinterm-dojo-picker"
+  ln -s splinterm-dojo-picker "$pkgdir/usr/bin/splinterm-session-picker"
 
   install -Dm644 dist/applications/com.oldjobobo.splinterm.desktop \
     "$pkgdir/usr/share/applications/com.oldjobobo.splinterm.desktop"

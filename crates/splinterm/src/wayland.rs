@@ -282,7 +282,7 @@ const fn final_tab_removal_action(
 
 fn session_picker_handoff_command(executable: &Path) -> Command {
     let mut command = Command::new(executable);
-    command.arg("sessions");
+    command.arg("dojos");
     command
 }
 
@@ -290,7 +290,7 @@ fn spawn_session_picker_handoff() -> Result<()> {
     let executable = std::env::current_exe().context("locate the running Splinterm client")?;
     session_picker_handoff_command(&executable)
         .spawn()
-        .context("launch the Recent Sessions picker after final-tab removal")?;
+        .context("launch the Recent Dojos picker after final-tab removal")?;
     Ok(())
 }
 
@@ -707,7 +707,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let title = if trusted_consent.is_some() {
         "Splinterm — Trusted Access Request".to_owned()
     } else if session_picker.is_some() {
-        "Splinterm — Recent Sessions".to_owned()
+        "Splinterm — Recent Dojos".to_owned()
     } else {
         window_title(
             options.title.as_deref().or_else(|| {
@@ -4886,12 +4886,9 @@ impl App {
         self.input.prefix_state.clear();
         anyhow::ensure!(
             self.modal.session_picker.is_none(),
-            "session picker is already open"
+            "Dojo picker is already open"
         );
-        anyhow::ensure!(
-            items.len() == targets.len(),
-            "session picker targets differ"
-        );
+        anyhow::ensure!(items.len() == targets.len(), "Dojo picker targets differ");
         self.settle_terminal_presses_for_picker();
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         self.modal.session_picker_wheel = WheelAccumulator::default();
@@ -4916,7 +4913,7 @@ impl App {
         self.surface.window.set_title(match selector_kind {
             Some(SelectorKind::Dojo) => "Splinterm — Dojos",
             Some(SelectorKind::LairDojo) => "Splinterm — Lairs and Dojos",
-            None => "Splinterm — Recent Sessions",
+            None => "Splinterm — Recent Dojos",
         });
         self.presentation.full_redraw = true;
         Ok(())
@@ -5700,7 +5697,7 @@ impl App {
                         self.modal.session_picker_targets.get(index).copied()
                     else {
                         self.scheduling
-                            .fail(anyhow::anyhow!("session picker selected an invalid target"));
+                            .fail(anyhow::anyhow!("Dojo picker selected an invalid target"));
                         return;
                     };
                     WindowTopologyCommand::OpenDojo { lair_id, dojo_id }
@@ -6372,7 +6369,7 @@ impl App {
     ) -> Result<()> {
         anyhow::ensure!(
             !self.modal.inline_picker_open(),
-            "topology replacement arrived while the session picker was open"
+            "topology replacement arrived while the Dojo picker was open"
         );
         let removed = removed.into_iter().collect::<HashSet<_>>();
         let mut prepared = Vec::with_capacity(added.len());
@@ -6504,7 +6501,7 @@ impl App {
                     continue;
                 }
                 self.close_inline_session_picker();
-                eprintln!("splinterm session picker: cancelled to apply queued topology updates");
+                eprintln!("splinterm Dojo picker: cancelled to apply queued topology updates");
                 let mut replay = VecDeque::from(std::mem::take(
                     &mut self.tab_state.deferred_topology_updates,
                 ));
@@ -6539,7 +6536,7 @@ impl App {
                         } else {
                             self.close_inline_session_picker();
                             eprintln!(
-                                "splinterm session picker: cancelled to apply queued topology updates"
+                                "splinterm Dojo picker: cancelled to apply queued topology updates"
                             );
                             let mut replay = VecDeque::from(std::mem::take(
                                 &mut self.tab_state.deferred_topology_updates,
@@ -6645,7 +6642,7 @@ impl App {
                         FinalTabRemovalAction::ExitAndHandoffPicker => {
                             self.modal.session_picker_requested = false;
                             if spawn_session_picker_handoff().is_err() {
-                                eprintln!("splinterm session picker handoff failed");
+                                eprintln!("splinterm Dojo picker handoff failed");
                             }
                             self.scheduling
                                 .request_exit(ExitClass::CleanFinalTabRemoved);
@@ -6721,7 +6718,7 @@ impl App {
                     self.close_inline_session_picker();
                     self.modal.session_picker_requested = false;
                     self.tab_state.session_switch_pending = false;
-                    eprintln!("splinterm session picker failed");
+                    eprintln!("splinterm Dojo picker failed");
                 }
                 WindowTopologyUpdate::Theme(update) => {
                     if self.modal.inline_picker_open() {
@@ -8710,7 +8707,7 @@ mod tests {
 
         let command = session_picker_handoff_command(Path::new("/opt/splinterm"));
         assert_eq!(command.get_program(), "/opt/splinterm");
-        assert_eq!(command.get_args().collect::<Vec<_>>(), ["sessions"]);
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["dojos"]);
     }
 
     #[test]

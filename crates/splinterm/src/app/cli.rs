@@ -54,7 +54,7 @@ use super::{
     presets::{materialize_preset, run_preset_command},
     remote_cli::run_remote_command,
     session_catalog::{automation_launch, create_request, launch_parameters, remember_dojo},
-    sessions::{launch, reopen_recent, run_sessions, select_dojo, xdg_launch},
+    sessions::{launch, reopen_recent, run_dojos, select_dojo, xdg_launch},
 };
 
 #[allow(
@@ -71,12 +71,12 @@ pub(crate) async fn run() -> Result<()> {
     } = Cli::parse();
     let command = match command {
         Some(command) => command,
-        None if remote.is_some() => Command::Sessions,
+        None if remote.is_some() => Command::Dojos,
         None => usage_error("a command is required unless --remote PROFILE is selected"),
     };
     if matches!(
         &command,
-        Command::Sessions
+        Command::Dojos
             | Command::Reopen
             | Command::Window { .. }
             | Command::Launch { .. }
@@ -242,7 +242,7 @@ pub(crate) async fn run() -> Result<()> {
 fn graphical_command(command: &Command) -> bool {
     matches!(
         command,
-        Command::Sessions
+        Command::Dojos
             | Command::Reopen
             | Command::Window { .. }
             | Command::Launch { .. }
@@ -266,7 +266,7 @@ async fn run_configured_command(
     factory: ConnectionFactory,
 ) -> Result<()> {
     match command {
-        Command::Sessions => run_sessions(config, factory).await,
+        Command::Dojos => run_dojos(config, factory).await,
         Command::Reopen => reopen_recent(config, factory).await,
         Command::Window { lair_id, dojo_id } => {
             let dojo = select_dojo(&factory, lair_id.zip(dojo_id)).await?;
@@ -342,7 +342,7 @@ async fn run_headless(
 ) -> Result<()> {
     let mut connection = factory.connect().await?;
     match command {
-        Command::Sessions
+        Command::Dojos
         | Command::Reopen
         | Command::Window { .. }
         | Command::Launch { .. }
@@ -712,13 +712,15 @@ mod tests {
     }
 
     #[test]
-    fn graphical_session_commands_are_explicit() {
+    fn graphical_dojo_commands_are_explicit_and_sessions_remains_an_alias() {
+        let dojos = Cli::try_parse_from(["splinterm", "dojos"]).unwrap();
+        assert!(matches!(dojos.command, Some(Command::Dojos)));
         let sessions = Cli::try_parse_from(["splinterm", "sessions"]).unwrap();
-        assert!(matches!(sessions.command, Some(Command::Sessions)));
+        assert!(matches!(sessions.command, Some(Command::Dojos)));
         let reopen = Cli::try_parse_from(["splinterm", "reopen"]).unwrap();
         assert!(matches!(reopen.command, Some(Command::Reopen)));
         let remote_default = Cli::try_parse_from(["splinterm", "--remote", "wintermute"])
-            .expect("a selected remote may omit the sessions subcommand");
+            .expect("a selected remote may omit the dojos subcommand");
         assert_eq!(remote_default.remote.as_deref(), Some("wintermute"));
         assert!(remote_default.command.is_none());
 

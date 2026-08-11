@@ -1,4 +1,4 @@
-//! Platform-independent session-picker interaction and standalone presentation state.
+//! Platform-independent Dojo-picker interaction and standalone presentation state.
 
 use std::sync::mpsc::Sender as StdSender;
 
@@ -191,7 +191,7 @@ impl SessionPickerUi {
     }
 
     /// Builds the temporary terminal presentation used only by the standalone
-    /// `splinterm sessions` host.
+    /// `splinterm dojos` host.
     ///
     /// # Panics
     ///
@@ -204,13 +204,13 @@ impl SessionPickerUi {
             ..
         } = &mut self.host
         else {
-            panic!("inline session picker does not own a terminal snapshot");
+            panic!("inline Dojo picker does not own a terminal snapshot");
         };
         *revision = revision.saturating_add(1).max(1);
         let marker = |selected| if selected { "› " } else { "  " };
         let mut lines = vec![
-            "RECENT SESSIONS".to_owned(),
-            "Open a running window without restoring or relaunching.".to_owned(),
+            "RECENT DOJOS".to_owned(),
+            "Open a running Dojo without restoring or relaunching.".to_owned(),
             String::new(),
             format!("{}New Terminal", marker(self.selected == 0)),
             "    Start a fresh shell".to_owned(),
@@ -324,7 +324,7 @@ fn picker_terminal_snapshot(
         },
         palette: vec![0; 256],
         default_colors: [0x00f4_f0e8, 0x0014_1820, 0x00e0_a030],
-        title: "Recent Sessions".to_owned(),
+        title: "Recent Dojos".to_owned(),
         visible_rows,
         history_generation: 1,
         oldest_available_scrollback_row_id: None,

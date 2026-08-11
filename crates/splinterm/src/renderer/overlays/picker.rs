@@ -760,9 +760,9 @@ pub(crate) fn paint_session_picker_overlay(
         canvas_width,
         canvas_height,
         if layout.mode == SessionPickerPresentationMode::Minimal {
-            "SESSIONS"
+            "DOJOS"
         } else {
-            "RECENT SESSIONS"
+            "RECENT DOJOS"
         },
         ChromeTextStyle::Bold,
         scale_120,

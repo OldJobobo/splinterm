@@ -63,8 +63,9 @@ impl From<NewSplintSide> for SplitSide {
 
 #[derive(Debug, Subcommand)]
 pub(in crate::app) enum Command {
-    /// Choose a recent running logical Dojo or create a fresh terminal.
-    Sessions,
+    /// Choose a recent running Dojo or create a fresh terminal.
+    #[command(alias = "sessions")]
+    Dojos,
     /// Reopen the most recently opened logical Dojo that is still running.
     Reopen,
     /// Render ordered snapshots of one explicitly selected terminal.
@@ -88,7 +89,7 @@ pub(in crate::app) enum Command {
     },
     /// Read only the keyboard-focused graphical Splint ID and current working directory.
     Focus,
-    /// Stop the daemon, back up and clear every session, then restart cleanly.
+    /// Stop the daemon, back up and clear every Lair, then restart cleanly.
     Reset {
         /// Confirm termination of every daemon-owned shell without prompting.
         #[arg(long)]
@@ -96,7 +97,7 @@ pub(in crate::app) enum Command {
     },
     /// List active Lairs without flooding the terminal with exited history.
     List {
-        /// Include exited-only sessions and their complete topology.
+        /// Include exited-only Lairs and their complete topology.
         #[arg(long)]
         all: bool,
     },

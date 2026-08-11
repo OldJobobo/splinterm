@@ -37,8 +37,8 @@ if ! ping; then
 fi
 
 case ${0##*/} in
-  splinterm-sessions)
-    exec splinterm sessions
+  splinterm-dojos | splinterm-sessions)
+    exec splinterm dojos
     ;;
   splinterm-reopen)
     exec splinterm reopen

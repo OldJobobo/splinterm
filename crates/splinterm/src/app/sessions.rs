@@ -180,15 +180,12 @@ async fn select_reopenable_dojo(
         .is_some_and(|entry| entry.reopenable());
     anyhow::ensure!(
         reopenable,
-        "selected session no longer has a fully running pane layout"
+        "selected Dojo no longer has a fully running pane layout"
     );
     Ok(dojo)
 }
 
-pub(in crate::app) async fn run_sessions(
-    config: AppConfig,
-    factory: ConnectionFactory,
-) -> Result<()> {
+pub(in crate::app) async fn run_dojos(config: AppConfig, factory: ConnectionFactory) -> Result<()> {
     let mut connection = factory
         .connect()
         .await
@@ -206,7 +203,7 @@ pub(in crate::app) async fn run_sessions(
     let decision =
         tokio::task::spawn_blocking(move || choose_recent_session(&picker_config, &picker_entries))
             .await
-            .context("session picker task failed")??;
+            .context("Dojo picker task failed")??;
     match decision {
         None => Ok(()),
         Some(SessionPickerDecision::New) => {
@@ -239,7 +236,7 @@ pub(in crate::app) async fn run_sessions(
             }
             let selected = entries
                 .get(index)
-                .context("session picker returned an invalid selection")?;
+                .context("Dojo picker returned an invalid selection")?;
             let dojo = select_reopenable_dojo(&factory, selected.lair_id, selected.dojo_id).await?;
             remember_dojo(&factory, dojo.id);
             run_live_multipane_window(config, dojo, factory).await
@@ -267,7 +264,7 @@ pub(in crate::app) async fn reopen_recent(
                 .iter()
                 .find(|entry| entry.dojo_id == *dojo_id && entry.reopenable())
         })
-        .context("no recent running session; open the session picker with `splinterm sessions`")?;
+        .context("no recent running Dojo; open the Dojo picker with `splinterm dojos`")?;
     let dojo = select_dojo_from(&lairs, (selected.lair_id, selected.dojo_id))?;
     drop(connection);
     remember_dojo(&factory, dojo.id);

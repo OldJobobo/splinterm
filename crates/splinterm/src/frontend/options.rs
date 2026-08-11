@@ -54,7 +54,7 @@ pub struct WindowOptions {
     pub capture_scale: Option<u32>,
     /// Trusted application-owned consent mode. Terminal content cannot enable it.
     pub trusted_consent: Option<TrustedConsentUi>,
-    /// Application-owned recent-session picker. Terminal content cannot enable it.
+    /// Application-owned recent-Dojo picker. Terminal content cannot enable it.
     pub session_picker: Option<SessionPickerUi>,
     /// Trusted authority state rendered in persistent application chrome.
     pub authority: AuthorityStatus,

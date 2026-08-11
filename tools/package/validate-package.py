@@ -22,6 +22,8 @@ REQUIRED = {
     "usr/bin/generate-omarchy-theme.py",
     "usr/bin/splinterd",
     "usr/bin/splinterm",
+    "usr/bin/splinterm-dojo-picker",
+    "usr/bin/splinterm-dojos",
     "usr/bin/splinterm-relay",
     "usr/bin/splinterm-reopen",
     "usr/bin/splinterm-session-picker",
@@ -63,6 +65,8 @@ EXECUTABLES = {
     "usr/bin/generate-omarchy-theme.py",
     "usr/bin/splinterd",
     "usr/bin/splinterm",
+    "usr/bin/splinterm-dojo-picker",
+    "usr/bin/splinterm-dojos",
     "usr/bin/splinterm-mcp",
     "usr/bin/splinterm-relay",
     "usr/bin/splinterm-reopen",
@@ -170,8 +174,10 @@ def validate_launcher(root: Path) -> None:
             "$(must-not-run)",
         ]
 
+        run([str(root / "usr/bin/splinterm-dojos")], env=environment, timeout=10)
+        assert record.read_text(encoding="utf-8").splitlines() == ["dojos"]
         run([str(root / "usr/bin/splinterm-sessions")], env=environment, timeout=10)
-        assert record.read_text(encoding="utf-8").splitlines() == ["sessions"]
+        assert record.read_text(encoding="utf-8").splitlines() == ["dojos"]
         run([str(root / "usr/bin/splinterm-reopen")], env=environment, timeout=10)
         assert record.read_text(encoding="utf-8").splitlines() == ["reopen"]
 
@@ -961,6 +967,7 @@ def main() -> int:
         for relative in EXECUTABLES:
             mode = (root / relative).stat().st_mode
             assert mode & stat.S_IXUSR, f"{relative} is not executable"
+        assert os.readlink(root / "usr/bin/splinterm-session-picker") == "splinterm-dojo-picker"
         for binary in ("splinterm", "splinterd", "splinterm-mcp", "splinterm-relay", "splinterm-pty-child"):
             result = run(["ldd", str(root / "usr/bin" / binary)], capture_output=True)
             assert "not found" not in result.stdout
@@ -974,10 +981,11 @@ def main() -> int:
         with desktop.open(encoding="utf-8") as desktop_file:
             desktop_config.read_file(desktop_file)
         assert desktop_config["Desktop Entry"]["Exec"] == "splinterm-xdg-terminal-exec"
-        assert desktop_config["Desktop Entry"]["Actions"] == "New;Sessions;Reopen;"
+        assert desktop_config["Desktop Entry"]["Actions"] == "New;Dojos;Reopen;"
         assert desktop_config["Desktop Entry"]["Icon"] == "com.oldjobobo.splinterm"
         assert desktop_config["Desktop Action New"]["Exec"] == "splinterm-xdg-terminal-exec"
-        assert desktop_config["Desktop Action Sessions"]["Exec"] == "splinterm-sessions"
+        assert desktop_config["Desktop Action Dojos"]["Name"] == "Recent Dojos"
+        assert desktop_config["Desktop Action Dojos"]["Exec"] == "splinterm-dojos"
         assert desktop_config["Desktop Action Reopen"]["Exec"] == "splinterm-reopen"
 
         pkginfo = package_metadata(package)
@@ -996,12 +1004,12 @@ def main() -> int:
         validate_headless_runtime(
             root / "usr/bin/splinterd",
             root / "usr/bin/splinterm",
-            root / "usr/bin/splinterm-session-picker",
+            root / "usr/bin/splinterm-dojo-picker",
         )
         validate_picker_runtime(
             root / "usr/bin/splinterd",
             root / "usr/bin/splinterm",
-            root / "usr/bin/splinterm-session-picker",
+            root / "usr/bin/splinterm-dojo-picker",
         )
         validate_relay_runtime(
             root / "usr/bin/splinterd",

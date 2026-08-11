@@ -280,10 +280,10 @@ impl KeyboardHandler for App {
                         .is_err()
                     {
                         self.modal.session_picker_requested = false;
-                        eprintln!("splinterm session picker request failed");
+                        eprintln!("splinterm Dojo picker request failed");
                     }
                 } else {
-                    eprintln!("splinterm session picker is unavailable for this attachment");
+                    eprintln!("splinterm Dojo picker is unavailable for this attachment");
                 }
             }
             return;

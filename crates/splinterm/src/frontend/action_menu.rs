@@ -586,7 +586,7 @@ pub(crate) enum BuiltInCommandId {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CommandCategory {
-    Sessions,
+    Dojos,
     Tabs,
     Panes,
     History,
@@ -597,7 +597,7 @@ pub(crate) enum CommandCategory {
 impl CommandCategory {
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Sessions => "SESSION",
+            Self::Dojos => "DOJO",
             Self::Tabs => "TAB",
             Self::Panes => "PANE",
             Self::History => "HISTORY",
@@ -710,16 +710,16 @@ impl BuiltInCommandDescriptor {
 pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 31] = [
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::RecentSessions,
-        category: CommandCategory::Sessions,
-        title: "Open recent sessions",
-        keywords: &["open", "recent", "session", "lair", "dojo", "reopen"],
+        category: CommandCategory::Dojos,
+        title: "Open recent Dojos",
+        keywords: &["open", "recent", "dojo", "session", "lair", "reopen"],
         shortcut_action: Some(ActionId::RecentSessions),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::NewSession,
-        category: CommandCategory::Sessions,
-        title: "New session",
-        keywords: &["new", "session", "lair", "window"],
+        category: CommandCategory::Dojos,
+        title: "New terminal",
+        keywords: &["new", "terminal", "dojo", "session", "lair", "window"],
         shortcut_action: Some(ActionId::NewSession),
     },
     BuiltInCommandDescriptor {

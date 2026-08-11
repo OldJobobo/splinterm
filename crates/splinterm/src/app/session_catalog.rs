@@ -100,7 +100,7 @@ pub(in crate::app) fn select_dojo_from(
 pub(in crate::app) fn recent_dojo_ids(factory: &ConnectionFactory) -> Vec<DojoId> {
     RecentDojos::discover_namespace(&factory.capabilities().recency_namespace).map_or_else(
         |error| {
-            eprintln!("splinterm recent sessions unavailable: {error:#}");
+            eprintln!("splinterm recent Dojos unavailable: {error:#}");
             Vec::new()
         },
         |store| store.load(),
@@ -112,7 +112,7 @@ pub(in crate::app) fn remember_dojo(factory: &ConnectionFactory, dojo_id: DojoId
         .and_then(|store| store.record(dojo_id))
     {
         Ok(()) => {}
-        Err(error) => eprintln!("splinterm could not update recent sessions: {error:#}"),
+        Err(error) => eprintln!("splinterm could not update recent Dojos: {error:#}"),
     }
 }
 
