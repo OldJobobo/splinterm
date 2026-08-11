@@ -573,6 +573,7 @@ pub(crate) enum BuiltInCommandId {
     PageUp,
     PageDown,
     ReturnToLive,
+    ToggleTabStrip,
     ZoomIn,
     ZoomOut,
     ResetZoom,
@@ -674,6 +675,7 @@ pub(crate) enum BuiltInCommandDispatch {
     Topology(WindowTopologyCommand),
     Focus(SplintId),
     Zoom(CommandZoomAction),
+    ToggleTabStrip,
     History {
         target: SplintId,
         action: CommandHistoryAction,
@@ -707,7 +709,7 @@ impl BuiltInCommandDescriptor {
     }
 }
 
-pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 31] = [
+pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 32] = [
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::RecentSessions,
         category: CommandCategory::Dojos,
@@ -863,6 +865,13 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 31] = [
         shortcut_action: Some(ActionId::ReturnToLive),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ToggleTabStrip,
+        category: CommandCategory::View,
+        title: "Toggle Dojo tab strip",
+        keywords: &["toggle", "show", "hide", "dojo", "tabs", "strip", "view"],
+        shortcut_action: Some(ActionId::ToggleTabStrip),
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::ZoomIn,
         category: CommandCategory::View,
         title: "Zoom in",
@@ -973,6 +982,7 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         | BuiltInCommandId::SearchScrollback
         | BuiltInCommandId::PageUp
         | BuiltInCommandId::PageDown
+        | BuiltInCommandId::ToggleTabStrip
         | BuiltInCommandId::ZoomIn
         | BuiltInCommandId::ZoomOut
         | BuiltInCommandId::ResetZoom => true,
@@ -1283,6 +1293,7 @@ pub(crate) fn command_dispatch(
             target: context.splint_id,
             action: CommandHistoryAction::ReturnToLive,
         },
+        BuiltInCommandId::ToggleTabStrip => BuiltInCommandDispatch::ToggleTabStrip,
         BuiltInCommandId::ZoomIn => BuiltInCommandDispatch::Zoom(CommandZoomAction::Increase),
         BuiltInCommandId::ZoomOut => BuiltInCommandDispatch::Zoom(CommandZoomAction::Decrease),
         BuiltInCommandId::ResetZoom => BuiltInCommandDispatch::Zoom(CommandZoomAction::Reset),
@@ -1527,6 +1538,7 @@ mod tests {
         assert_eq!(
             palette.filtered,
             vec![
+                BuiltInCommandId::ToggleTabStrip,
                 BuiltInCommandId::ZoomIn,
                 BuiltInCommandId::ZoomOut,
                 BuiltInCommandId::ResetZoom
@@ -1660,8 +1672,8 @@ mod tests {
             .iter()
             .map(|descriptor| descriptor.id)
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(BUILT_IN_COMMANDS.len(), 31);
-        assert_eq!(ids.len(), 31);
+        assert_eq!(BUILT_IN_COMMANDS.len(), 32);
+        assert_eq!(ids.len(), 32);
         let mut palette = palette();
         assert!(palette.append_text("control"));
         assert_eq!(palette.filtered().len(), 6);
@@ -1770,6 +1782,10 @@ mod tests {
                     target: context.splint_id,
                 }
             ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::ToggleTabStrip, &context),
+            Some(BuiltInCommandDispatch::ToggleTabStrip)
         );
         assert_eq!(
             command_dispatch(BuiltInCommandId::ZoomOut, &context),

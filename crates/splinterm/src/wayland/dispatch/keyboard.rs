@@ -401,6 +401,18 @@ impl KeyboardHandler for App {
                 }
                 return;
             }
+            Some(ActionId::ToggleTabStrip) => {
+                match self.toggle_tab_strip() {
+                    Ok(true) if self.surface.configured => {
+                        if let Err(error) = self.schedule_draw(queue_handle) {
+                            self.scheduling.fail(error);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.scheduling.fail(error),
+                }
+                return;
+            }
             _ => {}
         }
         if self.tab_state.topology_commands.is_some()

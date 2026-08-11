@@ -53,9 +53,9 @@ action registry. This avoids claiming arbitrary `foot.ini` compatibility.
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste, Ctrl+Shift+S
 to open the native Recent Dojos picker, and Ctrl+Shift+P to open the searchable
 command palette inside any focused managed terminal Window. The palette groups
-31 built-ins across Dojos, tabs, panes, history, view, and control. In addition
-to recent Dojos, tab navigation, splits, pane focus, closing, and font zoom, it
-can create a terminal, rename the current tab, detach
+32 built-ins across Dojos, tabs, panes, history, view, and control. In addition
+to recent Dojos, tab navigation, splits, pane focus, closing, tab-strip toggling,
+and font zoom, it can create a terminal, rename the current tab, detach
 other tabs, open confirmed Dojo termination, resize a pane, search/page
 scrollback, return to live output, request/release/force control, revoke captured
 access grants, and accept or deny a captured pending transfer. Force control is
@@ -107,8 +107,9 @@ available names. The Omarchy profile provides `Ctrl+Space` and `Ctrl+B` prefixes
 its direct and prefixed pane controls, exact five-cell directional resize,
 client-local pane zoom, Dojo/Lair creation and selection, numeric and reordered
 Window-local tabs, stable-ID trusted choosers, confirmed rename/termination,
-Lair navigation, clean Window detach, a generated trusted `Prefix+?` help
-overlay, vi copy mode, and transactional config reload. New Dojos and Lairs
+Lair navigation, clean Window detach, a per-Window `Prefix+B` Dojo tab-strip
+toggle, a generated trusted `Prefix+?` help overlay, vi copy mode, and
+transactional config reload. New Dojos and Lairs
 inherit the focused Splint cwd.
 
 `Prefix+[` enters copy mode at the live cursor or current history viewport.
@@ -177,11 +178,12 @@ pane.close                pane.resize-smaller
 pane.resize-larger        pane.resize-left-5
 pane.resize-right-5       pane.resize-up-5
 pane.resize-down-5        pane.zoom-toggle
-app.binding-help          app.config-reload
+view.toggle-tab-strip     app.binding-help
+app.config-reload
 copy-mode.enter           terminal.send-prefix      history.search
 history.page-up           history.page-down
 history.return-live       view.zoom-in
-view.zoom-out              view.zoom-reset
+view.zoom-out             view.zoom-reset
 control.request           control.release
 control.force             control.accept-transfer
 control.deny-transfer     access.revoke-all

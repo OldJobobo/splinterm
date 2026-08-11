@@ -921,6 +921,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
             active_identity: initial_identity,
             managed_tabs,
+            tab_strip_visible: true,
             tab_strip_layout: None,
             tab_strip_pressed: None,
             tab_label_cache: HashMap::new(),
@@ -2590,13 +2591,21 @@ fn pending_remote_snapshot(splint_id: SplintId, columns: usize, rows: usize) -> 
     }
 }
 
+fn tab_strip_height(managed_tabs: bool, visible: bool, surface_height: u32) -> u32 {
+    if managed_tabs && visible {
+        TAB_STRIP_LOGICAL_HEIGHT.min(surface_height)
+    } else {
+        0
+    }
+}
+
 impl App {
     fn content_rect(&self) -> Rect {
-        let y = if self.tab_state.managed_tabs {
-            TAB_STRIP_LOGICAL_HEIGHT.min(self.surface.logical_height)
-        } else {
-            0
-        };
+        let y = tab_strip_height(
+            self.tab_state.managed_tabs,
+            self.tab_state.tab_strip_visible,
+            self.surface.logical_height,
+        );
         Rect {
             x: 0,
             y,
@@ -4509,6 +4518,12 @@ impl App {
                     queue_handle,
                 )
                 .map(|_| ()),
+            BuiltInCommandDispatch::ToggleTabStrip => (|| -> Result<()> {
+                if self.toggle_tab_strip()? && self.surface.configured {
+                    self.schedule_draw(queue_handle)?;
+                }
+                Ok(())
+            })(),
             BuiltInCommandDispatch::History { target, action } => (|| -> Result<()> {
                 anyhow::ensure!(
                     self.panes.focused_splint() == Some(target),
@@ -5125,6 +5140,27 @@ impl App {
             )?;
         }
         Ok(rebuilt)
+    }
+
+    fn toggle_tab_strip(&mut self) -> Result<bool> {
+        if !self.tab_state.managed_tabs {
+            return Ok(false);
+        }
+        self.tab_state.tab_strip_visible = !self.tab_state.tab_strip_visible;
+        self.tab_state.tab_strip_layout = None;
+        if !self.tab_state.tab_strip_visible
+            && let Some((button, _)) = self.tab_state.tab_strip_pressed.take()
+        {
+            self.input
+                .pressed_buttons
+                .insert(button, PressOwner::Ignored);
+        }
+        self.presentation.full_redraw = true;
+        self.update_ime_cursor_rectangle();
+        if self.surface.configured {
+            self.emit_resize()?;
+        }
+        Ok(true)
     }
 
     fn apply_font_zoom(
@@ -8684,6 +8720,20 @@ mod tests {
             .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
+    }
+
+    #[test]
+    fn hidden_tab_strip_reclaims_managed_window_height() {
+        assert_eq!(
+            tab_strip_height(true, true, TAB_STRIP_LOGICAL_HEIGHT + 20),
+            TAB_STRIP_LOGICAL_HEIGHT
+        );
+        assert_eq!(
+            tab_strip_height(true, true, TAB_STRIP_LOGICAL_HEIGHT - 1),
+            TAB_STRIP_LOGICAL_HEIGHT - 1
+        );
+        assert_eq!(tab_strip_height(true, false, 200), 0);
+        assert_eq!(tab_strip_height(false, true, 200), 0);
     }
 
     #[test]

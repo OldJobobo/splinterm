@@ -56,7 +56,7 @@ action = "app.command-palette"
     assert!(checked.status.success(), "{:?}", checked.stderr);
     let stdout = String::from_utf8(checked.stdout).unwrap();
     assert!(stdout.contains("Configuration OK"));
-    assert!(stdout.contains("Keymap   splinterm (31 bindings)"));
+    assert!(stdout.contains("Keymap   splinterm (32 bindings)"));
     assert!(stdout.contains("Prefix timeout   750 ms"));
 
     let shown = output(

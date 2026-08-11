@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn keymap_output_is_grouped_bounded_and_source_aware() {
         let rendered = render_keymap(&ResolvedKeymap::default());
-        assert!(rendered.starts_with("Keymap  splinterm\nBindings  31\n"));
+        assert!(rendered.starts_with("Keymap  splinterm\nBindings  32\n"));
         assert!(rendered.contains("Ctrl+Shift+P"));
         assert!(rendered.contains("app.command-palette"));
         assert!(rendered.contains("built-in profile splinterm"));

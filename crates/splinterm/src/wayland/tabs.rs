@@ -319,6 +319,7 @@ pub(super) struct TabsState {
     pub(super) tabs: WindowTabSet<Option<DojoTabView>>,
     pub(super) active_identity: WindowDojoIdentity,
     pub(super) managed_tabs: bool,
+    pub(super) tab_strip_visible: bool,
     pub(super) tab_strip_layout: Option<TabStripLayout>,
     pub(super) tab_strip_pressed: Option<(u32, TabHitTarget)>,
     pub(super) tab_label_cache: HashMap<DojoId, CachedFrameTitle>,
@@ -369,7 +370,7 @@ impl TabsState {
 
 impl App {
     pub(super) fn current_tab_strip_layout(&self) -> Option<TabStripLayout> {
-        if !self.tab_state.managed_tabs {
+        if !self.tab_state.managed_tabs || !self.tab_state.tab_strip_visible {
             return None;
         }
         let ids = self

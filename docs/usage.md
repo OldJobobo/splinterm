@@ -66,13 +66,16 @@ A Window holds an ordered, client-local set of distinct Dojo tabs:
 - `Ctrl+Shift+D` creates a Dojo in the active tab's Lair and opens it;
 - `Ctrl+Tab` and `Ctrl+Shift+Tab` move through tabs;
 - `Ctrl+Shift+Q` detaches the active tab and closes the Window if it was last;
+- `Ctrl+Shift+B` toggles the Dojo tab strip without changing the tab set;
 - `Ctrl+Shift+S` opens Recent Dojos inside the same Window;
 - choosing an already-open Dojo activates its tab rather than duplicating it;
 - choosing another running Dojo adds it without changing daemon topology; and
 - choosing New Terminal creates a fresh Lair and opens its initial Dojo.
 
 The trusted tab strip provides activation, a close target, and a `+` picker
-action. Right-clicking a visible tab opens a tab-targeted menu for Rename Tab,
+action. It is visible by default; hiding it is local to the current Window,
+reclaims its height for the pane grid, and does not persist or reappear when a
+new tab opens. Right-clicking a visible tab opens a tab-targeted menu for Rename Tab,
 Activate Tab, New Dojo, detach-only Close Tab, detach-only Close Other Tabs, and
 confirmed Terminate Dojo. Opening the menu does not first activate its tab.
 
@@ -96,6 +99,7 @@ The built-in application controls are:
 | New Dojo tab | `Ctrl+Shift+D` |
 | Previous/next Dojo tab | `Ctrl+Shift+Tab` / `Ctrl+Tab` |
 | Detach active tab | `Ctrl+Shift+Q` |
+| Toggle Dojo tab strip | `Ctrl+Shift+B` (`Prefix+B` in `omarchy-tmux`) |
 | Search scrollback | `Ctrl+Shift+F` |
 | Page history | `Shift+PageUp` / `Shift+PageDown` |
 | Return to live output | `Shift+End` |
@@ -119,8 +123,9 @@ See [Configuration](configuration.md#keymap-configuration) for the strict built-
 profile and TOML overlay. Configuration can bind only closed application actions;
 it cannot register shell commands or callbacks.
 
-With the `omarchy-tmux` profile, `Prefix+?` opens trusted read-only help generated
-from the resolved keymap, while `Prefix+[` enters client-local vi copy mode.
+With the `omarchy-tmux` profile, `Prefix+B` toggles the Dojo tab strip,
+`Prefix+?` opens trusted read-only help generated from the resolved keymap, and
+`Prefix+[` enters client-local vi copy mode.
 Move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown; press `v` to begin a
 selection, `y` to publish it to the Wayland clipboard and exit, or Escape to
 cancel. Copy mode never forwards these keys, pointer input, paste, or IME text to

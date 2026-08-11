@@ -58,6 +58,7 @@ pub enum ActionId {
     ResizePaneUpFive,
     ResizePaneDownFive,
     TogglePaneZoom,
+    ToggleTabStrip,
     BindingHelp,
     CopyModeEnter,
     ConfigReload,
@@ -122,6 +123,7 @@ impl ActionId {
         Self::ResizePaneUpFive,
         Self::ResizePaneDownFive,
         Self::TogglePaneZoom,
+        Self::ToggleTabStrip,
         Self::BindingHelp,
         Self::CopyModeEnter,
         Self::ConfigReload,
@@ -188,6 +190,7 @@ impl ActionId {
             Self::ResizePaneUpFive => "pane.resize-up-5",
             Self::ResizePaneDownFive => "pane.resize-down-5",
             Self::TogglePaneZoom => "pane.zoom-toggle",
+            Self::ToggleTabStrip => "view.toggle-tab-strip",
             Self::BindingHelp => "app.binding-help",
             Self::CopyModeEnter => "copy-mode.enter",
             Self::ConfigReload => "app.config-reload",
@@ -755,6 +758,13 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                 ),
                 built_in_binding(
                     CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Character('b')),
+                    KeyIdentity::Character('b'),
+                    ActionId::ToggleTabStrip,
+                    "Ctrl+Shift+B",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
                     normalized(true, true, KeyIdentity::Character('d')),
                     KeyIdentity::Character('d'),
                     ActionId::NewDojo,
@@ -1005,6 +1015,11 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                         )),
                         ActionId::ClipboardPaste,
                         "Super+V",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, false, KeyIdentity::Character('b')),
+                        ActionId::ToggleTabStrip,
+                        "Prefix B",
                     ),
                     omarchy_binding(
                         prefixed(false, false, KeyIdentity::Character('q')),
@@ -1547,6 +1562,10 @@ mod tests {
                 Some(binding.action)
             );
         }
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::ToggleTabStrip),
+            "Ctrl+Shift+B"
+        );
         for (index, left) in keymap.bindings().iter().enumerate() {
             for right in &keymap.bindings()[index + 1..] {
                 if std::mem::discriminant(&left.sequence) == std::mem::discriminant(&right.sequence)
@@ -1800,6 +1819,10 @@ action = "clipboard.paste"
                 }
             ),
             Some(ActionId::ResizePaneLeftFive)
+        );
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::ToggleTabStrip),
+            "Prefix B"
         );
         assert_eq!(keymap.primary_shortcut(ActionId::BindingHelp), "Prefix ?");
         assert_eq!(keymap.primary_shortcut(ActionId::CopyModeEnter), "Prefix [");

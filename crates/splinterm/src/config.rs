@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(defaults.font_size, FontSize::Pixels(14.0));
         assert_eq!(defaults.resize_delay_ms, 100);
         assert_eq!(defaults.keymap_profile, KeymapProfile::Splinterm);
-        assert_eq!(defaults.keymap.bindings().len(), 31);
+        assert_eq!(defaults.keymap.bindings().len(), 32);
         assert_eq!(defaults.prefix_timeout_ms, 1_000);
         assert_eq!(defaults.preset_path, None);
         assert!(
@@ -1066,7 +1066,7 @@ mod tests {
             parse("[key-bindings]\nprofile=splinterm\nprefix-timeout-ms=750\nunknown=value\n")
                 .unwrap();
         assert_eq!(loaded.config.keymap.profile(), KeymapProfile::Splinterm);
-        assert_eq!(loaded.config.keymap.bindings().len(), 31);
+        assert_eq!(loaded.config.keymap.bindings().len(), 32);
         assert_eq!(loaded.config.prefix_timeout_ms, 750);
         assert_eq!(loaded.diagnostics.len(), 1);
         assert!(loaded.diagnostics[0].contains("key-bindings.unknown"));
