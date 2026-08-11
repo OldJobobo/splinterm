@@ -46,7 +46,7 @@ jobs:
       - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh
       - run: python -m unittest tools/package/test_edge_manifest.py tools/package/test_edge_workflow.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo test --workspace -- --test-threads=1
       - run: python tools/foot-oracle/check-provenance.py --portable
       - run: python tools/foot-oracle/validate-fixtures.py
       - run: python tools/foot-oracle/validate-slice3-fixtures.py
