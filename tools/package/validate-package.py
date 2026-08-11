@@ -32,14 +32,20 @@ REQUIRED = {
     "usr/share/applications/com.oldjobobo.splinterm.desktop",
     "usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg",
     "usr/share/metainfo/com.oldjobobo.splinterm.metainfo.xml",
+    "usr/share/doc/splinterm/README.md",
     "usr/share/doc/splinterm/automation.md",
+    "usr/share/doc/splinterm/cli.md",
     "usr/share/doc/splinterm/config.ini",
     "usr/share/doc/splinterm/configuration.md",
     "usr/share/doc/splinterm/headless.md",
     "usr/share/doc/splinterm/integrations.md",
     "usr/share/doc/splinterm/images.md",
+    "usr/share/doc/splinterm/omarchy-tmux-reference.md",
     "usr/share/doc/splinterm/packaging.md",
+    "usr/share/doc/splinterm/presets.example.toml",
+    "usr/share/doc/splinterm/presets.md",
     "usr/share/doc/splinterm/remote.md",
+    "usr/share/doc/splinterm/usage.md",
     "usr/share/doc/splinterm/theme.json",
     "usr/share/doc/splinterm/xdg-terminals.list",
     "usr/share/licenses/splinterm/LICENSE",
@@ -873,6 +879,57 @@ def validate_theme_generator(root: Path) -> None:
         assert len(generated["ansi"]) == 16
 
 
+def validate_packaged_omarchy_workflows(root: Path) -> None:
+    binary = root / "usr/bin/splinterm"
+    docs = root / "usr/share/doc/splinterm"
+    with tempfile.TemporaryDirectory(prefix="splinterm-package-omarchy-") as directory:
+        temporary = Path(directory)
+        config = temporary / "config.ini"
+        config.write_text("[key-bindings]\nprofile=omarchy-tmux\n", encoding="utf-8")
+        environment = os.environ.copy()
+        environment.update({
+            "HOME": str(temporary),
+            "XDG_CONFIG_HOME": str(temporary / "config"),
+            "XDG_STATE_HOME": str(temporary / "state"),
+            "XDG_RUNTIME_DIR": str(temporary / "runtime"),
+            "SPLINTERM_CONFIG": str(config),
+        })
+        (temporary / "runtime").mkdir(mode=0o700)
+
+        keymap = run(
+            [str(binary), "keymap", "show"],
+            env=environment,
+            capture_output=True,
+        ).stdout
+        assert "Prefix [" in keymap
+        assert "copy-mode.enter" in keymap
+        assert "Prefix ?" in keymap
+        assert "app.binding-help" in keymap
+
+        presets = run(
+            [str(binary), "preset", "list"],
+            env=environment,
+            capture_output=True,
+        ).stdout
+        for name in ("omarchy.t", "omarchy.tdl", "omarchy.tds", "omarchy.tdlm", "omarchy.tsl"):
+            assert name in presets
+        run(
+            [str(binary), "preset", "check", str(docs / "presets.example.toml")],
+            env=environment,
+            capture_output=True,
+        )
+
+        shell = run(
+            [str(binary), "preset", "shell-init", "omarchy", "--shell", "bash"],
+            env=environment,
+            capture_output=True,
+        ).stdout
+        for function in ("s", "sdl", "sds", "sdlm", "ssl"):
+            assert f"{function}()" in shell
+        assert "eval " not in shell
+        assert "sh -c" not in shell
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
@@ -953,6 +1010,7 @@ def main() -> int:
         )
         validate_theme_generator(root)
         validate_launcher(root)
+        validate_packaged_omarchy_workflows(root)
         run([sys.executable, str(Path(__file__).with_name("validate-mcp-package.py")), str(root)], timeout=180)
 
     print(f"Package validation passed: {package} + {mcp_package}")

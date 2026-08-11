@@ -110,8 +110,10 @@ versioned immutable source URL and checksum.
   `/usr/bin/splinterm-session-picker` reference client, and the optional
   `/usr/bin/generate-omarchy-theme.py` JSON exporter;
 - desktop entry, AppStream metadata, scalable icon, and user service;
-- headless lifecycle/policy guidance, the exact terminal-image compatibility
-  matrix, and integration snippets under `/usr/share/doc/splinterm/`; and
+- the release README, CLI/usage/configuration guides, built-in Omarchy keymap
+  documentation, preset guide and example schema, optional shell-integration
+  instructions, headless lifecycle/policy guidance, terminal-image matrix, and
+  integration snippets under `/usr/share/doc/splinterm/`; and
 - MIT/project third-party notices under `/usr/share/licenses/splinterm/`.
 
 The package does not modify a user's home, enable a service or lingering,
@@ -171,6 +173,14 @@ tools/package/upgrade-local-package.sh --build
 The command uses `sudo` because it is intended to run in an interactive
 terminal, matching Omarchy's privilege convention. Pass `--yes` only for an
 already-approved unattended invocation.
+
+Trusted graphical authority requires `/usr/bin/splinterm` to match the device
+and inode of the client sibling adjacent to the running `/usr/bin/splinterd`.
+After an upgrade replaces that sibling, close and reopen every existing
+Splinterm Window: an already-running client retains the old inode and will be
+rejected as unauthorized. Verify the new daemon/client sibling identity before
+launching graphical acceptance; graphical testing remains a separately approved,
+guarded operation.
 
 The equivalent manual lifecycle is:
 

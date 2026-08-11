@@ -118,6 +118,21 @@ See [Configuration](configuration.md#keymap-configuration) for the strict built-
 profile and TOML overlay. Configuration can bind only closed application actions;
 it cannot register shell commands or callbacks.
 
+With the `omarchy-tmux` profile, `Prefix+?` opens trusted read-only help generated
+from the resolved keymap, while `Prefix+[` enters client-local vi copy mode.
+Move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown; press `v` to begin a
+selection, `y` to publish it to the Wayland clipboard and exit, or Escape to
+cancel. Copy mode never forwards these keys, pointer input, paste, or IME text to
+the terminal application. Outside copy mode, `Super+C/V` provide terminal
+copy/paste. Splinterm-owned command-palette, search, and rename fields also offer
+bounded local selection, cut, paste, and undo; terminal `Super+X/Z` remain owned
+by the running application.
+
+The same profile ships atomic `omarchy.t`, `omarchy.tdl`, `omarchy.tds`,
+`omarchy.tdlm`, and `omarchy.tsl` presets. Optional Bash functions use the
+separate `s`, `sdl`, `sds`, `sdlm`, and `ssl` names and install only through an
+explicit collision-safe workflow. See [Presets](presets.md) for exact behavior.
+
 ## Pointer, selection, clipboard, and URLs
 
 - Click a pane to focus it; click a tab to activate it.
@@ -185,7 +200,10 @@ for intent.
 ## Reset and daemon lifetime
 
 The daemon owns all running shells. Stopping it, installing a private-protocol-
-incompatible version, or resetting it ends those processes. To back up and clear
+incompatible version, or resetting it ends those processes. A package upgrade
+also replaces the trusted client inode: close and reopen every existing
+Splinterm Window after replacement so it uses the exact client sibling adjacent
+to the running daemon. To back up and clear
 every session in one guarded workflow:
 
 ```bash

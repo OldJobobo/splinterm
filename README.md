@@ -43,6 +43,8 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Native Wayland terminal | Implemented and validated |
 | Persistent sessions and explicit restore | Implemented and validated |
 | Pane layouts and multiple Dojos | Implemented and validated |
+| Omarchy keymap, presets, and optional Bash helpers | Implemented and validated |
+| Vi copy mode and context-local desktop editing | Implemented and validated |
 | Window-local Dojo tabs | Implemented and validated |
 | Multi-client controller transfer | Implemented and validated |
 | JSON/NDJSON automation | Implemented and validated |
@@ -73,7 +75,7 @@ To build and package the current committed checkout locally:
 
 Add `--check` to run the complete package test suite. The installer deliberately packages a clean committed `HEAD`; it does not include uncommitted worktree changes.
 
-Installation does **not** change your default terminal, edit Omarchy or Hyprland configuration, enable systemd user lingering, or install the optional MCP package on a fresh system.
+Installation does **not** change your default terminal, edit Omarchy or Hyprland configuration, enable systemd user lingering, or install the optional MCP package on a fresh system. Trusted graphical authority requires the client to be the exact device/inode sibling adjacent to the running `/usr/bin/splinterd`. After an upgrade replaces `/usr/bin/splinterm`, close and reopen every existing Splinterm window: an already-running client retains the old inode and is no longer the trusted sibling.
 
 Read the complete [installation guide](https://splinterm.com/docs/install/).
 
@@ -108,6 +110,16 @@ Inside a managed Splinterm window, these controls cover the essential workflow:
 | Detach active tab | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Q</kbd> |
 | Search scrollback | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> |
 | Copy / paste | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> |
+
+The optional `omarchy-tmux` profile adds familiar `Ctrl+Space` / `Ctrl+B`
+prefixes, `Prefix+?` resolved-key help, and `Prefix+[` vi copy mode. In copy
+mode, navigate with vi keys or arrows, press `v` to select, `y` to publish to the
+Wayland clipboard, or Escape to cancel. Outside copy mode, `Super+C/V` provide
+terminal copy/paste; Splinterm-owned fields additionally provide bounded local
+selection, cut, and undo without claiming universal terminal `Super+X/Z`.
+Packaged atomic Dojo presets and optional collision-safe Bash helpers cover the
+standard Omarchy `t`, `tdl`, `tds`, `tdlm`, and `tsl` workflows under
+Splinterm's separate `s*` shell namespace.
 
 Reopening attaches to processes that are still running. Starting an exited process again from saved launch metadata is an explicit **restore** operation.
 
