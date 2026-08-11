@@ -142,7 +142,7 @@ The following table summarizes the current repository state. “Validated” mea
 | Lair/Dojo/Splint topology and persistent multiplexing | Implemented and validated. |
 | Multi-pane graphical layouts | Implemented and validated. |
 | Window-local Dojo tabs | Implemented; a Window supports up to 32 distinct Dojo attachments and may mix Lairs. |
-| Recent Sessions picker and reopen-last workflow | Implemented. |
+| Recent Dojos picker and reopen-last workflow | Implemented. |
 | Searchable 31-command palette and trusted tab context menu | Implemented, packaged, installed, reviewed, and validated by Plan 0025. |
 | Multi-client observation and exclusive control transfer | Implemented and validated. |
 | Scrollback, literal search, selection, clipboard, IME, and scaling | Implemented within the documented contracts. |
@@ -236,7 +236,7 @@ Priority meanings:
 | `FR-UI-03` | P1 | A Window must support an ordered, non-persistent set of no more than 32 distinct Dojo tabs, including Dojos from multiple Lairs. | Implemented |
 | `FR-UI-04` | P0 | Closing a tab must detach only the Window-local reference; it must not close the Dojo or terminate its Splints. | Implemented |
 | `FR-UI-05` | P1 | Hidden tabs must remain synchronized without painting, blinking, reporting focus, resizing, or owning a controller. | Implemented |
-| `FR-UI-06` | P1 | Provide trusted Recent Sessions, command palette, tab menu, rename, confirmation, search, consent, and control surfaces that isolate terminal input while active. | Implemented |
+| `FR-UI-06` | P1 | Provide trusted Recent Dojos, command palette, tab menu, rename, confirmation, search, consent, and control surfaces that isolate terminal input while active. | Implemented |
 | `FR-UI-07` | P0 | Destructive actions must be explicit, exactly targeted, and confirmed where documented; cancellation must be the safe default. | Implemented |
 | `FR-UI-08` | P1 | Modal actions must capture exact resource identities and availability when opened and must never retarget because asynchronous state changes. | Implemented |
 | `FR-UI-09` | P1 | Native application controls must remain usable without exposing shell-, plugin-, terminal-content-, or automation-provided trusted commands. | Implemented |
@@ -366,7 +366,7 @@ A supported user should be able to:
 2. launch a fresh terminal through the desktop or XDG path;
 3. create panes and Dojos using discoverable native controls;
 4. close or detach the graphical view without ending the shell;
-5. reopen the running Dojo from Recent Sessions or reopen-last; and
+5. reopen the running Dojo from Recent Dojos or reopen-last; and
 6. understand when an operation will terminate a process or lose state.
 
 ### 13.2 Interaction rules

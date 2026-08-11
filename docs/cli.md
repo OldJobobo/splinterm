@@ -32,7 +32,7 @@ schema major 2 unless a later checked-in contract is explicitly documented.
 ## First human workflows
 
 ```bash
-splinterm sessions                 # trusted recent-session picker
+splinterm dojos                    # trusted recent-Dojo picker
 splinterm reopen                   # most recent still-running Dojo
 splinterm list                     # active Lairs
 splinterm list --all               # include exited-only history
@@ -41,7 +41,8 @@ splinterm launch --splint-id ID    # attach an exact Splint
 splinterm window --lair-id L --dojo-id D
 ```
 
-`sessions`, `reopen`, `window`, and `launch` are graphical human workflows. A
+`dojos`, `reopen`, `window`, and `launch` are graphical human workflows.
+`sessions` remains a compatibility alias for `dojos`. A
 Window is disposable and may hold multiple client-local Dojo tabs; these commands
 do not make compositor operations part of the machine API.
 
@@ -241,7 +242,7 @@ or CLI operations to that configured endpoint:
 
 ```bash
 splinterm remote check server
-splinterm --remote server sessions
+splinterm --remote server dojos
 splinterm --remote server --output json topology
 ```
 

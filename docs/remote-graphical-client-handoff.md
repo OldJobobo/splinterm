@@ -13,7 +13,7 @@ SSH stdio relay.
 Example UX:
 
 ```bash
-splinterm --remote wintermute sessions
+splinterm --remote wintermute dojos
 splinterm --remote wintermute window --lair-id LAIR_ID --dojo-id DOJO_ID
 ```
 
@@ -49,7 +49,7 @@ When a remote profile is selected, Splinterm must:
 - require non-terminal SSH operation;
 - execute the fixed remote command `/usr/bin/splinterm relay --stdio`;
 - negotiate the existing private Splinterm protocol over child stdin/stdout;
-- show the remote session picker and open selected remote Dojos;
+- show the remote Dojo picker and open selected remote Dojos;
 - render terminal text snapshots and ordered updates;
 - support panes, tabs, input, resize, scrollback, search, and normal controller
   ownership when authorized;
@@ -157,7 +157,7 @@ Update:
 - `docs/configuration.md`
   - document the strict remote-profile schema.
 - README or user-facing CLI documentation
-  - include the basic remote sessions/window workflow.
+  - include the basic remote Dojo/window workflow.
 
 Do not claim the feature is implemented or validated until code, evidence, and
 independent review exist.
@@ -166,8 +166,8 @@ independent review exist.
 
 The feature is complete when:
 
-1. `splinterm --remote PROFILE sessions` presents sessions from the selected
-   remote daemon.
+1. `splinterm --remote PROFILE dojos` presents Dojos from the selected remote
+   daemon.
 2. A selected remote Dojo opens in the local native Wayland client.
 3. Text output, panes, tabs, input, resize, scrollback, search, and controller
    ownership work through the SSH relay within granted policy.

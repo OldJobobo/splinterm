@@ -140,14 +140,14 @@ Select one profile globally to bind the complete native client lifetime to it:
 
 ```text
 splinterm --remote PROFILE
-splinterm --remote PROFILE sessions
+splinterm --remote PROFILE dojos
 splinterm --remote PROFILE reopen
 splinterm --remote PROFILE window --lair-id LAIR_ID --dojo-id DOJO_ID
 splinterm --remote PROFILE launch [--working-directory REMOTE_PATH] [-- ARGV...]
 ```
 
 Omitting the subcommand after `--remote PROFILE` opens that endpoint's Recent
-Sessions picker. Session discovery, tabs, pane snapshots and ordered updates,
+Dojo picker. Dojo discovery, tabs, pane snapshots and ordered updates,
 resynchronization, scrollback/search, ordinary requested control/input/resize,
 and ordinary lifecycle actions all use logical channels on the same SSH child.
 New Lairs, Dojos, and Splints may be created, attached, controlled, and rendered

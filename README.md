@@ -90,19 +90,21 @@ splinterm-xdg-terminal-exec
 
 A commandless desktop/XDG launch creates a persistent Lair with one Dojo and one Splint. Closing its window detaches the graphical client while `splinterd` keeps the session running. When another application asks the XDG terminal to host a command, Splinterm instead creates a transient client-bound Lair: command exit or owner-window disconnect terminates its processes and removes it from topology. Native `splinterm launch -- COMMAND...` remains persistent.
 
-Return through the native session picker:
+Return through the native Dojo picker:
 
 ```bash
-splinterm sessions  # choose a running Dojo or start a new terminal
-splinterm reopen    # reopen the last locally remembered running Dojo
+splinterm dojos   # choose a running Dojo or start a new terminal
+splinterm reopen  # reopen the last locally remembered running Dojo
 ```
+
+`splinterm sessions` remains a compatibility alias for `splinterm dojos`.
 
 Inside a managed Splinterm window, these controls cover the essential workflow:
 
 | Action | Control |
 | --- | --- |
 | Command palette | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> |
-| Recent Sessions | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> |
+| Recent Dojos | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> |
 | Split horizontally | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> |
 | Split vertically | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>\</kbd> |
 | Move between panes | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Arrow</kbd> |
@@ -124,7 +126,7 @@ Splinterm's separate `s*` shell namespace.
 
 Reopening attaches to processes that are still running. Starting an exited process again from saved launch metadata is an explicit **restore** operation.
 
-Continue with the [quickstart](https://splinterm.com/docs/quickstart/), repository [human usage guide](docs/usage.md), or website [sessions and persistence](https://splinterm.com/docs/sessions/).
+Continue with the [quickstart](https://splinterm.com/docs/quickstart/), repository [human usage guide](docs/usage.md), or website [Dojos and persistence](https://splinterm.com/docs/sessions/).
 
 ## How it works
 
@@ -191,7 +193,7 @@ See the [configuration guide](https://splinterm.com/docs/configure/configuration
 | Install and evaluate Splinterm | [Installation](https://splinterm.com/docs/install/) |
 | Open, detach, and return to work | [Quickstart](https://splinterm.com/docs/quickstart/) |
 | Understand Lairs, Dojos, Splints, and windows | [Core concepts](https://splinterm.com/docs/concepts/) |
-| Manage persistence, restore, and reset | [Sessions and persistence](https://splinterm.com/docs/sessions/) |
+| Manage persistence, restore, and reset | [Dojos and persistence](https://splinterm.com/docs/sessions/) |
 | Configure the terminal | [Configuration](https://splinterm.com/docs/configure/configuration/) |
 | Check maturity and availability | [Current status](docs/status.md) |
 | Use windows, tabs, panes, and restore safely | [Human usage](docs/usage.md) |

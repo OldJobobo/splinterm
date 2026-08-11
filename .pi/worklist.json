@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "revision": 3,
+  "goals": [
+    {
+      "id": "refine-lair-lifecycle-and-dojo-picker",
+      "title": "Rename Session Picker to Dojo Picker",
+      "description": "Align picker vocabulary with the topology model: Dojos are resumable terminal layouts, while Lairs are workspace containers and Splints are panes/processes. Rename user-facing Session Picker and Recent Sessions surfaces to Dojo Picker and Recent Dojos; add canonical `splinterm dojos`; retain documented compatibility aliases; and update internal picker names where safe.",
+      "group": "Now",
+      "status": "open",
+      "createdAt": "2026-08-11T06:55:35.004Z",
+      "updatedAt": "2026-08-11T07:05:47.746Z"
+    },
+    {
+      "id": "redesign-lair-retention-and-saved",
+      "title": "Redesign Lair retention and saved-workspace lifecycle",
+      "description": "Make inactive Lairs useful and intentional rather than accumulated anonymous history. Define named, pinned, preset-derived, and disposable Lair states; automatically retire low-value exited `terminal-*` Lairs under a clear bounded policy; preserve active detached Lairs; expose save, pin, restore, and delete actions; clarify inactive Dojo restoration; and make picker presentation distinguish live, detached, restorable, and expired states without persisting shell contents or sensitive terminal data.",
+      "group": "Later",
+      "status": "open",
+      "createdAt": "2026-08-11T14:13:27.537Z",
+      "updatedAt": "2026-08-11T14:13:27.537Z"
+    }
+  ]
+}

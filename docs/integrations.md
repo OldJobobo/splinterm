@@ -35,43 +35,45 @@ A supported client must:
 - use an exact least-privileged executable policy. Environment context, Unix UID,
   executable basename, and SSH login are not authority.
 
-## Reference session picker
+## Reference Dojo picker
 
 This automation reference client is separate from the native daily-use
-`splinterm sessions` picker and `splinterm reopen` command. Normal users do not
+`splinterm dojos` picker and `splinterm reopen` command. Normal users do not
 need to copy UUIDs through this interface.
 
-The packaged `splinterm-session-picker` is a narrow, dependency-free Python
+The packaged `splinterm-dojo-picker` is a narrow, dependency-free Python
 reference client. Its implementation lives at
-`tools/automation/splinterm-session-picker.py`. It invokes only the public CLI,
+`tools/automation/splinterm-dojo-picker.py`. The old
+`splinterm-session-picker` executable remains a compatibility alias. It invokes
+only the public CLI,
 checks v2 envelope/operation fields, and never imports Splinterm Rust or private
 protocol types.
 
 ```bash
 # List persistent Dojos for an editor/task picker.
-splinterm-session-picker list
+splinterm-dojo-picker list
 
 # Validate daemon-injected context against current authoritative topology.
-splinterm-session-picker context
+splinterm-dojo-picker context
 
 # Map an existing Dojo in a normal Splinterm graphical Window.
-splinterm-session-picker open "$SPLINTERM_DOJO_ID"
+splinterm-dojo-picker open "$SPLINTERM_DOJO_ID"
 
 # Start an editor in a new Dojo. The argv after -- stays structural.
-splinterm-session-picker start "$SPLINTERM_LAIR_ID" \
+splinterm-dojo-picker start "$SPLINTERM_LAIR_ID" \
   --name editor --cwd "$PWD" -- nvim --clean ./src/main.rs
 
 # Split the validated current Splint and launch a direct child argv.
-splinterm-session-picker split-context --axis vertical --side second \
+splinterm-dojo-picker split-context --axis vertical --side second \
   --cwd "$PWD" -- cargo check --workspace
 
 # Observe one bounded snapshot. Literal input uses atomic controller acquisition;
 # controller denial is surfaced and never bypassed or forced.
-splinterm-session-picker snapshot-context
-splinterm-session-picker send-context $'printf "ready\\n"\n'
+splinterm-dojo-picker snapshot-context
+splinterm-dojo-picker send-context $'printf "ready\\n"\n'
 
 # Watch until an explicit resync and rebuild authoritative state.
-splinterm-session-picker watch-context
+splinterm-dojo-picker watch-context
 ```
 
 `open` maps a graphical client with the selected Dojo as its initial tab and is
@@ -178,7 +180,7 @@ done
 ## Validation
 
 ```bash
-python -m unittest tools/automation/test_session_picker.py
+python -m unittest tools/automation/test_dojo_picker.py
 uv run --with jsonschema python tools/automation/validate-contract-fixtures.py
 ```
 

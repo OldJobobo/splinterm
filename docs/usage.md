@@ -28,19 +28,20 @@ splinterm-xdg-terminal-exec
 The normal launch creates a fresh Lair with one Dojo and one live Splint. Closing
 the Window leaves the work running in `splinterd`.
 
-Return through the native recent-session workflow:
+Return through the native recent-Dojo workflow:
 
 ```bash
-splinterm sessions
+splinterm dojos
 splinterm reopen
 ```
 
-`sessions` opens the trusted Recent Sessions picker. Select a running Dojo or
-choose New Terminal. `reopen` attaches the most recently remembered Dojo whose
-complete layout is still running. Neither command silently restores an exited
+`dojos` opens the trusted Recent Dojos picker. Select a running Dojo or choose
+New Terminal. `sessions` remains a compatibility alias for `dojos`. `reopen`
+attaches the most recently remembered Dojo whose complete layout is still
+running. Neither command silently restores an exited
 process.
 
-To inspect sessions without mapping a Window:
+To inspect Lairs and Dojos without mapping a Window:
 
 ```bash
 splinterm list
@@ -58,14 +59,14 @@ splinterm window --lair-id LAIR_ID --dojo-id DOJO_ID
 A normal `splinterm launch` creates a fresh graphical Lair. `window` requires the
 explicit Lair/Dojo pair and renders that saved layout.
 
-## Windows, tabs, and the session picker
+## Windows, tabs, and the Dojo picker
 
 A Window holds an ordered, client-local set of distinct Dojo tabs:
 
 - `Ctrl+Shift+D` creates a Dojo in the active tab's Lair and opens it;
 - `Ctrl+Tab` and `Ctrl+Shift+Tab` move through tabs;
 - `Ctrl+Shift+Q` detaches the active tab and closes the Window if it was last;
-- `Ctrl+Shift+S` opens Recent Sessions inside the same Window;
+- `Ctrl+Shift+S` opens Recent Dojos inside the same Window;
 - choosing an already-open Dojo activates its tab rather than duplicating it;
 - choosing another running Dojo adds it without changing daemon topology; and
 - choosing New Terminal creates a fresh Lair and opens its initial Dojo.
@@ -86,7 +87,7 @@ The built-in application controls are:
 | Action | Default control |
 | --- | --- |
 | Command palette | `Ctrl+Shift+P` |
-| Recent Sessions | `Ctrl+Shift+S` |
+| Recent Dojos | `Ctrl+Shift+S` |
 | Split below | `Ctrl+Shift+Enter` |
 | Split right | `Ctrl+Shift+\` |
 | Focus pane | `Ctrl+Shift+Arrow` |
@@ -230,7 +231,7 @@ Open the profile's native picker or an explicit workflow with:
 
 ```bash
 splinterm --remote PROFILE
-splinterm --remote PROFILE sessions
+splinterm --remote PROFILE dojos
 splinterm --remote PROFILE reopen
 ```
 

@@ -63,8 +63,8 @@ install a package as an incidental test step.
 - Rust package/unit/integration tests: `cargo test -p PACKAGE ...`
 - Serialized daemon end-to-end:
   `cargo test -p splinterd --test end_to_end -- --test-threads=1`
-- Session picker/reference client:
-  `python -m pytest -q tools/automation/test_session_picker.py`
+- Dojo picker/reference client:
+  `python -m pytest -q tools/automation/test_dojo_picker.py`
 - Public contract fixtures:
   `python tools/automation/validate-contract-fixtures.py`
 - Benchmark harness tests:

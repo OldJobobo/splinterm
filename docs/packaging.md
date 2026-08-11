@@ -112,8 +112,10 @@ versioned immutable source URL and checksum.
   policy-authorized `/usr/bin/splinterm-mcp`, its setup guide, and notices;
 - `/usr/bin/splinterm-xdg-terminal-exec`, which preserves structured XDG argv
   and selects persistent commandless or transient command-bearing launches, its
-  `splinterm-sessions` and `splinterm-reopen` session UX aliases, the public-CLI-only
-  `/usr/bin/splinterm-session-picker` reference client, and the optional
+  canonical `splinterm-dojos` and `splinterm-reopen` Dojo UX aliases, the
+  compatibility `splinterm-sessions` alias, the public-CLI-only
+  `/usr/bin/splinterm-dojo-picker` reference client and compatibility
+  `/usr/bin/splinterm-session-picker` alias, and the optional
   `/usr/bin/generate-omarchy-theme.py` JSON exporter;
 - desktop entry, AppStream metadata, scalable icon, and user service;
 - the release README, CLI/usage/configuration guides, built-in Omarchy keymap
@@ -151,10 +153,11 @@ com.oldjobobo.splinterm.desktop
 
 The reference snippet is `/usr/share/doc/splinterm/xdg-terminals.list`.
 
-The default launcher always creates a fresh terminal. Use the **Recent
-Sessions** desktop action or `splinterm-sessions` to choose an existing running
-window, and **Reopen Last Session** or `splinterm-reopen` for the last locally
-remembered window whose complete pane layout is still running. These aliases
+The default launcher always creates a fresh terminal. Use the **Recent Dojos**
+desktop action or `splinterm-dojos` to choose an existing running Dojo, and
+**Reopen Last Dojo** or `splinterm-reopen` for the last locally remembered Dojo
+whose complete pane layout is still running. `splinterm-sessions` remains a
+compatibility alias. These aliases
 also start the user daemon on demand. They never restore exited processes. See
 `configuration.md` for the suggested Omarchy shortcut split.
 

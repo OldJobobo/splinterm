@@ -51,11 +51,11 @@ overlay, so keyboard dispatch and command-palette shortcut labels share one
 action registry. This avoids claiming arbitrary `foot.ini` compatibility.
 
 Built-in local bindings include Ctrl+Shift+C/V for copy/paste, Ctrl+Shift+S
-to open the native Recent Sessions picker, and Ctrl+Shift+P to open the
-searchable command palette inside any focused managed terminal Window. The
-palette groups 31 built-ins across sessions, tabs, panes, history, view, and
-control. In addition to recent sessions, tab navigation, splits, pane focus,
-closing, and font zoom, it can create a session, rename the current tab, detach
+to open the native Recent Dojos picker, and Ctrl+Shift+P to open the searchable
+command palette inside any focused managed terminal Window. The palette groups
+31 built-ins across Dojos, tabs, panes, history, view, and control. In addition
+to recent Dojos, tab navigation, splits, pane focus, closing, and font zoom, it
+can create a terminal, rename the current tab, detach
 other tabs, open confirmed Dojo termination, resize a pane, search/page
 scrollback, return to live output, request/release/force control, revoke captured
 access grants, and accept or deny a captured pending transfer. Force control is
@@ -296,30 +296,32 @@ command.
 Use `splinterm remote list` and `splinterm remote inspect PROFILE` for local-only
 validation. `splinterm remote check PROFILE` additionally starts SSH and performs
 bounded non-mutating relay/daemon reachability probes. `splinterm --remote
-PROFILE` authenticates once and opens that profile's native Recent Sessions
-picker; explicit `sessions`, `reopen`, `window`, and `launch` forms are also
+PROFILE` authenticates once and opens that profile's native Recent Dojos
+picker; explicit `dojos`, `reopen`, `window`, and `launch` forms are also
 available. Recency is namespaced by validated local profile identity. See
 [remote.md](remote.md) for authentication, host-key, human authority,
 remote-path, no-image, and disconnect behavior.
 
-## Daily launch and session reopening
+## Daily launch and Dojo reopening
 
 The normal desktop/XDG command remains `splinterm-xdg-terminal-exec`. Without a
 command it creates a fresh persistent Lair with one Dojo. When an application
 supplies `-- COMMAND...`, the same adapter creates a transient client-bound Lair
 that is removed when the command exits or its owning Window disconnects. Native
-`splinterm launch -- COMMAND...` remains persistent. Session reopening is
-deliberately separate, and transient XDG commands never enter Recent Sessions:
+`splinterm launch -- COMMAND...` remains persistent. Dojo reopening is
+deliberately separate, and transient XDG commands never enter Recent Dojos:
 
 ```text
-splinterm-sessions  → native Recent Sessions picker
+splinterm-dojos     → native Recent Dojos picker
 splinterm-reopen    → last locally remembered running Dojo
 ```
+
+`splinterm-sessions` and `splinterm sessions` remain compatibility aliases.
 
 The in-window Ctrl+Shift+S shortcut paints a trusted modal overlay over dimmed
 live panes without creating another Wayland Window or replacing an existing tab.
 Escape removes the overlay and presents the newest valid pane state. Choosing a
-running session opens or activates its Dojo tab; New Terminal creates a fresh
+running Dojo opens or activates its tab; New Terminal creates a fresh
 Lair and opens its initial Dojo as a tab. One Window accepts at most 32 distinct
 Dojo tabs, may mix Lairs, and does not restore tab order after exit. Tabs use a
 sanitized Dojo label unless ambiguity requires sanitized `Lair / Dojo` context.
@@ -328,7 +330,7 @@ sizes, and vertical wheel or touchpad scrolling navigates hidden actions without
 reaching terminal history or mouse reporting.
 
 A suitable Omarchy convention is Super+Enter for the normal terminal command
-and Super+Shift+Enter for `splinterm-sessions`. Splinterm does not modify the
+and Super+Shift+Enter for `splinterm-dojos`. Splinterm does not modify the
 user's Hyprland configuration automatically. The picker opens only Dojos whose
 complete pane layout is still running; restoring exited processes
 remains an explicit lifecycle command.

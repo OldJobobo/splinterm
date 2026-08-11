@@ -179,7 +179,7 @@ one private application entry point. Binary-owned orchestration lives under
 Application services do not own Smithay objects, Wayland proxies, SHM buffers,
 or renderer frames. As the terminal-window composition boundary, `app/window.rs`
 configures the public renderer facade, creates the bounded shared image-content
-cache, and maps `WindowOptions` through `run_window`. The session-picker path in
+cache, and maps `WindowOptions` through `run_window`. The Dojo-picker path in
 `sessions.rs` also configures the renderer and calls the same public window
 facade for its transient trusted UI. The async pane and topology services
 exchange frontend contracts, image leases, and protocol data without depending
@@ -197,7 +197,7 @@ renderer ← geometry/config    wayland facade
    └──────── explicit frames ─────┘
 
 app/cli → commands + machine/local/session/window services
-app/window + sessions picker → renderer configuration + public wayland facade
+app/window + Dojo picker → renderer configuration + public wayland facade
 app/pane_bridge + topology_manager → frontend contracts + daemon protocol
 sessions + topology_manager → neutral session_catalog
 ```
@@ -245,7 +245,7 @@ reconcile every hint against current public topology before selection.
 
 The main Arch package installs four adjacent runtime executables—`splinterm`,
 `splinterd`, `splinterm-relay`, and `splinterm-pty-child`—plus the public-CLI-only
-`splinterm-session-picker` reference integration, an on-demand systemd user
+`splinterm-dojo-picker` reference integration, an on-demand systemd user
 service, xdg launcher/desktop metadata, icon/AppStream metadata, theme generator,
 examples, and license notices. The launcher starts the daemon
 and performs one bounded restart when protocol negotiation reveals a stale
