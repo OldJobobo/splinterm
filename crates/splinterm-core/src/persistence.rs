@@ -15,7 +15,7 @@ use crate::{
 const LEGACY_LAIR_SCHEMA_VERSION: u32 = 2;
 pub const TOPOLOGY_SCHEMA_VERSION: u32 = 3;
 pub const MAX_TOPOLOGY_DOCUMENT_BYTES: usize = 1024 * 1024;
-const MAX_LAIRS: usize = 64;
+pub const MAX_PERSISTENT_LAIRS: usize = 64;
 const MAX_DOJOS_PER_LAIR: usize = 64;
 const MAX_SPLINTS: usize = 256;
 const MAX_LAYOUT_DEPTH: usize = 32;
@@ -183,7 +183,7 @@ impl TopologyDocument {
         if self.schema_version != TOPOLOGY_SCHEMA_VERSION {
             return Err(PersistenceError::UnsupportedVersion(self.schema_version));
         }
-        if self.lairs.len() > MAX_LAIRS {
+        if self.lairs.len() > MAX_PERSISTENT_LAIRS {
             return Err(PersistenceError::CollectionTooLarge("Lairs"));
         }
 
@@ -613,7 +613,7 @@ mod tests {
 
         let mut value = valid_v3_document();
         let lair = value["lairs"][0].clone();
-        value["lairs"] = Value::Array(vec![lair; MAX_LAIRS + 1]);
+        value["lairs"] = Value::Array(vec![lair; MAX_PERSISTENT_LAIRS + 1]);
         assert_eq!(
             decode(&value),
             Err(PersistenceError::CollectionTooLarge("Lairs"))

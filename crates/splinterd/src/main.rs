@@ -32,8 +32,8 @@ use splinterd::{
     policy,
 };
 use splinterm_core::{
-    Dojo, DojoId, Lair, LairId, LairLifetime, LayoutNode, Splint, SplintId, SplintLaunchMetadata,
-    SplintState, Topology, TopologyDocument, TopologyError, TopologyRevision,
+    Dojo, DojoId, Lair, LairId, LairLifetime, LayoutNode, MAX_PERSISTENT_LAIRS, Splint, SplintId,
+    SplintLaunchMetadata, SplintState, Topology, TopologyDocument, TopologyError, TopologyRevision,
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
@@ -2234,6 +2234,60 @@ async fn persist_topology(state: &DaemonState, topology: &Topology) -> Result<()
             })?;
     }
     Ok(())
+}
+
+fn layout_is_fully_exited(node: &LayoutNode) -> bool {
+    match node {
+        LayoutNode::Leaf(splint) => matches!(splint.state, SplintState::Exited(_)),
+        LayoutNode::Branch { first, second, .. } => {
+            layout_is_fully_exited(first) && layout_is_fully_exited(second)
+        }
+    }
+}
+
+fn latest_lair_incarnation(lair: &Lair) -> u64 {
+    fn latest_in_layout(node: &LayoutNode) -> u64 {
+        match node {
+            LayoutNode::Leaf(splint) => splint.last_incarnation.unwrap_or_default(),
+            LayoutNode::Branch { first, second, .. } => {
+                latest_in_layout(first).max(latest_in_layout(second))
+            }
+        }
+    }
+
+    lair.dojos
+        .iter()
+        .map(|dojo| latest_in_layout(&dojo.root))
+        .max()
+        .unwrap_or_default()
+}
+
+fn bounded_history_retirement(topology: &Topology) -> Result<Option<LairId>, ProtocolError> {
+    let persistent_count = topology
+        .lairs()
+        .filter(|lair| lair.lifetime.is_persistent())
+        .count();
+    if persistent_count < MAX_PERSISTENT_LAIRS {
+        return Ok(None);
+    }
+    topology
+        .lairs()
+        .filter(|lair| {
+            lair.lifetime.is_persistent()
+                && lair
+                    .dojos
+                    .iter()
+                    .all(|dojo| layout_is_fully_exited(&dojo.root))
+        })
+        .min_by_key(|lair| (latest_lair_incarnation(lair), lair.id))
+        .map(|lair| lair.id)
+        .map(Some)
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::ResourceLimit,
+                "persistent Lair capacity is full and every Lair is active",
+            )
+        })
 }
 
 async fn durable_topology_candidate<T>(
@@ -5153,6 +5207,10 @@ async fn handle_authorized_request(
             if name.len() > 128 {
                 return Err(invalid("dojo name exceeds protocol limits"));
             }
+            let retired_lair_id = {
+                let topology = state.topology.read().await;
+                bounded_history_retirement(&topology)?
+            };
             let mut dojo = Lair::new(name, launch.cwd.clone());
             let lair_id = dojo.id;
             let dojo_id = dojo.dojos[0].id;
@@ -5172,38 +5230,49 @@ async fn handle_authorized_request(
             let incarnation = handle.incarnation.value();
             splint.last_incarnation = Some(incarnation);
             splint.state = SplintState::Running;
-            let previous = state.topology.read().await.clone();
-            let prepared = durable_topology_candidate(state, |lair| {
-                lair.insert_lair_at(expected_topology_revision, dojo.clone())
-            })
-            .await;
-            let (candidate, topology_revision) = match prepared {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    let _ = runtime.shutdown().await;
-                    return Err(error);
-                }
-            };
-            let rejected = {
-                let mut lair = state.topology.write().await;
-                let mut runtimes = state.runtimes.lock().await;
-                match runtimes.insert(runtime) {
-                    Ok(()) => {
-                        *lair = candidate;
-                        None
-                    }
-                    Err(runtime) => Some(runtime),
-                }
-            };
-            if let Some(runtime) = rejected {
-                if persist_topology(state, &previous).await.is_err() {
-                    error!("failed to roll back durable create after runtime registry rejection");
-                }
+            if let Err(runtime) = state.runtimes.lock().await.insert(runtime) {
                 let _ = runtime.shutdown().await;
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
                 ));
+            }
+            let prepared = durable_topology_candidate(state, |topology| {
+                if let Some(retired_lair_id) = retired_lair_id {
+                    topology.replace_lair_at(
+                        expected_topology_revision,
+                        retired_lair_id,
+                        dojo.clone(),
+                    )
+                } else {
+                    topology.insert_lair_at(expected_topology_revision, dojo.clone())
+                }
+            })
+            .await;
+            let (candidate, topology_revision) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let runtime = state
+                        .runtimes
+                        .lock()
+                        .await
+                        .remove(splint_id)
+                        .expect("unpublished persistent runtime remains admitted");
+                    let _ = runtime.shutdown().await;
+                    return Err(error);
+                }
+            };
+            install_topology(state, candidate).await;
+            if let Some(retired_lair_id) = retired_lair_id {
+                let revoked = state
+                    .grants
+                    .lock()
+                    .await
+                    .revoke_lair(retired_lair_id, "inactive Lair history compacted");
+                for grant_id in revoked {
+                    revoke_grant_controllers(state, grant_id).await;
+                    let _ = state.revocations.send(Revocation { grant_id });
+                }
             }
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::LairCreated).await;
@@ -7947,6 +8016,42 @@ mod tests {
     }
 
     #[test]
+    fn bounded_history_retires_only_a_fully_exited_persistent_lair() {
+        let mut topology = Topology::new();
+        let mut least_recent = None;
+        for index in 0..MAX_PERSISTENT_LAIRS {
+            let lair = topology
+                .create_lair(format!("history-{index}"), PathBuf::from("/tmp"))
+                .unwrap()
+                .clone();
+            let splint_id = lair.dojos[0].default_focus;
+            assert!(topology.set_splint_last_incarnation(splint_id, index as u64 + 1));
+            assert!(topology.set_splint_state(splint_id, SplintState::Exited(0)));
+            least_recent.get_or_insert(lair.id);
+        }
+        let retired = bounded_history_retirement(&topology).unwrap().unwrap();
+        assert_eq!(Some(retired), least_recent);
+        let expected = topology.revision();
+        topology
+            .replace_lair_at(expected, retired, Lair::new("fresh", PathBuf::from("/tmp")))
+            .unwrap();
+        assert_eq!(topology.lairs().count(), MAX_PERSISTENT_LAIRS);
+        assert!(topology.lairs().all(|lair| lair.id != retired));
+        TopologyDocument::from_topology(&topology).unwrap();
+
+        let mut active = Topology::new();
+        for index in 0..MAX_PERSISTENT_LAIRS {
+            active
+                .create_lair(format!("active-{index}"), PathBuf::from("/tmp"))
+                .unwrap();
+        }
+        assert_eq!(
+            bounded_history_retirement(&active).unwrap_err().code,
+            ErrorCode::ResourceLimit
+        );
+    }
+
+    #[test]
     fn lair_termination_capture_is_exact_and_rejects_membership_or_incarnation_drift() {
         let mut lair = Lair::new("main", PathBuf::from("/tmp"));
         let dojo_id = lair.dojos[0].id;
@@ -8624,6 +8729,91 @@ mod tests {
             login_shell: false,
             scrollback_lines: 1_000,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistent_create_compacts_full_inactive_history_atomically() {
+        let base = temp_dir();
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let metadata = MetadataStore::from_base(&base);
+        let state =
+            test_state_with_backend_and_metadata(false, test_pty_backend(), Some(metadata.clone()));
+        {
+            let mut topology = state.topology.write().await;
+            for index in 0..MAX_PERSISTENT_LAIRS {
+                let lair = topology
+                    .create_lair(format!("history-{index}"), PathBuf::from("/tmp"))
+                    .unwrap()
+                    .clone();
+                assert!(
+                    topology.set_splint_state(lair.dojos[0].default_focus, SplintState::Exited(0),)
+                );
+            }
+        }
+        let before = state.topology.read().await.clone();
+        persist_topology(&state, &before).await.unwrap();
+        let retired = bounded_history_retirement(&before).unwrap().unwrap();
+        let expected = before.revision();
+        state
+            .topology_save_failure_countdown
+            .store(0, Ordering::SeqCst);
+        let error = trusted_request(
+            &state,
+            500,
+            Request::CreateLair {
+                expected_topology_revision: expected,
+                name: "failed-fresh".into(),
+                launch: test_launch(&["/bin/true"]),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(*state.topology.read().await, before);
+        assert!(state.runtimes.lock().await.handles().is_empty());
+        assert_eq!(
+            metadata.load().unwrap().unwrap().into_topology().unwrap(),
+            before
+        );
+
+        let response = trusted_request(
+            &state,
+            501,
+            Request::CreateLair {
+                expected_topology_revision: expected,
+                name: "fresh".into(),
+                launch: test_launch(&["/bin/true"]),
+            },
+        )
+        .await
+        .unwrap();
+        let Response::LairCreated { lair, .. } = response else {
+            panic!("persistent create response was not returned");
+        };
+        let topology = state.topology.read().await;
+        assert_eq!(topology.lairs().count(), MAX_PERSISTENT_LAIRS);
+        assert!(topology.lairs().all(|current| current.id != retired));
+        assert!(topology.lairs().any(|current| current.id == lair.id));
+        let splint_id = lair.dojos[0].default_focus;
+        drop(topology);
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state
+                    .topology
+                    .read()
+                    .await
+                    .find_splint(splint_id)
+                    .is_some_and(|splint| matches!(splint.state, SplintState::Exited(_)))
+                {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fresh process did not exit");
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     fn preset_request(

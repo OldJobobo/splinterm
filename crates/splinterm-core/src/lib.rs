@@ -11,5 +11,6 @@ pub use model::{
     Dojo, DojoId, Lair, LairId, LairLifetime, Topology, TopologyError, TopologyRevision,
 };
 pub use persistence::{
-    MAX_TOPOLOGY_DOCUMENT_BYTES, PersistenceError, TOPOLOGY_SCHEMA_VERSION, TopologyDocument,
+    MAX_PERSISTENT_LAIRS, MAX_TOPOLOGY_DOCUMENT_BYTES, PersistenceError, TOPOLOGY_SCHEMA_VERSION,
+    TopologyDocument,
 };

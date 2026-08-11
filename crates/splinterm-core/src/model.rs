@@ -240,6 +240,35 @@ impl Topology {
         removed
     }
 
+    /// Atomically replaces one Lair with another at one topology revision.
+    pub fn replace_lair_at(
+        &mut self,
+        expected: TopologyRevision,
+        removed_id: LairId,
+        inserted: Lair,
+    ) -> Result<TopologyRevision, TopologyError> {
+        self.check_revision(expected)?;
+        validate_name(&inserted.name)?;
+        if removed_id == inserted.id || !self.lairs.contains_key(&removed_id) {
+            return Err(TopologyError::LairNotFound(removed_id));
+        }
+        if self.lairs.contains_key(&inserted.id) {
+            return Err(TopologyError::DuplicateLairId(inserted.id));
+        }
+        if self
+            .lairs
+            .values()
+            .any(|current| current.id != removed_id && current.name == inserted.name)
+        {
+            return Err(TopologyError::DuplicateLairName(inserted.name));
+        }
+        self.validate_new_dojos(&inserted.dojos)?;
+        self.lairs.remove(&removed_id);
+        self.lairs.insert(inserted.id, inserted);
+        self.advance_revision();
+        Ok(self.revision)
+    }
+
     /// Inserts a new leaf beside `target` and commits one topology revision.
     pub fn split_splint(
         &mut self,
@@ -760,6 +789,29 @@ mod tests {
         assert!(topology.set_splint_state(splint_id, SplintState::Running));
         assert_eq!(topology.remove_lair(lair.id).unwrap().id, lair.id);
         assert_eq!(topology.lairs().count(), 0);
+    }
+
+    #[test]
+    fn atomic_lair_replacement_advances_once_and_preserves_bounds() {
+        let mut topology = Topology::new();
+        let removed = topology
+            .create_lair("retired", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        topology.create_lair("kept", PathBuf::from("/tmp")).unwrap();
+        let expected = topology.revision();
+        let inserted = Lair::new("fresh", PathBuf::from("/tmp"));
+        let inserted_id = inserted.id;
+
+        assert_eq!(
+            topology
+                .replace_lair_at(expected, removed, inserted)
+                .unwrap(),
+            TopologyRevision(expected.0 + 1)
+        );
+        assert_eq!(topology.lairs().count(), 2);
+        assert!(topology.lairs().all(|lair| lair.id != removed));
+        assert!(topology.lairs().any(|lair| lair.id == inserted_id));
     }
 
     #[test]
