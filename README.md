@@ -67,7 +67,8 @@ The validated installation target is **x86_64 Omarchy/Arch Linux with native Way
 
 The installer downloads the newest successful `main` package, verifies its manifest and checksums, preserves a rollback copy, installs through Pacman, and verifies the packaged client identity. Private-repository collaborators must authenticate GitHub CLI once with `gh auth login`.
 
-To build and package the current committed checkout locally:
+To build and package the current committed checkout locally, run the installer
+from Foot or another terminal not owned by `splinterd`:
 
 ```bash
 ./install.sh --source

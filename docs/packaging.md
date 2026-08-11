@@ -48,11 +48,17 @@ installation.
 
 ## One-command source installation
 
-To compile and install the current committed checkout instead, use:
+To compile and install the current committed checkout instead, use an external
+terminal such as Foot—not a shell running inside Splinterm:
 
 ```bash
 ./install.sh --source
 ```
+
+Both source and prebuilt installation refuse before service or package work when
+the installer has a `splinterd` or `splinterm-pty-child` ancestor. Stopping the
+daemon from one of its own shells would terminate the installer before Pacman or
+its recovery path could complete.
 
 This installs missing build/runtime dependencies, builds the committed checkout,
 validates package contents, and asks before installation. Pass `--check` (which

@@ -53,6 +53,29 @@ for command in sudo python; do
   }
 done
 
+refuse_daemon_owned_invocation() {
+  local proc_root=${SPLINTERM_INSTALL_PROC_ROOT:-/proc}
+  local pid=${SPLINTERM_INSTALL_PARENT_PID:-$PPID}
+  local depth=0 executable parent
+  while [[ $pid =~ ^[0-9]+$ ]] && ((pid > 1 && depth < 64)); do
+    executable=$(readlink -f "$proc_root/$pid/exe" 2>/dev/null || true)
+    case ${executable##*/} in
+      splinterd|splinterm-pty-child)
+        printf '%s\n' \
+          'Refusing to install from inside a Splinterm-owned shell.' \
+          'Stopping splinterd would terminate this installer before it can finish.' \
+          'Run the installer from Foot or another terminal not owned by splinterd.' >&2
+        exit 1
+        ;;
+    esac
+    parent=$(awk '/^PPid:/ { print $2; exit }' "$proc_root/$pid/status" 2>/dev/null || true)
+    pid=$parent
+    depth=$((depth + 1))
+  done
+}
+
+refuse_daemon_owned_invocation
+
 confirm() {
   local prompt=$1
   if [[ $assume_yes == true ]]; then
