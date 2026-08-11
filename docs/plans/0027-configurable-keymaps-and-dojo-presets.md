@@ -507,6 +507,9 @@ source of truth.
 | `Prefix+[` | enter copy mode | keyboard history/copy mode |
 | copy mode `v` | begin selection | copy-mode-local action |
 | copy mode `y` | copy and leave | Wayland clipboard publication using retained serial policy |
+| normal `Super+C` / `Super+V` | copy terminal selection / paste clipboard | client-local clipboard actions outside copy mode |
+| owned-field `Super+C` / `Super+V` | copy selection / paste text | shared bounded text-editor actions |
+| owned-field `Super+X` / `Super+Z` | cut selection / undo field edit | shared bounded text-editor actions and undo history |
 
 The first release may ship the profile before copy mode only if `Prefix+[` is
 shown as unavailable rather than silently mapped to a different behavior. The
@@ -949,7 +952,15 @@ Implement as a dedicated client-local state over loaded history:
 - Escape exits without copying;
 - terminal mouse reporting, paste, tabs, dividers, IME, and application input are
   isolated while active;
-- clipboard publication must obey current Wayland serial/ownership constraints.
+- clipboard publication must obey current Wayland serial/ownership constraints;
+- outside copy mode, `Super+C` copies the terminal selection and `Super+V`
+  performs the existing safe/bracketed paste;
+- Splinterm-owned editable fields, including search, picker/filter, and rename
+  editors, use `Super+C`, `Super+V`, `Super+X`, and `Super+Z` for copy, paste,
+  cut, and bounded local undo;
+- terminal panes do not pretend to own an application's editable input buffer:
+  `Super+X` and `Super+Z` pass through unchanged unless a separately documented
+  shell/application integration handles them.
 
 Do not label search mode as copy mode; ship the real interaction or report it as
 unavailable.
@@ -1220,6 +1231,11 @@ Gate:
 Work:
 
 - implement vi copy mode and clipboard handoff;
+- add context-sensitive `Super+C`/`Super+V` terminal clipboard shortcuts outside
+  copy mode;
+- add `Super+C`/`Super+V`/`Super+X`/`Super+Z` copy, paste, cut, and bounded undo
+  to Splinterm-owned editable fields;
+- preserve normal application handling for terminal-pane `Super+X`/`Super+Z`;
 - replace unavailable `Prefix+[` profile entry;
 - finish generated `Prefix+?` help.
 
@@ -1227,6 +1243,9 @@ Gate:
 
 - keyboard-only selection spans visible and loaded historical rows;
 - `v`, `y`, Escape, paging, focus loss, and topology changes are bounded;
+- desktop shortcuts are context-local, never leak text across fields/panes, and
+  bounded undo state clears on field close, replacement, or context loss;
+- terminal-pane `Super+X`/`Super+Z` are never mislabeled as universal cut/undo;
 - the Omarchy profile can be documented as complete for all reference bindings
   that have a meaningful Splinterm equivalent.
 
