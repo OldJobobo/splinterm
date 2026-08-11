@@ -21,9 +21,17 @@ pub(super) const CLIPBOARD_IO_TIMEOUT: Duration = Duration::from_secs(2);
 pub(super) static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OwnedFieldTarget {
+    CommandPalette,
+    DojoPrompt,
+    Search,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PasteTarget {
     Clipboard,
     Primary,
+    OwnedField(OwnedFieldTarget),
 }
 
 pub(super) struct ClipboardRead {

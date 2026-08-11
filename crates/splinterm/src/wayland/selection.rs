@@ -1,5 +1,6 @@
 //! Pure terminal selection, copied-text, overlay-row, and URL interpretation.
 
+use splinterm_core::SplintId;
 use splinterm_protocol::{ActiveScreen, TerminalSnapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -20,6 +21,142 @@ pub(super) struct SelectionEndpoint {
 pub(super) struct Selection {
     pub(super) anchor: SelectionEndpoint,
     pub(super) end: SelectionEndpoint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CopyModeState {
+    pub(super) splint_id: SplintId,
+    pub(super) incarnation: u64,
+    pub(super) cursor: SelectionEndpoint,
+    pub(super) anchor: Option<SelectionEndpoint>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CopyMotion {
+    Left,
+    Right,
+    Up(usize),
+    Down(usize),
+    LineStart,
+    LineEnd,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct CopyMoveOutcome {
+    pub(super) moved: bool,
+    pub(super) request_older: bool,
+}
+
+impl CopyModeState {
+    pub(super) fn overlay_selection(self) -> Selection {
+        Selection {
+            anchor: self.anchor.unwrap_or(self.cursor),
+            end: self.cursor,
+        }
+    }
+
+    pub(super) fn begin_selection(&mut self) {
+        self.anchor = Some(self.cursor);
+    }
+
+    pub(super) const fn selecting(self) -> bool {
+        self.anchor.is_some()
+    }
+}
+
+pub(super) fn copy_mode_enter(
+    snapshot: &TerminalSnapshot,
+    display: &TerminalSnapshot,
+) -> Option<CopyModeState> {
+    let row = usize::try_from(display.cursor_row)
+        .ok()
+        .filter(|row| *row < display.visible_rows.len())
+        .unwrap_or_else(|| display.visible_rows.len().saturating_sub(1));
+    let column = usize::try_from(display.cursor_column)
+        .unwrap_or(0)
+        .min(snapshot.columns.saturating_sub(1));
+    Some(CopyModeState {
+        splint_id: snapshot.splint_id,
+        incarnation: snapshot.incarnation,
+        cursor: selection_endpoint(display, CellPosition { row, column })?,
+        anchor: None,
+    })
+}
+
+pub(super) fn copy_mode_is_valid(snapshot: &TerminalSnapshot, state: CopyModeState) -> bool {
+    state.splint_id == snapshot.splint_id
+        && state.incarnation == snapshot.incarnation
+        && state.cursor.active_screen == snapshot.active_screen
+        && state.cursor.history_generation == snapshot.history_generation
+        && loaded_row_position(snapshot, state.cursor.row_id).is_some()
+        && state.anchor.is_none_or(|anchor| {
+            anchor.active_screen == snapshot.active_screen
+                && anchor.history_generation == snapshot.history_generation
+                && loaded_row_position(snapshot, anchor.row_id).is_some()
+        })
+}
+
+pub(super) fn move_copy_cursor(
+    snapshot: &TerminalSnapshot,
+    state: &mut CopyModeState,
+    motion: CopyMotion,
+) -> CopyMoveOutcome {
+    let Some(row) = loaded_row_position(snapshot, state.cursor.row_id) else {
+        return CopyMoveOutcome::default();
+    };
+    let row_count = snapshot
+        .scrollback_rows
+        .len()
+        .saturating_add(snapshot.visible_rows.len());
+    if row_count == 0 || snapshot.columns == 0 {
+        return CopyMoveOutcome::default();
+    }
+    let (next_row, next_column, request_older) = match motion {
+        CopyMotion::Left => (row, state.cursor.column.saturating_sub(1), false),
+        CopyMotion::Right => (
+            row,
+            state
+                .cursor
+                .column
+                .saturating_add(1)
+                .min(snapshot.columns - 1),
+            false,
+        ),
+        CopyMotion::Up(lines) => {
+            let next = row.saturating_sub(lines);
+            (next, state.cursor.column, next == 0 && lines > row)
+        }
+        CopyMotion::Down(lines) => (
+            row.saturating_add(lines).min(row_count - 1),
+            state.cursor.column,
+            false,
+        ),
+        CopyMotion::LineStart => (row, 0, false),
+        CopyMotion::LineEnd => (row, snapshot.columns - 1, false),
+    };
+    let row_id = snapshot
+        .scrollback_rows
+        .iter()
+        .chain(&snapshot.visible_rows)
+        .nth(next_row)
+        .and_then(|row| row.row_id);
+    let Some(row_id) = row_id else {
+        return CopyMoveOutcome {
+            moved: false,
+            request_older,
+        };
+    };
+    let next = SelectionEndpoint {
+        row_id,
+        column: next_column,
+        ..state.cursor
+    };
+    let moved = next != state.cursor;
+    state.cursor = next;
+    CopyMoveOutcome {
+        moved,
+        request_older,
+    }
 }
 
 pub(super) fn selection_endpoint(

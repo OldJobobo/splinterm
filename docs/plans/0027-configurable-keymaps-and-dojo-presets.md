@@ -1,6 +1,6 @@
 # Plan 0027: Configurable keymaps and Dojo presets
 
-- **Status:** Active — Milestones 1–8 complete; Milestone 9 next
+- **Status:** Active — Milestones 1–9 complete; Milestone 10 next
 - **Date:** 2026-08-07
 - **Depends on:** [Plan 0018](0018-lair-dojo-topology-migration.md), [Plan 0019](0019-dojo-tabs.md), [Plan 0025](0025-command-palette-and-tab-context-menus.md)
 - **Primary compatibility reference:** [Omarchy Tmux Reference](../omarchy-tmux-reference.md)
@@ -946,7 +946,8 @@ cleanly.
 Implement as a dedicated client-local state over loaded history:
 
 - `Prefix+[` enters at the live cursor/current viewport;
-- vi movement is bounded to loaded rows and can request bounded older pages;
+- `h/j/k/l`, arrows, Home/End, and PageUp/PageDown are bounded to loaded rows;
+  upward boundary movement can request one bounded older page at a time;
 - `v` anchors selection;
 - `y` publishes selected UTF-8 and exits;
 - Escape exits without copying;
@@ -955,8 +956,8 @@ Implement as a dedicated client-local state over loaded history:
 - clipboard publication must obey current Wayland serial/ownership constraints;
 - outside copy mode, `Super+C` copies the terminal selection and `Super+V`
   performs the existing safe/bracketed paste;
-- Splinterm-owned editable fields, including search, picker/filter, and rename
-  editors, use `Super+C`, `Super+V`, `Super+X`, and `Super+Z` for copy, paste,
+- Splinterm-owned editable command-palette, search, and rename fields use
+  `Super+C`, `Super+V`, `Super+X`, and `Super+Z` for copy, paste,
   cut, and bounded local undo;
 - terminal panes do not pretend to own an application's editable input buffer:
   `Super+X` and `Super+Z` pass through unchanged unless a separately documented
@@ -1227,6 +1228,25 @@ Gate:
 - installation never edits or replaces an existing alias silently.
 
 ### Milestone 9 — copy mode and complete Omarchy profile
+
+**Status:** Complete
+
+Recorded evidence:
+
+- validation: the final serialized Splinterm all-target suite passed with 348
+  library tests (one existing manual timing harness ignored), 74 binary tests,
+  and every automation, diagnostics, keymap, policy, preset, remote, shell, and
+  example target passing. Focused copy-mode, owned-editor, resolved-binding-help,
+  renderer, and keymap CLI tests pass; formatting, workspace checks, strict
+  Clippy, package-validator compilation, and `git diff --check` also pass;
+- review: one fresh read-only interaction/security review confirmed copy-mode
+  identity/history validation, older-page throttling, current-key serial
+  publication, modal precedence, stale clipboard generation checks, owned-field
+  cut ordering, and the no-execution help guards. Its actionable finding was
+  that the initial help surface rendered the static command catalog rather than
+  every resolved binding. The accepted fix adds a dedicated read-only row model
+  generated from the complete resolved keymap plus copy-mode-local bindings,
+  with focused and serialized regression coverage.
 
 Work:
 

@@ -107,10 +107,26 @@ available names. The Omarchy profile provides `Ctrl+Space` and `Ctrl+B` prefixes
 its direct and prefixed pane controls, exact five-cell directional resize,
 client-local pane zoom, Dojo/Lair creation and selection, numeric and reordered
 Window-local tabs, stable-ID trusted choosers, confirmed rename/termination,
-Lair navigation, clean Window detach, generated-help guidance, and transactional
-config reload. New Dojos and Lairs inherit the focused Splint cwd. `Prefix+[` is
-listed explicitly as unavailable rather than captured for another action; copy
-mode arrives in its later plan milestone.
+Lair navigation, clean Window detach, a generated trusted `Prefix+?` help
+overlay, vi copy mode, and transactional config reload. New Dojos and Lairs
+inherit the focused Splint cwd.
+
+`Prefix+[` enters copy mode at the live cursor or current history viewport.
+`h/j/k/l` and arrows move over visible and loaded historical rows; Home/End move
+to line edges and PageUp/PageDown page within bounded loaded history while
+requesting older bounded pages when needed. `v` anchors a selection, `y` copies
+it to the Wayland clipboard with the triggering keyboard serial and exits, and
+Escape cancels. Copy mode isolates terminal input, paste, pointer actions, IME,
+and application mouse reporting, and cancels safely on focus, topology, pane
+identity, or history-generation changes.
+
+Outside copy mode, the Omarchy profile maps `Super+C` to terminal-selection copy
+and `Super+V` to the existing safe/bracketed paste. Splinterm-owned command
+palette, search, and rename fields support `Super+A` selection, `Super+C/V/X/Z`
+copy/paste/cut/undo, and Shift+Left/Right selection. Their Unicode-safe undo
+history is limited to 16 states and disappears with the field. Terminal-pane
+`Super+X` and `Super+Z` are not claimed as universal cut or undo actions because
+the running application owns its input buffer.
 
 The overlay is versioned TOML and inherits one built-in profile:
 
@@ -162,7 +178,7 @@ pane.resize-larger        pane.resize-left-5
 pane.resize-right-5       pane.resize-up-5
 pane.resize-down-5        pane.zoom-toggle
 app.binding-help          app.config-reload
-terminal.send-prefix      history.search
+copy-mode.enter           terminal.send-prefix      history.search
 history.page-up           history.page-down
 history.return-live       view.zoom-in
 view.zoom-out              view.zoom-reset

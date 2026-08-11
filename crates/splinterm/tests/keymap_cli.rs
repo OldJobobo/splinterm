@@ -129,8 +129,11 @@ fn keymap_list_is_small_and_machine_flags_are_rejected() {
     let stdout = String::from_utf8(shown.stdout).unwrap();
     assert!(stdout.contains("Keymap  omarchy-tmux"));
     assert!(stdout.contains("Prefix ?"));
-    assert!(stdout.contains("Prefix [ (unavailable)"));
-    assert!(stdout.contains("copy-mode.unavailable"));
+    assert!(stdout.contains("Prefix ["));
+    assert!(stdout.contains("copy-mode.enter"));
+    assert!(stdout.contains("Super+C"));
+    assert!(stdout.contains("Super+V"));
+    assert!(!stdout.contains("copy-mode.unavailable"));
     assert!(stdout.contains("Alt+1"));
     assert!(stdout.contains("dojo.choose"));
     assert!(stdout.contains("lair.terminate-confirmed"));

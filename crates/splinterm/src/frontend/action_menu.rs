@@ -6,7 +6,7 @@ use splinterm_core::{Axis, DojoId, LairId, SplintId};
 
 use crate::keymap::{ActionId, ResolvedKeymap};
 
-use super::{LairPromptTarget, WindowTopologyCommand};
+use super::{LairPromptTarget, WindowTopologyCommand, text_edit::BoundedTextEditor};
 
 const MAX_QUERY_BYTES: usize = 256;
 const MAX_QUERY_SCALARS: usize = 128;
@@ -24,16 +24,19 @@ pub(crate) struct DojoActionTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RenameDojoUi {
     target: DojoActionTarget,
-    input: String,
-    replace_on_edit: bool,
+    editor: BoundedTextEditor,
 }
 
 impl RenameDojoUi {
     pub(crate) fn new(target: DojoActionTarget) -> Self {
         Self {
-            input: target.name.clone(),
+            editor: BoundedTextEditor::new(
+                target.name.clone(),
+                MAX_DOJO_NAME_BYTES,
+                MAX_DOJO_NAME_BYTES,
+                true,
+            ),
             target,
-            replace_on_edit: true,
         }
     }
 
@@ -42,45 +45,23 @@ impl RenameDojoUi {
     }
 
     pub(crate) fn input(&self) -> &str {
-        &self.input
+        self.editor.text()
     }
 
     pub(crate) fn append_text(&mut self, text: &str) -> bool {
-        let mut next = if self.replace_on_edit {
-            String::new()
-        } else {
-            self.input.clone()
-        };
-        let mut accepted = false;
-        for character in text.chars() {
-            if character.is_control() || is_bidi_formatting(character) {
-                continue;
-            }
-            if next.len().saturating_add(character.len_utf8()) > MAX_DOJO_NAME_BYTES {
-                break;
-            }
-            next.push(character);
-            accepted = true;
-        }
-        if !accepted {
-            return false;
-        }
-        self.input = next;
-        self.replace_on_edit = false;
-        true
+        self.editor.insert(text)
     }
 
     pub(crate) fn backspace(&mut self) -> bool {
-        if self.replace_on_edit {
-            self.input.clear();
-            self.replace_on_edit = false;
-            return true;
-        }
-        self.input.pop().is_some()
+        self.editor.backspace()
+    }
+
+    pub(crate) fn editor_mut(&mut self) -> &mut BoundedTextEditor {
+        &mut self.editor
     }
 
     pub(crate) fn command(&self) -> Option<WindowTopologyCommand> {
-        let name = self.input.trim();
+        let name = self.editor.text().trim();
         (!name.is_empty() && name.len() <= MAX_DOJO_NAME_BYTES).then(|| {
             WindowTopologyCommand::RenameDojo {
                 dojo_id: self.target.dojo_id,
@@ -148,16 +129,19 @@ impl TerminateDojoUi {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RenameLairUi {
     target: LairPromptTarget,
-    input: String,
-    replace_on_edit: bool,
+    editor: BoundedTextEditor,
 }
 
 impl RenameLairUi {
     pub(crate) fn new(target: LairPromptTarget) -> Self {
         Self {
-            input: target.name.clone(),
+            editor: BoundedTextEditor::new(
+                target.name.clone(),
+                MAX_DOJO_NAME_BYTES,
+                MAX_DOJO_NAME_BYTES,
+                true,
+            ),
             target,
-            replace_on_edit: true,
         }
     }
 
@@ -166,45 +150,23 @@ impl RenameLairUi {
     }
 
     pub(crate) fn input(&self) -> &str {
-        &self.input
+        self.editor.text()
     }
 
     pub(crate) fn append_text(&mut self, text: &str) -> bool {
-        let mut next = if self.replace_on_edit {
-            String::new()
-        } else {
-            self.input.clone()
-        };
-        let mut accepted = false;
-        for character in text.chars() {
-            if character.is_control() || is_bidi_formatting(character) {
-                continue;
-            }
-            if next.len().saturating_add(character.len_utf8()) > MAX_DOJO_NAME_BYTES {
-                break;
-            }
-            next.push(character);
-            accepted = true;
-        }
-        if !accepted {
-            return false;
-        }
-        self.input = next;
-        self.replace_on_edit = false;
-        true
+        self.editor.insert(text)
     }
 
     pub(crate) fn backspace(&mut self) -> bool {
-        if self.replace_on_edit {
-            self.input.clear();
-            self.replace_on_edit = false;
-            return true;
-        }
-        self.input.pop().is_some()
+        self.editor.backspace()
+    }
+
+    pub(crate) fn editor_mut(&mut self) -> &mut BoundedTextEditor {
+        &mut self.editor
     }
 
     pub(crate) fn command(&self) -> Option<WindowTopologyCommand> {
-        let name = self.input.trim();
+        let name = self.editor.text().trim();
         (!name.is_empty() && name.len() <= MAX_DOJO_NAME_BYTES).then(|| {
             WindowTopologyCommand::RenameLair {
                 lair_id: self.target.lair_id,
@@ -315,6 +277,14 @@ impl DojoPromptUi {
         match self {
             Self::Rename(prompt) => Some(prompt.input()),
             Self::RenameLair(prompt) => Some(prompt.input()),
+            Self::Terminate(_) | Self::TerminateLair(_) => None,
+        }
+    }
+
+    pub(crate) fn editor_mut(&mut self) -> Option<&mut BoundedTextEditor> {
+        match self {
+            Self::Rename(prompt) => Some(prompt.editor_mut()),
+            Self::RenameLair(prompt) => Some(prompt.editor_mut()),
             Self::Terminate(_) | Self::TerminateLair(_) => None,
         }
     }
@@ -957,13 +927,6 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 31] = [
     },
 ];
 
-fn is_bidi_formatting(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-    )
-}
-
 fn descriptor_matches(descriptor: BuiltInCommandDescriptor, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -1019,7 +982,7 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommandPaletteUi {
     context: CommandPaletteContext,
-    query: String,
+    editor: BoundedTextEditor,
     filtered: Vec<BuiltInCommandId>,
     selected: usize,
     visible_start: usize,
@@ -1030,7 +993,12 @@ impl CommandPaletteUi {
     pub(crate) fn new(context: CommandPaletteContext) -> Self {
         Self {
             context,
-            query: String::new(),
+            editor: BoundedTextEditor::new(
+                String::new(),
+                MAX_QUERY_BYTES,
+                MAX_QUERY_SCALARS,
+                false,
+            ),
             filtered: BUILT_IN_COMMANDS.iter().map(|command| command.id).collect(),
             selected: 0,
             visible_start: 0,
@@ -1043,7 +1011,11 @@ impl CommandPaletteUi {
     }
 
     pub(crate) fn query(&self) -> &str {
-        &self.query
+        self.editor.text()
+    }
+
+    pub(crate) fn editor_mut(&mut self) -> &mut BoundedTextEditor {
+        &mut self.editor
     }
 
     pub(crate) fn filtered(&self) -> &[BuiltInCommandId] {
@@ -1142,19 +1114,7 @@ impl CommandPaletteUi {
     }
 
     pub(crate) fn append_text(&mut self, text: &str) -> bool {
-        let before = self.query.clone();
-        for character in text
-            .chars()
-            .filter(|character| !character.is_control() && !is_bidi_formatting(*character))
-        {
-            if self.query.chars().count() == MAX_QUERY_SCALARS
-                || self.query.len().saturating_add(character.len_utf8()) > MAX_QUERY_BYTES
-            {
-                break;
-            }
-            self.query.push(character);
-        }
-        if self.query == before {
+        if !self.editor.insert(text) {
             return false;
         }
         self.refilter();
@@ -1162,11 +1122,15 @@ impl CommandPaletteUi {
     }
 
     pub(crate) fn backspace(&mut self) -> bool {
-        if self.query.pop().is_none() {
+        if !self.editor.backspace() {
             return false;
         }
         self.refilter();
         true
+    }
+
+    pub(crate) fn editor_changed(&mut self) {
+        self.refilter();
     }
 
     fn refilter(&mut self) {
@@ -1174,7 +1138,7 @@ impl CommandPaletteUi {
         self.filtered = BUILT_IN_COMMANDS
             .iter()
             .copied()
-            .filter(|descriptor| descriptor_matches(*descriptor, &self.query))
+            .filter(|descriptor| descriptor_matches(*descriptor, self.editor.text()))
             .map(|descriptor| descriptor.id)
             .collect();
         self.selected = selected
@@ -1622,6 +1586,31 @@ mod tests {
         assert!(palette.query().chars().count() <= MAX_QUERY_SCALARS);
         assert!(palette.backspace());
         assert!(std::str::from_utf8(palette.query().as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn owned_palette_and_rename_editors_refilter_and_undo_in_place() {
+        let mut palette = palette();
+        assert!(palette.append_text("zoom"));
+        assert!(palette.filtered().contains(&BuiltInCommandId::ZoomIn));
+        assert!(palette.editor_mut().select_all());
+        assert_eq!(palette.editor_mut().cut().as_deref(), Some("zoom"));
+        palette.editor_changed();
+        assert_eq!(palette.query(), "");
+        assert!(palette.editor_mut().undo());
+        palette.editor_changed();
+        assert_eq!(palette.query(), "zoom");
+
+        let target = DojoActionTarget {
+            dojo_id: DojoId::new(),
+            name: "old".into(),
+            pane_count: 1,
+            splints: vec![(SplintId::new(), 1)],
+        };
+        let mut rename = RenameDojoUi::new(target);
+        assert_eq!(rename.editor_mut().cut().as_deref(), Some("old"));
+        assert!(rename.editor_mut().undo());
+        assert_eq!(rename.input(), "old");
     }
 
     #[test]

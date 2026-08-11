@@ -223,6 +223,18 @@ splinterm remote list
 splinterm remote inspect PROFILE
 ```
 
+With the `omarchy-tmux` profile, `Prefix+?` opens a read-only trusted overlay
+built from the resolved keymap. `Prefix+[` enters vi copy mode: move with
+`h/j/k/l`, arrows, Home/End, or PageUp/PageDown; press `v` to select, `y` to copy
+and leave, or Escape to cancel. Selection spans visible and bounded loaded
+history without sending keys to the terminal application.
+
+Outside copy mode, `Super+C/V` copy the terminal selection and perform
+safe/bracketed paste. Splinterm-owned command-palette, search, and rename fields
+also support `Super+A`, `Super+C/V/X/Z`, and Shift+Left/Right for bounded local
+selection, clipboard editing, and undo. Terminal panes do not claim Super+X/Z as
+universal cut/undo because the child application owns its input buffer.
+
 `remote check PROFILE` additionally starts bounded SSH/relay/daemon read-only
 probes but does not map a Window. `--remote PROFILE` binds compatible graphical
 or CLI operations to that configured endpoint:

@@ -43,6 +43,7 @@ impl KeyboardHandler for App {
     ) {
         if surface == self.surface.window.wl_surface() {
             self.input.prefix_state.clear();
+            self.close_copy_mode();
             self.set_ime_focus(false);
             self.presentation.full_redraw = true;
             if self.panes.input_modes().focus_reporting && !self.modal.input_modal_open() {
@@ -69,6 +70,30 @@ impl KeyboardHandler for App {
     ) {
         if self.modal.input_modal_open() {
             self.input.prefix_state.clear();
+        }
+        if self.modal.copy_mode.is_some() {
+            self.modal
+                .session_picker_consumed_keys
+                .insert(event.raw_code);
+            if let Err(error) = self.handle_copy_mode_key(&event, queue_handle, serial) {
+                self.scheduling.fail(error);
+            } else if self.presentation.full_redraw
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.scheduling.fail(error);
+            }
+            return;
+        }
+        if self.handle_owned_field_key(&event, queue_handle, serial) {
+            self.modal
+                .session_picker_consumed_keys
+                .insert(event.raw_code);
+            if self.presentation.full_redraw
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.scheduling.fail(error);
+            }
+            return;
         }
         if self.modal.command_palette.is_some()
             || self.modal.dojo_prompt.is_some()
@@ -334,16 +359,19 @@ impl KeyboardHandler for App {
                 return;
             }
             Some(ActionId::BindingHelp) => {
-                eprintln!(
-                    "splinterm key bindings: run `splinterm keymap show {}` for the generated binding list",
-                    self.input.keymap.profile().name()
-                );
+                if self.show_binding_help().is_err() {
+                    eprintln!("splinterm key binding help unavailable");
+                } else if let Err(error) = self.schedule_draw(queue_handle) {
+                    self.scheduling.fail(error);
+                }
                 return;
             }
-            Some(ActionId::CopyModeUnavailable) => {
-                eprintln!(
-                    "splinterm keymap: Prefix+[ is unavailable until copy mode is implemented"
-                );
+            Some(ActionId::CopyModeEnter) => {
+                if self.enter_copy_mode()
+                    && let Err(error) = self.schedule_draw(queue_handle)
+                {
+                    self.scheduling.fail(error);
+                }
                 return;
             }
             Some(ActionId::ConfigReload) => {
@@ -473,9 +501,26 @@ impl KeyboardHandler for App {
         _connection: &Connection,
         queue_handle: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
+        serial: u32,
         event: KeyEvent,
     ) {
+        if self.modal.copy_mode.is_some() {
+            if let Err(error) = self.handle_copy_mode_key(&event, queue_handle, serial) {
+                self.scheduling.fail(error);
+            }
+            return;
+        }
+        if self.input.modifiers.logo && self.active_owned_field().is_some() {
+            return;
+        }
+        if self.handle_owned_field_key(&event, queue_handle, serial) {
+            if self.presentation.full_redraw
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.scheduling.fail(error);
+            }
+            return;
+        }
         if self.modal.command_palette.is_some()
             || self.modal.dojo_prompt.is_some()
             || self.modal.tab_context_menu.is_some()

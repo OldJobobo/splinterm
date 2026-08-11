@@ -6,8 +6,8 @@ use anyhow::Result;
 
 use crate::{
     frontend::{
-        BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteUi, DojoPromptUi,
-        TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId, TerminationDecision,
+        BindingHelpUi, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteUi,
+        DojoPromptUi, TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId, TerminationDecision,
         command_descriptor, tab_menu_descriptor,
     },
     geometry::Rect,
@@ -358,6 +358,7 @@ pub(crate) fn paint_command_palette(
     keymap: &ResolvedKeymap,
     pressed: Option<BuiltInCommandId>,
     keyboard_focused: bool,
+    binding_help: Option<&BindingHelpUi>,
 ) -> Result<()> {
     blend_rect(
         canvas,
@@ -450,7 +451,11 @@ pub(crate) fn paint_command_palette(
         canvas,
         width,
         height,
-        "COMMANDS",
+        if binding_help.is_some() {
+            "KEYS"
+        } else {
+            "COMMANDS"
+        },
         ChromeTextStyle::Bold,
         scale_120,
         renderer_generation,
@@ -463,7 +468,9 @@ pub(crate) fn paint_command_palette(
         palette.primary,
         false,
     )?;
-    let query = if state.query().is_empty() {
+    let query = if binding_help.is_some() {
+        format!("{} profile · generated bindings", keymap.profile().name())
+    } else if state.query().is_empty() {
         "> Type a command".to_owned()
     } else {
         format!("> {}_", state.query())
@@ -487,7 +494,7 @@ pub(crate) fn paint_command_palette(
                 .saturating_sub(title_width),
             height: header.height,
         },
-        if state.query().is_empty() {
+        if binding_help.is_some() || state.query().is_empty() {
             palette.secondary
         } else {
             palette.primary
@@ -516,145 +523,244 @@ pub(crate) fn paint_command_palette(
             false,
         )?;
     }
-    let selected = state.selected_command();
-    for row in &layout.rows {
-        let rect = buffer_rect(row.rect, scale_120);
-        let enabled = state.command_enabled(row.command);
-        let is_selected = enabled && selected == Some(row.command);
-        if is_selected {
-            fill_rect(
-                canvas,
-                width,
-                height,
-                tuple(rect),
-                rgba(palette.selected_fill),
-            );
-            fill_rect(
-                canvas,
-                width,
-                height,
-                (
-                    i32::try_from(rect.x).unwrap_or(i32::MAX),
-                    i32::try_from(rect.y).unwrap_or(i32::MAX),
-                    3_u32.saturating_mul(scale_120).div_ceil(120).max(1),
-                    rect.height,
-                ),
-                rgba(palette.selected_rail),
-            );
-        } else if enabled && state.hovered() == Some(row.command) {
-            blend_rect(
-                canvas,
-                width,
-                height,
-                tuple(rect),
-                [
-                    u8::try_from((palette.selected_fill >> 16) & 0xff).unwrap_or(0),
-                    u8::try_from((palette.selected_fill >> 8) & 0xff).unwrap_or(0),
-                    u8::try_from(palette.selected_fill & 0xff).unwrap_or(0),
-                    64,
-                ],
-            );
-        }
-        if enabled && pressed == Some(row.command) {
-            blend_rect(
-                canvas,
-                width,
-                height,
-                tuple(rect),
-                [
-                    u8::try_from((palette.selected_rail >> 16) & 0xff).unwrap_or(0),
-                    u8::try_from((palette.selected_rail >> 8) & 0xff).unwrap_or(0),
-                    u8::try_from(palette.selected_rail & 0xff).unwrap_or(0),
-                    48,
-                ],
-            );
-        }
-        let primary = if !enabled {
-            palette.secondary
-        } else if is_selected {
-            palette.selected_primary
-        } else {
-            palette.primary
-        };
-        if is_selected {
+    if let Some(help) = binding_help {
+        for (offset, row) in layout.rows.iter().enumerate() {
+            let index = layout.visible_start.saturating_add(offset);
+            let Some(help_row) = help.rows().get(index) else {
+                continue;
+            };
+            let rect = buffer_rect(row.rect, scale_120);
+            let is_selected = index == help.selected_index();
+            if is_selected {
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    tuple(rect),
+                    rgba(palette.selected_fill),
+                );
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (
+                        i32::try_from(rect.x).unwrap_or(i32::MAX),
+                        i32::try_from(rect.y).unwrap_or(i32::MAX),
+                        3_u32.saturating_mul(scale_120).div_ceil(120).max(1),
+                        rect.height,
+                    ),
+                    rgba(palette.selected_rail),
+                );
+            }
+            let primary = if is_selected {
+                palette.selected_primary
+            } else {
+                palette.primary
+            };
+            if row.category.width > 0 {
+                paint_text(
+                    cache,
+                    context,
+                    canvas,
+                    width,
+                    height,
+                    &help_row.source,
+                    ChromeTextStyle::Regular,
+                    scale_120,
+                    renderer_generation,
+                    buffer_rect(row.category, scale_120),
+                    if is_selected {
+                        palette.selected_secondary
+                    } else {
+                        palette.secondary
+                    },
+                    false,
+                )?;
+            }
             paint_text(
                 cache,
                 context,
                 canvas,
                 width,
                 height,
-                "›",
-                ChromeTextStyle::Bold,
+                if layout.compact {
+                    &help_row.compact
+                } else {
+                    &help_row.action
+                },
+                if is_selected {
+                    ChromeTextStyle::Bold
+                } else {
+                    ChromeTextStyle::Regular
+                },
                 scale_120,
                 renderer_generation,
-                Rect {
-                    x: rect.x.saturating_add(inset / 2),
-                    y: rect.y,
-                    width: 20_u32.saturating_mul(scale_120).div_ceil(120),
-                    height: rect.height,
-                },
+                buffer_rect(row.title, scale_120),
                 primary,
                 false,
             )?;
+            if !layout.compact {
+                paint_text(
+                    cache,
+                    context,
+                    canvas,
+                    width,
+                    height,
+                    &help_row.shortcut,
+                    ChromeTextStyle::Regular,
+                    scale_120,
+                    renderer_generation,
+                    buffer_rect(row.shortcut, scale_120),
+                    if is_selected {
+                        palette.selected_secondary
+                    } else {
+                        palette.secondary
+                    },
+                    true,
+                )?;
+            }
         }
-        let descriptor = command_descriptor(row.command);
-        if row.category.width > 0 {
+    } else {
+        let selected = state.selected_command();
+        for row in &layout.rows {
+            let rect = buffer_rect(row.rect, scale_120);
+            let enabled = state.command_enabled(row.command);
+            let is_selected = enabled && selected == Some(row.command);
+            if is_selected {
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    tuple(rect),
+                    rgba(palette.selected_fill),
+                );
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (
+                        i32::try_from(rect.x).unwrap_or(i32::MAX),
+                        i32::try_from(rect.y).unwrap_or(i32::MAX),
+                        3_u32.saturating_mul(scale_120).div_ceil(120).max(1),
+                        rect.height,
+                    ),
+                    rgba(palette.selected_rail),
+                );
+            } else if enabled && state.hovered() == Some(row.command) {
+                blend_rect(
+                    canvas,
+                    width,
+                    height,
+                    tuple(rect),
+                    [
+                        u8::try_from((palette.selected_fill >> 16) & 0xff).unwrap_or(0),
+                        u8::try_from((palette.selected_fill >> 8) & 0xff).unwrap_or(0),
+                        u8::try_from(palette.selected_fill & 0xff).unwrap_or(0),
+                        64,
+                    ],
+                );
+            }
+            if enabled && pressed == Some(row.command) {
+                blend_rect(
+                    canvas,
+                    width,
+                    height,
+                    tuple(rect),
+                    [
+                        u8::try_from((palette.selected_rail >> 16) & 0xff).unwrap_or(0),
+                        u8::try_from((palette.selected_rail >> 8) & 0xff).unwrap_or(0),
+                        u8::try_from(palette.selected_rail & 0xff).unwrap_or(0),
+                        48,
+                    ],
+                );
+            }
+            let primary = if !enabled {
+                palette.secondary
+            } else if is_selected {
+                palette.selected_primary
+            } else {
+                palette.primary
+            };
+            if is_selected {
+                paint_text(
+                    cache,
+                    context,
+                    canvas,
+                    width,
+                    height,
+                    "›",
+                    ChromeTextStyle::Bold,
+                    scale_120,
+                    renderer_generation,
+                    Rect {
+                        x: rect.x.saturating_add(inset / 2),
+                        y: rect.y,
+                        width: 20_u32.saturating_mul(scale_120).div_ceil(120),
+                        height: rect.height,
+                    },
+                    primary,
+                    false,
+                )?;
+            }
+            let descriptor = command_descriptor(row.command);
+            if row.category.width > 0 {
+                paint_text(
+                    cache,
+                    context,
+                    canvas,
+                    width,
+                    height,
+                    descriptor.category.label(),
+                    ChromeTextStyle::Regular,
+                    scale_120,
+                    renderer_generation,
+                    buffer_rect(row.category, scale_120),
+                    if is_selected {
+                        palette.selected_secondary
+                    } else {
+                        palette.secondary
+                    },
+                    false,
+                )?;
+            }
             paint_text(
                 cache,
                 context,
                 canvas,
                 width,
                 height,
-                descriptor.category.label(),
-                ChromeTextStyle::Regular,
+                descriptor.title,
+                if is_selected {
+                    ChromeTextStyle::Bold
+                } else {
+                    ChromeTextStyle::Regular
+                },
                 scale_120,
                 renderer_generation,
-                buffer_rect(row.category, scale_120),
-                if is_selected {
-                    palette.selected_secondary
-                } else {
-                    palette.secondary
-                },
+                buffer_rect(row.title, scale_120),
+                primary,
                 false,
             )?;
-        }
-        paint_text(
-            cache,
-            context,
-            canvas,
-            width,
-            height,
-            descriptor.title,
-            if is_selected {
-                ChromeTextStyle::Bold
-            } else {
-                ChromeTextStyle::Regular
-            },
-            scale_120,
-            renderer_generation,
-            buffer_rect(row.title, scale_120),
-            primary,
-            false,
-        )?;
-        if !layout.compact {
-            paint_text(
-                cache,
-                context,
-                canvas,
-                width,
-                height,
-                descriptor.shortcut(keymap),
-                ChromeTextStyle::Regular,
-                scale_120,
-                renderer_generation,
-                buffer_rect(row.shortcut, scale_120),
-                if is_selected {
-                    palette.selected_secondary
-                } else {
-                    palette.secondary
-                },
-                true,
-            )?;
+            if !layout.compact {
+                paint_text(
+                    cache,
+                    context,
+                    canvas,
+                    width,
+                    height,
+                    descriptor.shortcut(keymap),
+                    ChromeTextStyle::Regular,
+                    scale_120,
+                    renderer_generation,
+                    buffer_rect(row.shortcut, scale_120),
+                    if is_selected {
+                        palette.selected_secondary
+                    } else {
+                        palette.secondary
+                    },
+                    true,
+                )?;
+            }
         }
     }
     let footer = buffer_rect(layout.footer, scale_120);
@@ -664,7 +770,11 @@ pub(crate) fn paint_command_palette(
         canvas,
         width,
         height,
-        "↑↓ navigate   Enter run   Esc close",
+        if binding_help.is_some() {
+            "↑↓/Pg navigate · Prefix+[ copy · v/y · Super+C/V · fields X/Z · Esc"
+        } else {
+            "↑↓ navigate   Enter run   Esc close"
+        },
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
@@ -1614,6 +1724,7 @@ mod tests {
             &keymap,
             None,
             true,
+            None,
         )
         .unwrap();
         let shaped = cache.len();
@@ -1634,8 +1745,29 @@ mod tests {
             &keymap,
             None,
             true,
+            None,
         )
         .unwrap();
         assert_eq!(cache.len(), shaped);
+        let help = BindingHelpUi::new(&keymap);
+        paint_command_palette(
+            &mut cache,
+            &RenderContext::new(u16::MAX),
+            &mut canvas,
+            640,
+            400,
+            content,
+            120,
+            1,
+            &layout,
+            session_picker_palette(theme),
+            &state,
+            &keymap,
+            None,
+            true,
+            Some(&help),
+        )
+        .unwrap();
+        assert!(cache.len() > shaped);
     }
 }

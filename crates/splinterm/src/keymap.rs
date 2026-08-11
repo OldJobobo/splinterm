@@ -59,7 +59,7 @@ pub enum ActionId {
     ResizePaneDownFive,
     TogglePaneZoom,
     BindingHelp,
-    CopyModeUnavailable,
+    CopyModeEnter,
     ConfigReload,
     SendPrefix,
     SearchScrollback,
@@ -123,6 +123,7 @@ impl ActionId {
         Self::ResizePaneDownFive,
         Self::TogglePaneZoom,
         Self::BindingHelp,
+        Self::CopyModeEnter,
         Self::ConfigReload,
         Self::SendPrefix,
         Self::SearchScrollback,
@@ -188,7 +189,7 @@ impl ActionId {
             Self::ResizePaneDownFive => "pane.resize-down-5",
             Self::TogglePaneZoom => "pane.zoom-toggle",
             Self::BindingHelp => "app.binding-help",
-            Self::CopyModeUnavailable => "copy-mode.unavailable",
+            Self::CopyModeEnter => "copy-mode.enter",
             Self::ConfigReload => "app.config-reload",
             Self::SendPrefix => "terminal.send-prefix",
             Self::SearchScrollback => "history.search",
@@ -980,8 +981,30 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                     ),
                     omarchy_binding(
                         prefixed(false, false, KeyIdentity::BracketLeft),
-                        ActionId::CopyModeUnavailable,
-                        "Prefix [ (unavailable)",
+                        ActionId::CopyModeEnter,
+                        "Prefix [",
+                    ),
+                    omarchy_binding(
+                        NormalizedSequence::Direct(normalized_with(
+                            ActiveModifiers {
+                                logo: true,
+                                ..ActiveModifiers::default()
+                            },
+                            KeyIdentity::Character('c'),
+                        )),
+                        ActionId::ClipboardCopy,
+                        "Super+C",
+                    ),
+                    omarchy_binding(
+                        NormalizedSequence::Direct(normalized_with(
+                            ActiveModifiers {
+                                logo: true,
+                                ..ActiveModifiers::default()
+                            },
+                            KeyIdentity::Character('v'),
+                        )),
+                        ActionId::ClipboardPaste,
+                        "Super+V",
                     ),
                     omarchy_binding(
                         prefixed(false, false, KeyIdentity::Character('q')),
@@ -1779,9 +1802,18 @@ action = "clipboard.paste"
             Some(ActionId::ResizePaneLeftFive)
         );
         assert_eq!(keymap.primary_shortcut(ActionId::BindingHelp), "Prefix ?");
+        assert_eq!(keymap.primary_shortcut(ActionId::CopyModeEnter), "Prefix [");
+        assert_eq!(keymap.primary_shortcut(ActionId::ClipboardCopy), "Super+C");
+        assert_eq!(keymap.primary_shortcut(ActionId::ClipboardPaste), "Super+V");
         assert_eq!(
-            keymap.primary_shortcut(ActionId::CopyModeUnavailable),
-            "Prefix [ (unavailable)"
+            keymap.action(
+                KeyIdentity::Character('x'),
+                ActiveModifiers {
+                    logo: true,
+                    ..ActiveModifiers::default()
+                }
+            ),
+            None
         );
         assert_eq!(
             keymap.primary_shortcut(ActionId::SplitHorizontal),

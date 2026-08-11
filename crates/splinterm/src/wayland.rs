@@ -124,12 +124,13 @@ use crate::diagnostics::{
     DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, global as diagnostics,
 };
 use crate::frontend::{
-    AuthorityStatus, BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction,
-    CommandHistoryAction, CommandPaletteContext, CommandPaletteUi, CommandZoomAction, DojoPromptUi,
-    LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind, SessionPickerDecision,
-    SessionPickerItem, SessionPickerUi, TabContextMenuUi, TabMenuActionId, TabMenuContext,
-    TabMenuDispatch, TabMenuRightPress, TerminationDecision, ThemeUpdate, TrustedConsentUi,
-    WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
+    BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction, CommandHistoryAction,
+    CommandPaletteContext, CommandPaletteUi, CommandZoomAction, DojoPromptUi, LairDirection,
+    LairPromptKind, PerfTraceCorrelation, SelectorKind, SessionPickerDecision, SessionPickerItem,
+    SessionPickerUi, TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch,
+    TabMenuRightPress, TerminationDecision, ThemeUpdate, TrustedConsentUi, WindowCommand,
+    WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
     WindowTopologyUpdate, WindowUpdate, command_dispatch, tab_menu_dispatch, tab_menu_right_press,
 };
 use crate::geometry::{
@@ -176,8 +177,8 @@ use chrome::divider_junction;
 use chrome::{paint_pane_chrome, paint_trusted_consent_chrome, sanitize_frame_title};
 pub use clipboard::encode_bracketed_paste;
 use clipboard::{
-    ACTIVE_CLIPBOARD_WORKERS, CLIPBOARD_IO_TIMEOUT, ClipboardRead, PasteTarget, TEXT_MIMES,
-    accepted_text_mime, safe_paste, spawn_clipboard_read, try_clipboard_worker,
+    ACTIVE_CLIPBOARD_WORKERS, CLIPBOARD_IO_TIMEOUT, ClipboardRead, OwnedFieldTarget, PasteTarget,
+    TEXT_MIMES, accepted_text_mime, safe_paste, spawn_clipboard_read, try_clipboard_worker,
     write_clipboard_with_deadline,
 };
 use damage::{
@@ -196,8 +197,9 @@ use input::{
     shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
 };
 use selection::{
-    CellPosition, Selection, SelectionEndpoint, selection_display_bounds, selection_endpoint,
-    selection_is_retained, selection_text, transient_overlay_rows, url_at,
+    CellPosition, CopyModeState, CopyMotion, CopyMoveOutcome, Selection, SelectionEndpoint,
+    copy_mode_enter, copy_mode_is_valid, move_copy_cursor, selection_display_bounds,
+    selection_endpoint, selection_is_retained, selection_text, transient_overlay_rows, url_at,
 };
 use tabs::{
     DojoTabView, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, TabsState, tab_context_target,
@@ -931,6 +933,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         },
         modal: ModalState {
             trusted_consent,
+            copy_mode: None,
+            binding_help: None,
             command_palette: None,
             command_palette_layout: None,
             command_palette_pressed: None,
@@ -1057,12 +1061,21 @@ fn note_output_leave<T: Eq>(entered: &mut Vec<T>, output: &T) -> bool {
 
 #[derive(Clone, Debug, Default)]
 struct SearchUiState {
-    input: Option<String>,
+    input: Option<BoundedTextEditor>,
     query: String,
     matches: Vec<SearchMatch>,
     selected: usize,
     next_cursor: Option<String>,
     pending_reveal: Option<SearchMatch>,
+}
+
+fn new_search_editor() -> BoundedTextEditor {
+    BoundedTextEditor::new(
+        String::new(),
+        splinterm_protocol::MAX_SEARCH_QUERY_BYTES,
+        splinterm_protocol::MAX_SEARCH_QUERY_BYTES,
+        false,
+    )
 }
 
 #[allow(
@@ -1820,6 +1833,8 @@ struct PanesState {
 )]
 struct ModalState {
     trusted_consent: Option<TrustedConsentUi>,
+    copy_mode: Option<CopyModeState>,
+    binding_help: Option<BindingHelpUi>,
     command_palette: Option<CommandPaletteUi>,
     command_palette_layout: Option<CommandPaletteLayout>,
     command_palette_pressed: Option<BuiltInCommandId>,
@@ -1972,7 +1987,9 @@ impl ModalState {
     }
 
     fn input_modal_open(&self) -> bool {
-        self.inline_picker_open()
+        self.copy_mode.is_some()
+            || self.binding_help.is_some()
+            || self.inline_picker_open()
             || self.command_palette.is_some()
             || self.dojo_prompt.is_some()
             || self.tab_context_menu.is_some()
@@ -2269,7 +2286,7 @@ fn window_title(
         title
     };
     if let Some(search) = search.filter(|search| search.input.is_some()) {
-        let query = search.input.as_deref().unwrap_or_default();
+        let query = search.input.as_ref().map_or("", BoundedTextEditor::text);
         let query = query
             .chars()
             .filter(|ch| !ch.is_control())
@@ -2652,6 +2669,7 @@ impl App {
         if previous_id == dojo_id {
             return Ok(false);
         }
+        self.close_copy_mode();
         anyhow::ensure!(
             self.tab_state
                 .tabs
@@ -3601,6 +3619,158 @@ impl App {
         })
     }
 
+    fn enter_copy_mode(&mut self) -> bool {
+        if self.modal.input_modal_open() || self.panes.pane.search.input.is_some() {
+            return false;
+        }
+        let Some(state) = (|| {
+            let snapshot = self.panes.pane.snapshot.as_ref()?;
+            let display = self.panes.display_snapshot_cow()?;
+            copy_mode_enter(snapshot, &display)
+        })() else {
+            return false;
+        };
+        self.clear_selection();
+        self.modal.copy_mode = Some(state);
+        self.panes.pane.selection = Some(state.overlay_selection());
+        self.panes.pane.selecting = false;
+        self.input.prefix_state.clear();
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
+        self.clear_ime_preedit();
+        self.surface.window.set_title("Splinterm — COPY");
+        self.presentation.full_redraw = true;
+        true
+    }
+
+    fn close_copy_mode(&mut self) -> bool {
+        if self.modal.copy_mode.take().is_none() {
+            return false;
+        }
+        self.clear_selection();
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
+        self.update_window_title();
+        self.presentation.full_redraw = true;
+        true
+    }
+
+    fn cancel_copy_mode_for_topology(&mut self) {
+        if self.modal.copy_mode.take().is_none() {
+            return;
+        }
+        self.panes.pane.clear_local_content_state();
+        for pane in &mut self.panes.inactive_panes {
+            pane.clear_local_content_state();
+        }
+        for tab in self.tab_state.tabs.iter_mut() {
+            if let Some(view) = tab.value.as_mut() {
+                view.pane.clear_local_content_state();
+                for pane in &mut view.inactive_panes {
+                    pane.clear_local_content_state();
+                }
+            }
+        }
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
+        self.presentation.full_redraw = true;
+    }
+
+    fn handle_copy_mode_key(
+        &mut self,
+        event: &KeyEvent,
+        queue_handle: &QueueHandle<Self>,
+        serial: u32,
+    ) -> Result<bool> {
+        let Some(mut state) = self.modal.copy_mode else {
+            return Ok(false);
+        };
+        if !self
+            .panes
+            .pane
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| copy_mode_is_valid(snapshot, state))
+        {
+            self.close_copy_mode();
+            return Ok(true);
+        }
+        let plain =
+            !self.input.modifiers.ctrl && !self.input.modifiers.alt && !self.input.modifiers.logo;
+        match event.keysym {
+            Keysym::Escape => {
+                self.close_copy_mode();
+                return Ok(true);
+            }
+            Keysym::v | Keysym::V if plain => {
+                state.begin_selection();
+                self.modal.copy_mode = Some(state);
+                self.dirty_selection(self.panes.pane.selection);
+                self.panes.pane.selection = Some(state.overlay_selection());
+                self.panes.pane.selecting = true;
+                self.dirty_selection(self.panes.pane.selection);
+                self.presentation.full_redraw = true;
+                return Ok(true);
+            }
+            Keysym::y | Keysym::Y if plain => {
+                if state.selecting() {
+                    self.modal.copy_mode = Some(state);
+                    self.panes.pane.selection = Some(state.overlay_selection());
+                    self.panes.pane.selecting = true;
+                    self.finish_selection();
+                    self.publish_clipboard(queue_handle, serial, false);
+                }
+                self.close_copy_mode();
+                return Ok(true);
+            }
+            _ => {}
+        }
+        let page = self
+            .panes
+            .pane
+            .snapshot
+            .as_ref()
+            .map_or(1, |snapshot| snapshot.rows.saturating_sub(1).max(1));
+        let motion = match event.keysym {
+            Keysym::h | Keysym::H | Keysym::Left if plain => Some(CopyMotion::Left),
+            Keysym::l | Keysym::L | Keysym::Right if plain => Some(CopyMotion::Right),
+            Keysym::k | Keysym::K | Keysym::Up if plain => Some(CopyMotion::Up(1)),
+            Keysym::j | Keysym::J | Keysym::Down if plain => Some(CopyMotion::Down(1)),
+            Keysym::Page_Up => Some(CopyMotion::Up(page)),
+            Keysym::Page_Down => Some(CopyMotion::Down(page)),
+            Keysym::Home => Some(CopyMotion::LineStart),
+            Keysym::End => Some(CopyMotion::LineEnd),
+            _ => None,
+        };
+        let Some(motion) = motion else {
+            return Ok(true);
+        };
+        let outcome = self
+            .panes
+            .pane
+            .snapshot
+            .as_ref()
+            .map_or(CopyMoveOutcome::default(), |snapshot| {
+                move_copy_cursor(snapshot, &mut state, motion)
+            });
+        if outcome.request_older {
+            self.request_older_history()?;
+        }
+        if outcome.moved {
+            self.dirty_selection(self.panes.pane.selection);
+            if let Some(snapshot) = self.panes.pane.snapshot.as_ref() {
+                self.panes
+                    .pane
+                    .scrollback_viewport
+                    .reveal_row(state.cursor.row_id, snapshot);
+            }
+            self.modal.copy_mode = Some(state);
+            self.panes.pane.selection = Some(state.overlay_selection());
+            self.panes.pane.selecting = state.selecting();
+            self.dirty_selection(self.panes.pane.selection);
+            self.panes.pane.viewport_dirty = true;
+            self.presentation.full_redraw = true;
+        }
+        Ok(true)
+    }
+
     fn clear_selection(&mut self) {
         let selection = self.panes.pane.selection.take();
         self.dirty_selection(selection);
@@ -3739,6 +3909,7 @@ impl App {
     }
 
     fn invalidate_local_content_state(&mut self) {
+        self.modal.copy_mode = None;
         self.dirty_selection(self.panes.pane.selection);
         self.panes.pane.selection = None;
         self.panes.pane.selecting = false;
@@ -3754,7 +3925,15 @@ impl App {
                 .as_ref()
                 .is_some_and(|snapshot| selection_is_retained(snapshot, selection))
         });
-        if !retained {
+        let copy_mode_retained = self.modal.copy_mode.is_none_or(|state| {
+            self.panes
+                .pane
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| copy_mode_is_valid(snapshot, state))
+        });
+        if !retained || !copy_mode_retained {
+            self.modal.copy_mode = None;
             self.panes.pane.selection = None;
             self.panes.pane.selecting = false;
             self.panes.pane.history_selection_pin_blocked = false;
@@ -3780,15 +3959,187 @@ impl App {
         }
     }
 
+    fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
+        if self.modal.binding_help.is_none()
+            && let Some(palette) = self.modal.command_palette.as_mut()
+        {
+            return Some((OwnedFieldTarget::CommandPalette, palette.editor_mut()));
+        }
+        if let Some(prompt) = self.modal.dojo_prompt.as_mut()
+            && let Some(editor) = prompt.editor_mut()
+        {
+            return Some((OwnedFieldTarget::DojoPrompt, editor));
+        }
+        self.panes
+            .pane
+            .search
+            .input
+            .as_mut()
+            .map(|editor| (OwnedFieldTarget::Search, editor))
+    }
+
+    fn owned_field_editor_mut(
+        &mut self,
+        target: OwnedFieldTarget,
+    ) -> Option<&mut BoundedTextEditor> {
+        match target {
+            OwnedFieldTarget::CommandPalette => self
+                .modal
+                .command_palette
+                .as_mut()
+                .map(CommandPaletteUi::editor_mut),
+            OwnedFieldTarget::DojoPrompt => self
+                .modal
+                .dojo_prompt
+                .as_mut()
+                .and_then(DojoPromptUi::editor_mut),
+            OwnedFieldTarget::Search => self.panes.pane.search.input.as_mut(),
+        }
+    }
+
+    fn refresh_owned_field(&mut self, target: OwnedFieldTarget) {
+        match target {
+            OwnedFieldTarget::CommandPalette => {
+                if let Some(palette) = self.modal.command_palette.as_mut() {
+                    palette.editor_changed();
+                }
+                self.refresh_command_palette();
+            }
+            OwnedFieldTarget::DojoPrompt => self.refresh_dojo_prompt(),
+            OwnedFieldTarget::Search => {
+                self.update_window_title();
+                self.presentation.full_redraw = true;
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ordered boundary keeps field clipboard publication and bounded edits atomic"
+    )]
+    fn handle_owned_field_key(
+        &mut self,
+        event: &KeyEvent,
+        queue_handle: &QueueHandle<Self>,
+        serial: u32,
+    ) -> bool {
+        let Some((target, _)) = self.active_owned_field() else {
+            return false;
+        };
+        let desktop = self.input.modifiers.logo
+            && !self.input.modifiers.ctrl
+            && !self.input.modifiers.alt
+            && !self.input.modifiers.shift;
+        let plain =
+            !self.input.modifiers.logo && !self.input.modifiers.ctrl && !self.input.modifiers.alt;
+        let extend = self.input.modifiers.shift;
+        let clipboard_available = self.clipboard.data_device.is_some();
+        let mut changed = false;
+        let mut copied = None;
+        let mut paste = false;
+        let handled = if desktop {
+            match event.keysym {
+                Keysym::c | Keysym::C => {
+                    copied = self
+                        .owned_field_editor_mut(target)
+                        .and_then(|editor| editor.selected_text().map(str::as_bytes))
+                        .map(<[u8]>::to_vec);
+                    true
+                }
+                Keysym::v | Keysym::V => {
+                    paste = true;
+                    true
+                }
+                Keysym::x | Keysym::X => {
+                    if clipboard_available {
+                        copied = self
+                            .owned_field_editor_mut(target)
+                            .and_then(BoundedTextEditor::cut)
+                            .map(String::into_bytes);
+                        changed = copied.is_some();
+                    }
+                    true
+                }
+                Keysym::z | Keysym::Z => {
+                    changed = self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(BoundedTextEditor::undo);
+                    true
+                }
+                Keysym::a | Keysym::A => {
+                    changed = self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(BoundedTextEditor::select_all);
+                    true
+                }
+                _ => true,
+            }
+        } else if plain {
+            match event.keysym {
+                Keysym::BackSpace => {
+                    changed = self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(BoundedTextEditor::backspace);
+                    true
+                }
+                Keysym::Left => {
+                    changed = self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(|editor| editor.move_left(extend));
+                    true
+                }
+                Keysym::Right => {
+                    changed = self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(|editor| editor.move_right(extend));
+                    true
+                }
+                Keysym::Home => {
+                    changed = self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(|editor| editor.move_home(extend));
+                    true
+                }
+                Keysym::End => {
+                    changed = self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(|editor| editor.move_end(extend));
+                    true
+                }
+                _ => event.utf8.as_deref().is_some_and(|text| {
+                    changed = self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(|editor| editor.insert(text));
+                    true
+                }),
+            }
+        } else {
+            false
+        };
+        if !handled {
+            return false;
+        }
+        if let Some(copied) = copied {
+            self.publish_clipboard_payload(queue_handle, serial, false, &copied);
+        }
+        if paste {
+            self.begin_clipboard_read(PasteTarget::OwnedField(target));
+        }
+        if changed {
+            self.refresh_owned_field(target);
+        }
+        true
+    }
+
     fn begin_clipboard_read(&mut self, target: PasteTarget) {
-        if self.modal.input_modal_open() {
+        if self.modal.input_modal_open() && !matches!(target, PasteTarget::OwnedField(_)) {
             return;
         }
         let tx = self.clipboard.clipboard_tx.clone();
         let waker = self.platform.update_waker.clone();
         let input_generation = self.input.input_generation;
         match target {
-            PasteTarget::Clipboard => {
+            PasteTarget::Clipboard | PasteTarget::OwnedField(_) => {
                 let Some(offer) = self.clipboard.clipboard_offer.clone() else {
                     return;
                 };
@@ -3813,11 +4164,7 @@ impl App {
 
     fn apply_clipboard_reads(&mut self) -> Result<()> {
         while let Ok(read) = self.clipboard.clipboard_rx.try_recv() {
-            if !clipboard_read_is_current(
-                self.modal.input_modal_open(),
-                self.input.input_generation,
-                read.input_generation,
-            ) {
+            if self.input.input_generation != read.input_generation {
                 continue;
             }
             let Ok(bytes) = read.bytes else {
@@ -3826,26 +4173,56 @@ impl App {
             let Ok(bytes) = safe_paste(&bytes) else {
                 continue;
             };
-            let bracketed = self
-                .panes
-                .pane
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.input_modes.bracketed_paste);
-            self.send_input(encode_bracketed_paste(bytes, bracketed))?;
-            let _ = read.target;
+            match read.target {
+                PasteTarget::Clipboard | PasteTarget::Primary => {
+                    if !clipboard_read_is_current(
+                        self.modal.input_modal_open(),
+                        self.input.input_generation,
+                        read.input_generation,
+                    ) {
+                        continue;
+                    }
+                    let bracketed = self
+                        .panes
+                        .pane
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.input_modes.bracketed_paste);
+                    self.send_input(encode_bracketed_paste(bytes, bracketed))?;
+                }
+                PasteTarget::OwnedField(target) => {
+                    let text = std::str::from_utf8(bytes)
+                        .expect("safe_paste already validated clipboard UTF-8");
+                    if self
+                        .owned_field_editor_mut(target)
+                        .is_some_and(|editor| editor.insert(text))
+                    {
+                        self.refresh_owned_field(target);
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     fn publish_clipboard(&mut self, qh: &QueueHandle<Self>, serial: u32, primary: bool) {
-        let Some(text) = self.panes.pane.selected_text.as_ref() else {
+        let Some(text) = self.panes.pane.selected_text.clone() else {
             return;
         };
+        self.publish_clipboard_payload(qh, serial, primary, &text);
+    }
+
+    fn publish_clipboard_payload(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        serial: u32,
+        primary: bool,
+        text: &[u8],
+    ) {
         if text.is_empty() {
             return;
         }
-        let payload = Arc::<[u8]>::from(text.clone());
+        let payload = Arc::<[u8]>::from(text.to_vec());
         let mimes: Vec<_> = TEXT_MIMES.iter().map(|mime| (*mime).to_owned()).collect();
         if primary {
             if let (Some(manager), Some(device)) = (
@@ -3948,6 +4325,7 @@ impl App {
 
     fn show_command_palette(&mut self) -> Result<()> {
         self.input.prefix_state.clear();
+        self.modal.binding_help = None;
         anyhow::ensure!(
             self.command_palette_available(),
             "command palette is unavailable"
@@ -4021,10 +4399,18 @@ impl App {
         Ok(())
     }
 
+    fn show_binding_help(&mut self) -> Result<()> {
+        self.show_command_palette()?;
+        self.modal.binding_help = Some(BindingHelpUi::new(&self.input.keymap));
+        self.surface.window.set_title("Splinterm — Key bindings");
+        Ok(())
+    }
+
     fn close_command_palette(&mut self) -> bool {
         if self.modal.command_palette.take().is_none() {
             return false;
         }
+        self.modal.binding_help = None;
         self.modal.command_palette_layout = None;
         self.modal.command_palette_pressed = None;
         self.modal.command_palette_text_cache.clear();
@@ -4130,7 +4516,8 @@ impl App {
                 );
                 match action {
                     CommandHistoryAction::Search => {
-                        self.panes.pane.search.input = Some(String::new());
+                        self.input.input_generation = self.input.input_generation.saturating_add(1);
+                        self.panes.pane.search.input = Some(new_search_editor());
                         self.panes.pane.search.matches.clear();
                         self.panes.pane.search.next_cursor = None;
                         self.update_window_title();
@@ -4426,6 +4813,7 @@ impl App {
 
     fn show_dojo_prompt(&mut self, prompt: DojoPromptUi) {
         self.input.prefix_state.clear();
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
         let title = match &prompt {
             DojoPromptUi::Rename(_) => "Splinterm — Rename Tab",
             DojoPromptUi::Terminate(_) => "Splinterm — Confirm Dojo Termination",
@@ -4445,6 +4833,7 @@ impl App {
         if self.modal.dojo_prompt.take().is_none() {
             return false;
         }
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
         self.modal.dojo_prompt_layout = None;
         self.modal.dojo_prompt_pressed = None;
         self.modal.dojo_prompt_text_cache.clear();
@@ -5029,7 +5418,7 @@ impl App {
             PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                 let pressed = self.modal.command_palette_pressed.take();
                 changed |= pressed.is_some();
-                if pressed.is_some() && pressed == target {
+                if self.modal.binding_help.is_none() && pressed.is_some() && pressed == target {
                     execute = target;
                 }
             }
@@ -5039,15 +5428,19 @@ impl App {
                     vertical.discrete,
                     vertical.value120,
                     44,
-                ) && let Some(palette) = self.modal.command_palette.as_mut()
-                {
+                ) {
                     let count = isize::try_from(count).unwrap_or(isize::MAX);
-                    changed |= palette.move_selection(match direction {
+                    let delta = match direction {
                         MouseAction::WheelUp => -count,
                         MouseAction::WheelDown => count,
                         _ => 0,
-                    });
-                    palette.update_hovered(None);
+                    };
+                    if let Some(help) = self.modal.binding_help.as_mut() {
+                        changed |= help.move_selection(delta);
+                    } else if let Some(palette) = self.modal.command_palette.as_mut() {
+                        changed |= palette.move_selection(delta);
+                        palette.update_hovered(None);
+                    }
                 }
             }
             _ => {}
@@ -5334,6 +5727,14 @@ impl App {
     }
 
     fn update_window_title(&self) {
+        if self.modal.copy_mode.is_some() {
+            self.surface.window.set_title("Splinterm — COPY");
+            return;
+        }
+        if self.modal.binding_help.is_some() {
+            self.surface.window.set_title("Splinterm — Key bindings");
+            return;
+        }
         if let Some(snapshot) = &self.panes.pane.snapshot {
             self.surface.window.set_title(window_title(
                 self.presentation
@@ -5499,6 +5900,36 @@ impl App {
             }
             return;
         }
+        if self.modal.binding_help.is_some() {
+            let mut close = false;
+            let mut changed = false;
+            if let Some(help) = self.modal.binding_help.as_mut() {
+                match event.keysym {
+                    Keysym::Up => changed = help.move_selection(-1),
+                    Keysym::Down => changed = help.move_selection(1),
+                    Keysym::Home => changed = help.select_first(),
+                    Keysym::End => changed = help.select_last(),
+                    Keysym::Page_Up => {
+                        changed = help.move_selection(
+                            -isize::try_from(BINDING_HELP_PAGE_ITEMS).unwrap_or(isize::MAX),
+                        );
+                    }
+                    Keysym::Page_Down => {
+                        changed = help.move_selection(
+                            isize::try_from(BINDING_HELP_PAGE_ITEMS).unwrap_or(isize::MAX),
+                        );
+                    }
+                    Keysym::Escape => close = true,
+                    _ => {}
+                }
+            }
+            if close {
+                self.close_command_palette();
+            } else if changed {
+                self.refresh_command_palette();
+            }
+            return;
+        }
         if self.modal.command_palette.is_some() {
             let mut execute = None;
             let mut close = false;
@@ -5514,7 +5945,10 @@ impl App {
                     }
                     Keysym::Escape => close = true,
                     Keysym::BackSpace => changed = palette.backspace(),
-                    _ if !self.input.modifiers.ctrl && !self.input.modifiers.alt => {
+                    _ if !self.input.modifiers.ctrl
+                        && !self.input.modifiers.alt
+                        && !self.input.modifiers.logo =>
+                    {
                         if let Some(text) = event.utf8.as_deref() {
                             changed = palette.append_text(text);
                         }
@@ -5612,6 +6046,7 @@ impl App {
             }
             match event.keysym {
                 Keysym::Escape => {
+                    self.input.input_generation = self.input.input_generation.saturating_add(1);
                     self.panes.pane.search = SearchUiState::default();
                     self.panes.pane.selection = None;
                 }
@@ -5621,27 +6056,20 @@ impl App {
                         .pane
                         .search
                         .input
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_owned();
+                        .as_ref()
+                        .map_or_else(String::new, |editor| editor.text().to_owned());
                     self.submit_search(None);
                 }
                 Keysym::BackSpace => {
                     if let Some(input) = self.panes.pane.search.input.as_mut() {
-                        input.pop();
+                        input.backspace();
                     }
                 }
                 _ if !self.input.modifiers.ctrl && !self.input.modifiers.alt => {
                     if let (Some(input), Some(text)) =
                         (self.panes.pane.search.input.as_mut(), event.utf8.as_deref())
                     {
-                        for character in text.chars().filter(|character| !character.is_control()) {
-                            if input.len() + character.len_utf8()
-                                <= splinterm_protocol::MAX_SEARCH_QUERY_BYTES
-                            {
-                                input.push(character);
-                            }
-                        }
+                        input.insert(text);
                     }
                 }
                 _ => {}
@@ -5682,7 +6110,8 @@ impl App {
                 return;
             }
             Some(ActionId::SearchScrollback) => {
-                self.panes.pane.search.input = Some(String::new());
+                self.input.input_generation = self.input.input_generation.saturating_add(1);
+                self.panes.pane.search.input = Some(new_search_editor());
                 self.panes.pane.search.matches.clear();
                 self.panes.pane.search.next_cursor = None;
                 self.update_window_title();
@@ -6431,6 +6860,9 @@ impl App {
     )]
     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         let (topology_changed, topology_theme) = self.apply_topology_updates()?;
+        if topology_changed {
+            self.cancel_copy_mode_for_topology();
+        }
         let theme = self.presentation.theme;
         let waker = self.platform.update_waker.clone();
         let topology_commands = self.tab_state.topology_commands.clone();
@@ -7512,14 +7944,24 @@ impl App {
         } else {
             None
         };
-        let command_palette_layout = self.modal.command_palette.as_ref().and_then(|palette| {
+        let command_palette_layout = if let Some(help) = self.modal.binding_help.as_ref() {
+            let placeholders = vec![BuiltInCommandId::RecentSessions; help.rows().len()];
             command_palette_layout(
                 self.content_rect(),
-                palette.filtered(),
-                palette.selected_index(),
-                palette.visible_start(),
+                &placeholders,
+                help.selected_index(),
+                help.visible_start(),
             )
-        });
+        } else {
+            self.modal.command_palette.as_ref().and_then(|palette| {
+                command_palette_layout(
+                    self.content_rect(),
+                    palette.filtered(),
+                    palette.selected_index(),
+                    palette.visible_start(),
+                )
+            })
+        };
         let dojo_prompt_layout = self
             .modal
             .dojo_prompt
@@ -7944,6 +8386,7 @@ impl App {
                 &self.input.keymap,
                 self.modal.command_palette_pressed,
                 self.input.keyboard_focused,
+                self.modal.binding_help.as_ref(),
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
@@ -9019,6 +9462,46 @@ mod tests {
         row.row_id = Some(1);
         snapshot.visible_rows = vec![row];
         snapshot
+    }
+
+    #[test]
+    fn copy_mode_uses_stable_loaded_rows_and_bounds_older_page_requests() {
+        let mut snapshot = snapshot(SplintId::new(), 1, 7);
+        snapshot.columns = 4;
+        snapshot.rows = 2;
+        snapshot.cursor_column = 2;
+        snapshot.cursor_row = 1;
+        snapshot.omitted_oldest_scrollback_rows = 20;
+        snapshot.scrollback_rows = (1..=2)
+            .map(|row_id| {
+                let mut row = blank_row(4);
+                row.row_id = Some(row_id);
+                row
+            })
+            .collect();
+        snapshot.visible_rows = (3..=4)
+            .map(|row_id| {
+                let mut row = blank_row(4);
+                row.row_id = Some(row_id);
+                row
+            })
+            .collect();
+        let mut state = copy_mode_enter(&snapshot, &snapshot).unwrap();
+        assert_eq!(state.cursor.row_id, 4);
+        assert_eq!(state.cursor.column, 2);
+        state.begin_selection();
+        let older = move_copy_cursor(&snapshot, &mut state, CopyMotion::Up(4));
+        assert!(older.moved);
+        assert!(older.request_older);
+        assert_eq!(state.cursor.row_id, 1);
+        assert!(copy_mode_is_valid(&snapshot, state));
+        let down = move_copy_cursor(&snapshot, &mut state, CopyMotion::Down(2));
+        assert!(down.moved);
+        assert!(!down.request_older);
+        assert_eq!(state.cursor.row_id, 3);
+        assert_eq!(state.overlay_selection().anchor.row_id, 4);
+        snapshot.history_generation += 1;
+        assert!(!copy_mode_is_valid(&snapshot, state));
     }
 
     fn pane_options(splint_id: SplintId) -> WindowPaneOptions {
@@ -10522,7 +11005,12 @@ mod tests {
     fn trusted_title_surfaces_control_decision_and_bounded_search_state() {
         let authority = AuthorityStatus::default();
         let mut search = SearchUiState {
-            input: Some("needle\nspoof".into()),
+            input: Some(BoundedTextEditor::new(
+                "needle\nspoof".into(),
+                64,
+                64,
+                false,
+            )),
             ..SearchUiState::default()
         };
         search.matches.push(SearchMatch {
