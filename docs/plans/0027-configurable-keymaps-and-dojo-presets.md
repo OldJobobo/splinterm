@@ -1,6 +1,6 @@
 # Plan 0027: Configurable keymaps and Dojo presets
 
-- **Status:** Active — Milestones 1–9 complete; Milestone 10 next
+- **Status:** Complete — Milestones 1–10 complete
 - **Date:** 2026-08-07
 - **Depends on:** [Plan 0018](0018-lair-dojo-topology-migration.md), [Plan 0019](0019-dojo-tabs.md), [Plan 0025](0025-command-palette-and-tab-context-menus.md)
 - **Primary compatibility reference:** [Omarchy Tmux Reference](../omarchy-tmux-reference.md)
@@ -1270,6 +1270,45 @@ Gate:
   that have a meaningful Splinterm equivalent.
 
 ### Milestone 10 — packaging, installation, and graphical acceptance
+
+**Status:** Complete
+
+Recorded evidence:
+
+- packaging: clean committed source at `53ea9a9` produced matching main and MCP
+  Arch packages with the full serialized PKGBUILD check enabled. Extracted-root
+  validation passed for runtime binaries, desktop/service metadata, the complete
+  packaged documentation set, resolved Omarchy keymap, built-in presets, preset
+  example schema, generated Bash integration, relay, headless client, and MCP;
+- review: one fresh read-only release/package review found that the authoritative
+  Omarchy reference was not packaged and that upgrade guidance omitted exact
+  adjacent device/inode and old-client reopening requirements. Both findings
+  were fixed before the clean package build and enforced by package validation;
+- installation: the final main/MCP packages were installed from external Foot,
+  `/usr/bin` hashes exactly match the built archives, Pacman reports zero altered
+  files, desktop and user-service metadata validate, `splinterd` is active and
+  responsive, and the running daemon's adjacent client device/inode is exactly
+  `/usr/bin/splinterm`. The final rollback snapshot is
+  `~/.local/state/splinterm/rollback/20260810-220054-pre-source-53ea9a95c894`;
+- installer safety: a live first attempt from a daemon-owned Splinterm shell
+  proved that stopping `splinterd` can terminate its own installer before
+  Pacman or trap recovery. Both installers now walk at most 64 ancestors and
+  refuse before service/package work when they find `splinterd` or
+  `splinterm-pty-child`; two fixture-backed regressions and the rebuilt package
+  check pass;
+- graphical acceptance: the installed trusted client mapped only on workspace 8
+  / DP-2 under exact-address guards. Captured states confirm generated resolved
+  binding help, client-local vi copy selection and Wayland clipboard publication,
+  modal input isolation, direct split/focus/five-cell resize, owned command-field
+  filtering, Dojo tab creation/index/navigation/reorder, Dojo/Lair choosers, and
+  the exact `tdl`, four-quadrant `tds`, and balanced four-worker `tsl` layouts.
+  Pane-zoom dispatch remains covered by the focused keymap/action tests rather
+  than accepted screenshot evidence because virtual prefix injection was not
+  reliable on the live Fcitx layout;
+- cleanup: every harness-created window was closed by exact address, every
+  harness-created live Splint was explicitly ended, workspace 8 is empty, no
+  Splinterm test Window remains, the temporary command wrapper is absent, and
+  the recorded Foot focus/workspace/monitor/geometry were restored.
 
 Work:
 
