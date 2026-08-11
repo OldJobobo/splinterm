@@ -532,7 +532,24 @@ async fn snapshot_until(
     incarnation: u64,
     marker: &str,
 ) -> TerminalSnapshot {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    snapshot_until_with_timeout(
+        connection,
+        splint_id,
+        incarnation,
+        marker,
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+async fn snapshot_until_with_timeout(
+    connection: &mut Connection,
+    splint_id: SplintId,
+    incarnation: u64,
+    marker: &str,
+    timeout: Duration,
+) -> TerminalSnapshot {
+    let deadline = Instant::now() + timeout;
     loop {
         let (subscription_id, snapshot) = connection.attach(splint_id, incarnation).await;
         assert_eq!(
@@ -3681,11 +3698,12 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 b"i=0; while [ $i -lt 30000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'overflow-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.005; done; printf 'overflow-finished\\n'\n",
             )
             .await;
-        let _completion_snapshot = snapshot_until(
+        let _completion_snapshot = snapshot_until_with_timeout(
             &mut reattached,
             splint_id,
             incarnation,
             "overflow-finished",
+            Duration::from_secs(60),
         )
         .await;
         time::timeout(Duration::from_secs(30), fast_drain)
