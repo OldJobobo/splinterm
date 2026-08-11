@@ -3662,6 +3662,12 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             }
         });
         let mut slow = daemon.connect().await;
+        nix::sys::socket::setsockopt(
+            &slow.stream,
+            nix::sys::socket::sockopt::RcvBuf,
+            &4096,
+        )
+        .unwrap();
         for _ in 0..MAX_SUBSCRIPTIONS {
             let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
         }
