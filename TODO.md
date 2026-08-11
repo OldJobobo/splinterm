@@ -32,3 +32,19 @@ is justified; they do not define user-facing product vocabulary.
 
 The existing bounded-history compaction remains the temporary safety mechanism
 until this lifecycle design is implemented and reviewed.
+
+## File and image path insertion
+
+- [ ] Support dropping one or more files or images onto a terminal and insert
+  their shell-escaped local paths into the focused Splint.
+- [ ] Support pasting clipboard image data by saving it with a collision-safe
+  filename, then insert the saved image path without changing normal text paste.
+- [ ] Define Wayland MIME handling, destination and cleanup behavior, user
+  confirmation, bracketed-paste behavior, and clear failure feedback.
+- [ ] Test spaces, quotes, Unicode, multiple files, file URIs, unsupported or
+  remote sources, clipboard image formats, and cancelled or failed saves.
+
+## Omarchy integration
+
+- [ ] Implement [Plan 0032](docs/plans/0032-omarchy-screensaver-integration.md)
+  to add Splinterm to the terminals supported by the Omarchy screensaver.
