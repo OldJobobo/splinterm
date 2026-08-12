@@ -1,0 +1,58 @@
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - .github/workflows/site.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: splinterm-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: ${{ vars.CLOUDFLARE_PAGES_DEPLOY == 'enabled' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - run: npm run validate
+      - name: Deploy and verify preview
+        run: |
+          npm run deploy:preview:upload -- --commit-hash "$GITHUB_SHA"
+          response=$(curl --fail --silent --show-error \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/splinterm-preview/deployments?page=1&per_page=1" \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+          deployment_url=$(jq --exit-status --raw-output --arg sha "$GITHUB_SHA" \
+            '.result[0] | select(.deployment_trigger.metadata.commit_hash == $sha and .latest_stage.status == "success") | .url' \
+            <<<"$response")
+          curl --fail --silent --show-error --max-time 15 \
+            "$deployment_url/sitemap.xml" >/dev/null
+      - name: Deploy and verify production
+        run: |
+          npm run deploy:production:upload -- --commit-hash "$GITHUB_SHA"
+          response=$(curl --fail --silent --show-error \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/splinterm-coming-soon/deployments?page=1&per_page=1" \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+          deployment_url=$(jq --exit-status --raw-output --arg sha "$GITHUB_SHA" \
+            '.result[0] | select(.deployment_trigger.metadata.commit_hash == $sha and .latest_stage.status == "success") | .url' \
+            <<<"$response")
+          curl --fail --silent --show-error --max-time 15 \
+            "$deployment_url/sitemap.xml" >/dev/null

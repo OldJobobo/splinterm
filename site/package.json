@@ -11,8 +11,11 @@
     "check:links": "node scripts/check-links.mjs",
     "validate": "npm run build && npm run check:links",
     "preview": "astro preview",
-    "deploy:production": "npm run validate && npx wrangler pages deploy dist --project-name splinterm-coming-soon --branch main",
-    "deploy:preview": "npm run validate && npx wrangler pages deploy dist --project-name splinterm-preview --branch main"
+    "deploy": "npm run validate && npm run deploy:preview:upload && npm run deploy:production:upload",
+    "deploy:production": "npm run validate && npm run deploy:production:upload",
+    "deploy:preview": "npm run validate && npm run deploy:preview:upload",
+    "deploy:production:upload": "npx --yes wrangler@4.122.0 pages deploy dist --project-name splinterm-coming-soon --branch main",
+    "deploy:preview:upload": "npx --yes wrangler@4.122.0 pages deploy dist --project-name splinterm-preview --branch main"
   },
   "dependencies": {
     "@astrojs/starlight": "0.41.7",

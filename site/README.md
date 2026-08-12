@@ -28,7 +28,7 @@ npm run validate
 npm run preview
 ```
 
-`npm run validate` type-checks the Astro project, builds every static route and search index, and verifies generated local page and asset links stay inside `dist/`.
+`npm run validate` type-checks the Astro project, builds every static route and search index, and verifies generated local page and asset links stay inside `dist/`. The build also emits `sitemap.xml`, `robots.txt`, the SVG favicon, and a `/favicon.ico` compatibility redirect.
 
 The generated `dist/` directory is local build output and is not committed.
 
@@ -36,9 +36,12 @@ The generated `dist/` directory is local build output and is not committed.
 
 Wrangler must be authenticated to the Cloudflare account that owns `splinterm.com`.
 
+For routine releases, validate once and deploy the same build to preview followed by production:
+
 ```bash
-npm run deploy:production
-npm run deploy:preview
+npm run deploy
 ```
 
-Each command validates and builds the unified public alpha site before uploading `dist/` to the corresponding Pages project.
+The individual `deploy:preview` and `deploy:production` commands remain available for recovery or targeted testing. Avoid running several production deploys in quick succession; use the unified command so one validated build advances both Pages projects in a predictable order.
+
+`.github/workflows/site.yml` applies the same sequence on pushes that change `site/`, cancels superseded runs, and verifies the exact preview deployment before promoting the build. Enable it by setting the `CLOUDFLARE_PAGES_DEPLOY` Actions variable to `enabled` and adding `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` Actions secrets with Cloudflare Pages edit access.
