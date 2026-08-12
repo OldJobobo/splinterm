@@ -4022,6 +4022,28 @@ impl App {
         }
     }
 
+    fn owned_field_defers_to_modal(target: OwnedFieldTarget, keysym: Keysym) -> bool {
+        match target {
+            OwnedFieldTarget::CommandPalette => matches!(
+                keysym,
+                Keysym::Up
+                    | Keysym::Down
+                    | Keysym::Home
+                    | Keysym::End
+                    | Keysym::Return
+                    | Keysym::KP_Enter
+                    | Keysym::Escape
+            ),
+            OwnedFieldTarget::DojoPrompt | OwnedFieldTarget::Search => {
+                matches!(keysym, Keysym::Return | Keysym::KP_Enter | Keysym::Escape)
+            }
+        }
+    }
+
+    fn editable_field_text(text: Option<&str>) -> Option<&str> {
+        text.filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one ordered boundary keeps field clipboard publication and bounded edits atomic"
@@ -4035,6 +4057,9 @@ impl App {
         let Some((target, _)) = self.active_owned_field() else {
             return false;
         };
+        if Self::owned_field_defers_to_modal(target, event.keysym) {
+            return false;
+        }
         let desktop = self.input.modifiers.logo
             && !self.input.modifiers.ctrl
             && !self.input.modifiers.alt
@@ -4115,7 +4140,7 @@ impl App {
                         .is_some_and(|editor| editor.move_end(extend));
                     true
                 }
-                _ => event.utf8.as_deref().is_some_and(|text| {
+                _ => Self::editable_field_text(event.utf8.as_deref()).is_some_and(|text| {
                     changed = self
                         .owned_field_editor_mut(target)
                         .is_some_and(|editor| editor.insert(text));
@@ -5869,7 +5894,7 @@ impl App {
                         Keysym::Escape => close = true,
                         Keysym::BackSpace => changed = rename.backspace(),
                         _ if !self.input.modifiers.ctrl && !self.input.modifiers.alt => {
-                            if let Some(text) = event.utf8.as_deref() {
+                            if let Some(text) = Self::editable_field_text(event.utf8.as_deref()) {
                                 changed = rename.append_text(text);
                             }
                         }
@@ -5888,7 +5913,7 @@ impl App {
                         Keysym::Escape => close = true,
                         Keysym::BackSpace => changed = rename.backspace(),
                         _ if !self.input.modifiers.ctrl && !self.input.modifiers.alt => {
-                            if let Some(text) = event.utf8.as_deref() {
+                            if let Some(text) = Self::editable_field_text(event.utf8.as_deref()) {
                                 changed = rename.append_text(text);
                             }
                         }
@@ -5984,7 +6009,7 @@ impl App {
                         && !self.input.modifiers.alt
                         && !self.input.modifiers.logo =>
                     {
-                        if let Some(text) = event.utf8.as_deref() {
+                        if let Some(text) = Self::editable_field_text(event.utf8.as_deref()) {
                             changed = palette.append_text(text);
                         }
                     }
@@ -6101,9 +6126,10 @@ impl App {
                     }
                 }
                 _ if !self.input.modifiers.ctrl && !self.input.modifiers.alt => {
-                    if let (Some(input), Some(text)) =
-                        (self.panes.pane.search.input.as_mut(), event.utf8.as_deref())
-                    {
+                    if let (Some(input), Some(text)) = (
+                        self.panes.pane.search.input.as_mut(),
+                        Self::editable_field_text(event.utf8.as_deref()),
+                    ) {
                         input.insert(text);
                     }
                 }
@@ -8722,6 +8748,45 @@ mod tests {
             .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
+    }
+
+    #[test]
+    fn owned_fields_defer_modal_control_keys_before_text_editing() {
+        for keysym in [
+            Keysym::Up,
+            Keysym::Down,
+            Keysym::Home,
+            Keysym::End,
+            Keysym::Return,
+            Keysym::KP_Enter,
+            Keysym::Escape,
+        ] {
+            assert!(App::owned_field_defers_to_modal(
+                OwnedFieldTarget::CommandPalette,
+                keysym
+            ));
+        }
+        for target in [OwnedFieldTarget::DojoPrompt, OwnedFieldTarget::Search] {
+            for keysym in [Keysym::Return, Keysym::KP_Enter, Keysym::Escape] {
+                assert!(App::owned_field_defers_to_modal(target, keysym));
+            }
+            assert!(!App::owned_field_defers_to_modal(target, Keysym::Left));
+            assert!(!App::owned_field_defers_to_modal(target, Keysym::BackSpace));
+        }
+        assert!(!App::owned_field_defers_to_modal(
+            OwnedFieldTarget::CommandPalette,
+            Keysym::BackSpace
+        ));
+    }
+
+    #[test]
+    fn owned_fields_accept_printable_unicode_but_reject_empty_and_control_text() {
+        assert_eq!(App::editable_field_text(Some("alpha 界")), Some("alpha 界"));
+        assert_eq!(App::editable_field_text(Some("")), None);
+        assert_eq!(App::editable_field_text(Some("\r")), None);
+        assert_eq!(App::editable_field_text(Some("\u{1b}")), None);
+        assert_eq!(App::editable_field_text(Some("a\tb")), None);
+        assert_eq!(App::editable_field_text(None), None);
     }
 
     #[test]
