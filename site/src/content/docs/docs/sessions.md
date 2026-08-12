@@ -7,14 +7,16 @@ description: Work with Lairs, Dojos, Splints, windows, detach, reopen, restore, 
 
 ## New work and existing work
 
-A commandless desktop/XDG launch creates a fresh persistent Lair with one Dojo and Splint. An XDG launch carrying a command creates a transient client-bound Lair instead; it is removed when its initial command exits or its owning Window disconnects. Transient Lairs are never saved, restored, listed in Recent Sessions, or selected by `reopen`. Native `splinterm launch -- COMMAND...` remains persistent. Reopening is intentionally separate:
+A commandless desktop/XDG launch creates a fresh persistent Lair with one Dojo and Splint. An XDG launch carrying a command creates a transient client-bound Lair instead; it is removed when its initial command exits or its owning Window disconnects. Transient Lairs are never saved, restored, listed in Recent Dojos, or selected by `reopen`. Native `splinterm launch -- COMMAND...` remains persistent. Reopening is intentionally separate:
 
 ```bash
-splinterm sessions  # choose New Terminal or a recent running Dojo
-splinterm reopen    # reopen the last remembered running Dojo
+splinterm dojos   # choose New Terminal or a recent running Dojo
+splinterm reopen  # reopen the last remembered running Dojo
 ```
 
-A graphical window may attach up to 32 distinct Dojos as local tabs, including Dojos from different Lairs. Opening a Dojo already present in that window activates its tab instead of duplicating it.
+`splinterm sessions` remains a compatibility alias for `dojos`.
+
+A graphical window may attach up to 32 distinct Dojos as local tabs, including Dojos from different Lairs. Opening a Dojo already present in that window activates its tab instead of duplicating it. **Ctrl+Shift+B** hides or restores the local tab strip without changing the tab set; the choice lasts only for that Window.
 
 ## Closing different things
 
@@ -25,6 +27,8 @@ These actions have deliberately different effects:
 | Close a persistent window | Detaches its local tabs and views |
 | Close a transient XDG command window | Terminates every process and removes its complete Lair |
 | Close a tab | Detaches that Dojo from this window |
+| Close Other Tabs | Detaches every other local tab without ending their Dojos |
+| Terminate Dojo from a tab menu | Confirms, then ends the Dojo's pane processes |
 | Terminate a live Splint | Ends its process after explicit confirmation |
 | Close an exited Splint | Removes the exited pane from topology |
 | Close a Dojo | Removes it only when all affected Splints have exited |
@@ -48,6 +52,23 @@ splinterm reset --yes # explicit unattended confirmation
 ```
 
 Reset moves the complete session database to a timestamped backup, restarts the canonical user service, waits for its configured socket, and leaves policy and configuration untouched.
+
+## Tab controls
+
+The visible tab strip supports activation, detach-only close, and a `+` action for Recent Dojos. Right-click a tab to Rename Tab, Activate Tab, create a New Dojo in its Lair, Close Tab, Close Other Tabs, or open confirmed Terminate Dojo. Opening the menu does not activate the target tab first.
+
+These are trusted application controls. Terminal content cannot paint, rename, or activate them.
+
+## Remote Dojos
+
+A configured SSH profile can open its own Recent Dojos picker and native Window:
+
+```bash
+splinterm --remote PROFILE
+splinterm --remote PROFILE reopen
+```
+
+Remote and local recency are kept separate. Losing the SSH connection closes local views and releases controllers without terminating daemon-owned remote processes. See [Remote access](/docs/remote/).
 
 :::caution
 Reset affects the complete persistent topology. Inspect what is running before confirming it.

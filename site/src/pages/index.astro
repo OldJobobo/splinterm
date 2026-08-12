@@ -17,7 +17,7 @@ const capabilities = [
   description="Splinterm is a persistent, security-conscious terminal substrate for humans and bounded automation."
 >
   <section class="intro-hero" aria-labelledby="intro-title">
-    <img class="intro-mark" src="/logo.png" alt="" width="768" height="768" />
+    <img class="intro-mark" src="/logo-transparent.png" alt="" width="768" height="768" />
     <h1 id="intro-title" class="intro-wordmark">splinterm</h1>
     <p class="intro-status">Public alpha</p>
     <div class="intro-actions">
@@ -105,10 +105,10 @@ const capabilities = [
       <article class="control-card human-card">
         <div class="card-label"><span>Human</span><i>native client</i></div>
         <h3>Hands on the Dojo</h3>
-        <p>Wayland windows, tabs, panes, search, clipboard, and explicit control transfer.</p>
+        <p>Local or SSH-backed Wayland windows, tabs, panes, presets, vi copy mode, and explicit control transfer.</p>
         <ul>
-          <li>Trusted application chrome</li>
-          <li>Native session picker</li>
+          <li>Typed keymaps and trusted chrome</li>
+          <li>Native Recent Dojos picker</li>
           <li>Visible authority state</li>
         </ul>
       </article>
@@ -250,11 +250,14 @@ const capabilities = [
       <p class="eyebrow">The ordinary path into the Lair</p>
       <h2 id="workflow-title">Leave the window.<br />Return to the Dojo.</h2>
       <p>Install the current public alpha from the AUR, open a Splint, then use the Dojo picker whenever you want the running work back.</p>
-      <a class="button primary" href="/docs/quickstart/">Follow the local quickstart</a>
+      <div class="hero-actions">
+        <a class="button primary" href="/docs/quickstart/">Follow the local quickstart</a>
+        <a class="text-link" href="/docs/remote/">Open a remote Lair <span aria-hidden="true">→</span></a>
+      </div>
     </div>
     <div class="command-stack" aria-label="Example Splinterm commands">
       <div><span>$</span><code>yay -S splinterm-bin</code></div>
-      <div><span>$</span><code>splinterm sessions</code><small>choose a running Dojo</small></div>
+      <div><span>$</span><code>splinterm dojos</code><small>choose a running Dojo</small></div>
       <div><span>$</span><code>splinterm reopen</code><small>return to the last one</small></div>
     </div>
   </section>
@@ -266,8 +269,10 @@ const capabilities = [
     </div>
     <div class="gateway-links">
       <a href="/docs/quickstart/"><span>Start using Splinterm</span><small>Install, launch, detach, and return.</small><i>↗</i></a>
-      <a href="/docs/configure/configuration/"><span>Configure the terminal</span><small>Fonts, sizing, theme, panes, and migration.</small><i>↗</i></a>
+      <a href="/docs/configure/configuration/"><span>Configure the terminal</span><small>Fonts, themes, typed keymaps, vi copy mode, and migration.</small><i>↗</i></a>
+      <a href="/docs/presets/"><span>Build a Dojo from a preset</span><small>Atomic Omarchy layouts, strict catalogs, and collision-safe shell helpers.</small><i>↗</i></a>
       <a href="/docs/sessions/"><span>Understand persistence</span><small>Lairs, Dojos, Splints, windows, and lifecycle.</small><i>↗</i></a>
+      <a href="/docs/remote/"><span>Enter a remote Lair</span><small>Native SSH-backed windows and separately bounded machine relay.</small><i>↗</i></a>
       <a href="/docs/wayland/"><span>Why native Wayland</span><small>Direct compositor integration, practical benefits, and honest limits.</small><i>↗</i></a>
       <a href="/docs/automation/"><span>Automate safely</span><small>Machine contracts, policy gates, controller ownership, and untrusted output.</small><i>↗</i></a>
       <a href="/docs/mcp/"><span>Connect an MCP host</span><small>Install the adapter, authorize only what it needs, validate, and revoke.</small><i>↗</i></a>

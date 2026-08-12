@@ -23,6 +23,7 @@ export default defineConfig({
             { label: 'Current status', slug: 'docs/status' },
             { label: 'Installation', slug: 'docs/install' },
             { label: 'Quickstart', slug: 'docs/quickstart' },
+            { label: 'CLI reference', slug: 'docs/cli' },
             { label: 'Core concepts', slug: 'docs/concepts' },
             { label: 'Why native Wayland?', slug: 'docs/wayland' },
           ],
@@ -31,7 +32,9 @@ export default defineConfig({
           label: 'Use Splinterm',
           items: [
             { label: 'Sessions and persistence', slug: 'docs/sessions' },
-            { label: 'Configuration', slug: 'docs/configure/configuration' },
+            { label: 'Configuration and keymaps', slug: 'docs/configure/configuration' },
+            { label: 'Dojo presets', slug: 'docs/presets' },
+            { label: 'Remote access', slug: 'docs/remote' },
             { label: 'Troubleshooting', slug: 'docs/troubleshooting' },
           ],
         },

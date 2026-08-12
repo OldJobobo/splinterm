@@ -136,7 +136,7 @@ No policy, a different digest, missing scope, wrong resource or incarnation, sta
 
 The adapter exposes:
 
-- 32 fixed tools;
+- 33 fixed tools;
 - one topology resource and terminal/control resource templates;
 - no arbitrary shell-string tool;
 - no filesystem, network, policy-write, clipboard, prompts, sampling, or elicitation capability; and

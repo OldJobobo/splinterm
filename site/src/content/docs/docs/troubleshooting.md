@@ -50,7 +50,7 @@ SPLINTERM_CONFIG=/path/to/config.ini splinterm launch
 
 Unknown keys and malformed values fail rather than being guessed. Compare the file with the [supported configuration](/docs/configure/configuration/).
 
-## A session is missing from Recent Sessions
+## A Dojo is missing from Recent Dojos
 
 The native picker opens only Dojos whose complete pane layout is still running. Exited Splints remain in persistent metadata, but starting them again requires explicit restore.
 

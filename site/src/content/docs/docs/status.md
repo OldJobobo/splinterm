@@ -23,10 +23,14 @@ Alpha2 is a critical keyboard-input hotfix. It restores command palette navigati
 | Persistent sessions and explicit restore | Implemented and validated |
 | XDG command lifecycle | Commandless launches remain persistent; command-bearing launches use trusted client-bound transient Lairs |
 | Pane layouts and multiple Dojos | Implemented and validated |
-| Window-local Dojo tabs | Implemented and validated |
+| Window-local Dojo tabs, tab strip, and context menus | Implemented and validated |
+| Configurable keymaps and Omarchy controls | Implemented and validated |
+| Atomic Dojo presets and optional Bash helpers | Implemented and validated |
+| Vi copy mode and trusted local field editing | Implemented and validated |
 | Multi-client controller transfer | Implemented and validated |
 | JSON/NDJSON automation | Implemented and validated |
 | SSH stdio relay | Implemented and validated |
+| [Native remote graphical client](/docs/remote/) | Implemented and validated with profile-bound OpenSSH transport; remote image transfer is excluded |
 | [MCP adapter](/docs/mcp/) | Implemented and validated as an optional, separately policy-identified package |
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned AUR and public alpha edge packages validated |

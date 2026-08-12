@@ -36,6 +36,15 @@ frame-title=splint
 [cursor]
 style=block
 blink=yes
+
+[key-bindings]
+profile=splinterm
+# file=keybindings.toml
+# prefix-timeout-ms=1000
+
+[presets]
+# file=presets.toml
+allow-unrestricted-commands=no
 ```
 
 Malformed supported values fail startup. Unknown sections and keys produce line-numbered diagnostics.
@@ -56,6 +65,11 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `cursor.style` | `block`, `beam`, or `underline` | `block` |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` | `line` |
 | `multiplexer.frame-title` | `splint` or `none` | `splint` |
+| `key-bindings.profile` | `splinterm` or `omarchy-tmux` | `splinterm` |
+| `key-bindings.file` | optional strict TOML overlay | unset |
+| `key-bindings.prefix-timeout-ms` | prefix timeout in milliseconds | 250–5000; 1000 |
+| `presets.file` | optional strict preset catalog | unset |
+| `presets.allow-unrestricted-commands` | enable packaged `c`, `cx`, `cy` aliases | `no` |
 
 ## Font sizing and Wayland scale
 
@@ -75,6 +89,58 @@ Set an explicit JSON palette only to opt out of native discovery:
 [main]
 theme=~/.config/splinterm/theme.json
 ```
+
+## Keymaps and the command palette
+
+Splinterm binds only a closed registry of application actions. Keyboard dispatch, command-palette labels, tab menus, and generated help therefore describe the same resolved keymap. Configuration cannot register shell commands or callbacks.
+
+Inspect the active configuration without contacting the daemon:
+
+```bash
+splinterm config check
+splinterm keymap list
+splinterm keymap show
+splinterm keymap show omarchy-tmux
+splinterm keymap conflicts
+```
+
+The default `splinterm` profile provides the controls in the [quickstart](/docs/quickstart/). The `omarchy-tmux` profile adds familiar `Ctrl+Space` and `Ctrl+B` prefixes, pane and tab workflows, local pane zoom, stable-ID choosers, `Prefix+B` tab-strip toggling, trusted `Prefix+?` key help, transactional configuration reload, and `Prefix+[` vi copy mode.
+
+In copy mode, move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown. Press `v` to begin selecting, `y` to publish to the Wayland clipboard and exit, or Escape to cancel. Copy mode never forwards those keys, pointer input, paste, or IME text to the terminal application.
+
+A strict overlay can unbind and replace closed actions:
+
+```toml
+version = 1
+inherits = "splinterm"
+
+[[unbind]]
+sequence = ["Ctrl+Shift+P"]
+
+[[binding]]
+sequence = ["Ctrl+Alt+P"]
+action = "app.command-palette"
+```
+
+Unknown actions, malformed chords, duplicate bindings, and semantic conflicts fail startup with source context rather than partially applying.
+
+## Dojo presets
+
+The optional `[presets]` file describes complete named pane trees. Splinterm always ships the bounded `omarchy.t`, `omarchy.tdl`, `omarchy.tds`, `omarchy.tdlm`, and `omarchy.tsl` workflows. Inspection and dry-run are local; real runs commit the complete layout atomically.
+
+Read [Dojo presets](/docs/presets/) for catalog syntax, commands, parameters, and the optional collision-safe `s`, `sdl`, `sds`, `sdlm`, and `ssl` Bash helpers.
+
+## Remote profiles
+
+SSH endpoints use a separate strict TOML file at `${XDG_CONFIG_HOME:-~/.config}/splinterm/remotes.toml`. Profile configuration cannot inject arbitrary SSH options or remote commands.
+
+```bash
+splinterm remote list
+splinterm remote inspect PROFILE
+splinterm remote check PROFILE
+```
+
+Read [Remote access](/docs/remote/) for the profile schema and graphical versus automation authority.
 
 ## Moving from Foot
 

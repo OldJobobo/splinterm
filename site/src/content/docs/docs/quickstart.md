@@ -23,15 +23,15 @@ A commandless launch creates a fresh persistent **Lair**, one **Dojo**, and one 
 
 Start a recognizable process in the terminal, then close the graphical window. Closing the final tab detaches the client; it does not terminate the daemon-owned Dojo or its running Splints.
 
-## 4. Return through Recent Sessions
+## 4. Return through Recent Dojos
 
-Open the native session picker:
+Open the native Dojo picker:
 
 ```bash
-splinterm sessions
+splinterm dojos
 ```
 
-Choose the running Dojo. In a focused managed Splinterm window, **Ctrl+Shift+S** opens the same Recent Sessions workflow as trusted application chrome.
+Choose the running Dojo. `splinterm sessions` remains a compatibility alias. In a focused managed Splinterm window, **Ctrl+Shift+S** opens the same Recent Dojos workflow as trusted application chrome.
 
 To reopen the last locally remembered running Dojo directly:
 
@@ -44,13 +44,14 @@ splinterm reopen
 | Action | Control |
 | --- | --- |
 | Command palette | Ctrl+Shift+P |
-| Recent Sessions | Ctrl+Shift+S |
+| Recent Dojos | Ctrl+Shift+S |
 | New horizontal split | Ctrl+Shift+Enter |
 | New vertical split | Ctrl+Shift+\\ |
 | Move between panes | Ctrl+Shift+Arrow |
 | Cycle tabs | Ctrl+Tab / Ctrl+Shift+Tab |
 | New Dojo tab | Ctrl+Shift+D |
 | Detach active tab | Ctrl+Shift+Q |
+| Toggle tab strip | Ctrl+Shift+B |
 | Search scrollback | Ctrl+Shift+F |
 | Copy / paste | Ctrl+Shift+C / Ctrl+Shift+V |
 
@@ -58,4 +59,6 @@ splinterm reopen
 Reopening attaches to processes that are still running. If a Splint has exited, starting it again from saved launch metadata is an explicit restore operation.
 :::
 
-Next, learn the [core concepts](/docs/concepts/) or read about [sessions and persistence](/docs/sessions/).
+The optional `omarchy-tmux` profile adds `Ctrl+Space` / `Ctrl+B` prefixes, trusted `Prefix+?` key help, and `Prefix+[` vi copy mode. See [Configuration and keymaps](/docs/configure/configuration/).
+
+Next, learn the [core concepts](/docs/concepts/), read about [sessions and persistence](/docs/sessions/), or create complete layouts with [Dojo presets](/docs/presets/).

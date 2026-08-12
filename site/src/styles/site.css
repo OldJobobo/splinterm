@@ -60,8 +60,8 @@ a:focus-visible { outline: 2px solid var(--signal); outline-offset: 4px; }
   padding: clamp(3rem, 7vh, 6rem) 1.25rem;
   text-align: center;
   background:
-    radial-gradient(circle at 50% 37%, rgb(107 44 46 / .2), transparent 24rem),
-    linear-gradient(to bottom, transparent 85%, rgb(218 147 54 / .045));
+    linear-gradient(to bottom, transparent 85%, rgb(218 147 54 / .045)),
+    var(--ground);
 }
 .intro-hero::after {
   content: '';
