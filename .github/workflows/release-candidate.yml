@@ -1,0 +1,113 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Cargo SemVer to prepare (for example 0.1.0-alpha3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    name: Build non-publishing candidate
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Bootstrap Git for checkout
+        run: pacman -Sy --noconfirm git
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install candidate build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            appstream desktop-file-utils fontconfig freetype2 git hicolor-icon-theme \
+            libxkbcommon noto-fonts-cjk noto-fonts-emoji pixman pkgconf python rust \
+            shellcheck ttf-jetbrains-mono-nerd wayland
+
+      - name: Validate candidate automation
+        run: |
+          shellcheck install.sh tools/package/build-local-package.sh
+          python -m unittest \
+            tools/package/test_installer_safety.py \
+            tools/package/test_omarchy_screensaver_integration.py \
+            tools/release/test_prepare_candidate.py \
+            tools/release/test_release_candidate_workflow.py
+
+      - name: Fail fast on candidate identity or recipe drift
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          python tools/release/prepare-candidate.py check \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "${GITHUB_SHA,,}" \
+            --version "$CANDIDATE_VERSION"
+
+      - name: Build and validate split packages once
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE' && tools/package/build-local-package.sh --no-check --skip-system-dependency-check"
+
+      - name: Assemble closed candidate artifact
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          main_package=$(find packaging -maxdepth 1 -type f -name 'splinterm-[0-9]*.pkg.tar.zst' -print -quit)
+          mcp_package=$(find packaging -maxdepth 1 -type f -name 'splinterm-mcp-[0-9]*.pkg.tar.zst' -print -quit)
+          test -n "$main_package"
+          test -n "$mcp_package"
+          output="$GITHUB_WORKSPACE/candidate-output"
+          runuser -u builder -- python tools/release/prepare-candidate.py create \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "${GITHUB_SHA,,}" \
+            --version "$CANDIDATE_VERSION" \
+            --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --splinterm "$main_package" \
+            --splinterm-mcp "$mcp_package" \
+            --output "$output"
+          printf 'CANDIDATE_DIR=%s\n' "$output" >>"$GITHUB_ENV"
+
+      - name: Summarize candidate without publishing
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["CANDIDATE_DIR"])
+          manifest = json.loads((root / "candidate-manifest.json").read_text())
+          assert manifest["state"] == "candidate"
+          assert manifest["publishable"] is False
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as stream:
+              stream.write(f"# Splinterm {manifest['version']} candidate\n\n")
+              stream.write(f"Commit: `{manifest['commit']}`\n\n")
+              stream.write("**Nothing was published.** Review the private candidate artifact before a separately approved release workflow.\n\n")
+              stream.write("## Assets\n\n")
+              for asset in manifest["assets"]:
+                  stream.write(f"- `{asset['path']}` — `{asset['sha256']}`\n")
+          PY
+
+      - name: Retain private candidate for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: splinterm-${{ inputs.version }}-candidate-${{ github.sha }}
+          path: ${{ env.CANDIDATE_DIR }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14

@@ -1,5 +1,8 @@
 # Public alpha Arch packaging
 
+Release authority, candidate construction, approval boundaries, and the future
+n8n notification role are defined in [Release automation](release-automation.md).
+
 Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.0alpha2` split
 package for reviewed local and CI builds. Its local source archive and `SKIP`
 checksum are valid only in that workflow. The source-built AUR authority is
@@ -99,6 +102,13 @@ Its equivalent manual build from a clean checkout is:
 ```bash
 git archive --format=tar.gz --prefix=splinterm-0.1.0alpha2/ \
   -o packaging/splinterm-0.1.0alpha2.tar.gz HEAD
+```
+
+The archive honors `.gitattributes` `export-ignore` entries; website source and
+website deployment automation are intentionally excluded from package release
+inputs. Continue the manual equivalent with:
+
+```bash
 (
   cd packaging
   makepkg --cleanbuild --syncdeps --noconfirm

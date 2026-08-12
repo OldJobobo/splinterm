@@ -90,6 +90,10 @@ package_splinterm() {
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg"
   install -Dm644 dist/systemd/user/splinterd.service \
     "$pkgdir/usr/lib/systemd/user/splinterd.service"
+  install -Dm755 dist/omarchy/omarchy-launch-screensaver \
+    "$pkgdir/usr/lib/splinterm/integrations/omarchy-launch-screensaver"
+  install -Dm644 dist/omarchy/screensaver.ini \
+    "$pkgdir/usr/share/splinterm/omarchy/screensaver.ini"
 
   install -Dm644 README.md "$pkgdir/usr/share/doc/splinterm/README.md"
   install -Dm644 config/splinterm/config.ini "$pkgdir/usr/share/doc/splinterm/config.ini"

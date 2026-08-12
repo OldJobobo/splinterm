@@ -44,7 +44,12 @@ jobs:
           fc-match 'Noto Sans CJK JP:style=Regular' | grep -F 'NotoSansCJK-Regular.ttc'
       - run: cargo fmt --all --check
       - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh
-      - run: python -m unittest tools/package/test_edge_manifest.py tools/package/test_edge_workflow.py
+      - run: |
+          python -m unittest \
+            tools/package/test_edge_manifest.py \
+            tools/package/test_edge_workflow.py \
+            tools/release/test_prepare_candidate.py \
+            tools/release/test_release_candidate_workflow.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace -- --test-threads=1
       - run: python tools/foot-oracle/check-provenance.py --portable
