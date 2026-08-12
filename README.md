@@ -53,7 +53,7 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Sixel, practical Kitty static images, and inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned AUR and public alpha edge packages validated |
 | Public source and edge builds | Available |
-| AUR package | Available as `splinterm` `0.1.0alpha1-1` |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`, both `0.1.0alpha1-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 
@@ -61,15 +61,15 @@ For limitations and release gates, read [Current status](docs/status.md). Exact 
 
 ## Install
 
-The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland**. Install the versioned public alpha from the [AUR](https://aur.archlinux.org/packages/splinterm) with an AUR helper, for example:
+The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland**. The recommended AUR packages download verified prebuilt binaries and do not compile locally:
 
 ```bash
-yay -S splinterm
+yay -S splinterm-bin
 # Optional policy-scoped MCP adapter:
-yay -S splinterm-mcp
+yay -S splinterm-mcp-bin
 ```
 
-`paru` may be used instead of `yay`. The package remains alpha software with no stable compatibility or support-duration guarantee.
+The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. All packages remain alpha software with no stable compatibility or support-duration guarantee.
 
 For the newest successfully validated commit-bound edge package, clone the public repository and run:
 

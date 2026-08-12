@@ -2,28 +2,25 @@
 
 Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.0alpha1` split
 package for reviewed local and CI builds. Its local source archive and `SKIP`
-checksum are valid only in that workflow. The published AUR authority is
+checksum are valid only in that workflow. The source-built AUR authority is
 `packaging/aur/PKGBUILD`, which uses the immutable `v0.1.0-alpha1` release
-asset and a reviewed SHA-256 checksum. It intentionally omits a `check()` phase
-so ordinary AUR installs compile and package Splinterm without rerunning the
-maintainer CI suite. The public package base is
-[splinterm](https://aur.archlinux.org/packages/splinterm).
+asset and a reviewed SHA-256 checksum. It intentionally omits a `check()` phase.
+The recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; it repackages
+checksummed artifacts from a successful immutable edge release without compiling
+or testing on the user's machine.
 
 ## Versioned AUR installation
 
-Use an AUR helper to resolve the `xdg-terminal-exec` AUR dependency and install
-the main package:
+Install the recommended prebuilt main package and optional exact-version MCP
+adapter with an AUR helper:
 
 ```bash
-yay -S splinterm
+yay -S splinterm-bin
+yay -S splinterm-mcp-bin
 ```
 
-The optional exact-version MCP split package is installed separately:
-
-```bash
-yay -S splinterm-mcp
-```
-
+The source-built alternatives are `splinterm` and `splinterm-mcp`. Migrating to
+the `-bin` packages prompts once to replace those conflicting source packages.
 `paru` may be used instead of `yay`. AUR availability does not expand the
 validated target beyond x86_64 Arch/Omarchy with native Wayland/Hyprland or add
 a stable compatibility and support-duration promise.
