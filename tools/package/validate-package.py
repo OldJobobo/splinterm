@@ -30,6 +30,7 @@ REQUIRED = {
     "usr/bin/splinterm-sessions",
     "usr/bin/splinterm-pty-child",
     "usr/bin/splinterm-xdg-terminal-exec",
+    "usr/lib/splinterm/integrations/omarchy-launch-screensaver",
     "usr/lib/systemd/user/splinterd.service",
     "usr/share/applications/com.oldjobobo.splinterm.desktop",
     "usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg",
@@ -75,6 +76,7 @@ EXECUTABLES = {
     "usr/bin/splinterm-sessions",
     "usr/bin/splinterm-pty-child",
     "usr/bin/splinterm-xdg-terminal-exec",
+    "usr/lib/splinterm/integrations/omarchy-launch-screensaver",
 }
 RUNTIME_DEPENDENCIES = {
     "fontconfig",

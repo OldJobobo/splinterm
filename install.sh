@@ -108,13 +108,33 @@ install_dependencies() {
   sudo pacman "${pacman_args[@]}" "${missing_packages[@]}"
 }
 
-report_screensaver_launcher_shadow() {
-  local resolved
-  resolved=$(command -v omarchy-launch-screensaver 2>/dev/null || true)
-  if [[ $resolved == "$HOME/.local/bin/omarchy-launch-screensaver" ]]; then
-    printf '%s\n' \
-      "A user-local Omarchy screensaver launcher shadows the packaged command: $resolved" \
-      'Splinterm did not modify it. Update or remove that override explicitly before screensaver acceptance.' >&2
+offer_omarchy_screensaver_integration() {
+  local launcher="$HOME/.local/bin/omarchy-launch-screensaver"
+  local enable='splinterm integration omarchy-screensaver enable'
+
+  command -v omarchy-launch-screensaver >/dev/null 2>&1 || return 0
+  [[ $(xdg-terminal-exec --print-id 2>/dev/null || true) == *com.oldjobobo.splinterm* ]] || return 0
+
+  if [[ -e $launcher || -L $launcher ]]; then
+    if [[ $(readlink "$launcher" 2>/dev/null || true) == /usr/lib/splinterm/integrations/omarchy-launch-screensaver ]]; then
+      printf 'Splinterm Omarchy screensaver integration is already enabled.\n'
+    else
+      printf '%s\n' \
+        "Cannot enable Splinterm's Omarchy screensaver integration automatically." \
+        "  Existing launcher: $launcher" \
+        'Splinterm did not modify or replace it.' >&2
+    fi
+    return 0
+  fi
+
+  if [[ $assume_yes == true || ! -t 0 ]]; then
+    printf 'Optional Omarchy screensaver integration was not enabled.\n  Enable: %s\n' "$enable"
+    return 0
+  fi
+  if confirm 'Enable Splinterm for the Omarchy screensaver?'; then
+    /usr/bin/splinterm integration omarchy-screensaver enable
+  else
+    printf 'Omarchy screensaver integration was not enabled.\n  Enable later: %s\n' "$enable"
   fi
 }
 
@@ -322,4 +342,4 @@ if [[ $source_build == true ]]; then
 else
   prebuilt_install
 fi
-report_screensaver_launcher_shadow
+offer_omarchy_screensaver_integration

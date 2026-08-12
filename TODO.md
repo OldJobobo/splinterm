@@ -62,5 +62,5 @@ until this lifecycle design is implemented and reviewed.
 
 ## Omarchy integration
 
-- [ ] Implement [Plan 0032](docs/plans/0032-omarchy-screensaver-integration.md)
-  to add Splinterm to the terminals supported by the Omarchy screensaver.
+- [ ] Complete [Plan 0032](docs/plans/0032-omarchy-screensaver-integration.md)
+  with the Splinterm-owned, opt-in Omarchy screensaver launcher and guarded acceptance.

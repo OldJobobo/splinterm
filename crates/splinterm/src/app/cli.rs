@@ -86,6 +86,7 @@ pub(crate) async fn run() -> Result<()> {
             | Command::Config { .. }
             | Command::Keymap { .. }
             | Command::Preset { .. }
+            | Command::Integration { .. }
             | Command::Policy { .. }
             | Command::Relay { .. }
             | Command::Remote { .. }
@@ -156,6 +157,7 @@ pub(crate) async fn run() -> Result<()> {
                 | Command::Config { .. }
                 | Command::Keymap { .. }
                 | Command::Preset { .. }
+                | Command::Integration { .. }
                 | Command::Policy { .. }
                 | Command::Relay { .. }
                 | Command::Remote { .. }
@@ -186,6 +188,9 @@ pub(crate) async fn run() -> Result<()> {
     );
     if !materializes_preset && let Command::Preset { command } = command {
         return run_preset_command(command);
+    }
+    if let Command::Integration { command } = command {
+        return super::integrations::run(command);
     }
     if let Command::Policy { command } = command {
         return run_policy_command(command);
@@ -356,6 +361,7 @@ async fn run_headless(
         | Command::Config { .. }
         | Command::Keymap { .. }
         | Command::Preset { .. }
+        | Command::Integration { .. }
         | Command::Policy { .. }
         | Command::Relay { .. }
         | Command::Remote { .. }
@@ -699,6 +705,30 @@ mod tests {
     use super::*;
     use crate::app::{commands::RemoteCommand, session_catalog::create_request_for};
     use splinterm_protocol::{ActiveScreen, TerminalInputModes, TerminalRow};
+
+    #[test]
+    fn integration_commands_parse_as_explicit_local_lifecycle_actions() {
+        for (name, expected) in [
+            ("enable", super::super::commands::IntegrationAction::Enable),
+            (
+                "disable",
+                super::super::commands::IntegrationAction::Disable,
+            ),
+            ("status", super::super::commands::IntegrationAction::Status),
+        ] {
+            let parsed =
+                Cli::try_parse_from(["splinterm", "integration", "omarchy-screensaver", name])
+                    .unwrap();
+            assert!(matches!(
+                parsed.command,
+                Some(Command::Integration {
+                    command: super::super::commands::IntegrationCommand::OmarchyScreensaver {
+                        action
+                    }
+                }) if action == expected
+            ));
+        }
+    }
 
     #[test]
     fn reset_requires_explicit_confirmation_for_unattended_use() {

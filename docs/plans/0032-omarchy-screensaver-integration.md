@@ -1,10 +1,10 @@
 # Plan 0032: Omarchy screensaver integration
 
-- **Status:** Milestones 1–4 implemented locally; clean package extraction,
-  upstream submission, and guarded graphical acceptance remain open
+- **Status:** Splinterm-owned integration redesign in progress; app-ID transport and
+  profile are implemented, while managed activation and guarded graphical acceptance remain open
 - **Date:** 2026-08-11
 - **Product authority:** Splinterm remains a standalone terminal and implements generic XDG launch metadata rather than an Omarchy-only window mode
-- **Integration authority:** Splinterm's packaged desktop adapter and the upstream Omarchy screensaver launcher
+- **Integration authority:** Splinterm's packaged desktop adapter, profile, launcher helper, and explicit user-level activation link
 - **Depends on:** implemented transient XDG command launches from Plan 0029
 
 ## Decision
@@ -13,7 +13,7 @@ Support Splinterm as Omarchy's default terminal for the fullscreen screensaver b
 
 1. Splinterm accepts and validates an XDG app-ID override for its private `xdg-launch` path.
 2. The Splinterm package installs a screensaver presentation profile owned by Splinterm.
-3. Omarchy's upstream launcher recognizes Splinterm and invokes the standard XDG adapter with `org.omarchy.screensaver`.
+3. Splinterm offers an explicit, reversible user-level launcher link that delegates to Omarchy for other terminals and invokes the standard XDG adapter with `org.omarchy.screensaver` only when Splinterm is selected.
 
 The integration must preserve the transient lifecycle already established for command-bearing XDG launches:
 
@@ -30,10 +30,9 @@ Splinterm's package must not overwrite Omarchy-owned system files or user-owned 
 
 ## Baseline blockers
 
-At plan approval, the following blockers defined the implementation. The local
-Splinterm source changes now address app-ID transport, desktop metadata, and the
-owned profile; the retained Omarchy patch is not yet submitted, and graphical
-acceptance remains open.
+At plan approval, the following blockers defined the implementation. The local Splinterm source changes address app-ID transport, desktop metadata,
+and the owned profile. The remaining integration is owned entirely by Splinterm;
+no Omarchy source modification or upstream submission is part of this plan.
 
 ### Omarchy rejects Splinterm
 
@@ -161,30 +160,34 @@ The same asset must be included by the repository's local installer/package layo
 
 The profile is intentionally owned by Splinterm rather than copied into `/usr/share/omarchy`. Omarchy may consume the stable path when Splinterm is selected, but neither package claims files owned by the other.
 
-### 4. Upstream Omarchy change
+### 4. Splinterm-owned launcher and activation
 
-Submit a focused change to `basecamp/omarchy` that:
+Install an executable helper at:
 
-- adds `com.oldjobobo.splinterm.desktop` to the supported-terminal allowlist;
-- updates the unsupported-terminal notification;
-- adds a Splinterm branch; and
-- launches through the selected XDG terminal adapter.
-
-The intended branch is equivalent to:
-
-```bash
-*com.oldjobobo.splinterm*)
-  hypr_exec env \
-    SPLINTERM_CONFIG=/usr/share/splinterm/omarchy/screensaver.ini \
-    xdg-terminal-exec \
-    --app-id=org.omarchy.screensaver \
-    -- omarchy-screensaver
-  ;;
+```text
+/usr/lib/splinterm/integrations/omarchy-launch-screensaver
 ```
 
-Use the current upstream `hypr_exec` argv-safe helper rather than reconstructing a shell command manually. Retain Omarchy's event-socket wait so one matching Window maps on each monitor before focus advances.
+When Splinterm is selected by `xdg-terminal-exec --print-id`, the helper launches
+one screensaver Window per monitor through the XDG adapter, uses the packaged
+profile and `org.omarchy.screensaver`, retains Omarchy's event-socket wait, and
+restores the original monitor focus. When another terminal is selected, it
+executes Omarchy's canonical `/usr/share/omarchy/bin/omarchy-launch-screensaver`
+directly without recursion.
 
-The exact environment variable and explicit-config contract must be confirmed against Splinterm's configuration loader during implementation. If the loader does not currently support selecting a one-shot profile cleanly, add a bounded private XDG configuration argument rather than mutating the user's normal config.
+Activation is explicit and user-scoped:
+
+```text
+~/.local/bin/omarchy-launch-screensaver
+  -> /usr/lib/splinterm/integrations/omarchy-launch-screensaver
+```
+
+`splinterm integration omarchy-screensaver enable` creates only that exact link.
+It refuses every existing file or different symlink, verifies login-shell command
+resolution, and moves the link to a dedicated non-PATH disabled location if the
+managed launcher does not win. `disable` atomically moves only the exact managed
+link to that location and never unlinks it; `enable` moves it back. `status` is
+read-only.
 
 ### 5. Installation and upgrades
 
@@ -232,9 +235,15 @@ must include the Splinterm adapter and the exact app-ID argument.
 
 Add and install the Splinterm-owned profile. Validate extracted package contents and configuration parsing without modifying the live system.
 
-### Milestone 4 — Omarchy upstream patch
+### Milestone 4 — Splinterm-owned activation
 
-Prepare the allowlist and launch branch against current `basecamp/omarchy`, run its non-graphical script checks, and submit or publish only after explicit approval.
+Package the launcher helper and add explicit `enable`, `disable`, and `status`
+commands. Prove collision refusal, exact-link-only removal, login-shell resolution
+rollback, non-Splinterm delegation, per-monitor waiting, and focus restoration.
+The normal installer may offer activation interactively with a default of No;
+unattended and direct package installs only print the activation command. Tests
+must cover concurrent replacement before and after an atomic move without
+unlinking either user object.
 
 ### Milestone 5 — guarded graphical acceptance
 
@@ -266,13 +275,7 @@ git diff --check
 
 Run the repository's documented package build and extracted-package validation only after source validation is green and the relevant source is committed, because the package builder archives a clean `HEAD`.
 
-For the Omarchy patch, at minimum run:
-
-```bash
-bash -n bin/omarchy-launch-screensaver
-```
-
-and any current repository checks documented by Omarchy at implementation time.
+For the packaged helper, run `bash -n`, ShellCheck, and its stubbed non-graphical contract tests. No Omarchy repository checkout or upstream submission is required.
 
 ## Required test matrix
 
@@ -286,7 +289,9 @@ and any current repository checks documented by Omarchy at implementation time.
 | XDG launch with screensaver command | Transient owner-bound Lair |
 | Wrapper with cwd, app-ID, and unusual argv | Every argument preserved exactly |
 | Extracted package | Desktop metadata and profile are present and valid |
-| Unsupported Omarchy terminal | One unchanged bounded notification and no launch |
+| Another XDG terminal selected | Delegate directly to Omarchy's canonical launcher |
+| Existing user-level launcher | Refuse activation without changing it |
+| Managed link loses PATH precedence | Roll back activation |
 | Splinterm selected in Omarchy | One matching screensaver Window per monitor |
 | Screensaver input or focus loss | All Windows, children, and transient Lairs retire |
 | User-local Omarchy override exists | Reported; never overwritten or removed automatically |
@@ -300,7 +305,7 @@ Stop and report before continuing if:
 - cwd or command argv would be reconstructed through a shell;
 - the screensaver launch becomes persistent or appears in Recent Dojos;
 - package integration requires claiming Omarchy-owned or user-owned files;
-- an upstream Omarchy change would require a hard package dependency on Splinterm;
+- activation would require modifying Omarchy, Hyprland, shell/menu, PATH, or an existing user launcher;
 - testing requires replacing the Pacman-owned client or Omarchy launcher without approval;
 - graphical testing has not been explicitly approved; or
 - publishing, pushing, installing, or removing the user-local override becomes necessary without explicit approval.
@@ -312,10 +317,10 @@ The integration is complete only when:
 - Splinterm advertises and correctly applies XDG app-ID overrides;
 - ordinary Splinterm Window identity remains unchanged;
 - the package installs a validated screensaver presentation profile under `/usr/share/splinterm`;
-- current Omarchy upstream recognizes Splinterm and launches `omarchy-screensaver` with `org.omarchy.screensaver`;
+- the Splinterm-owned helper launches `omarchy-screensaver` with `org.omarchy.screensaver` and delegates other terminals to Omarchy;
 - command-bearing launch remains transient and cleans up completely;
 - no installer or package overwrites Omarchy-owned or user-owned files;
-- user-local launcher shadowing has an explicit upgrade path;
+- user-level activation is explicit, collision-safe, precedence-verified, and reversibly moved outside PATH without unlinking;
 - recorded non-graphical validation passes;
 - guarded graphical acceptance is recorded; and
 - independent review has no unresolved blockers.

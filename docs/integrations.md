@@ -16,29 +16,63 @@ installs a dedicated profile at:
 /usr/share/splinterm/omarchy/screensaver.ini
 ```
 
-A compatible Omarchy launcher selects that profile only for the screensaver and
-invokes the normal XDG terminal adapter:
+The package also installs a Splinterm-owned launcher helper at:
+
+```text
+/usr/lib/splinterm/integrations/omarchy-launch-screensaver
+```
+
+Enable it explicitly for the current user after selecting Splinterm as the XDG
+terminal:
+
+```bash
+splinterm integration omarchy-screensaver enable
+```
+
+Activation creates only this exact managed link:
+
+```text
+~/.local/bin/omarchy-launch-screensaver
+  -> /usr/lib/splinterm/integrations/omarchy-launch-screensaver
+```
+
+The command refuses to replace any existing file or different symlink, verifies
+that the link wins login-shell command resolution, and moves it to a dedicated
+non-PATH disabled location if precedence is unsuitable. Inspect or disable it
+with:
+
+```bash
+splinterm integration omarchy-screensaver status
+splinterm integration omarchy-screensaver disable
+```
+
+When Splinterm is selected, the helper selects the dedicated profile and invokes
+the normal XDG terminal adapter:
 
 ```bash
 env SPLINTERM_CONFIG=/usr/share/splinterm/omarchy/screensaver.ini \
   xdg-terminal-exec --app-id=org.omarchy.screensaver -- omarchy-screensaver
 ```
 
+When another terminal is selected, it delegates directly to Omarchy's canonical
+`/usr/share/omarchy/bin/omarchy-launch-screensaver` without changing behavior.
+
 The command-bearing launch remains a transient client-bound Lair. The app-ID is
 validated at Splinterm's private XDG boundary and belongs only to that graphical
 Window; it is not persisted in topology, launch metadata, automation output, or
 user configuration. Ordinary Windows remain `com.oldjobobo.splinterm`.
 
-Splinterm installs no files under `/usr/share/omarchy` and never changes the
-user's preferred terminal. If:
-
-```bash
-command -v omarchy-launch-screensaver
-```
-
-resolves to `~/.local/bin/omarchy-launch-screensaver`, that user-owned override
-shadows Omarchy's packaged launcher. Review and update or remove it explicitly;
-Splinterm will report the condition but will not overwrite or delete the file.
+Splinterm installs no files under `/usr/share/omarchy`, changes no Omarchy or
+Hyprland configuration, and never changes the user's preferred terminal. The
+normal installer offers activation interactively with a default of No;
+unattended and direct Pacman/AUR installs print the explicit activation command.
+Disabling moves the managed link without deleting it to
+`~/.local/share/splinterm/integrations/omarchy-launch-screensaver.disabled`, so
+re-enabling is reversible and no raced user object is ever unlinked. Package
+removal never scans user homes. If an enabled link remains afterward, it is
+dangling and command lookup falls through to Omarchy's canonical launcher; the
+user may move it out of `~/.local/bin` with the documented disable command before
+uninstalling.
 
 ## Client-author checklist
 

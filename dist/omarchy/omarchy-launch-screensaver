@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly OMARCHY_LAUNCHER=/usr/share/omarchy/bin/omarchy-launch-screensaver
+readonly SPLINTERM_PROFILE=/usr/share/splinterm/omarchy/screensaver.ini
+readonly SCREENSAVER_APP_ID=org.omarchy.screensaver
+readonly PROC_ROOT=/proc
+readonly RANDOM_UUID=/proc/sys/kernel/random/uuid
+
+terminal=$(xdg-terminal-exec --print-id)
+if [[ $terminal != *com.oldjobobo.splinterm* ]]; then
+  exec "$OMARCHY_LAUNCHER" "$@"
+fi
+
+[[ -r $SPLINTERM_PROFILE ]] || {
+  printf 'Splinterm screensaver profile is unavailable: %s\n' "$SPLINTERM_PROFILE" >&2
+  exit 1
+}
+
+# Match Omarchy's force/toggle contract without modifying Omarchy-owned state.
+if command -v omarchy-toggle-enabled >/dev/null 2>&1 &&
+  omarchy-toggle-enabled screensaver-off && [[ ${1:-} != force ]]; then
+  exit 1
+fi
+if pgrep -f '[o]rg.omarchy.screensaver' >/dev/null; then
+  exit 0
+fi
+
+focused=$(omarchy-hyprland-monitor-focused)
+invocation_token=$(tr -d - <"$RANDOM_UUID")
+[[ $invocation_token =~ ^[0-9A-Fa-f]{32}$ ]] || {
+  printf 'Could not create a bounded screensaver invocation identity\n' >&2
+  exit 1
+}
+
+hypr_focus_monitor() {
+  hyprctl dispatch "hl.dsp.focus({ monitor = \"$1\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focusmonitor "$1" >/dev/null
+}
+
+hypr_exec() {
+  local command
+  printf -v command '%q ' "$@"
+  hyprctl dispatch "hl.dsp.exec_cmd([[$command]])" >/dev/null 2>&1 ||
+    hyprctl dispatch exec -- bash -lc "$command" >/dev/null
+}
+
+socket="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+exec {events}< <(socat -U - "UNIX-CONNECT:$socket")
+
+normalize_address() {
+  local address=$1
+  address=${address#0x}
+  [[ $address =~ ^[0-9A-Fa-f]+$ ]] || return 1
+  printf '0x%s\n' "$address"
+}
+
+invocation_owns_window() {
+  local address=$1 pid
+  pid=$(hyprctl clients -j | jq -er --arg address "$address" '
+    [.[] | select(
+      .address == $address and
+      (.class == "org.omarchy.screensaver" or
+       .initialClass == "org.omarchy.screensaver")
+    ) | .pid] | if length == 1 then .[0] else empty end
+  ') || return 1
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  tr '\0' '\n' <"$PROC_ROOT/$pid/environ" 2>/dev/null |
+    grep -Fqx "SPLINTERM_SCREENSAVER_INVOCATION=$invocation_token"
+}
+
+wait_for_screensaver_window() {
+  local line raw_address address deadline=$((SECONDS + 5))
+  while ((SECONDS < deadline)) &&
+    IFS= read -r -t $((deadline - SECONDS)) -u "$events" line; do
+    [[ $line == openwindow\>\>*,org.omarchy.screensaver,* ]] || continue
+    raw_address=${line#openwindow>>}
+    raw_address=${raw_address%%,*}
+    address=$(normalize_address "$raw_address") || continue
+    invocation_owns_window "$address" || continue
+    launched_addresses+=("$address")
+    return 0
+  done
+  return 1
+}
+
+window_exists() {
+  local address=$1
+  hyprctl clients -j | jq -e --arg address "$address" \
+    'any(.[]; .address == $address)' >/dev/null
+}
+
+cleanup_launched_windows() {
+  local address
+  for address in "${launched_addresses[@]}"; do
+    window_exists "$address" || continue
+    hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null
+  done
+  local deadline=$((SECONDS + 5)) remaining
+  while ((SECONDS < deadline)); do
+    remaining=false
+    for address in "${launched_addresses[@]}"; do
+      if window_exists "$address"; then
+        remaining=true
+        break
+      fi
+    done
+    [[ $remaining == false ]] && return 0
+    sleep 0.05
+  done
+  printf 'Splinterm screensaver cleanup did not retire every launched window\n' >&2
+  return 1
+}
+
+finish() {
+  local status=$?
+  trap - EXIT
+  if [[ $launch_complete == false && ${#launched_addresses[@]} -gt 0 ]]; then
+    cleanup_launched_windows || status=1
+  fi
+  restore_focus
+  exit "$status"
+}
+
+restore_focus() {
+  hypr_focus_monitor "$focused"
+}
+
+launched_addresses=()
+launch_complete=false
+trap finish EXIT
+
+while IFS= read -r monitor; do
+  [[ -n $monitor ]] || continue
+  hypr_focus_monitor "$monitor"
+  hypr_exec env \
+    SPLINTERM_CONFIG="$SPLINTERM_PROFILE" \
+    SPLINTERM_SCREENSAVER_INVOCATION="$invocation_token" \
+    xdg-terminal-exec \
+    --app-id="$SCREENSAVER_APP_ID" \
+    -- omarchy-screensaver
+  wait_for_screensaver_window || {
+    printf 'Splinterm screensaver window did not map on %s\n' "$monitor" >&2
+    exit 1
+  }
+done < <(hyprctl monitors -j | jq -r '.[] | .name')
+
+launch_complete=true

@@ -139,6 +139,11 @@ pub(in crate::app) enum Command {
         #[command(subcommand)]
         command: PresetCommand,
     },
+    /// Manage explicit, reversible desktop integrations.
+    Integration {
+        #[command(subcommand)]
+        command: IntegrationCommand,
+    },
     /// Validate, inspect, or reload the local persistent policy.
     Policy {
         #[command(subcommand)]
@@ -442,6 +447,25 @@ pub(in crate::app) enum ShellIntegration {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(in crate::app) enum IntegrationShell {
     Bash,
+}
+
+#[derive(Clone, Copy, Debug, Subcommand)]
+pub(in crate::app) enum IntegrationCommand {
+    /// Manage Splinterm as Omarchy's screensaver terminal.
+    OmarchyScreensaver {
+        #[command(subcommand)]
+        action: IntegrationAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
+pub(in crate::app) enum IntegrationAction {
+    /// Create the dedicated user-level launcher link when no collision exists.
+    Enable,
+    /// Remove only the exact launcher link managed by Splinterm.
+    Disable,
+    /// Report whether the managed launcher link is active.
+    Status,
 }
 
 #[derive(Debug, Subcommand)]

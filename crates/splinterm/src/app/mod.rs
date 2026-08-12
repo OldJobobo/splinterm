@@ -5,6 +5,7 @@ mod commands;
 mod consent;
 mod diagnostics_cli;
 mod human_output;
+mod integrations;
 mod keymap_cli;
 mod local_service;
 mod machine;
