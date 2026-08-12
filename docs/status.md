@@ -30,7 +30,7 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle; and
-- a public alpha `0.1.1alpha1` Arch package built from clean committed source.
+- a public alpha `0.1.0alpha1` Arch package built from clean committed source.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
@@ -53,7 +53,7 @@ interfaces on the documented platform.
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
 | Arch/Omarchy packaging | Public alpha packages validated | Versioned AUR and commit-bound edge split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR package | Available | [`splinterm` `0.1.1alpha1-2`](https://aur.archlinux.org/packages/splinterm) publishes the main package and optional exact-version `splinterm-mcp` split package from an immutable checksummed source release. |
+| AUR package | Available | [`splinterm` `0.1.0alpha1-1`](https://aur.archlinux.org/packages/splinterm) publishes the main package and optional exact-version `splinterm-mcp` split package from an immutable checksummed source release. |
 | Public source and edge channel | Available | The repository, documentation, immutable edge releases, and rolling verified installer channel are public. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
