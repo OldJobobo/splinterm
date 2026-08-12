@@ -56,6 +56,9 @@ until this lifecycle design is implemented and reviewed.
   repaint selected glyphs and decorations as a separate foreground layer.
 - [x] Add renderer tests proving exact resolved theme roles, including the Sakura
   Mochi `#f23888` selection color and the themed scrollback overlay.
+- [ ] Give selected Dojo tabs a dedicated exact theme-provided background role,
+  painted opaquely without mixing or deriving colors, while retaining
+  `ui_accent` as the contrasting selected-tab underline.
 
 ## Omarchy integration
 
