@@ -8314,6 +8314,7 @@ impl App {
                     dirty_rows: None,
                     focused: terminal_keyboard_focused,
                     selection_color: self.presentation.theme.selection,
+                    selection_foreground: self.presentation.theme.selection_foreground,
                     url_color: self.presentation.theme.url,
                     accent_color: self.presentation.theme.ui_accent,
                 },

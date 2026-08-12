@@ -55,7 +55,7 @@ pub use capture::{
     capture_final_buffer_with_sources,
 };
 #[cfg(test)]
-use compose::paint_glyphs;
+use compose::{paint_glyphs, paint_placed_glyph};
 pub(crate) use compose::{
     paint_snapshot, paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows,
     paint_snapshot_rows_presented, scroll_snapshot_pixels, snapshot_row_rect,
@@ -66,6 +66,8 @@ pub use cursor::{
     CursorPresentation, EffectiveCursorShape, UnfocusedCursorStyle, effective_cursor_shape,
 };
 use decorations::DecorationMetrics;
+#[cfg(test)]
+use decorations::DecorationSpan;
 pub use evidence::{benchmark_json, phase4_benchmark_json, write_ppm};
 pub(super) use fonts::*;
 pub use fonts::{ascii_glyph_evidence, production_ascii_glyph_evidence, snapshot_cache_metrics};

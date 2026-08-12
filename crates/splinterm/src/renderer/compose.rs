@@ -26,6 +26,25 @@ pub(super) fn paint_placed_glyph(
     placed: &SnapshotGlyph,
     foreground: [u8; 3],
 ) {
+    paint_placed_glyph_clipped(
+        canvas, width, height, frame, geometry, placed, foreground, None,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "selection foreground repaint adds one explicit clip to normal glyph composition"
+)]
+pub(super) fn paint_placed_glyph_clipped(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    frame: &SnapshotFrame,
+    geometry: &WindowGeometry,
+    placed: &SnapshotGlyph,
+    foreground: [u8; 3],
+    clip: Option<(i32, i32, i32, i32)>,
+) {
     let glyph = &frame.cache[&placed.key];
     let Some((cell_x, cell_y, _, _)) = frame.cell_rect(geometry, placed.column, placed.row) else {
         return;
@@ -35,27 +54,53 @@ pub(super) fn paint_placed_glyph(
     let pen_x = cell_x + round_to_i32(placed.x_offset);
     let baseline = cell_y + frame.baseline - round_to_i32(placed.y_offset);
     let grid = geometry.grid_rect;
-    let grid_left = i32::try_from(grid.x).unwrap_or(i32::MAX);
-    let grid_top = i32::try_from(grid.y).unwrap_or(i32::MAX);
-    let grid_right = i32::try_from(grid.x.saturating_add(grid.width)).unwrap_or(i32::MAX);
-    let grid_bottom = i32::try_from(grid.y.saturating_add(grid.height)).unwrap_or(i32::MAX);
+    let grid_clip = (
+        i32::try_from(grid.x).unwrap_or(i32::MAX),
+        i32::try_from(grid.y).unwrap_or(i32::MAX),
+        i32::try_from(grid.x.saturating_add(grid.width)).unwrap_or(i32::MAX),
+        i32::try_from(grid.y.saturating_add(grid.height)).unwrap_or(i32::MAX),
+    );
+    let clip = clip.map_or(Some(grid_clip), |clip| {
+        let intersection = (
+            grid_clip.0.max(clip.0),
+            grid_clip.1.max(clip.1),
+            grid_clip.2.min(clip.2),
+            grid_clip.3.min(clip.3),
+        );
+        (intersection.0 < intersection.2 && intersection.1 < intersection.3).then_some(intersection)
+    });
+    let Some(clip) = clip else {
+        return;
+    };
     if placed.key.face == BOX_DRAWING_FACE {
         let character = char::from_u32(u32::from(placed.key.glyph));
         if let Some((rect_x, rect_y, rect_width, rect_height)) = character.and_then(|character| {
             box_drawing::opaque_block_rect(character, glyph.width, glyph.height)
         }) {
-            fill_rect(
-                canvas,
-                width,
-                height,
-                (
-                    pen_x + glyph.left + i32::try_from(rect_x).expect("block x fits i32"),
-                    baseline - glyph.top + i32::try_from(rect_y).expect("block y fits i32"),
-                    rect_width,
-                    rect_height,
-                ),
-                [foreground[0], foreground[1], foreground[2], 0xff],
-            );
+            let block_left = pen_x + glyph.left + i32::try_from(rect_x).expect("block x fits i32");
+            let block_top = baseline - glyph.top + i32::try_from(rect_y).expect("block y fits i32");
+            let left = block_left.max(clip.0);
+            let top = block_top.max(clip.1);
+            let right = block_left
+                .saturating_add(i32::try_from(rect_width).unwrap_or(i32::MAX))
+                .min(clip.2);
+            let bottom = block_top
+                .saturating_add(i32::try_from(rect_height).unwrap_or(i32::MAX))
+                .min(clip.3);
+            if left < right && top < bottom {
+                fill_rect(
+                    canvas,
+                    width,
+                    height,
+                    (
+                        left,
+                        top,
+                        u32::try_from(right - left).unwrap_or(0),
+                        u32::try_from(bottom - top).unwrap_or(0),
+                    ),
+                    [foreground[0], foreground[1], foreground[2], 0xff],
+                );
+            }
             return;
         }
     }
@@ -67,7 +112,7 @@ pub(super) fn paint_placed_glyph(
         baseline - glyph.top,
         glyph,
         foreground,
-        Some((grid_left, grid_top, grid_right, grid_bottom)),
+        Some(clip),
     );
 }
 

@@ -48,15 +48,14 @@ until this lifecycle design is implemented and reviewed.
 
 ## Theme palette fidelity
 
-- [ ] Preserve theme-provided selection RGB roles verbatim; themes own hue and
-  Splinterm may vary alpha only in explicitly defined presentation cases.
-- [ ] Replace the current selection `blend_rect` path, which bakes the overlay
-  into the completed framebuffer and derives a different RGB color, with a
-  distinct theme-color-plus-alpha composition layer.
-- [ ] Keep selection composition from tinting already-rendered glyph colors;
-  render selected text as a separate foreground layer.
-- [ ] Add renderer tests proving that selection alpha never mutates the resolved
-  theme RGB role, including the Sakura Mochi `#f23888` selection color.
+- [x] Preserve theme-provided selection RGB roles verbatim; themes own hue and
+  selection presentation uses the exact resolved background role.
+- [x] Replace the selection `blend_rect` path with an opaque exact-theme
+  background layer rather than baking a derived RGB color into the framebuffer.
+- [x] Keep selection composition from tinting already-rendered glyph colors;
+  repaint selected glyphs and decorations as a separate foreground layer.
+- [x] Add renderer tests proving exact resolved theme roles, including the Sakura
+  Mochi `#f23888` selection color and the themed scrollback overlay.
 
 ## Omarchy integration
 

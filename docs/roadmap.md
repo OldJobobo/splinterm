@@ -27,8 +27,9 @@ product decision promotes them.
 
 ### 1 — near-term correctness and Omarchy integration
 
-1. Preserve exact theme-provided selection RGB roles and prove alpha composition
-   does not mutate palette colors or selected glyph foregrounds.
+1. Preserve exact theme-provided selection roles with an opaque selection
+   background and separately repainted glyph and decoration foregrounds; do not
+   derive, blend, or channel-swap the resolved theme colors.
 2. Execute [Plan 0032](plans/0032-omarchy-screensaver-integration.md) in its
    declared order: XDG-only app-ID transport, package metadata/profile, upstream
    Omarchy patch, non-graphical validation, then separately approved guarded

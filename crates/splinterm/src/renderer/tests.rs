@@ -1105,6 +1105,7 @@ fn empty_overlays_leave_compositor_border_area_untouched() {
             dirty_rows: None,
             focused: true,
             selection_color: 0x0035_4a60,
+            selection_foreground: 0x00eb_ebeb,
             url_color: 0x0078_beff,
             accent_color: 0x0078_d2ff,
         },
@@ -1121,6 +1122,7 @@ fn empty_overlays_leave_compositor_border_area_untouched() {
             dirty_rows: None,
             focused: false,
             selection_color: 0x0035_4a60,
+            selection_foreground: 0x00eb_ebeb,
             url_color: 0x0078_beff,
             accent_color: 0x0078_d2ff,
         },
@@ -1815,6 +1817,39 @@ fn cursor_and_selection_overlay_remain_above_nonnegative_images() {
     assert_eq!(&canvas[0..4], &[255, 255, 255, 255]);
 
     frame.cursor = None;
+    let key = GlyphKey { face: 0, glyph: 1 };
+    frame.glyphs = vec![SnapshotGlyph {
+        key,
+        column: 0,
+        row: 0,
+        cells: 1,
+        cluster_advance: 1.0,
+        x_offset: 0.0,
+        y_offset: 0.0,
+        foreground: [0xff; 3],
+    }];
+    frame.cache.insert(
+        key,
+        Arc::new(CachedGlyph {
+            content: Content::Mask,
+            left: 0,
+            top: 1,
+            width: 1,
+            height: 1,
+            data: vec![u8::MAX],
+        }),
+    );
+    frame.decorations = vec![DecorationSpan {
+        column: 0,
+        row: 0,
+        cells: 1,
+        underline: UnderlineStyle::None,
+        strikethrough: true,
+        underline_color: [0xff; 3],
+        underline_uses_foreground: true,
+        strike_color: [0xff; 3],
+        metrics: frame.cell_metrics[0],
+    }];
     paint_snapshot(
         &mut canvas,
         2,
@@ -1824,7 +1859,6 @@ fn cursor_and_selection_overlay_remain_above_nonnegative_images() {
         false,
         CursorStyle::Block,
     );
-    let image_pixel = canvas[0..4].to_vec();
     paint_snapshot_overlays(
         &mut canvas,
         2,
@@ -1836,12 +1870,109 @@ fn cursor_and_selection_overlay_remain_above_nonnegative_images() {
             hovered_url: None,
             dirty_rows: None,
             focused: true,
-            selection_color: 0x0000_ff00,
+            selection_color: 0x00f2_3888,
+            selection_foreground: 0x0011_2233,
             url_color: 0,
             accent_color: 0,
         },
     );
-    assert_ne!(&canvas[0..4], image_pixel);
+    assert_eq!(
+        &canvas[0..4],
+        &[0x33, 0x22, 0x11, 0xff],
+        "selected glyphs are repainted with the exact selection foreground"
+    );
+    assert_eq!(
+        &canvas[4..8],
+        &[0x88, 0x38, 0xf2, 0xff],
+        "Sakura Mochi selection RGB is not swapped, tinted, or alpha-mixed"
+    );
+    assert_eq!(
+        &canvas[8..12],
+        &[0x33, 0x22, 0x11, 0xff],
+        "selected decorations are repainted with the exact selection foreground"
+    );
+    assert_eq!(
+        &canvas[12..16],
+        &[0x33, 0x22, 0x11, 0xff],
+        "the complete selected decoration span uses selection foreground"
+    );
+}
+
+#[test]
+fn selection_repaint_preserves_foot_right_to_left_glyph_overlap_order() {
+    let mut frame = damage_test_frame();
+    let first = GlyphKey { face: 0, glyph: 1 };
+    let second = GlyphKey { face: 0, glyph: 2 };
+    frame.glyphs = vec![
+        SnapshotGlyph {
+            key: first,
+            column: 0,
+            row: 0,
+            cells: 1,
+            cluster_advance: 1.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            foreground: [0xff; 3],
+        },
+        SnapshotGlyph {
+            key: second,
+            column: 0,
+            row: 0,
+            cells: 1,
+            cluster_advance: 1.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            foreground: [0xff; 3],
+        },
+    ];
+    frame.cache.insert(
+        first,
+        Arc::new(CachedGlyph {
+            content: Content::Color,
+            left: 0,
+            top: 1,
+            width: 1,
+            height: 1,
+            data: vec![128, 0, 0, 128],
+        }),
+    );
+    frame.cache.insert(
+        second,
+        Arc::new(CachedGlyph {
+            content: Content::Color,
+            left: 0,
+            top: 1,
+            width: 1,
+            height: 1,
+            data: vec![0, 0, 128, 128],
+        }),
+    );
+    let geometry = frame.tight_geometry().unwrap();
+    let overlays = SnapshotOverlays {
+        selection: Some(((0, 0), (0, 0))),
+        hovered_url: None,
+        dirty_rows: None,
+        focused: true,
+        selection_color: 0,
+        selection_foreground: 0x00ff_ffff,
+        url_color: 0,
+        accent_color: 0,
+    };
+    let mut actual = vec![0; 2 * 6 * 4];
+    paint_snapshot_overlays(&mut actual, 2, 6, &frame, &geometry, overlays);
+
+    let mut expected = vec![0; actual.len()];
+    fill_rect(&mut expected, 2, 6, (0, 0, 2, 2), [0, 0, 0, u8::MAX]);
+    for glyph in frame.glyphs.iter().rev() {
+        paint_placed_glyph(&mut expected, 2, 6, &frame, &geometry, glyph, [u8::MAX; 3]);
+    }
+    let mut forward = vec![0; actual.len()];
+    fill_rect(&mut forward, 2, 6, (0, 0, 2, 2), [0, 0, 0, u8::MAX]);
+    for glyph in &frame.glyphs {
+        paint_placed_glyph(&mut forward, 2, 6, &frame, &geometry, glyph, [u8::MAX; 3]);
+    }
+    assert_eq!(actual, expected);
+    assert_ne!(actual, forward, "overlap order is visually observable");
 }
 
 #[test]

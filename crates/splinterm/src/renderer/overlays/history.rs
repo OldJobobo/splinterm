@@ -3,9 +3,14 @@
 use crate::geometry::{Rect, WindowGeometry};
 
 use super::super::{
-    SnapshotFrame,
-    raster::{blend_rect, fill_rect},
+    SnapshotFrame, compose::paint_placed_glyph_clipped, decorations::paint_decoration_span,
+    raster::fill_rect,
 };
+
+fn themed_rgba(color: u32, alpha: u8) -> [u8; 4] {
+    let [_, red, green, blue] = color.to_be_bytes();
+    [red, green, blue, alpha]
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HistoryOverlayStatus {
@@ -75,18 +80,16 @@ pub(crate) fn paint_history_overlay(
     layout.panel.1 = layout.panel.1.saturating_add(offset_y);
     layout.return_to_live.0 = layout.return_to_live.0.saturating_add(offset_x);
     layout.return_to_live.1 = layout.return_to_live.1.saturating_add(offset_y);
-    let [_, bg_red, bg_green, bg_blue] = background.to_be_bytes();
-    let [_, red, green, blue] = accent.to_be_bytes();
     fill_rect(
         canvas,
         width,
         height,
         layout.panel,
-        [bg_blue, bg_green, bg_red, 0xff],
+        themed_rgba(background, u8::MAX),
     );
     let (x, y, _, panel_height) = layout.panel;
     let unit = scale_120.div_ceil(120).max(1);
-    let bright = [blue, green, red, 0xff];
+    let bright = themed_rgba(accent, u8::MAX);
     for row in 0..3_u32 {
         fill_rect(
             canvas,
@@ -231,10 +234,15 @@ pub(crate) struct SnapshotOverlays<'a> {
     pub(crate) focused: bool,
     /// Packed `0xRRGGBB` project theme roles.
     pub(crate) selection_color: u32,
+    pub(crate) selection_foreground: u32,
     pub(crate) url_color: u32,
     pub(crate) accent_color: u32,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "selection background and foreground remain one ordered theme-composition boundary"
+)]
 pub(crate) fn paint_snapshot_overlays(
     canvas: &mut [u8],
     width: u32,
@@ -249,13 +257,10 @@ pub(crate) fn paint_snapshot_overlays(
         dirty_rows,
         focused: _focused,
         selection_color,
+        selection_foreground,
         url_color,
         accent_color: _accent_color,
     } = overlays;
-    let themed_bgra = |color: u32, alpha: u8| {
-        let [_, red, green, blue] = color.to_be_bytes();
-        [blue, green, red, alpha]
-    };
     // Focus framing belongs to the compositor. Painting a second solid frame
     // inside the client obscures Hyprland's active-border gradient.
     let row_is_dirty =
@@ -271,19 +276,80 @@ pub(crate) fn paint_snapshot_overlays(
             } else {
                 frame.columns.saturating_sub(1) as usize
             };
-            for column in first..=last.min(frame.columns.saturating_sub(1) as usize) {
-                let (Ok(column), Ok(row)) = (u32::try_from(column), u32::try_from(row)) else {
-                    continue;
-                };
-                let Some(rect) = frame.cell_rect(geometry, column, row) else {
-                    continue;
-                };
-                blend_rect(
+            let last = last.min(frame.columns.saturating_sub(1) as usize);
+            let (Ok(first), Ok(last), Ok(row)) = (
+                u32::try_from(first),
+                u32::try_from(last),
+                u32::try_from(row),
+            ) else {
+                continue;
+            };
+            let (Some((left, top, cell_width, cell_height)), Some((right, _, _, _))) = (
+                frame.cell_rect(geometry, first, row),
+                frame.cell_rect(geometry, last, row),
+            ) else {
+                continue;
+            };
+            let selection_width = u32::try_from(right.saturating_sub(left))
+                .unwrap_or(0)
+                .saturating_add(cell_width);
+            fill_rect(
+                canvas,
+                width,
+                height,
+                (left, top, selection_width, cell_height),
+                themed_rgba(selection_color, u8::MAX),
+            );
+            let clip = (
+                left,
+                top,
+                left.saturating_add(i32::try_from(selection_width).unwrap_or(i32::MAX)),
+                top.saturating_add(i32::try_from(cell_height).unwrap_or(i32::MAX)),
+            );
+            let selected_foreground = {
+                let [_, red, green, blue] = selection_foreground.to_be_bytes();
+                [red, green, blue]
+            };
+            for glyph in frame
+                .glyphs
+                .iter()
+                .filter(|glyph| {
+                    glyph.row == row
+                        && glyph.column < last.saturating_add(1)
+                        && glyph.column.saturating_add(glyph.cells.max(1)) > first
+                })
+                .rev()
+            {
+                paint_placed_glyph_clipped(
                     canvas,
                     width,
                     height,
-                    rect,
-                    themed_bgra(selection_color, 112),
+                    frame,
+                    geometry,
+                    glyph,
+                    selected_foreground,
+                    Some(clip),
+                );
+            }
+            for decoration in frame.decorations.iter().filter(|decoration| {
+                decoration.row == row
+                    && decoration.column < last.saturating_add(1)
+                    && decoration.column.saturating_add(decoration.cells) > first
+            }) {
+                let mut selected = *decoration;
+                let decoration_end = selected.column.saturating_add(selected.cells);
+                selected.column = selected.column.max(first);
+                selected.cells = decoration_end
+                    .min(last.saturating_add(1))
+                    .saturating_sub(selected.column);
+                paint_decoration_span(
+                    canvas,
+                    width,
+                    height,
+                    frame,
+                    geometry,
+                    &selected,
+                    Some(selected_foreground),
                 );
             }
         }
@@ -310,7 +376,7 @@ pub(crate) fn paint_snapshot_overlays(
                     cell_width,
                     2,
                 ),
-                themed_bgra(url_color, 255),
+                themed_rgba(url_color, u8::MAX),
             );
         }
     }
@@ -343,7 +409,7 @@ mod tests {
                 unseen_rows: 1_000,
             },
             0x0010_1820,
-            0x0078_d2ff,
+            0x00f2_3888,
         )
         .expect("overlay fits");
         let mut maximum = sentinel.repeat(usize::try_from(width * height).unwrap());
@@ -364,10 +430,35 @@ mod tests {
                 unseen_rows: 999,
             },
             0x0010_1820,
-            0x0078_d2ff,
+            0x00f2_3888,
         );
         assert_eq!(clamped, maximum);
         let (panel_x, panel_y, panel_width, panel_height) = layout.panel;
+        let pixel = |canvas: &[u8], x: i32, y: i32| -> [u8; 4] {
+            let index = usize::try_from(
+                (u32::try_from(y).unwrap() * width + u32::try_from(x).unwrap()) * 4,
+            )
+            .unwrap();
+            canvas[index..index + 4].try_into().unwrap()
+        };
+        assert_eq!(
+            pixel(
+                &clamped,
+                panel_x.saturating_add(1),
+                panel_y.saturating_add(i32::try_from(panel_height - 1).unwrap())
+            ),
+            [0x20, 0x18, 0x10, 0xff],
+            "panel uses the exact theme background without red/blue reversal"
+        );
+        assert_eq!(
+            pixel(
+                &clamped,
+                panel_x.saturating_add(7),
+                panel_y.saturating_add(8)
+            ),
+            [0x88, 0x38, 0xf2, 0xff],
+            "history marks use the exact Sakura Mochi accent"
+        );
         let (action_x, action_y, action_width, action_height) = layout.return_to_live;
         assert!(action_x >= panel_x);
         assert_eq!(action_y, panel_y);
