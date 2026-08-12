@@ -14,6 +14,7 @@ Keywords=shell;prompt;command;commandline;terminal;
 Actions=New;Dojos;Reopen;
 X-TerminalArgExec=--
 X-TerminalArgDir=--working-directory=
+X-TerminalArgAppId=--app-id=
 
 [Desktop Action New]
 Name=New Terminal

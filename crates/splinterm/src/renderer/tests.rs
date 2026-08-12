@@ -1784,39 +1784,7 @@ fn image_creation_order_and_row_damage_match_full_composition() {
     assert_eq!(full, clean_removed);
 }
 
-#[test]
-fn cursor_and_selection_overlay_remain_above_nonnegative_images() {
-    let mut frame = damage_test_frame();
-    frame.images = vec![test_snapshot_image(
-        &[0, 0, 255, 255],
-        1,
-        1,
-        0,
-        splinterm_protocol::ImagePixelRect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        0,
-        0,
-        1,
-    )];
-    frame.cursor = Some((0, 0));
-    let geometry = frame.tight_geometry().unwrap();
-    let mut canvas = vec![0; 2 * 6 * 4];
-    paint_snapshot(
-        &mut canvas,
-        2,
-        6,
-        &frame,
-        &geometry,
-        true,
-        CursorStyle::Block,
-    );
-    assert_eq!(&canvas[0..4], &[255, 255, 255, 255]);
-
-    frame.cursor = None;
+fn add_selection_foreground_fixture(frame: &mut SnapshotFrame) {
     let key = GlyphKey { face: 0, glyph: 1 };
     frame.glyphs = vec![SnapshotGlyph {
         key,
@@ -1850,6 +1818,42 @@ fn cursor_and_selection_overlay_remain_above_nonnegative_images() {
         strike_color: [0xff; 3],
         metrics: frame.cell_metrics[0],
     }];
+}
+
+#[test]
+fn cursor_and_selection_overlay_remain_above_nonnegative_images() {
+    let mut frame = damage_test_frame();
+    frame.images = vec![test_snapshot_image(
+        &[0, 0, 255, 255],
+        1,
+        1,
+        0,
+        splinterm_protocol::ImagePixelRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        0,
+        0,
+        1,
+    )];
+    frame.cursor = Some((0, 0));
+    let geometry = frame.tight_geometry().unwrap();
+    let mut canvas = vec![0; 2 * 6 * 4];
+    paint_snapshot(
+        &mut canvas,
+        2,
+        6,
+        &frame,
+        &geometry,
+        true,
+        CursorStyle::Block,
+    );
+    assert_eq!(&canvas[0..4], &[255, 255, 255, 255]);
+
+    frame.cursor = None;
+    add_selection_foreground_fixture(&mut frame);
     paint_snapshot(
         &mut canvas,
         2,

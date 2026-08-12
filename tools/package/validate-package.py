@@ -34,6 +34,7 @@ REQUIRED = {
     "usr/share/applications/com.oldjobobo.splinterm.desktop",
     "usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg",
     "usr/share/metainfo/com.oldjobobo.splinterm.metainfo.xml",
+    "usr/share/splinterm/omarchy/screensaver.ini",
     "usr/share/doc/splinterm/README.md",
     "usr/share/doc/splinterm/automation.md",
     "usr/share/doc/splinterm/cli.md",
@@ -157,6 +158,7 @@ def validate_launcher(root: Path) -> None:
             [
                 launcher,
                 "--working-directory=/tmp/a b",
+                "--app-id=org.omarchy.screensaver",
                 "--",
                 "/usr/bin/printf",
                 "",
@@ -168,6 +170,7 @@ def validate_launcher(root: Path) -> None:
         assert record.read_text(encoding="utf-8").splitlines() == [
             "xdg-launch",
             "--working-directory=/tmp/a b",
+            "--app-id=org.omarchy.screensaver",
             "--",
             "/usr/bin/printf",
             "",
@@ -983,10 +986,32 @@ def main() -> int:
         assert desktop_config["Desktop Entry"]["Exec"] == "splinterm-xdg-terminal-exec"
         assert desktop_config["Desktop Entry"]["Actions"] == "New;Dojos;Reopen;"
         assert desktop_config["Desktop Entry"]["Icon"] == "com.oldjobobo.splinterm"
+        assert desktop_config["Desktop Entry"]["X-TerminalArgAppId"] == "--app-id="
         assert desktop_config["Desktop Action New"]["Exec"] == "splinterm-xdg-terminal-exec"
         assert desktop_config["Desktop Action Dojos"]["Name"] == "Recent Dojos"
         assert desktop_config["Desktop Action Dojos"]["Exec"] == "splinterm-dojos"
         assert desktop_config["Desktop Action Reopen"]["Exec"] == "splinterm-reopen"
+
+        screensaver_profile = root / "usr/share/splinterm/omarchy/screensaver.ini"
+        profile = configparser.ConfigParser(interpolation=None, strict=True)
+        with screensaver_profile.open(encoding="utf-8") as profile_file:
+            profile.read_file(profile_file)
+        assert profile["main"]["font"] == "JetBrains Mono Nerd Font:style=Regular"
+        assert profile["main"]["font-point-size"] == "18"
+        assert profile["main"]["font-sizing-policy"] == "physical-dpi"
+        assert {
+            profile["main"][name]
+            for name in ("padding-left", "padding-right", "padding-top", "padding-bottom")
+        } == {"0"}
+        assert profile["colors"]["alpha"] == "1.0"
+        assert profile["colors"]["blur"] == "no"
+        profile_environment = os.environ.copy()
+        profile_environment["SPLINTERM_CONFIG"] = str(screensaver_profile)
+        run(
+            [str(root / "usr/bin/splinterm"), "config", "check"],
+            env=profile_environment,
+            capture_output=True,
+        )
 
         pkginfo = package_metadata(package)
         dependencies = {

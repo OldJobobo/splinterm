@@ -24,7 +24,7 @@ use super::{
         create_request, launch_parameters, recent_dojo_ids, remember_dojo, select_dojo_from,
         session_picker_item,
     },
-    window::{run_live_multipane_window, run_live_window},
+    window::{run_live_multipane_window, run_live_multipane_window_with_app_id, run_live_window},
 };
 
 use super::theme_watch::load_startup_theme;
@@ -290,12 +290,23 @@ where
 
 pub(in crate::app) async fn xdg_launch(
     cwd: PathBuf,
+    app_id: Option<String>,
     command: Vec<String>,
     config: AppConfig,
     factory: ConnectionFactory,
 ) -> Result<()> {
     if command.is_empty() {
-        return launch(None, Some(cwd), None, true, command, config, factory).await;
+        return launch_with_app_id(
+            None,
+            Some(cwd),
+            None,
+            true,
+            command,
+            config,
+            factory,
+            app_id,
+        )
+        .await;
     }
     if !factory.is_local() {
         bail!("transient XDG launch requires the local trusted client");
@@ -324,10 +335,33 @@ pub(in crate::app) async fn xdg_launch(
     if !matches!(&dojo.root, splinterm_core::LayoutNode::Leaf(_)) {
         bail!("new transient Dojo did not contain exactly one Splint");
     }
-    keep_owner_until_complete(owner, run_live_multipane_window(config, dojo, factory)).await
+    keep_owner_until_complete(
+        owner,
+        run_live_multipane_window_with_app_id(config, dojo, factory, app_id),
+    )
+    .await
 }
 
 pub(in crate::app) async fn launch(
+    name: Option<String>,
+    cwd: Option<PathBuf>,
+    splint_id: Option<SplintId>,
+    create_new: bool,
+    command: Vec<String>,
+    config: AppConfig,
+    factory: ConnectionFactory,
+) -> Result<()> {
+    launch_with_app_id(
+        name, cwd, splint_id, create_new, command, config, factory, None,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private XDG app ID remains explicit and client-local at the launch boundary"
+)]
+async fn launch_with_app_id(
     name: Option<String>,
     cwd: Option<PathBuf>,
     splint_id: Option<SplintId>,
@@ -335,6 +369,7 @@ pub(in crate::app) async fn launch(
     command: Vec<String>,
     config: AppConfig,
     factory: ConnectionFactory,
+    app_id: Option<String>,
 ) -> Result<()> {
     let mut connection = factory
         .connect()
@@ -374,7 +409,7 @@ pub(in crate::app) async fn launch(
     let dojo = dojo.clone();
     remember_dojo(&factory, dojo.id);
     drop(connection);
-    run_live_multipane_window(config, dojo, factory).await
+    run_live_multipane_window_with_app_id(config, dojo, factory, app_id).await
 }
 
 #[cfg(test)]

@@ -7,6 +7,39 @@ parse human output, or inherit authority from their logical location. See
 policy contract. The optional full-capability stdio adapter and supported host
 configuration are documented separately in [mcp.md](mcp.md).
 
+## Omarchy screensaver
+
+Splinterm's package advertises the desktop-standard XDG app-ID argument and
+installs a dedicated profile at:
+
+```text
+/usr/share/splinterm/omarchy/screensaver.ini
+```
+
+A compatible Omarchy launcher selects that profile only for the screensaver and
+invokes the normal XDG terminal adapter:
+
+```bash
+env SPLINTERM_CONFIG=/usr/share/splinterm/omarchy/screensaver.ini \
+  xdg-terminal-exec --app-id=org.omarchy.screensaver -- omarchy-screensaver
+```
+
+The command-bearing launch remains a transient client-bound Lair. The app-ID is
+validated at Splinterm's private XDG boundary and belongs only to that graphical
+Window; it is not persisted in topology, launch metadata, automation output, or
+user configuration. Ordinary Windows remain `com.oldjobobo.splinterm`.
+
+Splinterm installs no files under `/usr/share/omarchy` and never changes the
+user's preferred terminal. If:
+
+```bash
+command -v omarchy-launch-screensaver
+```
+
+resolves to `~/.local/bin/omarchy-launch-screensaver`, that user-owned override
+shadows Omarchy's packaged launcher. Review and update or remove it explicitly;
+Splinterm will report the condition but will not overwrite or delete the file.
+
 ## Client-author checklist
 
 A supported client must:

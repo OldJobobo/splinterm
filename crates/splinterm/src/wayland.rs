@@ -119,7 +119,7 @@ use smithay_client_toolkit::reexports::protocols::wp::{
 use crate::background_effect::{
     BackgroundEffectState, CommitReason as BackgroundCommitReason, EffectAction, EffectDiagnostic,
 };
-use crate::config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
+use crate::config::{CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
 use crate::diagnostics::{
     DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, global as diagnostics,
 };
@@ -723,7 +723,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         )
     };
     window.set_title(title);
-    window.set_app_id(APP_ID);
+    window.set_app_id(options.app_id.clone());
     window
         .set_buffer_scale(1)
         .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
@@ -10089,6 +10089,11 @@ mod tests {
         assert_eq!(*receiver.borrow(), None);
         update_graphical_focus_watch(Some(&sender), true, None);
         assert_eq!(*receiver.borrow(), None);
+    }
+
+    #[test]
+    fn ordinary_windows_keep_the_project_wayland_identity() {
+        assert_eq!(WindowOptions::default().app_id, crate::config::APP_ID);
     }
 
     #[test]

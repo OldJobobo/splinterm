@@ -103,14 +103,27 @@ fn finish_topology_manager(
         .context("topology manager stopped")
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "multi-pane startup keeps renderer, topology, theme, and input authorities in one lifecycle"
-)]
+fn resolved_window_app_id(app_id: Option<String>) -> String {
+    app_id.unwrap_or_else(|| splinterm::config::APP_ID.to_owned())
+}
+
 pub(super) async fn run_live_multipane_window(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
+) -> Result<()> {
+    run_live_multipane_window_with_app_id(config, dojo_model, factory, None).await
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "multi-pane startup keeps renderer, topology, theme, and input authorities in one lifecycle"
+)]
+pub(super) async fn run_live_multipane_window_with_app_id(
+    config: AppConfig,
+    dojo_model: splinterm_core::Dojo,
+    factory: ConnectionFactory,
+    app_id: Option<String>,
 ) -> Result<()> {
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
@@ -198,6 +211,7 @@ pub(super) async fn run_live_multipane_window(
             cursor_style: window_config.cursor_style,
             cursor_blink: window_config.cursor_blink,
             title: window_config.title,
+            app_id: resolved_window_app_id(app_id),
             theme,
             pane_divider_style: window_config.pane_divider_style,
             frame_title_mode: window_config.frame_title_mode,
@@ -554,5 +568,19 @@ pub(super) async fn run_live_window(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolved_window_app_id;
+
+    #[test]
+    fn xdg_window_identity_defaults_and_preserves_exact_override() {
+        assert_eq!(resolved_window_app_id(None), splinterm::config::APP_ID);
+        assert_eq!(
+            resolved_window_app_id(Some("org.omarchy.screensaver".to_owned())),
+            "org.omarchy.screensaver"
+        );
     }
 }

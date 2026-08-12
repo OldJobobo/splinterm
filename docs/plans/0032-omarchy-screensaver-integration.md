@@ -1,6 +1,7 @@
 # Plan 0032: Omarchy screensaver integration
 
-- **Status:** Planned
+- **Status:** Milestones 1–4 implemented locally; clean package extraction,
+  upstream submission, and guarded graphical acceptance remain open
 - **Date:** 2026-08-11
 - **Product authority:** Splinterm remains a standalone terminal and implements generic XDG launch metadata rather than an Omarchy-only window mode
 - **Integration authority:** Splinterm's packaged desktop adapter and the upstream Omarchy screensaver launcher
@@ -27,7 +28,12 @@ omarchy-launch-screensaver
 
 Splinterm's package must not overwrite Omarchy-owned system files or user-owned launcher overrides.
 
-## Current blockers
+## Baseline blockers
+
+At plan approval, the following blockers defined the implementation. The local
+Splinterm source changes now address app-ID transport, desktop metadata, and the
+owned profile; the retained Omarchy patch is not yet submitted, and graphical
+acceptance remains open.
 
 ### Omarchy rejects Splinterm
 

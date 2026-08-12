@@ -2,10 +2,12 @@ post_install() {
   echo 'Splinterm public alpha installed for the documented Arch/Omarchy target.'
   echo 'Active Omarchy Quattro themes are discovered and reloaded automatically; no theme hook is required.'
   echo 'Add com.oldjobobo.splinterm.desktop to ~/.config/xdg-terminals.list when ready to make it preferred.'
+  echo 'Omarchy screensaver support requires a compatible Omarchy launcher; user-local launcher overrides are never replaced.'
 }
 
 post_upgrade() {
   echo 'Restart running user splinterd services after protocol upgrades; the launcher does this when ping negotiation fails.'
+  echo 'Omarchy screensaver support requires a compatible Omarchy launcher; user-local launcher overrides are never replaced.'
 }
 
 post_remove() {

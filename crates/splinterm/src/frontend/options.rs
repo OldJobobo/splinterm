@@ -12,7 +12,7 @@ use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::TerminalSnapshot;
 
 use crate::{
-    config::{CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme},
+    config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme},
     keymap::ResolvedKeymap,
 };
 
@@ -68,6 +68,8 @@ pub struct WindowOptions {
     pub cursor_blink: bool,
     /// Optional fixed user title; terminal OSC titles remain active when absent.
     pub title: Option<String>,
+    /// Client-local Wayland identity. Only private XDG launch may override the default.
+    pub app_id: String,
     /// Current project-owned Omarchy role mapping.
     pub theme: ResolvedTheme,
     pub pane_divider_style: PaneDividerStyle,
@@ -112,6 +114,7 @@ impl Default for WindowOptions {
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             title: None,
+            app_id: APP_ID.to_owned(),
             theme: ResolvedTheme::default(),
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,

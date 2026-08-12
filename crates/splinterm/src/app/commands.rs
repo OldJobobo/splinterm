@@ -176,6 +176,9 @@ pub(in crate::app) enum Command {
     XdgLaunch {
         #[arg(long = "working-directory", alias = "dir")]
         cwd: Option<PathBuf>,
+        /// Client-local Wayland identity supplied only by the XDG adapter.
+        #[arg(long, value_parser = parse_xdg_app_id)]
+        app_id: Option<String>,
         /// Executable and arguments passed directly, never through a shell.
         #[arg(last = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -334,6 +337,35 @@ pub(in crate::app) enum Command {
     /// Private daemon-launched trusted consent surface.
     #[command(hide = true)]
     Consent,
+}
+
+pub(super) fn parse_xdg_app_id(value: &str) -> Result<String, String> {
+    const MAX_APP_ID_BYTES: usize = 255;
+    if value.is_empty() || value.len() > MAX_APP_ID_BYTES || !value.is_ascii() {
+        return Err("app ID must contain 1 to 255 ASCII bytes".to_owned());
+    }
+    let mut components = value.split('.');
+    let valid_component = |component: &str| {
+        let mut characters = component.chars();
+        characters
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            && characters.all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+    };
+    let Some(first) = components.next() else {
+        return Err("app ID must be a reverse-DNS identity".to_owned());
+    };
+    if !valid_component(first)
+        || components.clone().count() == 0
+        || !components.all(valid_component)
+    {
+        return Err(
+            "app ID must be dot-separated ASCII identifiers beginning with letters".to_owned(),
+        );
+    }
+    Ok(value.to_owned())
 }
 
 #[derive(Debug, Subcommand)]

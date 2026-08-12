@@ -108,6 +108,16 @@ install_dependencies() {
   sudo pacman "${pacman_args[@]}" "${missing_packages[@]}"
 }
 
+report_screensaver_launcher_shadow() {
+  local resolved
+  resolved=$(command -v omarchy-launch-screensaver 2>/dev/null || true)
+  if [[ $resolved == "$HOME/.local/bin/omarchy-launch-screensaver" ]]; then
+    printf '%s\n' \
+      "A user-local Omarchy screensaver launcher shadows the packaged command: $resolved" \
+      'Splinterm did not modify it. Update or remove that override explicitly before screensaver acceptance.' >&2
+  fi
+}
+
 source_install() {
   command -v git >/dev/null 2>&1 || {
     printf 'Source installation requires git.\n' >&2
@@ -312,3 +322,4 @@ if [[ $source_build == true ]]; then
 else
   prebuilt_install
 fi
+report_screensaver_launcher_shadow

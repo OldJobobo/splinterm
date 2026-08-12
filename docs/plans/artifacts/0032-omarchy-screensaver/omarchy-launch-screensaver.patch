@@ -1,0 +1,18 @@
+diff --git a/bin/omarchy-launch-screensaver b/bin/omarchy-launch-screensaver
+index afee404..9a73fdc 100755
+--- a/bin/omarchy-launch-screensaver
++++ b/bin/omarchy-launch-screensaver
+@@ -21 +21 @@ case $terminal in
+-*Alacritty* | *ghostty* | *foot* | *kitty*) ;;
++*Alacritty* | *ghostty* | *foot* | *kitty* | *com.oldjobobo.splinterm*) ;;
+@@ -23 +23 @@ case $terminal in
+-  omarchy-notification-send -g ✋ "Screensaver only runs in Alacritty, Foot, Ghostty, or Kitty"
++  omarchy-notification-send -g ✋ "Screensaver only runs in Alacritty, Foot, Ghostty, Kitty, or Splinterm"
+@@ -71,0 +72,7 @@ for m in $(hyprctl monitors -j | jq -r '.[] | .name'); do
++  *com.oldjobobo.splinterm*)
++    hypr_exec env \
++      SPLINTERM_CONFIG=/usr/share/splinterm/omarchy/screensaver.ini \
++      xdg-terminal-exec \
++      --app-id=org.omarchy.screensaver \
++      -- omarchy-screensaver
++    ;;

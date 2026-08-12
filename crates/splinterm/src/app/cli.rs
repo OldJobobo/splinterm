@@ -273,13 +273,17 @@ async fn run_configured_command(
             remember_dojo(&factory, dojo.id);
             run_live_multipane_window(config, dojo, factory).await
         }
-        Command::XdgLaunch { cwd, command } => {
+        Command::XdgLaunch {
+            cwd,
+            app_id,
+            command,
+        } => {
             if !factory.is_local() {
                 bail!("XDG launch is unavailable for remote endpoints");
             }
             let cwd =
                 cwd.unwrap_or(env::current_dir().context("failed to read current directory")?);
-            xdg_launch(cwd, command, config, factory).await
+            xdg_launch(cwd, app_id, command, config, factory).await
         }
         Command::Launch {
             cwd,
@@ -950,6 +954,7 @@ mod tests {
             "splinterm",
             "xdg-launch",
             "--working-directory=/tmp/a b",
+            "--app-id=org.omarchy.screensaver",
             "--",
             "/usr/bin/printf",
             "",
@@ -958,10 +963,33 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::XdgLaunch { cwd: Some(cwd), command })
-                if cwd == std::path::Path::new("/tmp/a b")
-                    && command == ["/usr/bin/printf", "", "$(must-not-run)"]
+            Some(Command::XdgLaunch {
+                cwd: Some(cwd),
+                app_id: Some(app_id),
+                command,
+            }) if cwd == std::path::Path::new("/tmp/a b")
+                && app_id == "org.omarchy.screensaver"
+                && command == ["/usr/bin/printf", "", "$(must-not-run)"]
         ));
+    }
+
+    #[test]
+    fn xdg_launch_parser_rejects_untrusted_app_ids() {
+        for invalid in [
+            "",
+            "screensaver",
+            ".org.omarchy",
+            "org..screensaver",
+            "org.omarchy.$(screensaver)",
+            "org.omarchy/screensaver",
+            "org.omarchy.\u{0007}screensaver",
+            &format!("org.omarchy.{}", "a".repeat(256)),
+        ] {
+            assert!(
+                Cli::try_parse_from(["splinterm", "xdg-launch", "--app-id", invalid]).is_err(),
+                "invalid app ID was accepted: {invalid:?}"
+            );
+        }
     }
 
     #[test]
