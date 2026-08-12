@@ -36,6 +36,7 @@ MCP_TOOLS = (
     "splinterm.read_scrollback",
     "splinterm.search_scrollback",
     "splinterm.request_access",
+    "splinterm.request_lair_access",
     "splinterm.authorization_status",
     "splinterm.revoke_access",
     "splinterm.inspect_audit",
@@ -85,6 +86,7 @@ MCP_ERROR_CODES = (
 )
 MCP_MUTATION_TOOLS = {
     "splinterm.request_access",
+    "splinterm.request_lair_access",
     "splinterm.revoke_access",
     "splinterm.create_lair",
     "splinterm.split_splint",
@@ -136,8 +138,12 @@ MCP_OUTPUT_RESOURCE_DEFS = {
     "splinterm.read_scrollback": "terminal_resource",
     "splinterm.search_scrollback": "terminal_resource",
     "splinterm.request_access": "authorization_resource",
+    "splinterm.request_lair_access": "lair_authorization_resource",
     "splinterm.authorization_status": "splint_resource",
-    "splinterm.revoke_access": "authorization_resource",
+    "splinterm.revoke_access": (
+        "authorization_resource",
+        "lair_authorization_resource",
+    ),
     "splinterm.inspect_audit": "audit_resource",
     "splinterm.create_lair": "lair_resource",
     "splinterm.split_splint": "splint_resource",
@@ -196,12 +202,12 @@ EXPECTED_MCP_SCHEMAS = {
     ),
 }
 EXPECTED_MCP_SCHEMA_SHA256 = {
-    'common.schema.json': '4117295507195b91d76a65e0c2c3b8a57182efbbe7ffda870d04f453d5d38d96',
+    'common.schema.json': 'ceca570328eb078c6387a16eb37a25205a91ecdbf2b436ba5065a3dcee277646',
     'error.schema.json': 'db5e68a6494912da6a114d055e8b5ae0426051f3f39ab9a5721d9b482e0307fe',
     'resources/control.schema.json': 'bf27457edc5eb95e7635ae4204ca462d319f1bdb64056f667a3409cf11bdcc34',
     'resources/terminal.schema.json': '54015be8b7cfa3880fb98e6c10448a93aa4750935b9f4f70ba9588bf6da302f8',
     'resources/topology.schema.json': '118e980740e399e391bdd0e52d49bc2a14eeb53c829035db485e828789ad3839',
-    'tools/acquire_control.input.schema.json': 'f3b7e8b06c5f16a0dd152eadf2bf868e0e264028369e6624f5cba32a1374ce82',
+    'tools/acquire_control.input.schema.json': 'bd216c2dfcd3986454d464e19a094f55ec55bafddc4357db58a7b08b02f11aff',
     'tools/acquire_control.output.schema.json': '5918e96c02ace8ccae4e93aa9c1659f7bb962784c17ec93e92907d00322e7e4f',
     'tools/authorization_status.input.schema.json': '7e55181e0b1e47d7b899625964398fa1e71e895219c8ca4527f9b58ae4da967f',
     'tools/authorization_status.output.schema.json': '13d2da8b86f49748efcd0f6414920b9bdb8d618adf153e7f3237afa74dca8586',
@@ -243,10 +249,12 @@ EXPECTED_MCP_SCHEMA_SHA256 = {
     'tools/rename_lair.output.schema.json': 'e3b427c306ac80808dc15b08053da509132b48caaa49d0754e4604f3e32af833',
     'tools/rename_splint.input.schema.json': '3835f78e6bc2c3381ae244e2fc79490de1aa67e7515502fb3ec108571bf571ac',
     'tools/rename_splint.output.schema.json': '456d8be17a96531b3ecf42d804395539418e11c830bfe5156f74a630a3437237',
-    'tools/request_access.input.schema.json': '12e69e8b506c85dc82962f5a15c2a703006ce52961df2ff3635a6a4c52880471',
+    'tools/request_access.input.schema.json': '97aaf9b747784f6274a40b7de3f00f8a85bcf905719f91ceb2701993d8de5041',
     'tools/request_access.output.schema.json': 'cda84ab8391295f4c13c8ab0d9f25e9388df5f52f84992d6d46c56400facec1c',
+    'tools/request_lair_access.input.schema.json': '8ef09af1c7a20c59ab710a66f21d26e611f01e4ab31d71429e1b80d15ed2bf08',
+    'tools/request_lair_access.output.schema.json': '53999206db7f81e40884643d56697754e12e2489edbae0d66a3dc458ef478e76',
     'tools/request_control_transfer.input.schema.json': '02d45ae645149890df20a4ab68a3216696db2bc2c61c569febc9ea9635ff582f',
-    'tools/request_control_transfer.output.schema.json': '928ba72053c4b50d05bf8501d3b2b213b677c6c1c329a7de39b530a9a394079e',
+    'tools/request_control_transfer.output.schema.json': 'a0f46afac3df5d2f0ebed0266e1ecfb145fdc685d018bffc2a08c3c0c99d1360',
     'tools/resize.input.schema.json': '6c3bfa8444814d73957345ad829343f062c8a8150c8c027a023e2362a1417cad',
     'tools/resize.output.schema.json': '2a5d90a468047ee3bfedc7f94f27881f50783f032cd2637e09c251462cc404f4',
     'tools/restore_dojo.input.schema.json': '72cbacd6d2442566ff33db0819f1d9b9e1bcddef33fe5f3d169237b07f5fb1bc',
@@ -256,7 +264,7 @@ EXPECTED_MCP_SCHEMA_SHA256 = {
     'tools/restore_splint.input.schema.json': '76e5784d61bf083030b0b1a89143b4a79dfd8dcbf323c9dd60a52139bb347c57',
     'tools/restore_splint.output.schema.json': '1123357d4b581fda43cdce190f9197c0459cfe3b7a01bce01e1cc4bd8d36fca3',
     'tools/revoke_access.input.schema.json': '8dcecdd55e6b6919116c7de6e161880185e273c3eec26cdbe459ce9d0cd11792',
-    'tools/revoke_access.output.schema.json': 'a11a6b1a02bf007222b259419b44ec8dc2ab1b6f13b4f29993f42e87af218c53',
+    'tools/revoke_access.output.schema.json': '9762aec9ecf592bee8bbb338f229ba46fca15a40eb7c295d760d28fdc7fbbe14',
     'tools/search_scrollback.input.schema.json': 'c017396b6cee51a5dd912880433a3160930e689ba3b729b4dfcdec8e21c188f1',
     'tools/search_scrollback.output.schema.json': '3bf75ea45fab25129c8b73162df81f09afaf80f43712a6a1a748308d01fe1643',
     'tools/set_dojo_default_focus.input.schema.json': 'bbf4448205eab1d34421ab9a80896104ee7780d4cd7e12daa0f4e22d64dc0d9e',
@@ -297,6 +305,7 @@ EXPECTED_MCP_INVALID_FIXTURES = {
     "private-daemon-id.json",
     "query-echo.json",
     "raw-bytes-leak.json",
+    "request_lair_access-unsupported-scope.input.json",
     "resource-open-metadata.json",
     "resource-private-controller-id.json",
     "uncommitted-mutation-success.json",
@@ -472,6 +481,7 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
         data_schema = output_properties["data"]
         if "$ref" in data_schema:
             data_schema = resolver.lookup(data_schema["$ref"]).contents
+        data_schemas = data_schema.get("oneOf", [data_schema])
 
         require_schema_condition(
             input_schema.get("type") == "object"
@@ -483,9 +493,13 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
             f"{tool}: output tool discriminator is not exact",
         )
         require_schema_condition(
-            data_schema.get("type") == "object"
-            and data_schema.get("additionalProperties") is False,
-            f"{tool}: output data must be a closed object",
+            bool(data_schemas)
+            and all(
+                schema.get("type") == "object"
+                and schema.get("additionalProperties") is False
+                for schema in data_schemas
+            ),
+            f"{tool}: output data must contain only closed objects",
         )
 
         expected_trust = (
@@ -497,25 +511,40 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
             output_properties["content_trust"].get("const") == expected_trust,
             f"{tool}: output trust label is not exact",
         )
-        expected_resource_ref = (
+        expected_resource_defs = MCP_OUTPUT_RESOURCE_DEFS[tool]
+        if isinstance(expected_resource_defs, str):
+            expected_resource_defs = (expected_resource_defs,)
+        expected_resource_refs = {
             "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/"
-            f"{MCP_OUTPUT_RESOURCE_DEFS[tool]}"
+            f"{definition}"
+            for definition in expected_resource_defs
+        }
+        resource_schema = output_properties.get("resource", {})
+        actual_resource_refs = (
+            {resource_schema["$ref"]}
+            if "$ref" in resource_schema
+            else {choice.get("$ref") for choice in resource_schema.get("oneOf", [])}
         )
         require_schema_condition(
-            output_properties.get("resource", {}).get("$ref")
-            == expected_resource_ref,
+            actual_resource_refs == expected_resource_refs,
             f"{tool}: output resource identity is not exact",
         )
         if tool in MCP_TERMINAL_OUTPUT_TOOLS:
             require_schema_condition(
-                "provenance" not in data_schema.get("properties", {})
+                all(
+                    "provenance" not in schema.get("properties", {})
+                    for schema in data_schemas
+                )
                 and MCP_OUTPUT_RESOURCE_DEFS[tool] == "terminal_resource",
                 f"{tool}: provenance must be carried once by terminal resource identity",
             )
         if tool in MCP_MUTATION_TOOLS:
             require_schema_condition(
-                "committed" in data_schema.get("required", [])
-                and data_schema["properties"]["committed"].get("const") is True,
+                all(
+                    "committed" in schema.get("required", [])
+                    and schema["properties"]["committed"].get("const") is True
+                    for schema in data_schemas
+                ),
                 f"{tool}: successful mutation must require committed=true",
             )
         if tool in MCP_CONFIRMED_TOOLS:
@@ -545,6 +574,9 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
         "authorization_resource": {
             "kind", "lair_id", "dojo_id", "splint_id", "incarnation",
             "grant_id", "authorization_revision",
+        },
+        "lair_authorization_resource": {
+            "kind", "lair_id", "topology_revision", "authorization_revision",
         },
         "audit_resource": {"kind"},
         "control_resource": {

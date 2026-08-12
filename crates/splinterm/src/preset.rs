@@ -2081,7 +2081,7 @@ title = "review"
     fn bundled_tdl_two_ai_and_tds_match_reference_trees() {
         let root = test_root();
         let catalog = PresetCatalog::bundled();
-        let tdl = catalog
+        let tdl_preset = catalog
             .compile_with_parameters(
                 "omarchy.tdl",
                 &context(&root),
@@ -2089,13 +2089,13 @@ title = "review"
                 false,
             )
             .unwrap();
-        assert_eq!(tdl.root.pane_count(), 4);
+        assert_eq!(tdl_preset.root.pane_count(), 4);
         assert_eq!(
-            layout_signature(&tdl.root),
+            layout_signature(&tdl_preset.root),
             "R850(C650(Peditor,R500(Pai1,Pai2)),Pterminal)"
         );
         let mut panes = Vec::new();
-        collect_panes(&tdl.root, &mut panes);
+        collect_panes(&tdl_preset.root, &mut panes);
         assert_eq!(
             panes.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
             ["editor", "ai1", "ai2", "terminal"]
@@ -2106,14 +2106,14 @@ title = "review"
                 .any(|(key, argv)| { *key == "ai2" && *argv == ["codex"] })
         );
 
-        let tds = catalog.compile("omarchy.tds", &context(&root)).unwrap();
-        assert_eq!(tds.focus.as_str(), "editor");
+        let tds_preset = catalog.compile("omarchy.tds", &context(&root)).unwrap();
+        assert_eq!(tds_preset.focus.as_str(), "editor");
         assert_eq!(
-            layout_signature(&tds.root),
+            layout_signature(&tds_preset.root),
             "R500(C500(Peditor,Pdiff),C500(Pterminal,Pai))"
         );
         let mut panes = Vec::new();
-        collect_panes(&tds.root, &mut panes);
+        collect_panes(&tds_preset.root, &mut panes);
         assert_eq!(
             panes.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
             ["editor", "diff", "terminal", "ai"]

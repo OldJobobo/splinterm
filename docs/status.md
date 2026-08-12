@@ -9,8 +9,8 @@ this page owns what the product is today.
 
 **Splinterm is a public alpha.**
 
-Source, documentation, and commit-bound Arch edge packages are publicly
-available. Core terminal emulation, daemon-owned persistence, multiplexing,
+Source, documentation, the versioned AUR package, and commit-bound Arch edge
+packages are publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
 native Wayland presentation, Arch packaging, and bounded automation workflows
 are implemented and validated in the scopes named below. Public availability is
 not a stable-support promise: alpha interfaces may change, the validated target
@@ -30,7 +30,8 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle; and
-- a public alpha `0.1.0.pre` Arch edge package built from clean committed source.
+- a public alpha `0.1.0alpha2` Arch package built from clean committed source;
+- the alpha2 keyboard hotfix restores command palette navigation, Enter activation, Escape dismissal, and plain Enter confirmation in rename prompts.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
@@ -52,8 +53,9 @@ interfaces on the documented platform.
 | Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Plan 0028](plans/0028-remote-graphical-client.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
-| Arch/Omarchy packaging | Public alpha edge package validated | Public commit-bound split Pacman packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| Public source and edge channel | Available | The repository, documentation, immutable edge releases, and rolling verified installer channel are public. AUR publication is being prepared. |
+| Arch/Omarchy packaging | Public alpha packages validated | Versioned AUR and commit-bound edge split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha2-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable edge artifacts without local compilation. Source-built `splinterm` and `splinterm-mcp` remain available. |
+| Public source and edge channel | Available | The repository, documentation, immutable edge releases, and rolling verified installer channel are public. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
 

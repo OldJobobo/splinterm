@@ -1,13 +1,31 @@
 # Public alpha Arch packaging
 
-Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.0.pre` split
-package. It is the repository's clean-source package authority, but it is not yet
-the AUR publication recipe: its local source archive and `SKIP` checksum are
-valid only for reviewed local and CI builds. Immutable public GitHub commit
-releases plus the rolling `edge-channel` Git ref publish verified edge packages;
-AUR publication will use a versioned public source URL and checksum.
+Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.0alpha2` split
+package for reviewed local and CI builds. Its local source archive and `SKIP`
+checksum are valid only in that workflow. The source-built AUR authority is
+`packaging/aur/PKGBUILD`, which uses the immutable `v0.1.0-alpha2` release
+asset and a reviewed SHA-256 checksum. It intentionally omits a `check()` phase.
+The recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; it repackages
+checksummed artifacts from a successful immutable edge release without compiling
+or testing on the user's machine.
 
-## One-command prebuilt installation
+## Versioned AUR installation
+
+Install the recommended prebuilt main package and optional exact-version MCP
+adapter with an AUR helper:
+
+```bash
+yay -S splinterm-bin
+yay -S splinterm-mcp-bin
+```
+
+The source-built alternatives are `splinterm` and `splinterm-mcp`. Migrating to
+the `-bin` packages prompts once to replace those conflicting source packages.
+`paru` may be used instead of `yay`. AUR availability does not expand the
+validated target beyond x86_64 Arch/Omarchy with native Wayland/Hyprland or add
+a stable compatibility and support-duration promise.
+
+## One-command prebuilt edge installation
 
 On an x86_64 Arch/Omarchy machine, a clone installs or updates to the newest
 successfully built `main` commit without compiling locally:
@@ -79,8 +97,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0.pre/ \
-  -o packaging/splinterm-0.1.0.pre.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.0alpha2/ \
+  -o packaging/splinterm-0.1.0alpha2.tar.gz HEAD
 (
   cd packaging
   makepkg --cleanbuild --syncdeps --noconfirm
@@ -92,16 +110,16 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0.pre-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.0alpha2-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.0alpha2-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
 The local archive checksum is intentionally `SKIP`: the archive is generated
 from the reviewed local Git commit, is never downloaded, and the package's
-`.BUILDINFO`/`.PKGINFO` record the actual build. The future AUR recipe requires
-a versioned immutable public source URL and checksum and will be published
-separately from this local-build source entry.
+`.BUILDINFO`/`.PKGINFO` record the actual build. The separate checked-in AUR
+recipe uses the immutable versioned release asset and real SHA-256 checksums; do
+not submit the local-build recipe to the AUR.
 
 ## Installed layout
 
@@ -195,7 +213,7 @@ The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0.pre-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.0alpha2-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -203,7 +221,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0.pre-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.0alpha2-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional

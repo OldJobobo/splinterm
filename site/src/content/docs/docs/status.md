@@ -3,15 +3,17 @@ title: Current status
 description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
 ---
 
-Splinterm is a **public alpha**. Source, documentation, and verified commit-bound edge packages are public. Substantial core behavior is implemented and validated, while the supported target remains narrow and stable compatibility guarantees have not been released.
+Splinterm is a **public alpha**. Source, documentation, the versioned AUR package, and verified commit-bound edge packages are public. Substantial core behavior is implemented and validated, while the supported target remains narrow and stable compatibility guarantees have not been released.
+
+Alpha2 is a critical keyboard-input hotfix. It restores command palette navigation, plain Enter activation, Escape dismissal, and plain Enter confirmation in rename prompts.
 
 ## What that means
 
 - The product runs and has a normal graphical daily-use path.
 - Core terminal, persistence, multiplexing, packaging, and automation milestones have recorded validation.
 - The current target is narrow: x86_64 Omarchy/Arch Linux with native Wayland.
-- Installation uses public alpha edge packages or a committed source checkout.
-- AUR publication is being prepared; broader distribution and long-term compatibility promises have not been released.
+- Installation uses the versioned AUR package, public alpha edge packages, or a committed source checkout.
+- Broader distribution and long-term compatibility promises have not been released.
 
 ## Capability summary
 
@@ -27,9 +29,9 @@ Splinterm is a **public alpha**. Source, documentation, and verified commit-boun
 | SSH stdio relay | Implemented and validated |
 | [MCP adapter](/docs/mcp/) | Implemented and validated as an optional, separately policy-identified package |
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
-| Arch/Omarchy package | Public alpha edge package validated |
+| Arch/Omarchy package | Versioned AUR and public alpha edge packages validated |
 | Public source and edge builds | Available |
-| AUR package | Preparing for alpha publication |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0alpha2-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 

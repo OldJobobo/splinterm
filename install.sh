@@ -21,8 +21,8 @@ Arch/Omarchy without compiling locally.
   -h, --help   Show this help
 
 The default edge installer uses an authenticated GitHub CLI session when
-available (required for private repositories), otherwise it uses public release
-downloads. It never opts a fresh installation into the optional MCP package; an
+available and otherwise uses anonymous public release downloads. It never opts
+a fresh installation into the optional MCP package; an
 existing MCP installation is upgraded to keep package versions matched.
 EOF
 }
