@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "revision": 3,
+  "revision": 9,
   "goals": [
     {
       "id": "refine-lair-lifecycle-and-dojo-picker",
@@ -9,7 +9,10 @@
       "group": "Now",
       "status": "open",
       "createdAt": "2026-08-11T06:55:35.004Z",
-      "updatedAt": "2026-08-11T07:05:47.746Z"
+      "updatedAt": "2026-08-12T04:34:07.531Z",
+      "dependsOn": [
+        "reconcile-alpha2-release-state-and"
+      ]
     },
     {
       "id": "redesign-lair-retention-and-saved",
@@ -18,7 +21,68 @@
       "group": "Later",
       "status": "open",
       "createdAt": "2026-08-11T14:13:27.537Z",
-      "updatedAt": "2026-08-11T14:13:27.537Z"
+      "updatedAt": "2026-08-12T04:34:07.622Z",
+      "dependsOn": [
+        "reconcile-alpha2-release-state-and"
+      ]
+    },
+    {
+      "id": "reconcile-alpha2-release-state-and",
+      "title": "Reconcile alpha2 release state and planning authority",
+      "description": "Safely reconcile local main with origin/main while preserving the existing dirty website and Wayland changes; verify alpha2/AUR release provenance; deduplicate the already-upstream modal-routing hotfix; and update TODO, roadmap, status, PRD, packaging, and plan statuses so release truth has one authority.",
+      "group": "Release hygiene",
+      "status": "done",
+      "createdAt": "2026-08-12T04:30:09.866Z",
+      "updatedAt": "2026-08-12T04:51:36.388Z",
+      "completedAt": "2026-08-12T04:51:36.388Z"
+    },
+    {
+      "id": "correct-selection-theme-palette",
+      "title": "Correct selection theme palette composition",
+      "description": "Preserve theme-provided selection RGB roles verbatim while varying only explicit presentation alpha. Replace framebuffer-baked selection blending with a separate theme-color-plus-alpha layer, keep selected glyph foreground untinted, and add renderer coverage including Sakura Mochi #f23888.",
+      "group": "Next",
+      "dependsOn": [
+        "reconcile-alpha2-release-state-and"
+      ],
+      "status": "open",
+      "createdAt": "2026-08-12T04:33:52.763Z",
+      "updatedAt": "2026-08-12T04:33:52.763Z"
+    },
+    {
+      "id": "integrate-splinterm-with-omarchy",
+      "title": "Integrate Splinterm with Omarchy screensaver",
+      "description": "Implement Plan 0032: validate and propagate XDG-only app-ID overrides, advertise X-TerminalArgAppId, package a Splinterm-owned screensaver profile, prepare the bounded upstream Omarchy launcher change, and record approved graphical acceptance without overwriting Omarchy- or user-owned files.",
+      "group": "Next",
+      "dependsOn": [
+        "correct-selection-theme-palette"
+      ],
+      "status": "open",
+      "createdAt": "2026-08-12T04:33:52.763Z",
+      "updatedAt": "2026-08-12T04:33:52.763Z"
+    },
+    {
+      "id": "add-file-and-image-path-insertion",
+      "title": "Add file and image path insertion",
+      "description": "Support Wayland file drops by inserting shell-escaped local paths into the focused Splint, and support clipboard image data via collision-safe saved files without changing normal text paste. Define MIME, destination, cleanup, confirmation, bracketed-paste, failure, privacy, and edge-case contracts with focused tests.",
+      "group": "Later",
+      "dependsOn": [
+        "integrate-splinterm-with-omarchy"
+      ],
+      "status": "open",
+      "createdAt": "2026-08-12T04:33:52.763Z",
+      "updatedAt": "2026-08-12T04:33:52.763Z"
+    },
+    {
+      "id": "close-the-public-website-implementation",
+      "title": "Close the public website implementation milestone",
+      "description": "Finish and validate the existing site work, verify deployment configuration and release claims, and close Plan 0026 only after separately approved preview/production deployment and rollback evidence.",
+      "group": "Release hygiene",
+      "dependsOn": [
+        "reconcile-alpha2-release-state-and"
+      ],
+      "status": "open",
+      "createdAt": "2026-08-12T04:42:32.340Z",
+      "updatedAt": "2026-08-12T04:42:32.340Z"
     }
   ]
 }

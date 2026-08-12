@@ -9,8 +9,10 @@
 - [x] Retain `splinterm sessions`, `splinterm-sessions`, and
   `splinterm-session-picker` as compatibility aliases.
 - [x] Update current desktop metadata, documentation, packaging, and validation.
-- [ ] Commit, package, install, and perform guarded graphical acceptance of the
-  vocabulary release.
+- [x] Commit and publish the vocabulary changes in the versioned alpha and edge
+  packages.
+- [ ] Install the current packaged alpha and perform guarded graphical acceptance
+  of the picker labels, canonical commands, and compatibility aliases.
 
 Private `SessionPicker*` identifiers may remain until a broader internal rename
 is justified; they do not define user-facing product vocabulary.

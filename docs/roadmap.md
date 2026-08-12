@@ -7,6 +7,91 @@
 > [`pre-planning-research.md`](pre-planning-research.md) preserves historical
 > pre-implementation reasoning.
 
+## Current post-alpha roadmap
+
+This is the dependency order for work after the `v0.1.0-alpha2` release. Items
+listed as proposed or deferred remain options rather than commitments until a
+product decision promotes them.
+
+### 0 — release and planning hygiene
+
+- Keep release claims aligned across the repository, website, AUR recipes, and
+  immutable tags.
+- Close the remaining packaged Dojo-picker acceptance item without conflating
+  publication with installed graphical validation.
+- Finish Plan 0026's local website content and build/link validation before any
+  separately approved preview or production deployment.
+- Keep completed-plan closure facts separate from later release follow-ups.
+
+### 1 — near-term correctness and Omarchy integration
+
+1. Preserve exact theme-provided selection RGB roles and prove alpha composition
+   does not mutate palette colors or selected glyph foregrounds.
+2. Execute [Plan 0032](plans/0032-omarchy-screensaver-integration.md) in its
+   declared order: XDG-only app-ID transport, package metadata/profile, upstream
+   Omarchy patch, non-graphical validation, then separately approved guarded
+   graphical acceptance.
+
+The screensaver work depends on the released transient XDG launch foundation in
+[Plan 0029](plans/0029-transient-xdg-command-launches.md), not on the palette fix;
+the order above keeps release-sized graphical changes isolated.
+
+### 2 — lifecycle and desktop workflow
+
+1. Define named, pinned, preset-derived, and disposable Lair states before adding
+   destructive lifecycle controls.
+2. Implement bounded retirement, save, pin, restore, delete, migration, and
+   picker-state presentation without persisting sensitive terminal bodies.
+3. Add file-drop and clipboard-image path insertion only after its Wayland MIME,
+   destination, cleanup, confirmation, bracketed-paste, and failure contracts are
+   accepted.
+
+### 3 — automation confidence
+
+- Implement [Plan 0031](plans/0031-mcp-visual-demo-harness.md) with the reusable
+  non-graphical preflight, isolated topology, evidence manifest, and cleanup
+  attestation first.
+- Treat its human-consent graphical sequence as a separately approved acceptance
+  activity, not an ordinary automated test.
+- Keep proposed first-class Herdr and live-appearance IPC work outside the
+  committed near-term path until their product decisions are made.
+
+### 4 — beta performance gate
+
+[Plan 0011](plans/0011-burst-output-memory-retention.md) remains a recorded
+no-go, and [Plan 0012](plans/0012-bounded-compact-publication-frames.md) remains
+blocked on a sparse bounded-frame ownership redesign. Before a beta claim:
+
+1. reproduce attribution against the current alpha baseline;
+2. prove bounded exact reconstruction and client allocation non-graphically;
+3. preserve the Foot oracle, protocol limits, and one-latest-snapshot delayed
+   subscriber bound;
+4. pass serial validation and independent review; and
+5. run the guarded graphical comparison only after separate approval.
+
+Do not convert a daemon-only memory win or a client/latency regression into a
+beta success claim.
+
+### 5 — supported stable release
+
+After the beta performance gate has an explicit passing result or product-level
+disposition:
+
+1. define release channels, compatibility duration, supported environments,
+   upgrade/rollback policy, and support/security-reporting processes;
+2. validate public install, active-daemon refusal, upgrade, rollback, reset, and
+   recovery journeys outside the maintainer-only workflow;
+3. retain clean-build evidence and independent product/readability and technical
+   reviews; and
+4. reconcile every stable-release gate in [`status.md`](status.md).
+
+### 6 — broader distribution
+
+Nix, Home Manager, tertiary artifacts, additional compositors, and sandboxed
+packages follow explicit support boundaries. They must not broaden compatibility
+claims before their package, daemon/socket, upgrade, and validation contracts
+exist.
+
 ## Phase 0 — skeleton and research (complete)
 
 - Rust workspace and CI

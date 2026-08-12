@@ -1,6 +1,6 @@
 # Plan 0029: transient XDG command launches
 
-- **Status:** Implemented and source-validated; release package not prepared
+- **Status:** Complete — source-validated implementation released in the versioned public alpha packages
 - **Date:** 2026-08-07
 - **Implemented:** 2026-08-10
 - **Product authority:** Splinterm is a standalone terminal emulator; Foot is its behavioral origin and oracle, not a runtime dependency or fallback
@@ -596,4 +596,16 @@ Recorded non-graphical validation:
 
 Fresh product/compatibility and daemon-lifecycle/security reviews both approved the coherent validated implementation with no unresolved findings.
 
-A release package was intentionally not built or installed. The repository package builder archives a clean committed `HEAD`, so running it before this implementation is committed would validate the previous source rather than these changes. `pkgrel` therefore remains unchanged, as required when no release is being prepared.
+A release package was intentionally not built or installed during this plan's
+implementation closure. The repository package builder archives a clean committed
+`HEAD`, so running it before this implementation was committed would have validated
+the previous source rather than these changes. `pkgrel` therefore remained unchanged
+at closure, as required when no release was being prepared.
+
+## Release follow-up
+
+Commit `f0408e15a13bcca0662eb0a9af54f89942129c47` is contained in both
+`v0.1.0-alpha1` and `v0.1.0-alpha2`. The feature is therefore part of the
+versioned source-built and prebuilt public alpha package lines. This later release
+fact does not rewrite the historical implementation-closure evidence above and
+does not claim that Plan 0032's separate screensaver integration is complete.

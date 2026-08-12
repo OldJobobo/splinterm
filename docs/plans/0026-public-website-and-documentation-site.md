@@ -1,6 +1,6 @@
 # Plan 0026: public website and documentation site
 
-- **Status:** Proposed
+- **Status:** Implemented locally; deployment closure and final content validation pending
 - **Date:** 2026-08-07
 - **Product/content dependency:** [Plan 0021: product positioning and public documentation](0021-product-positioning-and-public-documentation.md)
 - **Technical authority:** current implementation, [Architecture](../architecture.md), and specialist documentation under `docs/`
