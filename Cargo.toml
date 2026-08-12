@@ -53,6 +53,12 @@ uuid = { version = "1.18", features = ["serde", "v4"] }
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
 
+# Integration authentication hashes the exact client executable on every local
+# connection. Debug sections make test binaries unnecessarily large and dominate
+# daemon end-to-end runtime; panic and test names remain available without them.
+[profile.test]
+debug = 0
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

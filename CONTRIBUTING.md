@@ -11,18 +11,36 @@ historical evidence; do not rewrite them merely to match current marketing.
 
 ## Standard validation
 
-Run from the repository root:
+Use the narrowest tier that proves the current boundary; do not run every tier
+after every edit.
+
+During implementation, run exact affected tests and cheap hygiene checks:
 
 ```bash
+cargo test -p PACKAGE TEST_FILTER -- --exact
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
 git diff --check
 ```
 
-Use serialized execution (`-- --test-threads=1`) for suites that own process,
-socket, signal, or service state. Run the nearest focused package/test first,
-then the workspace boundary when the change is coherent.
+At a coherent milestone, run the affected crate or integration targets plus
+strict workspace linting:
+
+```bash
+cargo test -p PACKAGE
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+At an integration or release boundary, run the complete workspace once:
+
+```bash
+cargo test --workspace -- --test-threads=1
+```
+
+Serialized execution is required for suites that own process, socket, signal,
+or service state. A clean package build after this complete pass should normally
+use `tools/package/build-local-package.sh --no-check`; omit `--no-check` only
+when the package build itself is the selected complete test boundary. This
+avoids compiling and running the same workspace suite twice.
 
 Documentation or packaging changes also use:
 

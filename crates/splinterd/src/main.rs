@@ -2408,6 +2408,12 @@ async fn spawn_runtime_with_size(
     .env("SPLINTERM_DOJO_ID", context.dojo.to_string())
     .env("SPLINTERM_SPLINT_ID", context.splint.to_string());
     let mut config = LiveSplintConfig::default();
+    #[cfg(debug_assertions)]
+    if let Some(grace) = debug_test_shutdown_grace(env::var_os("SPLINTERM_TEST_SHUTDOWN_GRACE_MS"))
+    {
+        config.hangup_grace = grace;
+        config.terminate_grace = grace;
+    }
     if let Some((columns, rows)) = initial_size {
         config.columns = columns;
         config.rows = rows;
@@ -7979,6 +7985,17 @@ async fn remove_stale_socket(path: &Path) -> Result<()> {
         Err(error) => Err(error.into()),
     }
 }
+#[cfg(debug_assertions)]
+fn debug_test_shutdown_grace(value: Option<std::ffi::OsString>) -> Option<Duration> {
+    const MAX_TEST_GRACE_MS: u64 = 1_000;
+
+    let value = value?.into_string().ok()?;
+    let milliseconds = value.parse::<u64>().ok()?;
+    (1..=MAX_TEST_GRACE_MS)
+        .contains(&milliseconds)
+        .then(|| Duration::from_millis(milliseconds))
+}
+
 fn socket_path() -> Result<PathBuf> {
     if let Some(path) = env::var_os("SPLINTERM_SOCKET") {
         return Ok(path.into());
@@ -7997,6 +8014,22 @@ fn try_admit_connection(connections: &Arc<Semaphore>) -> Option<tokio::sync::Own
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn production_shutdown_grace_is_stable_and_test_override_is_strict() {
+        let defaults = LiveSplintConfig::default();
+        assert_eq!(defaults.hangup_grace, Duration::from_secs(30));
+        assert_eq!(defaults.terminate_grace, Duration::from_secs(30));
+
+        assert_eq!(
+            debug_test_shutdown_grace(Some("20".into())),
+            Some(Duration::from_millis(20))
+        );
+        for invalid in ["", "0", "1001", "-1", "invalid"] {
+            assert_eq!(debug_test_shutdown_grace(Some(invalid.into())), None);
+        }
+        assert_eq!(debug_test_shutdown_grace(None), None);
+    }
 
     #[test]
     fn graphical_connection_budget_is_bounded_and_recovers_after_release() {

@@ -29,6 +29,7 @@ use tokio::{
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const TEST_SHUTDOWN_GRACE_MS: &str = "1000";
 
 struct Daemon {
     child: Child,
@@ -64,6 +65,13 @@ impl Daemon {
             .env(
                 "SPLINTERM_SPLINT_INCARNATION",
                 "caller-supplied-incarnation",
+            )
+            // Integration tests preserve the complete HUP -> TERM -> KILL state
+            // machine without paying production's two 30-second grace periods.
+            // Release daemon builds do not compile support for this override.
+            .env(
+                "SPLINTERM_TEST_SHUTDOWN_GRACE_MS",
+                TEST_SHUTDOWN_GRACE_MS,
             )
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
