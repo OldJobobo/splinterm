@@ -156,7 +156,7 @@ The following table summarizes the current repository state. “Validated” mea
 | MCP adapter | Implemented and validated as an optional separately identified package. |
 | Arch/Omarchy package and edge installer | Public alpha commit-bound package channel and installation path implemented and validated. |
 | Public source and documentation | Available. |
-| AUR package | Available as `splinterm` `0.1.1alpha1-1`; stable support remains unreleased. |
+| AUR package | Available as `splinterm` `0.1.1alpha1-2`; stable support remains unreleased. |
 | Stable support policy | Not released. |
 | Nix and broader distribution | Planned. |
 | Public product/documentation website | Implemented and build/link validated; repository `docs/status.md` remains the maturity authority. |

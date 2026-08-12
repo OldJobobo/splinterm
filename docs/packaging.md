@@ -4,8 +4,10 @@ Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.1alpha1` split
 package for reviewed local and CI builds. Its local source archive and `SKIP`
 checksum are valid only in that workflow. The published AUR authority is
 `packaging/aur/PKGBUILD`, which uses the immutable `v0.1.1-alpha.1` release
-asset, reviewed SHA-256 checksums, and a test-only clean-chroot stabilization
-patch. The public package base is [splinterm](https://aur.archlinux.org/packages/splinterm).
+asset and a reviewed SHA-256 checksum. It intentionally omits a `check()` phase
+so ordinary AUR installs compile and package Splinterm without rerunning the
+maintainer CI suite. The public package base is
+[splinterm](https://aur.archlinux.org/packages/splinterm).
 
 ## Versioned AUR installation
 

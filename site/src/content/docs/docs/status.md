@@ -29,7 +29,7 @@ Splinterm is a **public alpha**. Source, documentation, the versioned AUR packag
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned AUR and public alpha edge packages validated |
 | Public source and edge builds | Available |
-| [AUR package](https://aur.archlinux.org/packages/splinterm) | Available as `splinterm` `0.1.1alpha1-1` |
+| [AUR package](https://aur.archlinux.org/packages/splinterm) | Available as `splinterm` `0.1.1alpha1-2` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 
