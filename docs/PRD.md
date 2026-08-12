@@ -3,17 +3,18 @@
 - **Status:** Draft
 - **Product maturity:** Public alpha
 - **As of:** 2026-08-11
-- **Product authority:** Current implementation, accepted plans, retained validation evidence, and [Architecture](architecture.md)
+- **Strategic direction authority:** [Product roadmap](product-roadmap.md)
+- **Normative requirements authority:** This PRD after review and acceptance
 - **Current maturity authority:** [Status](status.md)
-- **Related documents:** [Roadmap](roadmap.md), [Product positioning](plans/0021-product-positioning-and-public-documentation.md), [Usage](usage.md), [CLI](cli.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
+- **Related documents:** [Product roadmap](product-roadmap.md), [Engineering roadmap](roadmap.md), [Product positioning](plans/0021-product-positioning-and-public-documentation.md), [Usage](usage.md), [CLI](cli.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
 
 ## 1. Purpose
 
-This document consolidates Splinterm's product intent and requirements from the current implementation and repository documentation. It defines what the product is for, whom it serves, which outcomes it must preserve, what is implemented today, and what remains before a supported stable release.
+This document consolidates Splinterm's normative product requirements and release criteria from the current implementation and repository documentation. The [product roadmap](product-roadmap.md) defines what the product is becoming, whom it serves next, and which outcome horizons have priority; this PRD defines the behavior and gates those active product promises require.
 
 This PRD is not an implementation plan or architecture decision log:
 
-- this document owns product outcomes, priorities, and release requirements;
+- this document owns normative product requirements and release criteria;
 - [architecture.md](architecture.md) owns system boundaries and technical invariants;
 - [ADRs](adr/) own accepted architectural decisions;
 - [plans](plans/) own dependency-ordered implementation work and evidence gates;
@@ -457,14 +458,15 @@ Each material decision should receive an ADR or a scoped product/implementation 
 
 | Subject | Authority |
 |---|---|
-| Product requirements and priorities | This PRD after review and acceptance |
+| Normative product requirements and release criteria | This PRD after review and acceptance |
 | Current maturity and availability | [status.md](status.md) |
 | Product entry point | [README.md](../README.md) |
 | Human operation and controls | [usage.md](usage.md) |
 | Human and machine command inventory | [cli.md](cli.md) |
 | Architecture and ownership | [architecture.md](architecture.md) |
 | Architecture decisions | [docs/adr/](adr/) |
-| Roadmap and future phases | [roadmap.md](roadmap.md) |
+| Product direction, audiences, and outcome horizons | [product-roadmap.md](product-roadmap.md) |
+| Engineering phases and dependency-ordered delivery | [roadmap.md](roadmap.md) |
 | Human configuration and bindings | [configuration.md](configuration.md) |
 | Machine contracts and policy | [automation.md](automation.md) |
 | MCP integration | [mcp.md](mcp.md) |
@@ -483,7 +485,8 @@ This draft synthesizes the current implementation and, principally:
 - [README](../README.md)
 - [Architecture](architecture.md)
 - [Pre-planning research](pre-planning-research.md)
-- [Roadmap](roadmap.md)
+- [Product roadmap](product-roadmap.md)
+- [Engineering roadmap](roadmap.md)
 - [Plan 0001: terminal kernel](plans/0001-terminal-kernel.md)
 - [Plan 0002: Omarchy-native terminal MVP](plans/0002-omarchy-terminal-mvp.md)
 - [Plan 0004: persistent multiplexing](plans/0004-phase3-multiplexing.md)

@@ -2,8 +2,9 @@
 
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. Historical plans and
-evidence explain how a capability was accepted; the roadmap owns future work;
-this page owns what the product is today.
+evidence explain how a capability was accepted; the [product roadmap](product-roadmap.md)
+owns strategic direction, the [engineering roadmap](roadmap.md) owns delivery
+sequence, and this page owns what the product is today.
 
 ## Maturity
 
@@ -119,7 +120,8 @@ capabilities above; none may be inferred as a stable-support promise.
 | Image compatibility | [Images](images.md) |
 | Service, persistence, policy, backup, and reset | [Headless operation](headless.md) |
 | Public alpha package installation and upgrades | [Packaging](packaging.md) |
-| Completed phases and future work | [Roadmap](roadmap.md) |
+| Product direction, audiences, and outcome horizons | [Product roadmap](product-roadmap.md) |
+| Engineering phases, dependencies, and future delivery work | [Engineering roadmap](roadmap.md) |
 | Development workflow and test guardrails | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 
 The public website may summarize these sources for readers, but it does not

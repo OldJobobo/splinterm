@@ -1,9 +1,11 @@
-# Roadmap
+# Engineering roadmap
 
-> This roadmap records completed implementation phases and the remaining path
-> from public alpha to a supported stable release. It is a completion
-> ledger and forward plan, not a compatibility or release promise. Current
-> maturity and validated scope are authoritative in [`status.md`](status.md);
+> This roadmap records completed implementation phases and the dependency-ordered
+> delivery path from public alpha to a supported stable release. It is an
+> engineering completion ledger and forward plan, not a product strategy,
+> compatibility promise, or release date. Product direction is authoritative in
+> the [`product roadmap`](product-roadmap.md); current maturity and validated
+> scope are authoritative in [`status.md`](status.md);
 > [`pre-planning-research.md`](pre-planning-research.md) preserves historical
 > pre-implementation reasoning.
 
