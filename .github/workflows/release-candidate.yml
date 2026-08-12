@@ -90,13 +90,18 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["CANDIDATE_DIR"])
-          manifest = json.loads((root / "candidate-manifest.json").read_text())
+          import hashlib
+
+          manifest_path = root / "candidate-manifest.json"
+          manifest = json.loads(manifest_path.read_text())
+          manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
           assert manifest["state"] == "candidate"
           assert manifest["publishable"] is False
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
           with summary.open("a", encoding="utf-8") as stream:
               stream.write(f"# Splinterm {manifest['version']} candidate\n\n")
-              stream.write(f"Commit: `{manifest['commit']}`\n\n")
+              stream.write(f"Commit: `{manifest['commit']}`  \n")
+              stream.write(f"Manifest SHA-256: `{manifest_sha256}`\n\n")
               stream.write("**Nothing was published.** Review the private candidate artifact before a separately approved release workflow.\n\n")
               stream.write("## Assets\n\n")
               for asset in manifest["assets"]:

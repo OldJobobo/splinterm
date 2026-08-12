@@ -1,0 +1,281 @@
+name: Promote release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Release candidate workflow run ID
+        required: true
+        type: string
+      candidate_manifest_sha256:
+        description: SHA-256 of candidate-manifest.json from that run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  RELEASE_REPOSITORY: OldJobobo/splinterm
+
+concurrency:
+  group: versioned-release-promotion
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify exact candidate before approval
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.candidate.outputs.commit }}
+      version: ${{ steps.candidate.outputs.version }}
+      tag: ${{ steps.candidate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Require promotion dispatch from main
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: test "$DISPATCH_REF" = refs/heads/main
+
+      - name: Validate promotion automation
+        run: |
+          python -m unittest \
+            tools/release/test_promote_release.py \
+            tools/release/test_promote_release_workflow.py
+
+      - name: Inspect candidate workflow run and artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          [[ $CANDIDATE_RUN_ID =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$RELEASE_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" >candidate-run.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100" \
+            >candidate-artifacts.json
+          source_record=$(python tools/release/promote-release.py source-run \
+            --run candidate-run.json \
+            --artifacts candidate-artifacts.json \
+            --repository "$RELEASE_REPOSITORY" \
+            --run-id "$CANDIDATE_RUN_ID")
+          python - "$source_record" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          record = json.loads(sys.argv[1])
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              stream.write(f"artifact_id={record['artifact_id']}\n")
+              stream.write(f"commit={record['commit']}\n")
+          PY
+
+      - name: Download exact private candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.source.outputs.artifact_id }}
+          path: candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - name: Close over candidate files and hashes
+        id: candidate
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
+        run: |
+          python tools/release/promote-release.py verify-candidate \
+            --directory candidate \
+            --repository "$RELEASE_REPOSITORY" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --expected-commit "${{ steps.source.outputs.commit }}" \
+            --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
+            --output promotion.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          promotion = json.loads(Path("promotion.json").read_text())
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as stream:
+              for key in ("commit", "version", "tag"):
+                  stream.write(f"{key}={promotion[key]}\n")
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as stream:
+              stream.write(f"# Verified Splinterm {promotion['version']} candidate\n\n")
+              stream.write(f"Commit: `{promotion['commit']}`  \n")
+              stream.write(f"Tag to create: `{promotion['tag']}`  \n")
+              stream.write(f"Candidate run: `{promotion['candidate_run_id']}`  \n")
+              stream.write(f"Manifest: `{promotion['candidate_manifest_sha256']}`\n\n")
+              stream.write("The publish job now waits for approval in the protected GitHub `release` environment.\n")
+          PY
+
+      - name: Transfer verified candidate to protected job
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-release-candidate-${{ inputs.candidate_run_id }}
+          path: |
+            candidate
+            promotion.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 3
+
+  publish:
+    name: Publish approved immutable release
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download verified candidate from this promotion run
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-release-candidate-${{ inputs.candidate_run_id }}
+          path: verified
+
+      - name: Reverify transferred candidate after approval
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
+        run: |
+          python tools/release/promote-release.py verify-candidate \
+            --directory verified/candidate \
+            --repository "$RELEASE_REPOSITORY" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --expected-commit "${{ needs.verify.outputs.commit }}" \
+            --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
+            --output promotion-reverified.json >/dev/null
+          cmp verified/promotion.json promotion-reverified.json
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Require configured protected release environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$RELEASE_REPOSITORY/environments/release" >release-environment.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/environments/release/deployment-branch-policies?per_page=100" \
+            >release-branch-policies.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          environment = json.loads(Path("release-environment.json").read_text())
+          branch_pages = json.loads(Path("release-branch-policies.json").read_text())
+          rules = environment.get("protection_rules")
+          if not isinstance(rules, list):
+              raise SystemExit("release environment protection rules are unavailable")
+          reviewer_rules = [rule for rule in rules if rule.get("type") == "required_reviewers"]
+          if len(reviewer_rules) != 1 or not reviewer_rules[0].get("reviewers"):
+              raise SystemExit("release environment requires at least one reviewer")
+          policy = environment.get("deployment_branch_policy")
+          if not isinstance(policy, dict) or policy != {
+              "protected_branches": False,
+              "custom_branch_policies": True,
+          }:
+              raise SystemExit("release environment requires custom deployment branch policies")
+          policies = [
+              item
+              for page in branch_pages
+              if isinstance(page, dict)
+              for item in page.get("branch_policies", [])
+              if isinstance(item, dict)
+          ]
+          if [item.get("name") for item in policies] != ["main"]:
+              raise SystemExit("release environment must permit exactly the main branch")
+          PY
+
+      - name: Refuse existing tag or release and fail closed on API errors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          require_absent() {
+            local endpoint=$1 label=$2 response status
+            set +e
+            response=$(gh api -i "$endpoint" 2>&1)
+            status=$?
+            set -e
+            if [[ $status -eq 0 ]]; then
+              printf 'refusing to replace existing %s %s\n' "$label" "$RELEASE_TAG" >&2
+              exit 1
+            fi
+            if ! grep -Fq 'HTTP/2.0 404' <<<"$response" && \
+               ! grep -Fq 'HTTP/1.1 404' <<<"$response"; then
+              printf 'could not prove %s %s is absent\n%s\n' "$label" "$RELEASE_TAG" "$response" >&2
+              exit 1
+            fi
+          }
+          require_absent "repos/$RELEASE_REPOSITORY/git/ref/tags/$RELEASE_TAG" tag
+          require_absent "repos/$RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG" release
+
+      - name: Create tag and immutable prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.verify.outputs.commit }}
+        run: |
+          gh api --method POST "repos/$RELEASE_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" \
+            -f sha="$RELEASE_COMMIT"
+          gh release create "$RELEASE_TAG" \
+            --repo "$RELEASE_REPOSITORY" \
+            --target "$RELEASE_COMMIT" \
+            --prerelease \
+            --title "Splinterm ${{ needs.verify.outputs.version }}" \
+            --notes-file verified/candidate/RELEASE-NOTES.md
+
+      - name: Upload exact approved assets without replacement
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          mapfile -t assets < <(python - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path("verified/promotion.json").read_text())
+          for name in value["public_assets"]:
+              print(Path("verified/candidate") / name)
+          PY
+          )
+          gh release upload "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" "${assets[@]}"
+
+      - name: Download and verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          mkdir published
+          gh release download "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --dir published
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
+            --json assets,isDraft,isPrerelease,tagName,url >published-release.json
+          gh api "repos/$RELEASE_REPOSITORY/git/ref/tags/$RELEASE_TAG" >published-ref.json
+          python tools/release/promote-release.py receipt \
+            --promotion verified/promotion.json \
+            --release published-release.json \
+            --ref published-ref.json \
+            --downloads published \
+            --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --output release-receipt.json
+
+      - name: Retain durable publication receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-receipt-${{ needs.verify.outputs.tag }}
+          path: release-receipt.json
+          if-no-files-found: error
+          retention-days: 90

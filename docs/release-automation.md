@@ -21,8 +21,8 @@ n8n is not trusted with release authority. Its unavailability may delay a notifi
 
 1. **Source** — an exact Git commit contains a consistent workspace version, package recipes, documentation, and tests.
 2. **Candidate** — a manually dispatched, read-only workflow builds that commit once and emits a closed manifest, source archive, packages, checksums, release-notes draft, and AUR recipe drafts. Candidate artifacts are private GitHub workflow artifacts and are explicitly marked non-published.
-3. **Approved** — a maintainer reviews the candidate and approves the protected GitHub `release` environment. This state is reserved for a later publishing workflow; creating a candidate never implies approval.
-4. **Published** — automation creates the immutable tag and GitHub release from the approved candidate artifacts without rebuilding them.
+3. **Approved** — a maintainer starts `.github/workflows/promote-release.yml` with the exact candidate workflow run ID and manifest SHA-256, reviews the verified summary, and approves the protected GitHub `release` environment. Creating or selecting a candidate never implies approval.
+4. **Published** — the protected job creates the immutable tag and GitHub prerelease from the approved candidate artifacts without rebuilding them, downloads every published asset, verifies the tag target and exact asset set, and retains a publication receipt.
 5. **Distributed** — separately gated automation updates AUR recipes to the exact published assets and verifies their visible state.
 6. **Recorded** — release URLs, hashes, workflow run, AUR versions, and resulting status-document changes are retained as release evidence.
 
@@ -45,9 +45,11 @@ The candidate manifest binds the repository, commit, version, tag, architecture,
 
 ## Human approval boundary
 
-The future publishing job must use `environment: release`. Configure required reviewers in the GitHub repository settings before enabling that job. The workflow must display the candidate manifest, checksums, release notes, and validation run before pausing for approval.
+The publishing job uses `environment: release`. Configure at least one required reviewer and exactly one custom deployment-branch policy named `main` in the GitHub repository settings before running it. The protected job independently queries the Environment and fails closed unless both controls are present; merely referencing an automatically created unprotected Environment cannot publish. The read-only verification job has only `actions: read` and `contents: read`; it accepts a candidate run ID and candidate-manifest SHA-256, proves that the source was one successful manual candidate run from `main`, paginates the run artifact inventory, requires exactly one unexpired artifact, binds its workflow commit to the candidate manifest commit, and closes over the exact file set and hashes before the protected job becomes approvable. The write-authorized job executes release tooling only from the reviewed promotion-workflow dispatch commit, never from candidate-controlled source, and checkout credentials are not persisted.
 
-Approval authorizes only the exact candidate identified by commit, version, manifest digest, and workflow run. AUR publication remains a distinct job after GitHub release verification so partial distribution can be diagnosed and retried without recreating the release.
+Approval authorizes only the exact candidate identified by commit, version, manifest digest, and workflow run. After approval, publication refuses an existing tag or release and never clobbers, force-updates, or deletes remote state. If a later step fails after tag or release creation, the workflow stops and reports the partial immutable state for maintainer diagnosis. It does not retry by replacing that state.
+
+The publisher uploads only the source archive, main/MCP packages, candidate manifest, and checksums. AUR drafts remain private inputs for the separately gated distribution milestone. It downloads the public assets again, verifies the tag resolves to the candidate commit, requires an exact asset set, and retains a 90-day receipt. AUR publication remains a distinct job after GitHub release verification so partial distribution can be diagnosed without recreating the release.
 
 ## n8n boundary
 

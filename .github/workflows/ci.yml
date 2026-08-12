@@ -49,7 +49,9 @@ jobs:
             tools/package/test_edge_manifest.py \
             tools/package/test_edge_workflow.py \
             tools/release/test_prepare_candidate.py \
-            tools/release/test_release_candidate_workflow.py
+            tools/release/test_promote_release.py \
+            tools/release/test_release_candidate_workflow.py \
+            tools/release/test_promote_release_workflow.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace -- --test-threads=1
       - run: python tools/foot-oracle/check-provenance.py --portable

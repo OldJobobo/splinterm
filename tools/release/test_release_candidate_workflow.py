@@ -33,6 +33,7 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
         for value in forbidden:
             self.assertNotIn(value, workflow)
         self.assertIn('manifest["publishable"] is False', workflow)
+        self.assertIn("Manifest SHA-256:", workflow)
         self.assertIn("Nothing was published", workflow)
 
     def test_candidate_builds_once_and_retains_review_artifact(self) -> None:
