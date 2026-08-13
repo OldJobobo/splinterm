@@ -144,7 +144,7 @@ The following table summarizes the current repository state. “Validated” mea
 | Multi-pane graphical layouts | Implemented and validated. |
 | Window-local Dojo tabs | Implemented; a Window supports up to 32 distinct Dojo attachments and may mix Lairs. |
 | Recent Dojos picker and reopen-last workflow | Implemented. |
-| Searchable closed command palette and trusted tab context menu | Implemented, packaged, installed, reviewed, and validated at the alpha2 scope; the bounded alpha3 expansion and keymap-closure gate are planned in Plan 0033. |
+| Searchable closed command palette and trusted tab context menu | Alpha2 scope is packaged and accepted; the bounded alpha3 expansion and keymap-closure matrix are implemented and non-graphically validated, with packaged graphical acceptance pending under Plan 0033. |
 | Multi-client observation and exclusive control transfer | Implemented and validated. |
 | Scrollback, literal search, selection, clipboard, IME, and scaling | Implemented within the documented contracts. |
 | Omarchy theme discovery and live reload | Implemented. |
@@ -243,9 +243,9 @@ Priority meanings:
 | `FR-UI-07` | P0 | Destructive actions must be explicit, exactly targeted, and confirmed where documented; cancellation must be the safe default. | Implemented |
 | `FR-UI-08` | P1 | Modal actions must capture exact resource identities and availability when opened and must never retarget because asynchronous state changes. | Implemented |
 | `FR-UI-09` | P1 | Native application controls must remain usable without exposing shell-, plugin-, terminal-content-, or automation-provided trusted commands. | Implemented |
-| `FR-UI-10` | P1 | Before alpha3 publication, the curated command palette, bindable action registry, resolved shortcut labels, built-in `splinterm` and `omarchy-tmux` profiles, safe context-sensitive `Super+C/V/X/Z` behavior, custom-overlay reload, and runtime dispatch must satisfy the Plan 0033 closure matrix without permitting externally registered trusted commands or capturing terminal-pane `Super+X/Z`. | Planned for alpha3 |
+| `FR-UI-10` | P1 | Before alpha3 publication, the curated command palette, bindable action registry, resolved shortcut labels, built-in `splinterm` and `omarchy-tmux` profiles, safe context-sensitive `Super+C/V/X/Z` behavior, custom-overlay reload, and runtime dispatch must satisfy the Plan 0033 closure matrix without permitting externally registered trusted commands or capturing terminal-pane `Super+X/Z`. | Implemented and non-graphically validated; packaged graphical acceptance pending |
 | `FR-UI-11` | P2 | In a post-alpha3 update before supported 1.0, provide strictly validated user-defined tab identity, behavior, and appearance: presentation labels/icons/pinning, deterministic ordering and default actions, per-tab shortcuts limited to the closed typed action registry, and bounded theme-aware visual overrides. Customization must preserve accessibility, exact targeting, non-destructive tab semantics, and trusted-UI isolation. | Planned post-alpha3, pre-1.0 |
-| `FR-UI-12` | P1 | Before alpha3 publication, a bounded Wayland `text/uri-list` drop of one or more local regular files must insert one deterministic POSIX-shell-escaped path payload into the exact accepted, live, controlled Splint. It must reject malformed, remote, stale, modal, unsupported, or unauthorized drops without PTY input; never read or persist file bodies or paths; preserve bracketed paste; and append no submission bytes. | Planned for alpha3 |
+| `FR-UI-12` | P1 | Before alpha3 publication, a bounded Wayland `text/uri-list` drop of one or more local regular files must insert one deterministic POSIX-shell-escaped path payload into the exact accepted, live, controlled Splint. It must reject malformed, remote, stale, modal, unsupported, or unauthorized drops without PTY input; never read or persist file bodies or paths; preserve bracketed paste; and append no submission bytes. | Implemented and non-graphically validated; packaged graphical acceptance pending |
 
 ### 10.3 Session lifecycle and control
 
@@ -254,12 +254,12 @@ Priority meanings:
 | `FR-LIFE-01` | P0 | Default desktop/XDG launch must create a fresh Lair and Dojo rather than silently attaching to previous work. | Implemented |
 | `FR-LIFE-02` | P1 | Reopening existing work must be a separate explicit picker or reopen-last action. | Implemented |
 | `FR-LIFE-03` | P0 | Kill, close, detach, relaunch, restore, and reset must remain separate operations with honest consequences. | Implemented |
-| `FR-LIFE-04` | P1 | Before alpha3 publication, users must be able to explicitly save, preview, pin, and restore a Lair's Dojo trees, proportional split ratios, default focus, Splint names, known structured launch recipes, launch working directories, and bounded geometry hints. Saving must never checkpoint process state, infer arbitrary foreground applications, persist sensitive terminal bodies, or execute commands automatically. | Planned for alpha3 |
+| `FR-LIFE-04` | P1 | Before alpha3 publication, users must be able to explicitly save, preview, pin, and restore a Lair's Dojo trees, proportional split ratios, default focus, Splint names, known structured launch recipes, launch working directories, and bounded geometry hints. Saving must never checkpoint process state, infer arbitrary foreground applications, persist sensitive terminal bodies, or execute commands automatically. | Implemented and non-graphically validated; packaged graphical acceptance pending |
 | `FR-CTRL-01` | P0 | Observation must not imply input or resize control. | Implemented |
 | `FR-CTRL-02` | P0 | At most one connection may own controller/size authority for a live Splint at a time; different Splints may have different controllers. | Implemented and validated |
 | `FR-CTRL-03` | P0 | Control transfer, force transfer, release, revocation, denial, timeout, and disconnect behavior must be explicit and visible. | Implemented |
 | `FR-HIST-01` | P1 | Scrollback and literal search must be bounded, revision/generation-aware, and resynchronize explicitly after gaps or replacement. | Implemented |
-| `FR-HIST-02` | P1 | Before alpha3 publication, Return or keypad Enter pressed while the focused Splint viewport is historical must return that viewport to live output, consume the physical key through release, and send no PTY bytes; Enter pressed while already live retains normal terminal behavior. | Planned for alpha3 |
+| `FR-HIST-02` | P1 | Before alpha3 publication, Return or keypad Enter pressed while the focused Splint viewport is historical must return that viewport to live output, consume the physical key through release, and send no PTY bytes; Enter pressed while already live retains normal terminal behavior. | Implemented and non-graphically validated; packaged graphical acceptance pending |
 
 ### 10.4 Configuration and Omarchy integration
 

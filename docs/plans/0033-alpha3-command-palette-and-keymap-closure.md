@@ -1,6 +1,6 @@
 # Plan 0033: Alpha3 command-palette and keymap closure
 
-- **Status:** Planned for `0.1.0-alpha3`
+- **Status:** Implemented, non-graphically validated, and reviewed for `0.1.0-alpha3`; packaged graphical acceptance pending
 - **Date:** 2026-08-12
 - **Product authority:** The command palette remains a closed, trusted,
   application-owned catalog; resolved keymaps remain the authority for active
@@ -247,6 +247,33 @@ installed adjacent trusted client and daemon in one guarded sequence to verify:
 
 Abort on wrong-window input, unexpected focus movement, unrelated topology
 mutation, configuration rollback failure, or incomplete cleanup.
+
+## Implementation evidence (2026-08-13)
+
+- `dojo.close-other-tabs` is part of the closed bindable registry and routes
+  keyboard and palette activation through the same exact-target, Window-local,
+  non-destructive tab behavior.
+- The curated palette includes the bounded everyday command set for effective
+  keybinding help, configuration reload, copy mode, pane zoom, Dojo and Lair
+  navigation/management, saved-Lair actions, and Window detachment. Availability,
+  shortcut projection, stale-target handling, and typed dispatch have focused
+  coverage.
+- The built-in `splinterm` and `omarchy-tmux` profiles, prefix bindings, strict
+  overlay add/replace/unbind/reload behavior, and catalog/registry drift
+  invariants are exercised non-graphically.
+- Terminal `Super+C/V`, Omarchy's terminal-tagged Insert translation,
+  owned-field `Super+C/V/X/Z`, copy-mode isolation, and terminal-pane
+  `Super+X/Z` passthrough are covered under both profiles.
+- Usage, configuration, PRD, and status authorities describe the resolved
+  keymap, curated palette, shared clipboard controls, and corrected pane-resize
+  guidance.
+- On the coherent pre-release worktree, `cargo fmt --all --check`, strict
+  workspace Clippy, `cargo test --workspace`, release/package tooling tests,
+  site check/build, shell validation, and `git diff --check` pass.
+- A fresh read-only correctness review confirmed the bindable exact-target
+  close-other-tabs route, closed typed action/keymap matrix, and evidence scope,
+  with no blockers or fixes worth doing now. Optimized installed-package
+  graphical acceptance remains required before closure.
 
 ## Alpha3 acceptance
 

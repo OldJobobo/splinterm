@@ -126,8 +126,13 @@ process-group grace periods, exit reconciliation, final metadata save, and socke
 removal before systemd may force cleanup.
 Persisted topology and launch metadata may remain, but saved commands are never
 automatically executed; restoration requires an explicit authorized `restore`,
-`restore-dojo`, or `restore-lair` command. Audit retention is
-daemon-lifetime-only and resets after restart.
+`restore-dojo`, or `restore-lair` command. Explicitly Saved and Pinned Lairs are
+protected from automatic retirement; only fully exited Disposable Lairs are
+eligible for the daemon's bounded capacity-retirement policy. Saving or pinning
+is metadata-only and never starts, stops, resizes, or detaches a process. Saved
+split ratios are proportional layout authority, while stored rows and columns
+are bounded launch hints rather than a promise of identical pixel geometry.
+Audit retention is daemon-lifetime-only and resets after restart.
 
 To terminate every daemon-owned shell, move the complete session database to a
 timestamped backup, restart the service, and wait for its socket in one guarded

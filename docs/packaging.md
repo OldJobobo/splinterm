@@ -3,14 +3,17 @@
 Release authority, candidate construction, approval boundaries, and the future
 n8n notification role are defined in [Release automation](release-automation.md).
 
-Splinterm's `packaging/PKGBUILD` produces the public alpha `0.1.0alpha2` split
-package for reviewed local and CI builds. Its local source archive and `SKIP`
-checksum are valid only in that workflow. The source-built AUR authority is
-`packaging/aur/PKGBUILD`, which uses the immutable `v0.1.0-alpha2` release
-asset and a reviewed SHA-256 checksum. It intentionally omits a `check()` phase.
-The recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; it repackages
-checksummed artifacts from a successful immutable edge release without compiling
-or testing on the user's machine.
+Splinterm's `packaging/PKGBUILD` produces the `0.1.0alpha3` split-package
+candidate for reviewed local and CI builds. Its local source archive and `SKIP`
+checksum are valid only in that workflow. Until protected promotion and separate
+AUR distribution complete, the latest publicly available versioned AUR release
+remains `0.1.0alpha2-1`. The source-built AUR draft authority is
+`packaging/aur/PKGBUILD`; candidate construction replaces its source-archive
+checksum with the exact immutable `v0.1.0-alpha3` candidate archive digest. It
+intentionally omits a `check()` phase. The recommended prebuilt draft authority
+is `packaging/aur-bin/PKGBUILD`; candidate construction rewrites its release URLs,
+commit, and checksums to the exact approved packages so users never compile or
+test them locally.
 
 ## Versioned AUR installation
 
@@ -100,8 +103,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0alpha2/ \
-  -o packaging/splinterm-0.1.0alpha2.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.0alpha3/ \
+  -o packaging/splinterm-0.1.0alpha3.tar.gz HEAD
 ```
 
 The archive honors `.gitattributes` `export-ignore` entries; website source and
@@ -120,8 +123,8 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0alpha2-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0alpha2-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.0alpha3-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.0alpha3-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
@@ -233,7 +236,7 @@ The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0alpha2-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.0alpha3-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -241,7 +244,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0alpha2-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.0alpha3-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional

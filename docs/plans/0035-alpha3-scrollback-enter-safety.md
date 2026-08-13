@@ -1,6 +1,6 @@
 # Plan 0035: Alpha3 scrollback Enter safety
 
-- **Status:** Planned for `0.1.0-alpha3`
+- **Status:** Implemented, non-graphically validated, and reviewed for `0.1.0-alpha3`; packaged graphical acceptance pending
 - **Date:** 2026-08-12
 - **Product authority:** Enter submits terminal input only while the focused
   Splint is following live output
@@ -99,6 +99,27 @@ After separate approval under the repository graphical-testing rules:
 
 Abort on wrong-window input, any submission from the historical Enter press,
 unrelated viewport/topology mutation, or incomplete cleanup.
+
+## Implementation evidence (2026-08-13)
+
+- Plain Return and keypad Enter inspect the focused Splint's authoritative
+  viewport before terminal encoding. A historical viewport uses the existing
+  Return-to-Live path and emits zero PTY bytes.
+- The initiating raw key is retained in bounded consumed-key state through
+  repeat and cleared only by its matching release, so one held press cannot
+  become terminal input after the viewport reaches live output.
+- Enter pressed while already live retains ordinary carriage-return behavior.
+  Palette, picker, prompt, search, help, copy-mode, consent, and confirmation
+  handling remain earlier authoritative modal routes.
+- Focused tests cover Return and keypad Enter, press/repeat/release, subsequent
+  live submission, pane-local viewport choice, redraw, and modal isolation.
+- On the coherent pre-release worktree, `cargo fmt --all --check`, strict
+  workspace Clippy, `cargo test --workspace`, release/package tooling tests,
+  site check/build, shell validation, and `git diff --check` pass.
+- A fresh read-only correctness review confirmed modal precedence, historical
+  plain/keypad Enter routing, exact raw-key consumption through matching release,
+  and the evidence scope, with no blockers or fixes worth doing now. Optimized
+  installed-package graphical acceptance remains required before closure.
 
 ## Alpha3 acceptance
 

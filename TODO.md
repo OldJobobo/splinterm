@@ -88,7 +88,7 @@ is justified; they do not define user-facing product vocabulary.
   persistence-failure, partial-launch-failure, concurrency, and picker tests.
 - [ ] Perform separately approved packaged graphical save/preview/restore
   acceptance with unequal nested splits and mixed application/shell leaves.
-- [ ] Document retention defaults, proportional size restoration, destructive
+- [x] Document retention defaults, proportional size restoration, destructive
   actions, explicit execution, limitations, and recovery behavior.
 
 The existing durable topology already stores tree shape, ratios, launch metadata,

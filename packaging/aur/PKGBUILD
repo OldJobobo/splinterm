@@ -1,8 +1,8 @@
 # Maintainer: OldJobobo
 pkgbase=splinterm
 pkgname=('splinterm' 'splinterm-mcp')
-pkgver=0.1.0alpha2
-_upstream_ver=0.1.0-alpha2
+pkgver=0.1.0alpha3
+_upstream_ver=0.1.0-alpha3
 pkgrel=1
 arch=('x86_64')
 url='https://github.com/oldjobobo/splinterm'

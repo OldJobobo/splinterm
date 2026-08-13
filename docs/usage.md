@@ -217,6 +217,53 @@ without another interactive prompt. Machine forms require `--yes` for all three.
 Use `--yes` only for an already-approved unattended operation, not as a substitute
 for intent.
 
+## Saved Lair layouts and retention
+
+The command palette exposes exact-target actions to **Save current Lair layout**,
+**Pin/Unpin current Lair**, **Preview saved Lair layout**, and explicitly restore
+a saved Lair or one selected Dojo. Saving preserves the durable Lair/Dojo/Splint
+tree, split axes and proportional ratios, default focus, names, validated launch
+working directories, known structured argv, shell policy, scrollback policy, and
+bounded last-known rows and columns. Ratios—not prior pixel dimensions—are the
+saved size authority; a restored Window projects them into its current cell grid
+and fails clearly when minimum pane geometry cannot be satisfied.
+
+Retention state has a narrow meaning:
+
+- **Disposable** is the default. A fully exited low-value Lair may be selected by
+  the daemon's bounded retirement policy when capacity is required.
+- **Saved** retains an explicit durable workspace recipe and is never selected
+  for automatic retirement.
+- **Pinned** is also protected from automatic retirement. Pinning does not start,
+  stop, resize, or detach processes.
+- **Live** and **Detached** describe running daemon-owned work with or without a
+  graphical attachment; neither is eligible for automatic retirement.
+- **Restorable** means validated launch/layout metadata remains after every
+  Splint has exited. It does not mean a process is running or will start
+  automatically.
+
+Preview is body-free. It identifies tree shape, ratios, working directories, and
+each leaf as a known application recipe, a shell, or lacking a restorable recipe.
+Splinterm does not infer foreground applications from `/proc`, titles, prompts,
+or terminal output and does not save process memory, PTYs, editor state, shell
+state, environment values, secrets, terminal bodies, scrollback, clipboard, or
+image bodies.
+
+Restoring more than one process requires explicit confirmation and revalidates
+the captured identity, revision, argv, working directory, and topology bounds.
+Missing directories and invalid recipes fail instead of silently substituting
+another command or cwd. A per-leaf launch failure retains the saved recipe and
+does not discard successfully restored leaves. Saving, pinning, previewing,
+daemon startup, login, and package upgrades never execute saved commands.
+
+Removing saved or pinned metadata is destructive and uses the existing exact
+captured-Lair confirmation path; it must not silently retarget another Lair.
+For recovery, inspect complete exited topology with `splinterm list --all`, use
+preview before restoring, and back up the owner-only state directory while the
+daemon is stopped as described in [Headless operation](headless.md). Splinterm
+does not promise live-process checkpointing, reboot-transparent process
+continuity, reusable templates, or cross-machine saved-layout synchronization.
+
 ## Reset and daemon lifetime
 
 The daemon owns all running shells. Stopping it, installing a private-protocol-

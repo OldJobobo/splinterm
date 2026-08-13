@@ -46,19 +46,22 @@ includes:
 
 - packaged graphical acceptance for the Splinterm-owned Omarchy screensaver
   integration and current Dojo-picker vocabulary;
-- [Plan 0033](plans/0033-alpha3-command-palette-and-keymap-closure.md), which
-  closes the `dojo.close-other-tabs` binding defect, expands the curated palette
-  with implemented everyday actions, shares safe Omarchy-style
-  `Super+C/V/X/Z` behavior with the default profile where context permits,
-  proves built-in and configurable keymaps end to end, and adds registry-drift
-  invariants;
-- [Plan 0035](plans/0035-alpha3-scrollback-enter-safety.md), which makes Enter
-  on a historical focused Splint return live without sending PTY input while
-  retaining normal Enter behavior from the live viewport;
-- [Plan 0034](plans/0034-alpha3-saved-lair-layouts.md), which turns the existing
-  durable Dojo trees, split ratios, launch metadata, and geometry hints into an
-  explicit Save/Preview/Restore Lair workflow while retaining deliberate
-  execution and refusing to guess arbitrary foreground applications;
+- packaged graphical acceptance for
+  [Plan 0033](plans/0033-alpha3-command-palette-and-keymap-closure.md), whose
+  non-graphical implementation closes the `dojo.close-other-tabs` binding
+  defect, expands the curated palette, shares context-safe Omarchy-style
+  `Super+C/V/X/Z` behavior, proves built-in and configurable keymaps end to end,
+  and adds registry-drift invariants;
+- packaged graphical acceptance for
+  [Plan 0035](plans/0035-alpha3-scrollback-enter-safety.md), whose non-graphical
+  implementation makes Enter on a historical focused Splint return live without
+  sending PTY input while retaining normal Enter behavior from the live viewport;
+- packaged graphical acceptance for
+  [Plan 0034](plans/0034-alpha3-saved-lair-layouts.md), whose non-graphical
+  implementation turns durable Dojo trees, split ratios, launch metadata, and
+  geometry hints into an explicit Save/Preview/Restore Lair workflow while
+  retaining deliberate execution and refusing to guess arbitrary foreground
+  applications;
 - [Plan 0036](plans/0036-alpha3-wayland-file-drop-path-insertion.md), whose
   non-graphical implementation now accepts bounded Wayland local regular-file
   drops and inserts deterministic shell-escaped paths into one exact controlled

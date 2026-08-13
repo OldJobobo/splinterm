@@ -1,7 +1,7 @@
 # Maintainer: OldJobobo
 pkgbase=splinterm-bin
 pkgname=('splinterm-bin' 'splinterm-mcp-bin')
-pkgver=0.1.0alpha2
+pkgver=0.1.0alpha3
 pkgrel=1
 _commit=c6e711a2fdeef7c2e3bf5b9dac0b6f2f2c93ec5e
 arch=('x86_64')
