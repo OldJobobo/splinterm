@@ -6550,8 +6550,18 @@ impl App {
                 pixel_height: resize.3,
             }
         };
-        try_window_command(commands, resize_command)?;
-        pane.last_resize = Some(resize);
+        match commands.try_send(resize_command) {
+            Ok(()) => pane.last_resize = Some(resize),
+            Err(TrySendError::Full(_)) => {
+                // Layout and scale reconciliation can briefly outpace the
+                // one-pane command worker. Keep the previous dimensions so a
+                // later update retries the newest resize instead of treating
+                // ordinary backpressure as a fatal Wayland failure.
+            }
+            Err(TrySendError::Closed(_)) => {
+                anyhow::bail!("Wayland command receiver disconnected");
+            }
+        }
         Ok(())
     }
 
@@ -10913,6 +10923,49 @@ mod tests {
         row.row_id = Some(id);
         row.cells[0].content = "x".repeat(content_bytes);
         row
+    }
+
+    #[test]
+    fn saturated_pane_resize_defers_without_advancing_and_retries_exactly() {
+        let splint_id = SplintId::new();
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                updates: update_receiver,
+                commands: commands.clone(),
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+        commands
+            .try_send(WindowCommand::Input(vec![1]))
+            .expect("fill pane command queue");
+
+        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true)
+            .expect("queue saturation defers resize");
+        assert_eq!(pane.last_resize, None);
+        assert_eq!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![1])
+        );
+
+        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true)
+            .expect("deferred resize retries");
+        let retried = command_receiver.try_recv().unwrap();
+        assert!(matches!(retried, WindowCommand::Resize { .. }));
+        assert!(pane.last_resize.is_some());
+
+        drop(command_receiver);
+        pane.last_resize = None;
+        let error = App::emit_pane_resize(&mut pane, 640, 480, SCALE_DENOMINATOR, true)
+            .expect_err("disconnected resize receiver");
+        assert!(error.to_string().contains("disconnected"));
+        assert_eq!(pane.last_resize, None);
     }
 
     #[test]
