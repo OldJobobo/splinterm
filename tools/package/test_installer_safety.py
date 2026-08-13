@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +15,23 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class InstallerSafetyTest(unittest.TestCase):
+    def test_package_validator_private_protocol_pin_matches_rust_authority(self) -> None:
+        protocol = (ROOT / "crates/splinterm-protocol/src/lib.rs").read_text(
+            encoding="utf-8"
+        )
+        validator = (ROOT / "tools/package/validate-package.py").read_text(
+            encoding="utf-8"
+        )
+        rust_version = re.search(
+            r"^pub const PROTOCOL_VERSION: u16 = ([0-9]+);$", protocol, re.MULTILINE
+        )
+        validator_version = re.search(
+            r"^PRIVATE_PROTOCOL_VERSION = ([0-9]+)$", validator, re.MULTILINE
+        )
+        self.assertIsNotNone(rust_version)
+        self.assertIsNotNone(validator_version)
+        self.assertEqual(validator_version.group(1), rust_version.group(1))
+
     def daemon_owned_environment(self, directory: Path) -> dict[str, str]:
         proc = directory / "proc"
         binary = directory / "bin" / "splinterm-pty-child"
