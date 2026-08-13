@@ -1,6 +1,6 @@
 # Plan 0036: Alpha3 Wayland file-drop path insertion
 
-- **Status:** Planned for `0.1.0-alpha3`
+- **Status:** Implemented and non-graphically validated for `0.1.0-alpha3`; packaged graphical acceptance pending
 - **Date:** 2026-08-12
 - **Product authority:** Dropping local files is an explicit request to insert
   bounded shell-escaped paths into one exact Splint; it never reads file bodies,
@@ -147,6 +147,68 @@ installed adjacent trusted client and daemon in one isolated Window to:
 
 Abort on wrong-pane input, command execution, any file-content read or move,
 unrelated topology mutation, unexpected focus movement, or incomplete cleanup.
+
+## Implementation evidence (2026-08-13)
+
+- Added a dedicated strict `text/uri-list` parser with 64 KiB offer, 32 URI,
+  4,096-byte path, and 128 KiB joined-payload bounds.
+- Local `file:` URIs accept only empty authority or `localhost`, strict UTF-8
+  percent decoding, absolute existing regular files, and no raw query/fragment,
+  control, NUL, directory, socket, device, FIFO, remote-host, or non-file input.
+- Every path is deterministically single-quoted for POSIX shells; embedded
+  apostrophes use the standard `'\\''` sequence. Multiple paths retain source
+  order with one ASCII space and no trailing or submission bytes.
+- Wayland offers accept only `text/uri-list` with Copy semantics, refresh the
+  exact pane target on drag motion, receive once on drop through the bounded
+  clipboard worker/deadline, and finish the offer without claiming Move.
+- Completion revalidates topology revision, Dojo, Splint, incarnation, input
+  generation, modal state, controller ownership, and command-channel presence.
+  Focus changes invalidate in-flight drops rather than retargeting them.
+- Focused policy, target, worker, bracketed-paste, full `splinterm` library, and
+  integration tests pass. Strict workspace Clippy, formatting, and
+  `git diff --check` pass. The stale fake-SSH fixture was reconciled from
+  protocol 33 to the current protocol 34 during serial validation.
+- Fresh read-only review found one DnD ordering blocker: the destination called
+  `finish()` immediately after starting the async read. The accepted offer now
+  travels with the worker completion and is finished exactly once when that
+  completion is consumed, before either safe insertion or rejection. Post-fix
+  full validation passes. The workspace run encountered the known phase-8
+  frame-read timing timeout once; its exact test passed immediately in isolation.
+- The first approved isolated dev smoke exposed a release blocker: a Nautilus
+  `text/uri-list` drop inserted nothing, and Nautilus remained temporarily in
+  its drag interaction state before recovering. Retained client evidence showed
+  no crash and a clean later compositor close, but lacked DnD branch telemetry.
+  Inspection found definite post-drop early returns that abandoned the offer
+  without a terminal protocol outcome. Rejected delivered drops now explicitly
+  cancel and destroy their offer; completed reads finish and destroy it exactly
+  once after EOF, following SCTK's reference lifecycle. Bounded reason-only
+  diagnostics identify negotiation, target, read, parse, and insertion rejection
+  classes without logging paths. Focused tests, the full 368-test library suite,
+  strict Clippy, formatting, and `git diff --check` pass after the correction.
+- Follow-up isolated dev testing first identified two additional negotiation
+  faults: drop-time `selected_action` could lag the delivered drop, and hover
+  motion treated temporarily empty source/selected actions as final rejection.
+  The destination now retains a valid MIME/target through intermediate action
+  states, reasserts Copy-only acceptance at drop, and still rejects a source
+  that definitively lacks Copy support.
+- The final clean isolated dev retest passed all seven requested usability cases:
+  ordinary paths, spaces, apostrophes, ordered multiple files, no automatic
+  execution, directory rejection with normal Nautilus recovery, chrome
+  rejection, and modal rejection. Event evidence recorded accepted enters and
+  delivered drops; rejected directories produced bounded URI-list rejection.
+  The isolated window and daemon were removed afterward and production remained
+  untouched.
+- Packaged graphical acceptance remains pending. Isolated dev usability evidence
+  does not replace the required adjacent optimized packaged-client matrix.
+- Final serial workspace validation passed every Plan 0036 path and the prior
+  phase-8 timing case. One unrelated remote-session fake-SSH fixture encountered
+  a transient `ETXTBSY` race and passed immediately under exact isolated rerun.
+  Strict workspace Clippy, formatting, and `git diff --check` pass.
+- A final fresh read-only security/correctness review found no release blockers
+  or fixes worth doing now and approved Plan 0036 non-graphical closure. It
+  independently confirmed Copy-only negotiation, terminal offer lifecycle,
+  exact-target authority revalidation, bounded all-or-nothing parsing and
+  quoting, zero PTY bytes on rejection, and path-free diagnostics.
 
 ## Alpha3 acceptance
 

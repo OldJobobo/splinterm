@@ -169,6 +169,7 @@ mod chrome;
 mod clipboard;
 mod damage;
 mod dispatch;
+mod file_drop;
 mod input;
 mod selection;
 mod tabs;
@@ -185,6 +186,10 @@ use clipboard::{
 use damage::{
     BackingDamage, pending_draw_waits_for_frame, sync_backing_damage, take_full_surface_damage,
     terminal_draw_waits_for_frame,
+};
+use file_drop::{
+    FileDropTarget, URI_LIST_MIME, accepted_uri_list_mime, copy_action_supported,
+    dropped_file_payload, file_drop_target_is_current, pane_drop_target,
 };
 use input::{
     CommandPaletteShortcutAction, CopyModeDesktopAction, FontZoomAction, HistoryNavigation,
@@ -874,6 +879,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             primary_device: None,
             clipboard_offer: None,
             primary_offer: None,
+            drag_target: None,
             clipboard_sources: Vec::new(),
             primary_sources: Vec::new(),
             clipboard_tx,
@@ -1815,6 +1821,7 @@ struct ClipboardState {
     primary_device: Option<PrimarySelectionDevice>,
     clipboard_offer: Option<SelectionOffer>,
     primary_offer: Option<PrimarySelectionOffer>,
+    drag_target: Option<FileDropTarget>,
     clipboard_sources: Vec<(CopyPasteSource, Arc<[u8]>)>,
     primary_sources: Vec<(PrimarySelectionSource, Arc<[u8]>)>,
     clipboard_tx: StdSender<ClipboardRead>,
@@ -2908,6 +2915,37 @@ impl App {
         }
     }
 
+    fn pane_for_splint(&self, splint_id: SplintId) -> Option<&PaneView> {
+        std::iter::once(&self.panes.pane)
+            .chain(self.panes.inactive_panes.iter())
+            .find(|pane| {
+                pane.snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.splint_id == splint_id)
+            })
+    }
+
+    fn file_drop_target_at(&self, point: (f64, f64)) -> Option<FileDropTarget> {
+        let layout = self.computed_pane_layout().ok().flatten()?;
+        let over_divider = layout.split_at(point, 6).is_some();
+        let splint_id = pane_drop_target(
+            self.content_rect(),
+            layout.panes.iter().map(|pane| (pane.splint_id, pane.rect)),
+            point,
+            self.modal.input_modal_open(),
+            over_divider,
+        )?;
+        let pane = self.pane_for_splint(splint_id)?;
+        let snapshot = pane.snapshot.as_ref()?;
+        (pane.controller_active && pane.commands.is_some()).then_some(FileDropTarget {
+            topology_revision: self.tab_state.active_identity.topology_revision,
+            dojo_id: self.tab_state.active_dojo_id(),
+            splint_id,
+            incarnation: snapshot.incarnation,
+            input_generation: self.input.input_generation,
+        })
+    }
+
     fn splint_at_point(&self, point: (f64, f64)) -> Option<SplintId> {
         let layout = self.computed_pane_layout().ok().flatten()?;
         layout.panes.into_iter().find_map(|pane| {
@@ -2940,6 +2978,8 @@ impl App {
             self.panes.restored_frontend_needs_resize = true;
         }
         std::mem::swap(&mut self.panes.pane, &mut self.panes.inactive_panes[index]);
+        self.input.input_generation = self.input.input_generation.saturating_add(1);
+        self.clipboard.drag_target = None;
         self.panes.pane.pointer_cell = None;
         self.panes.pane.hovered_url = None;
         self.presentation.full_redraw = true;
@@ -4200,7 +4240,7 @@ impl App {
                 let mime = offer.with_mime_types(accepted_text_mime);
                 let Some(mime) = mime else { return };
                 if let Ok(pipe) = offer.receive(mime) {
-                    spawn_clipboard_read(pipe.into(), target, input_generation, tx, waker);
+                    spawn_clipboard_read(pipe.into(), target, input_generation, None, tx, waker);
                 }
             }
             PasteTarget::Primary => {
@@ -4210,21 +4250,35 @@ impl App {
                 let mime = offer.with_mime_types(accepted_text_mime);
                 let Some(mime) = mime else { return };
                 if let Ok(pipe) = offer.receive(mime) {
-                    spawn_clipboard_read(pipe.into(), target, input_generation, tx, waker);
+                    spawn_clipboard_read(pipe.into(), target, input_generation, None, tx, waker);
                 }
             }
+            PasteTarget::FileDrop(_) => {}
         }
     }
 
     fn apply_clipboard_reads(&mut self) -> Result<()> {
         while let Ok(read) = self.clipboard.clipboard_rx.try_recv() {
+            if let Some(offer) = &read.drag_offer {
+                offer.finish();
+                offer.destroy();
+            }
             if self.input.input_generation != read.input_generation {
+                if matches!(read.target, PasteTarget::FileDrop(_)) {
+                    eprintln!("splinterm file drop rejected: input target changed");
+                }
                 continue;
             }
             let Ok(bytes) = read.bytes else {
+                if matches!(read.target, PasteTarget::FileDrop(_)) {
+                    eprintln!("splinterm file drop rejected: offer read failed");
+                }
                 continue;
             };
             let Ok(bytes) = safe_paste(&bytes) else {
+                if matches!(read.target, PasteTarget::FileDrop(_)) {
+                    eprintln!("splinterm file drop rejected: unsafe offer bytes");
+                }
                 continue;
             };
             match read.target {
@@ -4253,6 +4307,44 @@ impl App {
                     {
                         self.refresh_owned_field(target);
                     }
+                }
+                PasteTarget::FileDrop(target) => {
+                    let Some(pane) = self.pane_for_splint(target.splint_id) else {
+                        eprintln!("splinterm file drop rejected: target pane unavailable");
+                        continue;
+                    };
+                    let Some(snapshot) = pane.snapshot.as_ref() else {
+                        eprintln!("splinterm file drop rejected: target snapshot unavailable");
+                        continue;
+                    };
+                    let current = FileDropTarget {
+                        topology_revision: self.tab_state.active_identity.topology_revision,
+                        dojo_id: self.tab_state.active_dojo_id(),
+                        splint_id: snapshot.splint_id,
+                        incarnation: snapshot.incarnation,
+                        input_generation: self.input.input_generation,
+                    };
+                    if !file_drop_target_is_current(
+                        target,
+                        current,
+                        self.modal.input_modal_open(),
+                        pane.controller_active,
+                        pane.commands.is_some(),
+                    ) {
+                        eprintln!("splinterm file drop rejected: target became stale");
+                        continue;
+                    }
+                    let Ok(payload) = dropped_file_payload(bytes) else {
+                        eprintln!("splinterm file drop rejected: invalid URI list");
+                        continue;
+                    };
+                    let encoded =
+                        encode_bracketed_paste(&payload, snapshot.input_modes.bracketed_paste);
+                    let Some(commands) = pane.commands.clone() else {
+                        eprintln!("splinterm file drop rejected: command channel unavailable");
+                        continue;
+                    };
+                    try_window_command(&commands, WindowCommand::Input(encoded))?;
                 }
             }
         }

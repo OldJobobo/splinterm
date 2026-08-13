@@ -59,10 +59,11 @@ includes:
   durable Dojo trees, split ratios, launch metadata, and geometry hints into an
   explicit Save/Preview/Restore Lair workflow while retaining deliberate
   execution and refusing to guess arbitrary foreground applications;
-- [Plan 0036](plans/0036-alpha3-wayland-file-drop-path-insertion.md), which adds
-  bounded Wayland local regular-file drops that insert deterministic
-  shell-escaped paths into one exact controlled Splint without reading file
-  bodies, retargeting stale offers, or submitting terminal input;
+- [Plan 0036](plans/0036-alpha3-wayland-file-drop-path-insertion.md), whose
+  non-graphical implementation now accepts bounded Wayland local regular-file
+  drops and inserts deterministic shell-escaped paths into one exact controlled
+  Splint without reading file bodies, retargeting stale offers, or submitting
+  terminal input; packaged graphical acceptance remains pending;
 - one coherent version and release-note reconciliation across Cargo, package,
   AUR, `.SRCINFO`, README, and status authorities; and
 - private candidate construction and review before any separately authorized

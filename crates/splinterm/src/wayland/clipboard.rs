@@ -14,6 +14,11 @@ use std::{
 use anyhow::{Context, Result};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
+use super::{
+    DragOffer,
+    file_drop::{FileDropTarget, MAX_DROP_BYTES},
+};
+
 pub(super) const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
 const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 const MAX_CLIPBOARD_WORKERS: usize = 4;
@@ -32,11 +37,13 @@ pub(super) enum PasteTarget {
     Clipboard,
     Primary,
     OwnedField(OwnedFieldTarget),
+    FileDrop(FileDropTarget),
 }
 
 pub(super) struct ClipboardRead {
     pub(super) target: PasteTarget,
     pub(super) input_generation: u64,
+    pub(super) drag_offer: Option<DragOffer>,
     pub(super) bytes: io::Result<Vec<u8>>,
 }
 
@@ -122,7 +129,11 @@ fn wait_for_fd(fd: &impl AsFd, events: PollFlags, deadline: Instant) -> io::Resu
     Ok(returned.intersects(events | PollFlags::HUP))
 }
 
-fn read_clipboard_with_deadline(fd: &OwnedFd, timeout: Duration) -> io::Result<Vec<u8>> {
+fn read_clipboard_with_deadline(
+    fd: &OwnedFd,
+    timeout: Duration,
+    maximum_bytes: usize,
+) -> io::Result<Vec<u8>> {
     let deadline = Instant::now() + timeout;
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
@@ -133,9 +144,7 @@ fn read_clipboard_with_deadline(fd: &OwnedFd, timeout: Duration) -> io::Result<V
                 "clipboard read timed out",
             ));
         }
-        let remaining = MAX_CLIPBOARD_BYTES
-            .saturating_add(1)
-            .saturating_sub(bytes.len());
+        let remaining = maximum_bytes.saturating_add(1).saturating_sub(bytes.len());
         if remaining == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -148,7 +157,7 @@ fn read_clipboard_with_deadline(fd: &OwnedFd, timeout: Duration) -> io::Result<V
             return Ok(bytes);
         }
         bytes.extend_from_slice(&chunk[..read]);
-        if bytes.len() > MAX_CLIPBOARD_BYTES {
+        if bytes.len() > maximum_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "clipboard offer exceeds byte limit",
@@ -188,6 +197,7 @@ pub(super) fn spawn_clipboard_read(
     fd: OwnedFd,
     target: PasteTarget,
     input_generation: u64,
+    drag_offer: Option<DragOffer>,
     tx: StdSender<ClipboardRead>,
     waker: Waker,
 ) {
@@ -195,6 +205,7 @@ pub(super) fn spawn_clipboard_read(
         let _ = tx.send(ClipboardRead {
             target,
             input_generation,
+            drag_offer,
             bytes: Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "clipboard worker limit reached",
@@ -205,10 +216,17 @@ pub(super) fn spawn_clipboard_read(
     };
     std::thread::spawn(move || {
         let _permit = permit;
-        let bytes = read_clipboard_with_deadline(&fd, CLIPBOARD_IO_TIMEOUT);
+        let maximum_bytes = match target {
+            PasteTarget::FileDrop(_) => MAX_DROP_BYTES,
+            PasteTarget::Clipboard | PasteTarget::Primary | PasteTarget::OwnedField(_) => {
+                MAX_CLIPBOARD_BYTES
+            }
+        };
+        let bytes = read_clipboard_with_deadline(&fd, CLIPBOARD_IO_TIMEOUT, maximum_bytes);
         let _ = tx.send(ClipboardRead {
             target,
             input_generation,
+            drag_offer,
             bytes,
         });
         waker.wake();
@@ -266,8 +284,9 @@ mod tests {
 
         let (reader, _writer) = UnixStream::pair().expect("socket pair");
         let fd = OwnedFd::from(reader);
-        let error = read_clipboard_with_deadline(&fd, Duration::from_millis(5))
-            .expect_err("idle peer times out");
+        let error =
+            read_clipboard_with_deadline(&fd, Duration::from_millis(5), MAX_CLIPBOARD_BYTES)
+                .expect_err("idle peer times out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 }

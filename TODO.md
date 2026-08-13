@@ -97,16 +97,16 @@ promise live-process checkpointing or arbitrary foreground-application replay.
 
 ## Alpha3 Wayland file-drop path insertion
 
-- [ ] Complete [Plan 0036](docs/plans/0036-alpha3-wayland-file-drop-path-insertion.md).
-- [ ] Accept bounded `text/uri-list` drops with Wayland copy semantics and only
+- [x] Complete the non-graphical implementation in [Plan 0036](docs/plans/0036-alpha3-wayland-file-drop-path-insertion.md).
+- [x] Accept bounded `text/uri-list` drops with Wayland copy semantics and only
   local regular-file URIs.
-- [ ] Capture and revalidate the exact pane, Splint incarnation, tab, controller,
+- [x] Capture and revalidate the exact pane, Splint incarnation, tab, controller,
   and input generation; never retarget an asynchronous drop.
-- [ ] Insert one deterministic, space-separated POSIX-shell-escaped payload with
+- [x] Insert one deterministic, space-separated POSIX-shell-escaped payload with
   no trailing space or submission bytes.
-- [ ] Preserve bracketed paste, modal isolation, all-or-nothing multi-file
+- [x] Preserve bracketed paste, modal isolation, all-or-nothing multi-file
   behavior, bounded feedback, and body-free diagnostics.
-- [ ] Test spaces, apostrophes, Unicode, leading dashes, multiple files, LF/CRLF,
+- [x] Test spaces, apostrophes, Unicode, leading dashes, multiple files, LF/CRLF,
   malformed encodings, remote hosts, stale targets, limits, and cancellation.
 - [ ] Perform separately approved packaged graphical acceptance without moving,
   opening, uploading, retaining, or executing dropped files.
