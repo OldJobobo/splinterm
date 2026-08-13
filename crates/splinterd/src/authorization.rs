@@ -150,7 +150,9 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
                 requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
             }
         }
-        Request::SetSplitRatio { .. } | Request::SetDojoDefaultFocus { .. } => {
+        Request::SetSplitRatio { .. }
+        | Request::SetDojoDefaultFocus { .. }
+        | Request::SetLairRetention { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyLayoutMutate])
         }
         Request::RenameLair { .. } | Request::RenameDojo { .. } | Request::RenameSplint { .. } => {

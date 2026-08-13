@@ -88,6 +88,7 @@ impl ActionId {
         Self::PreviousDojo,
         Self::NextDojo,
         Self::CloseCurrentTab,
+        Self::CloseOtherTabs,
         Self::RenameCurrentTab,
         Self::TerminateCurrentDojo,
         Self::DojoChooser,
@@ -277,6 +278,7 @@ pub enum KeyIdentity {
     PageUp,
     PageDown,
     End,
+    Insert,
     Plus,
     Equal,
     Minus,
@@ -312,6 +314,7 @@ impl KeyIdentity {
             Self::PageUp => "PageUp".to_owned(),
             Self::PageDown => "PageDown".to_owned(),
             Self::End => "End".to_owned(),
+            Self::Insert => "Insert".to_owned(),
             Self::Plus => "Plus".to_owned(),
             Self::Equal => "Equal".to_owned(),
             Self::Minus => "Minus".to_owned(),
@@ -636,6 +639,12 @@ const CTRL_NO_SHIFT_NO_ALT_LOGO: ModifierPattern = ModifierPattern {
     alt: FORBIDDEN,
     logo: FORBIDDEN,
 };
+const CTRL_INSERT_TRANSLATED: ModifierPattern = ModifierPattern {
+    ctrl: REQUIRED,
+    shift: FORBIDDEN,
+    alt: FORBIDDEN,
+    logo: ANY,
+};
 const CTRL_SHIFT_NO_ALT_LOGO: ModifierPattern = ModifierPattern {
     ctrl: REQUIRED,
     shift: REQUIRED,
@@ -659,6 +668,12 @@ const SHIFT_ANY_OTHER: ModifierPattern = ModifierPattern {
     shift: REQUIRED,
     alt: ANY,
     logo: ANY,
+};
+const LOGO_NO_OTHER: ModifierPattern = ModifierPattern {
+    ctrl: FORBIDDEN,
+    shift: FORBIDDEN,
+    alt: FORBIDDEN,
+    logo: REQUIRED,
 };
 
 fn built_in_binding(
@@ -869,6 +884,46 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                     "Ctrl+0",
                 ),
                 built_in_binding(
+                    LOGO_NO_OTHER,
+                    normalized_with(
+                        ActiveModifiers {
+                            logo: true,
+                            ..ActiveModifiers::default()
+                        },
+                        KeyIdentity::Character('c'),
+                    ),
+                    KeyIdentity::Character('c'),
+                    ActionId::ClipboardCopy,
+                    "Super+C",
+                ),
+                built_in_binding(
+                    CTRL_INSERT_TRANSLATED,
+                    normalized(true, false, KeyIdentity::Insert),
+                    KeyIdentity::Insert,
+                    ActionId::ClipboardCopy,
+                    "Ctrl+Insert",
+                ),
+                built_in_binding(
+                    LOGO_NO_OTHER,
+                    normalized_with(
+                        ActiveModifiers {
+                            logo: true,
+                            ..ActiveModifiers::default()
+                        },
+                        KeyIdentity::Character('v'),
+                    ),
+                    KeyIdentity::Character('v'),
+                    ActionId::ClipboardPaste,
+                    "Super+V",
+                ),
+                built_in_binding(
+                    SHIFT_ANY_OTHER,
+                    normalized(false, true, KeyIdentity::Insert),
+                    KeyIdentity::Insert,
+                    ActionId::ClipboardPaste,
+                    "Shift+Insert",
+                ),
+                built_in_binding(
                     CTRL_SHIFT_ANY_ALT_LOGO,
                     normalized(true, true, KeyIdentity::Character('c')),
                     KeyIdentity::Character('c'),
@@ -993,28 +1048,6 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                         prefixed(false, false, KeyIdentity::BracketLeft),
                         ActionId::CopyModeEnter,
                         "Prefix [",
-                    ),
-                    omarchy_binding(
-                        NormalizedSequence::Direct(normalized_with(
-                            ActiveModifiers {
-                                logo: true,
-                                ..ActiveModifiers::default()
-                            },
-                            KeyIdentity::Character('c'),
-                        )),
-                        ActionId::ClipboardCopy,
-                        "Super+C",
-                    ),
-                    omarchy_binding(
-                        NormalizedSequence::Direct(normalized_with(
-                            ActiveModifiers {
-                                logo: true,
-                                ..ActiveModifiers::default()
-                            },
-                            KeyIdentity::Character('v'),
-                        )),
-                        ActionId::ClipboardPaste,
-                        "Super+V",
                     ),
                     omarchy_binding(
                         prefixed(false, false, KeyIdentity::Character('b')),
@@ -1500,6 +1533,7 @@ fn parse_chord(value: &str) -> Result<NormalizedChord> {
         "pageup" | "page_up" => KeyIdentity::PageUp,
         "pagedown" | "page_down" => KeyIdentity::PageDown,
         "end" => KeyIdentity::End,
+        "insert" => KeyIdentity::Insert,
         "plus" => KeyIdentity::Plus,
         "equal" | "=" => KeyIdentity::Equal,
         "minus" | "-" => KeyIdentity::Minus,
@@ -1566,6 +1600,19 @@ mod tests {
             keymap.primary_shortcut(ActionId::ToggleTabStrip),
             "Ctrl+Shift+B"
         );
+        assert_eq!(keymap.primary_shortcut(ActionId::ClipboardCopy), "Super+C");
+        assert_eq!(keymap.primary_shortcut(ActionId::ClipboardPaste), "Super+V");
+        assert_eq!(
+            keymap.action(
+                KeyIdentity::Character('x'),
+                ActiveModifiers {
+                    logo: true,
+                    ..ActiveModifiers::default()
+                }
+            ),
+            None,
+            "terminal Super+X remains application-owned"
+        );
         for (index, left) in keymap.bindings().iter().enumerate() {
             for right in &keymap.bindings()[index + 1..] {
                 if std::mem::discriminant(&left.sequence) == std::mem::discriminant(&right.sequence)
@@ -1579,6 +1626,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn every_built_in_binding_resolves_to_its_declared_action() {
+        for profile in [KeymapProfile::Splinterm, KeymapProfile::OmarchyTmux] {
+            let keymap = built_in_keymap(profile);
+            for binding in keymap.bindings() {
+                let active = ActiveModifiers {
+                    ctrl: binding.chord.modifiers.ctrl == ModifierRule::Required,
+                    shift: binding.chord.modifiers.shift == ModifierRule::Required,
+                    alt: binding.chord.modifiers.alt == ModifierRule::Required,
+                    logo: binding.chord.modifiers.logo == ModifierRule::Required,
+                };
+                let resolved = match binding.sequence {
+                    NormalizedSequence::Direct(_) => keymap.action(binding.chord.key, active),
+                    NormalizedSequence::Prefix(_) => {
+                        let mut state = PrefixState::Armed {
+                            raw_code: 1,
+                            deadline: Instant::now() + Duration::from_secs(1),
+                        };
+                        match keymap.press(
+                            &mut state,
+                            binding.chord.key,
+                            active,
+                            2,
+                            Instant::now(),
+                            Duration::from_secs(1),
+                        ) {
+                            KeymapPress::Consumed(action) => action,
+                            other => panic!(
+                                "{} binding {} did not consume: {other:?}",
+                                profile.name(),
+                                binding.display()
+                            ),
+                        }
+                    }
+                };
+                assert_eq!(
+                    resolved,
+                    Some(binding.action()),
+                    "{} binding {} drifted",
+                    profile.name(),
+                    binding.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_desktop_clipboard_aliases_preserve_terminal_cut_and_undo() {
+        for profile in [KeymapProfile::Splinterm, KeymapProfile::OmarchyTmux] {
+            let keymap = built_in_keymap(profile);
+            let desktop = ActiveModifiers {
+                logo: true,
+                ..ActiveModifiers::default()
+            };
+            assert_eq!(
+                keymap.action(KeyIdentity::Character('c'), desktop),
+                Some(ActionId::ClipboardCopy),
+                "{} Super+C",
+                profile.name()
+            );
+            assert_eq!(
+                keymap.action(KeyIdentity::Character('v'), desktop),
+                Some(ActionId::ClipboardPaste),
+                "{} Super+V",
+                profile.name()
+            );
+            assert_eq!(keymap.action(KeyIdentity::Character('x'), desktop), None);
+            assert_eq!(keymap.action(KeyIdentity::Character('z'), desktop), None);
+            assert!(keymap.bindings().iter().any(|binding| {
+                binding.action() == ActionId::ClipboardCopy && binding.display() == "Ctrl+Shift+C"
+            }));
+            assert!(keymap.bindings().iter().any(|binding| {
+                binding.action() == ActionId::ClipboardPaste && binding.display() == "Ctrl+Shift+V"
+            }));
+        }
+    }
+
+    #[test]
+    fn bindable_action_names_are_closed_unique_and_nonempty() {
+        let names = ActionId::BINDABLE
+            .iter()
+            .map(|action| action.config_name())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(names.len(), ActionId::BINDABLE.len());
+        assert!(names.iter().all(|name| !name.trim().is_empty()));
     }
 
     #[test]
@@ -1629,6 +1763,7 @@ mod tests {
             ("PageDown", KeyIdentity::PageDown),
             ("Page_Down", KeyIdentity::PageDown),
             ("End", KeyIdentity::End),
+            ("Insert", KeyIdentity::Insert),
             ("Plus", KeyIdentity::Plus),
             ("Equal", KeyIdentity::Equal),
             ("=", KeyIdentity::Equal),
@@ -1742,6 +1877,39 @@ action = "app.command-palette"
             resolved.keymap.bindings().last().unwrap().source(),
             BindingSource::User { line: 8, .. }
         ));
+    }
+
+    #[test]
+    fn close_other_tabs_is_bindable_without_claiming_a_default_chord() {
+        assert!(ActionId::BINDABLE.contains(&ActionId::CloseOtherTabs));
+        let path = Path::new("keybindings.toml");
+        let text = r#"
+version = 1
+inherits = "splinterm"
+[[binding]]
+sequence = ["Ctrl+Alt+O"]
+action = "dojo.close-other-tabs"
+"#;
+        let resolved = resolve_keymap_text(KeymapProfile::Splinterm, text, path).unwrap();
+        assert_eq!(
+            resolved.keymap.action(
+                KeyIdentity::Character('o'),
+                ActiveModifiers {
+                    ctrl: true,
+                    alt: true,
+                    ..ActiveModifiers::default()
+                }
+            ),
+            Some(ActionId::CloseOtherTabs)
+        );
+        assert_eq!(
+            resolved.keymap.primary_shortcut(ActionId::CloseOtherTabs),
+            "Ctrl+Alt+O"
+        );
+        assert_eq!(
+            built_in_keymap(KeymapProfile::Splinterm).primary_shortcut(ActionId::CloseOtherTabs),
+            ""
+        );
     }
 
     #[test]

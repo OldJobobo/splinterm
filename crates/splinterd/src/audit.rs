@@ -74,6 +74,7 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::RestoreSplint { .. } => AuditOperation::RestoreSplint,
         Request::RestoreDojo { .. } => AuditOperation::RestoreDojo,
         Request::RestoreLair { .. } => AuditOperation::RestoreLair,
+        Request::SetLairRetention { .. } => AuditOperation::SetLairRetention,
         Request::CloseSplint { .. } => AuditOperation::CloseSplint,
         Request::SetSplitRatio { .. } => AuditOperation::SetSplitRatio,
         Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => AuditOperation::NewDojo,

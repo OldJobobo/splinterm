@@ -1,7 +1,7 @@
 # Plan 0032: Omarchy screensaver integration
 
-- **Status:** Splinterm-owned integration redesign in progress; app-ID transport and
-  profile are implemented, while managed activation and guarded graphical acceptance remain open
+- **Status:** Splinterm-owned implementation complete; final non-graphical
+  release-state validation and guarded packaged graphical acceptance remain open
 - **Date:** 2026-08-11
 - **Product authority:** Splinterm remains a standalone terminal and implements generic XDG launch metadata rather than an Omarchy-only window mode
 - **Integration authority:** Splinterm's packaged desktop adapter, profile, launcher helper, and explicit user-level activation link
@@ -28,13 +28,23 @@ omarchy-launch-screensaver
 
 Splinterm's package must not overwrite Omarchy-owned system files or user-owned launcher overrides.
 
-## Baseline blockers
+## Implementation state
 
-At plan approval, the following blockers defined the implementation. The local Splinterm source changes address app-ID transport, desktop metadata,
-and the owned profile. The remaining integration is owned entirely by Splinterm;
-no Omarchy source modification or upstream submission is part of this plan.
+Committed Splinterm source now provides the validated XDG-only app-ID transport,
+desktop metadata, owned presentation profile, packaged launcher helper, and
+explicit collision-safe `enable`, `disable`, and `status` workflow. No Omarchy
+source modification or upstream submission is required.
 
-### Omarchy rejects Splinterm
+The remaining closure is to rerun the declared non-graphical checks on the
+coherent Alpha3 release state, review the extracted package, and record the
+separately approved guarded graphical matrix. Implementation does not itself
+prove installed graphical acceptance.
+
+## Baseline blockers at plan approval
+
+The following historical blockers explain the implemented design.
+
+### Omarchy rejected Splinterm
 
 `xdg-terminal-exec --print-id` reports:
 
@@ -42,11 +52,15 @@ no Omarchy source modification or upstream submission is part of this plan.
 com.oldjobobo.splinterm.desktop
 ```
 
-The upstream `omarchy-launch-screensaver` allowlist and launch branches currently recognize only Alacritty, Ghostty, Foot, and Kitty. Splinterm is rejected before a Window is launched.
+The upstream launcher recognized only its built-in terminal branches, so the
+selected Splinterm desktop identity was rejected before a Window launched. The
+implemented Splinterm-owned helper now handles the Splinterm branch and delegates
+all other selected terminals to Omarchy's canonical launcher.
 
-### XDG app-ID propagation is not advertised
+### XDG app-ID propagation was not advertised
 
-`dist/applications/com.oldjobobo.splinterm.desktop` does not declare `X-TerminalArgAppId`. Consequently, `xdg-terminal-exec` drops:
+The desktop entry did not declare `X-TerminalArgAppId`, so
+`xdg-terminal-exec` dropped:
 
 ```text
 --app-id=org.omarchy.screensaver
@@ -58,16 +72,20 @@ and invokes only:
 splinterm-xdg-terminal-exec -- omarchy-screensaver
 ```
 
-### Splinterm fixes every Wayland app ID
+### Splinterm fixed every Wayland app ID
 
-`crates/splinterm/src/wayland.rs` currently applies `config::APP_ID` to every Window. Omarchy relies on the exact app ID `org.omarchy.screensaver` for:
+The Wayland client applied `config::APP_ID` to every Window. Omarchy relies on
+the exact app ID `org.omarchy.screensaver` for:
 
 - fullscreen, floating, and animation rules;
 - detecting when each monitor's screensaver Window has mapped;
 - determining whether the screensaver still has focus; and
 - terminating screensaver client processes during cleanup.
 
-Changing the Omarchy allowlist alone would therefore launch an ordinary Splinterm Window that does not satisfy the screensaver lifecycle.
+Changing an allowlist alone would therefore have launched an ordinary Splinterm
+Window that did not satisfy the screensaver lifecycle. The implemented private
+XDG boundary now carries the validated per-Window app ID without persisting it
+in daemon topology.
 
 ### A user-local launcher can shadow Omarchy
 
@@ -188,6 +206,14 @@ resolution, and moves the link to a dedicated non-PATH disabled location if the
 managed launcher does not win. `disable` atomically moves only the exact managed
 link to that location and never unlinks it; `enable` moves it back. `status` is
 read-only.
+
+Alpha3 also provides `splinterm integration omarchy enable|status|disable` as the
+preferred unified user lifecycle. It coordinates XDG default-terminal selection,
+an exact user-owned Hyprland terminal-tag module, and this screensaver link under
+a versioned pending/committed journal. It recognizes externally ready terminal
+preference/tag configuration without claiming it and adopts only the exact
+Splinterm-managed legacy screensaver link. Package installation remains
+side-effect free and never invokes the unified command automatically.
 
 ### 5. Installation and upgrades
 

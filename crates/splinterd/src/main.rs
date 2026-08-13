@@ -32,8 +32,9 @@ use splinterd::{
     policy,
 };
 use splinterm_core::{
-    Dojo, DojoId, Lair, LairId, LairLifetime, LayoutNode, MAX_PERSISTENT_LAIRS, Splint, SplintId,
-    SplintLaunchMetadata, SplintState, Topology, TopologyDocument, TopologyError, TopologyRevision,
+    Dojo, DojoId, Lair, LairId, LairLifetime, LairRetention, LayoutNode, MAX_PERSISTENT_LAIRS,
+    Splint, SplintId, SplintLaunchMetadata, SplintState, Topology, TopologyDocument, TopologyError,
+    TopologyRevision,
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
@@ -2274,6 +2275,7 @@ fn bounded_history_retirement(topology: &Topology) -> Result<Option<LairId>, Pro
         .lairs()
         .filter(|lair| {
             lair.lifetime.is_persistent()
+                && lair.retention == LairRetention::Disposable
                 && lair
                     .dojos
                     .iter()
@@ -3133,6 +3135,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::RestoreLair { .. }
             | Request::CloseSplint { .. }
             | Request::SetSplitRatio { .. }
+            | Request::SetLairRetention { .. }
             | Request::NewDojo { .. }
             | Request::NewDojoAutomation { .. }
             | Request::MaterializePreset { .. }
@@ -3908,7 +3911,8 @@ async fn request_policy_resources(
         },
         Request::NewDojo { lair_id, .. }
         | Request::NewDojoAutomation { lair_id, .. }
-        | Request::RenameLair { lair_id, .. } => lair(*lair_id, false)?,
+        | Request::RenameLair { lair_id, .. }
+        | Request::SetLairRetention { lair_id, .. } => lair(*lair_id, false)?,
         Request::RenameDojo { dojo_id, .. } => dojo(*dojo_id, false)?,
         Request::SetDojoDefaultFocus {
             dojo_id, splint_id, ..
@@ -5487,6 +5491,29 @@ async fn handle_authorized_request(
                 results,
             }
         }
+        Request::SetLairRetention {
+            expected_topology_revision,
+            lair_id,
+            retention,
+        } => {
+            let _transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let (candidate, topology_revision) = durable_topology_candidate(state, |topology| {
+                topology.set_lair_retention_at(expected_topology_revision, lair_id, retention)
+            })
+            .await?;
+            install_topology(state, candidate).await;
+            publish_topology(
+                state,
+                topology_revision,
+                TopologyChangeKind::LairRetentionChanged,
+            )
+            .await;
+            Response::TopologyCommitted { topology_revision }
+        }
         Request::CloseSplint {
             expected_topology_revision,
             splint_id,
@@ -5648,10 +5675,11 @@ async fn handle_authorized_request(
                 .collect::<Vec<_>>();
             let (candidate, (lair_id, topology_revision)) =
                 durable_topology_candidate(state, |topology| match target {
-                    PresetTarget::NewLair { name } => topology.materialize_lair_at(
+                    PresetTarget::NewLair { name } => topology.materialize_lair_with_provenance_at(
                         expected_topology_revision,
                         name,
                         prepared_dojos,
+                        Some("preset".to_owned()),
                     ),
                     PresetTarget::ExistingLair { lair_id, rename } => topology
                         .materialize_dojos_at(
@@ -8072,6 +8100,15 @@ mod tests {
         assert!(topology.lairs().all(|lair| lair.id != retired));
         TopologyDocument::from_topology(&topology).unwrap();
 
+        let protected_id = topology.lairs().next().unwrap().id;
+        topology
+            .set_lair_retention_at(topology.revision(), protected_id, LairRetention::Saved)
+            .unwrap();
+        assert_ne!(
+            bounded_history_retirement(&topology).unwrap(),
+            Some(protected_id)
+        );
+
         let mut active = Topology::new();
         for index in 0..MAX_PERSISTENT_LAIRS {
             active
@@ -8765,6 +8802,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saved_retention_commit_is_atomic_on_persistence_failure() {
+        let base = temp_dir();
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let metadata = MetadataStore::from_base(&base);
+        let state = test_state_with_backend_and_metadata(false, test_pty_backend(), Some(metadata));
+        let lair_id = state
+            .topology
+            .write()
+            .await
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let before = state.topology.read().await.clone();
+        persist_topology(&state, &before).await.unwrap();
+        state
+            .topology_save_failure_countdown
+            .store(0, Ordering::SeqCst);
+        let error = trusted_request(
+            &state,
+            499,
+            Request::SetLairRetention {
+                expected_topology_revision: before.revision(),
+                lair_id,
+                retention: LairRetention::Saved,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(*state.topology.read().await, before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn persistent_create_compacts_full_inactive_history_atomically() {
         let base = temp_dir();
         std::fs::create_dir(&base).unwrap();
@@ -9389,6 +9460,14 @@ mod tests {
             }
         ));
         assert!(interactive_bypass(false, false, true, &Request::ListLairs));
+        let retention = Request::SetLairRetention {
+            expected_topology_revision: TopologyRevision::new(7),
+            lair_id: LairId::new(),
+            retention: LairRetention::Saved,
+        };
+        assert!(interactive_bypass(true, true, false, &retention));
+        assert!(interactive_bypass(false, false, true, &retention));
+        assert!(!interactive_bypass(false, true, false, &retention));
         assert!(!interactive_bypass(
             false,
             false,

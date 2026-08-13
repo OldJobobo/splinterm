@@ -1,6 +1,9 @@
 //! Pure shortcut resolution before adapter-side effects.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use crate::{
     keymap::{ActionId, ActiveModifiers, KeyIdentity, KeymapPress, PrefixState, ResolvedKeymap},
@@ -20,6 +23,46 @@ pub(in crate::wayland) enum PaneTopologyAction {
 pub(in crate::wayland) enum CommandPaletteShortcutAction {
     Open,
     Consume,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::wayland) enum CopyModeDesktopAction {
+    CopySelection,
+    Consume,
+}
+
+pub(in crate::wayland) fn consume_detached_enter_press(
+    keysym: Keysym,
+    modifiers: Modifiers,
+    viewport_detached: bool,
+    raw_code: u32,
+    consumed_keys: &mut HashSet<u32>,
+) -> Option<super::HistoryNavigation> {
+    let navigation = (viewport_detached
+        && matches!(keysym, Keysym::Return | Keysym::KP_Enter)
+        && !modifiers.ctrl
+        && !modifiers.shift
+        && !modifiers.alt
+        && !modifiers.logo)
+        .then_some(super::HistoryNavigation::ReturnToLive)?;
+    consumed_keys.insert(raw_code);
+    Some(navigation)
+}
+
+pub(in crate::wayland) fn copy_mode_desktop_action(
+    keysym: Keysym,
+    modifiers: Modifiers,
+) -> Option<CopyModeDesktopAction> {
+    if !modifiers.logo || modifiers.ctrl || modifiers.alt || modifiers.shift {
+        return None;
+    }
+    match keysym {
+        Keysym::c | Keysym::C => Some(CopyModeDesktopAction::CopySelection),
+        Keysym::v | Keysym::V | Keysym::x | Keysym::X | Keysym::z | Keysym::Z => {
+            Some(CopyModeDesktopAction::Consume)
+        }
+        _ => None,
+    }
 }
 
 fn active_modifiers(modifiers: Modifiers) -> ActiveModifiers {
@@ -111,6 +154,7 @@ pub(in crate::wayland) enum TabShortcutAction {
     Previous,
     NewDojo,
     Close,
+    CloseOthers,
     Select(usize),
     Move(isize),
     Rename,
@@ -132,6 +176,7 @@ pub(in crate::wayland) fn tab_shortcut_action(
         ActionId::PreviousDojo => TabShortcutAction::Previous,
         ActionId::NewDojo => TabShortcutAction::NewDojo,
         ActionId::CloseCurrentTab => TabShortcutAction::Close,
+        ActionId::CloseOtherTabs => TabShortcutAction::CloseOthers,
         ActionId::SelectDojo1 => TabShortcutAction::Select(0),
         ActionId::SelectDojo2 => TabShortcutAction::Select(1),
         ActionId::SelectDojo3 => TabShortcutAction::Select(2),
@@ -282,6 +327,7 @@ fn key_identity(keysym: Keysym) -> Option<KeyIdentity> {
         Keysym::Page_Up => KeyIdentity::PageUp,
         Keysym::Page_Down => KeyIdentity::PageDown,
         Keysym::End => KeyIdentity::End,
+        Keysym::Insert | Keysym::KP_Insert => KeyIdentity::Insert,
         Keysym::plus | Keysym::KP_Add => KeyIdentity::Plus,
         Keysym::equal => KeyIdentity::Equal,
         Keysym::minus | Keysym::KP_Subtract => KeyIdentity::Minus,
@@ -314,6 +360,122 @@ mod tests {
             ctrl: true,
             shift: true,
             ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn detached_plain_enter_and_keypad_enter_are_consumed_through_release() {
+        for keysym in [Keysym::Return, Keysym::KP_Enter] {
+            let mut consumed = HashSet::new();
+            assert_eq!(
+                consume_detached_enter_press(keysym, Modifiers::default(), true, 28, &mut consumed),
+                Some(super::super::HistoryNavigation::ReturnToLive)
+            );
+            assert!(
+                consumed.contains(&28),
+                "repeat remains consumed after return-live"
+            );
+            consumed.remove(&28);
+            assert!(!consumed.contains(&28), "matching release clears the key");
+            assert_eq!(
+                consume_detached_enter_press(
+                    keysym,
+                    Modifiers::default(),
+                    false,
+                    28,
+                    &mut consumed
+                ),
+                None,
+                "the next live press retains terminal encoding"
+            );
+            assert!(!consumed.contains(&28));
+            assert_eq!(
+                consume_detached_enter_press(
+                    keysym,
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                    true,
+                    28,
+                    &mut consumed
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            consume_detached_enter_press(
+                Keysym::space,
+                Modifiers::default(),
+                true,
+                57,
+                &mut HashSet::new()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn copy_mode_desktop_shortcuts_copy_or_consume_without_terminal_routes() {
+        let desktop = Modifiers {
+            logo: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            copy_mode_desktop_action(Keysym::c, desktop),
+            Some(CopyModeDesktopAction::CopySelection)
+        );
+        for keysym in [Keysym::v, Keysym::x, Keysym::z] {
+            assert_eq!(
+                copy_mode_desktop_action(keysym, desktop),
+                Some(CopyModeDesktopAction::Consume)
+            );
+        }
+        assert_eq!(
+            copy_mode_desktop_action(
+                Keysym::c,
+                Modifiers {
+                    logo: true,
+                    shift: true,
+                    ..Modifiers::default()
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn omarchy_universal_clipboard_translation_reaches_terminal_actions() {
+        for profile in [
+            crate::keymap::KeymapProfile::Splinterm,
+            crate::keymap::KeymapProfile::OmarchyTmux,
+        ] {
+            let keymap = crate::keymap::built_in_keymap(profile);
+            for logo in [false, true] {
+                assert_eq!(
+                    shortcut_action_for(
+                        &keymap,
+                        Keysym::Insert,
+                        Modifiers {
+                            ctrl: true,
+                            logo,
+                            ..Modifiers::default()
+                        }
+                    ),
+                    Some(ActionId::ClipboardCopy)
+                );
+            }
+            assert_eq!(
+                shortcut_action_for(
+                    &keymap,
+                    Keysym::Insert,
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    }
+                ),
+                Some(ActionId::ClipboardPaste)
+            );
         }
     }
 
@@ -394,6 +556,14 @@ mod tests {
             Some(TabShortcutAction::Close)
         );
         assert_eq!(
+            tab_shortcut_action(Some(ActionId::CloseOtherTabs), false, true),
+            Some(TabShortcutAction::CloseOthers)
+        );
+        assert_eq!(
+            tab_shortcut_action(Some(ActionId::CloseOtherTabs), true, true),
+            Some(TabShortcutAction::Consume)
+        );
+        assert_eq!(
             tab_shortcut_action(shortcut_action(Keysym::Tab, ctrl), true, true),
             Some(TabShortcutAction::Consume)
         );
@@ -437,6 +607,74 @@ mod tests {
             shortcut_action_for(&keymap, Keysym::Down, alt),
             Some(ActionId::NextLair)
         );
+    }
+
+    #[test]
+    fn every_bindable_action_has_an_explicit_runtime_route() {
+        for action in ActionId::BINDABLE {
+            let route = match action {
+                ActionId::CommandPalette => "command palette boundary",
+                ActionId::RecentSessions => "Dojo picker boundary",
+                ActionId::NewSession
+                | ActionId::RenameCurrentLair
+                | ActionId::TerminateCurrentLair
+                | ActionId::PreviousLair
+                | ActionId::NextLair
+                | ActionId::LairChooser => "Lair topology route",
+                ActionId::RenameCurrentTab
+                | ActionId::NewDojo
+                | ActionId::PreviousDojo
+                | ActionId::NextDojo
+                | ActionId::CloseCurrentTab
+                | ActionId::CloseOtherTabs
+                | ActionId::TerminateCurrentDojo
+                | ActionId::DojoChooser
+                | ActionId::SelectDojo1
+                | ActionId::SelectDojo2
+                | ActionId::SelectDojo3
+                | ActionId::SelectDojo4
+                | ActionId::SelectDojo5
+                | ActionId::SelectDojo6
+                | ActionId::SelectDojo7
+                | ActionId::SelectDojo8
+                | ActionId::SelectDojo9
+                | ActionId::MoveDojoLeft
+                | ActionId::MoveDojoRight => "Window-local Dojo route",
+                ActionId::SplitHorizontal
+                | ActionId::SplitVertical
+                | ActionId::CloseFocusedPane
+                | ActionId::ResizePaneSmaller
+                | ActionId::ResizePaneLarger
+                | ActionId::ResizePaneLeftFive
+                | ActionId::ResizePaneRightFive
+                | ActionId::ResizePaneUpFive
+                | ActionId::ResizePaneDownFive => "pane topology route",
+                ActionId::FocusLeft
+                | ActionId::FocusRight
+                | ActionId::FocusUp
+                | ActionId::FocusDown => "pane focus route",
+                ActionId::ZoomIn | ActionId::ZoomOut | ActionId::ResetZoom => "font zoom route",
+                ActionId::DetachWindow
+                | ActionId::TogglePaneZoom
+                | ActionId::ToggleTabStrip
+                | ActionId::BindingHelp
+                | ActionId::CopyModeEnter
+                | ActionId::ConfigReload
+                | ActionId::SendPrefix => "typed local application route",
+                ActionId::SearchScrollback
+                | ActionId::PageUp
+                | ActionId::PageDown
+                | ActionId::ReturnToLive => "history route",
+                ActionId::RequestControl
+                | ActionId::ReleaseControl
+                | ActionId::ForceControl
+                | ActionId::RevokeAllAccess
+                | ActionId::AcceptControlTransfer
+                | ActionId::DenyControlTransfer => "authority route",
+                ActionId::ClipboardCopy | ActionId::ClipboardPaste => "clipboard route",
+            };
+            assert!(!route.is_empty(), "{}", action.config_name());
+        }
     }
 
     #[test]
@@ -526,6 +764,57 @@ action = "app.command-palette"
         assert_eq!(
             shortcut_action_for(&resolved.keymap, Keysym::p, ctrl_shift()),
             None
+        );
+    }
+
+    #[test]
+    fn strict_prefix_overlay_reaches_the_same_typed_runtime_route() {
+        let resolved = crate::keymap::resolve_keymap_text(
+            crate::keymap::KeymapProfile::OmarchyTmux,
+            r#"
+version = 1
+inherits = "omarchy-tmux"
+[[binding]]
+sequence = ["Prefix", "o"]
+action = "dojo.close-other-tabs"
+"#,
+            std::path::Path::new("keybindings.toml"),
+        )
+        .unwrap();
+        let mut state = PrefixState::Idle;
+        let now = Instant::now();
+        let control = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            keymap_press_for(
+                &resolved.keymap,
+                &mut state,
+                Keysym::space,
+                control,
+                1,
+                now,
+                Duration::from_secs(1),
+            ),
+            KeymapPress::Consumed(None)
+        );
+        let action = match keymap_press_for(
+            &resolved.keymap,
+            &mut state,
+            Keysym::o,
+            Modifiers::default(),
+            2,
+            now,
+            Duration::from_secs(1),
+        ) {
+            KeymapPress::Consumed(action) => action,
+            other => panic!("custom prefix did not dispatch: {other:?}"),
+        };
+        assert_eq!(action, Some(ActionId::CloseOtherTabs));
+        assert_eq!(
+            tab_shortcut_action(action, false, true),
+            Some(TabShortcutAction::CloseOthers)
         );
     }
 

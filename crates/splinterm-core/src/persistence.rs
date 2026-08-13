@@ -8,12 +8,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    Dojo, DojoId, Lair, LairId, LairLifetime, LayoutNode, SplintId, SplintState, Topology,
-    TopologyRevision,
+    Dojo, DojoId, Lair, LairId, LairLifetime, LairRetention, LayoutNode, SplintId, SplintState,
+    Topology, TopologyRevision,
 };
 
 const LEGACY_LAIR_SCHEMA_VERSION: u32 = 2;
-pub const TOPOLOGY_SCHEMA_VERSION: u32 = 3;
+const LEGACY_TOPOLOGY_SCHEMA_VERSION: u32 = 3;
+pub const TOPOLOGY_SCHEMA_VERSION: u32 = 4;
 pub const MAX_TOPOLOGY_DOCUMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_PERSISTENT_LAIRS: usize = 64;
 const MAX_DOJOS_PER_LAIR: usize = 64;
@@ -36,6 +37,46 @@ pub struct TopologyDocument {
 #[derive(Deserialize)]
 struct DocumentVersion {
     schema_version: u32,
+}
+
+/// Schema-v3 lacked explicit saved-layout retention and provenance.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyTopologyDocumentV3 {
+    schema_version: u32,
+    revision: TopologyRevision,
+    lairs: Vec<LegacyLairV3>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyLairV3 {
+    id: LairId,
+    name: String,
+    #[serde(default)]
+    lifetime: LairLifetime,
+    dojos: Vec<Dojo>,
+}
+
+impl LegacyTopologyDocumentV3 {
+    fn migrate(self) -> TopologyDocument {
+        TopologyDocument {
+            schema_version: TOPOLOGY_SCHEMA_VERSION,
+            revision: self.revision,
+            lairs: self
+                .lairs
+                .into_iter()
+                .map(|lair| Lair {
+                    id: lair.id,
+                    name: lair.name,
+                    lifetime: lair.lifetime,
+                    retention: LairRetention::Disposable,
+                    provenance: None,
+                    dojos: lair.dojos,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Exact schema-v2 representation used only for validated migration.
@@ -73,6 +114,8 @@ impl LegacyLairDocumentV2 {
                 id: LairId::from_uuid(legacy_lair.id),
                 name: legacy_lair.name,
                 lifetime: LairLifetime::Persistent,
+                retention: LairRetention::Disposable,
+                provenance: None,
                 dojos: legacy_lair
                     .windows
                     .into_iter()
@@ -134,6 +177,14 @@ impl TopologyDocument {
         let document = match version.schema_version {
             TOPOLOGY_SCHEMA_VERSION => serde_json::from_slice(bytes)
                 .map_err(|error| PersistenceError::Decode(error.to_string()))?,
+            LEGACY_TOPOLOGY_SCHEMA_VERSION => {
+                let legacy: LegacyTopologyDocumentV3 = serde_json::from_slice(bytes)
+                    .map_err(|error| PersistenceError::Decode(error.to_string()))?;
+                if legacy.schema_version != LEGACY_TOPOLOGY_SCHEMA_VERSION {
+                    return Err(PersistenceError::UnsupportedVersion(legacy.schema_version));
+                }
+                legacy.migrate()
+            }
             LEGACY_LAIR_SCHEMA_VERSION => {
                 let legacy: LegacyLairDocumentV2 = serde_json::from_slice(bytes)
                     .map_err(|error| PersistenceError::Decode(error.to_string()))?;
@@ -194,6 +245,14 @@ impl TopologyDocument {
         let mut splint_count = 0;
         for lair in &self.lairs {
             validate_name(&lair.name, "Lair name")?;
+            if let Some(provenance) = &lair.provenance {
+                validate_name(provenance, "Lair provenance")?;
+            }
+            if !lair.lifetime.is_persistent()
+                && (lair.retention.is_protected() || lair.provenance.is_some())
+            {
+                return Err(PersistenceError::InvalidLairLifecycle);
+            }
             if !lair_ids.insert(lair.id) {
                 return Err(PersistenceError::DuplicateId("Lair"));
             }
@@ -337,6 +396,8 @@ pub enum PersistenceError {
     InvalidDojoDefaultFocus,
     #[error("metadata claims a process is live")]
     LiveProcessState,
+    #[error("metadata contains an invalid Lair lifecycle")]
+    InvalidLairLifecycle,
 }
 
 #[cfg(test)]
@@ -527,6 +588,41 @@ mod tests {
     }
 
     #[test]
+    fn schema_v3_migration_defaults_to_disposable_without_provenance() {
+        let mut value = valid_v3_document();
+        value["schema_version"] = json!(LEGACY_TOPOLOGY_SCHEMA_VERSION);
+        let topology = decode(&value).unwrap().into_topology().unwrap();
+        let lair = topology.lairs().next().unwrap();
+        assert_eq!(lair.retention, LairRetention::Disposable);
+        assert_eq!(lair.provenance, None);
+    }
+
+    #[test]
+    fn saved_lifecycle_and_provenance_round_trip() {
+        let mut topology = Topology::new();
+        let lair_id = topology
+            .create_lair("main", std::path::PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        topology
+            .set_lair_retention_at(topology.revision(), lair_id, LairRetention::Pinned)
+            .unwrap();
+        topology.lairs.get_mut(&lair_id).unwrap().provenance = Some("preset: tdl".into());
+        let restored = TopologyDocument::decode(
+            &TopologyDocument::from_topology(&topology)
+                .unwrap()
+                .encode()
+                .unwrap(),
+        )
+        .unwrap()
+        .into_topology()
+        .unwrap();
+        let lair = restored.find_lair(lair_id).unwrap();
+        assert_eq!(lair.retention, LairRetention::Pinned);
+        assert_eq!(lair.provenance.as_deref(), Some("preset: tdl"));
+    }
+
+    #[test]
     fn schema_v2_migration_preserves_identity_and_layout_boundaries() {
         let document = decode(&valid_v2_document()).unwrap();
         let topology = document.into_topology().unwrap();
@@ -544,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn migrated_schema_encodes_only_as_v3() {
+    fn migrated_schema_encodes_only_as_current_version() {
         let document = decode(&valid_v2_document()).unwrap();
         let encoded: Value = serde_json::from_slice(&document.encode().unwrap()).unwrap();
         assert_eq!(encoded["schema_version"], json!(TOPOLOGY_SCHEMA_VERSION));

@@ -41,6 +41,10 @@ const PROMPT_MARGIN: u32 = 24;
 const PROMPT_PADDING: u32 = 24;
 const PROMPT_TITLE_HEIGHT: u32 = 34;
 const PROMPT_BODY_HEIGHT: u32 = 42;
+const PREVIEW_BODY_HEIGHT: u32 = 168;
+const PREVIEW_LINE_HEIGHT: u32 = 24;
+const MAX_PREVIEW_LINES: usize = 7;
+const MAX_PREVIEW_LINE_SCALARS: usize = 120;
 const PROMPT_INPUT_HEIGHT: u32 = 38;
 const PROMPT_BUTTON_HEIGHT: u32 = 34;
 const PROMPT_GAP: u32 = 12;
@@ -1091,6 +1095,7 @@ pub(crate) struct DojoPromptLayout {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines, reason = "shared bounded prompt geometry")]
 pub(crate) fn dojo_prompt_layout(content: Rect, state: &DojoPromptUi) -> Option<DojoPromptLayout> {
     if content.width == 0 || content.height == 0 {
         return None;
@@ -1102,10 +1107,15 @@ pub(crate) fn dojo_prompt_layout(content: Rect, state: &DojoPromptUi) -> Option<
     } else {
         PROMPT_BUTTON_HEIGHT
     };
+    let body_height = if state.is_preview() {
+        PREVIEW_BODY_HEIGHT
+    } else {
+        PROMPT_BODY_HEIGHT
+    };
     let height = PROMPT_PADDING
         .saturating_mul(2)
         .saturating_add(PROMPT_TITLE_HEIGHT)
-        .saturating_add(PROMPT_BODY_HEIGHT)
+        .saturating_add(body_height)
         .saturating_add(PROMPT_GAP.saturating_mul(2))
         .saturating_add(controls_height);
     if width < 180 || content.height < height.saturating_add(margin.saturating_mul(2)) {
@@ -1135,7 +1145,7 @@ pub(crate) fn dojo_prompt_layout(content: Rect, state: &DojoPromptUi) -> Option<
             .saturating_add(title.height)
             .saturating_add(PROMPT_GAP),
         width: inner_width,
-        height: PROMPT_BODY_HEIGHT,
+        height: body_height,
     };
     let controls_y = body
         .y
@@ -1150,6 +1160,17 @@ pub(crate) fn dojo_prompt_layout(content: Rect, state: &DojoPromptUi) -> Option<
                 height: PROMPT_INPUT_HEIGHT,
             }),
             None,
+            None,
+        )
+    } else if state.is_preview() {
+        (
+            None,
+            Some(Rect {
+                x: title.x,
+                y: controls_y,
+                width: inner_width,
+                height: PROMPT_BUTTON_HEIGHT,
+            }),
             None,
         )
     } else {
@@ -1275,20 +1296,56 @@ pub(crate) fn paint_dojo_prompt(
         palette.primary,
         false,
     )?;
-    paint_text(
-        cache,
-        context,
-        canvas,
-        width,
-        height,
-        &body,
-        ChromeTextStyle::Regular,
-        scale_120,
-        renderer_generation,
-        buffer_rect(layout.body, scale_120),
-        palette.secondary,
-        false,
-    )?;
+    if state.is_preview() {
+        let body_rect = buffer_rect(layout.body, scale_120);
+        let line_height = PREVIEW_LINE_HEIGHT.saturating_mul(scale_120).div_ceil(120);
+        for (index, source) in body.lines().take(MAX_PREVIEW_LINES).enumerate() {
+            let mut line = source
+                .chars()
+                .take(MAX_PREVIEW_LINE_SCALARS)
+                .collect::<String>();
+            if source.chars().count() > MAX_PREVIEW_LINE_SCALARS {
+                line.push('…');
+            }
+            paint_text(
+                cache,
+                context,
+                canvas,
+                width,
+                height,
+                &line,
+                ChromeTextStyle::Regular,
+                scale_120,
+                renderer_generation,
+                Rect {
+                    y: body_rect.y.saturating_add(
+                        u32::try_from(index)
+                            .unwrap_or(u32::MAX)
+                            .saturating_mul(line_height),
+                    ),
+                    height: line_height,
+                    ..body_rect
+                },
+                palette.secondary,
+                false,
+            )?;
+        }
+    } else {
+        paint_text(
+            cache,
+            context,
+            canvas,
+            width,
+            height,
+            &body,
+            ChromeTextStyle::Regular,
+            scale_120,
+            renderer_generation,
+            buffer_rect(layout.body, scale_120),
+            palette.secondary,
+            false,
+        )?;
+    }
     if let Some(prompt_input) = state.input() {
         let input = buffer_rect(layout.input.expect("rename input exists"), scale_120);
         fill_rect(
@@ -1317,8 +1374,31 @@ pub(crate) fn paint_dojo_prompt(
             palette.selected_primary,
             false,
         )?;
+    } else if state.is_preview() {
+        let rect = buffer_rect(layout.cancel.expect("preview close exists"), scale_120);
+        fill_rect(
+            canvas,
+            width,
+            height,
+            tuple(rect),
+            rgba(palette.selected_fill),
+        );
+        paint_text(
+            cache,
+            context,
+            canvas,
+            width,
+            height,
+            "Close",
+            ChromeTextStyle::Bold,
+            scale_120,
+            renderer_generation,
+            rect,
+            palette.selected_primary,
+            false,
+        )?;
     } else {
-        let selected_decision = state.decision().expect("termination decision exists");
+        let selected_decision = state.decision().expect("confirmation decision exists");
         for (decision, rect, label) in [
             (
                 TerminationDecision::Cancel,
@@ -1377,7 +1457,9 @@ pub(crate) fn paint_dojo_prompt(
 mod tests {
     use super::*;
     use crate::{
-        config::ResolvedTheme, frontend::CommandPaletteContext, renderer::session_picker_palette,
+        config::ResolvedTheme,
+        frontend::{CommandPaletteContext, CommandTabMoveAvailability},
+        renderer::session_picker_palette,
     };
     use splinterm_core::{DojoId, LairId, SplintId};
 
@@ -1524,6 +1606,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, reason = "one shared prompt paint scenario")]
     fn dojo_prompts_are_bounded_default_cancel_and_half_open() {
         let content = Rect {
             x: 0,
@@ -1598,6 +1681,40 @@ mod tests {
             unreachable!();
         };
         assert_eq!(confirmation.decision(), TerminationDecision::Cancel);
+
+        let preview = DojoPromptUi::preview_lair(crate::frontend::LairPromptTarget {
+            topology_revision: splinterm_core::TopologyRevision::new(9),
+            lair_id: LairId::new(),
+            dojo_id: None,
+            name: "saved".to_owned(),
+            retention: splinterm_core::LairRetention::Saved,
+            preview: format!(
+                "Lair: saved\nDojo: shell\n  Horizontal split 758/1000\n    shell — Application: /usr/bin/bash — /home/oldjobobo/Projects/splinterm\n    shell — Shell — /home/oldjobobo/Projects/splinterm\n  shell — Shell — /home/oldjobobo/Projects/splinterm\nNot restored: {}",
+                "terminal/scrollback bodies, process memory, shell state, environment, clipboard, images".repeat(4)
+            ),
+            targets: Vec::new(),
+        });
+        let preview_layout = dojo_prompt_layout(content, &preview).unwrap();
+        assert!(preview_layout.cancel.is_some());
+        assert!(preview_layout.terminate.is_none());
+        assert_eq!(preview_layout.body.height, PREVIEW_BODY_HEIGHT);
+        canvas.fill(0);
+        paint_dojo_prompt(
+            &mut cache,
+            &RenderContext::new(u16::MAX),
+            &mut canvas,
+            640,
+            400,
+            content,
+            120,
+            1,
+            &preview_layout,
+            session_picker_palette(ResolvedTheme::default()),
+            &preview,
+            true,
+        )
+        .unwrap();
+        assert!(canvas.iter().any(|byte| *byte != 0));
     }
 
     #[test]
@@ -1669,6 +1786,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, reason = "one bounded paint/cache scenario")]
     fn painter_marks_transient_panel_and_reuses_bounded_text() {
         let content = Rect {
             x: 0,
@@ -1678,6 +1796,7 @@ mod tests {
         };
         let state = CommandPaletteUi::new(CommandPaletteContext {
             lair_id: LairId::new(),
+            lair_retention: splinterm_core::LairRetention::Disposable,
             focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "test".to_owned(),
@@ -1687,6 +1806,7 @@ mod tests {
             other_dojo_ids: Vec::new(),
             previous_dojo_id: None,
             next_dojo_id: None,
+            tab_move: CommandTabMoveAvailability::Neither,
             focus_left: None,
             focus_right: None,
             focus_up: None,

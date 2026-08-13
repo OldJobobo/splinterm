@@ -451,7 +451,12 @@ pub(in crate::app) enum IntegrationShell {
 
 #[derive(Clone, Copy, Debug, Subcommand)]
 pub(in crate::app) enum IntegrationCommand {
-    /// Manage Splinterm as Omarchy's screensaver terminal.
+    /// Manage every user-level integration required for Omarchy.
+    Omarchy {
+        #[command(subcommand)]
+        action: IntegrationAction,
+    },
+    /// Manage only Splinterm's legacy Omarchy screensaver integration.
     OmarchyScreensaver {
         #[command(subcommand)]
         action: IntegrationAction,

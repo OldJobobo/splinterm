@@ -50,16 +50,17 @@ selects the typed built-in `splinterm` profile and an optional strict TOML
 overlay, so keyboard dispatch and command-palette shortcut labels share one
 action registry. This avoids claiming arbitrary `foot.ini` compatibility.
 
-Built-in local bindings include Ctrl+Shift+C/V for copy/paste, Ctrl+Shift+S
-to open the native Recent Dojos picker, and Ctrl+Shift+P to open the searchable
-command palette inside any focused managed terminal Window. The palette groups
-32 built-ins across Dojos, tabs, panes, history, view, and control. In addition
-to recent Dojos, tab navigation, splits, pane focus, closing, tab-strip toggling,
-and font zoom, it can create a terminal, rename the current tab, detach
-other tabs, open confirmed Dojo termination, resize a pane, search/page
-scrollback, return to live output, request/release/force control, revoke captured
-access grants, and accept or deny a captured pending transfer. Force control is
-trusted-local only and remains visibly disabled in remote Windows. Typing filters
+Built-in local bindings include Ctrl+Shift+C/V and Super+C/V for copy/paste,
+Ctrl+Shift+S to open the native Recent Dojos picker, and Ctrl+Shift+P to open the
+searchable command palette inside any focused managed terminal Window. The
+palette is a curated trusted subset of the same closed action registry used by
+the effective keymap. It includes resolved keybinding help, transactional
+configuration reload, copy mode, focused-pane zoom, Dojo and Lair choosers,
+Dojo reordering, Lair rename/navigation/termination, and clean Window detach in
+addition to recent Dojos, tab navigation, splits, pane focus/closing/resizing,
+tab-strip and font zoom, history/search, and bounded control actions. Force
+control is trusted-local only and remains visibly disabled in remote Windows.
+Typing filters
 titles, categories, and keywords; arrows skip unavailable commands, Enter runs,
 and Escape closes. Actions without an available captured target remain visible
 but disabled. Right-clicking a visible Dojo tab opens a compact trusted menu
@@ -121,9 +122,17 @@ Escape cancels. Copy mode isolates terminal input, paste, pointer actions, IME,
 and application mouse reporting, and cancels safely on focus, topology, pane
 identity, or history-generation changes.
 
-Outside copy mode, the Omarchy profile maps `Super+C` to terminal-selection copy
-and `Super+V` to the existing safe/bracketed paste. Splinterm-owned command
-palette, search, and rename fields support `Super+A` selection, `Super+C/V/X/Z`
+Outside copy mode, both built-in profiles map `Super+C` to terminal-selection
+copy and `Super+V` to the existing safe/bracketed paste while both profiles
+retain `Ctrl+Shift+C/V` aliases. Omarchy's universal binding injects
+`Ctrl+Insert`/`Shift+Insert` into windows carrying its `terminal` tag, which
+Splinterm accepts. Omarchy must classify `com.oldjobobo.splinterm` as a terminal;
+without that classification its universal copy branch injects ordinary
+`Ctrl+C`, which remains terminal interrupt. In copy mode, `Super+C` copies the active
+selection and exits; `Super+V/X/Z` are consumed locally without pasting or
+sending PTY input. These Super shortcuts work only when the compositor delivers
+the chord to the Splinterm Window. Splinterm-owned command palette, search, and
+rename fields support `Super+A` selection, `Super+C/V/X/Z`
 copy/paste/cut/undo, and Shift+Left/Right selection. Their Unicode-safe undo
 history is limited to 16 states and disappears with the field. Terminal-pane
 `Super+X` and `Super+Z` are not claimed as universal cut or undo actions because
@@ -161,7 +170,8 @@ app.command-palette       session.recent
 clipboard.copy            clipboard.paste
 dojo.new                  dojo.previous
 dojo.next                 dojo.close-tab
-dojo.rename               dojo.terminate-confirmed
+dojo.close-other-tabs      dojo.rename
+dojo.terminate-confirmed
 dojo.choose               dojo.select-1
 dojo.select-2             dojo.select-3
 dojo.select-4             dojo.select-5

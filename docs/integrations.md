@@ -7,7 +7,39 @@ parse human output, or inherit authority from their logical location. See
 policy contract. The optional full-capability stdio adapter and supported host
 configuration are documented separately in [mcp.md](mcp.md).
 
-## Omarchy screensaver
+## Unified Omarchy setup
+
+Use one explicit command to make Splinterm behave as Omarchy's complete default
+terminal for the current user:
+
+```bash
+splinterm integration omarchy enable
+splinterm integration omarchy status
+```
+
+The lifecycle manages three independently verified components:
+
+1. the `xdg-terminal-exec` preference, preserving the previous
+   `xdg-terminals.list` object exactly;
+2. an exact user-owned Hyprland module that applies Omarchy's `terminal` tag to
+   `com.oldjobobo.splinterm`, so universal `Super+C/V` arrives as
+   `Ctrl+Insert`/`Shift+Insert`; and
+3. the guarded Omarchy screensaver adapter described below.
+
+Enable preflights every destination before mutation, records a versioned pending
+journal, verifies terminal resolution and Hyprland reload, and rolls back on a
+failed verification. Status performs no reload or mutation. Disable removes only
+unchanged Splinterm-managed files, restores the exact previous terminal
+preference, and leaves externally configured components untouched:
+
+```bash
+splinterm integration omarchy disable
+```
+
+Package installation never runs this command automatically. It remains a
+separate, explicit user action.
+
+## Omarchy screensaver component
 
 Splinterm's package advertises the desktop-standard XDG app-ID argument and
 installs a dedicated profile at:
@@ -22,8 +54,8 @@ The package also installs a Splinterm-owned launcher helper at:
 /usr/lib/splinterm/integrations/omarchy-launch-screensaver
 ```
 
-Enable it explicitly for the current user after selecting Splinterm as the XDG
-terminal:
+The unified command enables this component automatically. The legacy
+component-only lifecycle remains available for compatibility:
 
 ```bash
 splinterm integration omarchy-screensaver enable
@@ -62,9 +94,10 @@ validated at Splinterm's private XDG boundary and belongs only to that graphical
 Window; it is not persisted in topology, launch metadata, automation output, or
 user configuration. Ordinary Windows remain `com.oldjobobo.splinterm`.
 
-Splinterm installs no files under `/usr/share/omarchy`, changes no Omarchy or
-Hyprland configuration, and never changes the user's preferred terminal. The
-normal installer offers activation interactively with a default of No;
+Splinterm installs no files under `/usr/share/omarchy` and package installation
+changes no Omarchy/Hyprland configuration or preferred terminal. Only the
+explicit unified user command manages dedicated user-owned integration files.
+The normal installer offers screensaver-only activation interactively with a default of No;
 unattended and direct Pacman/AUR installs print the explicit activation command.
 Disabling moves the managed link without deleting it to
 `~/.local/share/splinterm/integrations/omarchy-launch-screensaver.disabled`, so

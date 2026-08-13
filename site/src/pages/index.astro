@@ -22,6 +22,7 @@ const capabilities = [
     <p class="intro-status">Public alpha</p>
     <div class="intro-actions">
       <a class="intro-link" href="#product">Enter the Lair <span aria-hidden="true">↓</span></a>
+      <a class="intro-link intro-link-muted" href="/roadmap/">See the roadmap <span aria-hidden="true">↗</span></a>
       <a class="intro-link intro-link-muted" href="/docs/">Read the docs <span aria-hidden="true">↗</span></a>
     </div>
   </section>
@@ -230,9 +231,12 @@ const capabilities = [
       <h2 id="status-title">The doors are open.<br />The edges stay marked.</h2>
       <p>
         Splinterm is a public alpha. Source, documentation, the versioned AUR package, and verified
-        edge packages are open; the supported target remains narrow and stable compatibility guarantees do not exist yet.
+        edge packages are open; the validated target remains narrow and stable compatibility guarantees do not exist yet.
       </p>
-      <a class="text-link" href="/docs/status/">Read the complete status and limits <span aria-hidden="true">→</span></a>
+      <div class="status-actions">
+        <a class="text-link" href="/docs/status/">Read the complete status and limits <span aria-hidden="true">→</span></a>
+        <a class="text-link" href="/roadmap/">Follow the product roadmap <span aria-hidden="true">→</span></a>
+      </div>
     </div>
     <div class="capability-list">
       {capabilities.map(([name, status], index) => (
@@ -276,6 +280,7 @@ const capabilities = [
       <a href="/docs/wayland/"><span>Why native Wayland</span><small>Direct compositor integration, practical benefits, and honest limits.</small><i>↗</i></a>
       <a href="/docs/automation/"><span>Automate safely</span><small>Machine contracts, policy gates, controller ownership, and untrusted output.</small><i>↗</i></a>
       <a href="/docs/mcp/"><span>Connect an MCP host</span><small>Install the adapter, authorize only what it needs, validate, and revoke.</small><i>↗</i></a>
+      <a href="/roadmap/"><span>Follow the product roadmap</span><small>Daily-driver confidence, supported 1.0, connected workspaces, and gated expansion.</small><i>↗</i></a>
       <a href="/docs/development/"><span>Develop and contribute</span><small>Workspace structure, checks, and architecture.</small><i>↗</i></a>
     </div>
   </section>

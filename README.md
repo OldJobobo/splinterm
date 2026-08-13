@@ -90,7 +90,7 @@ from Foot or another terminal not owned by `splinterd`:
 
 Add `--check` to run the complete package test suite. The installer deliberately packages a clean committed `HEAD`; it does not include uncommitted worktree changes.
 
-Installation does **not** change your default terminal, edit Omarchy or Hyprland configuration, enable systemd user lingering, or install the optional MCP package on a fresh system. Trusted graphical authority requires the client to be the exact device/inode sibling adjacent to the running `/usr/bin/splinterd`. After an upgrade replaces `/usr/bin/splinterm`, close and reopen every existing Splinterm window: an already-running client retains the old inode and is no longer the trusted sibling.
+Installation does **not** change your default terminal, edit Omarchy or Hyprland configuration, enable systemd user lingering, or install the optional MCP package on a fresh system. After installation, `splinterm integration omarchy enable` explicitly configures the complete reversible user-level default-terminal, terminal-tag, and screensaver integration. Trusted graphical authority requires the client to be the exact device/inode sibling adjacent to the running `/usr/bin/splinterd`. After an upgrade replaces `/usr/bin/splinterm`, close and reopen every existing Splinterm window: an already-running client retains the old inode and is no longer the trusted sibling.
 
 Read the complete [installation guide](https://splinterm.com/docs/install/).
 

@@ -1898,6 +1898,7 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
         AuditOperation::RestoreSplint => "restore_splint",
         AuditOperation::RestoreDojo => "restore_dojo",
         AuditOperation::RestoreLair => "restore_lair",
+        AuditOperation::SetLairRetention => "set_lair_retention",
         AuditOperation::CloseSplint => "close_splint",
         AuditOperation::SetSplitRatio => "set_split_ratio",
         AuditOperation::NewDojo => "new_dojo",

@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplitRatio, TopologyRevision};
+use splinterm_core::{
+    DojoId, LairId, LairRetention, LayoutNode, SplintId, SplitRatio, TopologyRevision,
+};
 use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
 use super::{SessionPickerItem, ThemeUpdate, WindowPaneOptions};
@@ -13,6 +15,7 @@ pub struct WindowDojoIdentity {
     pub lair_id: LairId,
     pub dojo_id: DojoId,
     pub lair_name: String,
+    pub lair_retention: LairRetention,
     pub dojo_name: String,
 }
 
@@ -31,13 +34,19 @@ pub enum LairDirection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LairPromptKind {
     Rename,
+    Preview,
+    Restore,
     Terminate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LairPromptTarget {
+    pub topology_revision: TopologyRevision,
     pub lair_id: LairId,
+    pub dojo_id: Option<DojoId>,
     pub name: String,
+    pub retention: LairRetention,
+    pub preview: String,
     pub targets: Vec<MutationTarget>,
 }
 
@@ -93,6 +102,9 @@ pub enum WindowTopologyCommand {
         lair_id: LairId,
         kind: LairPromptKind,
     },
+    RequestDojoRestorePrompt {
+        dojo_id: DojoId,
+    },
     RenameLair {
         lair_id: LairId,
         name: String,
@@ -100,6 +112,18 @@ pub enum WindowTopologyCommand {
     TerminateLair {
         lair_id: LairId,
         targets: Vec<MutationTarget>,
+    },
+    SetLairRetention {
+        lair_id: LairId,
+        retention: LairRetention,
+    },
+    RestoreLair {
+        expected_topology_revision: TopologyRevision,
+        lair_id: LairId,
+    },
+    RestoreDojo {
+        expected_topology_revision: TopologyRevision,
+        dojo_id: DojoId,
     },
     RenameDojo {
         dojo_id: DojoId,

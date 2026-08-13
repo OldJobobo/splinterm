@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use splinterm_core::{
-    Axis, DojoId, Lair, LairId, SplintId, SplitRatio, SplitSide, Topology, TopologyRevision,
+    Axis, DojoId, Lair, LairId, LairRetention, SplintId, SplitRatio, SplitSide, Topology,
+    TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 33;
+pub const PROTOCOL_VERSION: u16 = 34;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
@@ -453,6 +454,11 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         lair_id: LairId,
     },
+    SetLairRetention {
+        expected_topology_revision: TopologyRevision,
+        lair_id: LairId,
+        retention: LairRetention,
+    },
     CloseSplint {
         expected_topology_revision: TopologyRevision,
         splint_id: SplintId,
@@ -892,6 +898,7 @@ pub enum TopologyChangeKind {
     DojoClosed,
     LairTerminated,
     LairRenamed,
+    LairRetentionChanged,
     DojoRenamed,
     DojoDefaultFocusChanged,
     SplintRenamed,
@@ -1380,6 +1387,7 @@ pub enum AuditOperation {
     RestoreSplint,
     RestoreDojo,
     RestoreLair,
+    SetLairRetention,
     CloseSplint,
     SetSplitRatio,
     NewDojo,
@@ -2901,7 +2909,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 33);
+        assert_eq!(PROTOCOL_VERSION, 34);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

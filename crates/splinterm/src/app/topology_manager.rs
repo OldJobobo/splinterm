@@ -6,8 +6,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    LairDirection, LairPromptTarget, SelectorKind, SessionPickerItem, WindowDojoIdentity,
-    WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate,
+    LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, SessionPickerItem,
+    WindowDojoIdentity, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate,
     automation::{Connection, SharedImageContentCache, protocol_error},
     config::AppConfig,
     endpoint::{ConnectionFactory, LaunchSemantics},
@@ -476,8 +476,12 @@ async fn apply_topology_command(
         | WindowTopologyCommand::MaterializePreset { .. }
         | WindowTopologyCommand::NavigateLair { .. }
         | WindowTopologyCommand::RequestLairPrompt { .. }
+        | WindowTopologyCommand::RequestDojoRestorePrompt { .. }
         | WindowTopologyCommand::RenameLair { .. }
         | WindowTopologyCommand::TerminateLair { .. }
+        | WindowTopologyCommand::SetLairRetention { .. }
+        | WindowTopologyCommand::RestoreLair { .. }
+        | WindowTopologyCommand::RestoreDojo { .. }
         | WindowTopologyCommand::RenameDojo { .. }
         | WindowTopologyCommand::TerminateDojo { .. }
         | WindowTopologyCommand::ActivateTab { .. }
@@ -667,6 +671,7 @@ fn window_dojo_identity(
         lair_id: lair.id,
         dojo_id: dojo.id,
         lair_name: lair.name.clone(),
+        lair_retention: lair.retention,
         dojo_name: dojo.name.clone(),
     }
 }
@@ -835,11 +840,72 @@ fn collect_lair_targets(lair: &splinterm_core::Lair) -> Result<Vec<MutationTarge
     Ok(targets)
 }
 
+fn saved_layout_preview(lair: &splinterm_core::Lair) -> String {
+    fn leaves(node: &LayoutNode, depth: usize, output: &mut Vec<String>) {
+        match node {
+            LayoutNode::Leaf(splint) => {
+                let recipe = if let Some(executable) = splint.command.first() {
+                    format!("Application: {executable}")
+                } else if splint.launch.shell.is_some() || splint.command.is_empty() {
+                    "Shell".to_owned()
+                } else {
+                    "No restorable recipe".to_owned()
+                };
+                output.push(format!(
+                    "{}{} — {} — {}",
+                    "  ".repeat(depth),
+                    splint.title,
+                    recipe,
+                    splint.cwd.display()
+                ));
+            }
+            LayoutNode::Branch {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                output.push(format!(
+                    "{}{:?} split {}/1000",
+                    "  ".repeat(depth),
+                    axis,
+                    ratio.get()
+                ));
+                leaves(first, depth + 1, output);
+                leaves(second, depth + 1, output);
+            }
+        }
+    }
+    let mut lines = vec![format!(
+        "{} — {:?} — {} Dojo(s)",
+        lair.name,
+        lair.retention,
+        lair.dojos.len()
+    )];
+    for dojo in &lair.dojos {
+        lines.push(format!(
+            "{} ({} Splints)",
+            dojo.name,
+            dojo.root.splint_count()
+        ));
+        leaves(&dojo.root, 1, &mut lines);
+    }
+    if let Some(provenance) = &lair.provenance {
+        lines.push(format!("Origin: {provenance}"));
+    }
+    lines.push("Not restored: terminal/scrollback bodies, process memory, shell state, environment, clipboard, images".to_owned());
+    lines.join("\n")
+}
+
 async fn lair_prompt_target(
     connection: &mut Connection,
     lair_id: LairId,
 ) -> Result<LairPromptTarget> {
-    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await? else {
+    let Response::Lairs {
+        lairs,
+        topology_revision,
+    } = connection.request(Request::ListLairs).await?
+    else {
         bail!("splinterd did not return its Lair catalog");
     };
     let lair = lairs
@@ -847,8 +913,12 @@ async fn lair_prompt_target(
         .find(|lair| lair.id == lair_id)
         .context("captured Lair is absent")?;
     Ok(LairPromptTarget {
+        topology_revision,
         lair_id,
+        dojo_id: None,
         name: lair.name.clone(),
+        retention: lair.retention,
+        preview: saved_layout_preview(lair),
         targets: collect_lair_targets(lair)?,
     })
 }
@@ -1336,6 +1406,56 @@ async fn handle_session_manager_command(
             }
             TopologyManagerCommandOutcome::Continue
         }
+        WindowTopologyCommand::RequestDojoRestorePrompt { dojo_id } => {
+            let result = async {
+                let Response::Lairs {
+                    lairs,
+                    topology_revision,
+                } = connection.request(Request::ListLairs).await?
+                else {
+                    bail!("splinterd did not return its Lair catalog");
+                };
+                let (lair, dojo) = lairs
+                    .iter()
+                    .find_map(|lair| {
+                        lair.dojos
+                            .iter()
+                            .find(|dojo| dojo.id == dojo_id)
+                            .map(|dojo| (lair, dojo))
+                    })
+                    .context("captured Dojo is absent")?;
+                let mut target = LairPromptTarget {
+                    topology_revision,
+                    lair_id: lair.id,
+                    dojo_id: Some(dojo_id),
+                    name: dojo.name.clone(),
+                    retention: lair.retention,
+                    preview: saved_layout_preview(lair),
+                    targets: collect_lair_targets(lair)?
+                        .into_iter()
+                        .filter(|target| target.dojo_id == dojo_id)
+                        .collect(),
+                };
+                target.preview = format!("Selected Dojo: {}\n{}", dojo.name, target.preview);
+                updates
+                    .send(WindowTopologyUpdate::ShowLairPrompt {
+                        kind: LairPromptKind::Restore,
+                        target,
+                    })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Wayland tab update channel closed"))
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: Some(dojo_id),
+                        message: format!("{error:#}"),
+                    })
+                    .await;
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
         WindowTopologyCommand::RenameLair { lair_id, name } => {
             let result = async {
                 anyhow::ensure!(
@@ -1354,6 +1474,101 @@ async fn handle_session_manager_command(
                     matches!(response, Response::TopologyCommitted { .. }),
                     "splinterd did not acknowledge Lair rename"
                 );
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: None,
+                        message: format!("{error:#}"),
+                    })
+                    .await;
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::RestoreLair {
+            expected_topology_revision,
+            lair_id,
+        } => {
+            let result = async {
+                anyhow::ensure!(
+                    state.tabs.iter().any(|tab| tab.lair_id == lair_id),
+                    "restore targeted a detached Lair"
+                );
+                let response = connection
+                    .request(Request::RestoreLair {
+                        expected_topology_revision,
+                        lair_id,
+                    })
+                    .await?;
+                anyhow::ensure!(
+                    matches!(response, Response::RestoreCompleted { .. }),
+                    "splinterd did not acknowledge Lair restore"
+                );
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: None,
+                        message: format!("{error:#}"),
+                    })
+                    .await;
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::RestoreDojo {
+            expected_topology_revision,
+            dojo_id,
+        } => {
+            let result = connection
+                .request(Request::RestoreDojo {
+                    expected_topology_revision,
+                    dojo_id,
+                })
+                .await;
+            if let Err(error) = result {
+                let _ = updates
+                    .send(WindowTopologyUpdate::TabFailed {
+                        dojo_id: Some(dojo_id),
+                        message: format!("{error:#}"),
+                    })
+                    .await;
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::SetLairRetention { lair_id, retention } => {
+            let result = async {
+                anyhow::ensure!(
+                    state.tabs.iter().any(|tab| tab.lair_id == lair_id),
+                    "retention change targeted a detached Lair"
+                );
+                let expected_topology_revision = connection.topology_revision().await?;
+                let response = connection
+                    .request(Request::SetLairRetention {
+                        expected_topology_revision,
+                        lair_id,
+                        retention,
+                    })
+                    .await?;
+                let Response::TopologyCommitted {
+                    topology_revision, ..
+                } = response
+                else {
+                    bail!("splinterd did not acknowledge Lair retention change");
+                };
+                for tab in state.tabs.iter_mut().filter(|tab| tab.lair_id == lair_id) {
+                    tab.value.identity.topology_revision = topology_revision;
+                    tab.value.identity.lair_retention = retention;
+                    updates
+                        .send(WindowTopologyUpdate::UpdateIdentity(
+                            tab.value.identity.clone(),
+                        ))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Wayland tab update channel closed"))?;
+                }
                 Ok::<(), anyhow::Error>(())
             }
             .await;
@@ -2123,6 +2338,8 @@ mod tests {
             id: lair_id,
             name: "main".into(),
             lifetime: splinterm_core::LairLifetime::Persistent,
+            retention: splinterm_core::LairRetention::default(),
+            provenance: None,
             dojos: vec![dojo],
         };
         let pane = |key: &str, splint_id| splinterm_protocol::PresetPaneIdentity {

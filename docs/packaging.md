@@ -171,15 +171,25 @@ and [mcp.md](mcp.md) for the optional adapter's host and digest-policy setup.
 ## Optional user integration
 
 Splinterm follows the active Omarchy Quattro theme natively; no theme hook or
-user-generated palette is required. To prefer Splinterm through
-`xdg-terminal-exec`, prepend its desktop ID to the
-user-owned preference file; do not overwrite existing entries:
+user-generated palette is required. The explicit unified integration makes
+Splinterm the current user's XDG default terminal, gives its Window Omarchy's
+`terminal` tag, and enables the guarded screensaver adapter:
 
-```text
-com.oldjobobo.splinterm.desktop
+```bash
+splinterm integration omarchy enable
+splinterm integration omarchy status
 ```
 
-The reference snippet is `/usr/share/doc/splinterm/xdg-terminals.list`.
+`disable` removes only exact managed objects and restores the previous
+`xdg-terminals.list` object byte-for-byte, including a relative or dangling
+symlink. Components already configured externally are reported as ready but are
+never claimed or removed. A versioned state journal under
+`${XDG_STATE_HOME:-~/.local/state}/splinterm/integrations/` prevents guessing
+after an interrupted transaction.
+
+Package installation still changes none of these user files. The reference
+terminal-list snippet remains `/usr/share/doc/splinterm/xdg-terminals.list` for
+manual setups.
 
 The default launcher always creates a fresh terminal. Use the **Recent Dojos**
 desktop action or `splinterm-dojos` to choose an existing running Dojo, and

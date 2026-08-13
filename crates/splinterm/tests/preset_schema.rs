@@ -201,6 +201,8 @@ fn preset_run_sends_one_atomic_tree_and_reconciles_stable_mappings() {
                 id: lair_id,
                 name: "main".into(),
                 lifetime: splinterm_core::LairLifetime::Persistent,
+                retention: splinterm_core::LairRetention::default(),
+                provenance: None,
                 dojos: vec![Dojo {
                     id: invoking_dojo_id,
                     name: "terminal".into(),

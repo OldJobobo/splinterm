@@ -233,9 +233,11 @@ expansion remain options rather than roadmap commitments.
 
 ## Product health signals
 
-Splinterm currently has no telemetry requirement. Until a reviewed telemetry
-policy exists, product decisions should use privacy-preserving evidence such as
-opt-in reports, issue patterns, release validation, documentation feedback, and
+Splinterm does not embed product telemetry in the terminal application. The
+public website uses Cloudflare Web Analytics for privacy-preserving aggregate
+page and visit trends; it does not establish whether a terminal workflow
+succeeded. Product decisions should combine that limited signal with opt-in
+reports, issue patterns, release validation, documentation feedback, and
 explicit user research.
 
 The product should eventually measure or otherwise establish:

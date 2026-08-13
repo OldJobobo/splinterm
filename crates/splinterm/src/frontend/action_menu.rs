@@ -2,11 +2,14 @@
 
 use std::path::PathBuf;
 
-use splinterm_core::{Axis, DojoId, LairId, SplintId};
+use splinterm_core::{Axis, DojoId, LairId, LairRetention, SplintId};
 
 use crate::keymap::{ActionId, ResolvedKeymap};
 
-use super::{LairPromptTarget, WindowTopologyCommand, text_edit::BoundedTextEditor};
+use super::{
+    LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, WindowTopologyCommand,
+    text_edit::BoundedTextEditor,
+};
 
 const MAX_QUERY_BYTES: usize = 256;
 const MAX_QUERY_SCALARS: usize = 128;
@@ -177,6 +180,58 @@ impl RenameLairUi {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RestoreLairUi {
+    target: LairPromptTarget,
+    decision: TerminationDecision,
+}
+
+impl RestoreLairUi {
+    pub(crate) fn new(target: LairPromptTarget) -> Self {
+        Self {
+            target,
+            decision: TerminationDecision::Cancel,
+        }
+    }
+
+    pub(crate) const fn target(&self) -> &LairPromptTarget {
+        &self.target
+    }
+
+    pub(crate) const fn decision(&self) -> TerminationDecision {
+        self.decision
+    }
+
+    pub(crate) fn move_selection(&mut self) -> bool {
+        self.decision = match self.decision {
+            TerminationDecision::Cancel => TerminationDecision::Terminate,
+            TerminationDecision::Terminate => TerminationDecision::Cancel,
+        };
+        true
+    }
+
+    pub(crate) fn select(&mut self, decision: TerminationDecision) -> bool {
+        if self.decision == decision {
+            return false;
+        }
+        self.decision = decision;
+        true
+    }
+
+    pub(crate) fn command(&self) -> Option<WindowTopologyCommand> {
+        (self.decision == TerminationDecision::Terminate).then_some(self.target.dojo_id.map_or(
+            WindowTopologyCommand::RestoreLair {
+                expected_topology_revision: self.target.topology_revision,
+                lair_id: self.target.lair_id,
+            },
+            |dojo_id| WindowTopologyCommand::RestoreDojo {
+                expected_topology_revision: self.target.topology_revision,
+                dojo_id,
+            },
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TerminateLairUi {
     target: LairPromptTarget,
     decision: TerminationDecision,
@@ -229,12 +284,18 @@ pub(crate) enum DojoPromptUi {
     Rename(RenameDojoUi),
     Terminate(TerminateDojoUi),
     RenameLair(RenameLairUi),
+    PreviewLair(LairPromptTarget),
+    RestoreLair(RestoreLairUi),
     TerminateLair(TerminateLairUi),
 }
 
 impl DojoPromptUi {
     pub(crate) const fn is_rename(&self) -> bool {
         matches!(self, Self::Rename(_) | Self::RenameLair(_))
+    }
+
+    pub(crate) const fn is_preview(&self) -> bool {
+        matches!(self, Self::PreviewLair(_))
     }
 
     pub(crate) fn title_and_body(&self) -> (&'static str, String) {
@@ -257,6 +318,20 @@ impl DojoPromptUi {
                 "RENAME LAIR",
                 format!("Name for ‘{}’", prompt.target().name),
             ),
+            Self::PreviewLair(target) => ("SAVED LAIR PREVIEW", target.preview.clone()),
+            Self::RestoreLair(prompt) => (
+                "RESTORE SAVED LAIR",
+                format!(
+                    "{}\n\nRestore {} captured Splint{}?",
+                    prompt.target().preview,
+                    prompt.target().targets.len(),
+                    if prompt.target().targets.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+            ),
             Self::TerminateLair(prompt) => (
                 "TERMINATE LAIR",
                 format!(
@@ -277,7 +352,10 @@ impl DojoPromptUi {
         match self {
             Self::Rename(prompt) => Some(prompt.input()),
             Self::RenameLair(prompt) => Some(prompt.input()),
-            Self::Terminate(_) | Self::TerminateLair(_) => None,
+            Self::Terminate(_)
+            | Self::PreviewLair(_)
+            | Self::RestoreLair(_)
+            | Self::TerminateLair(_) => None,
         }
     }
 
@@ -285,15 +363,19 @@ impl DojoPromptUi {
         match self {
             Self::Rename(prompt) => Some(prompt.editor_mut()),
             Self::RenameLair(prompt) => Some(prompt.editor_mut()),
-            Self::Terminate(_) | Self::TerminateLair(_) => None,
+            Self::Terminate(_)
+            | Self::PreviewLair(_)
+            | Self::RestoreLair(_)
+            | Self::TerminateLair(_) => None,
         }
     }
 
     pub(crate) const fn decision(&self) -> Option<TerminationDecision> {
         match self {
             Self::Terminate(prompt) => Some(prompt.decision()),
+            Self::RestoreLair(prompt) => Some(prompt.decision()),
             Self::TerminateLair(prompt) => Some(prompt.decision()),
-            Self::Rename(_) | Self::RenameLair(_) => None,
+            Self::Rename(_) | Self::RenameLair(_) | Self::PreviewLair(_) => None,
         }
     }
 
@@ -313,6 +395,14 @@ impl DojoPromptUi {
 
     pub(crate) fn rename_lair(target: LairPromptTarget) -> Self {
         Self::RenameLair(RenameLairUi::new(target))
+    }
+
+    pub(crate) fn preview_lair(target: LairPromptTarget) -> Self {
+        Self::PreviewLair(target)
+    }
+
+    pub(crate) fn restore_lair(target: LairPromptTarget) -> Self {
+        Self::RestoreLair(RestoreLairUi::new(target))
     }
 
     pub(crate) fn terminate_lair(target: LairPromptTarget) -> Self {
@@ -504,6 +594,16 @@ pub(crate) enum TabMenuDispatch {
     ConfirmTermination(DojoActionTarget),
 }
 
+pub(crate) fn close_other_tabs_command(
+    retain_dojo_id: DojoId,
+    dojo_ids: Vec<DojoId>,
+) -> Option<WindowTopologyCommand> {
+    (!dojo_ids.is_empty()).then_some(WindowTopologyCommand::CloseTabs {
+        retain_dojo_id,
+        dojo_ids,
+    })
+}
+
 pub(crate) fn tab_menu_dispatch(
     id: TabMenuActionId,
     context: &TabMenuContext,
@@ -530,10 +630,7 @@ pub(crate) fn tab_menu_dispatch(
             }))
         }
         TabMenuActionId::CloseOtherTabs => Some(TabMenuDispatch::Topology(
-            WindowTopologyCommand::CloseTabs {
-                retain_dojo_id: context.dojo_id,
-                dojo_ids: context.other_dojo_ids.clone(),
-            },
+            close_other_tabs_command(context.dojo_id, context.other_dojo_ids.clone())?,
         )),
         TabMenuActionId::TerminateDojo => {
             Some(TabMenuDispatch::ConfirmTermination(context.action_target()))
@@ -551,15 +648,31 @@ pub(crate) fn tab_menu_descriptor(id: TabMenuActionId) -> TabMenuActionDescripto
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum BuiltInCommandId {
+    ShowKeybindings,
+    ReloadConfiguration,
     RecentSessions,
     NewSession,
     RenameCurrentTab,
     NewDojo,
+    ChooseDojo,
     PreviousDojo,
     NextDojo,
+    MoveDojoLeft,
+    MoveDojoRight,
     CloseCurrentTab,
     CloseOtherTabs,
     TerminateCurrentDojo,
+    RestoreCurrentDojo,
+    ChooseLair,
+    RenameCurrentLair,
+    SaveCurrentLair,
+    PinCurrentLair,
+    UnpinCurrentLair,
+    PreviewCurrentLair,
+    RestoreCurrentLair,
+    PreviousLair,
+    NextLair,
+    TerminateCurrentLair,
     SplitHorizontal,
     SplitVertical,
     FocusLeft,
@@ -569,6 +682,8 @@ pub(crate) enum BuiltInCommandId {
     CloseFocusedPane,
     ResizePaneSmaller,
     ResizePaneLarger,
+    EnterCopyMode,
+    ToggleFocusedPaneZoom,
     SearchScrollback,
     PageUp,
     PageDown,
@@ -577,6 +692,7 @@ pub(crate) enum BuiltInCommandId {
     ZoomIn,
     ZoomOut,
     ResetZoom,
+    DetachWindow,
     RequestControl,
     ReleaseControl,
     ForceControl,
@@ -585,8 +701,65 @@ pub(crate) enum BuiltInCommandId {
     DenyControlTransfer,
 }
 
+impl BuiltInCommandId {
+    pub(crate) const ALL: &[Self] = &[
+        Self::ShowKeybindings,
+        Self::ReloadConfiguration,
+        Self::RecentSessions,
+        Self::NewSession,
+        Self::RenameCurrentTab,
+        Self::NewDojo,
+        Self::ChooseDojo,
+        Self::PreviousDojo,
+        Self::NextDojo,
+        Self::MoveDojoLeft,
+        Self::MoveDojoRight,
+        Self::CloseCurrentTab,
+        Self::CloseOtherTabs,
+        Self::TerminateCurrentDojo,
+        Self::RestoreCurrentDojo,
+        Self::ChooseLair,
+        Self::RenameCurrentLair,
+        Self::SaveCurrentLair,
+        Self::PinCurrentLair,
+        Self::UnpinCurrentLair,
+        Self::PreviewCurrentLair,
+        Self::RestoreCurrentLair,
+        Self::PreviousLair,
+        Self::NextLair,
+        Self::TerminateCurrentLair,
+        Self::SplitHorizontal,
+        Self::SplitVertical,
+        Self::FocusLeft,
+        Self::FocusRight,
+        Self::FocusUp,
+        Self::FocusDown,
+        Self::CloseFocusedPane,
+        Self::ResizePaneSmaller,
+        Self::ResizePaneLarger,
+        Self::EnterCopyMode,
+        Self::ToggleFocusedPaneZoom,
+        Self::SearchScrollback,
+        Self::PageUp,
+        Self::PageDown,
+        Self::ReturnToLive,
+        Self::ToggleTabStrip,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::ResetZoom,
+        Self::DetachWindow,
+        Self::RequestControl,
+        Self::ReleaseControl,
+        Self::ForceControl,
+        Self::RevokeAllAccess,
+        Self::AcceptControlTransfer,
+        Self::DenyControlTransfer,
+    ];
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CommandCategory {
+    Application,
     Dojos,
     Tabs,
     Panes,
@@ -598,6 +771,7 @@ pub(crate) enum CommandCategory {
 impl CommandCategory {
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::Application => "APP",
             Self::Dojos => "DOJO",
             Self::Tabs => "TAB",
             Self::Panes => "PANE",
@@ -608,6 +782,33 @@ impl CommandCategory {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommandTabMoveAvailability {
+    Neither,
+    Left,
+    Right,
+    Both,
+}
+
+impl CommandTabMoveAvailability {
+    pub(crate) const fn from_edges(can_move_left: bool, can_move_right: bool) -> Self {
+        match (can_move_left, can_move_right) {
+            (false, false) => Self::Neither,
+            (true, false) => Self::Left,
+            (false, true) => Self::Right,
+            (true, true) => Self::Both,
+        }
+    }
+
+    const fn can_move_left(self) -> bool {
+        matches!(self, Self::Left | Self::Both)
+    }
+
+    const fn can_move_right(self) -> bool {
+        matches!(self, Self::Right | Self::Both)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     clippy::struct_field_names,
@@ -615,6 +816,7 @@ impl CommandCategory {
 )]
 pub(crate) struct CommandPaletteContext {
     pub(crate) lair_id: LairId,
+    pub(crate) lair_retention: LairRetention,
     pub(crate) focused_cwd: PathBuf,
     pub(crate) dojo_id: DojoId,
     pub(crate) dojo_name: String,
@@ -624,6 +826,7 @@ pub(crate) struct CommandPaletteContext {
     pub(crate) other_dojo_ids: Vec<DojoId>,
     pub(crate) previous_dojo_id: Option<DojoId>,
     pub(crate) next_dojo_id: Option<DojoId>,
+    pub(crate) tab_move: CommandTabMoveAvailability,
     pub(crate) focus_left: Option<SplintId>,
     pub(crate) focus_right: Option<SplintId>,
     pub(crate) focus_up: Option<SplintId>,
@@ -673,6 +876,15 @@ pub(crate) enum CommandControlAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BuiltInCommandDispatch {
     Topology(WindowTopologyCommand),
+    ShowKeybindings,
+    ReloadConfiguration,
+    EnterCopyMode,
+    ToggleFocusedPaneZoom,
+    MoveDojo {
+        dojo_id: DojoId,
+        delta: isize,
+    },
+    DetachWindow,
     Focus(SplintId),
     Zoom(CommandZoomAction),
     ToggleTabStrip,
@@ -709,7 +921,21 @@ impl BuiltInCommandDescriptor {
     }
 }
 
-pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 32] = [
+pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId::ALL.len()] = [
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ShowKeybindings,
+        category: CommandCategory::Application,
+        title: "Show keybindings",
+        keywords: &["show", "help", "keys", "keybindings", "shortcuts"],
+        shortcut_action: Some(ActionId::BindingHelp),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ReloadConfiguration,
+        category: CommandCategory::Application,
+        title: "Reload configuration",
+        keywords: &["reload", "configuration", "config", "keymap"],
+        shortcut_action: Some(ActionId::ConfigReload),
+    },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::RecentSessions,
         category: CommandCategory::Dojos,
@@ -739,6 +965,13 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 32] = [
         shortcut_action: Some(ActionId::NewDojo),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ChooseDojo,
+        category: CommandCategory::Tabs,
+        title: "Choose Dojo",
+        keywords: &["choose", "select", "switch", "dojo", "tab"],
+        shortcut_action: Some(ActionId::DojoChooser),
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::PreviousDojo,
         category: CommandCategory::Tabs,
         title: "Previous Dojo",
@@ -751,6 +984,20 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 32] = [
         title: "Next Dojo",
         keywords: &["next", "dojo", "tab", "right"],
         shortcut_action: Some(ActionId::NextDojo),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::MoveDojoLeft,
+        category: CommandCategory::Tabs,
+        title: "Move Dojo left",
+        keywords: &["move", "reorder", "dojo", "tab", "left"],
+        shortcut_action: Some(ActionId::MoveDojoLeft),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::MoveDojoRight,
+        category: CommandCategory::Tabs,
+        title: "Move Dojo right",
+        keywords: &["move", "reorder", "dojo", "tab", "right"],
+        shortcut_action: Some(ActionId::MoveDojoRight),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::CloseCurrentTab,
@@ -772,6 +1019,83 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 32] = [
         title: "Terminate current Dojo…",
         keywords: &["terminate", "kill", "close", "current", "dojo", "panes"],
         shortcut_action: Some(ActionId::TerminateCurrentDojo),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::RestoreCurrentDojo,
+        category: CommandCategory::Tabs,
+        title: "Restore current Dojo…",
+        keywords: &["restore", "launch", "current", "dojo", "tab"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ChooseLair,
+        category: CommandCategory::Dojos,
+        title: "Choose Lair",
+        keywords: &["choose", "select", "switch", "lair", "workspace"],
+        shortcut_action: Some(ActionId::LairChooser),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::RenameCurrentLair,
+        category: CommandCategory::Dojos,
+        title: "Rename current Lair",
+        keywords: &["rename", "name", "current", "lair", "workspace"],
+        shortcut_action: Some(ActionId::RenameCurrentLair),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::SaveCurrentLair,
+        category: CommandCategory::Dojos,
+        title: "Save current Lair layout",
+        keywords: &["save", "retain", "lair", "layout", "workspace"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::PinCurrentLair,
+        category: CommandCategory::Dojos,
+        title: "Pin current Lair",
+        keywords: &["pin", "protect", "lair", "workspace"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::UnpinCurrentLair,
+        category: CommandCategory::Dojos,
+        title: "Unpin current Lair",
+        keywords: &["unpin", "saved", "lair", "workspace"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::PreviewCurrentLair,
+        category: CommandCategory::Dojos,
+        title: "Preview saved Lair layout",
+        keywords: &["preview", "saved", "lair", "layout", "recipe"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::RestoreCurrentLair,
+        category: CommandCategory::Dojos,
+        title: "Restore saved Lair…",
+        keywords: &["restore", "launch", "saved", "lair", "layout"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::PreviousLair,
+        category: CommandCategory::Dojos,
+        title: "Previous Lair",
+        keywords: &["previous", "switch", "lair", "workspace"],
+        shortcut_action: Some(ActionId::PreviousLair),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::NextLair,
+        category: CommandCategory::Dojos,
+        title: "Next Lair",
+        keywords: &["next", "switch", "lair", "workspace"],
+        shortcut_action: Some(ActionId::NextLair),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::TerminateCurrentLair,
+        category: CommandCategory::Dojos,
+        title: "Terminate current Lair…",
+        keywords: &["terminate", "kill", "close", "current", "lair", "workspace"],
+        shortcut_action: Some(ActionId::TerminateCurrentLair),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::SplitHorizontal,
@@ -837,6 +1161,20 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 32] = [
         shortcut_action: Some(ActionId::ResizePaneLarger),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::EnterCopyMode,
+        category: CommandCategory::History,
+        title: "Enter copy mode",
+        keywords: &["enter", "copy", "mode", "history", "keyboard"],
+        shortcut_action: Some(ActionId::CopyModeEnter),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ToggleFocusedPaneZoom,
+        category: CommandCategory::Panes,
+        title: "Toggle focused pane zoom",
+        keywords: &["toggle", "focused", "pane", "zoom", "maximize"],
+        shortcut_action: Some(ActionId::TogglePaneZoom),
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::SearchScrollback,
         category: CommandCategory::History,
         title: "Search scrollback",
@@ -893,6 +1231,13 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 32] = [
         shortcut_action: Some(ActionId::ResetZoom),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::DetachWindow,
+        category: CommandCategory::View,
+        title: "Detach Window",
+        keywords: &["detach", "close", "window", "leave", "keep", "running"],
+        shortcut_action: Some(ActionId::DetachWindow),
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::RequestControl,
         category: CommandCategory::Control,
         title: "Request control",
@@ -936,6 +1281,18 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; 32] = [
     },
 ];
 
+fn lifecycle_command_visible(id: BuiltInCommandId, retention: LairRetention) -> bool {
+    match id {
+        BuiltInCommandId::SaveCurrentLair => retention == LairRetention::Disposable,
+        BuiltInCommandId::PinCurrentLair => retention != LairRetention::Pinned,
+        BuiltInCommandId::UnpinCurrentLair => retention == LairRetention::Pinned,
+        BuiltInCommandId::PreviewCurrentLair | BuiltInCommandId::RestoreCurrentLair => {
+            retention.is_protected()
+        }
+        _ => true,
+    }
+}
+
 fn descriptor_matches(descriptor: BuiltInCommandDescriptor, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -953,11 +1310,20 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
     match id {
         BuiltInCommandId::PreviousDojo => context.previous_dojo_id.is_some(),
         BuiltInCommandId::NextDojo => context.next_dojo_id.is_some(),
+        BuiltInCommandId::MoveDojoLeft => context.tab_move.can_move_left(),
+        BuiltInCommandId::SaveCurrentLair => context.lair_retention == LairRetention::Disposable,
+        BuiltInCommandId::PinCurrentLair => context.lair_retention != LairRetention::Pinned,
+        BuiltInCommandId::UnpinCurrentLair => context.lair_retention == LairRetention::Pinned,
+        BuiltInCommandId::PreviewCurrentLair | BuiltInCommandId::RestoreCurrentLair => {
+            context.lair_retention.is_protected()
+        }
+        BuiltInCommandId::MoveDojoRight => context.tab_move.can_move_right(),
         BuiltInCommandId::FocusLeft => context.focus_left.is_some(),
         BuiltInCommandId::FocusRight => context.focus_right.is_some(),
         BuiltInCommandId::FocusUp => context.focus_up.is_some(),
         BuiltInCommandId::FocusDown => context.focus_down.is_some(),
         BuiltInCommandId::CloseOtherTabs => !context.other_dojo_ids.is_empty(),
+        BuiltInCommandId::ToggleFocusedPaneZoom => context.pane_count > 1,
         BuiltInCommandId::ReturnToLive => context.viewport_detached,
         BuiltInCommandId::RequestControl => !context.controller_active,
         BuiltInCommandId::ForceControl => {
@@ -968,24 +1334,35 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         BuiltInCommandId::AcceptControlTransfer | BuiltInCommandId::DenyControlTransfer => {
             context.pending_transfer_id.is_some()
         }
-        BuiltInCommandId::RecentSessions
+        BuiltInCommandId::ShowKeybindings
+        | BuiltInCommandId::ReloadConfiguration
+        | BuiltInCommandId::RecentSessions
         | BuiltInCommandId::NewSession
         | BuiltInCommandId::RenameCurrentTab
         | BuiltInCommandId::NewDojo
+        | BuiltInCommandId::ChooseDojo
         | BuiltInCommandId::CloseCurrentTab
         | BuiltInCommandId::TerminateCurrentDojo
+        | BuiltInCommandId::RestoreCurrentDojo
+        | BuiltInCommandId::ChooseLair
+        | BuiltInCommandId::RenameCurrentLair
+        | BuiltInCommandId::PreviousLair
+        | BuiltInCommandId::NextLair
+        | BuiltInCommandId::TerminateCurrentLair
         | BuiltInCommandId::SplitHorizontal
         | BuiltInCommandId::SplitVertical
         | BuiltInCommandId::CloseFocusedPane
         | BuiltInCommandId::ResizePaneSmaller
         | BuiltInCommandId::ResizePaneLarger
+        | BuiltInCommandId::EnterCopyMode
         | BuiltInCommandId::SearchScrollback
         | BuiltInCommandId::PageUp
         | BuiltInCommandId::PageDown
         | BuiltInCommandId::ToggleTabStrip
         | BuiltInCommandId::ZoomIn
         | BuiltInCommandId::ZoomOut
-        | BuiltInCommandId::ResetZoom => true,
+        | BuiltInCommandId::ResetZoom
+        | BuiltInCommandId::DetachWindow => true,
     }
 }
 
@@ -1001,6 +1378,7 @@ pub(crate) struct CommandPaletteUi {
 
 impl CommandPaletteUi {
     pub(crate) fn new(context: CommandPaletteContext) -> Self {
+        let lair_retention = context.lair_retention;
         Self {
             context,
             editor: BoundedTextEditor::new(
@@ -1009,7 +1387,11 @@ impl CommandPaletteUi {
                 MAX_QUERY_SCALARS,
                 false,
             ),
-            filtered: BUILT_IN_COMMANDS.iter().map(|command| command.id).collect(),
+            filtered: BUILT_IN_COMMANDS
+                .iter()
+                .filter(|command| lifecycle_command_visible(command.id, lair_retention))
+                .map(|command| command.id)
+                .collect(),
             selected: 0,
             visible_start: 0,
             hovered: None,
@@ -1148,6 +1530,9 @@ impl CommandPaletteUi {
         self.filtered = BUILT_IN_COMMANDS
             .iter()
             .copied()
+            .filter(|descriptor| {
+                lifecycle_command_visible(descriptor.id, self.context.lair_retention)
+            })
             .filter(|descriptor| descriptor_matches(*descriptor, self.editor.text()))
             .map(|descriptor| descriptor.id)
             .collect();
@@ -1198,6 +1583,8 @@ pub(crate) fn command_dispatch(
         return None;
     }
     let dispatch = match id {
+        BuiltInCommandId::ShowKeybindings => BuiltInCommandDispatch::ShowKeybindings,
+        BuiltInCommandId::ReloadConfiguration => BuiltInCommandDispatch::ReloadConfiguration,
         BuiltInCommandId::RecentSessions => BuiltInCommandDispatch::RecentSessions,
         BuiltInCommandId::NewSession => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewLair {
@@ -1213,6 +1600,12 @@ pub(crate) fn command_dispatch(
                 cwd: context.focused_cwd.clone(),
             })
         }
+        BuiltInCommandId::ChooseDojo => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestSelector {
+                kind: SelectorKind::Dojo,
+                lair_id: context.lair_id,
+            })
+        }
         BuiltInCommandId::PreviousDojo => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::ActivateTab {
                 dojo_id: context.previous_dojo_id?,
@@ -1223,19 +1616,83 @@ pub(crate) fn command_dispatch(
                 dojo_id: context.next_dojo_id?,
             })
         }
+        BuiltInCommandId::MoveDojoLeft => BuiltInCommandDispatch::MoveDojo {
+            dojo_id: context.dojo_id,
+            delta: -1,
+        },
+        BuiltInCommandId::MoveDojoRight => BuiltInCommandDispatch::MoveDojo {
+            dojo_id: context.dojo_id,
+            delta: 1,
+        },
         BuiltInCommandId::CloseCurrentTab => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::CloseTab {
                 dojo_id: context.dojo_id,
             })
         }
-        BuiltInCommandId::CloseOtherTabs => {
-            BuiltInCommandDispatch::Topology(WindowTopologyCommand::CloseTabs {
-                retain_dojo_id: context.dojo_id,
-                dojo_ids: context.other_dojo_ids.clone(),
-            })
-        }
+        BuiltInCommandId::CloseOtherTabs => BuiltInCommandDispatch::Topology(
+            close_other_tabs_command(context.dojo_id, context.other_dojo_ids.clone())?,
+        ),
         BuiltInCommandId::TerminateCurrentDojo => {
             BuiltInCommandDispatch::ConfirmTermination(context.action_target())
+        }
+        BuiltInCommandId::RestoreCurrentDojo => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestDojoRestorePrompt {
+                dojo_id: context.dojo_id,
+            })
+        }
+        BuiltInCommandId::ChooseLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestSelector {
+                kind: SelectorKind::LairDojo,
+                lair_id: context.lair_id,
+            })
+        }
+        BuiltInCommandId::RenameCurrentLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
+                lair_id: context.lair_id,
+                kind: LairPromptKind::Rename,
+            })
+        }
+        BuiltInCommandId::SaveCurrentLair | BuiltInCommandId::UnpinCurrentLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::SetLairRetention {
+                lair_id: context.lair_id,
+                retention: LairRetention::Saved,
+            })
+        }
+        BuiltInCommandId::PinCurrentLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::SetLairRetention {
+                lair_id: context.lair_id,
+                retention: LairRetention::Pinned,
+            })
+        }
+        BuiltInCommandId::PreviewCurrentLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
+                lair_id: context.lair_id,
+                kind: LairPromptKind::Preview,
+            })
+        }
+        BuiltInCommandId::RestoreCurrentLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
+                lair_id: context.lair_id,
+                kind: LairPromptKind::Restore,
+            })
+        }
+        BuiltInCommandId::PreviousLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::NavigateLair {
+                current_lair_id: context.lair_id,
+                direction: LairDirection::Previous,
+            })
+        }
+        BuiltInCommandId::NextLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::NavigateLair {
+                current_lair_id: context.lair_id,
+                direction: LairDirection::Next,
+            })
+        }
+        BuiltInCommandId::TerminateCurrentLair => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
+                lair_id: context.lair_id,
+                kind: LairPromptKind::Terminate,
+            })
         }
         BuiltInCommandId::SplitHorizontal => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::Split {
@@ -1277,6 +1734,8 @@ pub(crate) fn command_dispatch(
                 delta: 50,
             })
         }
+        BuiltInCommandId::EnterCopyMode => BuiltInCommandDispatch::EnterCopyMode,
+        BuiltInCommandId::ToggleFocusedPaneZoom => BuiltInCommandDispatch::ToggleFocusedPaneZoom,
         BuiltInCommandId::SearchScrollback => BuiltInCommandDispatch::History {
             target: context.splint_id,
             action: CommandHistoryAction::Search,
@@ -1297,6 +1756,7 @@ pub(crate) fn command_dispatch(
         BuiltInCommandId::ZoomIn => BuiltInCommandDispatch::Zoom(CommandZoomAction::Increase),
         BuiltInCommandId::ZoomOut => BuiltInCommandDispatch::Zoom(CommandZoomAction::Decrease),
         BuiltInCommandId::ResetZoom => BuiltInCommandDispatch::Zoom(CommandZoomAction::Reset),
+        BuiltInCommandId::DetachWindow => BuiltInCommandDispatch::DetachWindow,
         BuiltInCommandId::RequestControl => BuiltInCommandDispatch::Control {
             target: context.splint_id,
             action: CommandControlAction::Request,
@@ -1341,6 +1801,7 @@ mod tests {
         let splint_id = SplintId::new();
         CommandPaletteUi::new(CommandPaletteContext {
             lair_id: LairId::new(),
+            lair_retention: LairRetention::Disposable,
             focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "current".to_owned(),
@@ -1350,6 +1811,7 @@ mod tests {
             other_dojo_ids: vec![DojoId::new(), DojoId::new()],
             previous_dojo_id: Some(DojoId::new()),
             next_dojo_id: Some(DojoId::new()),
+            tab_move: CommandTabMoveAvailability::Both,
             focus_left: Some(SplintId::new()),
             focus_right: Some(SplintId::new()),
             focus_up: Some(SplintId::new()),
@@ -1420,8 +1882,12 @@ mod tests {
     fn lair_termination_defaults_cancel_and_preserves_the_exact_capture() {
         let lair_id = LairId::new();
         let target = LairPromptTarget {
+            topology_revision: splinterm_core::TopologyRevision::new(7),
             lair_id,
+            dojo_id: None,
             name: "work".to_owned(),
+            retention: LairRetention::Saved,
+            preview: "work — Saved".to_owned(),
             targets: vec![splinterm_protocol::MutationTarget {
                 lair_id,
                 dojo_id: DojoId::new(),
@@ -1489,10 +1955,18 @@ mod tests {
             Some(TabMenuDispatch::Topology(
                 WindowTopologyCommand::CloseTabs {
                     retain_dojo_id: context.dojo_id,
-                    dojo_ids: other_dojo_ids,
+                    dojo_ids: other_dojo_ids.clone(),
                 }
             ))
         );
+        assert_eq!(
+            close_other_tabs_command(context.dojo_id, other_dojo_ids),
+            Some(WindowTopologyCommand::CloseTabs {
+                retain_dojo_id: context.dojo_id,
+                dojo_ids: context.other_dojo_ids.clone(),
+            })
+        );
+        assert_eq!(close_other_tabs_command(context.dojo_id, Vec::new()), None);
 
         assert_eq!(
             tab_menu_dispatch(TabMenuActionId::TerminateDojo, &context),
@@ -1518,7 +1992,13 @@ mod tests {
     #[test]
     fn filtering_is_case_insensitive_stable_category_and_keyword_aware() {
         let mut palette = palette();
-        assert_eq!(palette.filtered.len(), BUILT_IN_COMMANDS.len());
+        let visible_count = BUILT_IN_COMMANDS
+            .iter()
+            .filter(|descriptor| {
+                lifecycle_command_visible(descriptor.id, palette.context.lair_retention)
+            })
+            .count();
+        assert_eq!(palette.filtered.len(), visible_count);
         assert!(palette.append_text("SPLIT"));
         assert_eq!(
             palette.filtered,
@@ -1530,7 +2010,7 @@ mod tests {
         assert!(palette.append_text(" horizontal"));
         assert!(palette.filtered.is_empty());
         while palette.backspace() {}
-        assert_eq!(palette.filtered.len(), BUILT_IN_COMMANDS.len());
+        assert_eq!(palette.filtered.len(), visible_count);
         assert!(palette.append_text("horizontal"));
         assert_eq!(palette.filtered, vec![BuiltInCommandId::SplitHorizontal]);
         while palette.backspace() {}
@@ -1541,8 +2021,95 @@ mod tests {
                 BuiltInCommandId::ToggleTabStrip,
                 BuiltInCommandId::ZoomIn,
                 BuiltInCommandId::ZoomOut,
-                BuiltInCommandId::ResetZoom
+                BuiltInCommandId::ResetZoom,
+                BuiltInCommandId::DetachWindow
             ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_commands_show_only_actions_applicable_to_the_captured_lair() {
+        let disposable = palette();
+        assert!(
+            disposable
+                .filtered()
+                .contains(&BuiltInCommandId::SaveCurrentLair)
+        );
+        assert!(
+            disposable
+                .filtered()
+                .contains(&BuiltInCommandId::PinCurrentLair)
+        );
+        assert!(
+            !disposable
+                .filtered()
+                .contains(&BuiltInCommandId::UnpinCurrentLair)
+        );
+        assert!(
+            !disposable
+                .filtered()
+                .contains(&BuiltInCommandId::PreviewCurrentLair)
+        );
+        assert!(
+            !disposable
+                .filtered()
+                .contains(&BuiltInCommandId::RestoreCurrentLair)
+        );
+
+        let saved = CommandPaletteUi::new(CommandPaletteContext {
+            lair_retention: LairRetention::Saved,
+            ..disposable.context()
+        });
+        assert!(
+            !saved
+                .filtered()
+                .contains(&BuiltInCommandId::SaveCurrentLair)
+        );
+        assert!(saved.filtered().contains(&BuiltInCommandId::PinCurrentLair));
+        assert!(
+            !saved
+                .filtered()
+                .contains(&BuiltInCommandId::UnpinCurrentLair)
+        );
+        assert!(
+            saved
+                .filtered()
+                .contains(&BuiltInCommandId::PreviewCurrentLair)
+        );
+        assert!(
+            saved
+                .filtered()
+                .contains(&BuiltInCommandId::RestoreCurrentLair)
+        );
+
+        let pinned = CommandPaletteUi::new(CommandPaletteContext {
+            lair_retention: LairRetention::Pinned,
+            ..saved.context()
+        });
+        assert!(
+            !pinned
+                .filtered()
+                .contains(&BuiltInCommandId::SaveCurrentLair)
+        );
+        assert!(
+            !pinned
+                .filtered()
+                .contains(&BuiltInCommandId::PinCurrentLair)
+        );
+        assert!(
+            pinned
+                .filtered()
+                .contains(&BuiltInCommandId::UnpinCurrentLair)
+        );
+        assert!(
+            pinned
+                .filtered()
+                .contains(&BuiltInCommandId::PreviewCurrentLair)
+        );
+        assert!(
+            pinned
+                .filtered()
+                .contains(&BuiltInCommandId::RestoreCurrentLair)
         );
     }
 
@@ -1555,7 +2122,10 @@ mod tests {
             Some(BuiltInCommandId::DenyControlTransfer)
         );
         assert!(palette.append_text("zoom"));
-        assert_eq!(palette.selected_command(), Some(BuiltInCommandId::ZoomIn));
+        assert_eq!(
+            palette.selected_command(),
+            Some(BuiltInCommandId::ToggleFocusedPaneZoom)
+        );
         assert!(!palette.select_first());
         assert!(palette.select_last());
         assert_eq!(
@@ -1566,6 +2136,7 @@ mod tests {
         let context = CommandPaletteContext {
             previous_dojo_id: None,
             next_dojo_id: None,
+            tab_move: CommandTabMoveAvailability::Neither,
             focus_left: None,
             focus_right: None,
             focus_up: None,
@@ -1576,12 +2147,12 @@ mod tests {
         disabled.select_first();
         assert_eq!(
             disabled.selected_command(),
-            Some(BuiltInCommandId::RecentSessions)
+            Some(BuiltInCommandId::ShowKeybindings)
         );
         disabled.move_selection(1);
         assert_eq!(
             disabled.selected_command(),
-            Some(BuiltInCommandId::NewSession)
+            Some(BuiltInCommandId::ReloadConfiguration)
         );
         assert!(!disabled.command_enabled(BuiltInCommandId::PreviousDojo));
         assert!(!disabled.update_hovered(Some(BuiltInCommandId::FocusLeft)));
@@ -1659,11 +2230,11 @@ mod tests {
             command_descriptor(BuiltInCommandId::RecentSessions).shortcut(&custom.keymap),
             "Ctrl+Alt+S"
         );
-        assert!(
-            BUILT_IN_COMMANDS
-                .iter()
-                .all(|descriptor| descriptor.shortcut_action.is_some())
-        );
+        assert!(BUILT_IN_COMMANDS.iter().all(|descriptor| {
+            descriptor
+                .shortcut_action
+                .is_none_or(|action| ActionId::BINDABLE.contains(&action))
+        }));
     }
 
     #[test]
@@ -1672,14 +2243,32 @@ mod tests {
             .iter()
             .map(|descriptor| descriptor.id)
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(BUILT_IN_COMMANDS.len(), 32);
-        assert_eq!(ids.len(), 32);
+        assert_eq!(ids.len(), BUILT_IN_COMMANDS.len());
+        assert_eq!(
+            ids,
+            BuiltInCommandId::ALL.iter().copied().collect(),
+            "every command identity has exactly one descriptor"
+        );
+        assert!(BUILT_IN_COMMANDS.iter().all(|descriptor| {
+            !descriptor.title.trim().is_empty()
+                && !descriptor.category.label().trim().is_empty()
+                && !descriptor.keywords.is_empty()
+        }));
+        let titles = BUILT_IN_COMMANDS
+            .iter()
+            .map(|descriptor| descriptor.title)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            titles.len(),
+            BUILT_IN_COMMANDS.len(),
+            "command titles remain unique"
+        );
         let mut palette = palette();
         assert!(palette.append_text("control"));
         assert_eq!(palette.filtered().len(), 6);
         while palette.backspace() {}
         assert!(palette.append_text("history"));
-        assert_eq!(palette.filtered().len(), 4);
+        assert_eq!(palette.filtered().len(), 5);
     }
 
     #[test]
@@ -1741,6 +2330,78 @@ mod tests {
             ))
         );
         assert_eq!(
+            command_dispatch(BuiltInCommandId::ShowKeybindings, &context),
+            Some(BuiltInCommandDispatch::ShowKeybindings)
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::ReloadConfiguration, &context),
+            Some(BuiltInCommandDispatch::ReloadConfiguration)
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::EnterCopyMode, &context),
+            Some(BuiltInCommandDispatch::EnterCopyMode)
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::ToggleFocusedPaneZoom, &context),
+            Some(BuiltInCommandDispatch::ToggleFocusedPaneZoom)
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::MoveDojoLeft, &context),
+            Some(BuiltInCommandDispatch::MoveDojo {
+                dojo_id: context.dojo_id,
+                delta: -1,
+            })
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::ChooseDojo, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::RequestSelector {
+                    kind: SelectorKind::Dojo,
+                    lair_id: context.lair_id,
+                }
+            ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::ChooseLair, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::RequestSelector {
+                    kind: SelectorKind::LairDojo,
+                    lair_id: context.lair_id,
+                }
+            ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::RenameCurrentLair, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::RequestLairPrompt {
+                    lair_id: context.lair_id,
+                    kind: LairPromptKind::Rename,
+                }
+            ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::PreviousLair, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::NavigateLair {
+                    current_lair_id: context.lair_id,
+                    direction: LairDirection::Previous,
+                }
+            ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::TerminateCurrentLair, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::RequestLairPrompt {
+                    lair_id: context.lair_id,
+                    kind: LairPromptKind::Terminate,
+                }
+            ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::DetachWindow, &context),
+            Some(BuiltInCommandDispatch::DetachWindow)
+        );
+        assert_eq!(
             command_dispatch(BuiltInCommandId::TerminateCurrentDojo, &context),
             Some(BuiltInCommandDispatch::ConfirmTermination(
                 DojoActionTarget {
@@ -1797,6 +2458,16 @@ mod tests {
                 &CommandPaletteContext {
                     next_dojo_id: None,
                     ..context.clone()
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            command_dispatch(
+                BuiltInCommandId::ToggleFocusedPaneZoom,
+                &CommandPaletteContext {
+                    pane_count: 1,
+                    ..context
                 }
             ),
             None

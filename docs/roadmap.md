@@ -15,12 +15,31 @@ This is the dependency order for work after the `v0.1.0-alpha2` release. Items
 listed as proposed or deferred remain options rather than commitments until a
 product decision promotes them.
 
-### 0 — release and planning hygiene
+### 0 — alpha3 release and planning hygiene
 
 - Keep release claims aligned across the repository, website, AUR recipes, and
   immutable tags.
 - Close the remaining packaged Dojo-picker acceptance item without conflating
   publication with installed graphical validation.
+- Complete the bounded command-palette and keymap closure in
+  [Plan 0033](plans/0033-alpha3-command-palette-and-keymap-closure.md) before
+  constructing the `0.1.0-alpha3` candidate.
+- Complete the explicit saved-workspace workflow in
+  [Plan 0034](plans/0034-alpha3-saved-lair-layouts.md): saved Lairs retain Dojo
+  trees, proportional split ratios, known structured launch recipes, launch
+  working directories, and bounded geometry hints without checkpointing process
+  state or automatically executing commands.
+- Complete [Plan 0035](plans/0035-alpha3-scrollback-enter-safety.md): Enter while
+  the focused Splint is in historical scrollback returns it to live output like
+  `Shift+End`, consumes that physical key through release, and sends no PTY input.
+- Complete [Plan 0036](plans/0036-alpha3-wayland-file-drop-path-insertion.md):
+  bounded local regular-file drops insert deterministic shell-escaped paths into
+  one exact controlled Splint without reading file bodies or submitting input.
+- Reconcile Cargo, package, AUR, `.SRCINFO`, README, status, and release-note
+  versions in one coherent alpha3 release-state commit.
+- Construct the private candidate once, review its exact retained artifacts,
+  and exercise promotion only to the protected approval pause unless publication
+  receives separate explicit authorization.
 - Finish Plan 0026's local website content and build/link validation before any
   separately approved preview or production deployment.
 - Keep completed-plan closure facts separate from later release follow-ups.
@@ -30,26 +49,97 @@ product decision promotes them.
 1. Preserve exact theme-provided selection roles with an opaque selection
    background and separately repainted glyph and decoration foregrounds; do not
    derive, blend, or channel-swap the resolved theme colors.
-2. Execute [Plan 0032](plans/0032-omarchy-screensaver-integration.md) in its
-   declared order: XDG-only app-ID transport, package metadata/profile, upstream
-   Omarchy patch, non-graphical validation, then separately approved guarded
+2. Complete [Plan 0032](plans/0032-omarchy-screensaver-integration.md) through
+   the Splinterm-owned package helper, explicit non-deleting user activation,
+   non-graphical validation, and separately approved guarded graphical
+   acceptance; no Omarchy source change or upstream submission is required.
+3. Execute [Plan 0033](plans/0033-alpha3-command-palette-and-keymap-closure.md):
+   close the `dojo.close-other-tabs` binding defect, add the bounded everyday
+   command set, share safe `Super+C/V` terminal aliases and context-local
+   `Super+C/V/X/Z` editing across built-in profiles, prove keymaps end to end,
+   prevent registry drift, reconcile documentation, and record packaged
    graphical acceptance.
+4. Execute [Plan 0035](plans/0035-alpha3-scrollback-enter-safety.md) so plain and
+   keypad Enter return a historical focused Splint to live output without
+   sending input; preserve modal precedence and normal live-view Enter behavior.
 
 The screensaver work depends on the released transient XDG launch foundation in
-[Plan 0029](plans/0029-transient-xdg-command-launches.md), not on the palette fix;
-the order above keeps release-sized graphical changes isolated.
+[Plan 0029](plans/0029-transient-xdg-command-launches.md). Plan 0033 depends on
+accepted [Plan 0025](plans/0025-command-palette-and-tab-context-menus.md) and
+[Plan 0027](plans/0027-configurable-keymaps-and-dojo-presets.md). Keeping their
+non-graphical milestones and guarded acceptance cases explicit prevents either
+slice from becoming an unbounded UI redesign.
 
 ### 2 — lifecycle and desktop workflow
 
-1. Define named, pinned, preset-derived, and disposable Lair states before adding
-   destructive lifecycle controls.
-2. Implement bounded retirement, save, pin, restore, delete, migration, and
-   picker-state presentation without persisting sensitive terminal bodies.
-3. Add file-drop and clipboard-image path insertion only after its Wayland MIME,
-   destination, cleanup, confirmation, bracketed-paste, and failure contracts are
-   accepted.
+1. Execute [Plan 0034](plans/0034-alpha3-saved-lair-layouts.md) as the alpha3
+   lifecycle slice: define Live, Detached, Saved, Restorable, Pinned, and
+   Disposable states; expose exact-target save/preview/restore controls; and
+   preserve existing explicit-execution and privacy boundaries.
+2. Retain tree shape, split axes and ratios, default focus, Splint names, known
+   structured launch argv, launch working directories, and bounded geometry
+   hints. Do not infer interactive foreground applications or claim process,
+   shell, editor, or terminal-body checkpointing.
+3. Complete Plan 0034's bounded retirement, confirmed deletion, capacity, and
+   picker-state requirements; keep cloning and reusable templates deferred.
+4. Execute [Plan 0036](plans/0036-alpha3-wayland-file-drop-path-insertion.md) as
+   the Alpha3 desktop-input slice: accept bounded local `text/uri-list` regular
+   files, preserve exact targeting and bracketed paste, insert no submission
+   bytes, and retain body-free diagnostics.
+5. Keep clipboard-image saving, directories, remote transfer, private
+   file-manager MIME types, and drag-out outside Alpha3 pending separate
+   destination, cleanup, confirmation, and privacy contracts.
 
-### 3 — automation confidence
+### 3 — post-alpha3 user-customizable tabs
+
+Deliver full user-defined tab customization in a scoped update after
+`0.1.0-alpha3` and before the supported `1.0` release.
+
+#### Identity
+
+1. let users set presentation-only tab labels, optional bounded icons, and
+   pinned/favorite presentation state;
+2. distinguish a tab label from the persistent Dojo name so a Window-local
+   customization never silently renames shared daemon topology; and
+3. define whether selected identity overrides are Window-local, reusable by
+   Dojo identity, or explicitly promoted to durable metadata.
+
+#### Behavior
+
+1. support deterministic ordering rules, initial active-tab selection, strip
+   visibility policy, and user-chosen default tab actions;
+2. allow per-tab shortcuts only for the closed, typed application action
+   registry, with strict conflict detection and generated help/shortcut labels;
+3. preserve exact-target, stale-revision, non-destructive detach, confirmation,
+   modal-isolation, and 32-tab bounds; and
+4. never let a tab customization execute arbitrary shell commands, register
+   trusted actions, mutate shared topology implicitly, or steal another
+   client's focus/control.
+
+#### Appearance
+
+1. let users customize active/inactive colors, dimensions, padding, separators,
+   alignment, icon/label spacing, close indicators, and strip visibility;
+2. provide global defaults plus bounded per-tab or per-Dojo overrides;
+3. keep the active tab identifiable without color alone and preserve close/new
+   targets, pointer hit regions, keyboard navigation, compact layouts,
+   fractional scaling, and 1–32-tab overflow behavior; and
+4. inherit the active theme by default, validate every override strictly, and
+   fall back atomically to the last valid configuration rather than partially
+   applying malformed appearance state.
+
+Add schema, precedence, migration, conflict, renderer, pointer, keyboard, and
+configuration tests plus separately approved guarded matrices across
+identity/behavior combinations, dark/light, opaque/translucent,
+active/inactive, compact, overflow, and multiple-scale cases.
+
+This milestone does not permit arbitrary CSS, executable icon providers,
+terminal-output-controlled chrome, arbitrary key-launched commands, or plugins
+that inject trusted tab UI. Its exact schema, persistence scope, icon source
+policy, action allowlist, ordering semantics, and theme precedence require a
+focused implementation plan before work begins.
+
+### 4 — automation confidence
 
 - Implement [Plan 0031](plans/0031-mcp-visual-demo-harness.md) with the reusable
   non-graphical preflight, isolated topology, evidence manifest, and cleanup
@@ -59,7 +149,7 @@ the order above keeps release-sized graphical changes isolated.
 - Keep proposed first-class Herdr and live-appearance IPC work outside the
   committed near-term path until their product decisions are made.
 
-### 4 — beta performance gate
+### 5 — beta performance gate
 
 [Plan 0011](plans/0011-burst-output-memory-retention.md) remains a recorded
 no-go, and [Plan 0012](plans/0012-bounded-compact-publication-frames.md) remains
@@ -75,7 +165,7 @@ blocked on a sparse bounded-frame ownership redesign. Before a beta claim:
 Do not convert a daemon-only memory win or a client/latency regression into a
 beta success claim.
 
-### 5 — supported stable release
+### 6 — supported stable release
 
 After the beta performance gate has an explicit passing result or product-level
 disposition:
@@ -88,7 +178,7 @@ disposition:
    reviews; and
 4. reconcile every stable-release gate in [`status.md`](status.md).
 
-### 6 — broader distribution
+### 7 — broader distribution
 
 Nix, Home Manager, tertiary artifacts, additional compositors, and sandboxed
 packages follow explicit support boundaries. They must not broaden compatibility

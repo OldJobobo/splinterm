@@ -716,11 +716,19 @@ mod tests {
             ),
             ("status", super::super::commands::IntegrationAction::Status),
         ] {
-            let parsed =
+            let unified =
+                Cli::try_parse_from(["splinterm", "integration", "omarchy", name]).unwrap();
+            assert!(matches!(
+                unified.command,
+                Some(Command::Integration {
+                    command: super::super::commands::IntegrationCommand::Omarchy { action }
+                }) if action == expected
+            ));
+            let legacy =
                 Cli::try_parse_from(["splinterm", "integration", "omarchy-screensaver", name])
                     .unwrap();
             assert!(matches!(
-                parsed.command,
+                legacy.command,
                 Some(Command::Integration {
                     command: super::super::commands::IntegrationCommand::OmarchyScreensaver {
                         action

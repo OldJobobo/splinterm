@@ -104,9 +104,13 @@ splinterm keymap show omarchy-tmux
 splinterm keymap conflicts
 ```
 
-The default `splinterm` profile provides the controls in the [quickstart](/docs/quickstart/). The `omarchy-tmux` profile adds familiar `Ctrl+Space` and `Ctrl+B` prefixes, pane and tab workflows, local pane zoom, stable-ID choosers, `Prefix+B` tab-strip toggling, trusted `Prefix+?` key help, transactional configuration reload, and `Prefix+[` vi copy mode.
+The default `splinterm` profile provides the controls in the [quickstart](/docs/quickstart/). The `omarchy-tmux` profile adds familiar `Ctrl+Space` and `Ctrl+B` prefixes, pane and tab workflows, local pane zoom, stable-ID choosers, `Prefix+B` tab-strip toggling, trusted `Prefix+?` key help, transactional configuration reload, and `Prefix+[` vi copy mode. `dojo.close-other-tabs` is available to strict overlays even though neither profile claims a default chord.
 
-In copy mode, move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown. Press `v` to begin selecting, `y` to publish to the Wayland clipboard and exit, or Escape to cancel. Copy mode never forwards those keys, pointer input, paste, or IME text to the terminal application.
+The command palette is a curated trusted subset of this closed registry. It projects shortcut labels from the effective resolved keymap and exposes binding help, reload, copy mode, pane zoom, Dojo/Lair workflows, and Window detach without allowing configuration, plugins, or terminal output to register commands.
+
+Both profiles provide terminal `Super+C/V`, retain `Ctrl+Shift+C/V`, and accept Omarchy's terminal-tagged `Ctrl+Insert`/`Shift+Insert`. Omarchy must classify `com.oldjobobo.splinterm` as a terminal; without that classification its universal copy branch may inject ordinary `Ctrl+C`, which remains terminal interrupt. Splinterm-owned fields use local `Super+C/V/X/Z`, while terminal-pane `Super+X/Z` remain application-owned. These Super shortcuts work only when the compositor delivers the chord to the Splinterm Window. In copy mode, move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown. Press `v` to begin selecting, `y` or `Super+C` to publish to the Wayland clipboard and exit, or Escape to cancel. `Super+V/X/Z`, pointer input, paste, and IME text are consumed locally and never forwarded to the terminal application.
+
+While a focused pane is viewing historical output, plain Enter or keypad Enter returns it to live output without sending terminal input. A later Enter pressed while already live submits normally.
 
 A strict overlay can unbind and replace closed actions:
 

@@ -69,8 +69,14 @@ hero:
     <span class="route-meta">MCP adapter</span>
     <span class="route-arrow" aria-hidden="true">↗</span>
   </a>
-  <a href="/docs/development/">
+  <a href="/docs/roadmap/">
     <span class="route-index">09</span>
+    <span class="route-copy"><strong>See where the work is going</strong><small>Follow the path from daily-driver confidence to supported 1.0 and a connected persistent workspace.</small></span>
+    <span class="route-meta">Roadmap</span>
+    <span class="route-arrow" aria-hidden="true">↗</span>
+  </a>
+  <a href="/docs/development/">
+    <span class="route-index">10</span>
     <span class="route-copy"><strong>Work on the system</strong><small>Find architecture, contributor checks, and integration contracts.</small></span>
     <span class="route-meta">Development</span>
     <span class="route-arrow" aria-hidden="true">↗</span>
@@ -81,6 +87,7 @@ hero:
   <p><span>Public alpha</span> The source is open; the validated environment and compatibility promise remain intentionally narrow.</p>
   <div>
     <a href="/docs/status/">Read current status</a>
+    <a href="/docs/roadmap/">Product roadmap</a>
     <a href="/docs/troubleshooting/">Troubleshooting</a>
     <a href="/docs/sessions/">Sessions and persistence</a>
   </div>

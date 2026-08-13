@@ -17,6 +17,7 @@ const CANONICAL_OMARCHY_LAUNCHER: &str = "/usr/share/omarchy/bin/omarchy-launch-
 
 pub(super) fn run(command: IntegrationCommand) -> Result<()> {
     match command {
+        IntegrationCommand::Omarchy { action } => super::omarchy_integration::run(action),
         IntegrationCommand::OmarchyScreensaver { action } => {
             let home = env::var_os("HOME")
                 .map(PathBuf::from)
@@ -40,11 +41,11 @@ pub(super) fn run(command: IntegrationCommand) -> Result<()> {
     }
 }
 
-fn run_omarchy_screensaver(
+pub(super) fn run_omarchy_screensaver(
     action: IntegrationAction,
     home: &Path,
     helper: &Path,
-    output: &mut impl std::io::Write,
+    output: &mut dyn std::io::Write,
     resolve_launcher: impl Fn() -> Result<PathBuf>,
 ) -> Result<()> {
     let launcher = home.join(".local/bin").join(OMARCHY_LAUNCHER);
@@ -84,7 +85,7 @@ fn enable(
     path: &Path,
     disabled: &Path,
     helper: &Path,
-    output: &mut impl std::io::Write,
+    output: &mut dyn std::io::Write,
     resolve_launcher: impl Fn() -> Result<PathBuf>,
 ) -> Result<()> {
     if !helper.is_file() {
@@ -222,7 +223,7 @@ fn disable(
     path: &Path,
     disabled: &Path,
     helper: &Path,
-    output: &mut impl std::io::Write,
+    output: &mut dyn std::io::Write,
 ) -> Result<()> {
     if managed_link(disabled, helper) && fs::symlink_metadata(path).is_err() {
         writeln!(output, "Omarchy screensaver integration is not enabled")?;
@@ -255,7 +256,7 @@ fn status(
     path: &Path,
     disabled: &Path,
     helper: &Path,
-    output: &mut impl std::io::Write,
+    output: &mut dyn std::io::Write,
 ) -> Result<()> {
     if managed_link(path, helper) {
         writeln!(output, "Omarchy screensaver integration: enabled")?;

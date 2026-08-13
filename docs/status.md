@@ -39,6 +39,41 @@ not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain alpha
 interfaces on the documented platform.
 
+## Alpha3 readiness
+
+`0.1.0-alpha3` is not yet released. Its remaining bounded readiness work
+includes:
+
+- packaged graphical acceptance for the Splinterm-owned Omarchy screensaver
+  integration and current Dojo-picker vocabulary;
+- [Plan 0033](plans/0033-alpha3-command-palette-and-keymap-closure.md), which
+  closes the `dojo.close-other-tabs` binding defect, expands the curated palette
+  with implemented everyday actions, shares safe Omarchy-style
+  `Super+C/V/X/Z` behavior with the default profile where context permits,
+  proves built-in and configurable keymaps end to end, and adds registry-drift
+  invariants;
+- [Plan 0035](plans/0035-alpha3-scrollback-enter-safety.md), which makes Enter
+  on a historical focused Splint return live without sending PTY input while
+  retaining normal Enter behavior from the live viewport;
+- [Plan 0034](plans/0034-alpha3-saved-lair-layouts.md), which turns the existing
+  durable Dojo trees, split ratios, launch metadata, and geometry hints into an
+  explicit Save/Preview/Restore Lair workflow while retaining deliberate
+  execution and refusing to guess arbitrary foreground applications;
+- [Plan 0036](plans/0036-alpha3-wayland-file-drop-path-insertion.md), which adds
+  bounded Wayland local regular-file drops that insert deterministic
+  shell-escaped paths into one exact controlled Splint without reading file
+  bodies, retargeting stale offers, or submitting terminal input;
+- one coherent version and release-note reconciliation across Cargo, package,
+  AUR, `.SRCINFO`, README, and status authorities; and
+- private candidate construction and review before any separately authorized
+  protected promotion or AUR publication.
+
+Planned alpha3 work is not part of the validated capability truth table until
+its required non-graphical evidence, review, and separately approved packaged
+graphical acceptance are recorded. Full user-defined tab identity, behavior,
+and appearance are a separate post-alpha3, pre-1.0 roadmap milestone and do not
+block the alpha3 candidate.
+
 ## Capability truth table
 
 | Area | Classification | Current boundary and evidence |

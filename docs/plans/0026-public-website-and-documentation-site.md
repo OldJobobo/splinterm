@@ -322,7 +322,9 @@ The first release should include:
 - structured data for the software application and documentation where accurate;
 - RSS only when a changelog or release-notes stream exists;
 - a generated `llms.txt`/Markdown-oriented index only after its content and security implications are reviewed; and
-- no analytics beacon by default until the desired measurement and privacy policy are explicitly chosen.
+- Cloudflare Pages Web Analytics limited to privacy-preserving aggregate page and
+  visit trends; the terminal application embeds no telemetry, and website
+  analytics must not be treated as terminal-workflow success evidence.
 
 ### Redirects
 

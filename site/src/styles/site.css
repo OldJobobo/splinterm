@@ -290,6 +290,7 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
 .status-section { display: grid; grid-template-columns: .36fr .8fr 1fr; gap: 4vw; }
 .text-link { display: inline-flex; gap: 1rem; margin-top: 2rem; color: var(--signal); font: 400 .72rem var(--mono); text-decoration: none; }
 .text-link:hover { text-decoration: underline; }
+.status-actions { display: flex; flex-wrap: wrap; gap: 0 1.8rem; }
 .capability-list { border-top: 1px solid var(--line-hot); }
 .capability-row { display: grid; grid-template-columns: 38px 1fr auto; gap: 1rem; align-items: center; padding: 1.3rem 0; border-bottom: 1px solid var(--line); }
 .capability-row span { color: var(--dim); font: 300 .62rem var(--mono); }
@@ -306,6 +307,61 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
 .command-stack > div:last-child { border: 0; }
 .command-stack span { color: var(--signal); }
 .command-stack small { color: var(--dim); }
+
+.roadmap-hero {
+  min-height: min(820px, calc(100svh - 76px));
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, .85fr);
+  gap: clamp(3rem, 8vw, 9rem);
+  align-items: center;
+  padding-block: clamp(5rem, 10vw, 10rem);
+  background:
+    linear-gradient(90deg, transparent 0 49.9%, rgb(218 147 54 / .055) 50% 50.1%, transparent 50.2%),
+    linear-gradient(135deg, transparent 0 72%, rgb(107 44 46 / .08) 72% 100%);
+}
+.roadmap-hero h1 { max-width: 900px; margin: 0; font-size: clamp(3.6rem, 7vw, 8rem); font-weight: 500; line-height: .88; letter-spacing: -.078em; }
+.roadmap-hero h1 em { color: var(--signal); font-style: normal; }
+.roadmap-hero-copy > p:not(.eyebrow) { max-width: 700px; margin: 2rem 0 0; color: var(--muted); font-size: clamp(1rem, 1.4vw, 1.22rem); line-height: 1.75; }
+.roadmap-compass { align-self: center; padding: clamp(1.6rem, 3vw, 2.8rem); border: 1px solid var(--line-hot); background: #171719; box-shadow: 20px 20px 0 #191719, 20px 20px 0 1px var(--line); }
+.roadmap-compass > span { color: var(--dim); font: 400 .61rem var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+.roadmap-compass > strong { display: block; margin: 1rem 0 3rem; color: var(--signal); font-size: clamp(2rem, 4vw, 3.8rem); font-weight: 500; letter-spacing: -.06em; }
+.compass-line { display: grid; grid-template-columns: repeat(4, 1fr); align-items: center; height: 1px; margin-inline: .4rem; background: var(--line-hot); }
+.compass-line i { width: 9px; height: 9px; border: 1px solid var(--dim); border-radius: 50%; background: #171719; transform: translateX(-50%); }
+.compass-line i:first-child { border-color: var(--signal); background: var(--signal); box-shadow: 0 0 0 6px rgb(218 147 54 / .12); }
+.roadmap-compass ol { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; margin: 1.2rem 0 3rem; padding: 0; list-style: none; color: var(--dim); font: 300 .57rem/1.4 var(--mono); text-transform: uppercase; }
+.roadmap-compass li.active { color: var(--signal); }
+.roadmap-compass > p { margin: 0; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--dim); font: 300 .62rem/1.5 var(--mono); }
+
+.roadmap-north { display: grid; grid-template-columns: .35fr 1.2fr .65fr; gap: 4vw; align-items: start; padding-block: clamp(5rem, 9vw, 9rem); border-top: 1px solid var(--line); }
+.roadmap-north blockquote { margin: 0; max-width: 980px; font-size: clamp(2.2rem, 4.8vw, 5.2rem); font-weight: 500; line-height: 1.02; letter-spacing: -.06em; }
+.roadmap-north > p { margin: .4rem 0 0; color: var(--muted); font-size: .92rem; line-height: 1.75; }
+
+.public-horizons { border-top: 1px solid var(--line-hot); }
+.public-horizon { display: grid; grid-template-columns: .24fr .76fr 1fr; gap: 4vw; padding-block: clamp(4rem, 8vw, 8rem); border-bottom: 1px solid var(--line); }
+.public-horizon.current { background: linear-gradient(90deg, rgb(218 147 54 / .045), transparent 54%); }
+.public-horizon.explore { opacity: .78; }
+.public-horizon-index { position: relative; color: var(--dim); font: 400 .7rem var(--mono); }
+.public-horizon-index i { position: absolute; top: 2.2rem; bottom: calc(-8rem - 1px); left: .4rem; width: 1px; background: var(--line); }
+.public-horizon:last-child .public-horizon-index i { display: none; }
+.public-horizon.current .public-horizon-index::after { content: ''; position: absolute; top: 1.8rem; left: .12rem; width: .58rem; height: .58rem; border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 7px rgb(218 147 54 / .12); }
+.public-horizon header > p:first-child, .public-horizon-outcomes > p { margin: 0 0 1rem; color: var(--signal); font: 500 .64rem/1.5 var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+.public-horizon header > p:first-child span { color: var(--dim); }
+.public-horizon h2 { font-size: clamp(2.4rem, 4.4vw, 4.8rem); }
+.horizon-summary { max-width: 590px; margin: 1.6rem 0 0; color: var(--muted); line-height: 1.75; }
+.public-horizon-outcomes ul { margin: 0; padding: 0; border-top: 1px solid var(--line-hot); list-style: none; }
+.public-horizon-outcomes li { position: relative; padding: 1rem 0 1rem 1.4rem; border-bottom: 1px solid var(--line); color: #c5c5c0; font: 300 .72rem/1.55 var(--mono); }
+.public-horizon-outcomes li::before { content: '/'; position: absolute; left: 0; color: var(--signal); }
+.public-horizon-signal { margin-top: 1.5rem; padding: 1.2rem 1.4rem; border-left: 2px solid var(--signal); background: var(--panel); color: var(--muted); font-size: .84rem; line-height: 1.65; }
+.public-horizon-signal span { display: block; margin-bottom: .4rem; color: var(--ink); font: 500 .59rem var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+
+.roadmap-boundaries { display: grid; grid-template-columns: .85fr 1.15fr; gap: 8vw; padding-block: clamp(5rem, 9vw, 9rem); background: var(--panel); }
+.roadmap-boundaries ul { display: grid; grid-template-columns: 1fr 1fr; margin: 0; padding: 0; border-top: 1px solid var(--line-hot); border-left: 1px solid var(--line); list-style: none; }
+.roadmap-boundaries li { min-height: 100px; padding: 1.2rem; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font: 300 .7rem/1.5 var(--mono); }
+.roadmap-boundaries li::before { content: '× '; color: var(--signal); }
+.roadmap-boundaries code { color: var(--signal); }
+.roadmap-exit { display: grid; grid-template-columns: .8fr 1.2fr; gap: 8vw; align-items: end; padding-block: clamp(5rem, 9vw, 9rem); }
+.roadmap-exit > div:last-child > p { max-width: 680px; margin: 0; color: var(--muted); line-height: 1.75; }
+.roadmap-exit .text-link { align-self: center; margin-top: 0; }
 
 .docs-gateway { display: grid; grid-template-columns: .8fr 1.2fr; gap: 8vw; padding-block: clamp(5rem, 9vw, 9rem); }
 .gateway-links { border-top: 1px solid var(--line-hot); }
@@ -340,7 +396,10 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
   .performance-heading, .performance-feature, .benchmark-grid, .benchmark-note { grid-column: 1; }
   .performance-feature { grid-row: auto; margin-top: 2rem; }
   .control-heading { grid-template-columns: 1fr; }
-  .first-workflow, .docs-gateway { grid-template-columns: 1fr; }
+  .first-workflow, .docs-gateway, .roadmap-hero, .roadmap-north, .public-horizon, .roadmap-boundaries, .roadmap-exit { grid-template-columns: 1fr; }
+  .roadmap-compass { margin: 1rem 0 2rem; }
+  .public-horizon-index { min-height: 1.5rem; }
+  .public-horizon-index i { display: none; }
 }
 
 @media (max-width: 760px) {
@@ -376,6 +435,10 @@ h2 { margin: 0; font-size: clamp(2.4rem, 4.5vw, 5rem); line-height: 1.02; letter
   .capability-row i { grid-column: 2; }
   .command-stack > div { grid-template-columns: 18px 1fr; padding-block: .8rem; }
   .command-stack small { grid-column: 2; margin-top: .35rem; }
+  .roadmap-hero { background-image: none; }
+  .roadmap-hero h1 { font-size: clamp(3.2rem, 16vw, 5.5rem); }
+  .roadmap-compass ol { grid-template-columns: 1fr 1fr; gap: .8rem; }
+  .roadmap-boundaries ul { grid-template-columns: 1fr; }
   .gateway-links a { grid-template-columns: 1fr auto; }
   .gateway-links small { grid-column: 1; }
   .gateway-links i { grid-column: 2; grid-row: 1 / span 2; }

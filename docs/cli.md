@@ -78,6 +78,8 @@ paths. With no focused Splinterm Window, its two projection fields are null.
 | `preset run NAME [--cwd DIR] [--param NAME=VALUE]... [--no-open]` | Run a packaged or user preset using one exact invoking/focused context and atomic topology transaction. |
 | `preset shell-init omarchy --shell bash` | Print guarded `s*` Bash functions without writing or sourcing anything. |
 | `preset shell-install omarchy --shell bash` | Create the dedicated integration file without replacing it or editing shell startup files. |
+| `integration omarchy enable\|status\|disable` | Manage the complete user-level Omarchy default-terminal, terminal-tag, and screensaver setup as one reversible lifecycle. |
+| `integration omarchy-screensaver enable\|status\|disable` | Manage only the legacy screensaver component. |
 | `split TARGET_SPLINT_ID --axis horizontal|vertical --side first|second [--ratio N] [--cwd DIR] [-- ARGV...]` | Split a leaf and launch its sibling. |
 | `ratio TARGET_SPLINT_ID RATIO` | Set the selected leaf's parent split ratio in thousandths. |
 | `rename-lair LAIR_ID NAME` | Rename a Lair. |
@@ -230,9 +232,15 @@ built from the resolved keymap. `Prefix+[` enters vi copy mode: move with
 and leave, or Escape to cancel. Selection spans visible and bounded loaded
 history without sending keys to the terminal application.
 
-Outside copy mode, `Super+C/V` copy the terminal selection and perform
-safe/bracketed paste. Splinterm-owned command-palette, search, and rename fields
-also support `Super+A`, `Super+C/V/X/Z`, and Shift+Left/Right for bounded local
+Outside copy mode, both built-in profiles use `Super+C/V` to copy the terminal
+selection and perform safe/bracketed paste; both profiles retain
+`Ctrl+Shift+C/V` and accept Omarchy's terminal-tagged
+`Ctrl+Insert`/`Shift+Insert`. Omarchy must classify `com.oldjobobo.splinterm` as
+terminal; ordinary `Ctrl+C` remains terminal interrupt. In copy mode, `Super+C` copies the active selection and exits,
+while `Super+V/X/Z` are consumed locally. These Super shortcuts work only when
+the compositor delivers the chord to the Splinterm Window. Splinterm-owned
+command-palette, search, and rename fields also support `Super+A`,
+`Super+C/V/X/Z`, and Shift+Left/Right for bounded local
 selection, clipboard editing, and undo. Terminal panes do not claim Super+X/Z as
 universal cut/undo because the child application owns its input buffer.
 

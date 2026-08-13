@@ -126,12 +126,13 @@ use crate::diagnostics::{
 use crate::frontend::{
     AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
     BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction, CommandHistoryAction,
-    CommandPaletteContext, CommandPaletteUi, CommandZoomAction, DojoPromptUi, LairDirection,
-    LairPromptKind, PerfTraceCorrelation, SelectorKind, SessionPickerDecision, SessionPickerItem,
-    SessionPickerUi, TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch,
-    TabMenuRightPress, TerminationDecision, ThemeUpdate, TrustedConsentUi, WindowCommand,
-    WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
-    WindowTopologyUpdate, WindowUpdate, command_dispatch, tab_menu_dispatch, tab_menu_right_press,
+    CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability, CommandZoomAction,
+    DojoPromptUi, LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind,
+    SessionPickerDecision, SessionPickerItem, SessionPickerUi, TabContextMenuUi, TabMenuActionId,
+    TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminationDecision, ThemeUpdate,
+    TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, close_other_tabs_command,
+    command_dispatch, tab_menu_dispatch, tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -186,12 +187,13 @@ use damage::{
     terminal_draw_waits_for_frame,
 };
 use input::{
-    CommandPaletteShortcutAction, FontZoomAction, HistoryNavigation, ModalPointerFrame,
-    MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile, PressOwner,
-    SessionPickerShortcutAction, TabShortcutAction, WheelAccumulator, WheelOutcome,
+    CommandPaletteShortcutAction, CopyModeDesktopAction, FontZoomAction, HistoryNavigation,
+    ModalPointerFrame, MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile,
+    PressOwner, SessionPickerShortcutAction, TabShortcutAction, WheelAccumulator, WheelOutcome,
     application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
-    font_zoom_action, history_overlay_status, history_return_to_live_hit, key_input,
-    keymap_press_for, local_selection_owner, mouse_report, pane_focus_action, pane_topology_action,
+    consume_detached_enter_press, copy_mode_desktop_action, font_zoom_action,
+    history_overlay_status, history_return_to_live_hit, key_input, keymap_press_for,
+    local_selection_owner, mouse_report, pane_focus_action, pane_topology_action,
     pending_selection_drag_anchor, picker_ime_reconcile, picker_release_activation,
     pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
     shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
@@ -754,6 +756,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             lair_id: LairId::new(),
             dojo_id: DojoId::new(),
             lair_name: String::new(),
+            lair_retention: splinterm_core::LairRetention::Disposable,
             dojo_name: String::new(),
         });
     if let Some(diagnostics) = diagnostics() {
@@ -2013,7 +2016,7 @@ impl SchedulingState {
                 Some(DiagnosticErrorCode::WaylandDispatch),
             );
         }
-        eprintln!("splinterm Wayland client failed");
+        eprintln!("splinterm Wayland client failed: {error:#}");
         self.failure = Some(error);
         self.request_exit(ExitClass::ErrorWaylandDispatch);
     }
@@ -3519,6 +3522,30 @@ impl App {
         std::fs::rename(&temporary, &probe.report_path).context("publish sign-off report")
     }
 
+    fn apply_history_navigation(
+        &mut self,
+        navigation: HistoryNavigation,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<()> {
+        let page = self
+            .panes
+            .pane
+            .snapshot
+            .as_ref()
+            .map_or(1, |snapshot| snapshot.rows.saturating_sub(1).max(1));
+        let changed = match navigation {
+            HistoryNavigation::PageUp => self.scroll_history(MouseAction::WheelUp, page)?,
+            HistoryNavigation::PageDown => self.scroll_history(MouseAction::WheelDown, page)?,
+            HistoryNavigation::ReturnToLive => {
+                self.scroll_history(MouseAction::WheelDown, usize::MAX)?
+            }
+        };
+        if changed && self.surface.configured {
+            self.schedule_draw(queue_handle)?;
+        }
+        Ok(())
+    }
+
     fn handle_history_key(
         &mut self,
         event: &KeyEvent,
@@ -3533,31 +3560,7 @@ impl App {
                 }
                 _ => return Ok(false),
             };
-        let page = self
-            .panes
-            .pane
-            .snapshot
-            .as_ref()
-            .map_or(1, |snapshot| snapshot.rows.saturating_sub(1).max(1));
-        match navigation {
-            HistoryNavigation::PageUp => {
-                if self.scroll_history(MouseAction::WheelUp, page)? && self.surface.configured {
-                    self.schedule_draw(queue_handle)?;
-                }
-            }
-            HistoryNavigation::PageDown => {
-                if self.scroll_history(MouseAction::WheelDown, page)? && self.surface.configured {
-                    self.schedule_draw(queue_handle)?;
-                }
-            }
-            HistoryNavigation::ReturnToLive => {
-                if self.scroll_history(MouseAction::WheelDown, usize::MAX)?
-                    && self.surface.configured
-                {
-                    self.schedule_draw(queue_handle)?;
-                }
-            }
-        }
+        self.apply_history_navigation(navigation, queue_handle)?;
         Ok(true)
     }
 
@@ -3682,6 +3685,22 @@ impl App {
         self.presentation.full_redraw = true;
     }
 
+    fn publish_copy_mode_selection_and_close(
+        &mut self,
+        state: CopyModeState,
+        queue_handle: &QueueHandle<Self>,
+        serial: u32,
+    ) {
+        if state.selecting() {
+            self.modal.copy_mode = Some(state);
+            self.panes.pane.selection = Some(state.overlay_selection());
+            self.panes.pane.selecting = true;
+            self.finish_selection();
+            self.publish_clipboard(queue_handle, serial, false);
+        }
+        self.close_copy_mode();
+    }
+
     fn handle_copy_mode_key(
         &mut self,
         event: &KeyEvent,
@@ -3703,6 +3722,14 @@ impl App {
         }
         let plain =
             !self.input.modifiers.ctrl && !self.input.modifiers.alt && !self.input.modifiers.logo;
+        match copy_mode_desktop_action(event.keysym, self.input.modifiers) {
+            Some(CopyModeDesktopAction::CopySelection) => {
+                self.publish_copy_mode_selection_and_close(state, queue_handle, serial);
+                return Ok(true);
+            }
+            Some(CopyModeDesktopAction::Consume) => return Ok(true),
+            None => {}
+        }
         match event.keysym {
             Keysym::Escape => {
                 self.close_copy_mode();
@@ -3719,14 +3746,7 @@ impl App {
                 return Ok(true);
             }
             Keysym::y | Keysym::Y if plain => {
-                if state.selecting() {
-                    self.modal.copy_mode = Some(state);
-                    self.panes.pane.selection = Some(state.overlay_selection());
-                    self.panes.pane.selecting = true;
-                    self.finish_selection();
-                    self.publish_clipboard(queue_handle, serial, false);
-                }
-                self.close_copy_mode();
+                self.publish_copy_mode_selection_and_close(state, queue_handle, serial);
                 return Ok(true);
             }
             _ => {}
@@ -4381,8 +4401,15 @@ impl App {
         self.modal.session_picker_wheel = WheelAccumulator::default();
         let multiple_tabs = self.tab_state.tabs.len() > 1;
         let active_dojo_id = self.tab_state.active_dojo_id();
+        let active_tab_index = self
+            .tab_state
+            .tabs
+            .iter()
+            .position(|tab| tab.dojo_id == active_dojo_id)
+            .context("active Dojo is missing from the Window tab set")?;
         self.modal.command_palette = Some(CommandPaletteUi::new(CommandPaletteContext {
             lair_id: self.tab_state.active_identity.lair_id,
+            lair_retention: self.tab_state.active_identity.lair_retention,
             focused_cwd: self.focused_cwd()?,
             dojo_id: active_dojo_id,
             dojo_name: self.tab_state.active_identity.dojo_name.clone(),
@@ -4406,6 +4433,10 @@ impl App {
                 .then(|| self.tab_state.tabs.previous())
                 .flatten(),
             next_dojo_id: multiple_tabs.then(|| self.tab_state.tabs.next()).flatten(),
+            tab_move: CommandTabMoveAvailability::from_edges(
+                active_tab_index > 0,
+                active_tab_index + 1 < self.tab_state.tabs.len(),
+            ),
             focus_left: self.directional_splint(FocusDirection::Left),
             focus_right: self.directional_splint(FocusDirection::Right),
             focus_up: self.directional_splint(FocusDirection::Up),
@@ -4438,6 +4469,21 @@ impl App {
         self.modal.binding_help = Some(BindingHelpUi::new(&self.input.keymap));
         self.surface.window.set_title("Splinterm — Key bindings");
         Ok(())
+    }
+
+    fn reload_keymap_configuration(&mut self) {
+        match crate::config::load_default() {
+            Ok(loaded) => {
+                self.input.keymap = loaded.config.keymap;
+                self.input.prefix_timeout =
+                    std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
+                self.input.prefix_state.clear();
+                for _ in loaded.diagnostics {
+                    eprintln!("splinterm configuration warning");
+                }
+            }
+            Err(_) => eprintln!("splinterm config reload rejected"),
+        }
     }
 
     fn close_command_palette(&mut self) -> bool {
@@ -4501,7 +4547,54 @@ impl App {
             self.reconcile_command_palette_close(queue_handle);
         }
         let result = match dispatch {
+            BuiltInCommandDispatch::ShowKeybindings => self.show_binding_help(),
+            BuiltInCommandDispatch::ReloadConfiguration => {
+                self.reload_keymap_configuration();
+                Ok(())
+            }
+            BuiltInCommandDispatch::EnterCopyMode => {
+                self.enter_copy_mode();
+                Ok(())
+            }
+            BuiltInCommandDispatch::ToggleFocusedPaneZoom => {
+                self.toggle_pane_zoom();
+                Ok(())
+            }
+            BuiltInCommandDispatch::MoveDojo { dojo_id, delta } => (|| -> Result<()> {
+                let source = self
+                    .tab_state
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.dojo_id == dojo_id)
+                    .context("captured Dojo tab is no longer available")?;
+                let target = if delta.is_negative() {
+                    source.saturating_sub(delta.unsigned_abs())
+                } else {
+                    source
+                        .saturating_add(delta.unsigned_abs())
+                        .min(self.tab_state.tabs.len().saturating_sub(1))
+                };
+                anyhow::ensure!(target != source, "captured Dojo tab cannot move further");
+                anyhow::ensure!(
+                    self.tab_state.tabs.move_tab(dojo_id, target),
+                    "captured Dojo tab move was rejected"
+                );
+                self.presentation.full_redraw = true;
+                Ok(())
+            })(),
+            BuiltInCommandDispatch::DetachWindow => {
+                self.scheduling.request_exit(ExitClass::CleanUserClose);
+                Ok(())
+            }
             BuiltInCommandDispatch::Topology(mut command) => (|| -> Result<()> {
+                let requests_picker = matches!(
+                    &command,
+                    WindowTopologyCommand::RequestSelector { .. }
+                        | WindowTopologyCommand::RequestLairPrompt { .. }
+                );
+                if requests_picker {
+                    self.modal.session_picker_requested = true;
+                }
                 let pending_started = if self.input.optimistic_remote_splits
                     && let WindowTopologyCommand::Split {
                         target,
@@ -4521,7 +4614,12 @@ impl App {
                 } else {
                     false
                 };
-                self.send_topology_command(command)?;
+                if let Err(error) = self.send_topology_command(command) {
+                    if requests_picker {
+                        self.modal.session_picker_requested = false;
+                    }
+                    return Err(error);
+                }
                 if pending_started && self.surface.configured {
                     self.schedule_draw(queue_handle)?;
                 }
@@ -4858,6 +4956,8 @@ impl App {
             DojoPromptUi::Rename(_) => "Splinterm — Rename Tab",
             DojoPromptUi::Terminate(_) => "Splinterm — Confirm Dojo Termination",
             DojoPromptUi::RenameLair(_) => "Splinterm — Rename Lair",
+            DojoPromptUi::PreviewLair(_) => "Splinterm — Saved Lair Preview",
+            DojoPromptUi::RestoreLair(_) => "Splinterm — Restore Saved Lair",
             DojoPromptUi::TerminateLair(_) => "Splinterm — Confirm Lair Termination",
         };
         self.modal.dojo_prompt = Some(prompt);
@@ -4887,8 +4987,9 @@ impl App {
             Some(DojoPromptUi::Rename(prompt)) => prompt.command(),
             Some(DojoPromptUi::Terminate(prompt)) => prompt.command(),
             Some(DojoPromptUi::RenameLair(prompt)) => prompt.command(),
+            Some(DojoPromptUi::PreviewLair(_)) | None => None,
+            Some(DojoPromptUi::RestoreLair(prompt)) => prompt.command(),
             Some(DojoPromptUi::TerminateLair(prompt)) => prompt.command(),
-            None => None,
         };
         if command.is_none()
             && self
@@ -5533,10 +5634,18 @@ impl App {
                             Some(DojoPromptUi::Terminate(confirmation)) => {
                                 changed |= confirmation.select(decision);
                             }
+                            Some(DojoPromptUi::RestoreLair(confirmation)) => {
+                                changed |= confirmation.select(decision);
+                            }
                             Some(DojoPromptUi::TerminateLair(confirmation)) => {
                                 changed |= confirmation.select(decision);
                             }
-                            Some(DojoPromptUi::Rename(_) | DojoPromptUi::RenameLair(_)) | None => {}
+                            Some(
+                                DojoPromptUi::Rename(_)
+                                | DojoPromptUi::RenameLair(_)
+                                | DojoPromptUi::PreviewLair(_),
+                            )
+                            | None => {}
                         }
                     }
                 } else {
@@ -5546,7 +5655,18 @@ impl App {
             PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                 let pressed = self.modal.dojo_prompt_pressed.take();
                 changed |= pressed.is_some();
-                execute = pressed.is_some() && pressed == target;
+                if self
+                    .modal
+                    .dojo_prompt
+                    .as_ref()
+                    .is_some_and(DojoPromptUi::is_preview)
+                    && pressed == Some(TerminationDecision::Cancel)
+                    && pressed == target
+                {
+                    changed |= self.close_dojo_prompt();
+                } else {
+                    execute = pressed.is_some() && pressed == target;
+                }
             }
             _ => {}
         }
@@ -5917,6 +6037,18 @@ impl App {
                                 changed = rename.append_text(text);
                             }
                         }
+                        _ => {}
+                    },
+                    DojoPromptUi::PreviewLair(_) => match event.keysym {
+                        Keysym::Return | Keysym::KP_Enter | Keysym::Escape => close = true,
+                        _ => {}
+                    },
+                    DojoPromptUi::RestoreLair(confirmation) => match event.keysym {
+                        Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down | Keysym::Tab => {
+                            changed = confirmation.move_selection();
+                        }
+                        Keysym::Return | Keysym::KP_Enter => execute = true,
+                        Keysym::Escape => close = true,
                         _ => {}
                     },
                     DojoPromptUi::TerminateLair(confirmation) => match event.keysym {
@@ -6734,14 +6866,14 @@ impl App {
                     self.presentation.full_redraw = true;
                     changed = true;
                 }
-                WindowTopologyUpdate::TabFailed {
-                    dojo_id: _,
-                    message: _,
-                } => {
+                WindowTopologyUpdate::TabFailed { dojo_id, message } => {
                     self.close_inline_session_picker();
                     self.modal.session_picker_requested = false;
                     self.tab_state.session_switch_pending = false;
-                    eprintln!("splinterm Dojo tab failed");
+                    eprintln!(
+                        "splinterm topology action failed{}: {message}",
+                        dojo_id.map_or_else(String::new, |id| format!(" for Dojo {id}"))
+                    );
                 }
                 WindowTopologyUpdate::ShowSessionPicker { items, targets } => {
                     if self.modal.session_picker_requested
@@ -6773,6 +6905,8 @@ impl App {
                     self.modal.session_picker_requested = false;
                     let prompt = match kind {
                         LairPromptKind::Rename => DojoPromptUi::rename_lair(target),
+                        LairPromptKind::Preview => DojoPromptUi::preview_lair(target),
+                        LairPromptKind::Restore => DojoPromptUi::restore_lair(target),
                         LairPromptKind::Terminate => DojoPromptUi::terminate_lair(target),
                     };
                     self.show_dojo_prompt(prompt);
@@ -9645,6 +9779,7 @@ mod tests {
                 lair_id: LairId::new(),
                 dojo_id: DojoId::new(),
                 lair_name: "hidden lair".to_owned(),
+                lair_retention: splinterm_core::LairRetention::Disposable,
                 dojo_name: "hidden dojo".to_owned(),
             },
             LayoutNode::Leaf(splint),
@@ -9705,6 +9840,7 @@ mod tests {
                 lair_id: LairId::new(),
                 dojo_id: DojoId::new(),
                 lair_name: "hidden lair".to_owned(),
+                lair_retention: splinterm_core::LairRetention::Disposable,
                 dojo_name: "hidden dojo".to_owned(),
             },
             layout,
@@ -9781,6 +9917,7 @@ mod tests {
                 lair_id,
                 dojo_id,
                 lair_name: "image lair".to_owned(),
+                lair_retention: splinterm_core::LairRetention::Disposable,
                 dojo_name: "image dojo".to_owned(),
             },
             LayoutNode::Leaf(splint),
@@ -10698,6 +10835,7 @@ mod tests {
                 lair_id: LairId::new(),
                 dojo_id: DojoId::new(),
                 lair_name: "test lair".to_owned(),
+                lair_retention: splinterm_core::LairRetention::Disposable,
                 dojo_name: "test dojo".to_owned(),
             },
             LayoutNode::Leaf(splint),

@@ -135,6 +135,26 @@ impl LairLifetime {
     }
 }
 
+/// Durable retention policy for a persistent Lair recipe.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LairRetention {
+    /// Eligible for bounded retirement only after every Splint has exited.
+    #[default]
+    Disposable,
+    /// Explicitly saved and protected from automatic retirement.
+    Saved,
+    /// Explicitly pinned and protected from automatic retirement.
+    Pinned,
+}
+
+impl LairRetention {
+    #[must_use]
+    pub const fn is_protected(self) -> bool {
+        matches!(self, Self::Saved | Self::Pinned)
+    }
+}
+
 /// A named session containing Dojos.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lair {
@@ -142,6 +162,11 @@ pub struct Lair {
     pub name: String,
     #[serde(default, skip_serializing_if = "LairLifetime::is_persistent")]
     pub lifetime: LairLifetime,
+    #[serde(default)]
+    pub retention: LairRetention,
+    /// Bounded, presentation-only origin label retained independently of its source file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
     pub dojos: Vec<Dojo>,
 }
 
@@ -161,6 +186,8 @@ impl Lair {
             id: LairId::new(),
             name: name.into(),
             lifetime,
+            retention: LairRetention::Disposable,
+            provenance: None,
             dojos: vec![Dojo::with_shell("terminal", cwd)],
         }
     }
@@ -433,6 +460,16 @@ impl Topology {
         name: impl Into<String>,
         dojos: Vec<Dojo>,
     ) -> Result<(LairId, TopologyRevision), TopologyError> {
+        self.materialize_lair_with_provenance_at(expected, name, dojos, None)
+    }
+
+    pub fn materialize_lair_with_provenance_at(
+        &mut self,
+        expected: TopologyRevision,
+        name: impl Into<String>,
+        dojos: Vec<Dojo>,
+        provenance: Option<String>,
+    ) -> Result<(LairId, TopologyRevision), TopologyError> {
         self.check_revision(expected)?;
         if dojos.is_empty() {
             return Err(TopologyError::EmptyDojoSet);
@@ -449,6 +486,8 @@ impl Topology {
                 id: lair_id,
                 name,
                 lifetime: LairLifetime::Persistent,
+                retention: LairRetention::Disposable,
+                provenance,
                 dojos,
             },
         );
@@ -489,6 +528,25 @@ impl Topology {
         self.lairs
             .remove(&lair_id)
             .ok_or(TopologyError::LairNotFound(lair_id))?;
+        self.advance_revision();
+        Ok(self.revision)
+    }
+
+    pub fn set_lair_retention_at(
+        &mut self,
+        expected: TopologyRevision,
+        lair_id: LairId,
+        retention: LairRetention,
+    ) -> Result<TopologyRevision, TopologyError> {
+        self.check_revision(expected)?;
+        let lair = self
+            .lairs
+            .get_mut(&lair_id)
+            .ok_or(TopologyError::LairNotFound(lair_id))?;
+        if !lair.lifetime.is_persistent() {
+            return Err(TopologyError::TransientLairRetention(lair_id));
+        }
+        lair.retention = retention;
         self.advance_revision();
         Ok(self.revision)
     }
@@ -746,6 +804,8 @@ pub enum TopologyError {
     LairNotFound(LairId),
     #[error("Lair {0:?} already exists")]
     DuplicateLairId(LairId),
+    #[error("transient Lair {0:?} cannot be saved or pinned")]
+    TransientLairRetention(LairId),
     #[error("Dojo {0:?} does not exist")]
     DojoNotFound(DojoId),
     #[error("preset materialization requires at least one Dojo")]
@@ -812,6 +872,37 @@ mod tests {
         assert_eq!(topology.lairs().count(), 2);
         assert!(topology.lairs().all(|lair| lair.id != removed));
         assert!(topology.lairs().any(|lair| lair.id == inserted_id));
+    }
+
+    #[test]
+    fn lair_retention_is_revision_bound_and_rejects_transient_lairs() {
+        let mut topology = Topology::new();
+        let lair_id = topology
+            .create_lair("main", PathBuf::from("/tmp"))
+            .unwrap()
+            .id;
+        let stale = topology.revision();
+        topology
+            .set_lair_retention_at(stale, lair_id, LairRetention::Saved)
+            .unwrap();
+        assert_eq!(
+            topology.find_lair(lair_id).unwrap().retention,
+            LairRetention::Saved
+        );
+        assert!(matches!(
+            topology.set_lair_retention_at(stale, lair_id, LairRetention::Pinned),
+            Err(TopologyError::StaleTopology { .. })
+        ));
+
+        let transient = Lair::transient("private", PathBuf::from("/tmp"));
+        let transient_id = transient.id;
+        topology
+            .insert_lair_at(topology.revision(), transient)
+            .unwrap();
+        assert_eq!(
+            topology.set_lair_retention_at(topology.revision(), transient_id, LairRetention::Saved),
+            Err(TopologyError::TransientLairRetention(transient_id))
+        );
     }
 
     #[test]

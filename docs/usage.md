@@ -95,15 +95,15 @@ The built-in application controls are:
 | Split right | `Ctrl+Shift+\` |
 | Focus pane | `Ctrl+Shift+Arrow` |
 | Close focused managed pane | `Ctrl+Shift+W` |
-| Resize pane smaller/larger | Command palette |
+| Resize pane smaller/larger | `Ctrl+Shift+[` / `Ctrl+Shift+]` |
 | New Dojo tab | `Ctrl+Shift+D` |
 | Previous/next Dojo tab | `Ctrl+Shift+Tab` / `Ctrl+Tab` |
 | Detach active tab | `Ctrl+Shift+Q` |
 | Toggle Dojo tab strip | `Ctrl+Shift+B` (`Prefix+B` in `omarchy-tmux`) |
 | Search scrollback | `Ctrl+Shift+F` |
 | Page history | `Shift+PageUp` / `Shift+PageDown` |
-| Return to live output | `Shift+End` |
-| Copy / paste | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
+| Return to live output | `Shift+End`, or plain Enter while viewing history |
+| Copy / paste | `Super+C` / `Super+V` (`Ctrl+Shift+C/V`, `Ctrl+Insert`/`Shift+Insert` aliases) |
 | Release control | `Ctrl+Shift+L` |
 | Request control transfer | `Ctrl+Shift+T` |
 | Accept / deny transfer | `Ctrl+Shift+Y` / `Ctrl+Shift+N` |
@@ -115,8 +115,12 @@ Application-owned chords are consumed rather than forwarded to the PTY. In a
 legacy direct single-Splint attachment, `Ctrl+Shift+W` remains terminal input;
 it closes only a focused Splint in a managed multi-pane Window.
 
-The command palette exposes the same typed action registry used by keyboard
-bindings and labels unavailable actions rather than guessing a target. Type to
+The command palette is a curated trusted subset of the same typed action registry
+used by keyboard bindings and projects shortcut labels from the effective
+resolved keymap. It exposes keybinding help, configuration reload, copy mode,
+focused-pane zoom, Dojo and Lair selection/navigation/management, and Window
+detach alongside the existing pane, history, view, and control actions. It labels
+unavailable actions rather than guessing or retargeting a resource. Type to
 filter, use arrows to navigate, Enter to run, and Escape to close.
 
 See [Configuration](configuration.md#keymap-configuration) for the strict built-in
@@ -127,10 +131,17 @@ With the `omarchy-tmux` profile, `Prefix+B` toggles the Dojo tab strip,
 `Prefix+?` opens trusted read-only help generated from the resolved keymap, and
 `Prefix+[` enters client-local vi copy mode.
 Move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown; press `v` to begin a
-selection, `y` to publish it to the Wayland clipboard and exit, or Escape to
-cancel. Copy mode never forwards these keys, pointer input, paste, or IME text to
-the terminal application. Outside copy mode, `Super+C/V` provide terminal
-copy/paste. Splinterm-owned command-palette, search, and rename fields also offer
+selection, `y` or `Super+C` to publish it to the Wayland clipboard and exit, or
+Escape to cancel. Copy-mode `Super+V/X/Z` are consumed locally; copy mode never
+forwards these keys, pointer input, paste, or IME text to the terminal
+application. Outside copy mode, both built-in profiles provide terminal
+`Super+C/V` copy/paste while both profiles retain `Ctrl+Shift+C/V` aliases.
+Omarchy's universal shortcuts arrive as `Ctrl+Insert`/`Shift+Insert` when
+`com.oldjobobo.splinterm` carries Omarchy's `terminal` tag; both profiles accept
+that form. Without the terminal classification Omarchy may inject ordinary
+`Ctrl+C`, which remains terminal interrupt. These Super shortcuts work only when the compositor
+delivers the chord to the Splinterm Window. Splinterm-owned command-palette,
+search, and rename fields also offer
 bounded local selection, cut, paste, and undo; terminal `Super+X/Z` remain owned
 by the running application.
 
@@ -155,7 +166,10 @@ Pasting requires the graphical client to hold terminal input control.
 
 ## Scrollback and search
 
-`Ctrl+Shift+F` opens local literal scrollback search. Enter submits, `Ctrl+N` and
+While the focused pane is viewing historical output, plain Enter or keypad Enter
+returns it to live output and sends no PTY bytes; a later Enter pressed while
+already live submits normally. `Ctrl+Shift+F` opens local literal scrollback
+search. Enter submits, `Ctrl+N` and
 `Ctrl+P` navigate matches, and Escape closes the trusted search surface. Search
 queries are not injected into the terminal. History paging remains bounded and
 preserves follow-live behavior when returning with `Shift+End`.

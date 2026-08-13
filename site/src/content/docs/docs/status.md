@@ -3,7 +3,7 @@ title: Current status
 description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
 ---
 
-Splinterm is a **public alpha**. Source, documentation, the versioned AUR package, and verified commit-bound edge packages are public. Substantial core behavior is implemented and validated, while the supported target remains narrow and stable compatibility guarantees have not been released.
+Splinterm is a **public alpha**. Source, documentation, the versioned AUR package, and verified commit-bound edge packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
 Alpha2 is a critical keyboard-input hotfix. It restores command palette navigation, plain Enter activation, Escape dismissal, and plain Enter confirmation in rename prompts.
 
@@ -47,4 +47,4 @@ Persistent topology is also separate from graphical presentation. Creating or mu
 
 ## Before depending on it
 
-Review the repository roadmap and the exact specialist documentation for the feature you intend to use. Public alpha availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.
+Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Public alpha availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.

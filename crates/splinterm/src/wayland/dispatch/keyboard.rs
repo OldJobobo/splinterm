@@ -4,8 +4,9 @@ use super::super::{
     ActionId, App, CommandPaletteShortcutAction, Connection, ExitClass, KeyEvent, KeyboardHandler,
     KeymapPress, Keysym, Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle,
     RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
-    WindowTopologyCommand, command_palette_shortcut_action, font_zoom_action, keymap_press_for,
-    pane_focus_action, pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
+    WindowTopologyCommand, close_other_tabs_command, command_palette_shortcut_action,
+    consume_detached_enter_press, font_zoom_action, keymap_press_for, pane_focus_action,
+    pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
     tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
 };
 
@@ -122,6 +123,19 @@ impl KeyboardHandler for App {
             }
             return;
         }
+        if let Some(navigation) = consume_detached_enter_press(
+            event.keysym,
+            self.input.modifiers,
+            !self.panes.pane.scrollback_viewport.is_live(),
+            event.raw_code,
+            &mut self.modal.session_picker_consumed_keys,
+        ) {
+            self.input.prefix_state.clear();
+            if let Err(error) = self.apply_history_navigation(navigation, queue_handle) {
+                self.scheduling.fail(error);
+            }
+            return;
+        }
         let prefix_was_armed = self.input.prefix_state.is_armed();
         let shortcut = match keymap_press_for(
             &self.input.keymap,
@@ -213,6 +227,17 @@ impl KeyboardHandler for App {
                     TabShortcutAction::Close => Some(WindowTopologyCommand::CloseTab {
                         dojo_id: self.tab_state.active_dojo_id(),
                     }),
+                    TabShortcutAction::CloseOthers => {
+                        let retain_dojo_id = self.tab_state.active_dojo_id();
+                        let dojo_ids = self
+                            .tab_state
+                            .tabs
+                            .iter()
+                            .map(|tab| tab.dojo_id)
+                            .filter(|dojo_id| *dojo_id != retain_dojo_id)
+                            .collect::<Vec<_>>();
+                        close_other_tabs_command(retain_dojo_id, dojo_ids)
+                    }
                     TabShortcutAction::Select(index) => self.tab_state.tabs.at(index).map(|tab| {
                         WindowTopologyCommand::ActivateTab {
                             dojo_id: tab.dojo_id,
@@ -375,18 +400,7 @@ impl KeyboardHandler for App {
                 return;
             }
             Some(ActionId::ConfigReload) => {
-                match crate::config::load_default() {
-                    Ok(loaded) => {
-                        self.input.keymap = loaded.config.keymap;
-                        self.input.prefix_timeout =
-                            std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
-                        self.input.prefix_state.clear();
-                        for _ in loaded.diagnostics {
-                            eprintln!("splinterm configuration warning");
-                        }
-                    }
-                    Err(_) => eprintln!("splinterm config reload rejected"),
-                }
+                self.reload_keymap_configuration();
                 return;
             }
             Some(ActionId::SendPrefix) => {

@@ -21,6 +21,7 @@ export default defineConfig({
           items: [
             { label: 'Documentation home', slug: 'docs' },
             { label: 'Current status', slug: 'docs/status' },
+            { label: 'Roadmap', slug: 'docs/roadmap' },
             { label: 'Installation', slug: 'docs/install' },
             { label: 'Quickstart', slug: 'docs/quickstart' },
             { label: 'CLI reference', slug: 'docs/cli' },

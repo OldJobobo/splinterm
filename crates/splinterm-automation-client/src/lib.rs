@@ -1399,6 +1399,7 @@ fn audit_operation_name(operation: AuditOperation) -> &'static str {
         AuditOperation::RestoreSplint => "restore_splint",
         AuditOperation::RestoreDojo => "restore_dojo",
         AuditOperation::RestoreLair => "restore_lair",
+        AuditOperation::SetLairRetention => "set_lair_retention",
         AuditOperation::CloseSplint => "close_splint",
         AuditOperation::SetSplitRatio => "set_split_ratio",
         AuditOperation::NewDojo => "new_dojo",
@@ -2384,6 +2385,7 @@ impl CliEventV2 {
             TopologyChangeKind::DojoClosed => "dojo_closed",
             TopologyChangeKind::LairTerminated => "lair_terminated",
             TopologyChangeKind::LairRenamed => "lair_renamed",
+            TopologyChangeKind::LairRetentionChanged => "lair_retention_changed",
             TopologyChangeKind::DojoRenamed => "dojo_renamed",
             TopologyChangeKind::DojoDefaultFocusChanged => "dojo_default_focus_changed",
             TopologyChangeKind::SplintRenamed => "splint_renamed",
@@ -4128,6 +4130,8 @@ mod tests {
             id: lair_id,
             name: "main".to_owned(),
             lifetime: splinterm_core::LairLifetime::default(),
+            retention: splinterm_core::LairRetention::default(),
+            provenance: None,
             dojos: vec![dojo],
         };
         let mut topology = Topology::new();

@@ -13,8 +13,9 @@ pub(in crate::wayland) use pointer::{
     pointer_axis_focus_target, reconciled_focus_report, take_press_owner,
 };
 pub(in crate::wayland) use shortcuts::{
-    CommandPaletteShortcutAction, FontZoomAction, PaneFocusAction, PaneTopologyAction,
-    SessionPickerShortcutAction, TabShortcutAction, command_palette_shortcut_action,
+    CommandPaletteShortcutAction, CopyModeDesktopAction, FontZoomAction, PaneFocusAction,
+    PaneTopologyAction, SessionPickerShortcutAction, TabShortcutAction,
+    command_palette_shortcut_action, consume_detached_enter_press, copy_mode_desktop_action,
     font_zoom_action, keymap_press_for, pane_focus_action, pane_topology_action,
     session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
     tab_shortcut_action,
