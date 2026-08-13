@@ -1,7 +1,6 @@
 # Plan 0032: Omarchy screensaver integration
 
-- **Status:** Splinterm-owned implementation complete; final non-graphical
-  release-state validation and guarded packaged graphical acceptance remain open
+- **Status:** Splinterm-owned implementation complete, release-state package validation recorded; guarded packaged graphical acceptance remains open
 - **Date:** 2026-08-11
 - **Product authority:** Splinterm remains a standalone terminal and implements generic XDG launch metadata rather than an Omarchy-only window mode
 - **Integration authority:** Splinterm's packaged desktop adapter, profile, launcher helper, and explicit user-level activation link
@@ -35,10 +34,10 @@ desktop metadata, owned presentation profile, packaged launcher helper, and
 explicit collision-safe `enable`, `disable`, and `status` workflow. No Omarchy
 source modification or upstream submission is required.
 
-The remaining closure is to rerun the declared non-graphical checks on the
-coherent Alpha3 release state, review the extracted package, and record the
-separately approved guarded graphical matrix. Implementation does not itself
-prove installed graphical acceptance.
+The declared non-graphical checks now pass on the coherent Alpha3 release state,
+and the extracted optimized package has been reviewed. The remaining closure is
+the separately approved guarded graphical matrix. Implementation and extracted
+runtime validation do not themselves prove installed graphical acceptance.
 
 ## Baseline blockers at plan approval
 
@@ -335,6 +334,33 @@ Stop and report before continuing if:
 - testing requires replacing the Pacman-owned client or Omarchy launcher without approval;
 - graphical testing has not been explicitly approved; or
 - publishing, pushing, installing, or removing the user-local override becomes necessary without explicit approval.
+
+## Release-state validation evidence (2026-08-13)
+
+- Commit `99c3fd0289a21b2c2611636b8f02db97205bb74c` carries workspace version
+  `0.1.0-alpha3` and coherent `0.1.0alpha3-1` local/source/binary Arch recipe
+  versions. Candidate identity preflight passes and the alpha3 tag is absent.
+- Serial `cargo fmt --all --check`, strict workspace Clippy,
+  `cargo test --workspace`, release/package Python tests, shell syntax,
+  ShellCheck, site check/build, and `git diff --check` pass.
+- The first optimized package validation exposed a stale package-validator
+  private-protocol pin at 33 while the protocol authority is 34. The pin was
+  corrected and a cheap regression test now requires it to match the Rust
+  authority before future package builds.
+- A clean committed rebuild produced and validated
+  `splinterm-0.1.0alpha3-1-x86_64.pkg.tar.zst` and the exact-version optional
+  `splinterm-mcp-0.1.0alpha3-1-x86_64.pkg.tar.zst`. Extracted runtime validation
+  passed the private daemon/client/relay handshake and MCP runtime checks.
+- Package inspection confirmed the desktop metadata, owned screensaver profile,
+  screensaver launcher helper, canonical Dojo picker commands, compatibility
+  aliases, adjacent runtime executables, documentation, and license payloads.
+- Main package SHA-256:
+  `042ae011581a7362fb4fe37550088174724421738204d85549e225877b530c1f`.
+  MCP package SHA-256:
+  `29a5d35bb10187b96b2094e38bcbebc1ee9f78da91a9e4e0ee31f0177af359a2`.
+- No package was installed and no live daemon, Window, user integration, or
+  Omarchy-owned file was modified. Guarded installed-package graphical
+  acceptance remains pending.
 
 ## Completion criteria
 

@@ -168,7 +168,7 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
 
 - [x] Implement Plan 0032's XDG-only app-ID transport, owned profile, packaged
   launcher helper, and explicit collision-safe activation workflow.
-- [ ] Rerun [Plan 0032](docs/plans/0032-omarchy-screensaver-integration.md)
+- [x] Rerun [Plan 0032](docs/plans/0032-omarchy-screensaver-integration.md)
   non-graphical validation on the coherent Alpha3 release state and inspect the
   extracted package.
 - [ ] Perform separately approved guarded packaged graphical acceptance for the
