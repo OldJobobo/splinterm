@@ -173,7 +173,11 @@ pub(crate) fn command_palette_layout(
                 height: ROW_HEIGHT.saturating_sub(vertical_gutter.saturating_mul(2)),
             };
             let inset = CONTENT_INSET.min(rect.width / 6);
-            let shortcut_width = if compact { 0 } else { rect.width.min(180) / 3 };
+            let shortcut_width = if compact {
+                0
+            } else {
+                (rect.width / 3).min(180)
+            };
             let content_x = rect.x.saturating_add(inset).saturating_add(20);
             let category_width = if compact { 0 } else { 72.min(rect.width / 5) };
             let category_gap = if category_width == 0 { 0 } else { 12 };
@@ -1497,6 +1501,8 @@ mod tests {
                 assert_eq!(row.category.width == 0, layout.compact);
                 if !layout.compact {
                     assert!(row.title.x > row.category.x + row.category.width);
+                    assert_eq!(row.shortcut.width, (row.rect.width / 3).min(180));
+                    assert!(row.shortcut.width > 60);
                 }
                 assert_eq!(
                     command_palette_hit_test(
