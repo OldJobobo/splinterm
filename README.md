@@ -53,7 +53,7 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Sixel, practical Kitty static images, and inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`, both `0.1.0alpha3-1` |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`, both `0.1.0alpha3.1-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 

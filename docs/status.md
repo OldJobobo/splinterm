@@ -31,15 +31,43 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle;
-- public Alpha3 `0.1.0alpha3-1` Arch packages built from clean committed source;
-  and
+- public Alpha3.1 `0.1.0alpha3.1-1` Arch packages built from clean committed
+  source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
-  saved-Lair, Wayland file-drop, and Omarchy screensaver workflows.
+  saved-Lair, Wayland file-drop, and Omarchy screensaver workflows, plus isolated
+  exact-package acceptance for the Alpha3.1 transient-tab hotfixes.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain alpha
 interfaces on the documented platform.
+
+## Alpha3.1 release
+
+[`v0.1.0-alpha3.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.1)
+was published as a GitHub prerelease on 2026-08-14 and distributed through both
+AUR package bases as `0.1.0alpha3.1-1`. It hides the initial tab strip for
+command-bearing private XDG launches, keeps transient Lairs non-persistent while
+allowing additional live Dojos and splits, and gives the selected tab its exact
+theme-provided background role at the configured terminal alpha.
+
+- Candidate workflow run `31816769542` built commit
+  `f77602214ef504348845cdcc0640d641fbe2af11` once. Candidate manifest SHA-256:
+  `05c16987343c5dc99901fd12ffd7b283ac16b323a4e678d0b5ded6aa45bf446d`.
+- Protected promotion workflow run `31818277079` created the immutable tag,
+  published and downloaded the exact five-asset set, verified every hash, and
+  retained publication receipt artifact `9225923430`.
+- Source archive SHA-256:
+  `802ed735c6715200183426198f738a4bfb919214d15e3d300fa7d5b2b459d443`.
+  Main package SHA-256:
+  `b029bbf9ea06371f23d205220f1a065ab80fd82245411e83fd5be301cc3a9e42`.
+  MCP package SHA-256:
+  `b54357aca4c3ddd60514c0e4e38c7c3ce2d622d0c26694c8f66b138ad4af2c0e`.
+- AUR source package commit: `60c89b1151cd6d748d1c9c923444059baa7bc8ca`.
+  AUR prebuilt package commit: `dd74dc69d9792c21175664ef9e95861b24473498`.
+- The exact package passed isolated graphical acceptance for hidden initial
+  chrome, theme alpha on the strip and selected-tab body, exact selected-tab
+  color and accent underline, and live transient New Dojo attachment.
 
 ## Alpha3 release
 
@@ -84,7 +112,7 @@ post-alpha3, pre-1.0 roadmap milestone.
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
 | Arch/Omarchy packaging | Public alpha packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha3-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0alpha3-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha3.1-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0alpha3.1-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |

@@ -4,7 +4,11 @@
 
 - [x] Hide the tab strip by default when XDG invokes Splinterm with a
   command-bearing `-e` launch; these transient command windows should not present
-  ordinary persistent-Dojo tabs.
+  ordinary persistent-Dojo tabs initially.
+- [x] Keep transient XDG Lairs excluded from persistence while allowing their
+  live owner Window to create and attach additional Dojos and splits.
+- [x] Give selected Dojo tabs an exact theme-provided background role and apply
+  the configured terminal alpha to both the strip and selected-tab body.
 
 ## Alpha3 command palette and keymaps
 
@@ -167,9 +171,10 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
   repaint selected glyphs and decorations as a separate foreground layer.
 - [x] Add renderer tests proving exact resolved theme roles, including the Sakura
   Mochi `#f23888` selection color and the themed scrollback overlay.
-- [x] Give selected Dojo tabs a dedicated exact theme-provided background role,
-  painted opaquely without mixing or deriving colors, while retaining
-  `ui_accent` as the contrasting selected-tab underline.
+- [x] Give selected Dojo tabs a dedicated exact theme-provided background role
+  without mixing or deriving colors, inherit the configured terminal alpha for
+  the strip and selected-tab body, and retain `ui_accent` as the contrasting
+  opaque selected-tab underline.
 
 ## Omarchy integration
 
