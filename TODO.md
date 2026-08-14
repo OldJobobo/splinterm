@@ -1,6 +1,18 @@
 # TODO
 
-## Immediate hotfix
+## Alpha3.2 Backspace crash hotfix
+
+- [x] Keep held Backspace and other ordinary terminal input nonblocking when a
+  pane controller's bounded command queue is temporarily saturated.
+- [x] Bound pending terminal input globally, preserve pane identity and complete
+  input units, and retain input-before-focus/control ordering.
+- [x] Route file-drop input through the same bounded path and discard stale
+  pane-bound batches safely after pane or tab teardown.
+- [x] Add saturation, multi-pane, ordering, atomicity, retry, and teardown
+  regressions; pass full release CI and independent review.
+- [x] Publish `v0.1.0-alpha3.2` and both `0.1.0alpha3.2-1` AUR package bases.
+
+## Alpha3.1 transient-window hotfix
 
 - [x] Hide the tab strip by default when XDG invokes Splinterm with a
   command-bearing `-e` launch; these transient command windows should not present
