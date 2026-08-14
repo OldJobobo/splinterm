@@ -11,7 +11,7 @@ use splinterm::{
     automation::{Connection, SharedImageContentCache, protocol_error},
     config::AppConfig,
     endpoint::{ConnectionFactory, LaunchSemantics},
-    session_picker::{SessionEntry, collect_sessions},
+    session_picker::{SessionEntry, collect_sessions, dojo_has_fully_running_pane_layout},
     tab::{DojoTab, OpenTabOutcome, WindowTabSet},
 };
 use splinterm_core::{
@@ -715,6 +715,19 @@ fn materialized_dojo_targets(
     Ok(targets)
 }
 
+fn select_live_dojo_from(
+    lairs: &[splinterm_core::Lair],
+    lair_id: LairId,
+    dojo_id: DojoId,
+) -> Result<splinterm_core::Dojo> {
+    let dojo = select_dojo_from(lairs, (lair_id, dojo_id))?;
+    anyhow::ensure!(
+        dojo_has_fully_running_pane_layout(&dojo),
+        "selected session no longer has a fully running pane layout"
+    );
+    Ok(dojo)
+}
+
 async fn reopenable_dojo(
     connection: &mut Connection,
     lair_id: LairId,
@@ -731,13 +744,7 @@ async fn reopenable_dojo(
         .iter()
         .find(|lair| lair.id == lair_id)
         .context("selected Lair is absent")?;
-    let dojo = select_dojo_from(&lairs, (lair_id, dojo_id))?;
-    anyhow::ensure!(
-        collect_sessions(&lairs, &[])
-            .into_iter()
-            .any(|entry| entry.dojo_id == dojo_id && entry.reopenable()),
-        "selected session no longer has a fully running pane layout"
-    );
+    let dojo = select_live_dojo_from(&lairs, lair_id, dojo_id)?;
     Ok((window_dojo_identity(topology_revision, lair, &dojo), dojo))
 }
 
@@ -2159,11 +2166,32 @@ mod tests {
         WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets, close_action,
         close_other_tab_targets, collect_lair_targets, command_has_pending_split,
         lair_navigation_target, materialized_dojo_targets, next_topology_manager_wake,
-        parent_ratio, pending_focus_for_observation, refreshed_close_state,
+        parent_ratio, pending_focus_for_observation, refreshed_close_state, select_live_dojo_from,
         topology_command_outcome, topology_edit_target, topology_identity_diff,
         validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
+
+    #[test]
+    fn live_dojo_selection_accepts_transient_tabs_but_rejects_exited_layouts() {
+        let mut transient = splinterm_core::Lair::transient("transient", PathBuf::from("/tmp"));
+        let dojo_id = transient.dojos[0].id;
+        let splint_id = transient.dojos[0].default_focus;
+        transient.dojos[0]
+            .root
+            .find_splint_mut(splint_id)
+            .unwrap()
+            .state = SplintState::Running;
+
+        assert!(select_live_dojo_from(&[transient.clone()], transient.id, dojo_id).is_ok());
+
+        transient.dojos[0]
+            .root
+            .find_splint_mut(splint_id)
+            .unwrap()
+            .state = SplintState::Exited(0);
+        assert!(select_live_dojo_from(&[transient.clone()], transient.id, dojo_id).is_err());
+    }
 
     #[test]
     fn restore_prompt_targets_only_exited_splints() {

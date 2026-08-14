@@ -121,6 +121,16 @@ fn pane_states(node: &LayoutNode) -> (usize, usize) {
     }
 }
 
+/// Reports whether a live Dojo can be attached to a managed Window.
+///
+/// This intentionally does not inspect the owning Lair's persistence policy. Transient Dojos are
+/// valid live Window tabs even though they must remain absent from persistence-oriented catalogs.
+#[must_use]
+pub fn dojo_has_fully_running_pane_layout(dojo: &splinterm_core::Dojo) -> bool {
+    let (running_panes, _) = pane_states(&dojo.root);
+    running_panes > 0 && running_panes == dojo.root.splint_count()
+}
+
 #[must_use]
 pub fn collect_sessions(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> {
     let ranks: HashMap<_, _> = recent
@@ -401,6 +411,7 @@ mod tests {
         let mut transient = running_dojo("transient", "/var/tmp");
         transient.lifetime = splinterm_core::LairLifetime::Transient;
         let stale_recent = transient.dojos[0].id;
+        assert!(dojo_has_fully_running_pane_layout(&transient.dojos[0]));
         let entries = collect_sessions(&[transient, persistent], &[stale_recent]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].lair_name, "persistent");
