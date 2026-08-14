@@ -1111,7 +1111,7 @@ pub(crate) fn dojo_prompt_layout(content: Rect, state: &DojoPromptUi) -> Option<
     } else {
         PROMPT_BUTTON_HEIGHT
     };
-    let body_height = if state.is_preview() {
+    let body_height = if state.uses_layout_summary() {
         PREVIEW_BODY_HEIGHT
     } else {
         PROMPT_BODY_HEIGHT
@@ -1300,7 +1300,7 @@ pub(crate) fn paint_dojo_prompt(
         palette.primary,
         false,
     )?;
-    if state.is_preview() {
+    if state.uses_layout_summary() {
         let body_rect = buffer_rect(layout.body, scale_120);
         let line_height = PREVIEW_LINE_HEIGHT.saturating_mul(scale_120).div_ceil(120);
         for (index, source) in body.lines().take(MAX_PREVIEW_LINES).enumerate() {
@@ -1403,6 +1403,9 @@ pub(crate) fn paint_dojo_prompt(
         )?;
     } else {
         let selected_decision = state.decision().expect("confirmation decision exists");
+        let confirmation_label = state
+            .confirmation_label()
+            .expect("confirmation label exists");
         for (decision, rect, label) in [
             (
                 TerminationDecision::Cancel,
@@ -1412,7 +1415,7 @@ pub(crate) fn paint_dojo_prompt(
             (
                 TerminationDecision::Terminate,
                 layout.terminate.expect("terminate exists"),
-                "Terminate",
+                confirmation_label,
             ),
         ] {
             let rect = buffer_rect(rect, scale_120);
@@ -1688,7 +1691,7 @@ mod tests {
         };
         assert_eq!(confirmation.decision(), TerminationDecision::Cancel);
 
-        let preview = DojoPromptUi::preview_lair(crate::frontend::LairPromptTarget {
+        let target = crate::frontend::LairPromptTarget {
             topology_revision: splinterm_core::TopologyRevision::new(9),
             lair_id: LairId::new(),
             dojo_id: None,
@@ -1699,7 +1702,8 @@ mod tests {
                 "terminal/scrollback bodies, process memory, shell state, environment, clipboard, images".repeat(4)
             ),
             targets: Vec::new(),
-        });
+        };
+        let preview = DojoPromptUi::preview_lair(target.clone());
         let preview_layout = dojo_prompt_layout(content, &preview).unwrap();
         assert!(preview_layout.cancel.is_some());
         assert!(preview_layout.terminate.is_none());
@@ -1717,6 +1721,36 @@ mod tests {
             &preview_layout,
             session_picker_palette(ResolvedTheme::default()),
             &preview,
+            true,
+        )
+        .unwrap();
+        assert!(canvas.iter().any(|byte| *byte != 0));
+
+        let restore = DojoPromptUi::restore_lair(target);
+        let restore_layout = dojo_prompt_layout(content, &restore).unwrap();
+        assert!(restore_layout.cancel.is_some());
+        assert!(restore_layout.terminate.is_some());
+        assert_eq!(restore_layout.body.height, PREVIEW_BODY_HEIGHT);
+        assert!(
+            restore
+                .title_and_body()
+                .1
+                .starts_with("Restore 0 captured Splints?")
+        );
+        assert_eq!(restore.confirmation_label(), Some("Restore"));
+        canvas.fill(0);
+        paint_dojo_prompt(
+            &mut cache,
+            &RenderContext::new(u16::MAX),
+            &mut canvas,
+            640,
+            400,
+            content,
+            120,
+            1,
+            &restore_layout,
+            session_picker_palette(ResolvedTheme::default()),
+            &restore,
             true,
         )
         .unwrap();

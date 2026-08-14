@@ -298,6 +298,10 @@ impl DojoPromptUi {
         matches!(self, Self::PreviewLair(_))
     }
 
+    pub(crate) const fn uses_layout_summary(&self) -> bool {
+        matches!(self, Self::PreviewLair(_) | Self::RestoreLair(_))
+    }
+
     pub(crate) fn title_and_body(&self) -> (&'static str, String) {
         match self {
             Self::Rename(prompt) => ("RENAME TAB", format!("Name for ‘{}’", prompt.target().name)),
@@ -322,14 +326,14 @@ impl DojoPromptUi {
             Self::RestoreLair(prompt) => (
                 "RESTORE SAVED LAIR",
                 format!(
-                    "{}\n\nRestore {} captured Splint{}?",
-                    prompt.target().preview,
+                    "Restore {} captured Splint{}?\n\n{}",
                     prompt.target().targets.len(),
                     if prompt.target().targets.len() == 1 {
                         ""
                     } else {
                         "s"
-                    }
+                    },
+                    prompt.target().preview,
                 ),
             ),
             Self::TerminateLair(prompt) => (
@@ -367,6 +371,14 @@ impl DojoPromptUi {
             | Self::PreviewLair(_)
             | Self::RestoreLair(_)
             | Self::TerminateLair(_) => None,
+        }
+    }
+
+    pub(crate) const fn confirmation_label(&self) -> Option<&'static str> {
+        match self {
+            Self::RestoreLair(_) => Some("Restore"),
+            Self::Terminate(_) | Self::TerminateLair(_) => Some("Terminate"),
+            Self::Rename(_) | Self::RenameLair(_) | Self::PreviewLair(_) => None,
         }
     }
 
