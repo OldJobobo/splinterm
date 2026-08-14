@@ -33,7 +33,7 @@ pub(super) enum MachineMutation {
     },
     NewDojo {
         lair_id: LairId,
-        name: String,
+        name: Option<String>,
         cwd: Option<PathBuf>,
         command: Vec<String>,
     },
@@ -250,6 +250,28 @@ fn require_lair(topology: &splinterm_protocol::TopologySnapshot, lair_id: LairId
     }
 }
 
+fn machine_new_dojo_request(
+    topology: &splinterm_protocol::TopologySnapshot,
+    lair_id: LairId,
+    name: Option<&str>,
+    launch: LaunchParameters,
+) -> Result<Request> {
+    let lair = topology
+        .topology
+        .find_lair(lair_id)
+        .context("requested Lair was not found")?;
+    let name = match name {
+        Some(name) => name.to_owned(),
+        None => lair.next_default_dojo_name()?,
+    };
+    Ok(Request::NewDojo {
+        expected_topology_revision: topology.revision,
+        lair_id,
+        name,
+        launch,
+    })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "closed machine mutation request construction stays adjacent for auditability"
@@ -306,15 +328,12 @@ fn machine_mutation_request(
             name,
             cwd,
             command,
-        } => {
-            require_lair(topology, *lair_id)?;
-            Request::NewDojo {
-                expected_topology_revision,
-                lair_id: *lair_id,
-                name: name.clone(),
-                launch: machine_launch(cwd.clone(), command.clone())?,
-            }
-        }
+        } => machine_new_dojo_request(
+            topology,
+            *lair_id,
+            name.as_deref(),
+            machine_launch(cwd.clone(), command.clone())?,
+        )?,
         MachineMutation::CloseDojo { dojo_id, .. } => {
             topology_dojo_location(topology, *dojo_id)?;
             Request::CloseDojo {
@@ -916,4 +935,66 @@ pub(super) async fn run_machine_audit(
     }
     .await;
     finish_machine_envelope(OPERATION, result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use splinterm_core::{Dojo, Topology};
+
+    fn launch() -> LaunchParameters {
+        LaunchParameters {
+            cwd: PathBuf::from("/tmp"),
+            command: vec!["true".to_owned()],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 1_000,
+        }
+    }
+
+    #[test]
+    fn machine_new_dojo_requests_resolve_defaults_and_preserve_explicit_names_and_revision() {
+        let mut model = Topology::new();
+        let lair_id = model.create_lair("main", PathBuf::from("/tmp")).unwrap().id;
+        model
+            .new_dojo_at(
+                model.revision(),
+                lair_id,
+                Dojo::with_shell("Dojo 3", PathBuf::from("/tmp")),
+            )
+            .unwrap();
+        let revision = model.revision();
+        let snapshot = splinterm_protocol::TopologySnapshot {
+            revision,
+            topology: model,
+            runtimes: Vec::new(),
+        };
+
+        let implicit = machine_new_dojo_request(&snapshot, lair_id, None, launch()).unwrap();
+        assert!(matches!(
+            implicit,
+            Request::NewDojo {
+                expected_topology_revision,
+                lair_id: requested_lair,
+                name,
+                ..
+            } if expected_topology_revision == revision
+                && requested_lair == lair_id
+                && name == "Dojo 4"
+        ));
+
+        let explicit =
+            machine_new_dojo_request(&snapshot, lair_id, Some("logs"), launch()).unwrap();
+        assert!(matches!(
+            explicit,
+            Request::NewDojo {
+                expected_topology_revision,
+                lair_id: requested_lair,
+                name,
+                ..
+            } if expected_topology_revision == revision
+                && requested_lair == lair_id
+                && name == "logs"
+        ));
+    }
 }

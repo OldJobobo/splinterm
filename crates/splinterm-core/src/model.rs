@@ -188,8 +188,31 @@ impl Lair {
             lifetime,
             retention: LairRetention::Disposable,
             provenance: None,
-            dojos: vec![Dojo::with_shell("terminal", cwd)],
+            dojos: vec![Dojo::with_shell("Dojo 1", cwd)],
         }
+    }
+
+    /// Returns the next implicit Dojo name without reusing numeric gaps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TopologyError::DefaultDojoNameExhausted`] when the highest
+    /// canonical numbered name is `Dojo 18446744073709551615`.
+    pub fn next_default_dojo_name(&self) -> Result<String, TopologyError> {
+        let highest = self
+            .dojos
+            .iter()
+            .filter_map(|dojo| {
+                let suffix = dojo.name.strip_prefix("Dojo ")?;
+                let number = suffix.parse::<u64>().ok()?;
+                (number > 0 && suffix == number.to_string()).then_some(number)
+            })
+            .max()
+            .unwrap_or(0);
+        let next = highest
+            .checked_add(1)
+            .ok_or(TopologyError::DefaultDojoNameExhausted)?;
+        Ok(format!("Dojo {next}"))
     }
 }
 
@@ -808,6 +831,8 @@ pub enum TopologyError {
     TransientLairRetention(LairId),
     #[error("Dojo {0:?} does not exist")]
     DojoNotFound(DojoId),
+    #[error("default Dojo numbering is exhausted")]
+    DefaultDojoNameExhausted,
     #[error("preset materialization requires at least one Dojo")]
     EmptyDojoSet,
     #[error("Dojo {0:?} already exists")]
@@ -837,6 +862,61 @@ pub enum TopologyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_dojo_names_start_at_one_and_advance_past_the_highest_exact_number() {
+        let mut lair = Lair::new("main", PathBuf::from("/tmp"));
+        assert_eq!(lair.dojos[0].name, "Dojo 1");
+        assert_eq!(lair.next_default_dojo_name().unwrap(), "Dojo 2");
+
+        lair.dojos
+            .push(Dojo::with_shell("Dojo 3", PathBuf::from("/tmp")));
+        lair.dojos
+            .push(Dojo::with_shell("logs", PathBuf::from("/tmp")));
+        assert_eq!(lair.next_default_dojo_name().unwrap(), "Dojo 4");
+    }
+
+    #[test]
+    fn legacy_and_empty_lairs_begin_numbering_at_one() {
+        let mut lair = Lair::new("main", PathBuf::from("/tmp"));
+        lair.dojos[0].name = "terminal".to_owned();
+        assert_eq!(lair.next_default_dojo_name().unwrap(), "Dojo 1");
+
+        lair.dojos.clear();
+        assert_eq!(lair.next_default_dojo_name().unwrap(), "Dojo 1");
+    }
+
+    #[test]
+    fn default_dojo_names_ignore_noncanonical_numbers_and_reject_exhaustion() {
+        let mut lair = Lair::new("main", PathBuf::from("/tmp"));
+        for name in [
+            "dojo 9",
+            "Dojo 0",
+            "Dojo 02",
+            "Dojo +8",
+            "Dojo 7 ",
+            "Dojo 18446744073709551616",
+        ] {
+            lair.dojos
+                .push(Dojo::with_shell(name, PathBuf::from("/tmp")));
+        }
+        assert_eq!(lair.next_default_dojo_name().unwrap(), "Dojo 2");
+
+        lair.dojos.push(Dojo::with_shell(
+            format!("Dojo {}", u64::MAX),
+            PathBuf::from("/tmp"),
+        ));
+        assert_eq!(
+            lair.next_default_dojo_name(),
+            Err(TopologyError::DefaultDojoNameExhausted)
+        );
+    }
+
+    #[test]
+    fn transient_lairs_also_start_with_dojo_one() {
+        let lair = Lair::transient("private", PathBuf::from("/tmp"));
+        assert_eq!(lair.dojos[0].name, "Dojo 1");
+    }
 
     #[test]
     fn runtime_state_can_transition_and_failed_creation_can_roll_back() {

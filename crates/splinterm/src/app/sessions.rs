@@ -210,25 +210,13 @@ pub(in crate::app) async fn run_dojos(config: AppConfig, factory: ConnectionFact
             if let Some(diagnostics) = splinterm::diagnostics::global() {
                 diagnostics.begin_window(None, None);
             }
-            let stamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let name = fresh_lair_name(SystemTime::now(), std::process::id());
             let cwd = if factory.is_local() {
                 Some(env::current_dir().context("failed to read current directory")?)
             } else {
                 None
             };
-            launch(
-                Some(format!("terminal-{stamp}-{}", std::process::id())),
-                cwd,
-                None,
-                true,
-                Vec::new(),
-                config,
-                factory,
-            )
-            .await
+            launch(Some(name), cwd, None, true, Vec::new(), config, factory).await
         }
         Some(SessionPickerDecision::Open(index)) => {
             if let Some(diagnostics) = splinterm::diagnostics::global() {
@@ -271,7 +259,7 @@ pub(in crate::app) async fn reopen_recent(
     run_live_multipane_window(config, dojo, factory).await
 }
 
-fn fresh_dojo_name(now: SystemTime, process_id: u32) -> String {
+fn fresh_lair_name(now: SystemTime, process_id: u32) -> String {
     let stamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     format!("terminal-{stamp}-{process_id}")
 }
@@ -316,7 +304,7 @@ pub(in crate::app) async fn xdg_launch(
         .await
         .context("splinterd is unavailable; start splinterd.service or run splinterd")?;
     let expected = owner.topology_revision().await?;
-    let name = fresh_dojo_name(SystemTime::now(), std::process::id());
+    let name = fresh_lair_name(SystemTime::now(), std::process::id());
     let Response::LairCreated { lair, .. } = owner
         .request(Request::CreateTransientLair {
             expected_topology_revision: expected,
@@ -389,7 +377,7 @@ async fn launch_with_app_id(
         return run_live_window(config, splint_id, factory).await;
     }
 
-    let name = name.unwrap_or_else(|| fresh_dojo_name(SystemTime::now(), std::process::id()));
+    let name = name.unwrap_or_else(|| fresh_lair_name(SystemTime::now(), std::process::id()));
     let expected = connection.topology_revision().await?;
     let Response::LairCreated { lair: dojo, .. } = connection
         .request(create_request(
@@ -489,9 +477,9 @@ mod tests {
     }
 
     #[test]
-    fn fresh_dojo_names_include_time_and_process_identity() {
+    fn fresh_lair_names_include_time_and_process_identity() {
         assert_eq!(
-            fresh_dojo_name(
+            fresh_lair_name(
                 SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_234),
                 56
             ),

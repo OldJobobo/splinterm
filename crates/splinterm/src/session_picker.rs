@@ -401,7 +401,7 @@ mod tests {
         let entries = collect_sessions(&[first, second], &[recent]);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].dojo_id, recent);
-        assert_eq!(entries[0].display_title(), "notes / terminal");
+        assert_eq!(entries[0].display_title(), "notes / Dojo 1");
         assert_eq!(entries[0].working_directory(), "/notes");
     }
 

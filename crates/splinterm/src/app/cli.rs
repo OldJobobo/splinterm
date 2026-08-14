@@ -53,7 +53,9 @@ use super::{
     },
     presets::{materialize_preset, run_preset_command},
     remote_cli::run_remote_command,
-    session_catalog::{automation_launch, create_request, launch_parameters, remember_dojo},
+    session_catalog::{
+        automation_launch, create_request, launch_parameters, new_dojo_request_for, remember_dojo,
+    },
     sessions::{launch, reopen_recent, run_dojos, select_dojo, xdg_launch},
 };
 
@@ -477,26 +479,24 @@ async fn run_headless(
             cwd,
             command,
         } => {
-            let expected_topology_revision = connection.topology_revision().await?;
-            let cwd = endpoint_launch_cwd(factory, cwd)?;
-            let request = match factory.capabilities().launch_semantics {
-                LaunchSemantics::LocalTrusted => Request::NewDojo {
-                    expected_topology_revision,
-                    lair_id,
-                    name,
-                    launch: launch_parameters(
-                        cwd.context("local Dojo working directory is unavailable")?,
-                        command,
-                        config,
-                    ),
-                },
-                LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
-                    expected_topology_revision,
-                    lair_id,
-                    name,
-                    launch: automation_launch(cwd, command),
-                },
+            let Response::Lairs {
+                lairs,
+                topology_revision: expected_topology_revision,
+            } = connection.request(Request::ListLairs).await?
+            else {
+                bail!("splinterd did not return its Lair catalog");
             };
+            let cwd = endpoint_launch_cwd(factory, cwd)?;
+            let request = new_dojo_request_for(
+                factory.capabilities().launch_semantics,
+                expected_topology_revision,
+                &lairs,
+                lair_id,
+                name,
+                cwd,
+                command,
+                config,
+            )?;
             print_response(connection.request(request).await?)
         }
         Command::CloseDojo { dojo_id, .. } => {
@@ -939,6 +939,30 @@ mod tests {
         assert!(Cli::try_parse_from(["splinterm", "remote"]).is_err());
         assert!(Cli::try_parse_from(["splinterm", "remote", "inspect"]).is_err());
         assert!(Cli::try_parse_from(["splinterm", "remote", "check"]).is_err());
+    }
+
+    #[test]
+    fn new_dojo_name_is_optional_and_explicit_names_are_preserved() {
+        let lair_id = LairId::new();
+        let implicit =
+            Cli::try_parse_from(["splinterm", "new-dojo", &lair_id.to_string()]).unwrap();
+        assert!(matches!(
+            implicit.command,
+            Some(Command::NewDojo { name: None, .. })
+        ));
+
+        let explicit = Cli::try_parse_from([
+            "splinterm",
+            "new-dojo",
+            &lair_id.to_string(),
+            "--name",
+            "logs",
+        ])
+        .unwrap();
+        assert!(matches!(
+            explicit.command,
+            Some(Command::NewDojo { name: Some(name), .. }) if name == "logs"
+        ));
     }
 
     #[test]

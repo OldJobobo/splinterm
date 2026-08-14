@@ -88,7 +88,10 @@ paths. With no focused Splinterm Window, its two projection fields are null.
 | `dojo-focus-hint DOJO_ID SPLINT_ID` | Persist a presentation hint; it does not focus a client or Window. |
 
 `ARGV` after `--` is executed directly, never through a shell. With no explicit
-argv, creation uses the configured shell.
+argv, creation uses the configured shell. A new Lair starts with `Dojo 1`. When
+`new-dojo` omits `--name`, Splinterm uses one greater than that Lair's highest
+existing exact `Dojo N` name; numeric gaps are not reused. Explicit names are
+preserved.
 
 ```bash
 splinterm new project --cwd "$HOME/src/project"
