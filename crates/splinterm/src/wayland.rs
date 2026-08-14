@@ -88,7 +88,7 @@ use wayland_protocols::ext::background_effect::v1::client::{
 
 use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::{
-    Axis, DojoId, LairId, LayoutNode, Splint, SplintId, SplitRatio, TopologyRevision,
+    Axis, DojoId, LairId, LairRetention, LayoutNode, Splint, SplintId, SplitRatio, TopologyRevision,
 };
 use splinterm_protocol::{
     ActiveScreen, ControlTransferDecision, MouseTracking, SearchMatch, TerminalCell,
@@ -535,9 +535,14 @@ fn pane_stream_has_terminal_notice(updates: &[WindowUpdate]) -> bool {
 
 fn enqueue_pending_exited_splints(
     dojo_id: DojoId,
+    lair_retention: LairRetention,
     pending: &mut HashSet<SplintId>,
     commands: &Sender<WindowTopologyCommand>,
 ) -> bool {
+    if lair_retention.is_protected() {
+        pending.clear();
+        return true;
+    }
     let targets = pending.iter().copied().collect::<Vec<_>>();
     for target in targets {
         match commands.try_send(WindowTopologyCommand::Close { dojo_id, target }) {
@@ -7173,6 +7178,7 @@ impl App {
                 if let Some(commands) = &topology_commands {
                     enqueue_pending_exited_splints(
                         tab.dojo_id,
+                        view.identity.lair_retention,
                         &mut view.pending_exited_splints,
                         commands,
                     );
@@ -7658,6 +7664,7 @@ impl App {
                     .is_some_and(|commands| {
                         enqueue_pending_exited_splints(
                             self.tab_state.active_identity.dojo_id,
+                            self.tab_state.active_identity.lair_retention,
                             &mut self.panes.pending_exited_splints,
                             commands,
                         )
@@ -9417,6 +9424,7 @@ mod tests {
 
         assert!(enqueue_pending_exited_splints(
             dojo_id,
+            LairRetention::Disposable,
             &mut pending,
             &commands
         ));
@@ -9433,6 +9441,7 @@ mod tests {
 
         assert!(enqueue_pending_exited_splints(
             dojo_id,
+            LairRetention::Disposable,
             &mut pending,
             &commands
         ));
@@ -9449,10 +9458,28 @@ mod tests {
         pending.insert(retained);
         assert!(!enqueue_pending_exited_splints(
             dojo_id,
+            LairRetention::Disposable,
             &mut pending,
             &commands
         ));
         assert_eq!(pending, HashSet::from([retained]));
+    }
+
+    #[test]
+    fn protected_lairs_retain_exited_splints_without_close_commands() {
+        for retention in [LairRetention::Saved, LairRetention::Pinned] {
+            let mut pending = HashSet::from([SplintId::new()]);
+            let (commands, mut receiver) = tokio::sync::mpsc::channel(1);
+
+            assert!(enqueue_pending_exited_splints(
+                DojoId::new(),
+                retention,
+                &mut pending,
+                &commands,
+            ));
+            assert!(pending.is_empty());
+            assert!(receiver.try_recv().is_err());
+        }
     }
 
     #[test]
