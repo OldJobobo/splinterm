@@ -3140,6 +3140,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::NewDojoAutomation { .. }
             | Request::MaterializePreset { .. }
             | Request::CloseDojo { .. }
+            | Request::TerminateLair { .. }
             | Request::RenameLair { .. }
             | Request::RenameDojo { .. }
             | Request::SetDojoDefaultFocus { .. }
@@ -9468,6 +9469,15 @@ mod tests {
         assert!(interactive_bypass(true, true, false, &retention));
         assert!(interactive_bypass(false, false, true, &retention));
         assert!(!interactive_bypass(false, true, false, &retention));
+        let terminate_lair = Request::TerminateLair {
+            expected_topology_revision: TopologyRevision::new(7),
+            lair_id: LairId::new(),
+            targets: Vec::new(),
+        };
+        assert!(interactive_bypass(true, true, false, &terminate_lair));
+        assert!(interactive_bypass(false, false, true, &terminate_lair));
+        assert!(!interactive_bypass(true, false, false, &terminate_lair));
+        assert!(!interactive_bypass(false, true, false, &terminate_lair));
         assert!(!interactive_bypass(
             false,
             false,
