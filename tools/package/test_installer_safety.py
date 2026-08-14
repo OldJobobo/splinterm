@@ -37,7 +37,7 @@ class InstallerSafetyTest(unittest.TestCase):
         binaries = directory / "bin"
         binary = binaries / "splinterm-pty-child"
         binaries.mkdir()
-        for executable in (binary, binaries / "sudo"):
+        for executable in (binary, binaries / "sudo", binaries / "pacman"):
             executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             executable.chmod(0o700)
         for pid, parent, executable in (
