@@ -127,12 +127,13 @@ def replace_checksums(text: str, checksums: list[str]) -> str:
     return replaced
 
 
-def version_binary_release_urls(text: str, version: str) -> str:
-    expected = "releases/download/edge-$_commit/"
-    replacement = f"releases/download/v{version}/"
+def validate_binary_release_urls(text: str, version: str) -> str:
+    expected = f"releases/download/v{version}/"
     if text.count(expected) != 2:
-        raise ValueError("AUR-bin draft does not contain exactly two edge release URLs")
-    return text.replace(expected, replacement)
+        raise ValueError("AUR-bin draft does not contain exactly two versioned release URLs")
+    if "releases/download/edge-" in text:
+        raise ValueError("AUR-bin draft still depends on the retired edge channel")
+    return text
 
 
 def copy_recipe(source: Path, destination: Path) -> None:
@@ -245,7 +246,7 @@ def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
     binary_pkgbuild = binary_recipe / "PKGBUILD"
     binary_text = binary_pkgbuild.read_text(encoding="utf-8")
     binary_text = replace_assignment(binary_text, "_commit", commit)
-    binary_text = version_binary_release_urls(binary_text, arguments.version)
+    binary_text = validate_binary_release_urls(binary_text, arguments.version)
     binary_text = replace_checksums(
         binary_text, [sha256(main_package), sha256(mcp_package)]
     )

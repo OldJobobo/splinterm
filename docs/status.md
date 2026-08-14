@@ -10,8 +10,8 @@ sequence, and this page owns what the product is today.
 
 **Splinterm is a public alpha.**
 
-Source, documentation, the versioned AUR package, and commit-bound Arch edge
-packages are publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
+Source, documentation, and immutable versioned GitHub and AUR packages are
+publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
 native Wayland presentation, Arch packaging, and bounded automation workflows
 are implemented and validated in the scopes named below. Public availability is
 not a stable-support promise: alpha interfaces may change, the validated target
@@ -83,9 +83,9 @@ post-alpha3, pre-1.0 roadmap milestone.
 | Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Plan 0028](plans/0028-remote-graphical-client.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
-| Arch/Omarchy packaging | Public alpha packages validated | Versioned AUR and commit-bound edge split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
+| Arch/Omarchy packaging | Public alpha packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
 | AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha3-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0alpha3-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
-| Public source and edge channel | Available | The repository, documentation, immutable edge releases, and rolling verified installer channel are public. |
+| Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
 

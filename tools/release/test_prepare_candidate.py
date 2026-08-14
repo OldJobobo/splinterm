@@ -35,12 +35,18 @@ class PrepareCandidateTests(unittest.TestCase):
 
     def test_binary_draft_urls_target_the_versioned_release(self) -> None:
         original = (
-            'source=(\n  "https://example/releases/download/edge-$_commit/a"\n'
-            '  "https://example/releases/download/edge-$_commit/b"\n)\n'
+            'source=(\n  "https://example/releases/download/v1.2.3-alpha4/a"\n'
+            '  "https://example/releases/download/v1.2.3-alpha4/b"\n)\n'
         )
-        replaced = MODULE.version_binary_release_urls(original, "1.2.3-alpha4")
-        self.assertNotIn("edge-$_commit", replaced)
-        self.assertEqual(replaced.count("releases/download/v1.2.3-alpha4/"), 2)
+        validated = MODULE.validate_binary_release_urls(original, "1.2.3-alpha4")
+        self.assertEqual(validated, original)
+        with self.assertRaisesRegex(ValueError, "versioned release URLs"):
+            MODULE.validate_binary_release_urls(original, "1.2.3-alpha5")
+        with self.assertRaisesRegex(ValueError, "versioned release URLs"):
+            MODULE.validate_binary_release_urls(
+                original.replace("v1.2.3-alpha4", "edge-$_commit"),
+                "1.2.3-alpha4",
+            )
 
     def test_archive_does_not_read_worktree_attributes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="splinterm-archive-attrs-") as value:

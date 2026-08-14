@@ -3,7 +3,6 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repository=OldJobobo/splinterm
-channel_branch=edge-channel
 assume_yes=false
 source_build=false
 run_checks=false
@@ -12,7 +11,7 @@ usage() {
   cat <<'EOF'
 Usage: ./install.sh [--source] [--check] [-y|--yes]
 
-Download and install the newest successful Splinterm edge build on x86_64
+Download and install the newest published Splinterm versioned release on x86_64
 Arch/Omarchy without compiling locally.
 
   --source     Build and install the current committed checkout instead
@@ -20,7 +19,7 @@ Arch/Omarchy without compiling locally.
   -y, --yes    Skip dependency and installation confirmations
   -h, --help   Show this help
 
-The default edge installer uses an authenticated GitHub CLI session when
+The default release installer uses an authenticated GitHub CLI session when
 available and otherwise uses anonymous public release downloads. It never opts
 a fresh installation into the optional MCP package; an
 existing MCP installation is upgraded to keep package versions matched.
@@ -172,16 +171,17 @@ release_url() {
   printf 'https://github.com/%s/releases/download/%s/%s' "$repository" "$release" "$asset"
 }
 
-download_channel_manifest() {
+download_release_index() {
   local output=$1
   if [[ ${release_downloader:-} == gh ]]; then
-    gh api "repos/$repository/contents/edge-manifest.json?ref=$channel_branch" \
-      --jq .content | tr -d '\n' | base64 --decode >"$output"
+    gh api "repos/$repository/releases?per_page=100" >"$output"
     return
   fi
   curl --fail --location --retry 5 --retry-delay 2 --silent --show-error \
+    --header 'Accept: application/vnd.github+json' \
+    --header 'User-Agent: splinterm-release-installer' \
     --output "$output" \
-    "https://raw.githubusercontent.com/$repository/$channel_branch/edge-manifest.json"
+    "https://api.github.com/repos/$repository/releases?per_page=100"
 }
 
 download_asset() {
@@ -215,7 +215,7 @@ prebuilt_install() {
   fi
 
   local download_dir stopped=false
-  download_dir=$(mktemp -d "${TMPDIR:-/tmp}/splinterm-edge.XXXXXX")
+  download_dir=$(mktemp -d "${TMPDIR:-/tmp}/splinterm-release.XXXXXX")
   cleanup_prebuilt_install() {
     if [[ $stopped == true ]]; then
       systemctl --user daemon-reload || true
@@ -224,24 +224,42 @@ prebuilt_install() {
     rm -rf "$download_dir"
   }
   trap cleanup_prebuilt_install EXIT
-  if ! download_channel_manifest "$download_dir/edge-manifest.json"; then
-    printf 'Could not download the %s edge release.\n' "$repository" >&2
-    printf 'For a private repository, install GitHub CLI and run: gh auth login\n' >&2
+  if ! download_release_index "$download_dir/releases.json"; then
+    printf 'Could not query public releases for %s.\n' "$repository" >&2
     exit 1
   fi
 
-  local -a manifest
-  mapfile -t manifest < <(
-    python "$root/tools/package/edge-manifest.py" inspect \
-      --repository "$repository" "$download_dir/edge-manifest.json"
+  local -a selected
+  mapfile -t selected < <(
+    python "$root/tools/package/release-manifest.py" select \
+      --repository "$repository" "$download_dir/releases.json"
   )
-  if ((${#manifest[@]} != 6)); then
-    printf 'The edge manifest did not produce the expected package set.\n' >&2
+  if ((${#selected[@]} != 2)); then
+    printf 'The release index did not identify one closed versioned release.\n' >&2
     exit 1
   fi
-  local commit=${manifest[0]} release=${manifest[1]}
-  local main_asset=${manifest[2]} main_checksum=${manifest[3]}
-  local mcp_asset=${manifest[4]} mcp_checksum=${manifest[5]}
+  local release=${selected[0]} manifest_checksum=${selected[1]}
+  download_asset "$release" candidate-manifest.json "$download_dir"
+  local actual
+  actual=$(sha256sum "$download_dir/candidate-manifest.json" | cut -d' ' -f1)
+  [[ $actual == "$manifest_checksum" ]] || {
+    printf 'Downloaded release manifest checksum does not match the GitHub release record.\n' >&2
+    exit 1
+  }
+
+  local -a manifest
+  mapfile -t manifest < <(
+    python "$root/tools/package/release-manifest.py" inspect \
+      --repository "$repository" --tag "$release" \
+      "$download_dir/candidate-manifest.json"
+  )
+  if ((${#manifest[@]} != 7)); then
+    printf 'The release manifest did not produce the expected package set.\n' >&2
+    exit 1
+  fi
+  local commit=${manifest[0]} version=${manifest[2]}
+  local main_asset=${manifest[3]} main_checksum=${manifest[4]}
+  local mcp_asset=${manifest[5]} mcp_checksum=${manifest[6]}
 
   download_asset "$release" "$main_asset" "$download_dir"
   local mcp_installed=false
@@ -250,16 +268,15 @@ prebuilt_install() {
     download_asset "$release" "$mcp_asset" "$download_dir"
   fi
 
-  local actual
   actual=$(sha256sum "$download_dir/$main_asset" | cut -d' ' -f1)
   [[ $actual == "$main_checksum" ]] || {
-    printf 'Downloaded Splinterm package checksum does not match the edge manifest.\n' >&2
+    printf 'Downloaded Splinterm package checksum does not match the release manifest.\n' >&2
     exit 1
   }
   if [[ $mcp_installed == true ]]; then
     actual=$(sha256sum "$download_dir/$mcp_asset" | cut -d' ' -f1)
     [[ $actual == "$mcp_checksum" ]] || {
-      printf 'Downloaded MCP package checksum does not match the edge manifest.\n' >&2
+      printf 'Downloaded MCP package checksum does not match the release manifest.\n' >&2
       exit 1
     }
   fi
@@ -270,7 +287,7 @@ prebuilt_install() {
   if [[ $mcp_installed == true ]]; then
     mcp_candidate=$(pacman -Qp "$download_dir/$mcp_asset" | awk '{print $2}')
     [[ $candidate == "$mcp_candidate" ]] || {
-      printf 'The edge split-package versions do not match.\n' >&2
+      printf 'The versioned split-package versions do not match.\n' >&2
       exit 1
     }
     packages+=("$download_dir/$mcp_asset")
@@ -279,7 +296,8 @@ prebuilt_install() {
   local was_active=false
   systemctl --user is-active --quiet splinterd.service && was_active=true
   printf '%s\n' \
-    'Splinterm edge install' \
+    'Splinterm versioned release install' \
+    "  Release: $release ($version)" \
     "  Commit:  $commit" \
     "  Package: $candidate" \
     "  MCP:     $mcp_candidate" \
@@ -289,10 +307,10 @@ prebuilt_install() {
     printf 'splinterd is running; installation will end its daemon-owned shells.\n'
     /usr/bin/splinterm list 2>/dev/null || true
   fi
-  confirm 'Install this prebuilt Splinterm edge package?' || exit 0
+  confirm 'Install this prebuilt Splinterm versioned release?' || exit 0
 
   local snapshot
-  snapshot="$HOME/.local/state/splinterm/rollback/$(date +%Y%m%d-%H%M%S)-pre-edge-${commit:0:12}"
+  snapshot="$HOME/.local/state/splinterm/rollback/$(date +%Y%m%d-%H%M%S)-pre-release-${commit:0:12}"
   mkdir -p "$snapshot"
   local binary
   for binary in splinterm splinterd splinterm-mcp; do
@@ -332,7 +350,7 @@ prebuilt_install() {
     [[ $(stat -Lc '%d:%i' "$daemon_dir/splinterm") == $(stat -Lc '%d:%i' /usr/bin/splinterm) ]]
     /usr/bin/splinterm list
   fi
-  printf 'Splinterm edge %s installed. Emergency snapshot: %s\n' "${commit:0:12}" "$snapshot"
+  printf 'Splinterm %s installed. Emergency snapshot: %s\n' "$release" "$snapshot"
   rm -rf "$download_dir"
   trap - EXIT
 }

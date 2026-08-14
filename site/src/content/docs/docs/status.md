@@ -3,7 +3,7 @@ title: Current status
 description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
 ---
 
-Splinterm is a **public alpha**. Source, documentation, the versioned AUR package, and verified commit-bound edge packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
+Splinterm is a **public alpha**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
 [`v0.1.0-alpha3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3) is the current public prerelease. It adds the closed command/keymap surface, safe historical-Enter behavior, explicit saved-Lair restore workflows, bounded Wayland file drops, and the opt-in Omarchy screensaver integration.
 
@@ -12,7 +12,7 @@ Splinterm is a **public alpha**. Source, documentation, the versioned AUR packag
 - The product runs and has a normal graphical daily-use path.
 - Core terminal, persistence, multiplexing, packaging, and automation milestones have recorded validation.
 - The current target is narrow: x86_64 Omarchy/Arch Linux with native Wayland.
-- Installation uses the versioned AUR package, public alpha edge packages, or a committed source checkout.
+- Installation uses the versioned AUR package, the matching GitHub release, or a committed source checkout.
 - Broader distribution and long-term compatibility promises have not been released.
 
 ## Capability summary
@@ -33,8 +33,8 @@ Splinterm is a **public alpha**. Source, documentation, the versioned AUR packag
 | [Native remote graphical client](/docs/remote/) | Implemented and validated with profile-bound OpenSSH transport; remote image transfer is excluded |
 | [MCP adapter](/docs/mcp/) | Implemented and validated as an optional, separately policy-identified package |
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
-| Arch/Omarchy package | Versioned AUR and public alpha edge packages validated |
-| Public source and edge builds | Available |
+| Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
+| Public source and versioned builds | Available |
 | [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0alpha3-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |

@@ -155,9 +155,9 @@ The following table summarizes the current repository state. “Validated” mea
 | SSH stdio relay | Implemented and validated; no daemon network listener. |
 | Native remote graphical transport | Implemented and validated through Plan 0028: strict profiles, one-authentication multiplexer, endpoint-bound human-interactive workflow, remote-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, authentication, failure handling, persistence, and reviewed real-host graphical evidence. |
 | MCP adapter | Implemented and validated as an optional separately identified package. |
-| Arch/Omarchy package and edge installer | Public alpha commit-bound package channel and installation path implemented and validated. |
+| Arch/Omarchy package and release installer | Immutable versioned GitHub/AUR packages and installation paths implemented and validated. |
 | Public source and documentation | Available. |
-| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available as `0.1.0alpha2-1`; stable support remains unreleased. |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available as `0.1.0alpha3-1`; stable support remains unreleased. |
 | Stable support policy | Not released. |
 | Nix and broader distribution | Planned. |
 | Public product/documentation website | Implemented and build/link validated; repository `docs/status.md` remains the maturity authority. |
@@ -307,7 +307,7 @@ Priority meanings:
 | `FR-PKG-02` | P0 | Installation and upgrade must verify exact artifacts, warn before ending daemon-owned shells, and report the lack of cross-version process continuity. | Implemented |
 | `FR-PKG-03` | P0 | Packaging must not edit user homes, default terminal preference, Omarchy-owned files, SSH policy, or service lingering without an explicit separate action. | Implemented |
 | `FR-PKG-04` | P1 | The MCP adapter must remain an optional exact-version split package and installation alone must grant no authority. | Implemented |
-| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public alpha edge artifacts and the versioned AUR source are immutable and checksummed; a stable support policy remains pending |
+| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public alpha GitHub and AUR artifacts are immutable, versioned, and checksummed; a stable support policy remains pending |
 
 ## 11. Security and privacy requirements
 

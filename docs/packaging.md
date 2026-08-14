@@ -12,9 +12,10 @@ and both AUR package bases publish `0.1.0alpha3-1`.
 The source-built AUR authority is `packaging/aur/PKGBUILD`; candidate
 construction replaces its source-archive checksum with the exact immutable
 versioned archive digest. It intentionally omits a `check()` phase. The
-recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; candidate
-construction rewrites its release URLs, commit, and checksums to the exact
-approved packages so users never compile or test them locally.
+recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; it must already
+target the candidate version's immutable `v…` release URL, while candidate
+construction binds its commit and checksums to the exact approved packages so
+users never compile or test them locally.
 
 ## Versioned AUR installation
 
@@ -32,43 +33,38 @@ the `-bin` packages prompts once to replace those conflicting source packages.
 validated target beyond x86_64 Arch/Omarchy with native Wayland/Hyprland or add
 a stable compatibility and support-duration promise.
 
-## One-command prebuilt edge installation
+## One-command versioned release installation
 
 On an x86_64 Arch/Omarchy machine, a clone installs or updates to the newest
-successfully built `main` commit without compiling locally:
+published versioned release without compiling locally:
 
 ```bash
 ./install.sh
 ```
 
-`.github/workflows/edge-release.yml` performs a clean release build and validates
-both extracted packages in an Arch container; the separate CI workflow retains
-the full workspace source-test suite. Package assets include the full Git commit
-in their names and
-are published under the immutable `edge-<commit>` release. Only after that
-release is complete does the workflow atomically force-update the
-`edge-channel` Git ref to a one-file commit containing `edge-manifest.json`.
-That manifest binds the repository, architecture, release, commit, exact asset
-names, and SHA-256 digests. An interrupted publication therefore leaves either
-the prior channel commit or the complete new one rather than exposing a mixed
-package set.
+The installer queries the public GitHub release index and considers only
+non-draft complete SemVer `v…` tags with one `candidate-manifest.json` asset. It
+selects the most recently published qualifying release, verifies the manifest
+against the digest recorded by GitHub, then validates the reviewed candidate
+identity, repository, version, architecture, exact commit-bound package pair,
+and SHA-256 package digests before downloading either package. Historical
+`edge-*` releases cannot be selected.
 
-The installer uses an authenticated GitHub CLI session when one is already
-available and otherwise downloads the public channel manifest and release assets
-with `curl`. Authentication is not required for ordinary public alpha installs.
+An authenticated GitHub CLI session is used when one is already available;
+otherwise the installer uses anonymous GitHub API and release downloads through
+`curl`. Authentication is not required for ordinary public alpha installs.
 
-Before Pacman installation, the script validates the closed manifest shape,
-commit-bound release and asset names, checksums, architecture, and matching
+Before Pacman installation, the script verifies package checksums and matching
 split-package versions. It rejects a shadowing user-local client, preserves an
 emergency snapshot of replaced binaries for diagnosis or manual recovery, warns
 before stopping daemon-owned shells, restores the daemon after failure, and
 checks Pacman integrity, the desktop entry, and trusted-client sibling identity
 after restart. The snapshot is not presented as a Pacman package rollback;
-reinstall a previously retained package for a package-consistent downgrade. It deliberately does not change the default terminal or
-edit Omarchy configuration. A fresh installation does not install the optional
-MCP package; an existing MCP installation is upgraded to preserve its
-exact-version dependency. Pass `--yes` only for an already-approved unattended
-installation.
+reinstall a previously retained package for a package-consistent downgrade. It
+deliberately does not change the default terminal or edit Omarchy configuration.
+A fresh installation does not install the optional MCP package; an existing MCP
+installation is upgraded to preserve its exact-version dependency. Pass `--yes`
+only for an already-approved unattended installation.
 
 ## One-command source installation
 

@@ -21,9 +21,9 @@ yay -S splinterm-mcp-bin
 
 Source-built `splinterm` and `splinterm-mcp` packages remain available. Migrating from them prompts once to approve replacement by the conflicting `-bin` packages. `paru` may be used instead of `yay`. AUR availability does not expand the supported target or create stable compatibility and support-duration guarantees.
 
-## Install the current edge package
+## Install the current versioned release directly
 
-For the newest successfully validated commit-bound package, clone the public repository and run the edge installer:
+For the newest published versioned package, clone the public repository and run the release installer:
 
 ```bash
 git clone https://github.com/OldJobobo/splinterm.git
@@ -31,12 +31,12 @@ cd splinterm
 ./install.sh
 ```
 
-The installer obtains the newest successfully built package for committed `main`, verifies its manifest and checksums, preserves an emergency binary snapshot, warns before stopping a running daemon, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback.
+The installer selects the newest published SemVer `v…` release, verifies the GitHub-recorded candidate-manifest digest and exact package checksums, preserves an emergency binary snapshot, warns before stopping a running daemon, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback.
 
-The repository, channel manifest, and edge release assets are public. GitHub CLI authentication is optional; the installer falls back to anonymous verified downloads.
+The repository and versioned release assets are public. GitHub CLI authentication is optional; the installer falls back to anonymous verified downloads.
 
 :::caution
-The default installer downloads the newest successfully validated public `main` edge package. Source mode operates on a clean committed `HEAD` and does not package uncommitted worktree changes. Review the current worktree before using source mode.
+The default installer downloads only a published versioned release; it never selects historical `edge-*` releases or an arbitrary `main` commit. Source mode operates on a clean committed `HEAD` and does not package uncommitted worktree changes. Review the current worktree before using source mode.
 :::
 
 ## Build from committed source
