@@ -337,7 +337,7 @@ pub(in crate::app) async fn xdg_launch(
     }
     keep_owner_until_complete(
         owner,
-        run_live_multipane_window_with_app_id(config, dojo, factory, app_id),
+        run_live_multipane_window_with_app_id(config, dojo, factory, app_id, false),
     )
     .await
 }
@@ -409,7 +409,7 @@ async fn launch_with_app_id(
     let dojo = dojo.clone();
     remember_dojo(&factory, dojo.id);
     drop(connection);
-    run_live_multipane_window_with_app_id(config, dojo, factory, app_id).await
+    run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true).await
 }
 
 #[cfg(test)]

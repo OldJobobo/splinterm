@@ -660,7 +660,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         .map_or(Ok((INITIAL_WIDTH, INITIAL_HEIGHT)), |frame| {
             frame.initial_logical_size(options.initial_columns, options.initial_rows, 120)
         })?;
-    if managed_tabs {
+    if managed_tabs && options.initial_tab_strip_visible {
         initial_height = initial_height
             .checked_add(TAB_STRIP_LOGICAL_HEIGHT)
             .context("initial tab strip height overflow")?;
@@ -935,7 +935,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
             active_identity: initial_identity,
             managed_tabs,
-            tab_strip_visible: true,
+            tab_strip_visible: options.initial_tab_strip_visible,
             tab_strip_layout: None,
             tab_strip_pressed: None,
             tab_label_cache: HashMap::new(),
@@ -10358,8 +10358,10 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_windows_keep_the_project_wayland_identity() {
-        assert_eq!(WindowOptions::default().app_id, crate::config::APP_ID);
+    fn ordinary_windows_keep_project_identity_and_visible_tab_strip_default() {
+        let options = WindowOptions::default();
+        assert_eq!(options.app_id, crate::config::APP_ID);
+        assert!(options.initial_tab_strip_visible);
     }
 
     #[test]

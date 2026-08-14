@@ -1,5 +1,11 @@
 # TODO
 
+## Immediate hotfix
+
+- [x] Hide the tab strip by default when XDG invokes Splinterm with a
+  command-bearing `-e` launch; these transient command windows should not present
+  ordinary persistent-Dojo tabs.
+
 ## Alpha3 command palette and keymaps
 
 - [x] Complete [Plan 0033](docs/plans/0033-alpha3-command-palette-and-keymap-closure.md).
@@ -161,7 +167,7 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
   repaint selected glyphs and decorations as a separate foreground layer.
 - [x] Add renderer tests proving exact resolved theme roles, including the Sakura
   Mochi `#f23888` selection color and the themed scrollback overlay.
-- [ ] Give selected Dojo tabs a dedicated exact theme-provided background role,
+- [x] Give selected Dojo tabs a dedicated exact theme-provided background role,
   painted opaquely without mixing or deriving colors, while retaining
   `ui_accent` as the contrasting selected-tab underline.
 

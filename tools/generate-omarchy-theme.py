@@ -89,6 +89,9 @@ def generate(
     roles["selection_foreground"] = colors.get(
         "selection_foreground", roles["fg"]
     )
+    roles["active_tab_background"] = colors.get(
+        "active_tab_background", roles["selection"]
+    )
     missing = [name for name, value in roles.items() if value is None]
     if missing:
         raise ValueError("missing Omarchy roles: " + ", ".join(missing))
@@ -108,6 +111,7 @@ def generate(
         "cursor": roles["accent"],
         "selection": roles["selection"],
         "selection_foreground": roles["selection_foreground"],
+        "active_tab_background": roles["active_tab_background"],
         "url": roles["blue"],
         "ui_accent": roles["accent"],
         "pane_border": roles["muted"],

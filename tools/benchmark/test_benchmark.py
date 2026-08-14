@@ -1290,6 +1290,9 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
     assert generated["blur"] is True
     assert generated["background"] == legacy["background"]
     assert generated["selection_foreground"] == legacy["foreground"]
+    assert generated["active_tab_background"] == legacy["selection_background"]
+    explicit = module.generate({**legacy, "active_tab_background": "#303132"})
+    assert explicit["active_tab_background"] == "#303132"
     assert generated["ansi"][0] == legacy["color0"]
     assert generated["ansi"][15] == legacy["color15"]
 

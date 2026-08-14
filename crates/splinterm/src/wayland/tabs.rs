@@ -115,6 +115,15 @@ const fn tab_foreground(theme: ResolvedTheme, active: bool) -> u32 {
     }
 }
 
+const fn opaque_rgba(color: u32) -> [u8; 4] {
+    [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        u8::MAX,
+    ]
+}
+
 pub(super) fn tab_strip_hit_test(
     layout: &TabStripLayout,
     position: (f64, f64),
@@ -470,14 +479,6 @@ impl App {
         close_text: Option<&ChromeText>,
         new_text: Option<&ChromeText>,
     ) -> Result<()> {
-        let rgba = |color: u32| {
-            [
-                u8::try_from((color >> 16) & 0xff).unwrap_or(0),
-                u8::try_from((color >> 8) & 0xff).unwrap_or(0),
-                u8::try_from(color & 0xff).unwrap_or(0),
-                u8::MAX,
-            ]
-        };
         let position = |value| i32::try_from(value).unwrap_or(i32::MAX);
         let strip = Self::buffer_rect(layout.rect, scale_120)?;
         fill_rect(
@@ -490,7 +491,7 @@ impl App {
                 strip.width,
                 strip.height,
             ),
-            rgba(theme.background),
+            opaque_rgba(theme.background),
         );
         for tab in &layout.tabs {
             let rect = Self::buffer_rect(tab.rect, scale_120)?;
@@ -502,7 +503,7 @@ impl App {
                     width,
                     height,
                     (position(rect.x), position(rect.y), rect.width, rect.height),
-                    rgba(theme.selection),
+                    opaque_rgba(theme.active_tab_background),
                 );
                 let underline = logical_extent_to_buffer(3, scale_120)?.max(1);
                 fill_rect(
@@ -515,7 +516,7 @@ impl App {
                         rect.width,
                         underline,
                     ),
-                    rgba(theme.ui_accent),
+                    opaque_rgba(theme.ui_accent),
                 );
             }
             let label_rect = Self::buffer_rect(tab.label_rect, scale_120)?;
@@ -575,20 +576,49 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
-        DojoId, ResolvedTheme, TabHitTarget, tab_context_target, tab_foreground,
-        tab_strip_hit_test, tab_strip_layout,
+        App, DojoId, ResolvedTheme, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, opaque_rgba,
+        tab_context_target, tab_foreground, tab_strip_hit_test, tab_strip_layout,
     };
 
     #[test]
-    fn active_tab_uses_selection_foreground() {
+    fn active_tab_uses_exact_opaque_theme_roles() {
         let theme = ResolvedTheme {
             foreground: 0xaa_bb_cc,
             selection_foreground: 0x11_22_33,
+            active_tab_background: 0x44_55_66,
             ..ResolvedTheme::default()
         };
         assert_eq!(tab_foreground(theme, false), 0xaa_bb_cc);
         assert_eq!(tab_foreground(theme, true), 0x11_22_33);
+        assert_eq!(
+            opaque_rgba(theme.active_tab_background),
+            [0x44, 0x55, 0x66, 0xff]
+        );
+        assert_eq!(opaque_rgba(theme.ui_accent)[3], 0xff);
+
+        let active_dojo = DojoId::new();
+        let layout = tab_strip_layout(420, &[active_dojo], 0).unwrap();
+        let mut canvas = vec![0; 420 * usize::try_from(TAB_STRIP_LOGICAL_HEIGHT).unwrap() * 4];
+        App::paint_tab_strip(
+            &mut canvas,
+            420,
+            TAB_STRIP_LOGICAL_HEIGHT,
+            &layout,
+            120,
+            theme,
+            active_dojo,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        let sample_x = usize::try_from(layout.tabs[0].rect.x + 1).unwrap();
+        let sample_y = usize::try_from(layout.tabs[0].rect.y + 1).unwrap();
+        let offset = (sample_y * 420 + sample_x) * 4;
+        assert_eq!(&canvas[offset..offset + 4], &[0x66, 0x55, 0x44, 0xff]);
     }
 
     #[test]

@@ -319,8 +319,10 @@ remote-path, no-image, and disconnect behavior.
 The normal desktop/XDG command remains `splinterm-xdg-terminal-exec`. Without a
 command it creates a fresh persistent Lair with one Dojo. When an application
 supplies `-- COMMAND...`, the same adapter creates a transient client-bound Lair
-that is removed when the command exits or its owning Window disconnects. Native
-`splinterm launch -- COMMAND...` remains persistent. Dojo reopening is
+that is removed when the command exits or its owning Window disconnects. These
+command-bearing XDG windows start with the Dojo tab strip hidden; the normal
+strip-toggle action can still reveal it. Native `splinterm launch -- COMMAND...`
+remains persistent. Dojo reopening is
 deliberately separate, and transient XDG commands never enter Recent Dojos:
 
 ```text
@@ -393,9 +395,13 @@ With `main.theme` unset, Splinterm reads the active Quattro theme directly from
 `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective
 `foot.ini` supplies the terminal foreground/background, ANSI 16, cursor,
 selection background and foreground, alpha, and blur; `colors.toml` supplies the
-Omarchy UI accent used by trusted surfaces and active pane chrome. Active tab
-labels and close affordances use `selection-foreground`, falling back to the
-terminal foreground when that Foot role is absent. `[colors-dark]` takes
+Omarchy UI accent used by trusted surfaces and active pane chrome plus the exact
+`active_tab_background` role used for the opaque selected-Dojo-tab body. The
+selected-tab underline remains the UI accent. Active tab labels and close
+affordances use `selection-foreground`, falling back to the terminal foreground
+when that Foot role is absent. If an older theme omits `active_tab_background`,
+the selected-tab body falls back to the exact terminal selection background.
+`[colors-dark]` takes
 precedence over legacy `[colors]`, while absent alpha defaults opaque and absent
 blur defaults off.
 
@@ -410,7 +416,8 @@ safe fallback.
 No theme hook, generated file, or manual integration step is required. Setting
 `main.theme=/path/to/theme.json` explicitly opts out of Omarchy discovery for
 portable or isolated use. The strict JSON schema retains optional
-`selection_foreground`, `pane_border`, and `pane_border_active` overrides;
-`selection_foreground` falls back to the normal foreground for older JSON
+`selection_foreground`, `active_tab_background`, `pane_border`, and
+`pane_border_active` overrides; `selection_foreground` falls back to the normal
+foreground and `active_tab_background` falls back to `selection` for older JSON
 themes. `tools/generate-omarchy-theme.py`
 remains only an optional exporter for that override format.

@@ -93,6 +93,8 @@ pub struct WindowOptions {
     pub optimistic_remote_splits: bool,
     /// Stable identity for the initial managed Dojo; absent for legacy/evidence windows.
     pub initial_dojo: Option<WindowDojoIdentity>,
+    /// Initial tab-strip policy for managed Dojo windows.
+    pub initial_tab_strip_visible: bool,
 }
 
 impl Default for WindowOptions {
@@ -129,6 +131,7 @@ impl Default for WindowOptions {
             forced_control_transfer: true,
             optimistic_remote_splits: false,
             initial_dojo: None,
+            initial_tab_strip_visible: true,
         }
     }
 }

@@ -112,7 +112,7 @@ pub(super) async fn run_live_multipane_window(
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
 ) -> Result<()> {
-    run_live_multipane_window_with_app_id(config, dojo_model, factory, None).await
+    run_live_multipane_window_with_app_id(config, dojo_model, factory, None, true).await
 }
 
 #[allow(
@@ -124,6 +124,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
     app_id: Option<String>,
+    initial_tab_strip_visible: bool,
 ) -> Result<()> {
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
@@ -206,6 +207,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
             forced_control_transfer,
             optimistic_remote_splits,
             initial_dojo: Some(initial_identity),
+            initial_tab_strip_visible,
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
             cursor_style: window_config.cursor_style,
