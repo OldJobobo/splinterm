@@ -236,6 +236,8 @@ const SCALE_DENOMINATOR: u32 = 120;
 const MIN_SCALE_120: u32 = 120;
 const MAX_SCALE_120: u32 = 960;
 const MAX_PREEDIT_BYTES: usize = 4 * 1024;
+const MAX_PENDING_TERMINAL_INPUT_BYTES: usize = splinterm_protocol::MAX_INPUT_BYTES;
+const PENDING_INPUT_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const SIGNOFF_TICK_INTERVAL: Duration = Duration::from_millis(50);
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const IDLE_EVENT_LOOP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -863,6 +865,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             forced_control_transfer: options.forced_control_transfer,
             optimistic_remote_splits: options.optimistic_remote_splits,
             input_generation: 0,
+            pending_terminal_input: VecDeque::new(),
+            terminal_input_saturated: false,
             terminal_focus_reported: false,
             ime_generation: 0,
             ime_modal_barrier: false,
@@ -997,6 +1001,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let event_loop_result: Result<()> = (|| {
         while !app.scheduling.exit {
             app.apply_updates(&queue_handle)?;
+            if !app.scheduling.exit {
+                app.flush_pending_terminal_input();
+            }
             if app.scheduling.redraw_pending
                 && !pending_draw_waits_for_frame(
                     app.scheduling.frame_pending,
@@ -1804,6 +1811,8 @@ struct InputState {
     forced_control_transfer: bool,
     optimistic_remote_splits: bool,
     input_generation: u64,
+    pending_terminal_input: VecDeque<PendingTerminalInput>,
+    terminal_input_saturated: bool,
     terminal_focus_reported: bool,
     ime_generation: u64,
     ime_modal_barrier: bool,
@@ -2042,6 +2051,104 @@ fn try_window_command(commands: &Sender<WindowCommand>, command: WindowCommand) 
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalInputQueueOutcome {
+    Queued,
+    Pending,
+    Saturated,
+}
+
+struct PendingTerminalInput {
+    commands: Sender<WindowCommand>,
+    bytes: Vec<u8>,
+}
+
+fn pending_terminal_input_bytes(pending: &VecDeque<PendingTerminalInput>) -> usize {
+    pending.iter().map(|batch| batch.bytes.len()).sum()
+}
+
+fn terminal_input_pending_for(
+    pending: &VecDeque<PendingTerminalInput>,
+    commands: Option<&Sender<WindowCommand>>,
+) -> bool {
+    commands.is_some_and(|commands| {
+        pending
+            .iter()
+            .any(|batch| batch.commands.same_channel(commands))
+    })
+}
+
+fn try_flush_pending_terminal_input(pending: &mut VecDeque<PendingTerminalInput>) -> bool {
+    let batch_count = pending.len();
+    for _ in 0..batch_count {
+        let batch = pending.pop_front().expect("pending batch count is exact");
+        match batch.commands.try_send(WindowCommand::Input(batch.bytes)) {
+            Err(TrySendError::Full(WindowCommand::Input(bytes))) => {
+                pending.push_back(PendingTerminalInput {
+                    commands: batch.commands,
+                    bytes,
+                });
+            }
+            // Pane teardown can close a sender while its input is pending. The
+            // bytes remain bound to that pane and must not terminate the window
+            // or be retargeted to another pane.
+            Ok(()) | Err(TrySendError::Closed(_)) => {}
+            Err(TrySendError::Full(_)) => unreachable!("queued command remains terminal input"),
+        }
+    }
+    pending.is_empty()
+}
+
+fn retain_pending_terminal_input(
+    pending: &mut VecDeque<PendingTerminalInput>,
+    commands: &Sender<WindowCommand>,
+    bytes: Vec<u8>,
+) -> TerminalInputQueueOutcome {
+    let available =
+        MAX_PENDING_TERMINAL_INPUT_BYTES.saturating_sub(pending_terminal_input_bytes(pending));
+    if bytes.len() > available {
+        return TerminalInputQueueOutcome::Saturated;
+    }
+    if let Some(batch) = pending
+        .iter_mut()
+        .find(|batch| batch.commands.same_channel(commands))
+    {
+        batch.bytes.extend(bytes);
+    } else if !bytes.is_empty() {
+        pending.push_back(PendingTerminalInput {
+            commands: commands.clone(),
+            bytes,
+        });
+    }
+    TerminalInputQueueOutcome::Pending
+}
+
+fn queue_terminal_input(
+    commands: Option<&Sender<WindowCommand>>,
+    pending: &mut VecDeque<PendingTerminalInput>,
+    bytes: Vec<u8>,
+) -> Result<TerminalInputQueueOutcome> {
+    let Some(commands) = commands else {
+        return Ok(TerminalInputQueueOutcome::Queued);
+    };
+    if terminal_input_pending_for(pending, Some(commands)) {
+        let _ = try_flush_pending_terminal_input(pending);
+        if terminal_input_pending_for(pending, Some(commands)) {
+            return Ok(retain_pending_terminal_input(pending, commands, bytes));
+        }
+    }
+    match commands.try_send(WindowCommand::Input(bytes)) {
+        Ok(()) => Ok(TerminalInputQueueOutcome::Queued),
+        Err(TrySendError::Full(WindowCommand::Input(bytes))) => {
+            Ok(retain_pending_terminal_input(pending, commands, bytes))
+        }
+        Err(TrySendError::Closed(_)) => {
+            Err(anyhow::anyhow!("Wayland command receiver disconnected"))
+        }
+        Err(TrySendError::Full(_)) => unreachable!("queued command remains terminal input"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlReleaseOutcome {
     Queued,
     Retry,
@@ -2229,6 +2336,21 @@ fn event_loop_timeout(
         Some(CURSOR_BLINK_INTERVAL.saturating_sub(elapsed))
     } else {
         Some(IDLE_EVENT_LOOP_TIMEOUT)
+    }
+}
+
+fn pane_command_retry_pending(pane: &PaneView) -> bool {
+    pane.control_release_pending || pane.pending_focus_report.is_some()
+}
+
+fn command_retry_dispatch_timeout(
+    timeout: Option<Duration>,
+    command_retry_pending: bool,
+) -> Option<Duration> {
+    if command_retry_pending {
+        timeout.map(|timeout| timeout.min(PENDING_INPUT_RETRY_INTERVAL))
+    } else {
+        timeout
     }
 }
 
@@ -2629,8 +2751,13 @@ impl App {
         }
     }
 
-    fn request_pane_control_release(pane: &mut PaneView) {
+    fn request_pane_control_release(pane: &mut PaneView, terminal_input_pending: bool) {
         if !pane.controller_active {
+            pane.control_release_pending = false;
+            return;
+        }
+        if terminal_input_pending {
+            pane.control_release_pending = true;
             return;
         }
         let outcome = pane.commands.as_ref().map_or(
@@ -2651,19 +2778,27 @@ impl App {
         }
     }
 
-    fn retry_pane_control_release(pane: &mut PaneView) {
+    fn retry_pane_control_release(pane: &mut PaneView, terminal_input_pending: bool) {
         if pane.control_release_pending {
-            Self::request_pane_control_release(pane);
+            Self::request_pane_control_release(pane, terminal_input_pending);
         }
     }
 
-    fn release_tab_controllers(view: &mut DojoTabView) {
+    fn release_tab_controllers(
+        view: &mut DojoTabView,
+        pending_input: &VecDeque<PendingTerminalInput>,
+    ) {
         for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
-            Self::request_pane_control_release(pane);
+            let input_pending = terminal_input_pending_for(pending_input, pane.commands.as_ref());
+            Self::request_pane_control_release(pane, input_pending);
         }
     }
 
-    fn request_pane_focus_report(pane: &mut PaneView, focused: bool) {
+    fn request_pane_focus_report(pane: &mut PaneView, focused: bool, terminal_input_pending: bool) {
+        if terminal_input_pending {
+            pane.pending_focus_report = Some(focused);
+            return;
+        }
         let outcome = pane
             .commands
             .as_ref()
@@ -2681,9 +2816,38 @@ impl App {
         }
     }
 
-    fn retry_pane_focus_report(pane: &mut PaneView) {
+    fn retry_pane_focus_report(pane: &mut PaneView, terminal_input_pending: bool) {
         if let Some(focused) = pane.pending_focus_report {
-            Self::request_pane_focus_report(pane, focused);
+            Self::request_pane_focus_report(pane, focused, terminal_input_pending);
+        }
+    }
+
+    fn active_terminal_input_pending(&self) -> bool {
+        terminal_input_pending_for(
+            &self.input.pending_terminal_input,
+            self.panes.pane.commands.as_ref(),
+        )
+    }
+
+    fn request_active_pane_focus_report(&mut self, focused: bool) {
+        let input_pending = self.active_terminal_input_pending();
+        Self::request_pane_focus_report(&mut self.panes.pane, focused, input_pending);
+    }
+
+    fn request_active_pane_control_release(&mut self) {
+        let input_pending = self.active_terminal_input_pending();
+        Self::request_pane_control_release(&mut self.panes.pane, input_pending);
+    }
+
+    fn release_visible_pane_controllers(&mut self) {
+        for pane in
+            std::iter::once(&mut self.panes.pane).chain(self.panes.inactive_panes.iter_mut())
+        {
+            let input_pending = terminal_input_pending_for(
+                &self.input.pending_terminal_input,
+                pane.commands.as_ref(),
+            );
+            Self::request_pane_control_release(pane, input_pending);
         }
     }
 
@@ -2706,14 +2870,10 @@ impl App {
         self.presentation.zoomed_splint = None;
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         if self.input.terminal_focus_reported {
-            Self::request_pane_focus_report(&mut self.panes.pane, false);
+            self.request_active_pane_focus_report(false);
             self.input.terminal_focus_reported = false;
         }
-        for pane in
-            std::iter::once(&mut self.panes.pane).chain(self.panes.inactive_panes.iter_mut())
-        {
-            Self::request_pane_control_release(pane);
-        }
+        self.release_visible_pane_controllers();
         let next = self
             .tab_state
             .tabs
@@ -2770,7 +2930,7 @@ impl App {
         self.clear_ime_preedit();
         self.update_ime_cursor_rectangle();
         if self.input.keyboard_focused && self.panes.input_modes().focus_reporting {
-            Self::request_pane_focus_report(&mut self.panes.pane, true);
+            self.request_active_pane_focus_report(true);
             self.input.terminal_focus_reported = true;
         }
         if perf_trace_enabled() {
@@ -3613,10 +3773,7 @@ impl App {
         if self.modal.input_modal_open() {
             return Ok(());
         }
-        if let Some(commands) = &self.panes.pane.commands {
-            try_window_command(commands, WindowCommand::Input(bytes))?;
-        }
-        Ok(())
+        self.queue_terminal_input(bytes)
     }
 
     fn handle_vertical_wheel(
@@ -4349,7 +4506,7 @@ impl App {
                         eprintln!("splinterm file drop rejected: command channel unavailable");
                         continue;
                     };
-                    try_window_command(&commands, WindowCommand::Input(encoded))?;
+                    self.queue_terminal_input_for(Some(&commands), encoded)?;
                 }
             }
         }
@@ -4441,7 +4598,7 @@ impl App {
         ) else {
             return;
         };
-        Self::request_pane_focus_report(&mut self.panes.pane, self.input.keyboard_focused);
+        self.request_active_pane_focus_report(self.input.keyboard_focused);
         self.input.terminal_focus_reported = self.input.keyboard_focused;
     }
 
@@ -4793,7 +4950,7 @@ impl App {
                         self.send_command(WindowCommand::RequestControlTransfer);
                     }
                     CommandControlAction::Release => {
-                        Self::request_pane_control_release(&mut self.panes.pane);
+                        self.request_active_pane_control_release();
                     }
                     CommandControlAction::Force if self.input.forced_control_transfer => {
                         self.send_command(WindowCommand::ForceControlTransfer);
@@ -5182,7 +5339,12 @@ impl App {
     }
 
     fn send_command(&mut self, command: WindowCommand) {
-        if self.modal.input_modal_open() && matches!(command, WindowCommand::Input(_)) {
+        if let WindowCommand::Input(bytes) = command {
+            if !self.modal.input_modal_open()
+                && let Err(error) = self.queue_terminal_input(bytes)
+            {
+                self.scheduling.fail(error);
+            }
             return;
         }
         let Some(commands) = &self.panes.pane.commands else {
@@ -5193,8 +5355,33 @@ impl App {
         }
     }
 
+    fn queue_terminal_input(&mut self, bytes: Vec<u8>) -> Result<()> {
+        let commands = self.panes.pane.commands.clone();
+        self.queue_terminal_input_for(commands.as_ref(), bytes)
+    }
+
+    fn queue_terminal_input_for(
+        &mut self,
+        commands: Option<&Sender<WindowCommand>>,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        let outcome =
+            queue_terminal_input(commands, &mut self.input.pending_terminal_input, bytes)?;
+        if outcome == TerminalInputQueueOutcome::Saturated && !self.input.terminal_input_saturated {
+            eprintln!("splinterm input queue saturated; dropping excess terminal input");
+        }
+        self.input.terminal_input_saturated = outcome == TerminalInputQueueOutcome::Saturated;
+        Ok(())
+    }
+
+    fn flush_pending_terminal_input(&mut self) {
+        if try_flush_pending_terminal_input(&mut self.input.pending_terminal_input) {
+            self.input.terminal_input_saturated = false;
+        }
+    }
+
     fn send_coalescible_input(&mut self, bytes: Vec<u8>) {
-        if self.modal.input_modal_open() {
+        if self.modal.input_modal_open() || !self.input.pending_terminal_input.is_empty() {
             return;
         }
         let Some(commands) = &self.panes.pane.commands else {
@@ -6432,7 +6619,7 @@ impl App {
                 return;
             }
             Some(ActionId::ReleaseControl) => {
-                Self::request_pane_control_release(&mut self.panes.pane);
+                self.request_active_pane_control_release();
                 if let Some(snapshot) = &self.panes.pane.snapshot {
                     self.surface.window.set_title(window_title(
                         self.presentation
@@ -6916,11 +7103,7 @@ impl App {
                         if let Some(selected) = self.tab_state.tabs.selection_after_close(dojo_id) {
                             changed |= self.activate_tab(selected)?;
                         } else {
-                            for pane in std::iter::once(&mut self.panes.pane)
-                                .chain(self.panes.inactive_panes.iter_mut())
-                            {
-                                Self::request_pane_control_release(pane);
-                            }
+                            self.release_visible_pane_controllers();
                         }
                     }
                     let mut removed = self.tab_state.tabs.close(dojo_id);
@@ -6931,7 +7114,7 @@ impl App {
                     );
                     if let Some(removed) = removed.as_mut() {
                         if let Some(view) = removed.value.as_mut() {
-                            Self::release_tab_controllers(view);
+                            Self::release_tab_controllers(view, &self.input.pending_terminal_input);
                         }
                         self.tab_state.tab_label_cache.clear();
                         self.presentation.full_redraw = true;
@@ -7172,9 +7355,13 @@ impl App {
             if let Some(view) = tab.value.as_mut() {
                 view.drain_hidden_updates(&waker, theme)?;
                 for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
-                    Self::retry_pane_focus_report(pane);
+                    let input_pending = terminal_input_pending_for(
+                        &self.input.pending_terminal_input,
+                        pane.commands.as_ref(),
+                    );
+                    Self::retry_pane_focus_report(pane, input_pending);
                 }
-                Self::release_tab_controllers(view);
+                Self::release_tab_controllers(view, &self.input.pending_terminal_input);
                 if let Some(commands) = &topology_commands {
                     enqueue_pending_exited_splints(
                         tab.dojo_id,
@@ -7188,8 +7375,12 @@ impl App {
         if self.scheduling.exit {
             return Ok(());
         }
-        Self::retry_pane_focus_report(&mut self.panes.pane);
-        Self::retry_pane_control_release(&mut self.panes.pane);
+        let active_input_pending = terminal_input_pending_for(
+            &self.input.pending_terminal_input,
+            self.panes.pane.commands.as_ref(),
+        );
+        Self::retry_pane_focus_report(&mut self.panes.pane, active_input_pending);
+        Self::retry_pane_control_release(&mut self.panes.pane, active_input_pending);
         let inline_picker_open = self.modal.inline_picker_open();
         let picker_reconcile_pending = self.modal.session_picker_reconcile_pending;
         let mut next_theme = (!inline_picker_open)
@@ -7992,13 +8183,29 @@ impl App {
             })
     }
 
+    fn has_deferred_pane_command(&self) -> bool {
+        std::iter::once(&self.panes.pane)
+            .chain(self.panes.inactive_panes.iter())
+            .any(pane_command_retry_pending)
+            || self.tab_state.tabs.iter().any(|tab| {
+                tab.value.as_ref().is_some_and(|view| {
+                    std::iter::once(&view.pane)
+                        .chain(view.inactive_panes.iter())
+                        .any(pane_command_retry_pending)
+                })
+            })
+    }
+
     fn event_loop_dispatch_timeout(&self) -> Option<Duration> {
-        event_loop_timeout(
+        let timeout = event_loop_timeout(
             self.scheduling.exit,
             self.scheduling.signoff.is_some(),
             self.cursor_is_blinking()
                 .then(|| self.input.last_cursor_blink.elapsed()),
-        )
+        );
+        let command_retry_pending =
+            !self.input.pending_terminal_input.is_empty() || self.has_deferred_pane_command();
+        command_retry_dispatch_timeout(timeout, command_retry_pending)
     }
 
     fn tick_cursor_blink(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
@@ -9961,6 +10168,7 @@ mod tests {
         };
         let (_first_updates, first_update_receiver) = tokio::sync::mpsc::channel(1);
         let (first_commands, mut first_command_receiver) = tokio::sync::mpsc::channel(1);
+        let pending_first_commands = first_commands.clone();
         let (_second_updates, second_update_receiver) = tokio::sync::mpsc::channel(1);
         let (second_commands, mut second_command_receiver) = tokio::sync::mpsc::channel(1);
         let mut view = DojoTabView::from_open(
@@ -9998,22 +10206,42 @@ mod tests {
         )
         .unwrap();
 
-        App::release_tab_controllers(&mut view);
-
-        assert!(!view.pane.controller_active);
-        assert!(
-            view.inactive_panes
-                .iter()
-                .all(|pane| !pane.controller_active)
-        );
+        App::request_pane_focus_report(&mut view.pane, true, true);
+        assert_eq!(view.pane.pending_focus_report, Some(true));
+        assert!(pane_command_retry_pending(&view.pane));
+        assert!(first_command_receiver.try_recv().is_err());
+        App::retry_pane_focus_report(&mut view.pane, false);
         assert_eq!(
             first_command_receiver.try_recv().unwrap(),
-            WindowCommand::ReleaseControl
+            WindowCommand::Input(b"\x1b[I".to_vec())
         );
+
+        let pending = VecDeque::from([PendingTerminalInput {
+            commands: pending_first_commands,
+            bytes: vec![0x7f],
+        }]);
+        App::release_tab_controllers(&mut view, &pending);
+        assert!(view.pane.controller_active);
+        assert!(view.pane.control_release_pending);
+        assert!(pane_command_retry_pending(&view.pane));
+        assert!(!view.inactive_panes[0].controller_active);
+        assert!(first_command_receiver.try_recv().is_err());
         assert_eq!(
             second_command_receiver.try_recv().unwrap(),
             WindowCommand::ReleaseControl
         );
+
+        App::release_tab_controllers(&mut view, &VecDeque::new());
+        assert!(!view.pane.controller_active);
+        assert_eq!(
+            first_command_receiver.try_recv().unwrap(),
+            WindowCommand::ReleaseControl
+        );
+
+        view.pane.control_release_pending = true;
+        App::retry_pane_control_release(&mut view.pane, false);
+        assert!(!view.pane.control_release_pending);
+        assert!(!pane_command_retry_pending(&view.pane));
     }
 
     #[test]
@@ -11952,11 +12180,166 @@ mod tests {
     }
 
     #[test]
-    fn bounded_command_queue_reports_overflow_and_disconnect() {
+    fn saturated_command_queue_buffers_input_without_blocking_update_drain() {
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(1);
+        commands.try_send(WindowCommand::Input(vec![1])).unwrap();
+        let (updates, mut update_receiver) = tokio::sync::mpsc::channel(1);
+        updates.try_send(7).unwrap();
+        let mut pending = VecDeque::new();
+
+        assert_eq!(
+            queue_terminal_input(Some(&commands), &mut pending, vec![2]).unwrap(),
+            TerminalInputQueueOutcome::Pending
+        );
+        assert_eq!(pending.front().unwrap().bytes, [2]);
+        assert_eq!(
+            update_receiver.try_recv().unwrap(),
+            7,
+            "pending input must not block the Wayland update consumer"
+        );
+        assert_eq!(
+            queue_terminal_input(Some(&commands), &mut pending, vec![3]).unwrap(),
+            TerminalInputQueueOutcome::Pending
+        );
+        assert_eq!(pending.front().unwrap().bytes, [2, 3]);
+        assert_eq!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![1])
+        );
+        assert!(try_flush_pending_terminal_input(&mut pending));
+        assert!(pending.is_empty());
+        assert_eq!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![2, 3])
+        );
+    }
+
+    #[test]
+    fn pending_terminal_input_remains_bound_to_its_original_pane() {
+        let (first, mut first_receiver) = tokio::sync::mpsc::channel(1);
+        first.try_send(WindowCommand::Input(vec![1])).unwrap();
+        let (second, mut second_receiver) = tokio::sync::mpsc::channel(1);
+        let mut pending = VecDeque::new();
+
+        assert_eq!(
+            queue_terminal_input(Some(&first), &mut pending, vec![2]).unwrap(),
+            TerminalInputQueueOutcome::Pending
+        );
+        assert_eq!(
+            queue_terminal_input(Some(&second), &mut pending, vec![3]).unwrap(),
+            TerminalInputQueueOutcome::Queued
+        );
+        assert_eq!(
+            second_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![3])
+        );
+        assert_eq!(
+            first_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![1])
+        );
+        assert!(try_flush_pending_terminal_input(&mut pending));
+        assert_eq!(
+            first_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![2])
+        );
+    }
+
+    #[test]
+    fn saturated_pane_senders_share_the_pending_input_bound_without_loss() {
+        let (first, mut first_receiver) = tokio::sync::mpsc::channel(1);
+        first.try_send(WindowCommand::Input(vec![1])).unwrap();
+        let (second, mut second_receiver) = tokio::sync::mpsc::channel(1);
+        second.try_send(WindowCommand::Input(vec![2])).unwrap();
+        let mut pending = VecDeque::new();
+
+        assert_eq!(
+            queue_terminal_input(Some(&first), &mut pending, vec![3]).unwrap(),
+            TerminalInputQueueOutcome::Pending
+        );
+        assert_eq!(
+            queue_terminal_input(Some(&second), &mut pending, vec![4]).unwrap(),
+            TerminalInputQueueOutcome::Pending
+        );
+        assert_eq!(pending_terminal_input_bytes(&pending), 2);
+        assert_eq!(
+            first_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![1])
+        );
+        assert_eq!(
+            second_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![2])
+        );
+        assert!(try_flush_pending_terminal_input(&mut pending));
+        assert_eq!(
+            first_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![3])
+        );
+        assert_eq!(
+            second_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![4])
+        );
+    }
+
+    #[test]
+    fn closed_pending_pane_is_discarded_without_blocking_surviving_input() {
+        let (closed, closed_receiver) = tokio::sync::mpsc::channel(1);
+        closed.try_send(WindowCommand::Input(vec![1])).unwrap();
+        let (surviving, mut surviving_receiver) = tokio::sync::mpsc::channel(1);
+        surviving.try_send(WindowCommand::Input(vec![2])).unwrap();
+        let mut pending = VecDeque::new();
+
+        assert_eq!(
+            queue_terminal_input(Some(&closed), &mut pending, vec![3]).unwrap(),
+            TerminalInputQueueOutcome::Pending
+        );
+        assert_eq!(
+            queue_terminal_input(Some(&surviving), &mut pending, vec![4]).unwrap(),
+            TerminalInputQueueOutcome::Pending
+        );
+        drop(closed_receiver);
+        assert_eq!(
+            surviving_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![2])
+        );
+
+        assert!(try_flush_pending_terminal_input(&mut pending));
+        assert!(pending.is_empty());
+        assert_eq!(
+            surviving_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![4])
+        );
+    }
+
+    #[test]
+    fn pending_terminal_input_is_bounded_and_keeps_input_units_atomic() {
+        let (commands, _receiver) = tokio::sync::mpsc::channel(1);
+        commands.try_send(WindowCommand::Input(vec![1])).unwrap();
+        let mut pending = VecDeque::new();
+        let retained = vec![2; MAX_PENDING_TERMINAL_INPUT_BYTES - 2];
+
+        assert_eq!(
+            queue_terminal_input(Some(&commands), &mut pending, retained).unwrap(),
+            TerminalInputQueueOutcome::Pending
+        );
+        let before = pending.front().unwrap().bytes.clone();
+        let bracketed_paste_end = b"\x1b[201~".to_vec();
+        assert_eq!(
+            queue_terminal_input(Some(&commands), &mut pending, bracketed_paste_end).unwrap(),
+            TerminalInputQueueOutcome::Saturated
+        );
+        assert_eq!(pending.front().unwrap().bytes, before);
+        assert_eq!(
+            pending_terminal_input_bytes(&pending),
+            MAX_PENDING_TERMINAL_INPUT_BYTES - 2
+        );
+    }
+
+    #[test]
+    fn bounded_command_queue_reports_control_overflow_and_disconnect() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        try_window_command(&sender, WindowCommand::Input(vec![1])).expect("first command");
-        let error = try_window_command(&sender, WindowCommand::Input(vec![2]))
-            .expect_err("bounded overflow");
+        sender.try_send(WindowCommand::Input(vec![3])).unwrap();
+        let error = try_window_command(&sender, WindowCommand::ReleaseControl)
+            .expect_err("bounded control overflow");
         assert!(error.to_string().contains("overflow"));
         assert_eq!(
             try_queue_control_release(&sender),
@@ -11981,7 +12364,7 @@ mod tests {
         );
         assert_eq!(receiver.try_recv().unwrap(), WindowCommand::ReleaseControl);
         drop(receiver);
-        let error = try_window_command(&sender, WindowCommand::Input(vec![3]))
+        let error = try_window_command(&sender, WindowCommand::Input(vec![4]))
             .expect_err("disconnected receiver");
         assert!(error.to_string().contains("disconnected"));
         assert_eq!(
@@ -12239,6 +12622,15 @@ mod tests {
             Some(SIGNOFF_TICK_INTERVAL)
         );
         assert_eq!(event_loop_timeout(true, false, None), None);
+        assert_eq!(
+            command_retry_dispatch_timeout(Some(IDLE_EVENT_LOOP_TIMEOUT), true),
+            Some(PENDING_INPUT_RETRY_INTERVAL)
+        );
+        assert_eq!(
+            command_retry_dispatch_timeout(Some(Duration::ZERO), true),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(command_retry_dispatch_timeout(None, true), None);
     }
 
     #[test]
