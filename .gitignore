@@ -9,6 +9,7 @@ __pycache__/
 .env
 /graphify-out/
 /.pi-subagents/
+/.pi/subagents/
 /site/node_modules/
 /site/dist/
 /site/.astro/

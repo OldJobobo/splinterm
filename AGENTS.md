@@ -1,5 +1,56 @@
 # Splinterm Agent Guardrails
 
+## 0. Branch-First Repository Workflow
+
+### 0.1 Main Worktree Is Coordination-Only
+
+The repository-root worktree on `main` is reserved for fetch, status inspection,
+review, approved integration, and release operations. Do not begin task-file
+mutations or task commits there; approved integration and release-boundary
+commits remain permitted.
+
+Before the first edit for an authorized task:
+
+* Fetch the current remote state.
+* Create a short-lived branch from the reviewed `origin/main` base.
+* Create or use a dedicated worktree for that branch.
+* Confirm the branch and worktree path before editing.
+
+Use milestone-oriented names such as `plan/0039-searchable-keybindings`,
+`feat/0039-binding-help-search`, `fix/font-reload-race`, or
+`docs/configuration-font-sync`. Do not use one long-lived branch for all of a
+release program.
+
+If pre-existing changes are found on `main`, partition and preserve them before
+creating the task worktree. Never sweep unrelated tracked or untracked files
+into the new branch, stash, commit, move, or delete them without establishing
+ownership. If ownership cannot be established, do not alter the changes; stop
+and obtain an ownership decision.
+
+### 0.2 One Writer Per Branch and Worktree
+
+One writer owns each task branch and worktree. Read-only scouting, review, and
+validation may inspect that worktree. Review fixes return to the same writer and
+branch by default.
+
+Concurrent writers still require the approval in Section 1.2 and separate
+branches and worktrees. Branch isolation does not authorize uncontrolled
+parallel edits. Serialize dependent milestones and work that overlaps known
+convergence points such as `wayland.rs`, `keymap.rs`, `action_menu.rs`, or
+`TODO.md`.
+
+### 0.3 Pull Request and Merge Boundary
+
+Each coherent branch must pass its owning plan's focused checks, the appropriate
+non-graphical boundary, actual-diff inspection, `git diff --check`, and required
+independent review before merge. Record exact validation and residual risks in
+the pull request.
+
+Prefer squash merge so `main` receives one coherent milestone commit. Delete the
+merged task branch and remove its worktree after verifying the merge. Releases,
+candidates, tags, and publication remain `main`-only and retain their separate
+approval requirements.
+
 ## 1. Cost and Delegation Stop-Loss
 
 ### 1.1 Routine Subagent Authorization
