@@ -396,8 +396,10 @@ With `main.theme` unset, Splinterm reads the active Quattro theme directly from
 `foot.ini` supplies the terminal foreground/background, ANSI 16, cursor,
 selection background and foreground, alpha, and blur; `colors.toml` supplies the
 Omarchy UI accent used by trusted surfaces and active pane chrome plus the exact
-`active_tab_background` role used for the opaque selected-Dojo-tab body. The
-selected-tab underline remains the UI accent. Active tab labels and close
+`active_tab_background` role used for the selected-Dojo-tab body. The tab-strip
+and selected-tab backgrounds both inherit the terminal alpha while preserving
+their exact theme colors. The selected-tab underline remains the opaque UI
+accent. Active tab labels and close
 affordances use `selection-foreground`, falling back to the terminal foreground
 when that Foot role is absent. If an older theme omits `active_tab_background`,
 the selected-tab body falls back to the exact terminal selection background.

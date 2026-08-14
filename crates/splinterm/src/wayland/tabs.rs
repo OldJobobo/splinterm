@@ -508,7 +508,7 @@ impl App {
                     width,
                     height,
                     (position(rect.x), position(rect.y), rect.width, rect.height),
-                    opaque_rgba(theme.active_tab_background),
+                    premultiplied_theme_rgba(theme.active_tab_background, theme.background_alpha),
                 );
                 let underline = logical_extent_to_buffer(3, scale_120)?.max(1);
                 fill_rect(
@@ -589,22 +589,19 @@ mod tests {
     };
 
     #[test]
-    fn tab_strip_respects_background_alpha_but_keeps_active_theme_roles_opaque() {
+    fn tab_strip_and_active_tab_respect_background_alpha_with_exact_theme_roles() {
         let theme = ResolvedTheme {
             background: 0x80_40_20,
             background_alpha: u16::MAX / 2,
             foreground: 0xaa_bb_cc,
             selection_foreground: 0x11_22_33,
             active_tab_background: 0x44_55_66,
+            ui_accent: 0x77_88_99,
             ..ResolvedTheme::default()
         };
         assert_eq!(tab_foreground(theme, false), 0xaa_bb_cc);
         assert_eq!(tab_foreground(theme, true), 0x11_22_33);
-        assert_eq!(
-            opaque_rgba(theme.active_tab_background),
-            [0x44, 0x55, 0x66, 0xff]
-        );
-        assert_eq!(opaque_rgba(theme.ui_accent)[3], 0xff);
+        assert_eq!(opaque_rgba(theme.ui_accent), [0x77, 0x88, 0x99, 0xff]);
 
         let active_dojo = DojoId::new();
         let layout = tab_strip_layout(420, &[active_dojo], 0).unwrap();
@@ -627,7 +624,20 @@ mod tests {
         let active_offset = (sample_y * 420 + active_x) * 4;
         assert_eq!(
             &canvas[active_offset..active_offset + 4],
-            &[0x66, 0x55, 0x44, 0xff]
+            &[0x33, 0x2a, 0x22, 0x7f]
+        );
+
+        let underline_y = usize::try_from(
+            layout.tabs[0]
+                .rect
+                .y
+                .saturating_add(layout.tabs[0].rect.height.saturating_sub(1)),
+        )
+        .unwrap();
+        let underline_offset = (underline_y * 420 + active_x) * 4;
+        assert_eq!(
+            &canvas[underline_offset..underline_offset + 4],
+            &[0x99, 0x88, 0x77, 0xff]
         );
 
         let strip_x = usize::try_from(layout.new_rect.x + 1).unwrap();
