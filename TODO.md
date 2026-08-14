@@ -186,6 +186,24 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
 - [x] Perform separately approved guarded packaged graphical acceptance for the
   Splinterm-owned, opt-in Omarchy screensaver integration.
 
+## 0.2.0 persistence expansion and upgrade handoff
+
+- [ ] Complete [Plan 0037](docs/plans/0037-0.2-persistence-and-upgrade-handoff.md).
+- [ ] Approve precise persistence lifetime vocabulary, the in-place re-exec ADR,
+  and a separate privacy decision before any durable terminal archive work.
+- [ ] Prove an adoptable Linux PTY session preserves PID, process group, session,
+  one-reader ownership, reaping, signaling, ordered I/O, and bounded rollback.
+- [ ] Define bounded terminal checkpoint, descriptor, handoff, and rollback ABIs
+  with exact parser continuation, corruption rejection, and migration tests.
+- [ ] Add a daemon handoff coordinator that fences authority, adopts atomically,
+  reconnects clients by full resnapshot, and fault-injects every rollback edge.
+- [ ] Make launcher and packaging UX distinguish matching, compatible, blocked,
+  bootstrap, destructive-fallback, downgrade, and interrupted upgrade states.
+- [ ] Keep recipe-only reboot restore as the default; gate optional archives on
+  reviewed retention, deletion, export, trusted-read, and privacy policy.
+- [ ] Record serial workspace, package, identity, rollback, architecture,
+  security/privacy, release, and separately approved graphical evidence.
+
 ## 0.2.0 live Omarchy system-font synchronization
 
 - [ ] Complete [Plan 0038](docs/plans/0038-0.2-live-omarchy-font-sync.md).
