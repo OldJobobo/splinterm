@@ -18,8 +18,8 @@ branch and dedicated sibling worktree before editing:
 root=$PWD
 worktree=../splinterm-worktrees/0039-binding-help
 git fetch origin
-git worktree add "$worktree" \
-  -b feat/0039-binding-help-search origin/main
+git worktree add --no-track -b feat/0039-binding-help-search \
+  "$worktree" origin/main
 cd "$worktree"
 ```
 
@@ -31,6 +31,13 @@ explicit approval under [`AGENTS.md`](AGENTS.md).
 
 Open a pull request only after focused validation, actual-diff inspection,
 `git diff --check`, and the independent review required by the owning plan.
+Publish the exact task branch with an upstream of the same name, then open the
+pull request:
+
+```bash
+git push --set-upstream origin HEAD
+```
+
 Prefer squash merge. After the merge is verified:
 
 ```bash

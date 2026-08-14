@@ -13,13 +13,14 @@ dedicated sibling worktree:
 
 ```bash
 git fetch origin
-git worktree add ../splinterm-worktrees/my-change \
-  -b feat/my-change origin/main
+git worktree add --no-track -b feat/my-change \
+  ../splinterm-worktrees/my-change origin/main
 ```
 
 One writer owns each worktree. Dependent or overlapping changes remain serial;
 read-only review may inspect the task worktree. Validate and review the actual
-diff before opening a pull request, prefer squash merge, then remove the merged
+diff, then publish the task branch with `git push --set-upstream origin HEAD`
+before opening a pull request. Prefer squash merge, then remove the merged
 worktree and branch. Release candidates and publication originate only from
 reviewed `main` commits. See the repository's `CONTRIBUTING.md` and `AGENTS.md`
 for the complete workflow and agent-specific stop-loss rules.
