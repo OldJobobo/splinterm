@@ -36,6 +36,7 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("makepkg", workflow)
         self.assertIn("actions/download-artifact@v4", workflow)
         self.assertIn("artifact-ids: ${{ steps.source.outputs.artifact_id }}", workflow)
+        self.assertIn("merge-multiple: true", workflow)
         self.assertIn("gh api --paginate --slurp", workflow)
         self.assertIn("--expected-commit \"${{ steps.source.outputs.commit }}\"", workflow)
         self.assertIn("run-id: ${{ inputs.candidate_run_id }}", workflow)

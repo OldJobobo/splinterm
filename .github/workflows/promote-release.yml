@@ -80,6 +80,7 @@ jobs:
         with:
           artifact-ids: ${{ steps.source.outputs.artifact_id }}
           path: candidate
+          merge-multiple: true
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.candidate_run_id }}
