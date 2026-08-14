@@ -28,6 +28,11 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("permissions:\n      contents: write", workflow[publish:])
         self.assertEqual(workflow.count("environment: release"), 1)
         self.assertEqual(workflow.count("contents: write"), 1)
+        publish = workflow.index("  publish:")
+        release_token = "secrets.SPLINTERM_RELEASE_TOKEN"
+        self.assertNotIn(release_token, workflow[:publish])
+        self.assertEqual(workflow[publish:].count(release_token), 5)
+        self.assertNotIn("GH_TOKEN: ${{ github.token }}", workflow[publish:])
 
     def test_publish_consumes_candidate_without_building(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

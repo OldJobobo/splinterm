@@ -49,7 +49,20 @@ The publishing job uses `environment: release`. Configure at least one required 
 
 Approval authorizes only the exact candidate identified by commit, version, manifest digest, and workflow run. After approval, publication refuses an existing tag or release and never clobbers, force-updates, or deletes remote state. If a later step fails after tag or release creation, the workflow stops and reports the partial immutable state for maintainer diagnosis. It does not retry by replacing that state.
 
-The publisher uploads only the source archive, main/MCP packages, candidate manifest, and checksums. AUR drafts remain private inputs for the separately gated distribution milestone. It downloads the public assets again, verifies the tag resolves to the candidate commit, requires an exact asset set, and retains a 90-day receipt. AUR publication remains a distinct job after GitHub release verification so partial distribution can be diagnosed without recreating the release.
+The protected `release` environment supplies `SPLINTERM_RELEASE_TOKEN`, a
+fine-grained token scoped only to this repository with Contents and Workflows
+read/write permission. The read-only verifier cannot access it. The protected
+publisher needs Workflows permission because the immutable tag may point to a
+candidate that changes files under `.github/workflows/`; GitHub rejects that
+ref creation when only the job's ordinary `GITHUB_TOKEN` is used.
+
+The publisher uploads only the source archive, main/MCP packages, candidate
+manifest, and checksums. AUR drafts remain private inputs for the separately
+gated distribution milestone. It downloads the public assets again, verifies
+the tag resolves to the candidate commit, requires an exact asset set, and
+retains a 90-day receipt. AUR publication remains a distinct job after GitHub
+release verification so partial distribution can be diagnosed without
+recreating the release.
 
 ## n8n boundary
 
