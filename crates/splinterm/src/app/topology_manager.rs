@@ -817,14 +817,17 @@ fn collect_lair_targets(lair: &splinterm_core::Lair) -> Result<Vec<MutationTarge
         targets: &mut Vec<MutationTarget>,
     ) -> Result<()> {
         match node {
-            LayoutNode::Leaf(splint) => targets.push(MutationTarget {
-                lair_id,
-                dojo_id,
-                splint_id: splint.id,
-                incarnation: splint
-                    .last_incarnation
-                    .context("captured Lair pane has no process incarnation")?,
-            }),
+            LayoutNode::Leaf(splint) if matches!(splint.state, SplintState::Exited(_)) => {
+                targets.push(MutationTarget {
+                    lair_id,
+                    dojo_id,
+                    splint_id: splint.id,
+                    incarnation: splint
+                        .last_incarnation
+                        .context("captured Lair pane has no process incarnation")?,
+                });
+            }
+            LayoutNode::Leaf(_) => {}
             LayoutNode::Branch { first, second, .. } => {
                 collect(lair_id, dojo_id, first, targets)?;
                 collect(lair_id, dojo_id, second, targets)?;
@@ -2132,13 +2135,38 @@ mod tests {
         PendingTopologyFocus, RefreshedCloseState, Response, SessionEntry, SplintId, SplintState,
         SplitRatio, TopologyCommandOutcome, TopologyManagerWake, TopologyRevision, WindowTabSet,
         WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets, close_action,
-        close_other_tab_targets, command_has_pending_split, lair_navigation_target,
-        materialized_dojo_targets, next_topology_manager_wake, parent_ratio,
-        pending_focus_for_observation, refreshed_close_state, topology_command_outcome,
-        topology_edit_target, topology_identity_diff, validate_exited_close_target,
-        window_has_tab_capacity,
+        close_other_tab_targets, collect_lair_targets, command_has_pending_split,
+        lair_navigation_target, materialized_dojo_targets, next_topology_manager_wake,
+        parent_ratio, pending_focus_for_observation, refreshed_close_state,
+        topology_command_outcome, topology_edit_target, topology_identity_diff,
+        validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
+
+    #[test]
+    fn restore_prompt_targets_only_exited_splints() {
+        let mut lair = splinterm_core::Lair::new("saved", PathBuf::from("/tmp"));
+        let dojo = &mut lair.dojos[0];
+        let mut exited = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        exited.state = SplintState::Exited(0);
+        exited.last_incarnation = Some(7);
+        let exited_id = exited.id;
+        let mut running = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        running.state = SplintState::Running;
+        running.last_incarnation = Some(8);
+        dojo.default_focus = running.id;
+        dojo.root = LayoutNode::Branch {
+            axis: Axis::Horizontal,
+            ratio: SplitRatio::new(500).unwrap(),
+            first: Box::new(LayoutNode::Leaf(exited)),
+            second: Box::new(LayoutNode::Leaf(running)),
+        };
+
+        let targets = collect_lair_targets(&lair).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].splint_id, exited_id);
+        assert_eq!(targets[0].incarnation, 7);
+    }
 
     #[tokio::test]
     async fn closed_window_command_channel_stops_before_another_topology_poll() {
