@@ -15,10 +15,12 @@ Keep the repository-root `main` worktree coordination-only. Create a short-lived
 branch and dedicated sibling worktree before editing:
 
 ```bash
+root=$PWD
+worktree=../splinterm-worktrees/0039-binding-help
 git fetch origin
-git worktree add ../splinterm-worktrees/0039-binding-help \
+git worktree add "$worktree" \
   -b feat/0039-binding-help-search origin/main
-cd ../splinterm-worktrees/0039-binding-help
+cd "$worktree"
 ```
 
 Use `plan/…`, `feat/…`, `fix/…`, `docs/…`, or `release/…` names with one coherent
@@ -32,8 +34,10 @@ Open a pull request only after focused validation, actual-diff inspection,
 Prefer squash merge. After the merge is verified:
 
 ```bash
-git worktree remove ../splinterm-worktrees/0039-binding-help
-git branch -d feat/0039-binding-help-search
+cd "$root"
+git worktree remove "$worktree"
+# A verified squash merge does not make the branch tip an ancestor of main.
+git branch -D feat/0039-binding-help-search
 ```
 
 Do not publish releases from task branches. Release candidates and promotion
