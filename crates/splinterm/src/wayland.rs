@@ -155,9 +155,9 @@ use crate::renderer::{
     history_overlay_layout, paint, paint_command_palette, paint_dojo_prompt, paint_history_overlay,
     paint_session_picker_overlay, paint_snapshot_overlays, paint_snapshot_presented,
     paint_snapshot_region_presented, paint_snapshot_rows_presented, paint_tab_context_menu,
-    scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
-    session_picker_palette, snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout,
-    write_ppm,
+    premultiplied_theme_rgba, scroll_snapshot_pixels, session_picker_hit_test,
+    session_picker_overlay_layout, session_picker_palette, snapshot_row_rect,
+    tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},

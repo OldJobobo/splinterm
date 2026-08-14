@@ -100,11 +100,9 @@ pub(crate) use overlays::picker::{
     session_picker_palette,
 };
 #[cfg(test)]
-use raster::premultiplied_rgba;
-#[cfg(test)]
-use raster::{alpha_u8, pixel_index};
+use raster::pixel_index;
+use raster::{alpha_u8, blend_glyph, blend_rect, premultiplied_rgba};
 pub(crate) use raster::{background_bgra, fill_rect, paint_box_drawing_cell};
-use raster::{blend_glyph, blend_rect};
 use settings::{
     BASE_FONT_SIZE, PRIMARY_FONT, compatibility_render_context, effective_font_size,
     renderer_options,
@@ -113,6 +111,17 @@ pub use settings::{
     RenderContext, RendererOptions, RendererResources, configure, effective_font_resolution,
 };
 pub(crate) use text::{ChromeText, ChromeTextStyle};
+
+pub(crate) fn premultiplied_theme_rgba(color: u32, alpha: u16) -> [u8; 4] {
+    premultiplied_rgba(
+        [
+            ((color >> 16) & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            (color & 0xff) as u8,
+        ],
+        alpha_u8(alpha),
+    )
+}
 
 impl RenderContext {
     pub(crate) fn set_font_zoom_steps(

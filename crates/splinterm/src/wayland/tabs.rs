@@ -3,7 +3,8 @@ use super::{
     LayoutNode, PaneView, Receiver, Rect, RenderContext, ResolvedTheme, Result, Sender, SplintId,
     Waker, WindowDojoIdentity, WindowPaneOptions, WindowTabSet, WindowTopologyCommand,
     WindowTopologyUpdate, WindowUpdate, apply_theme, drain_receiver, fill_rect,
-    logical_extent_to_buffer, pane_stream_has_terminal_notice, rect_contains, sanitized_tab_label,
+    logical_extent_to_buffer, pane_stream_has_terminal_notice, premultiplied_theme_rgba,
+    rect_contains, sanitized_tab_label,
 };
 
 pub(super) const TAB_STRIP_LOGICAL_HEIGHT: u32 = 34;
@@ -122,6 +123,10 @@ const fn opaque_rgba(color: u32) -> [u8; 4] {
         (color & 0xff) as u8,
         u8::MAX,
     ]
+}
+
+fn tab_strip_background_rgba(theme: ResolvedTheme) -> [u8; 4] {
+    premultiplied_theme_rgba(theme.background, theme.background_alpha)
 }
 
 pub(super) fn tab_strip_hit_test(
@@ -491,7 +496,7 @@ impl App {
                 strip.width,
                 strip.height,
             ),
-            opaque_rgba(theme.background),
+            tab_strip_background_rgba(theme),
         );
         for tab in &layout.tabs {
             let rect = Self::buffer_rect(tab.rect, scale_120)?;
@@ -584,8 +589,10 @@ mod tests {
     };
 
     #[test]
-    fn active_tab_uses_exact_opaque_theme_roles() {
+    fn tab_strip_respects_background_alpha_but_keeps_active_theme_roles_opaque() {
         let theme = ResolvedTheme {
+            background: 0x80_40_20,
+            background_alpha: u16::MAX / 2,
             foreground: 0xaa_bb_cc,
             selection_foreground: 0x11_22_33,
             active_tab_background: 0x44_55_66,
@@ -615,10 +622,20 @@ mod tests {
             None,
         )
         .unwrap();
-        let sample_x = usize::try_from(layout.tabs[0].rect.x + 1).unwrap();
+        let active_x = usize::try_from(layout.tabs[0].rect.x + 1).unwrap();
         let sample_y = usize::try_from(layout.tabs[0].rect.y + 1).unwrap();
-        let offset = (sample_y * 420 + sample_x) * 4;
-        assert_eq!(&canvas[offset..offset + 4], &[0x66, 0x55, 0x44, 0xff]);
+        let active_offset = (sample_y * 420 + active_x) * 4;
+        assert_eq!(
+            &canvas[active_offset..active_offset + 4],
+            &[0x66, 0x55, 0x44, 0xff]
+        );
+
+        let strip_x = usize::try_from(layout.new_rect.x + 1).unwrap();
+        let strip_offset = (sample_y * 420 + strip_x) * 4;
+        assert_eq!(
+            &canvas[strip_offset..strip_offset + 4],
+            &[0x10, 0x20, 0x40, 0x7f]
+        );
     }
 
     #[test]
