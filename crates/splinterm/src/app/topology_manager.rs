@@ -809,15 +809,32 @@ async fn create_dojo_in_lair(
     reopenable_dojo(connection, lair_id, dojo_id).await
 }
 
-fn collect_lair_targets(lair: &splinterm_core::Lair) -> Result<Vec<MutationTarget>> {
+#[derive(Clone, Copy)]
+enum LairTargetState {
+    Exited,
+    Live,
+}
+
+fn collect_lair_targets(
+    lair: &splinterm_core::Lair,
+    target_state: LairTargetState,
+) -> Result<Vec<MutationTarget>> {
     fn collect(
         lair_id: LairId,
         dojo_id: DojoId,
         node: &LayoutNode,
+        target_state: LairTargetState,
         targets: &mut Vec<MutationTarget>,
     ) -> Result<()> {
         match node {
-            LayoutNode::Leaf(splint) if matches!(splint.state, SplintState::Exited(_)) => {
+            LayoutNode::Leaf(splint)
+                if match target_state {
+                    LairTargetState::Exited => matches!(splint.state, SplintState::Exited(_)),
+                    LairTargetState::Live => {
+                        matches!(splint.state, SplintState::Starting | SplintState::Running)
+                    }
+                } =>
+            {
                 targets.push(MutationTarget {
                     lair_id,
                     dojo_id,
@@ -829,8 +846,8 @@ fn collect_lair_targets(lair: &splinterm_core::Lair) -> Result<Vec<MutationTarge
             }
             LayoutNode::Leaf(_) => {}
             LayoutNode::Branch { first, second, .. } => {
-                collect(lair_id, dojo_id, first, targets)?;
-                collect(lair_id, dojo_id, second, targets)?;
+                collect(lair_id, dojo_id, first, target_state, targets)?;
+                collect(lair_id, dojo_id, second, target_state, targets)?;
             }
         }
         Ok(())
@@ -838,7 +855,7 @@ fn collect_lair_targets(lair: &splinterm_core::Lair) -> Result<Vec<MutationTarge
 
     let mut targets = Vec::new();
     for dojo in &lair.dojos {
-        collect(lair.id, dojo.id, &dojo.root, &mut targets)?;
+        collect(lair.id, dojo.id, &dojo.root, target_state, &mut targets)?;
     }
     Ok(targets)
 }
@@ -903,6 +920,7 @@ fn saved_layout_preview(lair: &splinterm_core::Lair) -> String {
 async fn lair_prompt_target(
     connection: &mut Connection,
     lair_id: LairId,
+    kind: LairPromptKind,
 ) -> Result<LairPromptTarget> {
     let Response::Lairs {
         lairs,
@@ -922,7 +940,11 @@ async fn lair_prompt_target(
         name: lair.name.clone(),
         retention: lair.retention,
         preview: saved_layout_preview(lair),
-        targets: collect_lair_targets(lair)?,
+        targets: match kind {
+            LairPromptKind::Restore => collect_lair_targets(lair, LairTargetState::Exited)?,
+            LairPromptKind::Terminate => collect_lair_targets(lair, LairTargetState::Live)?,
+            LairPromptKind::Rename | LairPromptKind::Preview => Vec::new(),
+        },
     })
 }
 
@@ -1388,7 +1410,7 @@ async fn handle_session_manager_command(
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
         WindowTopologyCommand::RequestLairPrompt { lair_id, kind } => {
-            match lair_prompt_target(connection, lair_id).await {
+            match lair_prompt_target(connection, lair_id, kind).await {
                 Ok(target) => {
                     if updates
                         .send(WindowTopologyUpdate::ShowLairPrompt { kind, target })
@@ -1434,7 +1456,7 @@ async fn handle_session_manager_command(
                     name: dojo.name.clone(),
                     retention: lair.retention,
                     preview: saved_layout_preview(lair),
-                    targets: collect_lair_targets(lair)?
+                    targets: collect_lair_targets(lair, LairTargetState::Exited)?
                         .into_iter()
                         .filter(|target| target.dojo_id == dojo_id)
                         .collect(),
@@ -2131,7 +2153,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        Axis, CloseAction, DojoId, DojoTab, LairDirection, LairId, LayoutNode,
+        Axis, CloseAction, DojoId, DojoTab, LairDirection, LairId, LairTargetState, LayoutNode,
         PendingTopologyFocus, RefreshedCloseState, Response, SessionEntry, SplintId, SplintState,
         SplitRatio, TopologyCommandOutcome, TopologyManagerWake, TopologyRevision, WindowTabSet,
         WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets, close_action,
@@ -2152,20 +2174,37 @@ mod tests {
         exited.last_incarnation = Some(7);
         let exited_id = exited.id;
         let mut running = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let running_id = running.id;
         running.state = SplintState::Running;
         running.last_incarnation = Some(8);
-        dojo.default_focus = running.id;
+        let mut starting = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        let starting_id = starting.id;
+        starting.state = SplintState::Starting;
+        starting.last_incarnation = Some(9);
+        dojo.default_focus = running_id;
         dojo.root = LayoutNode::Branch {
             axis: Axis::Horizontal,
             ratio: SplitRatio::new(500).unwrap(),
             first: Box::new(LayoutNode::Leaf(exited)),
-            second: Box::new(LayoutNode::Leaf(running)),
+            second: Box::new(LayoutNode::Branch {
+                axis: Axis::Vertical,
+                ratio: SplitRatio::new(500).unwrap(),
+                first: Box::new(LayoutNode::Leaf(running)),
+                second: Box::new(LayoutNode::Leaf(starting)),
+            }),
         };
 
-        let targets = collect_lair_targets(&lair).unwrap();
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].splint_id, exited_id);
-        assert_eq!(targets[0].incarnation, 7);
+        let restore_targets = collect_lair_targets(&lair, LairTargetState::Exited).unwrap();
+        assert_eq!(restore_targets.len(), 1);
+        assert_eq!(restore_targets[0].splint_id, exited_id);
+        assert_eq!(restore_targets[0].incarnation, 7);
+
+        let terminate_targets = collect_lair_targets(&lair, LairTargetState::Live).unwrap();
+        assert_eq!(terminate_targets.len(), 2);
+        assert_eq!(terminate_targets[0].splint_id, running_id);
+        assert_eq!(terminate_targets[0].incarnation, 8);
+        assert_eq!(terminate_targets[1].splint_id, starting_id);
+        assert_eq!(terminate_targets[1].incarnation, 9);
     }
 
     #[tokio::test]
