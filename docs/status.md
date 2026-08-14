@@ -68,6 +68,11 @@ theme-provided background role at the configured terminal alpha.
 - The exact package passed isolated graphical acceptance for hidden initial
   chrome, theme alpha on the strip and selected-tab body, exact selected-tab
   color and accent underline, and live transient New Dojo attachment.
+- Known source-metadata limitation: the immutable Alpha3.1 source tag retains the
+  previous `Cargo.lock` digest in Foot oracle provenance after the version-only
+  lockfile update, so its portable provenance check reports drift. The packaged
+  runtime and oracle fixtures are unaffected. `main` refreshes that digest and
+  future candidate construction now fails fast on the same check.
 
 ## Alpha3 release
 

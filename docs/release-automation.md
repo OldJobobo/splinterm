@@ -37,6 +37,8 @@ A failure never advances the state. Retrying candidate construction creates a ne
 - no GitHub Environment, release token, AUR credential, tag creation, push, or release API call;
 - full Git history is fetched so the exact commit and previous version tag can be recorded;
 - the requested version must exactly match Cargo and all three Arch recipes;
+- repository-owned Foot oracle metadata must match the current `Cargo.lock` before
+  candidate construction;
 - website sources and deployment automation are absent from the source archive;
 - package validation runs against extracted package contents;
 - all output is uploaded as one private, retention-bounded workflow artifact.

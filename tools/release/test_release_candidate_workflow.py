@@ -42,6 +42,11 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
             'git config --global --add safe.directory "$GITHUB_WORKSPACE"', workflow
         )
         self.assertIn("useradd --create-home validator", workflow)
+        provenance = workflow.index(
+            "runuser -u validator -- python tools/foot-oracle/check-provenance.py --portable"
+        )
+        candidate_check = workflow.index("prepare-candidate.py check")
+        self.assertLess(provenance, candidate_check)
         self.assertIn("runuser -u validator -- python -m unittest", workflow)
         self.assertNotIn("safe.directory '*'", workflow)
 

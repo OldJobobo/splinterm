@@ -45,6 +45,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           useradd --create-home validator
           chown -R validator:validator "$GITHUB_WORKSPACE"
+          runuser -u validator -- python tools/foot-oracle/check-provenance.py --portable
           runuser -u validator -- python -m unittest \
             tools/package/test_installer_safety.py \
             tools/package/test_omarchy_screensaver_integration.py \
