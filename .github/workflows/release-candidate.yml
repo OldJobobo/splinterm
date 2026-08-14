@@ -42,7 +42,10 @@ jobs:
       - name: Validate candidate automation
         run: |
           shellcheck install.sh tools/package/build-local-package.sh
-          python -m unittest \
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          useradd --create-home validator
+          chown -R validator:validator "$GITHUB_WORKSPACE"
+          runuser -u validator -- python -m unittest \
             tools/package/test_installer_safety.py \
             tools/package/test_omarchy_screensaver_integration.py \
             tools/release/test_prepare_candidate.py \

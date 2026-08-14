@@ -34,10 +34,12 @@ class InstallerSafetyTest(unittest.TestCase):
 
     def daemon_owned_environment(self, directory: Path) -> dict[str, str]:
         proc = directory / "proc"
-        binary = directory / "bin" / "splinterm-pty-child"
-        binary.parent.mkdir()
-        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        binary.chmod(0o700)
+        binaries = directory / "bin"
+        binary = binaries / "splinterm-pty-child"
+        binaries.mkdir()
+        for executable in (binary, binaries / "sudo"):
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o700)
         for pid, parent, executable in (
             (101, 100, Path("/usr/bin/bash")),
             (100, 1, binary),
@@ -53,6 +55,7 @@ class InstallerSafetyTest(unittest.TestCase):
             {
                 "SPLINTERM_INSTALL_PROC_ROOT": str(proc),
                 "SPLINTERM_INSTALL_PARENT_PID": "101",
+                "PATH": f"{binaries}:{os.environ['PATH']}",
             }
         )
         return environment

@@ -36,6 +36,15 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
         self.assertIn("Manifest SHA-256:", workflow)
         self.assertIn("Nothing was published", workflow)
 
+    def test_candidate_validation_is_unprivileged_and_git_is_bounded_safe(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn(
+            'git config --global --add safe.directory "$GITHUB_WORKSPACE"', workflow
+        )
+        self.assertIn("useradd --create-home validator", workflow)
+        self.assertIn("runuser -u validator -- python -m unittest", workflow)
+        self.assertNotIn("safe.directory '*'", workflow)
+
     def test_candidate_builds_once_and_retains_review_artifact(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(workflow.count("build-local-package.sh"), 2)
