@@ -5,7 +5,7 @@ description: What is implemented, validated, limited, planned, and unreleased in
 
 Splinterm is a **public alpha**. Source, documentation, the versioned AUR package, and verified commit-bound edge packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
-Alpha2 is a critical keyboard-input hotfix. It restores command palette navigation, plain Enter activation, Escape dismissal, and plain Enter confirmation in rename prompts.
+[`v0.1.0-alpha3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3) is the current public prerelease. It adds the closed command/keymap surface, safe historical-Enter behavior, explicit saved-Lair restore workflows, bounded Wayland file drops, and the opt-in Omarchy screensaver integration.
 
 ## What that means
 
@@ -35,7 +35,7 @@ Alpha2 is a critical keyboard-input hotfix. It restores command palette navigati
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned AUR and public alpha edge packages validated |
 | Public source and edge builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0alpha2-1` |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0alpha3-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 

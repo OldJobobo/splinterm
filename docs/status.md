@@ -30,33 +30,43 @@ The current product target is:
 - x86_64 Omarchy/Arch Linux;
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
-  as the terminal-behavior oracle; and
-- a public alpha `0.1.0alpha2` Arch package built from clean committed source;
-- the alpha2 keyboard hotfix restores command palette navigation, Enter activation, Escape dismissal, and plain Enter confirmation in rename prompts.
+  as the terminal-behavior oracle;
+- public Alpha3 `0.1.0alpha3-1` Arch packages built from clean committed source;
+  and
+- guarded installed-package evidence for the Alpha3 command, scrollback,
+  saved-Lair, Wayland file-drop, and Omarchy screensaver workflows.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain alpha
 interfaces on the documented platform.
 
-## Alpha3 readiness
+## Alpha3 release
 
-`0.1.0-alpha3` is not yet released. The coherent Alpha3 source and Arch package
-state has passed non-graphical validation, review, and the separately approved
-installed-package graphical matrix for Plans 0032–0036. The final package pair
-was built from commit `17267747a162ef04370bf80eefd39cad4a1a06a5`:
+[`v0.1.0-alpha3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3)
+was published as a GitHub prerelease on 2026-08-14 and distributed through both
+AUR package bases as `0.1.0alpha3-1`.
 
-- main package SHA-256:
-  `db8c63c5b26caefe0cb55396b2322cc58ecd5f72eb1148fbb6e085d31464e7dd`;
-- MCP package SHA-256:
-  `034bc259d2b80a0851e3a0b36e690c897fa13f821450bbf6eddf664bb1e26fbf`.
-
-The remaining bounded readiness work is private candidate construction and
-review. Push, candidate dispatch, protected promotion, release publication, and
-AUR publication remain separate, explicitly authorized operations.
+- Candidate workflow run `31761128534` built commit
+  `11742b60cb5b502cdadb60a582b9c3c838120d2b` once. Candidate manifest SHA-256:
+  `8fc8a2bd5468260b3f259f14191bf4cc931fbe9109e4744e20f4f11e1f74e077`.
+- Protected promotion workflow run `31762844821` created the immutable tag,
+  published and downloaded the exact five-asset set, verified every hash, and
+  retained a publication receipt.
+- Source archive SHA-256:
+  `5dfbed061d8c0c210d5ce9f1fac7eac88989f14c551f0ccd8eb3081d3fb070cf`.
+  Main package SHA-256:
+  `1a7f2a31c04dfc87495740938a3e8410f2a464f99c382a0f5d563045d8798cfb`.
+  MCP package SHA-256:
+  `e53a2b567619d6d8058522c4e18ef077e3b575cc99889d26cc1a18d65647ead0`.
+- AUR source package commit: `ca1f80f40c94e3e469973cbee81b3a210419ffce`.
+  AUR prebuilt package commit: `fbe9878af3938e5df87df79ecae05d4ec39b9667`.
+- Before candidate construction, the adjacent installed package matrix passed
+  Plans 0032–0036 against the final runtime implementation, including package
+  integrity, daemon health, exact trusted-client identity, and complete cleanup.
 
 Full user-defined tab identity, behavior, and appearance remain a separate
-post-alpha3, pre-1.0 roadmap milestone and do not block the alpha3 candidate.
+post-alpha3, pre-1.0 roadmap milestone.
 
 ## Capability truth table
 
@@ -74,7 +84,7 @@ post-alpha3, pre-1.0 roadmap milestone and do not block the alpha3 candidate.
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
 | Arch/Omarchy packaging | Public alpha packages validated | Versioned AUR and commit-bound edge split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha2-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable edge artifacts without local compilation. Source-built `splinterm` and `splinterm-mcp` remain available. |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha3-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0alpha3-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and edge channel | Available | The repository, documentation, immutable edge releases, and rolling verified installer channel are public. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |

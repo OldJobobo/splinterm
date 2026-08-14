@@ -3,17 +3,18 @@
 Release authority, candidate construction, approval boundaries, and the future
 n8n notification role are defined in [Release automation](release-automation.md).
 
-Splinterm's `packaging/PKGBUILD` produces the `0.1.0alpha3` split-package
-candidate for reviewed local and CI builds. Its local source archive and `SKIP`
-checksum are valid only in that workflow. Until protected promotion and separate
-AUR distribution complete, the latest publicly available versioned AUR release
-remains `0.1.0alpha2-1`. The source-built AUR draft authority is
-`packaging/aur/PKGBUILD`; candidate construction replaces its source-archive
-checksum with the exact immutable `v0.1.0-alpha3` candidate archive digest. It
-intentionally omits a `check()` phase. The recommended prebuilt draft authority
-is `packaging/aur-bin/PKGBUILD`; candidate construction rewrites its release URLs,
-commit, and checksums to the exact approved packages so users never compile or
-test them locally.
+Splinterm's `packaging/PKGBUILD` produces the `0.1.0alpha3` split packages for
+reviewed local and CI builds. Its local source archive and `SKIP` checksum are
+valid only in that workflow. The current public versioned release is
+[`v0.1.0-alpha3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3),
+and both AUR package bases publish `0.1.0alpha3-1`.
+
+The source-built AUR authority is `packaging/aur/PKGBUILD`; candidate
+construction replaces its source-archive checksum with the exact immutable
+versioned archive digest. It intentionally omits a `check()` phase. The
+recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; candidate
+construction rewrites its release URLs, commit, and checksums to the exact
+approved packages so users never compile or test them locally.
 
 ## Versioned AUR installation
 
