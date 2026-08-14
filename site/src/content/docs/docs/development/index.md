@@ -5,6 +5,26 @@ description: Build, test, and understand the Splinterm workspace without mixing 
 
 Splinterm is a Rust workspace with separate crates for the graphical client, daemon, domain model, protocol, relay, MCP adapter, PTY boundary, and Foot-derived terminal kernel.
 
+## Branch-first development
+
+Keep the root `main` checkout for coordination and releases. Make each coherent
+plan, feature, fix, or documentation milestone on a short-lived branch in a
+dedicated sibling worktree:
+
+```bash
+git fetch origin
+git worktree add --no-track -b feat/my-change \
+  ../splinterm-worktrees/my-change origin/main
+```
+
+One writer owns each worktree. Dependent or overlapping changes remain serial;
+read-only review may inspect the task worktree. Validate and review the actual
+diff, then publish the task branch with `git push --set-upstream origin HEAD`
+before opening a pull request. Prefer squash merge, then remove the merged
+worktree and branch. Release candidates and publication originate only from
+reviewed `main` commits. See the repository's `CONTRIBUTING.md` and `AGENTS.md`
+for the complete workflow and agent-specific stop-loss rules.
+
 ## Standard validation
 
 Run from the repository root:

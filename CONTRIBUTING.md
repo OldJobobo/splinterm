@@ -9,6 +9,47 @@ Read [`docs/status.md`](docs/status.md) for current product scope and
 protocol boundaries. Plans, spikes, benchmarks, and retained artifacts are
 historical evidence; do not rewrite them merely to match current marketing.
 
+## Branch and worktree workflow
+
+Keep the repository-root `main` worktree coordination-only. Create a short-lived
+branch and dedicated sibling worktree before editing:
+
+```bash
+root=$PWD
+worktree=../splinterm-worktrees/0039-binding-help
+git fetch origin
+git worktree add --no-track -b feat/0039-binding-help-search \
+  "$worktree" origin/main
+cd "$worktree"
+```
+
+Use `plan/…`, `feat/…`, `fix/…`, `docs/…`, or `release/…` names with one coherent
+milestone per branch. One writer owns each branch/worktree; dependent or
+overlapping milestones remain serial. Read-only review may inspect the same
+worktree, while intentionally concurrent writers require separate worktrees and
+explicit approval under [`AGENTS.md`](AGENTS.md).
+
+Open a pull request only after focused validation, actual-diff inspection,
+`git diff --check`, and the independent review required by the owning plan.
+Publish the exact task branch with an upstream of the same name, then open the
+pull request:
+
+```bash
+git push --set-upstream origin HEAD
+```
+
+Prefer squash merge. After the merge is verified:
+
+```bash
+cd "$root"
+git worktree remove "$worktree"
+# A verified squash merge does not make the branch tip an ancestor of main.
+git branch -D feat/0039-binding-help-search
+```
+
+Do not publish releases from task branches. Release candidates and promotion
+remain bound to reviewed commits on `main`.
+
 ## Standard validation
 
 Use the narrowest tier that proves the current boundary; do not run every tier
