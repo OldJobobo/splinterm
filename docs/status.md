@@ -41,42 +41,22 @@ interfaces on the documented platform.
 
 ## Alpha3 readiness
 
-`0.1.0-alpha3` is not yet released. Its remaining bounded readiness work
-includes:
+`0.1.0-alpha3` is not yet released. The coherent Alpha3 source and Arch package
+state has passed non-graphical validation, review, and the separately approved
+installed-package graphical matrix for Plans 0032–0036. The final package pair
+was built from commit `17267747a162ef04370bf80eefd39cad4a1a06a5`:
 
-- packaged graphical acceptance for the Splinterm-owned Omarchy screensaver
-  integration and current Dojo-picker vocabulary;
-- packaged graphical acceptance for
-  [Plan 0033](plans/0033-alpha3-command-palette-and-keymap-closure.md), whose
-  non-graphical implementation closes the `dojo.close-other-tabs` binding
-  defect, expands the curated palette, shares context-safe Omarchy-style
-  `Super+C/V/X/Z` behavior, proves built-in and configurable keymaps end to end,
-  and adds registry-drift invariants;
-- packaged graphical acceptance for
-  [Plan 0035](plans/0035-alpha3-scrollback-enter-safety.md), whose non-graphical
-  implementation makes Enter on a historical focused Splint return live without
-  sending PTY input while retaining normal Enter behavior from the live viewport;
-- packaged graphical acceptance for
-  [Plan 0034](plans/0034-alpha3-saved-lair-layouts.md), whose non-graphical
-  implementation turns durable Dojo trees, split ratios, launch metadata, and
-  geometry hints into an explicit Save/Preview/Restore Lair workflow while
-  retaining deliberate execution and refusing to guess arbitrary foreground
-  applications;
-- [Plan 0036](plans/0036-alpha3-wayland-file-drop-path-insertion.md), whose
-  non-graphical implementation now accepts bounded Wayland local regular-file
-  drops and inserts deterministic shell-escaped paths into one exact controlled
-  Splint without reading file bodies, retargeting stale offers, or submitting
-  terminal input; packaged graphical acceptance remains pending;
-- one coherent version and release-note reconciliation across Cargo, package,
-  AUR, `.SRCINFO`, README, and status authorities; and
-- private candidate construction and review before any separately authorized
-  protected promotion or AUR publication.
+- main package SHA-256:
+  `db8c63c5b26caefe0cb55396b2322cc58ecd5f72eb1148fbb6e085d31464e7dd`;
+- MCP package SHA-256:
+  `034bc259d2b80a0851e3a0b36e690c897fa13f821450bbf6eddf664bb1e26fbf`.
 
-Planned alpha3 work is not part of the validated capability truth table until
-its required non-graphical evidence, review, and separately approved packaged
-graphical acceptance are recorded. Full user-defined tab identity, behavior,
-and appearance are a separate post-alpha3, pre-1.0 roadmap milestone and do not
-block the alpha3 candidate.
+The remaining bounded readiness work is private candidate construction and
+review. Push, candidate dispatch, protected promotion, release publication, and
+AUR publication remain separate, explicitly authorized operations.
+
+Full user-defined tab identity, behavior, and appearance remain a separate
+post-alpha3, pre-1.0 roadmap milestone and do not block the alpha3 candidate.
 
 ## Capability truth table
 

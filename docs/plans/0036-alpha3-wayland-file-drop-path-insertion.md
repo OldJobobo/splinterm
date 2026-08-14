@@ -1,6 +1,6 @@
 # Plan 0036: Alpha3 Wayland file-drop path insertion
 
-- **Status:** Implemented and non-graphically validated for `0.1.0-alpha3`; packaged graphical acceptance pending
+- **Status:** Complete for `0.1.0-alpha3`; implementation, review, and installed-package graphical acceptance recorded
 - **Date:** 2026-08-12
 - **Product authority:** Dropping local files is an explicit request to insert
   bounded shell-escaped paths into one exact Splint; it never reads file bodies,
@@ -198,8 +198,6 @@ unrelated topology mutation, unexpected focus movement, or incomplete cleanup.
   delivered drops; rejected directories produced bounded URI-list rejection.
   The isolated window and daemon were removed afterward and production remained
   untouched.
-- Packaged graphical acceptance remains pending. Isolated dev usability evidence
-  does not replace the required adjacent optimized packaged-client matrix.
 - Final serial workspace validation passed every Plan 0036 path and the prior
   phase-8 timing case. One unrelated remote-session fake-SSH fixture encountered
   a transient `ETXTBSY` race and passed immediately under exact isolated rerun.
@@ -209,6 +207,18 @@ unrelated topology mutation, unexpected focus movement, or incomplete cleanup.
   independently confirmed Copy-only negotiation, terminal offer lifecycle,
   exact-target authority revalidation, bounded all-or-nothing parsing and
   quoting, zero PTY bytes on rejection, and path-free diagnostics.
+
+## Installed-package graphical evidence (2026-08-13)
+
+- The adjacent optimized client accepted a single regular-file path containing
+  spaces and an ordered three-file payload containing spaces, an apostrophe,
+  and Unicode. It inserted one shell-quoted, one-space-separated payload with
+  bracketed-paste behavior and no Return or execution.
+- A drop on tab-strip chrome added zero PTY bytes. A directory drop was rejected
+  as an invalid URI list, with no command execution, topology mutation, or path
+  body in diagnostics.
+- Source and target stayed bounded to the isolated acceptance workspace and all
+  temporary file-manager, client, and topology state was removed afterward.
 
 ## Alpha3 acceptance
 

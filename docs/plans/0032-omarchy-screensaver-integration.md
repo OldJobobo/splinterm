@@ -1,6 +1,6 @@
 # Plan 0032: Omarchy screensaver integration
 
-- **Status:** Splinterm-owned implementation complete, release-state package validation recorded; guarded packaged graphical acceptance remains open
+- **Status:** Complete for `0.1.0-alpha3`; release-state package validation and guarded installed-package graphical acceptance recorded
 - **Date:** 2026-08-11
 - **Product authority:** Splinterm remains a standalone terminal and implements generic XDG launch metadata rather than an Omarchy-only window mode
 - **Integration authority:** Splinterm's packaged desktop adapter, profile, launcher helper, and explicit user-level activation link
@@ -358,9 +358,22 @@ Stop and report before continuing if:
   `042ae011581a7362fb4fe37550088174724421738204d85549e225877b530c1f`.
   MCP package SHA-256:
   `29a5d35bb10187b96b2094e38bcbebc1ee9f78da91a9e4e0ee31f0177af359a2`.
-- No package was installed and no live daemon, Window, user integration, or
-  Omarchy-owned file was modified. Guarded installed-package graphical
-  acceptance remains pending.
+- This initial package-validation pass did not install or mutate live state; the
+  subsequent guarded acceptance below used the final committed package.
+
+## Installed-package graphical evidence (2026-08-13)
+
+- The final package pair from commit `17267747a162ef04370bf80eefd39cad4a1a06a5`
+  was installed with adjacent trusted client and daemon identities; `pacman -Qkk`
+  reported zero altered files.
+- The packaged Splinterm-owned helper mapped exactly one
+  `org.omarchy.screensaver` Window on each of DP-1, DP-2, and DP-3. All three
+  were compositor-fullscreen, and the DP-2 profile visibly used opaque,
+  zero-padding, 18-point presentation settings.
+- One Escape retired all three transient Windows and their topology and restored
+  focus. The pre-existing user-local launcher remained byte-identical at
+  SHA-256 `edde9196a9643d780e9b5f0d0234a2cdce4fc16647841b6e34c56163a6f4deec`;
+  no Omarchy-owned file was modified.
 
 ## Completion criteria
 

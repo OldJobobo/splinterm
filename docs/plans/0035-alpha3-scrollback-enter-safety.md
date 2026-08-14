@@ -1,6 +1,6 @@
 # Plan 0035: Alpha3 scrollback Enter safety
 
-- **Status:** Implemented, non-graphically validated, and reviewed for `0.1.0-alpha3`; packaged graphical acceptance pending
+- **Status:** Complete for `0.1.0-alpha3`; implementation, review, and installed-package graphical acceptance recorded
 - **Date:** 2026-08-12
 - **Product authority:** Enter submits terminal input only while the focused
   Splint is following live output
@@ -118,8 +118,15 @@ unrelated viewport/topology mutation, or incomplete cleanup.
   site check/build, shell validation, and `git diff --check` pass.
 - A fresh read-only correctness review confirmed modal precedence, historical
   plain/keypad Enter routing, exact raw-key consumption through matching release,
-  and the evidence scope, with no blockers or fixes worth doing now. Optimized
-  installed-package graphical acceptance remains required before closure.
+  and the evidence scope, with no blockers or fixes worth doing now.
+
+## Installed-package graphical evidence (2026-08-13)
+
+- In the optimized installed client, Return on historical output returned the
+  exact focused Splint to live state without executing a prepared command.
+- The initiating press remained consumed through release. A subsequent Return
+  from the live viewport submitted exactly once, while palette and confirmation
+  Return retained their earlier modal authority.
 
 ## Alpha3 acceptance
 

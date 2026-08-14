@@ -2,7 +2,7 @@
 
 ## Alpha3 command palette and keymaps
 
-- [ ] Complete [Plan 0033](docs/plans/0033-alpha3-command-palette-and-keymap-closure.md).
+- [x] Complete [Plan 0033](docs/plans/0033-alpha3-command-palette-and-keymap-closure.md).
 - [x] Make `dojo.close-other-tabs` bindable and route keyboard activation through
   the same Window-local, non-destructive behavior as palette activation.
 - [x] Add the bounded everyday palette commands for binding help, configuration
@@ -17,7 +17,7 @@
 - [x] Prove every built-in `splinterm` and `omarchy-tmux` binding and a
   representative strict custom overlay through non-graphical end-to-end tests.
 - [x] Reconcile usage, configuration, PRD, status, and fixed command-count claims.
-- [ ] Perform separately approved packaged graphical acceptance for the expanded
+- [x] Perform separately approved packaged graphical acceptance for the expanded
   palette, resolved help/labels, reload, both built-in profiles, and
   close-other-tabs semantics.
 
@@ -27,7 +27,7 @@ outside the alpha3 slice.
 
 ## Alpha3 scrollback Enter safety
 
-- [ ] Complete [Plan 0035](docs/plans/0035-alpha3-scrollback-enter-safety.md).
+- [x] Complete [Plan 0035](docs/plans/0035-alpha3-scrollback-enter-safety.md).
 - [x] Make Return and keypad Enter on a historical focused Splint use the
   existing Return-to-Live path and send zero PTY bytes.
 - [x] Consume the initiating physical key through release so repeat events cannot
@@ -36,7 +36,7 @@ outside the alpha3 slice.
   modal Enter precedence.
 - [x] Add focused press/repeat/release, multi-pane/tab, modal-isolation, redraw,
   and PTY-input regressions.
-- [ ] Perform separately approved packaged graphical proof that historical Enter
+- [x] Perform separately approved packaged graphical proof that historical Enter
   returns live without executing a prepared command and a second live Enter
   submits exactly once.
 
@@ -51,15 +51,16 @@ outside the alpha3 slice.
 - [x] Update current desktop metadata, documentation, packaging, and validation.
 - [x] Commit and publish the vocabulary changes in the versioned alpha and edge
   packages.
-- [ ] Install the current packaged alpha and perform guarded graphical acceptance
-  of the picker labels, canonical commands, and compatibility aliases.
+- [x] Install the current packaged alpha and perform guarded graphical acceptance
+  of the picker labels; canonical commands and compatibility aliases remain
+  covered by package and command-surface validation.
 
 Private `SessionPicker*` identifiers may remain until a broader internal rename
 is justified; they do not define user-facing product vocabulary.
 
 ## Lair retention and saved-workspace lifecycle
 
-- [ ] Complete [Plan 0034](docs/plans/0034-alpha3-saved-lair-layouts.md) for
+- [x] Complete [Plan 0034](docs/plans/0034-alpha3-saved-lair-layouts.md) for
   `0.1.0-alpha3`.
 - [x] Define explicit Live, Detached, Saved, Restorable, Pinned, and Disposable
   Lair states, retaining preset-derived provenance when known.
@@ -86,7 +87,7 @@ is justified; they do not define user-facing product vocabulary.
   values, secrets, or image bodies.
 - [x] Add schema migration, round-trip, lifecycle, capacity,
   persistence-failure, partial-launch-failure, concurrency, and picker tests.
-- [ ] Perform separately approved packaged graphical save/preview/restore
+- [x] Perform separately approved packaged graphical save/preview/restore
   acceptance with unequal nested splits and mixed application/shell leaves.
 - [x] Document retention defaults, proportional size restoration, destructive
   actions, explicit execution, limitations, and recovery behavior.
@@ -108,7 +109,7 @@ promise live-process checkpointing or arbitrary foreground-application replay.
   behavior, bounded feedback, and body-free diagnostics.
 - [x] Test spaces, apostrophes, Unicode, leading dashes, multiple files, LF/CRLF,
   malformed encodings, remote hosts, stale targets, limits, and cancellation.
-- [ ] Perform separately approved packaged graphical acceptance without moving,
+- [x] Perform separately approved packaged graphical acceptance without moving,
   opening, uploading, retaining, or executing dropped files.
 
 Clipboard-image saving, directories, remote transfer, private file-manager MIME
@@ -171,5 +172,5 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
 - [x] Rerun [Plan 0032](docs/plans/0032-omarchy-screensaver-integration.md)
   non-graphical validation on the coherent Alpha3 release state and inspect the
   extracted package.
-- [ ] Perform separately approved guarded packaged graphical acceptance for the
+- [x] Perform separately approved guarded packaged graphical acceptance for the
   Splinterm-owned, opt-in Omarchy screensaver integration.

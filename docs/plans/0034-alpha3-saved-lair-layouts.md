@@ -1,6 +1,6 @@
 # Plan 0034: Alpha3 saved Lair layouts
 
-- **Status:** Implemented and non-graphically validated for `0.1.0-alpha3`; packaged graphical acceptance pending
+- **Status:** Complete for `0.1.0-alpha3`; implementation, review, and installed-package graphical acceptance recorded
 - **Date:** 2026-08-12
 - **Product authority:** A saved Lair is an explicit durable workspace recipe,
   not a process checkpoint or automatic command-execution mechanism
@@ -254,6 +254,24 @@ installed adjacent trusted client and daemon in one guarded sequence to:
 Abort on wrong-window input, unexpected process launch, unrelated topology
 mutation, ratio drift outside documented integer projection, or incomplete
 cleanup.
+
+## Installed-package graphical evidence (2026-08-13)
+
+- A multi-Dojo Lair with nested splits and mixed shell/application recipes was
+  saved and previewed without terminal bodies. The durable tree, split ratios,
+  stable IDs, cwd/launch classifications, and default focus survived process
+  exit and explicit restoration.
+- Protected Saved/Pinned recipes retained exited leaves. Restore targeted only
+  `Exited` leaves; mixed live/exited prompts reported the exact restorable count,
+  stayed within protocol dimensions, defaulted to Cancel, and executed nothing
+  before explicit confirmation.
+- Termination separately targeted `Starting`/`Running` leaves. The final trusted
+  human UI confirmation atomically removed the exact four-process Lair; remote,
+  mismatched-local, and automation identities remain outside that bypass.
+- Queue saturation during nested resize now defers and retries instead of
+  advancing the applied size, while disconnect remains fatal. The final package
+  completed restore and destructive cleanup without crashes or authorization
+  errors.
 
 ## Alpha3 acceptance
 

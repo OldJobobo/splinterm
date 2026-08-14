@@ -1,6 +1,6 @@
 # Plan 0033: Alpha3 command-palette and keymap closure
 
-- **Status:** Implemented, non-graphically validated, and reviewed for `0.1.0-alpha3`; packaged graphical acceptance pending
+- **Status:** Complete for `0.1.0-alpha3`; implementation, review, and installed-package graphical acceptance recorded
 - **Date:** 2026-08-12
 - **Product authority:** The command palette remains a closed, trusted,
   application-owned catalog; resolved keymaps remain the authority for active
@@ -272,8 +272,20 @@ mutation, configuration rollback failure, or incomplete cleanup.
   site check/build, shell validation, and `git diff --check` pass.
 - A fresh read-only correctness review confirmed the bindable exact-target
   close-other-tabs route, closed typed action/keymap matrix, and evidence scope,
-  with no blockers or fixes worth doing now. Optimized installed-package
-  graphical acceptance remains required before closure.
+  with no blockers or fixes worth doing now.
+
+## Installed-package graphical evidence (2026-08-13)
+
+- The optimized package exercised the default and Omarchy-style command
+  surfaces, effective shortcut help and labels, strict overlay reload, pane
+  split/zoom, new-Dojo and tab navigation, and exact-target
+  **Close other tabs** behavior.
+- Long projected shortcuts remained readable after the bounded-label fix.
+  Terminal paste and literal compositor-delivered `Super+C/V/X/Z` field actions
+  preserved their intended terminal-versus-owned-field routing.
+- Palette Return, prompt Return, and cancellation defaults remained modal and
+  did not dispatch unrelated actions. Package integrity and configuration
+  rollback checks passed after cleanup.
 
 ## Alpha3 acceptance
 
