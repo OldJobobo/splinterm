@@ -196,8 +196,13 @@ A supported stable release should let a user:
 The current product does not promise:
 
 - production readiness, stability, or guaranteed support during alpha;
-- transparent process continuity across daemon crash, package upgrade, logout, reboot, or host failure;
-- restoration of process memory, kernel PTYs, or arbitrary unpersisted state;
+- process continuity across any package upgrade in the currently released alpha;
+  Plan 0037 defines an unimplemented `0.2.0` target only for explicitly
+  negotiated compatible planned upgrades;
+- transparent process continuity across daemon crash, logout, reboot, or host
+  failure;
+- restoration of process memory, kernel PTYs, durable terminal bodies, or
+  arbitrary unpersisted state after daemon or host loss;
 - full Foot configuration compatibility;
 - tmux configuration or plugin compatibility;
 - broad Linux, compositor, or distribution support;
@@ -229,6 +234,8 @@ Priority meanings:
 | `FR-PERSIST-04` | P0 | Relaunch must retain the Splint identity while allocating a new nonzero process incarnation; stale authority must not carry across incarnations. | Implemented |
 | `FR-PERSIST-05` | P0 | After daemon or host loss, restore must recover only validated topology and launch metadata with leaves exited/restorable and relaunch remaining explicit. It must not claim restoration of live PTYs, process memory, terminal grids, scrollback bodies, or image bodies. | Implemented; documentation must remain explicit |
 | `FR-PERSIST-06` | P1 | Structural mutations must be revision-bound and fail rather than overwrite concurrent topology changes. | Implemented |
+| `FR-PERSIST-07` | P0 | For `0.2.0`, an explicitly negotiated compatible planned daemon upgrade must preserve the daemon PID, child/PTY identity, one-reader ownership, terminal incarnation, ordered I/O, reaping, and signaling through guarded in-place re-exec. Unsupported state or incompatible schema must block rather than degrade silently. | Accepted target in Plan 0037 and ADR 0011; not implemented |
+| `FR-PERSIST-08` | P0 | `0.2.0` reboot and daemon-loss restoration must remain recipe-only. Body-bearing handoff checkpoints must use only anonymous sealed memory-backed descriptors and must not become durable terminal-grid, scrollback, image, parser, reply, or input archives, including after abrupt candidate failure. | Accepted in ADR 0012; existing durable privacy boundary retained |
 
 ### 10.2 Native human interface
 
@@ -308,6 +315,7 @@ Priority meanings:
 | `FR-PKG-03` | P0 | Packaging must not edit user homes, default terminal preference, Omarchy-owned files, SSH policy, or service lingering without an explicit separate action. | Implemented |
 | `FR-PKG-04` | P1 | The MCP adapter must remain an optional exact-version split package and installation alone must grant no authority. | Implemented |
 | `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public alpha GitHub and AUR artifacts are immutable, versioned, and checksummed; a stable support policy remains pending |
+| `FR-PKG-06` | P0 | A handoff-capable launcher must automatically perform only a fully negotiated compatible handoff on human launch, restart automatically only when idle after the `0.1.x` bootstrap boundary, and require exact-count confirmation for the first `0.1.x` to `0.2.0` restart and any active destructive fallback. Package scriptlets must never initiate user-service handoff or restart. | Accepted target in Plan 0037 and ADR 0011; not implemented |
 
 ## 11. Security and privacy requirements
 
@@ -323,6 +331,7 @@ Priority meanings:
 | `SEC-08` | P0 | Messages, queues, subscriptions, history, searches, images, transfers, and caches must have explicit bounds and deadlines. |
 | `SEC-09` | P0 | Stale identities, revisions, cursors, tokens, and incarnations must fail explicitly without fallback selection. |
 | `SEC-10` | P0 | Public claims must say “security-conscious” and describe concrete controls; they must not claim absolute security. |
+| `SEC-11` | P0 | Daemon handoff must fence stale clients and expire old connection authority. Any smooth local controller resumption must bind the same surviving client process, exact old connection set, pinned executable, bounded Window-local resume record, full resnapshot, and single-use generation claim through monitored pidfd identity and kernel-supplied message credentials; transfer, replay, mismatch, or conflict fails closed. |
 
 Detailed scope and policy behavior remain authoritative in [automation.md](automation.md), [ADR 0005](adr/0005-trusted-consent-broker.md), and [ADR 0007](adr/0007-supported-automation-policy.md).
 
@@ -506,6 +515,9 @@ This draft synthesizes the current implementation and, principally:
 - [Plan 0034: alpha3 saved Lair layouts](plans/0034-alpha3-saved-lair-layouts.md)
 - [Plan 0035: alpha3 scrollback Enter safety](plans/0035-alpha3-scrollback-enter-safety.md)
 - [Plan 0036: alpha3 Wayland file-drop path insertion](plans/0036-alpha3-wayland-file-drop-path-insertion.md)
+- [Plan 0037: 0.2.0 persistence and upgrade handoff](plans/0037-0.2-persistence-and-upgrade-handoff.md)
+- [ADR 0011: guarded in-place daemon re-exec](adr/0011-guarded-in-place-daemon-reexec.md)
+- [ADR 0012: defer durable terminal-body archives](adr/0012-defer-durable-terminal-archives.md)
 - [Supported automation contracts](automation.md)
 - [Configuration and Foot migration](configuration.md)
 - [Public alpha packaging](packaging.md)
