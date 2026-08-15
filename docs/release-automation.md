@@ -34,6 +34,8 @@ A failure never advances the state. Retrying candidate construction creates a ne
 `.github/workflows/release-candidate.yml` is deliberately non-publishing:
 
 - manual `workflow_dispatch` only from `main` or `maint/0.1`;
+- protected push CI runs the complete workspace boundary on both authority
+  branches before a merged commit can become a candidate;
 - repository permission limited to `contents: read`;
 - no GitHub Environment, release token, AUR credential, tag creation, push, or release API call;
 - full Git history is fetched so the exact commit and previous version tag can be recorded;

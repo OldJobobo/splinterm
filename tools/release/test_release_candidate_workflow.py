@@ -69,8 +69,9 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
         self.assertIn("retention-days: 14", workflow)
         self.assertIn("fetch-depth: 0", workflow)
 
-    def test_candidate_tests_are_part_of_ci(self) -> None:
+    def test_candidate_tests_are_part_of_both_authority_branch_checks(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn('branches: [main, "maint/0.1"]', ci)
         self.assertIn("tools/release/test_prepare_candidate.py", ci)
         self.assertIn("tools/release/test_release_candidate_workflow.py", ci)
 
