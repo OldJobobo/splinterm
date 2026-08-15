@@ -2,6 +2,15 @@ use super::{
     CliEnvelopeV2, CliErrorCodeV2, ErrorCode, Result, protocol_error, write_json_document,
 };
 
+fn is_default_dojo_name_exhausted(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<splinterm_core::TopologyError>(),
+            Some(splinterm_core::TopologyError::DefaultDojoNameExhausted)
+        )
+    })
+}
+
 pub(in crate::app) fn machine_exit_code(error: &anyhow::Error) -> i32 {
     if let Some(protocol) = protocol_error(error) {
         return match protocol.code {
@@ -13,6 +22,9 @@ pub(in crate::app) fn machine_exit_code(error: &anyhow::Error) -> i32 {
             ErrorCode::Internal | ErrorCode::DevelopmentFeatureDisabled => 70,
             _ => 5,
         };
+    }
+    if is_default_dojo_name_exhausted(error) {
+        return 5;
     }
     let message = error.to_string();
     if message.contains("requires --yes") {
@@ -70,6 +82,22 @@ pub(super) fn write_machine_connection_failure(
     )
 }
 
+fn local_machine_failure(error: &anyhow::Error) -> (CliErrorCodeV2, bool) {
+    if is_default_dojo_name_exhausted(error) {
+        (CliErrorCodeV2::InvalidArgument, false)
+    } else if error.to_string().contains("timed out") {
+        (CliErrorCodeV2::Timeout, true)
+    } else if error.to_string().contains("not found") {
+        (CliErrorCodeV2::NotFound, false)
+    } else if error.to_string().contains("expected incarnation")
+        || error.to_string().contains("does not have a live process")
+    {
+        (CliErrorCodeV2::StaleIncarnation, false)
+    } else {
+        (CliErrorCodeV2::Internal, false)
+    }
+}
+
 pub(super) fn finish_machine_envelope(
     operation: &'static str,
     result: Result<CliEnvelopeV2>,
@@ -85,17 +113,7 @@ pub(super) fn finish_machine_envelope(
                 )?)?;
                 return Err(error);
             }
-            let (code, retryable) = if error.to_string().contains("timed out") {
-                (CliErrorCodeV2::Timeout, true)
-            } else if error.to_string().contains("not found") {
-                (CliErrorCodeV2::NotFound, false)
-            } else if error.to_string().contains("expected incarnation")
-                || error.to_string().contains("does not have a live process")
-            {
-                (CliErrorCodeV2::StaleIncarnation, false)
-            } else {
-                (CliErrorCodeV2::Internal, false)
-            };
+            let (code, retryable) = local_machine_failure(&error);
             write_machine_read_failure(operation, code, bounded_public_message(&error), retryable)?;
             Err(error)
         }
@@ -112,4 +130,20 @@ pub(super) fn bounded_public_message(error: &anyhow::Error) -> String {
         .take(1023)
         .chain(std::iter::once('…'))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exhausted_default_dojo_number_is_a_recoverable_invalid_argument() {
+        let error = anyhow::Error::new(splinterm_core::TopologyError::DefaultDojoNameExhausted);
+
+        assert_eq!(machine_exit_code(&error), 5);
+        assert_eq!(
+            local_machine_failure(&error),
+            (CliErrorCodeV2::InvalidArgument, false)
+        );
+    }
 }

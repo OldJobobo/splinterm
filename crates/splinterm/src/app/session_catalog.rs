@@ -33,6 +33,44 @@ pub(in crate::app) fn automation_launch(
     AutomationLaunch { cwd, argv }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared local/remote request boundary keeps every launch field explicit"
+)]
+pub(in crate::app) fn new_dojo_request_for(
+    semantics: LaunchSemantics,
+    expected_topology_revision: TopologyRevision,
+    lairs: &[splinterm_core::Lair],
+    lair_id: LairId,
+    name: Option<String>,
+    cwd: Option<PathBuf>,
+    command: Vec<String>,
+    config: &AppConfig,
+) -> Result<Request> {
+    let name = match name {
+        Some(name) => name,
+        None => next_default_dojo_name(lairs, lair_id)?,
+    };
+    Ok(match semantics {
+        LaunchSemantics::LocalTrusted => Request::NewDojo {
+            expected_topology_revision,
+            lair_id,
+            name,
+            launch: launch_parameters(
+                cwd.context("local Dojo working directory is unavailable")?,
+                command,
+                config,
+            ),
+        },
+        LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
+            expected_topology_revision,
+            lair_id,
+            name,
+            launch: automation_launch(cwd, command),
+        },
+    })
+}
+
 pub(in crate::app) fn create_request(
     factory: &ConnectionFactory,
     expected_topology_revision: TopologyRevision,
@@ -75,6 +113,18 @@ pub(in crate::app) fn create_request_for(
             launch: automation_launch(cwd, command),
         },
     })
+}
+
+pub(in crate::app) fn next_default_dojo_name(
+    lairs: &[splinterm_core::Lair],
+    lair_id: LairId,
+) -> Result<String> {
+    lairs
+        .iter()
+        .find(|lair| lair.id == lair_id)
+        .context("selected Lair is not present in the current topology")?
+        .next_default_dojo_name()
+        .map_err(Into::into)
 }
 
 pub(in crate::app) fn select_dojo_from(
@@ -122,5 +172,111 @@ pub(in crate::app) fn session_picker_item(entry: &SessionEntry) -> SessionPicker
         working_directory: entry.working_directory(),
         pane_count: entry.pane_count,
         running_pane_count: entry.running_panes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use splinterm_core::Dojo;
+
+    #[test]
+    fn new_dojo_requests_preserve_revision_and_resolve_names_for_both_semantics() {
+        let mut lair = splinterm_core::Lair::new("main", PathBuf::from("/tmp"));
+        let lair_id = lair.id;
+        lair.dojos
+            .push(Dojo::with_shell("Dojo 3", PathBuf::from("/tmp")));
+        let revision = TopologyRevision::new(41);
+        let config = AppConfig::default();
+
+        let local = new_dojo_request_for(
+            LaunchSemantics::LocalTrusted,
+            revision,
+            std::slice::from_ref(&lair),
+            lair_id,
+            None,
+            Some(PathBuf::from("/work")),
+            vec!["local".to_owned()],
+            &config,
+        )
+        .unwrap();
+        assert!(matches!(
+            local,
+            Request::NewDojo {
+                expected_topology_revision,
+                lair_id: requested_lair,
+                name,
+                launch,
+            } if expected_topology_revision == revision
+                && requested_lair == lair_id
+                && name == "Dojo 4"
+                && launch.cwd == std::path::Path::new("/work")
+                && launch.command == ["local"]
+        ));
+
+        let local_explicit = new_dojo_request_for(
+            LaunchSemantics::LocalTrusted,
+            revision,
+            std::slice::from_ref(&lair),
+            lair_id,
+            Some("logs".to_owned()),
+            Some(PathBuf::from("/work")),
+            Vec::new(),
+            &config,
+        )
+        .unwrap();
+        assert!(matches!(
+            local_explicit,
+            Request::NewDojo {
+                expected_topology_revision,
+                name,
+                ..
+            } if expected_topology_revision == revision && name == "logs"
+        ));
+
+        let remote_implicit = new_dojo_request_for(
+            LaunchSemantics::RemoteInteractive,
+            revision,
+            std::slice::from_ref(&lair),
+            lair_id,
+            None,
+            None,
+            Vec::new(),
+            &config,
+        )
+        .unwrap();
+        assert!(matches!(
+            remote_implicit,
+            Request::NewDojoAutomation {
+                expected_topology_revision,
+                name,
+                ..
+            } if expected_topology_revision == revision && name == "Dojo 4"
+        ));
+
+        let remote = new_dojo_request_for(
+            LaunchSemantics::RemoteInteractive,
+            revision,
+            &[lair],
+            lair_id,
+            Some("logs".to_owned()),
+            None,
+            vec!["remote".to_owned()],
+            &config,
+        )
+        .unwrap();
+        assert!(matches!(
+            remote,
+            Request::NewDojoAutomation {
+                expected_topology_revision,
+                lair_id: requested_lair,
+                name,
+                launch,
+            } if expected_topology_revision == revision
+                && requested_lair == lair_id
+                && name == "logs"
+                && launch.cwd.is_none()
+                && launch.argv == ["remote"]
+        ));
     }
 }

@@ -240,8 +240,8 @@ pub(in crate::app) enum Command {
     /// Create a persistent Dojo with one live Splint.
     NewDojo {
         lair_id: LairId,
-        #[arg(long, default_value = "terminal")]
-        name: String,
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         cwd: Option<PathBuf>,
         #[arg(last = true, allow_hyphen_values = true)]

@@ -42,6 +42,8 @@ splinterm rename-splint SPLINT_ID TITLE
 
 Arguments after `--` are executed directly as an argument vector. Splinterm does not rebuild them into shell text.
 
+A new Lair starts with `Dojo 1`. If `new-dojo` omits `--name`, Splinterm chooses one greater than that Lair's highest exact `Dojo N` name without reusing gaps. Explicit names are preserved.
+
 ## Lifecycle
 
 | Command | Effect |

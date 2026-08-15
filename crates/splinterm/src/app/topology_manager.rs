@@ -26,8 +26,8 @@ use tokio::sync::mpsc;
 use super::{
     pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane},
     session_catalog::{
-        automation_launch, create_request, launch_parameters, recent_dojo_ids, remember_dojo,
-        select_dojo_from, session_picker_item,
+        automation_launch, create_request, launch_parameters, new_dojo_request_for,
+        recent_dojo_ids, remember_dojo, select_dojo_from, session_picker_item,
     },
 };
 
@@ -791,25 +791,23 @@ async fn create_dojo_in_lair(
     lair_id: LairId,
     cwd: std::path::PathBuf,
 ) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
-    let expected_topology_revision = connection.topology_revision().await?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let request = match factory.capabilities().launch_semantics {
-        LaunchSemantics::LocalTrusted => Request::NewDojo {
-            expected_topology_revision,
-            lair_id,
-            name: format!("terminal-{stamp}"),
-            launch: launch_parameters(cwd.clone(), Vec::new(), config),
-        },
-        LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
-            expected_topology_revision,
-            lair_id,
-            name: format!("terminal-{stamp}"),
-            launch: automation_launch(Some(cwd), Vec::new()),
-        },
+    let Response::Lairs {
+        lairs,
+        topology_revision: expected_topology_revision,
+    } = connection.request(Request::ListLairs).await?
+    else {
+        bail!("splinterd did not return its Lair catalog");
     };
+    let request = new_dojo_request_for(
+        factory.capabilities().launch_semantics,
+        expected_topology_revision,
+        &lairs,
+        lair_id,
+        None,
+        Some(cwd),
+        Vec::new(),
+        config,
+    )?;
     let Response::DojoStarted { dojo_id, .. } = connection.request(request).await? else {
         bail!("splinterd did not create the requested Dojo");
     };
