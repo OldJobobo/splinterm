@@ -1,6 +1,6 @@
-# Plan 0037: Numbered default Dojo names
+# Plan 0040: Numbered default Dojo names
 
-- **Status:** Implementation complete and reviewed for the current `0.1.0-alpha` patch line; release integration pending
+- **Status:** Implementation complete and reviewed for `0.1.0-alpha3.3`; release integration pending
 - **Date:** 2026-08-14
 - **Product authority:** Implicitly named Dojos use short, predictable per-Lair labels; explicit and persisted names remain user-owned
 - **Depends on:** accepted Lair/Dojo topology, topology revisions, graphical Dojo tabs, and `new-dojo` CLI creation
