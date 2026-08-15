@@ -10,7 +10,7 @@
 - [x] Cover graphical, human CLI, remote-interactive, and machine creation with
   exact topology-revision retention and stable machine error classification.
 - [x] Pass full release CI, isolated graphical smoke, independent implementation
-  and candidate review, immutable GitHub promotion, and AUR source verification.
+  and candidate review, protected GitHub promotion, and AUR source verification.
 - [x] Publish `v0.1.0-alpha3.3` and both `0.1.0alpha3.3-1` AUR package bases.
 
 ## Alpha3.2 Backspace crash hotfix

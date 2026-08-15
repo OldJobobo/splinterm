@@ -58,7 +58,7 @@ exhaustion is reported as a stable machine `invalid_argument`.
 - Candidate workflow run `31859941186` built commit
   `0c4276703eaa01b347fdbeb6327669b2b109e8b6` once. Candidate manifest SHA-256:
   `da995d5f0fe7dcd3993ebdc289160d1ef9fd1fcf325a3c46c353a2967f29cce6`.
-- Protected promotion workflow run `31860432730` created the immutable tag,
+- Protected promotion workflow run `31860432730` created the versioned tag,
   published and downloaded the exact five-asset set, verified every hash, and
   retained publication receipt artifact `9240460284`.
 - Source archive SHA-256:

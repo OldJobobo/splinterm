@@ -1,6 +1,6 @@
 # Plan 0040: Numbered default Dojo names
 
-- **Status:** Complete and published in `0.1.0-alpha3.3`; implementation, review, isolated graphical smoke, immutable promotion, and AUR distribution recorded
+- **Status:** Complete and published in `0.1.0-alpha3.3`; implementation, review, isolated graphical smoke, protected promotion, and AUR distribution recorded
 - **Date:** 2026-08-14
 - **Product authority:** Implicitly named Dojos use short, predictable per-Lair labels; explicit and persisted names remain user-owned
 - **Depends on:** accepted Lair/Dojo topology, topology revisions, graphical Dojo tabs, and `new-dojo` CLI creation
@@ -130,7 +130,7 @@ work.
   `da995d5f0fe7dcd3993ebdc289160d1ef9fd1fcf325a3c46c353a2967f29cce6`.
 - Fresh release-state and candidate-artifact reviews found no blocker and marked
   the exact candidate ready for promotion.
-- Protected promotion workflow run `31860432730` created immutable tag
+- Protected promotion workflow run `31860432730` created versioned tag
   `v0.1.0-alpha3.3`, published and redownloaded the exact five assets, verified
   every hash, and retained receipt artifact `9240460284`.
 - Public source package commit:

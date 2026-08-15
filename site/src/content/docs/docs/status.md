@@ -5,7 +5,7 @@ description: What is implemented, validated, limited, planned, and unreleased in
 
 Splinterm is a **public alpha**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
-[`v0.1.0-alpha3.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.3) is the current public prerelease. It retains the Alpha3 command/keymap, scrollback, saved-Lair, Wayland file-drop, Omarchy integration, and bounded-input fixes while giving new and implicitly created Dojos predictable per-Lair names such as `Dojo 1` and `Dojo 2`.
+[`v0.1.0-alpha3.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.3) is the current public prerelease. It retains the Alpha3 command/keymap, scrollback, saved-Lair, Wayland file-drop, Omarchy integration, and bounded-input fixes while starting new Lairs at `Dojo 1` and giving later implicitly created Dojos predictable per-Lair names such as `Dojo 2`. Explicit names remain unchanged.
 
 ## What that means
 

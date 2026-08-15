@@ -100,8 +100,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0alpha3/ \
-  -o packaging/splinterm-0.1.0alpha3.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.0alpha3.3/ \
+  -o packaging/splinterm-0.1.0alpha3.3.tar.gz HEAD
 ```
 
 The archive honors `.gitattributes` `export-ignore` entries; website source and
