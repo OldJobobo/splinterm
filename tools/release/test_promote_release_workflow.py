@@ -14,7 +14,8 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("\n  push:", workflow)
         self.assertIn("candidate_run_id:", workflow)
         self.assertIn("candidate_manifest_sha256:", workflow)
-        self.assertIn("test \"$DISPATCH_REF\" = refs/heads/main", workflow)
+        self.assertIn("refs/heads/main|refs/heads/maint/0.1", workflow)
+        self.assertIn('--expected-branch "$GITHUB_REF_NAME"', workflow)
         self.assertIn("group: versioned-release-promotion", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
 
@@ -58,12 +59,15 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         environment = workflow.index("name: Require configured protected release environment")
         existing = workflow.index("name: Refuse existing tag or release and fail closed on API errors")
-        create = workflow.index("name: Create tag and immutable prerelease")
+        create = workflow.index("name: Create versioned tag and prerelease")
         self.assertLess(environment, existing)
         self.assertLess(existing, create)
         self.assertIn('rule.get("type") == "required_reviewers"', workflow[environment:existing])
         self.assertIn('"custom_branch_policies": True', workflow[environment:existing])
-        self.assertIn('item.get("name") for item in policies] != ["main"]', workflow[environment:existing])
+        self.assertIn(
+            'sorted(item.get("name") for item in policies) != ["main", "maint/0.1"]',
+            workflow[environment:existing],
+        )
         self.assertIn("Refuse existing tag or release and fail closed on API errors", workflow)
         self.assertIn("HTTP/2.0 404", workflow)
         self.assertIn("HTTP/1.1 404", workflow)
@@ -74,7 +78,7 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
 
     def test_published_assets_are_downloaded_and_receipted(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        create = workflow.index("name: Create tag and immutable prerelease")
+        create = workflow.index("name: Create versioned tag and prerelease")
         upload = workflow.index("name: Upload exact approved assets without replacement")
         verify = workflow.index("name: Download and verify published release")
         receipt = workflow.index("name: Retain durable publication receipt")

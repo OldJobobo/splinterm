@@ -12,7 +12,9 @@ commits remain permitted.
 Before the first edit for an authorized task:
 
 * Fetch the current remote state.
-* Create a short-lived branch from the reviewed `origin/main` base.
+* Create a short-lived branch from the reviewed `origin/main` base for 0.2 and
+  general work, or from `origin/maint/0.1` for an explicitly authorized 0.1
+  maintenance patch.
 * Create or use a dedicated worktree for that branch.
 * Confirm the branch and worktree path before editing.
 
@@ -46,10 +48,13 @@ non-graphical boundary, actual-diff inspection, `git diff --check`, and required
 independent review before merge. Record exact validation and residual risks in
 the pull request.
 
-Prefer squash merge so `main` receives one coherent milestone commit. Delete the
-merged task branch and remove its worktree after verifying the merge. Releases,
-candidates, tags, and publication remain `main`-only and retain their separate
-approval requirements.
+Prefer squash merge so the owning integration branch receives one coherent
+milestone commit. Merge 0.2 and general work into `main`; merge 0.1 maintenance
+patches into `maint/0.1` and forward-port applicable fixes to `main` through a
+separate reviewed branch. Delete the merged task branch and remove its worktree
+after verifying the merge. Release candidates, promotions, tags, and publication
+may originate only from `main` or `maint/0.1`; the candidate and promotion must
+use the same authority branch and retain their separate approval requirements.
 
 ## 1. Cost and Delegation Stop-Loss
 
