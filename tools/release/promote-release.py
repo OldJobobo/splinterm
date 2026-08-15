@@ -25,6 +25,7 @@ EXPECTED_KINDS = {
     "aur-bin-draft": 3,
     "release-notes-draft": 1,
 }
+RELEASE_BRANCHES = {"main", "maint/0.1"}
 
 
 def sha256(path: Path) -> str:
@@ -63,16 +64,19 @@ def validate_source_run(
     artifacts: Any,
     repository: str,
     run_id: int,
+    expected_branch: str,
 ) -> tuple[int, str]:
     if REPOSITORY.fullmatch(repository) is None:
         raise ValueError("repository must be an owner/name pair")
+    if expected_branch not in RELEASE_BRANCHES:
+        raise ValueError("candidate branch is not a release authority")
     expected_run = {
         "id": run_id,
         "event": "workflow_dispatch",
         "status": "completed",
         "conclusion": "success",
         "path": ".github/workflows/release-candidate.yml",
-        "head_branch": "main",
+        "head_branch": expected_branch,
     }
     for key, expected in expected_run.items():
         if run.get(key) != expected:
@@ -298,6 +302,9 @@ def parser() -> argparse.ArgumentParser:
     source.add_argument("--artifacts", type=Path, required=True)
     source.add_argument("--repository", required=True)
     source.add_argument("--run-id", type=int, required=True)
+    source.add_argument(
+        "--expected-branch", choices=sorted(RELEASE_BRANCHES), required=True
+    )
     verify = commands.add_parser("verify-candidate")
     verify.add_argument("--directory", type=Path, required=True)
     verify.add_argument("--repository", required=True)
@@ -328,6 +335,7 @@ def main() -> int:
                 load_json_value(arguments.artifacts, "candidate artifacts"),
                 arguments.repository,
                 arguments.run_id,
+                arguments.expected_branch,
             )
             print(json.dumps({"artifact_id": artifact_id, "commit": commit}))
         elif arguments.command == "verify-candidate":
