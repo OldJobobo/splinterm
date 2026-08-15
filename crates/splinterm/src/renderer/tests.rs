@@ -42,6 +42,54 @@ fn synthetic_row() -> TextRow {
 }
 
 #[test]
+fn default_font_profile_records_uncapped_1440p_and_4k_grids() {
+    let snapshot = incremental_snapshot();
+    for (scale_120, expected_cell, expected_1440p, expected_4k) in [
+        (
+            120_u32,
+            (13, 30),
+            (195, 47, 2_535, 1_410),
+            (293, 71, 3_809, 2_130),
+        ),
+        (
+            150,
+            (17, 38),
+            (186, 46, 3_162, 1_748),
+            (280, 70, 4_760, 2_660),
+        ),
+        (
+            180,
+            (20, 44),
+            (190, 48, 3_800, 2_112),
+            (286, 72, 5_720, 3_168),
+        ),
+        (
+            240,
+            (26, 59),
+            (195, 48, 5_070, 2_832),
+            (293, 72, 7_618, 4_248),
+        ),
+    ] {
+        let frame = SnapshotFrame::load_scaled(&snapshot, scale_120).expect("default font frame");
+        assert_eq!((frame.cell_width, frame.cell_height), expected_cell);
+        assert_eq!(
+            frame
+                .terminal_size(2_560, 1_440, scale_120)
+                .expect("1440p terminal grid"),
+            expected_1440p
+        );
+        assert_eq!(
+            frame
+                .terminal_size(3_840, 2_160, scale_120)
+                .expect("4K terminal grid"),
+            expected_4k
+        );
+        assert!(expected_1440p.0 < MAX_COLUMNS && expected_1440p.1 < MAX_ROWS);
+        assert!(expected_4k.0 < MAX_COLUMNS && expected_4k.1 < MAX_ROWS);
+    }
+}
+
+#[test]
 fn deterministic_row_paints_identical_opaque_canvases() {
     let row = synthetic_row();
     let (width, height) = (96_u32, 128_u32);

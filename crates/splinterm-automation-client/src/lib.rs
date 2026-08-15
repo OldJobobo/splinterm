@@ -3708,8 +3708,9 @@ mod tests {
     use super::*;
     use splinterm_core::{Dojo, DojoId, Lair, LairId, Splint, SplintState, Topology};
     use splinterm_protocol::{
-        CellAttributes, ColorSource, ProtocolError, SearchMatch, SubscriptionEvent, TerminalCell,
-        TerminalRow, UnderlineStyle,
+        ActiveScreen, CellAttributes, ColorSource, MouseTracking, ProtocolError, SearchMatch,
+        SubscriptionEvent, TerminalCell, TerminalInputModes, TerminalRow, UnderlineStyle,
+        encode_server_frame_transaction,
     };
 
     #[tokio::test]
@@ -4028,6 +4029,60 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
+    fn oversized_terminal_event() -> ServerFrame {
+        let cell = TerminalCell {
+            content: "x".repeat(300),
+            spacer_remaining: None,
+            attributes: CellAttributes::default(),
+        };
+        let snapshot = TerminalSnapshot {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            revision: 1,
+            columns: usize::from(splinterm_protocol::MAX_COLUMNS),
+            rows: usize::from(splinterm_protocol::MAX_ROWS),
+            cursor_column: 0,
+            cursor_row: 0,
+            cursor_deferred_wrap: false,
+            active_screen: ActiveScreen::Normal,
+            input_modes: TerminalInputModes {
+                application_cursor: false,
+                application_keypad: false,
+                focus_reporting: false,
+                bracketed_paste: false,
+                cursor_visible: true,
+                cursor_blink: false,
+                mouse_tracking: MouseTracking::None,
+                sgr_mouse: false,
+            },
+            palette: vec![0; 256],
+            default_colors: [0; 3],
+            title: String::new(),
+            visible_rows: (1..=u64::from(splinterm_protocol::MAX_ROWS))
+                .map(|row_id| TerminalRow {
+                    row_id: Some(row_id),
+                    linebreak: false,
+                    cells: vec![cell.clone(); usize::from(splinterm_protocol::MAX_COLUMNS)],
+                })
+                .collect(),
+            history_generation: 1,
+            oldest_available_scrollback_row_id: None,
+            newest_available_scrollback_row_id: None,
+            scrollback_rows: Vec::new(),
+            available_scrollback_rows: 0,
+            omitted_oldest_scrollback_rows: 0,
+            images: None,
+            exited_code: None,
+            exited_signal: None,
+        };
+        snapshot.validate().unwrap();
+        ServerFrame::Event {
+            subscription_id: 1,
+            sequence: 1,
+            event: SubscriptionEvent::Snapshot { snapshot },
+        }
+    }
+
     fn established(stream: UnixStream) -> Connection {
         let (reader, writer) = stream.into_split();
         Connection {
@@ -4046,6 +4101,77 @@ mod tests {
             trusted_ui: false,
             unusable: false,
         }
+    }
+
+    #[tokio::test]
+    async fn connection_publishes_one_complete_oversized_terminal_transaction() {
+        let logical = oversized_terminal_event();
+        let frames = encode_server_frame_transaction(&logical).unwrap();
+        assert!(frames.len() >= 3);
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let writer = tokio::spawn(async move {
+            for frame in frames {
+                server.write_all(&frame).await.unwrap();
+            }
+        });
+        let mut connection = established(client);
+        assert_eq!(connection.next_server_frame().await.unwrap(), logical);
+        assert!(!connection.server_frame_assembler.has_pending());
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_rejects_reordered_terminal_transaction_and_becomes_unusable() {
+        let start = encode_frame(&ServerFrame::TerminalTransactionStart {
+            total_bytes: MAX_FRAME_BYTES + 1,
+            chunks: 3,
+        })
+        .unwrap();
+        let reordered = encode_frame(&ServerFrame::TerminalTransactionChunk {
+            index: 1,
+            data: "AQ==".to_owned(),
+        })
+        .unwrap();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let writer = tokio::spawn(async move {
+            server.write_all(&start).await.unwrap();
+            server.write_all(&reordered).await.unwrap();
+        });
+        let mut connection = established(client);
+        let error = connection.next_server_frame().await.unwrap_err();
+        assert!(error.to_string().contains("out of order"));
+        assert!(
+            connection
+                .next_server_frame()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be reused")
+        );
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_rejects_eof_during_terminal_transaction() {
+        let start = encode_frame(&ServerFrame::TerminalTransactionStart {
+            total_bytes: MAX_FRAME_BYTES + 1,
+            chunks: 3,
+        })
+        .unwrap();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let writer = tokio::spawn(async move {
+            server.write_all(&start).await.unwrap();
+            server.shutdown().await.unwrap();
+        });
+        let mut connection = established(client);
+        let error = connection.next_server_frame().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("incomplete terminal frame transaction")
+        );
+        assert!(!connection.server_frame_assembler.has_pending());
+        writer.await.unwrap();
     }
 
     fn fixture_document(raw: &str) -> serde_json::Value {

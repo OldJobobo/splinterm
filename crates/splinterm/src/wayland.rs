@@ -243,6 +243,7 @@ const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const IDLE_EVENT_LOOP_TIMEOUT: Duration = Duration::from_secs(60);
 const RECEIVER_DRAIN_BUDGET: usize = 8;
 const MAX_SHM_BUFFERS: usize = 2;
+const MAX_WINDOW_PRESENTATION_BYTES: usize = 512 * 1024 * 1024;
 
 fn translated_rect(mut rect: Rect, origin: Rect) -> Rect {
     rect.x = rect.x.saturating_add(origin.x);
@@ -601,6 +602,7 @@ impl WindowOptions {
         self.commands = Some(active.commands);
         self.authority = active.authority;
         self.controlled = active.controlled;
+        self.terminal_grid_limits = active.terminal_grid_limits;
         for pane in &mut self.panes {
             apply_theme(&mut pane.snapshot, self.theme);
         }
@@ -743,13 +745,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
     window.commit();
 
-    let pool_size = usize::try_from(
-        initial_width
-            .checked_mul(initial_height)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .context("initial SHM size overflow")?,
-    )
-    .context("initial SHM pool size fits usize")?;
+    let pool_size = bounded_window_backing_len(initial_width, initial_height)?;
     let pool = SlotPool::new(pool_size, &shm).context("create SHM pool")?;
     let signoff = SignoffProbe::from_environment(options.authority.development_bypass)?;
     let graphical_input_probe =
@@ -898,7 +894,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pane: PaneView {
                 snapshot: options.snapshot,
                 snapshot_frame,
-                terminal_grid_limits: TerminalGridLimits::default(),
+                terminal_grid_limits: options.terminal_grid_limits,
+                grid_cap_diagnostic_emitted: false,
                 image_sources: options.image_sources,
                 scrollback_viewport: ScrollbackViewport::default(),
                 painted_history_status: None,
@@ -1063,6 +1060,24 @@ fn viewport_destination(width: u32, height: u32) -> Result<(i32, i32)> {
     ))
 }
 
+fn bounded_window_backing_len(width: u32, height: u32) -> Result<usize> {
+    let backing_len = usize::try_from(
+        width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .context("backing dimensions overflow")?,
+    )
+    .context("backing size fits usize")?;
+    let presentation_bytes = backing_len
+        .checked_mul(MAX_SHM_BUFFERS + 1)
+        .context("Window presentation byte accounting overflow")?;
+    anyhow::ensure!(
+        presentation_bytes <= MAX_WINDOW_PRESENTATION_BYTES,
+        "WindowPresentationLimit: backing and SHM buffers exceed 512 MiB"
+    );
+    Ok(backing_len)
+}
+
 fn buffer_dimensions(
     logical_width: u32,
     logical_height: u32,
@@ -1109,6 +1124,7 @@ struct PaneView {
     snapshot: Option<TerminalSnapshot>,
     snapshot_frame: Option<SnapshotFrame>,
     terminal_grid_limits: TerminalGridLimits,
+    grid_cap_diagnostic_emitted: bool,
     image_sources: ImageContentLeaseSet,
     scrollback_viewport: ScrollbackViewport,
     painted_history_status: Option<HistoryOverlayStatus>,
@@ -1336,6 +1352,7 @@ impl PaneView {
             snapshot: Some(options.snapshot),
             snapshot_frame,
             terminal_grid_limits: options.terminal_grid_limits,
+            grid_cap_diagnostic_emitted: false,
             image_sources: options.image_sources,
             scrollback_viewport: ScrollbackViewport::default(),
             painted_history_status: None,
@@ -6744,17 +6761,30 @@ impl App {
         let (Some(frame), Some(commands)) = (&pane.snapshot_frame, &pane.commands) else {
             return Ok(());
         };
-        let resize = match frame.terminal_size_with_limits(
+        let (resize, column_capped, row_capped) = match frame.terminal_size_with_limit_status(
             logical_width,
             logical_height,
             scale_120,
             pane.terminal_grid_limits.maximum_columns,
             pane.terminal_grid_limits.maximum_rows,
         ) {
-            Ok(resize) => resize,
+            Ok(status) => (status.size, status.column_capped, status.row_capped),
             Err(error) if error.to_string().contains("SurfaceTooSmall") => return Ok(()),
             Err(error) => return Err(error),
         };
+        if (column_capped || row_capped) && !pane.grid_cap_diagnostic_emitted {
+            pane.grid_cap_diagnostic_emitted = true;
+            if let Some(diagnostics) = diagnostics() {
+                diagnostics.emit(DiagnosticLevel::Warn, DiagnosticEventCode::GridCapped, None);
+            }
+            eprintln!(
+                "splinterm terminal grid capped at {}x{} for a {}x{} logical pane",
+                pane.terminal_grid_limits.maximum_columns,
+                pane.terminal_grid_limits.maximum_rows,
+                logical_width,
+                logical_height
+            );
+        }
         if !resize_changed(pane.last_resize, resize) {
             return Ok(());
         }
@@ -8545,6 +8575,7 @@ impl App {
             && !command_palette_open
             && !dojo_prompt_open
             && !tab_context_menu_open;
+        let backing_len = bounded_window_backing_len(width, height)?;
         let mut buffer_index = None;
         for (index, buffer) in self.surface.buffers.iter().enumerate() {
             if self.surface.pool.canvas(&buffer.buffer).is_some() {
@@ -8577,13 +8608,6 @@ impl App {
             .canvas(&self.surface.buffers[buffer_index].buffer)
             .context("selected SHM buffer became unavailable")?;
 
-        let backing_len = usize::try_from(
-            width
-                .checked_mul(height)
-                .and_then(|pixels| pixels.checked_mul(4))
-                .context("backing dimensions overflow")?,
-        )
-        .context("backing size fits usize")?;
         let resized_backing = self.surface.backing.len() != backing_len;
         if resized_backing {
             self.surface.backing.resize(backing_len, 0);
@@ -10648,8 +10672,13 @@ mod tests {
             first: Box::new(LayoutNode::Leaf(first)),
             second: Box::new(LayoutNode::Leaf(second)),
         };
+        let mut second_options = pane_options(second_id);
+        second_options.terminal_grid_limits = TerminalGridLimits {
+            maximum_columns: 12,
+            maximum_rows: 8,
+        };
         let mut options = WindowOptions {
-            panes: vec![pane_options(first_id), pane_options(second_id)],
+            panes: vec![pane_options(first_id), second_options],
             layout: Some(layout.clone()),
             active_splint: Some(second_id),
             ..WindowOptions::default()
@@ -10658,6 +10687,13 @@ mod tests {
         assert_eq!(
             options.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
             Some(second_id)
+        );
+        assert_eq!(
+            options.terminal_grid_limits,
+            TerminalGridLimits {
+                maximum_columns: 12,
+                maximum_rows: 8,
+            }
         );
         assert_eq!(inactive.len(), 1);
         assert_eq!(inactive[0].snapshot.splint_id, first_id);
@@ -11254,6 +11290,35 @@ mod tests {
                 ..
             }
         ));
+        assert!(pane.grid_cap_diagnostic_emitted);
+        let frame = pane.snapshot_frame.as_ref().unwrap();
+        let geometry = pane
+            .window_geometry(frame, 2_000, 2_000, SCALE_DENOMINATOR)
+            .unwrap();
+        assert!(geometry.column_capped && geometry.row_capped);
+        assert!(geometry.residual_right > 0 && geometry.residual_bottom > 0);
+        assert_eq!(
+            frame.cell_at(
+                f64::from(geometry.grid_rect.x + geometry.grid_rect.width + 1),
+                f64::from(geometry.grid_rect.y + 1),
+                &geometry,
+            ),
+            None
+        );
+        let (cursor_x, cursor_y, cursor_width, cursor_height) =
+            frame.cursor_rectangle(&geometry).unwrap();
+        assert!(cursor_x >= 0 && cursor_y >= 0);
+        assert!(
+            u32::try_from(cursor_x + cursor_width).unwrap()
+                <= geometry.grid_rect.x + geometry.grid_rect.width
+        );
+        assert!(
+            u32::try_from(cursor_y + cursor_height).unwrap()
+                <= geometry.grid_rect.y + geometry.grid_rect.height
+        );
+        App::emit_pane_resize(&mut pane, 2_000, 2_000, SCALE_DENOMINATOR, true).unwrap();
+        assert!(command_receiver.try_recv().is_err());
+        assert!(pane.grid_cap_diagnostic_emitted);
     }
 
     fn history_row(id: u64, content_bytes: usize) -> TerminalRow {
@@ -12589,6 +12654,16 @@ mod tests {
             buffer_dimensions(960, 600, 240).expect("2x"),
             (1_920, 1_200, 7_680)
         );
+    }
+
+    #[test]
+    fn window_presentation_memory_is_checked_before_backing_or_shm_allocation() {
+        let maximum_pixels = MAX_WINDOW_PRESENTATION_BYTES / (MAX_SHM_BUFFERS + 1) / 4;
+        let maximum_height = u32::try_from(maximum_pixels).unwrap();
+        let backing = bounded_window_backing_len(1, maximum_height).unwrap();
+        assert!(backing.checked_mul(MAX_SHM_BUFFERS + 1).unwrap() <= MAX_WINDOW_PRESENTATION_BYTES);
+        assert!(bounded_window_backing_len(1, maximum_height + 1).is_err());
+        assert!(bounded_window_backing_len(u32::MAX, 2).is_err());
     }
 
     #[test]

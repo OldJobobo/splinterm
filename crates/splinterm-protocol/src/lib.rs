@@ -18,6 +18,8 @@ pub const PROTOCOL_VERSION: u16 = 35;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_TERMINAL_TRANSACTION_CHUNK_BASE64_BYTES: usize =
+    4 * MAX_TERMINAL_TRANSACTION_CHUNK_BYTES.div_ceil(3);
 pub const MAX_TERMINAL_TRANSACTION_CHUNKS: usize =
     MAX_TERMINAL_TRANSACTION_BYTES / MAX_TERMINAL_TRANSACTION_CHUNK_BYTES;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
@@ -2740,6 +2742,19 @@ pub enum FrameEncodeError {
     Serialize(#[source] serde_json::Error),
 }
 
+fn terminal_frame_transaction_eligible(value: &ServerFrame) -> bool {
+    matches!(
+        value,
+        ServerFrame::Response {
+            result: Response::Attached { .. },
+            ..
+        } | ServerFrame::Event {
+            event: SubscriptionEvent::Snapshot { .. } | SubscriptionEvent::Update { .. },
+            ..
+        }
+    )
+}
+
 /// Encodes one server frame directly or as one bounded, contiguous terminal
 /// transaction when its exact JSON body exceeds the individual frame limit.
 ///
@@ -2753,17 +2768,7 @@ pub fn encode_server_frame_transaction(
     if body.len() <= MAX_FRAME_BYTES {
         return encode_frame(value).map(|frame| vec![frame]);
     }
-    let terminal_state = matches!(
-        value,
-        ServerFrame::Response {
-            result: Response::Attached { .. },
-            ..
-        } | ServerFrame::Event {
-            event: SubscriptionEvent::Snapshot { .. } | SubscriptionEvent::Update { .. },
-            ..
-        }
-    );
-    if !terminal_state || body.len() > MAX_TERMINAL_TRANSACTION_BYTES {
+    if !terminal_frame_transaction_eligible(value) || body.len() > MAX_TERMINAL_TRANSACTION_BYTES {
         return Err(FrameEncodeError::TooLarge);
     }
     let chunks = body.len().div_ceil(MAX_TERMINAL_TRANSACTION_CHUNK_BYTES);
@@ -2859,6 +2864,12 @@ impl ServerFrameTransactionAssembler {
                         "terminal frame transaction chunks are out of order",
                     ));
                 }
+                if data.len() > MAX_TERMINAL_TRANSACTION_CHUNK_BASE64_BYTES {
+                    return Err(ProtocolError::new(
+                        ErrorCode::ResourceLimit,
+                        "terminal frame transaction base64 chunk exceeds limits",
+                    ));
+                }
                 let decoded = BASE64_STANDARD.decode(data).map_err(|_| {
                     ProtocolError::new(
                         ErrorCode::InvalidArgument,
@@ -2893,14 +2904,10 @@ impl ServerFrameTransactionAssembler {
                             "terminal frame transaction body is invalid",
                         )
                     })?;
-                if matches!(
-                    decoded,
-                    ServerFrame::TerminalTransactionStart { .. }
-                        | ServerFrame::TerminalTransactionChunk { .. }
-                ) {
+                if !terminal_frame_transaction_eligible(&decoded) {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,
-                        "terminal frame transactions cannot be nested",
+                        "terminal frame transaction body is not eligible",
                     ));
                 }
                 Ok(Some(decoded))
@@ -3004,6 +3011,49 @@ mod tests {
     }
 
     #[test]
+    fn oversized_terminal_updates_use_the_same_atomic_transaction_boundary() {
+        let cell = TerminalCell {
+            content: "x".repeat(300),
+            spacer_remaining: None,
+            attributes: CellAttributes::default(),
+        };
+        let mut large = update();
+        large.columns = Some(usize::from(MAX_COLUMNS));
+        large.row_count = Some(usize::from(MAX_ROWS));
+        large.rows = (0..usize::from(MAX_ROWS))
+            .map(|index| TerminalRowPatch {
+                index,
+                row: TerminalRow {
+                    row_id: Some(u64::try_from(index + 1).unwrap()),
+                    linebreak: false,
+                    cells: vec![cell.clone(); usize::from(MAX_COLUMNS)],
+                },
+            })
+            .collect();
+        large
+            .validate_against(
+                large.base_revision,
+                1,
+                usize::from(MAX_COLUMNS),
+                usize::from(MAX_ROWS),
+            )
+            .unwrap();
+        let logical = ServerFrame::Event {
+            subscription_id: 7,
+            sequence: 10,
+            event: SubscriptionEvent::Update { update: large },
+        };
+        let frames = encode_server_frame_transaction(&logical).unwrap();
+        assert!(frames.len() >= 3);
+        let mut assembler = ServerFrameTransactionAssembler::default();
+        let mut published = None;
+        for frame in frames {
+            published = assembler.push(decode_test_server_frame(&frame)).unwrap();
+        }
+        assert_eq!(published, Some(logical));
+    }
+
+    #[test]
     fn terminal_frame_transactions_fail_closed_on_order_and_interruption() {
         let start = ServerFrame::TerminalTransactionStart {
             total_bytes: MAX_FRAME_BYTES + 1,
@@ -3040,6 +3090,87 @@ mod tests {
                 result: Response::Pong,
             })
         );
+    }
+
+    #[test]
+    fn terminal_frame_transactions_reject_corrupt_duplicate_and_inconsistent_chunks() {
+        let start = ServerFrame::TerminalTransactionStart {
+            total_bytes: MAX_FRAME_BYTES + 1,
+            chunks: 3,
+        };
+        let chunk = |index, data: &str| ServerFrame::TerminalTransactionChunk {
+            index,
+            data: data.to_owned(),
+        };
+        let mut assembler = ServerFrameTransactionAssembler::default();
+
+        assert_eq!(assembler.push(start.clone()).unwrap(), None);
+        assert!(assembler.push(chunk(0, "not base64")).is_err());
+
+        assert_eq!(assembler.push(start.clone()).unwrap(), None);
+        assert!(
+            assembler
+                .push(chunk(
+                    0,
+                    &"A".repeat(MAX_TERMINAL_TRANSACTION_CHUNK_BASE64_BYTES + 1),
+                ))
+                .is_err()
+        );
+
+        assert_eq!(assembler.push(start.clone()).unwrap(), None);
+        assert_eq!(assembler.push(chunk(0, "AQ==")).unwrap(), None);
+        assert!(assembler.push(chunk(0, "AQ==")).is_err());
+
+        assert_eq!(assembler.push(start).unwrap(), None);
+        assert_eq!(assembler.push(chunk(0, "AQ==")).unwrap(), None);
+        assert_eq!(assembler.push(chunk(1, "AQ==")).unwrap(), None);
+        assert!(assembler.push(chunk(2, "AQ==")).is_err());
+
+        assert!(
+            assembler
+                .push(ServerFrame::TerminalTransactionStart {
+                    total_bytes: MAX_TERMINAL_TRANSACTION_BYTES + 1,
+                    chunks: MAX_TERMINAL_TRANSACTION_CHUNKS + 1,
+                })
+                .is_err()
+        );
+        assert!(!assembler.has_pending());
+    }
+
+    #[test]
+    fn transaction_wrapped_nonterminal_frames_are_rejected_after_reassembly() {
+        let logical = ServerFrame::Response {
+            request_id: 1,
+            result: Response::Pong,
+        };
+        let mut body = serde_json::to_vec(&logical).unwrap();
+        body.resize(MAX_FRAME_BYTES + 1, b' ');
+        let chunks = body.len().div_ceil(MAX_TERMINAL_TRANSACTION_CHUNK_BYTES);
+        let mut assembler = ServerFrameTransactionAssembler::default();
+        assert_eq!(
+            assembler
+                .push(ServerFrame::TerminalTransactionStart {
+                    total_bytes: body.len(),
+                    chunks,
+                })
+                .unwrap(),
+            None
+        );
+        for (index, bytes) in body
+            .chunks(MAX_TERMINAL_TRANSACTION_CHUNK_BYTES)
+            .enumerate()
+        {
+            let result = assembler.push(ServerFrame::TerminalTransactionChunk {
+                index,
+                data: BASE64_STANDARD.encode(bytes),
+            });
+            if index + 1 == chunks {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), None);
+            }
+        }
+        assert!(!assembler.has_pending());
     }
 
     #[test]

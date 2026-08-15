@@ -75,6 +75,12 @@ pub(crate) struct SnapshotFrame {
     pub(super) scale_120: u16,
 }
 
+pub(crate) struct TerminalSizeWithLimitStatus {
+    pub size: (u16, u16, u16, u16),
+    pub column_capped: bool,
+    pub row_capped: bool,
+}
+
 impl SnapshotFrame {
     pub(crate) const fn cell_width(&self) -> u32 {
         self.cell_width
@@ -225,6 +231,7 @@ impl SnapshotFrame {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn terminal_size_with_limits(
         &self,
         logical_width: u32,
@@ -233,6 +240,24 @@ impl SnapshotFrame {
         maximum_columns: u16,
         maximum_rows: u16,
     ) -> Result<(u16, u16, u16, u16)> {
+        self.terminal_size_with_limit_status(
+            logical_width,
+            logical_height,
+            scale_120,
+            maximum_columns,
+            maximum_rows,
+        )
+        .map(|status| status.size)
+    }
+
+    pub(crate) fn terminal_size_with_limit_status(
+        &self,
+        logical_width: u32,
+        logical_height: u32,
+        scale_120: u32,
+        maximum_columns: u16,
+        maximum_rows: u16,
+    ) -> Result<TerminalSizeWithLimitStatus> {
         let geometry = self.window_geometry_with_limits(
             logical_width,
             logical_height,
@@ -241,12 +266,16 @@ impl SnapshotFrame {
             maximum_rows,
         )?;
         let (pixel_width, pixel_height) = geometry.terminal_pixels()?;
-        Ok((
-            u16::try_from(geometry.columns).context("terminal columns fit u16")?,
-            u16::try_from(geometry.rows).context("terminal rows fit u16")?,
-            pixel_width,
-            pixel_height,
-        ))
+        Ok(TerminalSizeWithLimitStatus {
+            size: (
+                u16::try_from(geometry.columns).context("terminal columns fit u16")?,
+                u16::try_from(geometry.rows).context("terminal rows fit u16")?,
+                pixel_width,
+                pixel_height,
+            ),
+            column_capped: geometry.column_capped,
+            row_capped: geometry.row_capped,
+        })
     }
 
     #[allow(

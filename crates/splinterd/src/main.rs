@@ -87,6 +87,11 @@ const IMAGE_MEMFD_HEADER_BYTES: usize = 45;
 const MAX_LIVE_SPLINTS: usize = 256;
 const TOPOLOGY_QUEUE: usize = 16;
 const OUTBOUND_QUEUE: usize = 32;
+const TERMINAL_TRANSACTION_MEMORY_BYTES: usize = 96 * 1024 * 1024;
+const TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+const TERMINAL_PUBLICATION_BYTES: usize = 32 * 1024 * 1024;
+const TERMINAL_PUBLICATION_SPLINT_BYTES: usize = 64 * 1024 * 1024;
+const TERMINAL_PUBLICATION_DAEMON_BYTES: usize = 256 * 1024 * 1024;
 const CONTROL_QUEUE: usize = 4;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -729,6 +734,26 @@ impl TopologyHub {
     }
 }
 
+struct TerminalPublicationReservation {
+    _subscriber: Option<tokio::sync::OwnedSemaphorePermit>,
+    _splint: tokio::sync::OwnedSemaphorePermit,
+    _daemon: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct QueuedServerFrame {
+    frame: ServerFrame,
+    terminal_publication: Option<TerminalPublicationReservation>,
+}
+
+impl From<ServerFrame> for QueuedServerFrame {
+    fn from(frame: ServerFrame) -> Self {
+        Self {
+            frame,
+            terminal_publication: None,
+        }
+    }
+}
+
 struct DaemonState {
     topology: RwLock<Topology>,
     runtimes: Mutex<RuntimeRegistry>,
@@ -736,6 +761,9 @@ struct DaemonState {
     graphical_focus: Mutex<Option<GraphicalFocusClaim>>,
     topology_hub: Mutex<TopologyHub>,
     topology_transactions: Semaphore,
+    terminal_transaction_memory: Arc<Semaphore>,
+    terminal_publication_memory: Arc<Semaphore>,
+    terminal_splint_publication_memory: Mutex<HashMap<SplintId, std::sync::Weak<Semaphore>>>,
     exit_observers: TaskTracker,
     metadata: Option<MetadataStore>,
     #[cfg(test)]
@@ -859,6 +887,11 @@ async fn main() -> Result<()> {
         graphical_focus: Mutex::new(None),
         topology_hub: Mutex::new(TopologyHub::default()),
         topology_transactions: Semaphore::new(1),
+        terminal_transaction_memory: Arc::new(Semaphore::new(
+            TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES,
+        )),
+        terminal_publication_memory: Arc::new(Semaphore::new(TERMINAL_PUBLICATION_DAEMON_BYTES)),
+        terminal_splint_publication_memory: Mutex::new(HashMap::new()),
         exit_observers: TaskTracker::new(),
         metadata: Some(metadata),
         #[cfg(test)]
@@ -1249,8 +1282,9 @@ async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()>
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
     let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE);
     let (writer_closed_tx, writer_closed_rx) = watch::channel(false);
+    let terminal_transaction_memory = Arc::clone(&state.terminal_transaction_memory);
     let writer_task = AbortOnDrop::new(tokio::spawn(async move {
-        write_frames(writer, outbound_rx, control_rx).await;
+        write_frames(writer, outbound_rx, control_rx, terminal_transaction_memory).await;
         writer_closed_tx.send_replace(true);
     }));
     let authenticated = Box::pin(serve_authenticated(
@@ -1557,7 +1591,7 @@ async fn serve_authenticated(
     state: &Arc<DaemonState>,
     peer: &PeerIdentity,
     connection_id: u64,
-    outbound: &mpsc::Sender<ServerFrame>,
+    outbound: &mpsc::Sender<QueuedServerFrame>,
     control: &mpsc::Sender<ServerFrame>,
     mut writer_closed: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -1679,6 +1713,7 @@ async fn serve_authenticated(
             ClientFrame::Cancel { request_id } => {
                 send_response(
                     outbound,
+                    state,
                     request_id,
                     Err(ProtocolError::new(
                         ErrorCode::RequestNotFound,
@@ -1695,6 +1730,7 @@ async fn serve_authenticated(
                 if request_id == 0 {
                     send_response(
                         outbound,
+                        state,
                         request_id,
                         Err(ProtocolError::new(
                             ErrorCode::InvalidRequestId,
@@ -1707,6 +1743,7 @@ async fn serve_authenticated(
                 if request_id <= last_request_id {
                     send_response(
                         outbound,
+                        state,
                         request_id,
                         Err(ProtocolError::new(
                             ErrorCode::DuplicateRequestId,
@@ -1723,6 +1760,7 @@ async fn serve_authenticated(
                 {
                     send_response(
                         outbound,
+                        state,
                         request_id,
                         Err(ProtocolError::new(
                             ErrorCode::Unauthorized,
@@ -1750,6 +1788,7 @@ async fn serve_authenticated(
                         .await;
                         send_response(
                             outbound,
+                            state,
                             request_id,
                             Err(ProtocolError::new(
                                 ErrorCode::Unauthorized,
@@ -1774,7 +1813,7 @@ async fn serve_authenticated(
                         },
                     )
                     .await;
-                    send_response(outbound, request_id, Ok(Response::Acknowledged)).await?;
+                    send_response(outbound, state, request_id, Ok(Response::Acknowledged)).await?;
                     continue;
                 }
                 let diagnostic_event = diagnostic_lifecycle_event(&request);
@@ -1831,6 +1870,7 @@ async fn serve_authenticated(
                             if subscriptions.len() >= MAX_SUBSCRIPTIONS {
                                 send_response(
                                     outbound,
+                                    state,
                                     request_id,
                                     Err(ProtocolError::new(
                                         ErrorCode::ResourceLimit,
@@ -1840,7 +1880,7 @@ async fn serve_authenticated(
                                 .await?;
                                 continue;
                             }
-                            send_response(outbound, request_id, Ok(response)).await?;
+                            send_response(outbound, state, request_id, Ok(response)).await?;
                             let (id, task) = match subscription {
                                 PendingSubscription::Terminal {
                                     id,
@@ -1903,10 +1943,10 @@ async fn serve_authenticated(
                             };
                             subscriptions.insert(id, AbortOnDrop::new(task));
                         } else {
-                            send_response(outbound, request_id, Ok(response)).await?;
+                            send_response(outbound, state, request_id, Ok(response)).await?;
                         }
                     }
-                    Err(error) => send_response(outbound, request_id, Err(error)).await?,
+                    Err(error) => send_response(outbound, state, request_id, Err(error)).await?,
                 }
             }
         }
@@ -6845,7 +6885,7 @@ struct ControlSubscriptionContext {
 fn spawn_control_subscription(
     id: u64,
     mut stream: broadcast::Receiver<ControlNotice>,
-    outbound: mpsc::Sender<ServerFrame>,
+    outbound: mpsc::Sender<QueuedServerFrame>,
     context: ControlSubscriptionContext,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -6928,7 +6968,7 @@ fn spawn_control_subscription(
                 event,
             };
             if !frame_within_policy_limit(&frame, maximum_returned_bytes)
-                || outbound.send(frame).await.is_err()
+                || outbound.send(frame.into()).await.is_err()
             {
                 break;
             }
@@ -6940,7 +6980,7 @@ fn spawn_control_subscription(
 fn spawn_topology_subscription(
     id: u64,
     mut subscription: TopologySubscription,
-    outbound: mpsc::Sender<ServerFrame>,
+    outbound: mpsc::Sender<QueuedServerFrame>,
     maximum_returned_bytes: Option<usize>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -6976,7 +7016,7 @@ fn spawn_topology_subscription(
                 event,
             };
             if !frame_within_policy_limit(&frame, maximum_returned_bytes)
-                || outbound.send(frame).await.is_err()
+                || outbound.send(frame.into()).await.is_err()
             {
                 break;
             }
@@ -6989,7 +7029,7 @@ fn spawn_topology_subscription(
 }
 
 struct SubscriptionOutputs {
-    outbound: mpsc::Sender<ServerFrame>,
+    outbound: mpsc::Sender<QueuedServerFrame>,
     control: mpsc::Sender<ServerFrame>,
 }
 
@@ -7102,14 +7142,14 @@ fn exited_subscription_frame(
 }
 
 async fn send_final_subscription_frames(
-    outbound: &mpsc::Sender<ServerFrame>,
-    update: ServerFrame,
+    outbound: &mpsc::Sender<QueuedServerFrame>,
+    update: QueuedServerFrame,
     subscription_id: u64,
     sequence: u64,
     status: ProcessExit,
 ) -> bool {
     let resync_required = matches!(
-        &update,
+        &update.frame,
         ServerFrame::Event {
             event: SubscriptionEvent::ResyncRequired { .. },
             ..
@@ -7119,11 +7159,14 @@ async fn send_final_subscription_frames(
         return false;
     }
     outbound
-        .send(exited_subscription_frame(
-            subscription_id,
-            sequence + u64::from(!resync_required),
-            status,
-        ))
+        .send(
+            exited_subscription_frame(
+                subscription_id,
+                sequence + u64::from(!resync_required),
+                status,
+            )
+            .into(),
+        )
         .await
         .is_ok()
 }
@@ -7168,6 +7211,7 @@ fn spawn_subscription(
         let mut previous_visible_rows = access.visible_rows.clone();
         let expiry = time::sleep(consent::GRANT_LIFETIME);
         tokio::pin!(expiry);
+        let subscriber_publication_memory = Arc::new(Semaphore::new(1));
         'subscription: loop {
             let (received, trailing_exit) = tokio::select! {
                 value = subscription.recv_coalesced() => value,
@@ -7207,7 +7251,7 @@ fn spawn_subscription(
                 SubscriptionReceive::Event(LiveEvent::Exited { status, .. }) => {
                     let _ = outputs
                         .outbound
-                        .send(exited_subscription_frame(id, sequence, status))
+                        .send(exited_subscription_frame(id, sequence, status).into())
                         .await;
                     break;
                 }
@@ -7277,10 +7321,39 @@ fn spawn_subscription(
                                 .await;
                             break;
                         }
+                        let publication_bytes = match serde_json::to_vec(&frame) {
+                            Ok(encoded) => encoded.len().saturating_add(4),
+                            Err(_) => break,
+                        };
+                        let Some(reservation) = try_reserve_terminal_publication(
+                            &audit.state,
+                            handle.splint_id,
+                            Some(&subscriber_publication_memory),
+                            publication_bytes,
+                        )
+                        .await
+                        else {
+                            let revision = current_revision(&handle, access.scrollback_rows).await;
+                            let _ = outputs
+                                .control
+                                .send(ServerFrame::Event {
+                                    subscription_id: id,
+                                    sequence,
+                                    event: SubscriptionEvent::ResyncRequired {
+                                        current_revision: revision,
+                                    },
+                                })
+                                .await;
+                            break;
+                        };
+                        let queued = QueuedServerFrame {
+                            frame,
+                            terminal_publication: Some(reservation),
+                        };
                         if let Some(status) = trailing_exit {
                             let _ = send_final_subscription_frames(
                                 &outputs.outbound,
-                                frame,
+                                queued,
                                 id,
                                 sequence,
                                 status,
@@ -7288,7 +7361,7 @@ fn spawn_subscription(
                             .await;
                             break;
                         }
-                        if outputs.outbound.try_send(frame).is_err() {
+                        if outputs.outbound.try_send(queued).is_err() {
                             let revision = current_revision(&handle, access.scrollback_rows).await;
                             let _ = outputs
                                 .control
@@ -7327,6 +7400,42 @@ fn spawn_subscription(
                 SubscriptionReceive::Closed => break,
             }
         }
+    })
+}
+
+async fn try_reserve_terminal_publication(
+    state: &DaemonState,
+    splint_id: SplintId,
+    subscriber: Option<&Arc<Semaphore>>,
+    publication_bytes: usize,
+) -> Option<TerminalPublicationReservation> {
+    if publication_bytes == 0 || publication_bytes > TERMINAL_PUBLICATION_BYTES {
+        return None;
+    }
+    let permits = u32::try_from(publication_bytes).ok()?;
+    let subscriber = match subscriber {
+        Some(budget) => Some(Arc::clone(budget).acquire_owned().await.ok()?),
+        None => None,
+    };
+    let splint_budget = {
+        let mut budgets = state.terminal_splint_publication_memory.lock().await;
+        budgets.retain(|_, budget| budget.strong_count() > 0);
+        if let Some(budget) = budgets.get(&splint_id).and_then(std::sync::Weak::upgrade) {
+            budget
+        } else {
+            let budget = Arc::new(Semaphore::new(TERMINAL_PUBLICATION_SPLINT_BYTES));
+            budgets.insert(splint_id, Arc::downgrade(&budget));
+            budget
+        }
+    };
+    let splint = splint_budget.try_acquire_many_owned(permits).ok()?;
+    let daemon = Arc::clone(&state.terminal_publication_memory)
+        .try_acquire_many_owned(permits)
+        .ok()?;
+    Some(TerminalPublicationReservation {
+        _subscriber: subscriber,
+        _splint: splint,
+        _daemon: daemon,
     })
 }
 
@@ -7395,6 +7504,19 @@ fn event_base_revision(event: &SubscriptionEvent) -> u64 {
     }
 }
 
+fn frame_uses_terminal_transaction_memory(frame: &ServerFrame) -> bool {
+    matches!(
+        frame,
+        ServerFrame::Response {
+            result: Response::Attached { .. },
+            ..
+        } | ServerFrame::Event {
+            event: SubscriptionEvent::Snapshot { .. } | SubscriptionEvent::Update { .. },
+            ..
+        }
+    )
+}
+
 fn frame_trace_identity(frame: &ServerFrame) -> Option<(u64, u64, u64, u64)> {
     let ServerFrame::Event {
         subscription_id,
@@ -7423,13 +7545,37 @@ fn frame_trace_identity(frame: &ServerFrame) -> Option<(u64, u64, u64, u64)> {
 
 async fn write_frames(
     mut writer: OwnedWriteHalf,
-    mut normal: mpsc::Receiver<ServerFrame>,
+    mut normal: mpsc::Receiver<QueuedServerFrame>,
     mut control: mpsc::Receiver<ServerFrame>,
+    terminal_transaction_memory: Arc<Semaphore>,
 ) {
     loop {
-        let frame = tokio::select! { biased; frame = control.recv() => frame, frame = normal.recv() => frame };
-        let Some(frame) = frame else { break };
+        let (frame, _publication_reservation) = tokio::select! {
+            biased;
+            frame = control.recv() => {
+                let Some(frame) = frame else { break };
+                (frame, None)
+            }
+            queued = normal.recv() => {
+                let Some(queued) = queued else { break };
+                (queued.frame, queued.terminal_publication)
+            }
+        };
         let identity = frame_trace_identity(&frame);
+        let _memory_permit = if frame_uses_terminal_transaction_memory(&frame) {
+            let Ok(permits) = u32::try_from(TERMINAL_TRANSACTION_MEMORY_BYTES) else {
+                break;
+            };
+            let Ok(permit) = Arc::clone(&terminal_transaction_memory)
+                .acquire_many_owned(permits)
+                .await
+            else {
+                break;
+            };
+            Some(permit)
+        } else {
+            None
+        };
         let encode_started = perf_trace_enabled().then(Instant::now);
         let Ok(encoded_frames) = encode_server_frame_transaction(&frame) else {
             break;
@@ -7511,7 +7657,8 @@ async fn read_optional_frame(reader: &mut OwnedReadHalf) -> Result<Option<Client
 }
 
 async fn send_response(
-    sender: &mpsc::Sender<ServerFrame>,
+    sender: &mpsc::Sender<QueuedServerFrame>,
+    state: &DaemonState,
     request_id: u64,
     result: Result<Response, ProtocolError>,
 ) -> Result<()> {
@@ -7522,7 +7669,32 @@ async fn send_response(
             error,
         },
     };
-    sender.send(frame).await.context("writer closed")
+    let terminal_publication = match &frame {
+        ServerFrame::Response {
+            result: Response::Attached { snapshot, .. },
+            ..
+        } => {
+            let publication_bytes = serde_json::to_vec(&frame)?.len().saturating_add(4);
+            Some(
+                try_reserve_terminal_publication(
+                    state,
+                    snapshot.splint_id,
+                    None,
+                    publication_bytes,
+                )
+                .await
+                .context("terminal publication memory is exhausted")?,
+            )
+        }
+        _ => None,
+    };
+    sender
+        .send(QueuedServerFrame {
+            frame,
+            terminal_publication,
+        })
+        .await
+        .context("writer closed")
 }
 async fn send_control(sender: &mpsc::Sender<ServerFrame>, frame: ServerFrame) -> Result<()> {
     sender.send(frame).await.context("writer closed")
@@ -8347,11 +8519,13 @@ mod tests {
             signal: None,
         };
 
-        assert!(send_final_subscription_frames(&outbound, update.clone(), 11, 4, status).await);
-        assert_eq!(receiver.recv().await, Some(update));
+        assert!(
+            send_final_subscription_frames(&outbound, update.clone().into(), 11, 4, status).await
+        );
+        assert_eq!(receiver.recv().await.unwrap().frame, update);
         assert_eq!(
-            receiver.recv().await,
-            Some(exited_subscription_frame(11, 5, status))
+            receiver.recv().await.unwrap().frame,
+            exited_subscription_frame(11, 5, status)
         );
     }
 
@@ -8370,10 +8544,10 @@ mod tests {
             signal: None,
         };
 
-        assert!(send_final_subscription_frames(&outbound, resync, 11, 4, status).await);
+        assert!(send_final_subscription_frames(&outbound, resync.into(), 11, 4, status).await);
         assert_eq!(
-            receiver.recv().await,
-            Some(exited_subscription_frame(11, 4, status))
+            receiver.recv().await.unwrap().frame,
+            exited_subscription_frame(11, 4, status)
         );
         assert!(receiver.try_recv().is_err());
     }
@@ -8760,6 +8934,13 @@ mod tests {
             graphical_focus: Mutex::new(None),
             topology_hub: Mutex::new(TopologyHub::default()),
             topology_transactions: Semaphore::new(1),
+            terminal_transaction_memory: Arc::new(Semaphore::new(
+                TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES,
+            )),
+            terminal_publication_memory: Arc::new(Semaphore::new(
+                TERMINAL_PUBLICATION_DAEMON_BYTES,
+            )),
+            terminal_splint_publication_memory: Mutex::new(HashMap::new()),
             exit_observers: TaskTracker::new(),
             metadata,
             topology_save_failure_countdown: AtomicU64::new(u64::MAX),
@@ -10254,6 +10435,107 @@ mod tests {
         assert_eq!(
             error.current_topology_revision,
             Some(TopologyRevision::new(0))
+        );
+    }
+
+    #[test]
+    fn terminal_transaction_memory_admission_is_globally_bounded() {
+        assert_eq!(
+            TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES / TERMINAL_TRANSACTION_MEMORY_BYTES,
+            2
+        );
+        let budget = Arc::new(Semaphore::new(TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES));
+        let permits = u32::try_from(TERMINAL_TRANSACTION_MEMORY_BYTES).unwrap();
+        let admitted = (0..2)
+            .map(|_| Arc::clone(&budget).try_acquire_many_owned(permits).unwrap())
+            .collect::<Vec<_>>();
+        assert!(Arc::clone(&budget).try_acquire_many_owned(permits).is_err());
+        drop(admitted);
+        assert_eq!(
+            budget.available_permits(),
+            TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_publication_admission_is_single_slot_per_subscriber_and_bounded_globally() {
+        let state = test_state(true);
+        let splint_id = SplintId::new();
+        let first_subscriber = Arc::new(Semaphore::new(1));
+        let first = try_reserve_terminal_publication(
+            &state,
+            splint_id,
+            Some(&first_subscriber),
+            TERMINAL_PUBLICATION_BYTES,
+        )
+        .await
+        .unwrap();
+        assert!(
+            time::timeout(
+                Duration::from_millis(10),
+                try_reserve_terminal_publication(
+                    &state,
+                    splint_id,
+                    Some(&first_subscriber),
+                    TERMINAL_PUBLICATION_BYTES,
+                ),
+            )
+            .await
+            .is_err()
+        );
+        let second_subscriber = Arc::new(Semaphore::new(1));
+        let second = try_reserve_terminal_publication(
+            &state,
+            splint_id,
+            Some(&second_subscriber),
+            TERMINAL_PUBLICATION_BYTES,
+        )
+        .await
+        .unwrap();
+        let third_subscriber = Arc::new(Semaphore::new(1));
+        assert!(
+            try_reserve_terminal_publication(
+                &state,
+                splint_id,
+                Some(&third_subscriber),
+                TERMINAL_PUBLICATION_BYTES,
+            )
+            .await
+            .is_none()
+        );
+        drop((first, second));
+        assert_eq!(first_subscriber.available_permits(), 1);
+        assert_eq!(
+            state.terminal_publication_memory.available_permits(),
+            TERMINAL_PUBLICATION_DAEMON_BYTES
+        );
+        let mut global = Vec::new();
+        for _ in 0..8 {
+            global.push(
+                try_reserve_terminal_publication(
+                    &state,
+                    SplintId::new(),
+                    None,
+                    TERMINAL_PUBLICATION_BYTES,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        assert!(
+            try_reserve_terminal_publication(
+                &state,
+                SplintId::new(),
+                None,
+                TERMINAL_PUBLICATION_BYTES,
+            )
+            .await
+            .is_none()
+        );
+        drop(global);
+        assert_eq!(
+            state.terminal_publication_memory.available_permits(),
+            TERMINAL_PUBLICATION_DAEMON_BYTES
         );
     }
 

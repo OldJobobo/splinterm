@@ -1,6 +1,6 @@
 # Plan 0042: Beta1 wide Splint grid
 
-- **Status:** In progress; compact attributes plus bounded transactional row chunks selected
+- **Status:** Non-graphical implementation accepted; packaged graphical acceptance pending separate approval
 - **Date:** 2026-08-14
 - **Product authority:** A maximized Splint uses the complete terminal-cell area
   of validated 1440p and 4K surfaces instead of silently stopping at the legacy
@@ -85,14 +85,63 @@ without attributes and 21.23/18.87 MiB with full attributes. Compact attributes
 alone therefore do not satisfy the 16 MiB complete-state contract. The recorded
 second-stage decision retains compact attributes and 16 MiB individual frames,
 then adds bounded ordered terminal transactions: at most one in flight per
-connection, 8 MiB maximum raw row-chunk payload, 32 MiB maximum aggregate
-unchunked state, contiguous exact indices/count/length, and atomic publication
-only after complete reassembly. Nesting, interruption, duplicates, reordering,
+connection, 8 MiB maximum raw terminal-frame payload chunk, 32 MiB maximum
+aggregate unchunked state, contiguous exact indices/count/length, and atomic
+publication only after complete reassembly. Nesting, interruption, duplicates, reordering,
 length/count mismatch, or aggregate overflow fail closed and require bounded
 resynchronization. The earlier 16 MiB per-subscriber queued-payload ceiling is
 superseded only by one 32 MiB in-flight transaction; multiple queued aggregate
-transactions remain prohibited. The in-worktree dimension/frame/geometry
-changes remain unaccepted until these transaction invariants pass.
+transactions remain prohibited. The implemented transaction boundary now has
+protocol and client integration coverage for oversized snapshots and updates,
+corrupt base64, duplicate/reordered chunks, inconsistent lengths, aggregate
+overflow, interruption, and EOF cleanup. Daemon encoding reserves 96 MiB of
+transient admission per transaction beneath a 256 MiB global ceiling, so no
+more than two encodes can retain unchunked plus base64-framed bodies at once. Final
+acceptance still requires the complete validation and review boundaries below.
+
+### Pinned default-profile geometry evidence
+
+The non-graphical renderer fixture resolves JetBrains Mono Nerd Font Regular at
+14 px output-scale sizing and records these exact uncapped grids:
+
+| Scale (120ths) | Cell pixels | 2560x1440 | 3840x2160 |
+| ---: | ---: | ---: | ---: |
+| 120 | 13x30 | 195x47 | 293x71 |
+| 150 | 17x38 | 186x46 | 280x70 |
+| 180 | 20x44 | 190x48 | 286x72 |
+| 240 | 26x59 | 195x48 | 293x72 |
+
+All remain below 480x128. Pixel dimensions are asserted alongside grid cells so
+scale is applied exactly once.
+
+### Provisional 480x128 renderer evidence
+
+A one-sample release run records a 96,816,384-byte tight-grid canvas,
+142,045,184-byte process RSS after the profile, 1,206,703,370 ns cold-frame
+preparation, 113,970,615 ns full paint, 9,126,676 ns one-row preparation, and
+606,420 ns one-row paint. The canvas is Window-owned rather than per-pane
+semantic state and remains under the 512 MiB Window ceiling. These values prove
+the profile is measured; they do not establish a threshold. Multi-sample
+acceptance must retain the existing 80x24 and 240x80 gates unchanged and report
+the heavier maximum-grid costs honestly.
+
+### Non-graphical implementation review and validation
+
+Fresh protocol/security review `aa0f3c8c` and geometry/renderer review
+`652435dc` rejected the first acceptance candidate. The owning writer fixed the
+stale package v34 pin, transaction-wrapped nonterminal acceptance, pre-decode
+base64 allocation, unaccounted publication queue, focused-pane limit loss,
+missing cap diagnostic, missing 512 MiB Window presentation bound, and weak
+480x128 report validation. Parent verification confirms each correction.
+
+The post-fix boundary records 28 protocol tests, 40 automation-client tests,
+379 Splinterm library tests with one manual timing harness ignored, 60 daemon
+library tests, 72 daemon binary tests, 19 serial daemon integration tests, 13
+serial remote-session tests, and 67 package/benchmark Python tests. Workspace
+clippy passes for all targets with warnings denied; formatting and
+`git diff --check` pass. The PTY integration suite requires building the adjacent
+`splinterm-pty-child` helper first. No graphical test, installation, package
+replacement, push, merge, or release action is included in this evidence.
 
 ## Confirmed baseline defect
 
@@ -215,9 +264,11 @@ Work:
 - require the advertised frame limit to equal the selected fixed protocol
   constant and enforce it in encoding, decoding, queueing, and admission;
 - add checked per-subscriber, per-Splint, daemon-global, per-pane, and per-Window
-  byte accounting for the selected 16/64/256/64/512 MiB ceilings;
-- stop for a separate decision if 16 MiB cannot carry every accepted complete
-  state; do not add chunking inside this plan; and
+  accounting for 16 MiB physical frames, 32 MiB logical transactions, 96 MiB
+  transient daemon encoding admission, 256 MiB daemon-global admission, 64 MiB
+  pane semantic state, and 512 MiB Window presentation state;
+- transactionally chunk only oversized Attached/Snapshot/Update terminal frames,
+  with one ordered atomic aggregate per connection; and
 - preserve exact-version mismatch behavior across local and graphical SSH relay
   endpoints.
 

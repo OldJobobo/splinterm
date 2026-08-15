@@ -76,6 +76,8 @@ pub struct WindowOptions {
     pub authority: AuthorityStatus,
     /// Whether the legacy single-pane command channel already owns control.
     pub controlled: bool,
+    /// Endpoint-local terminal limits for the legacy or activated focused pane.
+    pub terminal_grid_limits: TerminalGridLimits,
     /// Initial terminal dimensions from the supported configuration subset.
     pub initial_columns: u16,
     pub initial_rows: u16,
@@ -127,6 +129,7 @@ impl Default for WindowOptions {
             session_picker: None,
             authority: AuthorityStatus::default(),
             controlled: true,
+            terminal_grid_limits: TerminalGridLimits::default(),
             initial_columns: 80,
             initial_rows: 24,
             cursor_style: CursorStyle::Block,
