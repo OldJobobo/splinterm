@@ -31,6 +31,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Require candidate dispatch from a release authority branch
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          case "$DISPATCH_REF" in
+            refs/heads/main|refs/heads/maint/0.1) ;;
+            *) printf 'candidate dispatch branch is not authorized: %s\n' "$DISPATCH_REF" >&2; exit 1 ;;
+          esac
+
       - name: Install candidate build dependencies
         run: |
           pacman -Syu --noconfirm

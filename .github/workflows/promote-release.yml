@@ -36,10 +36,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Require promotion dispatch from main
+      - name: Require promotion dispatch from a release authority branch
         env:
           DISPATCH_REF: ${{ github.ref }}
-        run: test "$DISPATCH_REF" = refs/heads/main
+        run: |
+          case "$DISPATCH_REF" in
+            refs/heads/main|refs/heads/maint/0.1) ;;
+            *) printf 'promotion dispatch branch is not authorized: %s\n' "$DISPATCH_REF" >&2; exit 1 ;;
+          esac
 
       - name: Validate promotion automation
         run: |
@@ -62,7 +66,8 @@ jobs:
             --run candidate-run.json \
             --artifacts candidate-artifacts.json \
             --repository "$RELEASE_REPOSITORY" \
-            --run-id "$CANDIDATE_RUN_ID")
+            --run-id "$CANDIDATE_RUN_ID" \
+            --expected-branch "$GITHUB_REF_NAME")
           python - "$source_record" <<'PY'
           import json
           import os
@@ -130,7 +135,7 @@ jobs:
           retention-days: 3
 
   publish:
-    name: Publish approved immutable release
+    name: Publish approved versioned release
     needs: verify
     runs-on: ubuntu-latest
     environment: release
@@ -196,8 +201,10 @@ jobs:
               for item in page.get("branch_policies", [])
               if isinstance(item, dict)
           ]
-          if [item.get("name") for item in policies] != ["main"]:
-              raise SystemExit("release environment must permit exactly the main branch")
+          if sorted(item.get("name") for item in policies) != ["main", "maint/0.1"]:
+              raise SystemExit(
+                  "release environment must permit exactly main and maint/0.1"
+              )
           PY
 
       - name: Refuse existing tag or release and fail closed on API errors
@@ -224,7 +231,7 @@ jobs:
           require_absent "repos/$RELEASE_REPOSITORY/git/ref/tags/$RELEASE_TAG" tag
           require_absent "repos/$RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG" release
 
-      - name: Create tag and immutable prerelease
+      - name: Create versioned tag and prerelease
         env:
           GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
           RELEASE_TAG: ${{ needs.verify.outputs.tag }}
