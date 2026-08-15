@@ -3,11 +3,11 @@
 Release authority, candidate construction, approval boundaries, and the future
 n8n notification role are defined in [Release automation](release-automation.md).
 
-Splinterm's `packaging/PKGBUILD` produces the `0.1.0alpha3.2` split packages for
+Splinterm's `packaging/PKGBUILD` produces the `0.1.0alpha3.3` split packages for
 reviewed local and CI builds. Its local source archive and `SKIP` checksum are
 valid only in that workflow. The current public versioned release is
-[`v0.1.0-alpha3.2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.2),
-and both AUR package bases publish `0.1.0alpha3.2-1`.
+[`v0.1.0-alpha3.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.3),
+and both AUR package bases publish `0.1.0alpha3.3-1`.
 
 The source-built AUR authority is `packaging/aur/PKGBUILD`; candidate
 construction replaces its source-archive checksum with the exact immutable
@@ -120,8 +120,8 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0alpha3.2-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0alpha3.2-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.0alpha3.3-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.0alpha3.3-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
@@ -233,7 +233,7 @@ The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0alpha3.2-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.0alpha3.3-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -241,7 +241,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0alpha3.2-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.0alpha3.3-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional

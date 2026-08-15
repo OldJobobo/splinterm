@@ -5,7 +5,7 @@ description: What is implemented, validated, limited, planned, and unreleased in
 
 Splinterm is a **public alpha**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
-[`v0.1.0-alpha3.2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.2) is the current public prerelease. It retains the Alpha3 command/keymap, scrollback, saved-Lair, Wayland file-drop, and Omarchy integration scope while preventing held Backspace and other ordinary input from terminating the Wayland client when a bounded pane command queue is temporarily saturated.
+[`v0.1.0-alpha3.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.3) is the current public prerelease. It retains the Alpha3 command/keymap, scrollback, saved-Lair, Wayland file-drop, Omarchy integration, and bounded-input fixes while giving new and implicitly created Dojos predictable per-Lair names such as `Dojo 1` and `Dojo 2`.
 
 ## What that means
 
@@ -35,7 +35,7 @@ Splinterm is a **public alpha**. Source, documentation, and immutable versioned 
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0alpha3.2-1` |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0alpha3.3-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 

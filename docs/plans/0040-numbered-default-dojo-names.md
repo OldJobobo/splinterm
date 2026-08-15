@@ -1,6 +1,6 @@
 # Plan 0040: Numbered default Dojo names
 
-- **Status:** Implementation complete and reviewed for `0.1.0-alpha3.3`; release integration pending
+- **Status:** Complete and published in `0.1.0-alpha3.3`; implementation, review, isolated graphical smoke, immutable promotion, and AUR distribution recorded
 - **Date:** 2026-08-14
 - **Product authority:** Implicitly named Dojos use short, predictable per-Lair labels; explicit and persisted names remain user-owned
 - **Depends on:** accepted Lair/Dojo topology, topology revisions, graphical Dojo tabs, and `new-dojo` CLI creation
@@ -113,3 +113,27 @@ work.
 - Fresh read-only review found no correctness blocker and requested stronger
   request-construction coverage. That coverage was added; bounded follow-up
   review confirmed the finding resolved and the patch ready.
+- GitHub review identified that local machine-mode exhaustion initially mapped
+  to `internal`; the release-boundary fix now emits stable `invalid_argument`,
+  returns exit status 5, and has focused regression coverage.
+
+## Release evidence (2026-08-14)
+
+- PR #10 squash-merged the reviewed implementation as commit
+  `d7368ff07f87a40979561dfa01b55be052e01ca3`; protected CI passed after one
+  unrelated MCP timing retry whose exact failed test passed in isolation.
+- An isolated development client/daemon pair on freeside workspace 2 started a
+  new Lair with `Dojo 1` without taking focus from the existing user Window.
+  This was not installed-package acceptance.
+- Candidate workflow run `31859941186` built release commit
+  `0c4276703eaa01b347fdbeb6327669b2b109e8b6` once. Candidate manifest SHA-256:
+  `da995d5f0fe7dcd3993ebdc289160d1ef9fd1fcf325a3c46c353a2967f29cce6`.
+- Fresh release-state and candidate-artifact reviews found no blocker and marked
+  the exact candidate ready for promotion.
+- Protected promotion workflow run `31860432730` created immutable tag
+  `v0.1.0-alpha3.3`, published and redownloaded the exact five assets, verified
+  every hash, and retained receipt artifact `9240460284`.
+- Public source package commit:
+  `8f373bf27f14831722c59fcd6e3f7f3ac2cd1907`. Public prebuilt package commit:
+  `b618d457bcc43a9a1993b596479c9d22c9cd1f25`. Both recipes passed
+  `makepkg --verifysource` against the immutable release assets before push.

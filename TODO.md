@@ -1,5 +1,18 @@
 # TODO
 
+## Alpha3.3 numbered default Dojo names
+
+- [x] Complete [Plan 0040](docs/plans/0040-numbered-default-dojo-names.md).
+- [x] Start new Lairs at `Dojo 1` and advance implicit per-Lair names from the
+  highest exact canonical `Dojo N` without reusing gaps.
+- [x] Preserve explicit and persisted names, retain collision-resistant generated
+  Lair names, and fail closed at numbering exhaustion.
+- [x] Cover graphical, human CLI, remote-interactive, and machine creation with
+  exact topology-revision retention and stable machine error classification.
+- [x] Pass full release CI, isolated graphical smoke, independent implementation
+  and candidate review, immutable GitHub promotion, and AUR source verification.
+- [x] Publish `v0.1.0-alpha3.3` and both `0.1.0alpha3.3-1` AUR package bases.
+
 ## Alpha3.2 Backspace crash hotfix
 
 - [x] Keep held Backspace and other ordinary terminal input nonblocking when a
