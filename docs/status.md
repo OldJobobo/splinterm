@@ -31,17 +31,51 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle;
-- public Alpha3.2 `0.1.0alpha3.2-1` Arch packages built from clean committed
+- public Alpha3.3 `0.1.0alpha3.3-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
   saved-Lair, Wayland file-drop, and Omarchy screensaver workflows, isolated
-  exact-package acceptance for the Alpha3.1 transient-tab hotfixes, and
-  non-graphical release/package validation for the Alpha3.2 input-queue fix.
+  exact-package acceptance for the Alpha3.1 transient-tab hotfixes,
+  non-graphical release/package validation for Alpha3.2, and isolated
+  development-build graphical smoke plus release/package validation for the
+  Alpha3.3 numbered-name patch.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain alpha
 interfaces on the documented platform.
+
+## Alpha3.3 release
+
+[`v0.1.0-alpha3.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.3)
+was published as a GitHub prerelease on 2026-08-14 and distributed through both
+AUR package bases as `0.1.0alpha3.3-1`. New persistent and transient Lairs start
+with `Dojo 1`; later implicit Dojo names advance from the highest exact canonical
+`Dojo N` in that Lair without reusing gaps. Explicit and persisted names remain
+unchanged, generated Lair names remain collision-resistant, and bounded
+exhaustion is reported as a stable machine `invalid_argument`.
+
+- Candidate workflow run `31859941186` built commit
+  `0c4276703eaa01b347fdbeb6327669b2b109e8b6` once. Candidate manifest SHA-256:
+  `da995d5f0fe7dcd3993ebdc289160d1ef9fd1fcf325a3c46c353a2967f29cce6`.
+- Protected promotion workflow run `31860432730` created the versioned tag,
+  published and downloaded the exact five-asset set, verified every hash, and
+  retained publication receipt artifact `9240460284`.
+- Source archive SHA-256:
+  `cf6726439a2b8977610453edd3368700304727027753f88e39ed88302dea1093`.
+  Main package SHA-256:
+  `5104941b47776b1a06aea044c50a4179afcc9fa6c843a663d47ac728d99bc456`.
+  MCP package SHA-256:
+  `a5b8e5ac5c583df75275881e2527940d3a999c20cb33e2521a366840d2abc4c2`.
+- AUR source package commit: `8f373bf27f14831722c59fcd6e3f7f3ac2cd1907`.
+  AUR prebuilt package commit: `b618d457bcc43a9a1993b596479c9d22c9cd1f25`.
+  Both public recipes passed `makepkg --verifysource` against the immutable
+  GitHub assets before publication.
+- Full serialized workspace tests, Clippy with warnings denied, release/package
+  automation tests, portable Foot provenance, exact package-content checks, and
+  two fresh read-only release reviews passed. An isolated development build on
+  freeside confirmed `Dojo 1` without stealing focus; no installed Alpha3.3
+  graphical acceptance was run.
 
 ## Alpha3.2 release
 
@@ -149,7 +183,7 @@ post-alpha3, pre-1.0 roadmap milestone.
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
 | Arch/Omarchy packaging | Public alpha packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha3.2-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0alpha3.2-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha3.3-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0alpha3.3-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
