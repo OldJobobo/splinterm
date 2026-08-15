@@ -79,7 +79,9 @@ The default `main.font-sizing-policy=output-scale` follows Wayland compositor ou
 
 ## Omarchy theme integration
 
-With `main.theme` unset, Splinterm reads the active Omarchy theme from `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective `foot.ini` supplies terminal colors, selection, alpha, and blur; `colors.toml` supplies the Omarchy UI accent.
+With `main.theme` unset, Splinterm reads the active Omarchy theme from `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective `foot.ini` supplies terminal colors, selection, alpha, and blur; `colors.toml` supplies the Omarchy UI accent plus optional active-tab background and foreground roles.
+
+Active tab text is independent from terminal selection text. When `active_tab_foreground` is absent, Splinterm chooses whichever effective terminal background or foreground has higher WCAG contrast against the resolved active-tab background, preferring foreground on a tie. Explicit malformed roles reject the palette instead of silently invoking the fallback. Explicit JSON themes use the same rule against their own background and foreground roles.
 
 Valid theme changes reload without restarting the daemon, shell, or window. A malformed or incomplete replacement retains the last valid palette.
 

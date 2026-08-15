@@ -1,5 +1,22 @@
 # TODO
 
+## Beta 1 active-tab foreground contrast patch
+
+- [ ] Complete [Plan 0041](docs/plans/0041-beta1-active-tab-foreground.md).
+- [x] Add optional `active_tab_foreground` roles to native Omarchy and strict
+  JSON theme resolution.
+- [x] Keep terminal `selection_foreground` independent from active Dojo-tab text.
+- [x] Fall back deterministically to the theme background or foreground with
+  higher contrast against the resolved active-tab background.
+- [x] Prove Dispatch resolves `#141d23` text on `#e6c93a` without changing its
+  terminal selection colors.
+- [x] Pass focused and serial non-graphical validation plus fresh read-only
+  review.
+- [ ] Complete separately approved packaged graphical acceptance before release.
+
+Version integration, candidate construction, publication, and AUR distribution
+remain separate release-boundary work.
+
 ## Alpha3.2 Backspace crash hotfix
 
 - [x] Keep held Backspace and other ordinary terminal input nonblocking when a

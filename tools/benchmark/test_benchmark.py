@@ -1343,8 +1343,25 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
     assert generated["background"] == legacy["background"]
     assert generated["selection_foreground"] == legacy["foreground"]
     assert generated["active_tab_background"] == legacy["selection_background"]
-    explicit = module.generate({**legacy, "active_tab_background": "#303132"})
+    assert generated["active_tab_foreground"] == legacy["foreground"]
+    explicit = module.generate(
+        {
+            **legacy,
+            "active_tab_background": "#303132",
+            "active_tab_foreground": "#a0b0c0",
+        }
+    )
     assert explicit["active_tab_background"] == "#303132"
+    assert explicit["active_tab_foreground"] == "#a0b0c0"
+    light_tab = module.generate(
+        {**legacy, "active_tab_background": "#f0f1f2"}
+    )
+    assert light_tab["active_tab_foreground"] == legacy["background"]
+    assert module.active_tab_foreground_fallback(
+        "#123456", "#123456", "#789abc"
+    ) == "#123456"
+    with pytest.raises(ValueError, match="active_tab_foreground"):
+        module.generate({**legacy, "active_tab_foreground": "invalid"})
     assert generated["ansi"][0] == legacy["color0"]
     assert generated["ansi"][15] == legacy["color15"]
 

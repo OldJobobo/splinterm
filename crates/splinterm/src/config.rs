@@ -528,6 +528,8 @@ pub struct ThemePalette {
     pub selection_foreground: Option<String>,
     #[serde(default)]
     pub active_tab_background: Option<String>,
+    #[serde(default)]
+    pub active_tab_foreground: Option<String>,
     pub url: String,
     pub ui_accent: String,
     #[serde(default = "opaque_alpha")]
@@ -549,6 +551,7 @@ pub struct ResolvedTheme {
     pub selection: u32,
     pub selection_foreground: u32,
     pub active_tab_background: u32,
+    pub active_tab_foreground: u32,
     pub url: u32,
     pub ui_accent: u32,
     pub pane_border: u32,
@@ -567,6 +570,7 @@ impl Default for ResolvedTheme {
             selection: 0x354a60,
             selection_foreground: 0xebebeb,
             active_tab_background: 0x354a60,
+            active_tab_foreground: 0xebebeb,
             url: 0x78beff,
             ui_accent: 0x78d2ff,
             pane_border: 0x7c7e80,
@@ -583,6 +587,41 @@ impl Default for ResolvedTheme {
 
 const fn opaque_alpha() -> f32 {
     1.0
+}
+
+fn srgb_channel_luminance(channel: u8) -> f64 {
+    let channel = f64::from(channel) / 255.0;
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn relative_luminance(color: u32) -> f64 {
+    let red = srgb_channel_luminance(((color >> 16) & 0xff) as u8);
+    let green = srgb_channel_luminance(((color >> 8) & 0xff) as u8);
+    let blue = srgb_channel_luminance((color & 0xff) as u8);
+    0.2126 * red + 0.7152 * green + 0.0722 * blue
+}
+
+fn contrast_ratio(first: u32, second: u32) -> f64 {
+    let first = relative_luminance(first);
+    let second = relative_luminance(second);
+    let (lighter, darker) = if first >= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+fn active_tab_foreground_fallback(background: u32, foreground: u32, active_tab: u32) -> u32 {
+    if contrast_ratio(background, active_tab) > contrast_ratio(foreground, active_tab) {
+        background
+    } else {
+        foreground
+    }
 }
 
 impl ResolvedTheme {
@@ -614,6 +653,20 @@ impl ThemePalette {
         let background = parse_color(&self.background)?;
         let foreground = parse_color(&self.foreground)?;
         let selection = parse_color(&self.selection)?;
+        let active_tab_background = self
+            .active_tab_background
+            .as_deref()
+            .map(parse_color)
+            .transpose()?
+            .unwrap_or(selection);
+        let active_tab_foreground = self
+            .active_tab_foreground
+            .as_deref()
+            .map(parse_json_color)
+            .transpose()?
+            .unwrap_or_else(|| {
+                active_tab_foreground_fallback(background, foreground, active_tab_background)
+            });
         let ui_accent = parse_color(&self.ui_accent)?;
         Ok(ResolvedTheme {
             background,
@@ -626,12 +679,8 @@ impl ThemePalette {
                 .map(parse_color)
                 .transpose()?
                 .unwrap_or(foreground),
-            active_tab_background: self
-                .active_tab_background
-                .as_deref()
-                .map(parse_color)
-                .transpose()?
-                .unwrap_or(selection),
+            active_tab_background,
+            active_tab_foreground,
             url: parse_color(&self.url)?,
             ui_accent,
             pane_border: self
@@ -761,6 +810,14 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         .transpose()
         .context("active Omarchy colors.toml has invalid active_tab_background")?
         .unwrap_or(selection);
+    let active_tab_foreground = colors
+        .get("active_tab_foreground")
+        .map(|value| parse_color(value))
+        .transpose()
+        .context("active Omarchy colors.toml has invalid active_tab_foreground")?
+        .unwrap_or_else(|| {
+            active_tab_foreground_fallback(background, foreground, active_tab_background)
+        });
     let ui_accent = ["accent", "cursor", "color4", "blue"]
         .iter()
         .find_map(|key| colors.get(*key))
@@ -791,6 +848,7 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         selection,
         selection_foreground,
         active_tab_background,
+        active_tab_foreground,
         url: ansi[4],
         ui_accent,
         pane_border: ansi[8],
@@ -923,6 +981,14 @@ fn foot_alpha(alpha: f32) -> u16 {
     (alpha * f32::from(u16::MAX)) as u16
 }
 
+fn parse_json_color(value: &str) -> Result<u32> {
+    if value.len() != 7 || !value.starts_with('#') {
+        bail!("JSON theme color {value:?} must be #RRGGBB");
+    }
+    u32::from_str_radix(&value[1..], 16)
+        .with_context(|| format!("invalid JSON theme color {value:?}"))
+}
+
 fn parse_color(value: &str) -> Result<u32> {
     let value = value.trim();
     let hex = value
@@ -950,6 +1016,17 @@ fn blend_rgb(first: u32, second: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn complete_foot_palette(
+        background: &str,
+        foreground: &str,
+        selection_background: &str,
+        selection_foreground: &str,
+    ) -> String {
+        format!(
+            "[colors-dark]\nforeground={foreground}\nbackground={background}\nselection-background={selection_background}\nselection-foreground={selection_foreground}\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n"
+        )
+    }
 
     #[test]
     fn defaults_match_foot_font_and_resize_behavior() {
@@ -1199,8 +1276,7 @@ mod tests {
 
     #[test]
     fn native_omarchy_theme_uses_effective_foot_palette_and_semantic_accent() {
-        let colors =
-            "accent = \"0x010203\" # inline comment\nactive_tab_background = \"#070809\"\n";
+        let colors = "accent = \"0x010203\" # inline comment\nactive_tab_background = \"#070809\"\nactive_tab_foreground = \"#0a0b0c\"\n";
         let foot = "[colors]\nforeground=000003\nbackground=000001\nselection-foreground=000002\nselection-background=000004\ncursor=000001 000006\nalpha=0.75\nblur=yes\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n";
         let theme = resolve_omarchy_theme(colors, foot).unwrap();
         assert_eq!(theme.background, 1);
@@ -1209,6 +1285,7 @@ mod tests {
         assert_eq!(theme.selection, 4);
         assert_eq!(theme.selection_foreground, 2);
         assert_eq!(theme.active_tab_background, 0x07_08_09);
+        assert_eq!(theme.active_tab_foreground, 0x0a_0b_0c);
         assert_eq!(theme.url, 4);
         assert_eq!(theme.ui_accent, 0x01_02_03);
         assert_eq!(theme.pane_border, 8);
@@ -1327,6 +1404,7 @@ mod tests {
         assert_eq!(resolved.background, 1);
         assert_eq!(resolved.selection_foreground, 3);
         assert_eq!(resolved.active_tab_background, resolved.selection);
+        assert_eq!(resolved.active_tab_foreground, resolved.background);
         assert_eq!(resolved.ui_accent, 6);
         assert_eq!(resolved.pane_border, 2);
         assert_eq!(resolved.pane_border_active, 6);
@@ -1336,7 +1414,7 @@ mod tests {
 
         let explicit = json.replace(
             "\"ansi\"",
-            "\"selection_foreground\":\"#000002\",\"active_tab_background\":\"#000009\",\"pane_border\":\"#000007\",\"pane_border_active\":\"#000008\",\"ansi\"",
+            "\"selection_foreground\":\"#000002\",\"active_tab_background\":\"#000009\",\"active_tab_foreground\":\"#00000a\",\"pane_border\":\"#000007\",\"pane_border_active\":\"#000008\",\"ansi\"",
         );
         let resolved = serde_json::from_str::<ThemePalette>(&explicit)
             .unwrap()
@@ -1344,6 +1422,7 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.selection_foreground, 2);
         assert_eq!(resolved.active_tab_background, 9);
+        assert_eq!(resolved.active_tab_foreground, 10);
         assert_eq!(resolved.pane_border, 7);
         assert_eq!(resolved.pane_border_active, 8);
 
@@ -1374,5 +1453,76 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn active_tab_foreground_fallback_uses_the_higher_contrast_endpoint() {
+        assert_eq!(
+            active_tab_foreground_fallback(0x00_00_00, 0xff_ff_ff, 0xff_ff_ff),
+            0x00_00_00
+        );
+        assert_eq!(
+            active_tab_foreground_fallback(0x00_00_00, 0xff_ff_ff, 0x00_00_00),
+            0xff_ff_ff
+        );
+        assert_eq!(
+            active_tab_foreground_fallback(0x12_34_56, 0x12_34_56, 0x78_9a_bc),
+            0x12_34_56
+        );
+
+        let json = r##"{"background":"#000000","foreground":"#ffffff","cursor":"#ffffff","selection":"#ffffff","url":"#0000ff","ui_accent":"#00ffff","ansi":["#000000","#000001","#000002","#000003","#000004","#000005","#000006","#000007","#000008","#000009","#00000a","#00000b","#00000c","#00000d","#00000e","#00000f"]}"##;
+        let resolved = serde_json::from_str::<ThemePalette>(json)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(resolved.active_tab_background, resolved.selection);
+        assert_eq!(resolved.active_tab_foreground, resolved.background);
+
+        let dark_tab = json.replace("\"selection\":\"#ffffff\"", "\"selection\":\"#000000\"");
+        let resolved = serde_json::from_str::<ThemePalette>(&dark_tab)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(resolved.active_tab_foreground, resolved.foreground);
+    }
+
+    #[test]
+    fn native_active_tab_foreground_is_independent_and_invalid_values_fail_closed() {
+        let foot = complete_foot_palette("141d23", "f2e8d5", "e6c93a", "b69f80");
+        let dispatch = resolve_omarchy_theme(
+            "active_tab_background=\"#e6c93a\"\nactive_tab_foreground=\"#141d23\"\naccent=\"#00aaff\"\n",
+            &foot,
+        )
+        .unwrap();
+        assert_eq!(dispatch.active_tab_background, 0xe6_c9_3a);
+        assert_eq!(dispatch.active_tab_foreground, 0x14_1d_23);
+        assert!((contrast_ratio(0x14_1d_23, 0xe6_c9_3a) - 10.39).abs() < 0.01);
+        assert_eq!(dispatch.selection_foreground, 0xb6_9f_80);
+
+        let fallback = resolve_omarchy_theme(
+            "active_tab_background=\"#e6c93a\"\naccent=\"#00aaff\"\n",
+            &foot,
+        )
+        .unwrap();
+        assert_eq!(fallback.active_tab_foreground, fallback.background);
+
+        assert!(
+            resolve_omarchy_theme("active_tab_foreground=\"invalid\"\n", &foot)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid active_tab_foreground")
+        );
+
+        let json = r##"{"background":"#000000","foreground":"#ffffff","cursor":"#ffffff","selection":"#ffffff","active_tab_foreground":"#141d23","url":"#0000ff","ui_accent":"#00ffff","ansi":["#000000","#000001","#000002","#000003","#000004","#000005","#000006","#000007","#000008","#000009","#00000a","#00000b","#00000c","#00000d","#00000e","#00000f"]}"##;
+        for invalid in ["invalid", "141d23", "0x141d23"] {
+            let invalid_json = json.replace("#141d23", invalid);
+            assert!(
+                serde_json::from_str::<ThemePalette>(&invalid_json)
+                    .unwrap()
+                    .resolve()
+                    .is_err(),
+                "accepted malformed JSON active_tab_foreground {invalid:?}"
+            );
+        }
     }
 }
