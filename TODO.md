@@ -1,6 +1,18 @@
 # TODO
 
-## Immediate hotfix
+## Alpha3.2 Backspace crash hotfix
+
+- [x] Keep held Backspace and other ordinary terminal input nonblocking when a
+  pane controller's bounded command queue is temporarily saturated.
+- [x] Bound pending terminal input globally, preserve pane identity and complete
+  input units, and retain input-before-focus/control ordering.
+- [x] Route file-drop input through the same bounded path and discard stale
+  pane-bound batches safely after pane or tab teardown.
+- [x] Add saturation, multi-pane, ordering, atomicity, retry, and teardown
+  regressions; pass full release CI and independent review.
+- [x] Publish `v0.1.0-alpha3.2` and both `0.1.0alpha3.2-1` AUR package bases.
+
+## Alpha3.1 transient-window hotfix
 
 - [x] Hide the tab strip by default when XDG invokes Splinterm with a
   command-bearing `-e` launch; these transient command windows should not present
@@ -185,3 +197,92 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
   extracted package.
 - [x] Perform separately approved guarded packaged graphical acceptance for the
   Splinterm-owned, opt-in Omarchy screensaver integration.
+
+## 0.2.0 persistence expansion and upgrade handoff
+
+- [ ] Complete [Plan 0037](docs/plans/0037-0.2-persistence-and-upgrade-handoff.md).
+- [ ] Approve precise persistence lifetime vocabulary, the in-place re-exec ADR,
+  and a separate privacy decision before any durable terminal archive work.
+- [ ] Prove an adoptable Linux PTY session preserves PID, process group, session,
+  one-reader ownership, reaping, signaling, ordered I/O, and bounded rollback.
+- [ ] Define bounded terminal checkpoint, descriptor, handoff, and rollback ABIs
+  with exact parser continuation, corruption rejection, and migration tests.
+- [ ] Add a daemon handoff coordinator that fences authority, adopts atomically,
+  reconnects clients by full resnapshot, and fault-injects every rollback edge.
+- [ ] Make launcher and packaging UX distinguish matching, compatible, blocked,
+  bootstrap, destructive-fallback, downgrade, and interrupted upgrade states.
+- [ ] Keep recipe-only reboot restore as the default; gate optional archives on
+  reviewed retention, deletion, export, trusted-read, and privacy policy.
+- [ ] Record serial workspace, package, identity, rollback, architecture,
+  security/privacy, release, and separately approved graphical evidence.
+
+## 0.2.0 live Omarchy system-font synchronization
+
+- [ ] Complete [Plan 0038](docs/plans/0038-0.2-live-omarchy-font-sync.md).
+- [ ] Follow Omarchy's fontconfig `monospace` family live only when
+  `main.font` is unset; preserve explicit Splinterm font authority.
+- [ ] Stage and publish complete renderer font generations transactionally,
+  retaining the last valid generation when resolution or validation fails.
+- [ ] Rebuild font-derived caches and Window geometry coherently while
+  preserving topology, focus, history, output DPI, configured size/policy,
+  padding, and runtime zoom.
+- [ ] Emit at most one final PTY resize per affected live Splint and never
+  restart the daemon, shell, or Window for a valid family change.
+- [ ] Add precedence, fingerprint, coalescing, rollback, cache-retirement,
+  geometry, resize-count, performance, and separately approved graphical tests.
+
+## 0.2.0 searchable keybindings and Lair controls
+
+- [ ] Complete [Plan 0039](docs/plans/0039-0.2-searchable-keybindings-and-lair-controls.md).
+- [ ] Add bounded deterministic fuzzy search to the effective keybinding-help
+  display across action labels, configuration names, shortcuts, sources, and
+  closed keywords.
+- [ ] Keep search editing modal and terminal-safe, with stable ranking,
+  clear-then-close Escape behavior, bounded navigation, and a calm no-match state.
+- [ ] Make Save, pin-toggle, Preview, and Restore current Lair closed bindable
+  actions using the existing lifecycle targeting, availability, and confirmation
+  paths.
+- [ ] Add reviewed collision-free `omarchy-tmux` defaults while preserving every
+  existing Lair shortcut and strict custom-overlay support.
+- [ ] Prove registry, help, CLI inspection, command-palette shortcut projection,
+  keyboard dispatch, and lifecycle behavior cannot drift.
+
+## Maintainability and architecture follow-up
+
+Track the findings from the
+[2026-08-14 code-size and architecture review](docs/reviews/2026-08-14-code-size-and-architecture.md).
+These are changeability improvements, not evidence of a blocker-level system
+redesign or a mandate to reduce security, protocol, oracle, or regression
+coverage.
+
+- [ ] Extract the secure policy loader, typed representation, validation, and
+  normalized inspection API into a narrow shared crate used by `splinterd` and
+  `splinterm`; initially retain the daemon API as a compatibility wrapper and
+  preserve every ownership, permission, size, shape, and semantic check.
+- [ ] Decompose daemon request execution into private access, topology,
+  history/search, control, and terminal-action handlers while preserving one
+  exhaustive top-level `Request` match and the centralized authorization and
+  resource tables.
+- [ ] Refactor the Wayland update and draw pipelines into explicit private phases
+  for update reduction, frame reconciliation, SHM/backing synchronization,
+  overlay composition, and commit finalization while preserving Wayland object
+  ownership and the atomic acquire/damage/commit sequence.
+- [ ] Split topology-manager command handling into picker,
+  creation/materialization, Lair lifecycle, Dojo lifecycle, and tab lifecycle
+  handlers while retaining one serialized manager loop and typed outcomes.
+- [ ] Move automation-client DTO projection, events/subscriptions, image
+  transport/cache, and connection framing/cancellation into private modules,
+  re-exporting the existing public API unchanged.
+- [ ] Add a canonical exhaustive `AuditOperation::as_str()` to
+  `splinterm-protocol` and remove the duplicate automation-client and MCP string
+  mappings.
+- [ ] Conservatively extract repeated MCP mutation preflight, revision, and
+  response plumbing while keeping the closed tool-name match visibly exhaustive
+  and authoritative.
+- [ ] Document a review rule requiring a cohesion, security, or generated-table
+  rationale for new functions over roughly 200–300 lines; use it to prevent new
+  orchestration hotspots rather than mechanically splitting existing code.
+- [ ] If retained evidence becomes a material clone or navigation problem,
+  evaluate Git LFS or versioned external object storage with checked manifests,
+  immutable provenance, offline behavior, and tooling migration defined before
+  moving any artifact.
