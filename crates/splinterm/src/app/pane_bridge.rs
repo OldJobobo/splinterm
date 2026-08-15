@@ -9,7 +9,8 @@ use splinterm::automation::{
 use splinterm::config::AppConfig;
 use splinterm::endpoint::{ConnectionFactory, ForcedControlTransfer, ImageTransport};
 use splinterm::{
-    AuthorityStatus, PerfTraceCorrelation, WindowCommand, WindowPaneOptions, WindowUpdate,
+    AuthorityStatus, PerfTraceCorrelation, TerminalGridLimits, WindowCommand, WindowPaneOptions,
+    WindowUpdate,
 };
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{
@@ -966,6 +967,11 @@ pub(in crate::app) async fn prepare_live_pane(
     claim_control: bool,
 ) -> Result<PreparedPane> {
     let mut connection = factory.connect().await?;
+    let server_limits = connection.limits();
+    let terminal_grid_limits = TerminalGridLimits {
+        maximum_columns: server_limits.maximum_columns,
+        maximum_rows: server_limits.maximum_rows,
+    };
     let incarnation = connection.live_incarnation(splint_id).await?;
     let scopes = pane_access_scopes();
     if !matches!(
@@ -1044,6 +1050,7 @@ pub(in crate::app) async fn prepare_live_pane(
     Ok(PreparedPane {
         options: WindowPaneOptions {
             snapshot,
+            terminal_grid_limits,
             updates: receiver,
             commands: command_sender,
             authority,

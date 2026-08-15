@@ -30,8 +30,9 @@ use splinterm_protocol::{
     AccessGrant, AccessScope, AuditDecision, AuditOperation, AuditOutcome, AuditPage,
     AutomationScope, ClientFrame, ClientRole, ControlStatus, ControlTransferOutcome, ErrorCode,
     ImageContentMetadata, ImageContentRequest, ImageTransferMode, MAX_CWD_BYTES, MAX_FRAME_BYTES,
-    MAX_IMAGE_CHUNK_BYTES, MAX_IMAGE_CHUNK_WINDOW, PROTOCOL_VERSION, PersistentAuthorizationStatus,
-    Request, Response, RestoreLeafResult, ScrollbackPage, SearchPage, ServerFrame, ServerLimits,
+    MAX_IMAGE_CHUNK_BYTES, MAX_IMAGE_CHUNK_WINDOW, MAX_TERMINAL_TRANSACTION_BYTES,
+    PROTOCOL_VERSION, PersistentAuthorizationStatus, Request, Response, RestoreLeafResult,
+    ScrollbackPage, SearchPage, ServerFrame, ServerFrameTransactionAssembler, ServerLimits,
     SplintLifecycle, SplintRuntimeSummary, TerminalRow, TerminalSnapshot, TerminalUpdate,
     TopologyChangeKind, TopologySnapshot, encode_frame, image_content_socket_path,
 };
@@ -44,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_BUFFERED_BYTES: usize = MAX_FRAME_BYTES + 4 + READ_CHUNK_BYTES;
 const MAX_QUEUED_EVENTS: usize = 64;
-const MAX_QUEUED_EVENT_BYTES: usize = MAX_FRAME_BYTES + 4;
+const MAX_QUEUED_EVENT_BYTES: usize = MAX_TERMINAL_TRANSACTION_BYTES + 4;
 const CLI_SCHEMA_V2: &str = "splinterm.cli.v2";
 const CLI_EVENT_SCHEMA_V2: &str = "splinterm.cli.event.v2";
 
@@ -3021,6 +3022,7 @@ pub struct Connection {
     read_buffer: Vec<u8>,
     read_offset: usize,
     read_scratch: Box<[u8; READ_CHUNK_BYTES]>,
+    server_frame_assembler: ServerFrameTransactionAssembler,
     queued_events: VecDeque<(ServerFrame, usize)>,
     queued_event_bytes: usize,
     limits: ServerLimits,
@@ -3170,7 +3172,15 @@ impl Connection {
         let limits = match read_frame(reader.as_mut()).await? {
             ServerFrame::Hello {
                 version, limits, ..
-            } if version == PROTOCOL_VERSION => limits,
+            } if version == PROTOCOL_VERSION => {
+                if let Err(error) = limits.validate_terminal_transport() {
+                    bail!(
+                        "splinterd advertised invalid terminal transport limits: {}",
+                        error.message
+                    );
+                }
+                limits
+            }
             ServerFrame::Error { error, .. } => {
                 return Err(anyhow::Error::new(DaemonProtocolFailure(error)));
             }
@@ -3184,6 +3194,7 @@ impl Connection {
             read_buffer: Vec::with_capacity(READ_CHUNK_BYTES),
             read_offset: 0,
             read_scratch: Box::new([0; READ_CHUNK_BYTES]),
+            server_frame_assembler: ServerFrameTransactionAssembler::default(),
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             limits,
@@ -3471,7 +3482,10 @@ impl Connection {
     }
 
     fn queue_event(&mut self, event: ServerFrame) -> Result<()> {
-        let encoded_bytes = encode_frame(&event)?.len();
+        let encoded_bytes = serde_json::to_vec(&event)?.len().saturating_add(4);
+        if encoded_bytes > MAX_QUEUED_EVENT_BYTES {
+            bail!("splinterd sent an event larger than the aggregate transaction limit");
+        }
         let total_bytes = self
             .queued_event_bytes
             .checked_add(encoded_bytes)
@@ -3504,7 +3518,14 @@ impl Connection {
                         self.read_buffer.clear();
                         self.read_offset = 0;
                     }
-                    return Ok(frame);
+                    match self
+                        .server_frame_assembler
+                        .push(frame)
+                        .map_err(|error| anyhow::anyhow!(error.message))?
+                    {
+                        Some(frame) => return Ok(frame),
+                        None => continue,
+                    }
                 }
             }
             if self.read_offset > 0 {
@@ -3520,6 +3541,9 @@ impl Connection {
                 .read(self.read_scratch.as_mut_slice())
                 .await?;
             if read == 0 {
+                if self.read_buffer.is_empty() && self.server_frame_assembler.has_pending() {
+                    bail!("splinterd closed an incomplete terminal frame transaction");
+                }
                 if self.read_buffer.is_empty() {
                     bail!("splinterd closed the connection");
                 }
@@ -3551,6 +3575,7 @@ impl Connection {
         self.queued_event_bytes = 0;
         self.read_buffer.clear();
         self.read_offset = 0;
+        self.server_frame_assembler = ServerFrameTransactionAssembler::default();
         self.reader.take();
         if let Some(mut writer) = self.writer.take()
             && let Ok(frame) = encode_frame(&ClientFrame::Cancel { request_id })
@@ -3581,6 +3606,7 @@ impl Connection {
         self.queued_event_bytes = 0;
         self.read_buffer.clear();
         self.read_offset = 0;
+        self.server_frame_assembler = ServerFrameTransactionAssembler::default();
     }
 
     /// Reads the current daemon topology revision.
@@ -4012,6 +4038,7 @@ mod tests {
             read_buffer: Vec::with_capacity(READ_CHUNK_BYTES),
             read_offset: 0,
             read_scratch: Box::new([0; READ_CHUNK_BYTES]),
+            server_frame_assembler: ServerFrameTransactionAssembler::default(),
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             limits: ServerLimits::default(),
@@ -4837,6 +4864,8 @@ mod tests {
         let (client, mut server) = UnixStream::pair().unwrap();
         let expected_limits = ServerLimits {
             maximum_input_bytes: 17,
+            maximum_columns: 240,
+            maximum_rows: 80,
             ..ServerLimits::default()
         };
         let server_task = tokio::spawn(async move {
@@ -4899,6 +4928,51 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("invalid handshake"));
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn negotiation_rejects_invalid_terminal_transport_limits() {
+        for limits in [
+            ServerLimits {
+                maximum_frame_bytes: 0,
+                ..ServerLimits::default()
+            },
+            ServerLimits {
+                maximum_frame_bytes: MAX_FRAME_BYTES - 1,
+                ..ServerLimits::default()
+            },
+            ServerLimits {
+                maximum_columns: 1,
+                ..ServerLimits::default()
+            },
+            ServerLimits {
+                maximum_rows: splinterm_protocol::MAX_ROWS + 1,
+                ..ServerLimits::default()
+            },
+        ] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let server_task = tokio::spawn(async move {
+                let _ = read_client_frame(&mut server).await;
+                let frame = ServerFrame::Hello {
+                    version: PROTOCOL_VERSION,
+                    limits,
+                    development_terminal_access: false,
+                };
+                server
+                    .write_all(&encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+            });
+            let error = Connection::connect_stream(client, ClientRole::Automation)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid terminal transport limits")
+            );
+            server_task.await.unwrap();
+        }
     }
 
     #[tokio::test]

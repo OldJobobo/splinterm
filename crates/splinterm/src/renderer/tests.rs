@@ -2323,7 +2323,15 @@ fn terminal_size_calculation_clamps_minimum_and_protocol_limits() {
         frame
             .terminal_size(20_000, 20_000, 120)
             .expect("bounded grid"),
-        (MAX_COLUMNS, MAX_ROWS, 2_400, 1_600)
+        (MAX_COLUMNS, MAX_ROWS, 4_800, 2_560)
+    );
+    assert_eq!(
+        frame.terminal_size(2_560, 1_440, 120).expect("1440p grid"),
+        (254, 71, 2_540, 1_420)
+    );
+    assert_eq!(
+        frame.terminal_size(3_840, 2_160, 120).expect("4K grid"),
+        (382, 107, 3_820, 2_140)
     );
     let configured = frame.window_geometry(1_027, 629, 120).unwrap();
     assert_eq!(

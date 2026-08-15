@@ -51,7 +51,8 @@ use splinterm_protocol::{
     SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalProvenance,
     TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
     TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind, TopologySnapshot,
-    UnderlineStyle as WireUnderlineStyle, encode_frame, image_content_socket_path,
+    UnderlineStyle as WireUnderlineStyle, encode_server_frame_transaction,
+    image_content_socket_path,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand, PtySize, default_shell};
@@ -7430,9 +7431,13 @@ async fn write_frames(
         let Some(frame) = frame else { break };
         let identity = frame_trace_identity(&frame);
         let encode_started = perf_trace_enabled().then(Instant::now);
-        let Ok(encoded) = encode_frame(&frame) else {
+        let Ok(encoded_frames) = encode_server_frame_transaction(&frame) else {
             break;
         };
+        let encoded_bytes = encoded_frames
+            .iter()
+            .try_fold(0_usize, |total, encoded| total.checked_add(encoded.len()))
+            .unwrap_or(usize::MAX);
         if let (Some(started), Some((subscription_id, sequence, base_revision, revision))) =
             (encode_started, identity)
         {
@@ -7447,17 +7452,19 @@ async fn write_frames(
                     duration_ns: Some(
                         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                     ),
-                    bytes: Some(u64::try_from(encoded.len()).unwrap_or(u64::MAX)),
+                    bytes: Some(u64::try_from(encoded_bytes).unwrap_or(u64::MAX)),
                     ..PerfTraceEvent::default()
                 },
             );
         }
         let write_started = perf_trace_enabled().then(Instant::now);
-        if time::timeout(WRITE_TIMEOUT, writer.write_all(&encoded))
-            .await
-            .is_err()
-        {
-            break;
+        for encoded in &encoded_frames {
+            if time::timeout(WRITE_TIMEOUT, writer.write_all(encoded))
+                .await
+                .is_err()
+            {
+                return;
+            }
         }
         if let (Some(started), Some((subscription_id, sequence, base_revision, revision))) =
             (write_started, identity)
@@ -7473,7 +7480,7 @@ async fn write_frames(
                     duration_ns: Some(
                         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                     ),
-                    bytes: Some(u64::try_from(encoded.len()).unwrap_or(u64::MAX)),
+                    bytes: Some(u64::try_from(encoded_bytes).unwrap_or(u64::MAX)),
                     ..PerfTraceEvent::default()
                 },
             );
@@ -10039,7 +10046,7 @@ mod tests {
         let task = tokio::spawn(serve_client(server, state));
         client
             .write_all(
-                &encode_frame(&ClientFrame::Request {
+                &splinterm_protocol::encode_frame(&ClientFrame::Request {
                     request_id: 1,
                     diagnostic_correlation: None,
                     request: Request::Ping,

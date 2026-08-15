@@ -1273,6 +1273,7 @@ dependencies = [
 name = "splinterm-protocol"
 version = "0.1.0-alpha3.3"
 dependencies = [
+ "base64",
  "rustix",
  "serde",
  "serde_json",

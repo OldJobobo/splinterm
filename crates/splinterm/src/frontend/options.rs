@@ -9,7 +9,7 @@ use tokio::sync::{
 
 use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::{LayoutNode, SplintId};
-use splinterm_protocol::TerminalSnapshot;
+use splinterm_protocol::{MAX_COLUMNS, MAX_ROWS, TerminalSnapshot};
 
 use crate::{
     config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme},
@@ -25,8 +25,24 @@ pub struct TrustedConsentUi {
     pub decision: StdSender<bool>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalGridLimits {
+    pub maximum_columns: u16,
+    pub maximum_rows: u16,
+}
+
+impl Default for TerminalGridLimits {
+    fn default() -> Self {
+        Self {
+            maximum_columns: MAX_COLUMNS,
+            maximum_rows: MAX_ROWS,
+        }
+    }
+}
+
 pub struct WindowPaneOptions {
     pub snapshot: TerminalSnapshot,
+    pub terminal_grid_limits: TerminalGridLimits,
     pub updates: Receiver<WindowUpdate>,
     pub commands: Sender<WindowCommand>,
     pub authority: AuthorityStatus,

@@ -583,7 +583,7 @@ def validate_picker_runtime(daemon: Path, client: Path, picker: Path) -> None:
 
 def encode_private_frame(document: dict[str, object]) -> bytes:
     body = json.dumps(document, separators=(",", ":")).encode("utf-8")
-    assert 0 < len(body) <= 8 * 1024 * 1024
+    assert 0 < len(body) <= 16 * 1024 * 1024
     return len(body).to_bytes(4, "big") + body
 
 
@@ -604,7 +604,7 @@ def read_exact_fd(descriptor: int, length: int, timeout: float = 10) -> bytes:
 def read_private_frame(pipe) -> dict[str, object]:
     descriptor = pipe.fileno()
     length = int.from_bytes(read_exact_fd(descriptor, 4), "big")
-    assert 0 < length <= 8 * 1024 * 1024
+    assert 0 < length <= 16 * 1024 * 1024
     return json.loads(read_exact_fd(descriptor, length))
 
 
@@ -819,7 +819,7 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
                 stderr=subprocess.PIPE,
             )
             assert malformed_relay.stdin is not None
-            malformed_relay.stdin.write((8 * 1024 * 1024 + 1).to_bytes(4, "big"))
+            malformed_relay.stdin.write((16 * 1024 * 1024 + 1).to_bytes(4, "big"))
             malformed_relay.stdin.flush()
             malformed_relay.stdin.close()
             malformed_relay.wait(timeout=10)

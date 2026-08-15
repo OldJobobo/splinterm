@@ -129,10 +129,10 @@ use crate::frontend::{
     CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability, CommandZoomAction,
     DojoPromptUi, LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind,
     SessionPickerDecision, SessionPickerItem, SessionPickerUi, TabContextMenuUi, TabMenuActionId,
-    TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminationDecision, ThemeUpdate,
-    TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
-    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, close_other_tabs_command,
-    command_dispatch, tab_menu_dispatch, tab_menu_right_press,
+    TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminalGridLimits, TerminationDecision,
+    ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions,
+    WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    close_other_tabs_command, command_dispatch, tab_menu_dispatch, tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -898,6 +898,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pane: PaneView {
                 snapshot: options.snapshot,
                 snapshot_frame,
+                terminal_grid_limits: TerminalGridLimits::default(),
                 image_sources: options.image_sources,
                 scrollback_viewport: ScrollbackViewport::default(),
                 painted_history_status: None,
@@ -1107,6 +1108,7 @@ fn new_search_editor() -> BoundedTextEditor {
 struct PaneView {
     snapshot: Option<TerminalSnapshot>,
     snapshot_frame: Option<SnapshotFrame>,
+    terminal_grid_limits: TerminalGridLimits,
     image_sources: ImageContentLeaseSet,
     scrollback_viewport: ScrollbackViewport,
     painted_history_status: Option<HistoryOverlayStatus>,
@@ -1136,6 +1138,24 @@ struct PaneView {
     selecting: bool,
     pointer_cell: Option<CellPosition>,
     hovered_url: Option<(CellPosition, CellPosition, String)>,
+}
+
+impl PaneView {
+    fn window_geometry(
+        &self,
+        frame: &SnapshotFrame,
+        logical_width: u32,
+        logical_height: u32,
+        scale_120: u32,
+    ) -> Result<WindowGeometry> {
+        frame.window_geometry_with_limits(
+            logical_width,
+            logical_height,
+            scale_120,
+            self.terminal_grid_limits.maximum_columns,
+            self.terminal_grid_limits.maximum_rows,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1315,6 +1335,7 @@ impl PaneView {
         Self {
             snapshot: Some(options.snapshot),
             snapshot_frame,
+            terminal_grid_limits: options.terminal_grid_limits,
             image_sources: options.image_sources,
             scrollback_viewport: ScrollbackViewport::default(),
             painted_history_status: None,
@@ -3379,7 +3400,7 @@ impl App {
         let Some(frame) = pane.snapshot_frame.as_ref() else {
             return Ok(None);
         };
-        let geometry = frame.window_geometry(rect.width, rect.height, scale_120)?;
+        let geometry = pane.window_geometry(frame, rect.width, rect.height, scale_120)?;
         Ok(Some(geometry.translated(
             logical_extent_to_buffer(rect.x, scale_120)?,
             logical_extent_to_buffer(rect.y, scale_120)?,
@@ -4084,8 +4105,10 @@ impl App {
                 )
             },
         );
-        let geometry = frame
-            .window_geometry(logical_width, logical_height, self.surface.scale_120)
+        let geometry = self
+            .panes
+            .pane
+            .window_geometry(frame, logical_width, logical_height, self.surface.scale_120)
             .ok()?;
         let (row, column) = frame.cell_at(position.0 - x, position.1 - y, &geometry)?;
         Some(CellPosition { row, column })
@@ -5418,8 +5441,10 @@ impl App {
     fn ime_cursor_rectangle(&self) -> Option<(i32, i32, i32, i32)> {
         let frame = self.panes.pane.snapshot_frame.as_ref()?;
         let rect = self.focused_logical_rect();
-        let geometry = frame
-            .window_geometry(rect.width, rect.height, self.surface.scale_120)
+        let geometry = self
+            .panes
+            .pane
+            .window_geometry(frame, rect.width, rect.height, self.surface.scale_120)
             .ok()?;
         offset_cursor_rectangle(frame.cursor_rectangle(&geometry)?, rect)
     }
@@ -6719,7 +6744,13 @@ impl App {
         let (Some(frame), Some(commands)) = (&pane.snapshot_frame, &pane.commands) else {
             return Ok(());
         };
-        let resize = match frame.terminal_size(logical_width, logical_height, scale_120) {
+        let resize = match frame.terminal_size_with_limits(
+            logical_width,
+            logical_height,
+            scale_120,
+            pane.terminal_grid_limits.maximum_columns,
+            pane.terminal_grid_limits.maximum_rows,
+        ) {
             Ok(resize) => resize,
             Err(error) if error.to_string().contains("SurfaceTooSmall") => return Ok(()),
             Err(error) => return Err(error),
@@ -6765,12 +6796,13 @@ impl App {
         if !remote_split_can_begin(&self.panes.pending_remote_splits) {
             return Ok(None);
         }
-        let target_snapshot = std::iter::once(&self.panes.pane)
+        let (target_snapshot, target_grid_limits) = std::iter::once(&self.panes.pane)
             .chain(self.panes.inactive_panes.iter())
             .find_map(|pane| {
                 pane.snapshot
                     .as_ref()
                     .filter(|snapshot| snapshot.splint_id == target)
+                    .map(|snapshot| (snapshot, pane.terminal_grid_limits))
             })
             .context("pending split target has no frontend pane")?;
         let pending_id = SplintId::new();
@@ -6793,6 +6825,7 @@ impl App {
         let (commands, command_receiver) = tokio::sync::mpsc::channel(1);
         let options = WindowPaneOptions {
             snapshot,
+            terminal_grid_limits: target_grid_limits,
             updates,
             commands,
             authority: AuthorityStatus::default(),
@@ -8388,8 +8421,14 @@ impl App {
                 .snapshot_frame
                 .as_ref()
                 .map_or(Ok(None), |frame| {
-                    frame
-                        .window_geometry(content.width, content.height, self.surface.scale_120)?
+                    self.panes
+                        .pane
+                        .window_geometry(
+                            frame,
+                            content.width,
+                            content.height,
+                            self.surface.scale_120,
+                        )?
                         .translated(
                             logical_extent_to_buffer(content.x, self.surface.scale_120)?,
                             logical_extent_to_buffer(content.y, self.surface.scale_120)?,
@@ -10094,6 +10133,7 @@ mod tests {
         let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
         WindowPaneOptions {
             snapshot: valid_snapshot(splint_id),
+            terminal_grid_limits: TerminalGridLimits::default(),
             updates: update_receiver,
             commands,
             authority: AuthorityStatus::default(),
@@ -10121,6 +10161,7 @@ mod tests {
             LayoutNode::Leaf(splint),
             vec![WindowPaneOptions {
                 snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -10184,6 +10225,7 @@ mod tests {
             vec![
                 WindowPaneOptions {
                     snapshot: valid_snapshot(first_id),
+                    terminal_grid_limits: TerminalGridLimits::default(),
                     updates: first_update_receiver,
                     commands: first_commands,
                     authority: AuthorityStatus::default(),
@@ -10192,6 +10234,7 @@ mod tests {
                 },
                 WindowPaneOptions {
                     snapshot: valid_snapshot(second_id),
+                    terminal_grid_limits: TerminalGridLimits::default(),
                     updates: second_update_receiver,
                     commands: second_commands,
                     authority: AuthorityStatus::default(),
@@ -10280,6 +10323,7 @@ mod tests {
             LayoutNode::Leaf(splint),
             vec![WindowPaneOptions {
                 snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -10975,6 +11019,7 @@ mod tests {
         let mut pane = PaneView::from_options(
             WindowPaneOptions {
                 snapshot: initial,
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -11030,6 +11075,7 @@ mod tests {
         let mut pane = PaneView::from_options(
             WindowPaneOptions {
                 snapshot: initial,
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -11099,6 +11145,7 @@ mod tests {
         let mut formerly_active = PaneView::from_options(
             WindowPaneOptions {
                 snapshot: initial,
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -11159,6 +11206,7 @@ mod tests {
         let mut pane = PaneView::from_options(
             WindowPaneOptions {
                 snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -11173,6 +11221,39 @@ mod tests {
         assert!(matches!(first, WindowCommand::Resize { .. }));
         App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true).unwrap();
         assert!(command_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn pane_resize_respects_same_version_endpoint_grid_limits() {
+        let splint_id = SplintId::new();
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(1);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits {
+                    maximum_columns: 12,
+                    maximum_rows: 8,
+                },
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+
+        App::emit_pane_resize(&mut pane, 2_000, 2_000, SCALE_DENOMINATOR, true).unwrap();
+        assert!(matches!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Resize {
+                columns: 12,
+                rows: 8,
+                ..
+            }
+        ));
     }
 
     fn history_row(id: u64, content_bytes: usize) -> TerminalRow {
@@ -11190,6 +11271,7 @@ mod tests {
         let mut pane = PaneView::from_options(
             WindowPaneOptions {
                 snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands: commands.clone(),
                 authority: AuthorityStatus::default(),
@@ -11243,6 +11325,7 @@ mod tests {
             LayoutNode::Leaf(splint),
             vec![WindowPaneOptions {
                 snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -11278,6 +11361,7 @@ mod tests {
         let mut pane = PaneView::from_options(
             WindowPaneOptions {
                 snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -11303,6 +11387,7 @@ mod tests {
         let mut pane = PaneView::from_inactive_options(
             WindowPaneOptions {
                 snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
@@ -11515,6 +11600,7 @@ mod tests {
         let mut pane = PaneView::from_options(
             WindowPaneOptions {
                 snapshot: initial,
+                terminal_grid_limits: TerminalGridLimits::default(),
                 updates: update_receiver,
                 commands,
                 authority: AuthorityStatus::default(),
