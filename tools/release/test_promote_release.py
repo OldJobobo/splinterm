@@ -59,7 +59,7 @@ class CandidateFixture:
 
 
 class PromoteReleaseTests(unittest.TestCase):
-    def test_source_run_requires_successful_main_candidate_and_one_artifact(self) -> None:
+    def test_source_run_requires_matching_release_branch_and_one_artifact(self) -> None:
         run = {
             "id": RUN_ID,
             "event": "workflow_dispatch",
@@ -80,10 +80,14 @@ class PromoteReleaseTests(unittest.TestCase):
                 }
             ]
         }
-        self.assertEqual(
-            MODULE.validate_source_run(run, artifacts, REPOSITORY, RUN_ID),
-            (99, COMMIT),
-        )
+        for branch in sorted(MODULE.RELEASE_BRANCHES):
+            run["head_branch"] = branch
+            self.assertEqual(
+                MODULE.validate_source_run(
+                    run, artifacts, REPOSITORY, RUN_ID, branch
+                ),
+                (99, COMMIT),
+            )
         artifacts["artifacts"].append(
             {
                 "id": 100,
@@ -93,11 +97,19 @@ class PromoteReleaseTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "exactly one unexpired"):
-            MODULE.validate_source_run(run, artifacts, REPOSITORY, RUN_ID)
+            MODULE.validate_source_run(
+                run, artifacts, REPOSITORY, RUN_ID, "maint/0.1"
+            )
         artifacts["artifacts"].pop()
-        run["head_branch"] = "feature"
+        run["head_branch"] = "main"
         with self.assertRaisesRegex(ValueError, "head_branch"):
-            MODULE.validate_source_run(run, artifacts, REPOSITORY, RUN_ID)
+            MODULE.validate_source_run(
+                run, artifacts, REPOSITORY, RUN_ID, "maint/0.1"
+            )
+        with self.assertRaisesRegex(ValueError, "release authority"):
+            MODULE.validate_source_run(
+                run, artifacts, REPOSITORY, RUN_ID, "feature"
+            )
 
     def test_candidate_closes_over_exact_files_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:
