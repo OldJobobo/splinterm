@@ -7224,6 +7224,28 @@ mod tests {
 
     #[tokio::test]
     async fn pre_materialization_admission_failure_clears_sparse_ownership() {
+        const ISOLATED_ENV: &str = "SPLINTERM_TEST_ISOLATED_PUBLICATION_ADMISSION";
+        if std::env::var_os(ISOLATED_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "live::tests::pre_materialization_admission_failure_clears_sparse_ownership",
+                    "--test-threads=1",
+                ])
+                .env(ISOLATED_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated daemon-admission test failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        // This child process runs only the exact test above, so its process-wide
+        // daemon publication counter cannot race leases owned by parallel tests.
         let incarnation = ProcessIncarnation::allocate();
         let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
         let metrics = Arc::new(RuntimeMetrics::default());
