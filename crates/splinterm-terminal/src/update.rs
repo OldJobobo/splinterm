@@ -114,6 +114,31 @@ impl TerminalUpdate {
         self.events.append(&mut update.events);
     }
 
+    /// Coalesces externally continuity-validated publication summaries once at
+    /// materialization, using exact final vector capacities. Individual
+    /// summaries may each cover more than one semantic revision.
+    #[must_use]
+    pub fn coalesce_publication_summaries(updates: Vec<Self>) -> Option<Self> {
+        let damage_count = updates.iter().try_fold(0_usize, |total, update| {
+            total.checked_add(update.damage.len())
+        })?;
+        let event_count = updates.iter().try_fold(0_usize, |total, update| {
+            total.checked_add(update.events.len())
+        })?;
+        let revision = updates.last()?.revision;
+        let mut damage = Vec::with_capacity(damage_count);
+        let mut events = Vec::with_capacity(event_count);
+        for mut update in updates {
+            damage.append(&mut update.damage);
+            events.append(&mut update.events);
+        }
+        Some(Self {
+            revision,
+            damage,
+            events,
+        })
+    }
+
     /// Returns the bytes allocated by this update's owned semantic vectors and
     /// variable-length event bodies, excluding allocator bookkeeping.
     #[must_use]
@@ -364,6 +389,45 @@ mod tests {
             ])
             .is_none()
         );
+    }
+
+    #[test]
+    fn publication_summaries_coalesce_once_with_exact_capacity_and_order() {
+        let first = TerminalUpdate::new(
+            TerminalRevision::new(4),
+            vec![TerminalDamage::Modes],
+            vec![TerminalEvent::Bell],
+        );
+        let second = TerminalUpdate::new(
+            TerminalRevision::new(10),
+            vec![TerminalDamage::Title, scroll_damage()],
+            vec![TerminalEvent::TitleChanged("summary".to_owned())],
+        );
+
+        let coalesced = TerminalUpdate::coalesce_publication_summaries(vec![first, second])
+            .expect("nonempty publication summaries");
+
+        assert_eq!(coalesced.revision(), TerminalRevision::new(10));
+        assert_eq!(coalesced.damage.len(), 3);
+        assert_eq!(coalesced.damage.capacity(), 3);
+        assert_eq!(coalesced.events.len(), 2);
+        assert_eq!(coalesced.events.capacity(), 2);
+        assert_eq!(
+            coalesced.damage,
+            vec![
+                TerminalDamage::Modes,
+                TerminalDamage::Title,
+                scroll_damage()
+            ]
+        );
+        assert_eq!(
+            coalesced.events,
+            vec![
+                TerminalEvent::Bell,
+                TerminalEvent::TitleChanged("summary".to_owned())
+            ]
+        );
+        assert!(TerminalUpdate::coalesce_publication_summaries(Vec::new()).is_none());
     }
 
     #[test]

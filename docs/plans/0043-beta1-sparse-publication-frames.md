@@ -526,6 +526,52 @@ Fresh read-only review `dbd49ebd` initially blocked on harness parity and causal
 overstatement; corrected matched evidence and bounded wording received a CLEAN
 follow-up from `2c5f9be7`.
 
+### Reusable direct-tail correction — 2026-08-16
+
+The corrected mailbox owns one reusable sparse row/history tail for its complete
+admitted sequence, bounded by the unchanged 64 producer-event and 16 MiB
+subscriber ceilings. A validated successor capture owns metadata, ordered update
+summaries, damage indices, and history ranges, but no duplicate visible or
+history row bodies. Explicit `clone_from` implementations reuse row, cell, and
+composed-string capacities; bounded history replacement and append paths reuse
+retained row buffers. Producer count and semantic-byte leases remain per frame
+and consolidate to exact final ownership. Ordered summaries remain separate in
+the queue and coalesce once, with exact vector capacities, during receiver
+materialization into one wire update.
+
+Prevalidation completes before mutation. Failed validation leaves the tail
+unchanged; failed admission owns nothing; any later checked accounting failure
+clears the mailbox before fail-closed resync. Existing continuity, cancellation,
+receiver-drop, writer-failure, and process-exit precedence remain unchanged.
+Focused tests prove visible/history buffer reuse, transactional prevalidation,
+truthful internal-summary metrics, and one delivered update.
+
+A seed-4304 headless matrix ran two warmups and ten measured 5,000-line cases per
+variant against integrated Plan 0042. All 20 measured cases completed with zero
+resync.
+
+| Variant | RSS/PSS growth | Private-anon | CPU ticks | Marker latency | Events | Batch HWM | Ordered-summary HWM |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Integrated Plan 0042 | 8.40 MiB | 8.27 MiB | 14.0 | 125.29 ms | 69.0 | 64.0 | 15,553.5 |
+| Reusable direct tail | 6.05 MiB | 5.95 MiB | 13.0 | 119.79 ms | 67.5 | 64.0 | 64.0 |
+
+The candidate is 28.0% below integrated Plan 0042 aggregate retention while also
+improving CPU and marker latency. This passes the mandatory below-control gate;
+the retained 40% reduction remains the explicitly non-mandatory release
+preference. The generic attribution runner records `valid: false` and exits 1
+because its old defect predicate requires both variants to reproduce the
+superseded 64-batch checkpoint defect; every measured case itself completed with
+`error: null`.
+
+Ten consecutive production-socket reconstruction runs, the complete serialized
+workspace/all-target suite, warnings-denied workspace Clippy, 63 benchmark tests,
+formatting, and `git diff --check` passed. Raw records, exact binary identities,
+rejected intermediate shapes, summaries, and checksums are retained under
+`docs/benchmarks/artifacts/2026-08-16-plan0043-direct-tail-candidate/`.
+This is headless acceptance only. Fresh read-only review `42a73b1e` returned
+**CLEAN**. The graphical aggregate gate remains failed until the exact committed
+candidate passes a separately approved rerun.
+
 ## Review and stop-loss
 
 Use one writer for the implementation worktree. Require one fresh read-only
