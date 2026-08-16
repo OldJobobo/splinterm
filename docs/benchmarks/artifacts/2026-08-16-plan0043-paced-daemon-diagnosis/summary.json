@@ -1,0 +1,52 @@
+{
+  "baseline_commit": "ba8f1cd28f1aca25d83f198c593832b829601a6c",
+  "candidate_commit": "54c8778",
+  "candidate_production_commit": "0a56dbe",
+  "correctness_boundary": "The existing mixed_clear_subscription_reconstructs_exact_final_snapshot_without_resync test separately proves exact final reconstruction and zero resync; the matched profile harness intentionally measures only final-marker delivery and rejects resync.",
+  "fix_direction": "Compose admitted successor state directly into one reusable mailbox-tail representation, reusing row/history buffers while preserving one count lease per producer frame, exact semantic-byte consolidation, continuity, exit precedence, and fail-closed resync.",
+  "graphical": {
+    "delta_mib": 7.82,
+    "plan0042_daemon_private_anon_growth_mib": 6.75,
+    "plan0043_daemon_private_anon_growth_mib": 14.57
+  },
+  "matched_production_socket_heaptrack": {
+    "candidate_capture_peak_bytes": 7022640,
+    "candidate_capture_peak_mib": 6.6973114013671875,
+    "candidate_capture_peak_percent": 85.20382690712938,
+    "candidate_into_live_peak_bytes": 124218,
+    "candidate_materialization_peak_bytes": 108672,
+    "harness_parity": "identical diagnostic_paced_retention_profile source and workload; real daemon 33 ms pacing; final marker required; resync rejected",
+    "peak_delta_bytes": 4423259,
+    "peak_delta_mib": 4.218348503112793,
+    "plan0042": {
+      "allocations": 820980,
+      "leaked_kib": 62.22,
+      "peak_heap_bytes": 3818906,
+      "peak_heap_mib": 3.6419925689697266,
+      "private_anon_growth_bytes": 6844416,
+      "private_anon_growth_mib": 6.52734375
+    },
+    "plan0043": {
+      "allocations": 871131,
+      "leaked_kib": 62.22,
+      "peak_heap_bytes": 8242165,
+      "peak_heap_mib": 7.8603410720825195,
+      "private_anon_growth_bytes": 14524416,
+      "private_anon_growth_mib": 13.8515625
+    }
+  },
+  "not_yet_proven": "The retained evidence does not directly sample live heap at the exact post-drain RSS point, so allocator page retention is a plausible correlation, not yet a proven causal mechanism for every byte of the graphical plateau.",
+  "rejected_experiments": {
+    "move_capture_ownership_median_mib": 16.77734375,
+    "paced_direct_probe": "invalid: 33 ms embedded consumer overflowed the 64-frame mailbox and resynchronized after one event",
+    "seal_64_frames_median_mib": 16.54296875,
+    "seal_to_subscriber_byte_limit_median_mib": 16.11328125
+  },
+  "review": {
+    "followup_clean_run": "2c5f9be7",
+    "initial_blocked_run": "dbd49ebd",
+    "verdict": "CLEAN"
+  },
+  "schema": "splinterm.plan0043.paced-daemon-diagnosis.v2",
+  "supported_conclusion": "Compared with Plan 0042 under a matched production-socket harness, Plan 0043 has a materially higher live heap peak dominated by allocations rooted at SparsePublicationFrame::capture. This is the leading source to remove before rerunning graphical retention."
+}

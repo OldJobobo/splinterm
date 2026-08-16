@@ -26,8 +26,8 @@ use super::{
         classify_subscription_event, layout_splint_ids, lease_snapshot_images, lease_update_images,
         load_authority_status, optional_pane_controller, pane_access_scopes,
         pane_claims_initial_control, prepare_live_pane, resolve_image_contents,
-        resolve_update_images, resynchronize, run_controller, update_advances_from,
-        validate_attached_snapshot,
+        resolve_update_images, resynchronize, run_controller, terminal_grid_limits,
+        update_advances_from, validate_attached_snapshot,
     },
     theme_watch::{ThemeUpdateSink, load_startup_theme, watch_theme},
     topology_manager::{initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke},
@@ -254,6 +254,7 @@ pub(super) async fn run_live_window(
         background_alpha: theme.background_alpha,
     })?;
     let mut connection = factory.connect().await?;
+    let terminal_grid_limits = terminal_grid_limits(connection.limits());
     let incarnation = connection.live_incarnation(splint_id).await?;
     let requested_scopes = pane_access_scopes();
     if !matches!(
@@ -339,6 +340,7 @@ pub(super) async fn run_live_window(
             controlled: controller_id.is_some(),
             graphical_focus,
             forced_control_transfer,
+            terminal_grid_limits,
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
             cursor_style: window_config.cursor_style,

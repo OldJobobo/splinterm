@@ -28,4 +28,5 @@ pub use live::{
     CompactSubscription, LiveCell, LiveError, LiveEvent, LiveRow, LiveRuntimeMetrics,
     LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle,
     LiveSplintRuntime, ProcessExit, ProcessIncarnation, Subscription, SubscriptionReceive,
+    TerminalPublicationMemoryLease,
 };

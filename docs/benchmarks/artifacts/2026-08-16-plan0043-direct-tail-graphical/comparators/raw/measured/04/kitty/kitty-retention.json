@@ -1,0 +1,233 @@
+{
+  "isolation": {
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "workspace": 8
+  },
+  "launch_mode": "standalone_process_launch",
+  "memory_timeline": {
+    "baseline": {
+      "aggregate": {
+        "private_anon_bytes": 110026752,
+        "private_file_bytes": 29044736,
+        "pss_bytes": 175863808,
+        "rss_bytes": 385216512,
+        "shared_bytes": 246145024,
+        "shmem_bytes": 0
+      },
+      "processes": [
+        {
+          "name": "kitty",
+          "pid": 3559373,
+          "private_anon_bytes": 57249792,
+          "private_file_bytes": 27844608,
+          "pss_bytes": 106134528,
+          "rss_bytes": 270249984,
+          "shared_bytes": 185155584,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "kitten",
+          "pid": 3559428,
+          "private_anon_bytes": 13082624,
+          "private_file_bytes": 307200,
+          "pss_bytes": 18546688,
+          "rss_bytes": 30470144,
+          "shared_bytes": 17080320,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "kitten",
+          "pid": 3559431,
+          "private_anon_bytes": 15196160,
+          "private_file_bytes": 135168,
+          "pss_bytes": 20502528,
+          "rss_bytes": 32440320,
+          "shared_bytes": 17108992,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "kitten",
+          "pid": 3559437,
+          "private_anon_bytes": 13103104,
+          "private_file_bytes": 757760,
+          "pss_bytes": 18890752,
+          "rss_bytes": 30687232,
+          "shared_bytes": 16826368,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "python",
+          "pid": 3559463,
+          "private_anon_bytes": 11395072,
+          "private_file_bytes": 0,
+          "pss_bytes": 11789312,
+          "rss_bytes": 21368832,
+          "shared_bytes": 9973760,
+          "shmem_bytes": 0
+        }
+      ]
+    },
+    "classification": {
+      "private_anon": "min(total private, Anonymous) from smaps_rollup",
+      "private_file": "total private minus classified private anonymous",
+      "shared": "Shared_Clean plus Shared_Dirty",
+      "shmem": "ShmemPmdMapped"
+    },
+    "marker_visible": {
+      "aggregate": {
+        "private_anon_bytes": 118370304,
+        "private_file_bytes": 29814784,
+        "pss_bytes": 185819136,
+        "rss_bytes": 408870912,
+        "shared_bytes": 260685824,
+        "shmem_bytes": 0
+      },
+      "processes": [
+        {
+          "name": "kitty",
+          "pid": 3559373,
+          "private_anon_bytes": 65593344,
+          "private_file_bytes": 28614656,
+          "pss_bytes": 116089856,
+          "rss_bytes": 293904384,
+          "shared_bytes": 199696384,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "kitten",
+          "pid": 3559428,
+          "private_anon_bytes": 13082624,
+          "private_file_bytes": 307200,
+          "pss_bytes": 18546688,
+          "rss_bytes": 30470144,
+          "shared_bytes": 17080320,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "kitten",
+          "pid": 3559431,
+          "private_anon_bytes": 15196160,
+          "private_file_bytes": 135168,
+          "pss_bytes": 20502528,
+          "rss_bytes": 32440320,
+          "shared_bytes": 17108992,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "kitten",
+          "pid": 3559437,
+          "private_anon_bytes": 13103104,
+          "private_file_bytes": 757760,
+          "pss_bytes": 18890752,
+          "rss_bytes": 30687232,
+          "shared_bytes": 16826368,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "python",
+          "pid": 3559463,
+          "private_anon_bytes": 11395072,
+          "private_file_bytes": 0,
+          "pss_bytes": 11789312,
+          "rss_bytes": 21368832,
+          "shared_bytes": 9973760,
+          "shmem_bytes": 0
+        }
+      ]
+    },
+    "peak_observed_rss_bytes": 408870912,
+    "settles": [
+      {
+        "memory": {
+          "aggregate": {
+            "private_anon_bytes": 118370304,
+            "private_file_bytes": 29814784,
+            "pss_bytes": 185817088,
+            "rss_bytes": 408870912,
+            "shared_bytes": 260685824,
+            "shmem_bytes": 0
+          },
+          "processes": [
+            {
+              "name": "kitty",
+              "pid": 3559373,
+              "private_anon_bytes": 65593344,
+              "private_file_bytes": 28614656,
+              "pss_bytes": 116088832,
+              "rss_bytes": 293904384,
+              "shared_bytes": 199696384,
+              "shmem_bytes": 0
+            },
+            {
+              "name": "kitten",
+              "pid": 3559428,
+              "private_anon_bytes": 13082624,
+              "private_file_bytes": 307200,
+              "pss_bytes": 18546688,
+              "rss_bytes": 30470144,
+              "shared_bytes": 17080320,
+              "shmem_bytes": 0
+            },
+            {
+              "name": "kitten",
+              "pid": 3559431,
+              "private_anon_bytes": 15196160,
+              "private_file_bytes": 135168,
+              "pss_bytes": 20502528,
+              "rss_bytes": 32440320,
+              "shared_bytes": 17108992,
+              "shmem_bytes": 0
+            },
+            {
+              "name": "kitten",
+              "pid": 3559437,
+              "private_anon_bytes": 13103104,
+              "private_file_bytes": 757760,
+              "pss_bytes": 18890752,
+              "rss_bytes": 30687232,
+              "shared_bytes": 16826368,
+              "shmem_bytes": 0
+            },
+            {
+              "name": "python",
+              "pid": 3559463,
+              "private_anon_bytes": 11395072,
+              "private_file_bytes": 0,
+              "pss_bytes": 11788288,
+              "rss_bytes": 21368832,
+              "shared_bytes": 9973760,
+              "shmem_bytes": 0
+            }
+          ]
+        },
+        "seconds": 2.0
+      }
+    ]
+  },
+  "notes": [],
+  "processes": {
+    "child_included": true,
+    "child_pid": 3559463,
+    "count": 5,
+    "root_pids": [
+      3559373
+    ]
+  },
+  "retention": {
+    "clear_cycles": 9,
+    "context_switches": 28,
+    "cpu_ticks": 2,
+    "lines": 5000,
+    "retained_growth_bytes": 23654400,
+    "rss_baseline_bytes": 385216512,
+    "rss_peak_observed_bytes": 408870912,
+    "rss_post_settle_bytes": 408870912,
+    "trigger_to_visible_marker_ns": 193205978
+  },
+  "schema": "splinterm.benchmark.graphical-retention.v2",
+  "terminal": "kitty",
+  "valid": true,
+  "variant": "kitty"
+}

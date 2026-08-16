@@ -1,0 +1,182 @@
+{
+  "baseline": {
+    "aggregate": {
+      "cpu_ticks": 0,
+      "private_anon_bytes": 819200,
+      "private_file_bytes": 1290240,
+      "pss_bytes": 2127872,
+      "rss_bytes": 4788224,
+      "shared_bytes": 2678784,
+      "shmem_bytes": 0
+    },
+    "processes": [
+      {
+        "memory": {
+          "cpu_ticks": 0,
+          "private_anon_bytes": 819200,
+          "private_file_bytes": 1290240,
+          "pss_bytes": 2127872,
+          "rss_bytes": 4788224,
+          "shared_bytes": 2678784,
+          "shmem_bytes": 0
+        },
+        "name": "plan11-daemon-r",
+        "pid": 3379937
+      }
+    ]
+  },
+  "case": "fast",
+  "clear_interval_lines": 500,
+  "cycles": 1,
+  "drain_events": 76,
+  "drain_resnapshots": 0,
+  "endpoints": [
+    {
+      "cycle": 0,
+      "marker": {
+        "aggregate": {
+          "cpu_ticks": 12,
+          "private_anon_bytes": 5550080,
+          "private_file_bytes": 1355776,
+          "pss_bytes": 6923264,
+          "rss_bytes": 9584640,
+          "shared_bytes": 2678784,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "cpu_ticks": 12,
+              "private_anon_bytes": 5550080,
+              "private_file_bytes": 1355776,
+              "pss_bytes": 6923264,
+              "rss_bytes": 9584640,
+              "shared_bytes": 2678784,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3379937
+          }
+        ]
+      },
+      "marker_latency_ns": 118209502,
+      "settle_2s": {
+        "aggregate": {
+          "cpu_ticks": 13,
+          "private_anon_bytes": 5554176,
+          "private_file_bytes": 1355776,
+          "pss_bytes": 6928384,
+          "rss_bytes": 9588736,
+          "shared_bytes": 2678784,
+          "shmem_bytes": 0
+        },
+        "processes": [
+          {
+            "memory": {
+              "cpu_ticks": 13,
+              "private_anon_bytes": 5554176,
+              "private_file_bytes": 1355776,
+              "pss_bytes": 6928384,
+              "rss_bytes": 9588736,
+              "shared_bytes": 2678784,
+              "shmem_bytes": 0
+            },
+            "name": "plan11-daemon-r",
+            "pid": 3379937
+          }
+        ]
+      }
+    }
+  ],
+  "final": {
+    "aggregate": {
+      "cpu_ticks": 13,
+      "private_anon_bytes": 5562368,
+      "private_file_bytes": 1355776,
+      "pss_bytes": 6936576,
+      "rss_bytes": 9596928,
+      "shared_bytes": 2678784,
+      "shmem_bytes": 0
+    },
+    "processes": [
+      {
+        "memory": {
+          "cpu_ticks": 13,
+          "private_anon_bytes": 5562368,
+          "private_file_bytes": 1355776,
+          "pss_bytes": 6936576,
+          "rss_bytes": 9596928,
+          "shared_bytes": 2678784,
+          "shmem_bytes": 0
+        },
+        "name": "plan11-daemon-r",
+        "pid": 3379937
+      }
+    ]
+  },
+  "final_settle_seconds": 2,
+  "lines_per_cycle": 5000,
+  "runtime_metrics": {
+    "command_queue_high_water": 1,
+    "output_live_events": 1163,
+    "output_parse_batches": 1163,
+    "output_processing_ns": 112810844,
+    "output_subscriber_overflows": 0,
+    "output_terminal_updates": 281716,
+    "pty_read_bytes": 296764,
+    "pty_read_calls": 76,
+    "publication_compact_batch_merges": 1087,
+    "publication_compact_batches": 1163,
+    "publication_compact_materializations": 76,
+    "publication_compact_materialized_appended_rows": 4772,
+    "publication_compact_materialized_appended_rows_high_water": 176,
+    "publication_compact_materialized_batches": 1163,
+    "publication_compact_materialized_batches_high_water": 41,
+    "publication_compact_materialized_scrolls": 4772,
+    "publication_compact_materialized_scrolls_high_water": 176,
+    "publication_compact_materialized_semantic_bytes": 49370096,
+    "publication_compact_materialized_semantic_bytes_high_water": 1586880,
+    "publication_compact_materialized_terminal_updates": 1163,
+    "publication_compact_materialized_terminal_updates_high_water": 41,
+    "publication_snapshot_builds": 1163,
+    "publication_snapshot_cells": 2614720,
+    "publication_snapshot_composed_cells": 0,
+    "publication_snapshot_empty_cells": 906002,
+    "publication_snapshot_enqueued_cells": 0,
+    "publication_snapshot_enqueued_owned_string_bytes": 0,
+    "publication_snapshot_enqueued_rows": 0,
+    "publication_snapshot_enqueues": 0,
+    "publication_snapshot_owned_string_bytes": 0,
+    "publication_snapshot_rows": 32684,
+    "publication_snapshot_scalar_cells": 1708718,
+    "publication_snapshot_spacer_cells": 0,
+    "queued_compact_appended_rows_current": 0,
+    "queued_compact_appended_rows_high_water": 176,
+    "queued_compact_batches_current": 0,
+    "queued_compact_batches_high_water": 41,
+    "queued_compact_scrolls_current": 0,
+    "queued_compact_scrolls_high_water": 176,
+    "queued_compact_semantic_bytes_current": 0,
+    "queued_compact_semantic_bytes_high_water": 1697912,
+    "queued_compact_terminal_updates_current": 0,
+    "queued_compact_terminal_updates_high_water": 41,
+    "queued_snapshot_cells_current": 0,
+    "queued_snapshot_cells_high_water": 0,
+    "queued_snapshot_events_current": 0,
+    "queued_snapshot_events_high_water": 0,
+    "queued_snapshot_owned_string_bytes_current": 0,
+    "queued_snapshot_owned_string_bytes_high_water": 0,
+    "queued_snapshot_rows_current": 0,
+    "queued_snapshot_rows_high_water": 0,
+    "reply_write_queue_high_water_bytes": 0,
+    "snapshot_build_ns": 638623,
+    "snapshot_builds": 12,
+    "subscriber_count_high_water": 1,
+    "subscriber_queue_events_current": 0,
+    "subscriber_queue_events_high_water": 41,
+    "subscriber_queue_per_subscriber_high_water": 41,
+    "user_write_queue_high_water_bytes": 6
+  },
+  "schema": "splinterm.plan0011.daemon-retention.v1",
+  "scrollback_lines": 1000
+}

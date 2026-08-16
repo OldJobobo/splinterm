@@ -92,7 +92,7 @@ pub fn phase4_benchmark_json(samples: usize) -> Result<serde_json::Value> {
     }
     let mut grids = Vec::new();
     let benchmark_rss_before = process_rss_bytes();
-    for (columns, rows) in [(80_usize, 24_usize), (240, 80)] {
+    for (columns, rows) in [(80_usize, 24_usize), (240, 80), (480, 128)] {
         reset_snapshot_cache();
         let cell = TerminalCell {
             content: "x".into(),

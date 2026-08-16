@@ -1,0 +1,61 @@
+{
+  "active_window": {
+    "acceptsInput": true,
+    "address": "0x55d2ce9c2ea0",
+    "allowedOverFullscreen": true,
+    "at": [
+      1289,
+      42
+    ],
+    "class": "foot",
+    "contentType": "none",
+    "floating": false,
+    "focusHistoryID": 0,
+    "fullscreen": 0,
+    "fullscreenClient": 0,
+    "fullscreenHandler": "scrolling",
+    "grouped": [],
+    "hidden": false,
+    "inhibitingIdle": false,
+    "initialClass": "foot",
+    "initialTitle": "Foot",
+    "mapped": true,
+    "monitor": 0,
+    "pid": 3298740,
+    "pinFullscreened": false,
+    "pinned": false,
+    "size": [
+      1222,
+      1374
+    ],
+    "stableId": "180001e7",
+    "swallowing": "0x0",
+    "tags": [
+      "default-opacity*",
+      "terminal*"
+    ],
+    "tearingHint": false,
+    "title": "\u03c0 - splinterm",
+    "visible": true,
+    "workspace": {
+      "id": 1,
+      "name": "1"
+    },
+    "xdgDescription": "",
+    "xdgTag": "",
+    "xwayland": false
+  },
+  "client_addresses": [
+    "0x55d2cbf4f900",
+    "0x55d2cdefcb60",
+    "0x55d2cdf21a40",
+    "0x55d2ce51b5d0",
+    "0x55d2ce76a760",
+    "0x55d2ce9c2ea0"
+  ],
+  "comparators_skipped": "Splinterm candidate failed aggregate retained-growth gate",
+  "original_focus_restored": true,
+  "schema": "splinterm.plan0043.graphical-cleanup.v1",
+  "unrelated_clients_unchanged": true,
+  "workspace_8_clients": []
+}
