@@ -1,133 +1,170 @@
-# Plan 0042 packaged graphical partial acceptance
+# Plan 0042 packaged graphical acceptance
 
 ## Decision
 
-**Partial acceptance only; Plan 0042 and Beta1 remain blocked.** The exact
-committed packaged candidate passed the guarded 1440p smoke, wide-grid,
-right-edge, split-layout, legacy-ceiling crossing, and real remote graphical
-cases. The synthetic capped-endpoint case did not reach a mapped Window, no
-non-keyboard IME was available for popup-placement proof, and no safe 4K output
-was present. These gaps prevent Plan 0042 closure.
+**The post-fix packaged graphical acceptance is accepted; integration remains
+pending.** The exact packaged
+candidate passed the guarded 1440p wide-grid, right-edge, split-layout,
+legacy-ceiling crossing, real remote endpoint, capped endpoint, residual
+hit-testing, and actual Mozc IME cases. No safe 4K output was available, so the
+plan-authorized non-graphical 4K proof remains the recorded 4K boundary.
+
+This evidence does not authorize or claim merge, installation, promotion,
+distribution, or Beta1 release.
 
 ## Provenance
 
-- Source branch: `feat/0042-beta1-wide-splint-grid`
+### Initial candidate
+
 - Source commit: `dc8e1165968f66c17dd872bf6153b8eb1681650a`
-- Package: `splinterm-0.1.0alpha3.3-1-x86_64.pkg.tar.zst`
 - Package SHA-256:
   `edde0c446aaf842034970aa312a1306a0a6d0d2f8626d2c6d973b834ca1ca2a2`
 - Packaged `splinterm` SHA-256:
   `9e114026843acb4cb6cb6b818e95a6f8bb4c5d0d55efa41814a1a9e273ee9304`
 - Packaged `splinterd` SHA-256:
   `da212f39741691b59228c19fcced291faabfde5a3780215bf0b0dfb00b3b4764`
-- Package builder and `tools/package/validate-package.py` completed
-  successfully. Package checks were skipped during compilation because the
-  branch's complete non-graphical validation and review were already recorded;
-  package runtime validation still ran.
-- The package was extracted under `/tmp` and its adjacent packaged client and
-  daemon were used directly. `/usr/bin/splinterm` and `/usr/bin/splinterd` were
-  not replaced.
+
+### Post-fix candidate
+
+- Source branch: `feat/0042-beta1-wide-splint-grid`
+- Source commit: `6c03fb7f3365adef7b24b8afd5ffb460a0a2402a`
+- Package: `splinterm-0.1.0alpha3.3-1-x86_64.pkg.tar.zst`
+- Package SHA-256:
+  `bd4199ff6bcb25386ab6de1b1f90fce16c5681bd450a5738eddf49823e529886`
+- Packaged `splinterm` SHA-256:
+  `7deb0d2c7cdeaf1c4acaf5e28ce91d5be977a520926b97f349effe83959649a0`
+- Packaged `splinterd` SHA-256:
+  `da212f39741691b59228c19fcced291faabfde5a3780215bf0b0dfb00b3b4764`
+- `tools/package/build-local-package.sh --no-check` and
+  `tools/package/validate-package.py` completed successfully. Package checks
+  were skipped only because the complete focused Splinterm boundary had just
+  passed; package structure and runtime validation still ran.
+- Both candidates were extracted under `/tmp` and run through their adjacent
+  packaged binaries. `/usr/bin/splinterm` and `/usr/bin/splinterd` were never
+  replaced.
 
 ## Environment
 
-- Hyprland workspace `3`, statically assigned to landscape `DP-1`
-- `DP-1`: 2560x1440, scale 1, transform 0
-- `DP-2`: 1920x1080; unsuitable for the mandatory 1440p case
-- `DP-3`: 2560x1440 with portrait transform; not used
-- No 4K monitor or safe 4K compositor path was available
+- Hyprland workspace 3 on landscape DP-1
+- DP-1: 2560x1440, scale 1, transform 0
 - Shipped profile: JetBrains Mono Nerd Font, output-scale sizing, 14 configured
   pixels, and 12 px four-sided padding
-- Original focus: Foot PID `3298740`, address `0x55d2ce9c2ea0`, workspace 1,
-  DP-1
+- No safe 3840x2160 graphical output was available
+- Fcitx5 with installed and configured Mozc supplied the actual IME case
 
-## Passed cases
+## Initial candidate results
 
-### Packaged smoke
+### Packaged smoke and exact 1440p fullscreen
 
-The staged adjacent daemon accepted `ping` and reported an empty isolated
-runtime before launch. The staged client mapped exactly once on workspace 3,
-DP-1, and accepted the bounded marker command `PLAN0042_SMOKE_OK`. The first
-authoritative snapshot reported `309x65`, already beyond the legacy 240-column
-ceiling.
+The initial staged daemon accepted `ping` and reported an empty isolated runtime.
+The staged client mapped exactly once. Its smoke snapshot reported `309x65`.
+At an exact 2560x1440 fullscreen surface, the authoritative snapshot reported
+`317x69`; `RIGHT_EDGE_OK` and the final-column marker rendered without stale
+pixels, and the cursor returned visibly to a known row.
 
-### Exact 1440p fullscreen and right edge
+### Right-edge selection
 
-The exact test Window was set to a 2560x1440 fullscreen surface. Its
-authoritative snapshot reported `317x69`. `RIGHT_EDGE_OK` rendered at the final
-right-edge cells and `Z` rendered in the last column without stale right-edge
-pixels. The cursor returned to a known row and remained visible.
-
-A temporary isolated `ydotoold` socket sent the selection press, relative
-pointer motion, and release while the exact test Window was freshly verified as
-focused. Selection visibly reached the right-edge marker. The first attempt,
-which mixed Hyprland cursor movement with virtual-device button events, produced
-no selection and was discarded; the bounded same-device retry succeeded.
+An isolated `ydotoold` device selected through the right-edge marker after one
+bounded device-calibration retry. Output, cursor, pointer targeting, and
+selection reached the final natural column.
 
 ### Pane-local geometry
 
-One vertical split produced two independent `317x33` PTYs. Splitting the second
-pane horizontally produced grids of `317x33`, `156x33`, and `156x33`.
-Authoritative snapshots were taken for every Splint. Test siblings were then
-terminated and their exited leaves closed, returning to one running Splint.
+One vertical split produced two `317x33` PTYs. Splitting the second pane
+horizontally produced `317x33`, `156x33`, and `156x33`. Every Splint supplied an
+authoritative snapshot. Test siblings were terminated and closed afterward.
 
-### Legacy 240-column crossing
+### Legacy-ceiling crossing
 
-The exact Window was floated and resized eight times between 1850 and 2100
-logical pixels, crossing from an authoritative 228-column grid to 259 columns
-and back. It ended at `259x47`. `PLAN0042_RESIZE_HISTORY_KEEP` remained in the
-final authoritative snapshot. The staged client remained alive, no resync loop
-was observed, and the final screenshot showed no stale right-edge region.
+The exact Window crossed between authoritative 228- and 259-column grids eight
+times. `PLAN0042_RESIZE_HISTORY_KEEP` remained in the final `259x47` snapshot.
+The client stayed alive; no resync loop or stale right-edge region appeared.
 
 ### Real remote graphical endpoint
 
-A second staged adjacent daemon and real graphical relay were run under isolated
-state. Splinterm's generated SSH argv was recorded; a bounded wrapper replaced
-network transport with the staged `splinterm relay --graphical-stdio` connected
-to that daemon. The remote packaged client mapped exactly once on workspace 3
-and negotiated an authoritative `309x66` grid. The local endpoint remained at
-`259x47`, demonstrating endpoint-local geometry with no dimension leakage.
+A second staged adjacent daemon and real packaged graphical relay ran under
+isolated state. A bounded SSH wrapper replaced network transport with staged
+`relay --graphical-stdio`. The remote endpoint negotiated `309x66` while the
+local endpoint remained `259x47`, proving endpoint-local geometry without
+cross-endpoint leakage at the default 480x128 limits.
 
-## Open and rejected cases
+## Capped endpoint defect and correction
 
-### Synthetic capped endpoint
+The first temporary 120x64 fixture was incomplete and stopped before mapping.
+A complete reusable `graphical-capped` fixture and a full authorization,
+attachment, control, resize, and detach integration test were then added.
 
-A temporary copy of the repository's `fake_ssh.py` fixture advertised limits of
-`120x64` and one synthetic running Splint. The first launch stopped after
-`inspect_splint` because the fixture lacked that response. One bounded fixture
-correction added the inspection response. The retry progressed through
-`list_lairs`, `inspect_splint`, and `request_access`, then stopped at the next
-unsupported fixture request, `authorization_status`, before mapping a Window.
+The complete fixture exposed a real product defect in the initial package: the
+direct `launch --splint-id` path sent `309x66` despite the endpoint advertising
+120x64. The multi-pane path already propagated negotiated limits, but
+`run_live_window` fell back to compile-time 480x128 defaults. Commit `6c03fb7`
+shares the endpoint-limit conversion and explicitly supplies the negotiated
+limits to direct-window `WindowOptions`.
 
-No production binary failed, no test Window mapped, and no existing Window
-received input. The stop-loss prohibited continuing to grow an ad hoc endpoint
-during acceptance. The capped diagnostic and residual pointer hit-testing
-therefore remain unproven graphically.
+Post-fix validation records:
 
-### IME
+- 379 Splinterm library tests passed; one manual timing harness remained ignored;
+- 101 Splinterm binary tests passed;
+- all Splinterm integration tests passed, including 14 remote-session tests;
+- all-target Splinterm Clippy passed with warnings denied;
+- Python fixture syntax, formatting, and `git diff --check` passed; and
+- the private Arch package built and validated successfully.
 
-Fcitx5 was running, but its only active input method was `keyboard-us`. The
-right-edge terminal cursor and pointer selection were proven, but no actual IME
-candidate popup or preedit placement was available. IME placement remains open.
+## Post-fix capped graphical acceptance
 
-### 4K
+The exact packaged client from `6c03fb7` mapped on workspace 3 / DP-1. For a
+2500x1362 logical pane it emitted exactly one bounded diagnostic:
 
-No safe 3840x2160 graphical output was available. Plan 0042's pinned
-non-graphical 4K fixture remains the only 4K evidence and must be reported as a
-graphical limitation.
+```text
+splinterm terminal grid capped at 120x64 for a 2500x1362 logical pane
+```
+
+The fixture recorded an endpoint-local resize of `120x64` and `960x1280` terminal
+pixels. The terminal remained top-left anchored and the large trailing right
+residual was visibly distinct from the real terminal rectangle.
+
+### Residual hit-testing
+
+One isolated virtual pointer remained alive for both controls. After compositor
+admission, a gesture beginning on the first real `CAP_EDGE` cell and ending in
+the residual selected exactly that one real cell. A second gesture ran wholly
+inside the residual from global x=1120 to x=1274, beyond the grid ending near
+x=1002. It neither created fictitious selection nor changed the retained real
+cell selection. A 160x80 crop around the marker contained **0 changed pixels**
+before and after the residual-only gesture. Neither gesture generated protocol
+terminal input.
+
+### Actual IME placement
+
+Fcitx was switched from `keyboard-us` to installed Mozc only while the exact
+packaged Window was freshly verified as focused. Typing bounded `nihongo` at
+cursor column 119 displayed Mozc's candidate popup adjacent to the final real
+cell and inside the grid boundary. Space committed UTF-8 `にほんご` through the
+exact Splint input channel; no Enter was sent. Escape cancelled remaining IME
+state, and Fcitx was restored to `keyboard-us`.
+
+## 4K limitation
+
+No safe 3840x2160 output existed. Plan 0042 explicitly permits retaining the
+pinned non-graphical 4K proof while reporting this graphical limitation. The
+absence of a safe 4K monitor is not represented as graphical 4K execution.
 
 ## Cleanup
 
-- Stopped staged local client PID `948303` and daemon PID `902063`.
-- Stopped staged remote client PID `997783` and daemon PID `997761`.
-- Confirmed the failed capped client was stopped.
-- Confirmed workspace 3 contained zero remaining clients.
-- Restored workspace 1 on DP-1, exact Foot focus, and cursor position.
-- Preserved unrelated packaged daemon PID `2433077` and Plan 0041 development
-  daemon PID `3968722`.
-- Restored monitor workspace assignments exactly: DP-1/workspace 1,
-  DP-2/workspace 8, and DP-3/workspace 6.
-- Pacman reported `56 total files, 0 altered files` for `splinterm`.
+Each graphical sequence used exact process and Window identities. Final cleanup:
 
-Image hashes are recorded in `SHA256SUMS`. This record does not authorize or
-claim merge, installation, candidate promotion, package publication, or Beta1
-release.
+- stopped every staged client, staged daemon, fixture process, relay, and
+  isolated input daemon created by the matrix;
+- left workspace 3 empty;
+- restored the exact pre-test active Window, workspace, monitor, and cursor;
+- restored Fcitx to `keyboard-us`;
+- preserved unrelated user Windows and Splinterm daemons;
+- restored DP-1/DP-2/DP-3 workspace assignments; and
+- confirmed `splinterm: 56 total files, 0 altered files` through Pacman.
+
+Fresh post-fix read-only review `ae030b0b` returned **CLEAN**, with no
+blocker-level or fix-worth-doing-now issue in the code, fixture, tests, images,
+or acceptance record.
+
+Image hashes are recorded in `SHA256SUMS`. Images 01–08 record the initial
+candidate matrix; images 09–13 record the post-fix capped and Mozc follow-up.

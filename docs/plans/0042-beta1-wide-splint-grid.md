@@ -1,6 +1,6 @@
 # Plan 0042: Beta1 wide Splint grid
 
-- **Status:** Non-graphical implementation accepted; packaged graphical acceptance partially passed, with capped-endpoint and IME proof still blocking closure
+- **Status:** Post-fix implementation and packaged graphical acceptance accepted; integration pending
 - **Date:** 2026-08-14
 - **Product authority:** A maximized Splint uses the complete terminal-cell area
   of validated 1440p and 4K surfaces instead of silently stopping at the legacy
@@ -143,23 +143,33 @@ clippy passes for all targets with warnings denied; formatting and
 `splinterm-pty-child` helper first. No graphical test, installation, package
 replacement, push, merge, or release action is included in this evidence.
 
-### Packaged graphical partial acceptance
+### Packaged graphical acceptance candidate
 
-The separately approved 2026-08-15 run used an exact package built from
-`dc8e1165968f66c17dd872bf6153b8eb1681650a` without replacing `/usr/bin`.
-It passed the guarded smoke, exact 2560x1440 fullscreen case at `317x69`,
-right-edge output/cursor/pointer selection, vertical and horizontal pane-local
-grid checks, eight rapid `228 -> 259 -> 228` legacy-ceiling crossings with
-history retained, and a real remote graphical relay at `309x66` while the local
-endpoint remained `259x47`.
+The separately approved 2026-08-15 matrix first tested the exact package from
+`dc8e1165968f66c17dd872bf6153b8eb1681650a`. It passed the guarded smoke,
+exact 2560x1440 fullscreen case at `317x69`, right-edge output/cursor/pointer
+selection, pane-local grids, eight rapid `228 -> 259 -> 228` crossings with
+history retained, and a real remote graphical relay without cross-endpoint
+leakage.
 
-Plan 0042 remains open. The temporary capped `120x64` endpoint fixture stopped
-before mapping because it lacked the graphical path's `authorization_status`
-response, Fcitx exposed only `keyboard-us` so no actual IME popup was available,
-and no safe 4K output existed. Cleanup restored the original workspace, exact
-Foot focus, cursor, monitor assignments, and all package state; Pacman reported
-zero altered files. Evidence:
-[packaged graphical partial acceptance](../benchmarks/artifacts/2026-08-15-plan0042-packaged-graphical/summary.md).
+The completed `120x64` endpoint fixture then exposed a direct-window defect:
+`launch --splint-id` discarded negotiated dimensions and sent `309x66`.
+Commit `6c03fb7f3365adef7b24b8afd5ffb460a0a2402a` now supplies the endpoint limits
+to direct-window `WindowOptions` and shares the same conversion used by the
+multi-pane path. The post-fix test boundary passes 379 library tests plus 101
+binary tests, all integration tests including 14 remote-session tests,
+all-target Clippy with warnings denied, formatting, and package validation.
+
+The exact post-fix package emitted one bounded diagnostic and sent only
+`120x64` / `960x1280` for a 2500x1362 pane. A real-cell selection positive
+control persisted unchanged through a wholly residual x=1120..1274 drag, with
+zero changed marker-crop pixels and no protocol input. Mozc displayed its popup
+at column 119 inside the grid and committed UTF-8 `にほんご`; Fcitx was restored to
+`keyboard-us`. No safe 4K output existed, so the plan-authorized non-graphical
+4K proof remains the recorded limitation. Cleanup restored exact focus,
+workspace, cursor, monitors, input method, and package state; Pacman reported
+zero altered files. Fresh post-fix review `ae030b0b` returned **CLEAN**. Only
+integration remains pending. Evidence: [packaged graphical acceptance](../benchmarks/artifacts/2026-08-15-plan0042-packaged-graphical/summary.md).
 
 ## Confirmed baseline defect
 

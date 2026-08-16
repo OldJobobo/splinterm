@@ -1,14 +1,24 @@
 {
-  "schema": "splinterm.plan0042.packaged-graphical.v1",
-  "decision": "partial_acceptance",
+  "schema": "splinterm.plan0042.packaged-graphical.v2",
+  "decision": "accepted_integration_pending",
+  "packaged_graphical_acceptance": true,
+  "post_fix_review": "CLEAN (ae030b0b)",
   "plan0042_complete": false,
   "beta1_allowed": false,
-  "source": {
-    "branch": "feat/0042-beta1-wide-splint-grid",
+  "initial_candidate": {
     "commit": "dc8e1165968f66c17dd872bf6153b8eb1681650a",
     "package_sha256": "edde0c446aaf842034970aa312a1306a0a6d0d2f8626d2c6d973b834ca1ca2a2",
     "splinterm_sha256": "9e114026843acb4cb6cb6b818e95a6f8bb4c5d0d55efa41814a1a9e273ee9304",
-    "splinterd_sha256": "da212f39741691b59228c19fcced291faabfde5a3780215bf0b0dfb00b3b4764"
+    "splinterd_sha256": "da212f39741691b59228c19fcced291faabfde5a3780215bf0b0dfb00b3b4764",
+    "direct_window_capped_endpoint_defect": true
+  },
+  "post_fix_candidate": {
+    "branch": "feat/0042-beta1-wide-splint-grid",
+    "commit": "6c03fb7f3365adef7b24b8afd5ffb460a0a2402a",
+    "package_sha256": "bd4199ff6bcb25386ab6de1b1f90fce16c5681bd450a5738eddf49823e529886",
+    "splinterm_sha256": "7deb0d2c7cdeaf1c4acaf5e28ce91d5be977a520926b97f349effe83959649a0",
+    "splinterd_sha256": "da212f39741691b59228c19fcced291faabfde5a3780215bf0b0dfb00b3b4764",
+    "package_validation": true
   },
   "environment": {
     "workspace": 3,
@@ -18,9 +28,9 @@
     "scale": 1,
     "transform": 0,
     "graphical_4k_available": false,
-    "ime": "keyboard-us"
+    "ime_engine": "mozc"
   },
-  "passed": {
+  "initial_matrix": {
     "packaged_smoke": true,
     "fullscreen_1440p": true,
     "fullscreen_grid": [317, 69],
@@ -42,24 +52,55 @@
       "local_grid_unchanged": [259, 47]
     }
   },
-  "open": {
-    "synthetic_capped_endpoint": {
-      "passed": false,
+  "post_fix_matrix": {
+    "capped_endpoint": {
       "advertised_limits": [120, 64],
-      "mapped": false,
-      "last_request": "authorization_status",
-      "classification": "temporary fixture incomplete"
+      "resize_grid": [120, 64],
+      "terminal_pixels": [960, 1280],
+      "logical_pane": [2500, 1362],
+      "bounded_diagnostic_count": 1,
+      "passed": true
     },
-    "ime_popup_placement": "not run; no non-keyboard IME available",
-    "graphical_4k": "not run; no safe 4K output"
+    "residual_hit_testing": {
+      "real_cell_positive_control": true,
+      "residual_drag": [1120, 1274],
+      "approximate_grid_right_edge": 1002,
+      "marker_crop_changed_pixels": 0,
+      "protocol_input_requests": 0,
+      "passed": true
+    },
+    "ime": {
+      "engine": "mozc",
+      "cursor_column": 119,
+      "candidate_popup_inside_grid": true,
+      "committed_utf8": "にほんご",
+      "enter_sent": false,
+      "restored_input_method": "keyboard-us",
+      "passed": true
+    }
+  },
+  "validation": {
+    "splinterm_library_passed": 379,
+    "splinterm_library_ignored": 1,
+    "splinterm_binary_passed": 101,
+    "remote_session_passed": 14,
+    "all_target_clippy_denied_warnings": true,
+    "formatting": true,
+    "python_fixture_syntax": true,
+    "diff_check": true
+  },
+  "limitations": {
+    "graphical_4k": "not run; no safe 4K output; plan-authorized non-graphical proof retained"
   },
   "cleanup": {
     "test_clients_stopped": true,
     "test_daemons_stopped": true,
+    "input_daemons_stopped": true,
     "workspace_3_empty": true,
     "original_focus_restored": true,
     "cursor_restored": true,
     "monitor_workspaces_restored": true,
+    "input_method_restored": "keyboard-us",
     "system_package_altered_files": 0,
     "unrelated_daemons_preserved": true
   }
