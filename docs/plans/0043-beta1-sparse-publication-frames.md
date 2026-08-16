@@ -491,6 +491,41 @@ retained under
 Plan 0043 cannot proceed to final release review or integration until this
 measured daemon retention class is corrected and the graphical gate is rerun.
 
+### Paced daemon diagnosis — 2026-08-16
+
+A matched renderer-free production-socket profile exercised the identical test
+source, workload, real 33 ms daemon cadence, final-marker condition, and resync
+rejection on integrated Plan 0042 and Plan 0043. The existing production-socket
+reconstruction regression separately proves exact final state and zero resync.
+Heaptrack measured a Plan 0042 heap peak of 3.64 MiB and a Plan 0043 peak of
+7.86 MiB. Both leaked only 62.22 KiB. Plan 0043 attributed 6.70 MiB, or 85.2%
+of its peak, to allocations rooted at `SparsePublicationFrame::capture`;
+materialization and compact-to-live conversion contributed only about 0.10 MiB
+and 0.12 MiB at peak.
+
+The supported conclusion is deliberately bounded: sparse capture creates the
+additional live heap peak and is the leading source to remove before the
+next graphical run. Equal leak totals exclude a differential retained-allocation
+leak. Because the profile does not sample live heap at the exact post-drain RSS
+timestamp, allocator page retention is a plausible correlation rather than a
+proven cause of every byte in the graphical plateau. Moving capture ownership
+and widening only the frame-count or per-chunk byte sealing spans each improved
+the diagnostic median by at most 1.3 MiB and were rejected.
+
+The next bounded implementation must avoid allocating a complete successor
+sparse frame before merge. After admission and complete prevalidation, it should
+compose successor damage directly into one reusable mailbox-tail representation,
+reuse visible/history row buffers, keep ordered updates separately, and preserve
+one count lease per producer frame, exact semantic-byte consolidation,
+continuity, exit precedence, and fail-closed resync. This is an ownership-shape
+change, not authorization for an allocator, renderer, protocol, or admission
+ceiling change. Diagnostic harness patches, plain peak attribution, compressed
+heaptrack traces and reports, logs, summaries, and checksums are retained under
+`docs/benchmarks/artifacts/2026-08-16-plan0043-paced-daemon-diagnosis/`.
+Fresh read-only review `dbd49ebd` initially blocked on harness parity and causal
+overstatement; corrected matched evidence and bounded wording received a CLEAN
+follow-up from `2c5f9be7`.
+
 ## Review and stop-loss
 
 Use one writer for the implementation worktree. Require one fresh read-only
