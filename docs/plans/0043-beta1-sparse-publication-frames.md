@@ -1,6 +1,6 @@
 # Plan 0043: Beta1 sparse terminal publication frames
 
-- **Status:** Milestone 3 accepted headlessly; graphical and final release gates pending
+- **Status:** Graphical aggregate retention gate failed; daemon follow-up required
 - **Date:** 2026-08-15
 - **Release decision:** Do not tag `0.1.0-beta.1` until this plan passes its
   non-graphical, graphical, review, integration, and release gates
@@ -461,6 +461,35 @@ and fresh read-only review:
 
 Restore focus, workspace, monitor, package state, runtime processes, and test
 artifacts as declared by the approved sequence.
+
+### Graphical gate result — 2026-08-16
+
+The separately approved guarded sequence used workspace 8 / DP-2, preserved the
+original Foot focus on workspace 1 / DP-1, and launched only isolated exact
+binary sets. The commit-`0a56dbe` 500-line smoke passed. The subsequent seed-4304
+matrix completed two warmups and ten measured 5,000-line mixed/ANSI/Unicode
+samples per variant with zero isolation or cleanup failure.
+
+| Variant | Application RSS growth | PSS growth | Private-anon growth | Daemon RSS growth | Client RSS growth | Marker latency | CPU ticks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Packaged Alpha3.3 | 28.66 MiB | 12.11 MiB | 10.87 MiB | 6.70 MiB | 21.95 MiB | 373.66 ms | 22.5 |
+| Integrated Plan 0042 | 28.76 MiB | 12.36 MiB | 11.14 MiB | 6.75 MiB | 21.99 MiB | 369.12 ms | 21.5 |
+| Plan 0043 candidate | 36.27 MiB | 19.69 MiB | 18.43 MiB | 14.57 MiB | 21.68 MiB | 379.63 ms | 23.0 |
+
+Execution was valid, but acceptance failed. Candidate application RSS growth was
+26.55% worse than Alpha3.3 and 26.09% worse than integrated Plan 0042. Client
+retention slightly improved; the entire material regression is daemon-side.
+Foot, Kitty, and Ghostty comparators were therefore skipped exactly as approved,
+because their gate required Splinterm to pass aggregate retention first.
+
+All test windows and isolated processes were removed. Workspace 8 is empty,
+unrelated client addresses are unchanged, original focus is restored, and
+`pacman -Qkk splinterm` reports 56 files with 0 alterations. Exact binaries,
+raw records, randomized order, smoke, cleanup state, summaries, and checksums are
+retained under
+`docs/benchmarks/artifacts/2026-08-16-plan0043-packaged-graphical/`.
+Plan 0043 cannot proceed to final release review or integration until this
+measured daemon retention class is corrected and the graphical gate is rerun.
 
 ## Review and stop-loss
 
