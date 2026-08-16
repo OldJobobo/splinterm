@@ -15,7 +15,8 @@ use splinterm::{
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{
     AccessGrant, AccessScope, ControlMode, ControlTransferOutcome, ErrorCode, LairAccessGrant,
-    Request, Response, ServerFrame, SubscriptionEvent, TerminalSnapshot, TerminalUpdate,
+    Request, Response, ServerFrame, ServerLimits, SubscriptionEvent, TerminalSnapshot,
+    TerminalUpdate,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use tokio::sync::mpsc;
@@ -959,6 +960,15 @@ pub(in crate::app) fn pane_access_scopes() -> Vec<AccessScope> {
     vec![AccessScope::Observe, AccessScope::Scrollback]
 }
 
+pub(in crate::app) const fn terminal_grid_limits(
+    server_limits: ServerLimits,
+) -> TerminalGridLimits {
+    TerminalGridLimits {
+        maximum_columns: server_limits.maximum_columns,
+        maximum_rows: server_limits.maximum_rows,
+    }
+}
+
 pub(in crate::app) async fn prepare_live_pane(
     factory: &ConnectionFactory,
     config: &AppConfig,
@@ -967,11 +977,7 @@ pub(in crate::app) async fn prepare_live_pane(
     claim_control: bool,
 ) -> Result<PreparedPane> {
     let mut connection = factory.connect().await?;
-    let server_limits = connection.limits();
-    let terminal_grid_limits = TerminalGridLimits {
-        maximum_columns: server_limits.maximum_columns,
-        maximum_rows: server_limits.maximum_rows,
-    };
+    let terminal_grid_limits = terminal_grid_limits(connection.limits());
     let incarnation = connection.live_incarnation(splint_id).await?;
     let scopes = pane_access_scopes();
     if !matches!(
@@ -1352,6 +1358,17 @@ mod tests {
             pane_access_scopes(),
             vec![AccessScope::Observe, AccessScope::Scrollback]
         );
+    }
+
+    #[test]
+    fn endpoint_terminal_limits_preserve_smaller_negotiated_dimensions() {
+        let limits = terminal_grid_limits(ServerLimits {
+            maximum_columns: 120,
+            maximum_rows: 64,
+            ..ServerLimits::default()
+        });
+        assert_eq!(limits.maximum_columns, 120);
+        assert_eq!(limits.maximum_rows, 64);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Plan 0042: Beta1 wide Splint grid
 
-- **Status:** Non-graphical implementation accepted; packaged graphical acceptance pending separate approval
+- **Status:** Non-graphical implementation accepted; packaged graphical acceptance partially passed, with capped-endpoint and IME proof still blocking closure
 - **Date:** 2026-08-14
 - **Product authority:** A maximized Splint uses the complete terminal-cell area
   of validated 1440p and 4K surfaces instead of silently stopping at the legacy
@@ -142,6 +142,24 @@ clippy passes for all targets with warnings denied; formatting and
 `git diff --check` pass. The PTY integration suite requires building the adjacent
 `splinterm-pty-child` helper first. No graphical test, installation, package
 replacement, push, merge, or release action is included in this evidence.
+
+### Packaged graphical partial acceptance
+
+The separately approved 2026-08-15 run used an exact package built from
+`dc8e1165968f66c17dd872bf6153b8eb1681650a` without replacing `/usr/bin`.
+It passed the guarded smoke, exact 2560x1440 fullscreen case at `317x69`,
+right-edge output/cursor/pointer selection, vertical and horizontal pane-local
+grid checks, eight rapid `228 -> 259 -> 228` legacy-ceiling crossings with
+history retained, and a real remote graphical relay at `309x66` while the local
+endpoint remained `259x47`.
+
+Plan 0042 remains open. The temporary capped `120x64` endpoint fixture stopped
+before mapping because it lacked the graphical path's `authorization_status`
+response, Fcitx exposed only `keyboard-us` so no actual IME popup was available,
+and no safe 4K output existed. Cleanup restored the original workspace, exact
+Foot focus, cursor, monitor assignments, and all package state; Pacman reported
+zero altered files. Evidence:
+[packaged graphical partial acceptance](../benchmarks/artifacts/2026-08-15-plan0042-packaged-graphical/summary.md).
 
 ## Confirmed baseline defect
 

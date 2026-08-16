@@ -1,0 +1,66 @@
+{
+  "schema": "splinterm.plan0042.packaged-graphical.v1",
+  "decision": "partial_acceptance",
+  "plan0042_complete": false,
+  "beta1_allowed": false,
+  "source": {
+    "branch": "feat/0042-beta1-wide-splint-grid",
+    "commit": "dc8e1165968f66c17dd872bf6153b8eb1681650a",
+    "package_sha256": "edde0c446aaf842034970aa312a1306a0a6d0d2f8626d2c6d973b834ca1ca2a2",
+    "splinterm_sha256": "9e114026843acb4cb6cb6b818e95a6f8bb4c5d0d55efa41814a1a9e273ee9304",
+    "splinterd_sha256": "da212f39741691b59228c19fcced291faabfde5a3780215bf0b0dfb00b3b4764"
+  },
+  "environment": {
+    "workspace": 3,
+    "monitor": "DP-1",
+    "width": 2560,
+    "height": 1440,
+    "scale": 1,
+    "transform": 0,
+    "graphical_4k_available": false,
+    "ime": "keyboard-us"
+  },
+  "passed": {
+    "packaged_smoke": true,
+    "fullscreen_1440p": true,
+    "fullscreen_grid": [317, 69],
+    "right_edge_output": true,
+    "right_edge_cursor": true,
+    "right_edge_pointer_selection": true,
+    "vertical_split_grids": [[317, 33], [317, 33]],
+    "mixed_split_grids": [[317, 33], [156, 33], [156, 33]],
+    "legacy_ceiling_crossing": {
+      "cycles": 8,
+      "low_columns": 228,
+      "high_columns": 259,
+      "history_retained": true,
+      "resync_loop_observed": false
+    },
+    "remote_graphical": {
+      "passed": true,
+      "remote_grid": [309, 66],
+      "local_grid_unchanged": [259, 47]
+    }
+  },
+  "open": {
+    "synthetic_capped_endpoint": {
+      "passed": false,
+      "advertised_limits": [120, 64],
+      "mapped": false,
+      "last_request": "authorization_status",
+      "classification": "temporary fixture incomplete"
+    },
+    "ime_popup_placement": "not run; no non-keyboard IME available",
+    "graphical_4k": "not run; no safe 4K output"
+  },
+  "cleanup": {
+    "test_clients_stopped": true,
+    "test_daemons_stopped": true,
+    "workspace_3_empty": true,
+    "original_focus_restored": true,
+    "cursor_restored": true,
+    "monitor_workspaces_restored": true,
+    "system_package_altered_files": 0,
+    "unrelated_daemons_preserved": true
+  }
+}

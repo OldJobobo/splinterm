@@ -384,6 +384,146 @@ async fn interactive_requests_preserve_exact_controller_and_terminal_identity() 
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture scenario proves the complete graphical pane handshake"
+)]
+async fn capped_graphical_fixture_supports_the_complete_pane_handshake() {
+    let directory = test_directory("graphical-capped");
+    let session = session(&directory, "graphical-capped").await;
+    let mut connection = session.connect_interactive().await.unwrap();
+    let splint_id: SplintId = "ffffffff-ffff-4fff-8fff-ffffffffffff".parse().unwrap();
+
+    assert_eq!(connection.limits().maximum_columns, 120);
+    assert_eq!(connection.limits().maximum_rows, 64);
+    let Response::Lairs { lairs, .. } = connection.request(Request::ListLairs).await.unwrap()
+    else {
+        panic!("capped fixture did not return topology");
+    };
+    assert_eq!(lairs.len(), 1);
+    assert_eq!(lairs[0].dojos[0].default_focus, splint_id);
+    assert!(matches!(
+        connection
+            .request(Request::InspectSplint { splint_id })
+            .await
+            .unwrap(),
+        Response::Splint { runtime, .. }
+            if runtime.splint_id == splint_id && runtime.live_incarnation == Some(1)
+    ));
+
+    let scopes = vec![
+        AccessScope::Observe,
+        AccessScope::Scrollback,
+        AccessScope::Input,
+        AccessScope::Resize,
+    ];
+    assert!(matches!(
+        connection
+            .request(Request::RequestAccess {
+                splint_id,
+                incarnation: 1,
+                scopes: scopes.clone(),
+            })
+            .await
+            .unwrap(),
+        Response::AccessGranted { grant, .. } if grant.scopes == scopes
+    ));
+    assert!(matches!(
+        connection
+            .request(Request::AuthorizationStatus {
+                splint_id,
+                incarnation: Some(1),
+            })
+            .await
+            .unwrap(),
+        Response::AuthorizationStatus { grants, .. }
+            if grants.len() == 1 && grants[0].splint_id == splint_id
+    ));
+
+    let Response::Attached {
+        subscription_id,
+        snapshot,
+        ..
+    } = connection
+        .request(Request::Attach {
+            splint_id,
+            incarnation: Some(1),
+            scrollback_rows: 16,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("capped fixture did not attach");
+    };
+    assert_eq!((snapshot.columns, snapshot.rows), (120, 64));
+    assert_eq!((snapshot.cursor_column, snapshot.cursor_row), (119, 10));
+    assert_eq!(snapshot.visible_rows.len(), 64);
+    snapshot.validate().unwrap();
+
+    let controller_id = connection
+        .acquire_control(splint_id, 1, vec![ControlMode::Input, ControlMode::Resize])
+        .await
+        .unwrap();
+    assert!(matches!(
+        connection
+            .request(Request::SubscribeControl {
+                splint_id,
+                incarnation: 1,
+            })
+            .await
+            .unwrap(),
+        Response::ControlSubscribed { status, .. } if status.splint_id == splint_id
+    ));
+    assert!(matches!(
+        connection
+            .request(Request::Resize {
+                controller_id,
+                splint_id,
+                incarnation: 1,
+                columns: 120,
+                rows: 64,
+                pixel_width: 960,
+                pixel_height: 1024,
+            })
+            .await
+            .unwrap(),
+        Response::TerminalActionAcknowledged { splint_id: acknowledged, .. }
+            if acknowledged == splint_id
+    ));
+    connection.release_control(controller_id).await.unwrap();
+    assert!(matches!(
+        connection
+            .request(Request::Detach { subscription_id })
+            .await
+            .unwrap(),
+        Response::Acknowledged
+    ));
+
+    drop(connection);
+    drop(session);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let requests = fs::read_to_string(directory.join("requests.jsonl")).unwrap();
+    for request_type in [
+        "list_lairs",
+        "inspect_splint",
+        "request_access",
+        "authorization_status",
+        "attach",
+        "acquire_control",
+        "subscribe_control",
+        "resize",
+        "release_control",
+        "detach",
+    ] {
+        assert!(
+            requests.contains(&format!("\"type\":\"{request_type}\"")),
+            "fixture did not record {request_type}"
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
 async fn read_only_pane_access_succeeds_without_interactive_scopes() {
     let directory = test_directory("read-only-pane");
     let session = session(&directory, "read-only-pane").await;
