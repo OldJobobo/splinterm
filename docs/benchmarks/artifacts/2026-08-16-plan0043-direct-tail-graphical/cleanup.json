@@ -1,0 +1,21 @@
+{
+  "active": {
+    "address": "0x55d2ce51b5d0",
+    "class": "vesktop",
+    "monitor": 2,
+    "pid": 1367564,
+    "title": "(79) Discord | #omarchy-custom-configs | Omacom",
+    "workspace": {
+      "id": 6,
+      "name": "6"
+    }
+  },
+  "original_focus_restored": true,
+  "owned_processes_remaining": [],
+  "package_integrity": "splinterm: 56 total files, 0 altered files",
+  "schema": "splinterm.plan0043.direct-tail-graphical-cleanup.v1",
+  "temporary_targets_removed": true,
+  "temporary_worktree_removed": true,
+  "workspace_8_clients": [],
+  "workspace_8_empty": true
+}

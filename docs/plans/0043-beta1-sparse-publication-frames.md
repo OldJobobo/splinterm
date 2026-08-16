@@ -569,8 +569,44 @@ formatting, and `git diff --check` passed. Raw records, exact binary identities,
 rejected intermediate shapes, summaries, and checksums are retained under
 `docs/benchmarks/artifacts/2026-08-16-plan0043-direct-tail-candidate/`.
 This is headless acceptance only. Fresh read-only review `42a73b1e` returned
-**CLEAN**. The graphical aggregate gate remains failed until the exact committed
-candidate passes a separately approved rerun.
+**CLEAN**.
+
+### Reusable direct-tail graphical rerun — 2026-08-16
+
+The separately approved guarded rerun tested exact commit `2c5ac9f` on isolated
+workspace 8 / DP-2. The candidate smoke passed, followed by the seed-4304 matrix
+with two warmups and ten measured 5,000-line cases per Alpha3.3, integrated Plan
+0042, and candidate variant. All 36 records were valid and cleanup-verified.
+
+| Variant | Application RSS | PSS | Private-anon | Daemon RSS | Client RSS | Marker latency | CPU ticks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Alpha3.3 | 28.78 MiB | 12.30 MiB | 11.11 MiB | 6.78 MiB | 22.07 MiB | 369.85 ms | 22.0 |
+| Integrated Plan 0042 | 29.03 MiB | 12.46 MiB | 11.20 MiB | 6.76 MiB | 22.22 MiB | 367.30 ms | 21.0 |
+| Reusable direct tail | 29.01 MiB | 12.50 MiB | 11.31 MiB | 6.79 MiB | 22.28 MiB | 370.91 ms | 21.5 |
+
+The prior daemon regression is corrected: candidate application RSS is 0.05%
+below integrated Plan 0042, and daemon RSS is only 0.32% above it. Candidate
+latency is 0.98% slower and CPU differs by half a tick. The approved
+Foot/Kitty/Ghostty comparator block therefore ran; all 36 comparator records were
+also valid and cleanup-verified.
+
+Fresh final release review `2c5dc855` returned **BLOCKED**. Packaged
+Alpha3.3, not integrated Plan 0042, is the exact release control. Candidate
+application RSS is 0.80% above Alpha3.3, so it does not satisfy the unqualified
+“below” gate. Candidate client RSS/PSS/private-anonymous are also above
+Alpha3.3, violating the unqualified “no worse” gate. Overlapping ranges cannot
+supply a tolerance the plan does not define. The comparator block was
+operationally valid and cleanup-verified, but it ran before this baseline
+interpretation was corrected and cannot count as release acceptance evidence.
+The minimum next action is one newly authorized, bounded, attributed retention
+correction followed by a fresh three-variant graphical matrix.
+
+All test windows and isolated processes were removed, the original Vesktop focus
+on workspace 6 / DP-3 was preserved, workspace 8 is empty, temporary builds were
+removed, and Pacman reports 56 package files with 0 alterations. Raw records,
+randomized order, exact binary hashes, summaries, comparator data, cleanup state,
+and checksums are retained under
+`docs/benchmarks/artifacts/2026-08-16-plan0043-direct-tail-graphical/`.
 
 ## Review and stop-loss
 

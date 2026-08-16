@@ -1,0 +1,161 @@
+{
+  "acceptance": "BLOCKED",
+  "candidate_commit": "2c5ac9f87629287e1481afe436aab9f2c9650af1",
+  "cleanup_verified": true,
+  "comparators": {
+    "foot": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 4259840,
+        "median": 4098048.0,
+        "minimum": 3874816
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 5245952,
+        "median": 5059072.0,
+        "minimum": 4851712
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 16121856,
+        "median": 15910912.0,
+        "minimum": 15683584
+      },
+      "context_switches": {
+        "maximum": 99,
+        "median": 68.0,
+        "minimum": 48
+      },
+      "cpu_ticks": {
+        "maximum": 4,
+        "median": 2.0,
+        "minimum": 0
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 189473120,
+        "median": 177145948.0,
+        "minimum": 174926922
+      }
+    },
+    "ghostty": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 4526080,
+        "median": 3762176.0,
+        "minimum": 3141632
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 6543360,
+        "median": 5784576.0,
+        "minimum": 5109760
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 16977920,
+        "median": 16203776.0,
+        "minimum": 15544320
+      },
+      "context_switches": {
+        "maximum": 156,
+        "median": 148.5,
+        "minimum": 140
+      },
+      "cpu_ticks": {
+        "maximum": 5,
+        "median": 5.0,
+        "minimum": 3
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 189923827,
+        "median": 186521867.0,
+        "minimum": 178189034
+      }
+    },
+    "kitty": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 9494528,
+        "median": 8347648.0,
+        "minimum": 8310784
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 11095040,
+        "median": 9946112.0,
+        "minimum": 9841664
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 24793088,
+        "median": 23635968.0,
+        "minimum": 23547904
+      },
+      "context_switches": {
+        "maximum": 34,
+        "median": 27.5,
+        "minimum": 23
+      },
+      "cpu_ticks": {
+        "maximum": 4,
+        "median": 2.0,
+        "minimum": 2
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 202133615,
+        "median": 194054589.0,
+        "minimum": 188195941
+      }
+    }
+  },
+  "comparisons_percent": {
+    "candidate_application_rss_vs_alpha3.3": 0.8008143875127248,
+    "candidate_application_rss_vs_plan0042": -0.05383217818450979,
+    "candidate_client_private_anon_vs_alpha3.3": 2.975133214920071,
+    "candidate_client_private_anon_vs_plan0042": 2.6560424966799467,
+    "candidate_client_pss_vs_alpha3.3": 2.5277704889355377,
+    "candidate_client_pss_vs_plan0042": 1.7093275488069415,
+    "candidate_client_rss_vs_alpha3.3": 0.9647725261108161,
+    "candidate_client_rss_vs_plan0042": 0.2636899006768041,
+    "candidate_daemon_rss_vs_plan0042": 0.3466204506065858
+  },
+  "execution_valid": true,
+  "gate_note": "The prior large daemon regression is corrected, but packaged Alpha3.3 is the exact release control. Candidate aggregate RSS is 0.80% above Alpha3.3, so the strict below-control gate fails. Comparator execution was valid but occurred before this baseline interpretation was corrected and cannot count as release acceptance evidence.",
+  "review": {
+    "blocker": "Packaged Alpha3.3 is the exact release control. Candidate aggregate RSS is 0.80% above it, and client retained growth is also above it; unqualified below/no-worse gates fail.",
+    "minimum_action": "One bounded attributed retention correction and a new three-variant graphical matrix before integration.",
+    "run": "2c5dc855",
+    "verdict": "BLOCKED"
+  },
+  "samples_per_variant": 10,
+  "schema": "splinterm.plan0043.direct-tail-graphical-acceptance.v1",
+  "seed": 4304,
+  "splinterm": {
+    "alpha3.3": {
+      "application_private_anon_mib": 11.11328125,
+      "application_pss_mib": 12.29541015625,
+      "application_rss_mib": 28.779296875,
+      "client_private_anon_mib": 4.3984375,
+      "client_pss_mib": 5.58251953125,
+      "client_rss_mib": 22.06640625,
+      "cpu_ticks": 22.0,
+      "daemon_rss_mib": 6.783203125,
+      "marker_latency_ms": 369.848002
+    },
+    "plan0042": {
+      "application_private_anon_mib": 11.197265625,
+      "application_pss_mib": 12.45654296875,
+      "application_rss_mib": 29.025390625,
+      "client_private_anon_mib": 4.412109375,
+      "client_pss_mib": 5.62744140625,
+      "client_rss_mib": 22.220703125,
+      "cpu_ticks": 21.0,
+      "daemon_rss_mib": 6.76171875,
+      "marker_latency_ms": 367.299538
+    },
+    "plan0043": {
+      "application_private_anon_mib": 11.30859375,
+      "application_pss_mib": 12.4951171875,
+      "application_rss_mib": 29.009765625,
+      "client_private_anon_mib": 4.529296875,
+      "client_pss_mib": 5.7236328125,
+      "client_rss_mib": 22.279296875,
+      "cpu_ticks": 21.5,
+      "daemon_rss_mib": 6.78515625,
+      "marker_latency_ms": 370.907937
+    }
+  },
+  "warmups_per_variant": 2
+}
