@@ -18,6 +18,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use splinterm_protocol::{MAX_COLUMNS, MAX_ROWS};
 
 use crate::{
     geometry::{FontSize, FontSizingPolicy, TerminalPadding},
@@ -305,11 +306,11 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 false
             }
             "main.initial-columns" => {
-                config.initial_columns = parse_range(value, 2, 240, index)?;
+                config.initial_columns = parse_range(value, 2, MAX_COLUMNS, index)?;
                 false
             }
             "main.initial-rows" => {
-                config.initial_rows = parse_range(value, 2, 80, index)?;
+                config.initial_rows = parse_range(value, 2, MAX_ROWS, index)?;
                 false
             }
             "main.shell" | "shell" => {
@@ -995,6 +996,16 @@ mod tests {
                 .any(|line| line.contains("font-size is deprecated"))
         );
     }
+
+    #[test]
+    fn initial_grid_accepts_protocol_maxima_and_rejects_larger_values() {
+        let loaded = parse("[main]\ninitial-columns=480\ninitial-rows=128\n").unwrap();
+        assert_eq!(loaded.config.initial_columns, MAX_COLUMNS);
+        assert_eq!(loaded.config.initial_rows, MAX_ROWS);
+        assert!(parse("[main]\ninitial-columns=481\n").is_err());
+        assert!(parse("[main]\ninitial-rows=129\n").is_err());
+    }
+
     #[test]
     fn geometry_font_units_and_padding_are_explicit() {
         let loaded = parse(

@@ -435,6 +435,8 @@ pub struct WindowGeometry {
     pub visible_grid_rect: Rect,
     pub residual_right: u32,
     pub residual_bottom: u32,
+    pub column_capped: bool,
+    pub row_capped: bool,
     pub residual_policy: ResidualPolicy,
 }
 
@@ -513,6 +515,8 @@ impl WindowGeometry {
             columns,
             rows,
             base,
+            false,
+            false,
         )
     }
 
@@ -542,6 +546,8 @@ impl WindowGeometry {
             columns,
             rows,
             base,
+            false,
+            false,
         )
     }
 
@@ -580,8 +586,10 @@ impl WindowGeometry {
         };
         let usable_width = buffer_width - base.left - base.right;
         let usable_height = buffer_height - base.top - base.bottom;
-        let columns = (usable_width / cell.width).min(max_columns);
-        let rows = (usable_height / cell.height).min(max_rows);
+        let natural_columns = usable_width / cell.width;
+        let natural_rows = usable_height / cell.height;
+        let columns = natural_columns.min(max_columns);
+        let rows = natural_rows.min(max_rows);
         debug_assert!(columns >= 2 && rows >= 2);
         Self::from_parts(
             logical_width,
@@ -592,6 +600,8 @@ impl WindowGeometry {
             columns,
             rows,
             base,
+            natural_columns > max_columns,
+            natural_rows > max_rows,
         )
     }
 
@@ -604,6 +614,8 @@ impl WindowGeometry {
         columns: u32,
         rows: u32,
         effective_base_padding: BufferPadding,
+        column_capped: bool,
+        row_capped: bool,
     ) -> Result<Self> {
         let surface = SurfaceGeometry::new(logical_width, logical_height, surface_scale_120)?;
         let buffer_width = surface.buffer_size.width.get();
@@ -653,6 +665,8 @@ impl WindowGeometry {
             visible_grid_rect: grid_rect,
             residual_right,
             residual_bottom,
+            column_capped,
+            row_capped,
             residual_policy: ResidualPolicy::TrailingEdges,
         })
     }
