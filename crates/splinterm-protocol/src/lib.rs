@@ -7,14 +7,21 @@ pub mod perf_trace;
 
 use std::path::{Path, PathBuf};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use splinterm_core::{
     Axis, DojoId, Lair, LairId, LairRetention, SplintId, SplitRatio, SplitSide, Topology,
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 34;
-pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub const PROTOCOL_VERSION: u16 = 35;
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_TERMINAL_TRANSACTION_CHUNK_BASE64_BYTES: usize =
+    4 * MAX_TERMINAL_TRANSACTION_CHUNK_BYTES.div_ceil(3);
+pub const MAX_TERMINAL_TRANSACTION_CHUNKS: usize =
+    MAX_TERMINAL_TRANSACTION_BYTES / MAX_TERMINAL_TRANSACTION_CHUNK_BYTES;
 pub const MAX_SNAPSHOT_SCROLLBACK_ROWS: usize = 16;
 pub const MAX_SCROLLBACK_PAGE_ROWS: usize = 16;
 pub const MAX_SEARCH_QUERY_BYTES: usize = 256;
@@ -34,8 +41,9 @@ pub const MAX_PRESET_DIRECTORY_IDENTITIES: usize = 32;
 pub const MAX_PRESET_DEPTH: usize = 32;
 pub const MAX_PRESET_KEY_BYTES: usize = 64;
 pub const MAX_PRESET_LABEL_BYTES: usize = 128;
-pub const MAX_COLUMNS: u16 = 240;
-pub const MAX_ROWS: u16 = 80;
+pub const MAX_COLUMNS: u16 = 480;
+pub const MAX_ROWS: u16 = 128;
+pub const MAX_GRID_CELLS: usize = MAX_COLUMNS as usize * MAX_ROWS as usize;
 pub const MAX_OUTSTANDING_REQUESTS: usize = 1;
 pub const MAX_SUBSCRIPTIONS: usize = 4;
 pub const MAX_UPDATE_ROW_PATCHES: usize = MAX_ROWS as usize;
@@ -162,6 +170,14 @@ pub enum ServerFrame {
         request_id: Option<u64>,
         error: ProtocolError,
     },
+    TerminalTransactionStart {
+        total_bytes: usize,
+        chunks: usize,
+    },
+    TerminalTransactionChunk {
+        index: usize,
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +243,32 @@ impl Default for ServerLimits {
             maximum_snapshot_scrollback_rows: MAX_SNAPSHOT_SCROLLBACK_ROWS,
             image: ImageServerCapabilities::default(),
         }
+    }
+}
+
+impl ServerLimits {
+    /// Validates the exact-version terminal transport envelope before a client
+    /// uses any advertised dimensions or frame budget.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` when the fixed frame limit or endpoint-local
+    /// grid bounds are outside the protocol's absolute envelope.
+    pub fn validate_terminal_transport(self) -> Result<(), ProtocolError> {
+        if self.maximum_frame_bytes != MAX_FRAME_BYTES {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "server frame limit does not match the protocol version",
+            ));
+        }
+        if !(2..=MAX_COLUMNS).contains(&self.maximum_columns)
+            || !(2..=MAX_ROWS).contains(&self.maximum_rows)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "server terminal dimensions exceed protocol limits",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -2502,30 +2544,6 @@ pub enum UnderlineStyle {
     clippy::trivially_copy_pass_by_ref,
     reason = "serde skip predicate receives a reference"
 )]
-fn underline_is_none(style: &UnderlineStyle) -> bool {
-    *style == UnderlineStyle::None
-}
-
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde skip predicate receives a reference"
-)]
-fn color_source_is_default(source: &ColorSource) -> bool {
-    *source == ColorSource::Default
-}
-
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde skip predicate receives a reference"
-)]
-fn color_value_is_zero(value: &u32) -> bool {
-    *value == 0
-}
-
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde skip predicate receives a reference"
-)]
 fn bool_is_false(value: &bool) -> bool {
     !*value
 }
@@ -2538,35 +2556,21 @@ fn cell_attributes_are_default(attributes: &CellAttributes) -> bool {
     clippy::struct_excessive_bools,
     reason = "wire rendition flags are independent terminal semantics"
 )]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CellAttributes {
-    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub bold: bool,
-    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub dim: bool,
-    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub italic: bool,
-    #[serde(default, skip_serializing_if = "underline_is_none")]
     pub underline: UnderlineStyle,
-    #[serde(default, skip_serializing_if = "color_source_is_default")]
     pub underline_color_source: ColorSource,
-    #[serde(default, skip_serializing_if = "color_value_is_zero")]
     pub underline_color: u32,
-    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub strikethrough: bool,
-    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub blink: bool,
-    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub conceal: bool,
-    #[serde(default, skip_serializing_if = "bool_is_false")]
     pub reverse: bool,
-    #[serde(default, skip_serializing_if = "color_source_is_default")]
     pub foreground_source: ColorSource,
-    #[serde(default, skip_serializing_if = "color_value_is_zero")]
     pub foreground: u32,
-    #[serde(default, skip_serializing_if = "color_source_is_default")]
     pub background_source: ColorSource,
-    #[serde(default, skip_serializing_if = "color_value_is_zero")]
     pub background: u32,
 }
 
@@ -2578,6 +2582,139 @@ pub enum ColorSource {
     Base16,
     Base256,
     Rgb,
+}
+
+const CELL_ATTRIBUTE_FLAG_BOLD: u8 = 1 << 0;
+const CELL_ATTRIBUTE_FLAG_DIM: u8 = 1 << 1;
+const CELL_ATTRIBUTE_FLAG_ITALIC: u8 = 1 << 2;
+const CELL_ATTRIBUTE_FLAG_STRIKETHROUGH: u8 = 1 << 3;
+const CELL_ATTRIBUTE_FLAG_BLINK: u8 = 1 << 4;
+const CELL_ATTRIBUTE_FLAG_CONCEAL: u8 = 1 << 5;
+const CELL_ATTRIBUTE_FLAG_REVERSE: u8 = 1 << 6;
+const CELL_ATTRIBUTE_KNOWN_FLAGS: u8 = CELL_ATTRIBUTE_FLAG_BOLD
+    | CELL_ATTRIBUTE_FLAG_DIM
+    | CELL_ATTRIBUTE_FLAG_ITALIC
+    | CELL_ATTRIBUTE_FLAG_STRIKETHROUGH
+    | CELL_ATTRIBUTE_FLAG_BLINK
+    | CELL_ATTRIBUTE_FLAG_CONCEAL
+    | CELL_ATTRIBUTE_FLAG_REVERSE;
+
+type WireCellAttributes = (u8, u8, u8, u32, u8, u32, u8, u32);
+
+impl Serialize for CellAttributes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut flags = 0;
+        flags |= u8::from(self.bold) * CELL_ATTRIBUTE_FLAG_BOLD;
+        flags |= u8::from(self.dim) * CELL_ATTRIBUTE_FLAG_DIM;
+        flags |= u8::from(self.italic) * CELL_ATTRIBUTE_FLAG_ITALIC;
+        flags |= u8::from(self.strikethrough) * CELL_ATTRIBUTE_FLAG_STRIKETHROUGH;
+        flags |= u8::from(self.blink) * CELL_ATTRIBUTE_FLAG_BLINK;
+        flags |= u8::from(self.conceal) * CELL_ATTRIBUTE_FLAG_CONCEAL;
+        flags |= u8::from(self.reverse) * CELL_ATTRIBUTE_FLAG_REVERSE;
+        (
+            flags,
+            underline_style_to_wire(self.underline),
+            color_source_to_wire(self.underline_color_source),
+            self.underline_color,
+            color_source_to_wire(self.foreground_source),
+            self.foreground,
+            color_source_to_wire(self.background_source),
+            self.background,
+        )
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CellAttributes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let (
+            flags,
+            underline,
+            underline_source,
+            underline_color,
+            foreground_source,
+            foreground,
+            background_source,
+            background,
+        ) = WireCellAttributes::deserialize(deserializer)?;
+        if flags & !CELL_ATTRIBUTE_KNOWN_FLAGS != 0 {
+            return Err(serde::de::Error::custom(
+                "terminal cell attributes contain unknown flags",
+            ));
+        }
+        Ok(Self {
+            bold: flags & CELL_ATTRIBUTE_FLAG_BOLD != 0,
+            dim: flags & CELL_ATTRIBUTE_FLAG_DIM != 0,
+            italic: flags & CELL_ATTRIBUTE_FLAG_ITALIC != 0,
+            underline: underline_style_from_wire(underline).ok_or_else(|| {
+                serde::de::Error::custom("terminal cell underline style is invalid")
+            })?,
+            underline_color_source: color_source_from_wire(underline_source).ok_or_else(|| {
+                serde::de::Error::custom("terminal cell underline color source is invalid")
+            })?,
+            underline_color,
+            strikethrough: flags & CELL_ATTRIBUTE_FLAG_STRIKETHROUGH != 0,
+            blink: flags & CELL_ATTRIBUTE_FLAG_BLINK != 0,
+            conceal: flags & CELL_ATTRIBUTE_FLAG_CONCEAL != 0,
+            reverse: flags & CELL_ATTRIBUTE_FLAG_REVERSE != 0,
+            foreground_source: color_source_from_wire(foreground_source).ok_or_else(|| {
+                serde::de::Error::custom("terminal cell foreground source is invalid")
+            })?,
+            foreground,
+            background_source: color_source_from_wire(background_source).ok_or_else(|| {
+                serde::de::Error::custom("terminal cell background source is invalid")
+            })?,
+            background,
+        })
+    }
+}
+
+const fn underline_style_to_wire(style: UnderlineStyle) -> u8 {
+    match style {
+        UnderlineStyle::None => 0,
+        UnderlineStyle::Single => 1,
+        UnderlineStyle::Double => 2,
+        UnderlineStyle::Curly => 3,
+        UnderlineStyle::Dotted => 4,
+        UnderlineStyle::Dashed => 5,
+    }
+}
+
+const fn underline_style_from_wire(value: u8) -> Option<UnderlineStyle> {
+    match value {
+        0 => Some(UnderlineStyle::None),
+        1 => Some(UnderlineStyle::Single),
+        2 => Some(UnderlineStyle::Double),
+        3 => Some(UnderlineStyle::Curly),
+        4 => Some(UnderlineStyle::Dotted),
+        5 => Some(UnderlineStyle::Dashed),
+        _ => None,
+    }
+}
+
+const fn color_source_to_wire(source: ColorSource) -> u8 {
+    match source {
+        ColorSource::Default => 0,
+        ColorSource::Base16 => 1,
+        ColorSource::Base256 => 2,
+        ColorSource::Rgb => 3,
+    }
+}
+
+const fn color_source_from_wire(value: u8) -> Option<ColorSource> {
+    match value {
+        0 => Some(ColorSource::Default),
+        1 => Some(ColorSource::Base16),
+        2 => Some(ColorSource::Base256),
+        3 => Some(ColorSource::Rgb),
+        _ => None,
+    }
 }
 
 /// Encodes one bounded JSON frame with a network-order 32-bit length prefix.
@@ -2603,6 +2740,185 @@ pub enum FrameEncodeError {
     TooLarge,
     #[error("frame serialization failed")]
     Serialize(#[source] serde_json::Error),
+}
+
+fn terminal_frame_transaction_eligible(value: &ServerFrame) -> bool {
+    matches!(
+        value,
+        ServerFrame::Response {
+            result: Response::Attached { .. },
+            ..
+        } | ServerFrame::Event {
+            event: SubscriptionEvent::Snapshot { .. } | SubscriptionEvent::Update { .. },
+            ..
+        }
+    )
+}
+
+/// Encodes one server frame directly or as one bounded, contiguous terminal
+/// transaction when its exact JSON body exceeds the individual frame limit.
+///
+/// # Errors
+/// Returns `TooLarge` when the complete body exceeds the aggregate transaction
+/// ceiling, or `Serialize` when the server frame cannot be encoded.
+pub fn encode_server_frame_transaction(
+    value: &ServerFrame,
+) -> Result<Vec<Vec<u8>>, FrameEncodeError> {
+    let body = serde_json::to_vec(value).map_err(FrameEncodeError::Serialize)?;
+    if body.len() <= MAX_FRAME_BYTES {
+        return encode_frame(value).map(|frame| vec![frame]);
+    }
+    if !terminal_frame_transaction_eligible(value) || body.len() > MAX_TERMINAL_TRANSACTION_BYTES {
+        return Err(FrameEncodeError::TooLarge);
+    }
+    let chunks = body.len().div_ceil(MAX_TERMINAL_TRANSACTION_CHUNK_BYTES);
+    if !(2..=MAX_TERMINAL_TRANSACTION_CHUNKS).contains(&chunks) {
+        return Err(FrameEncodeError::TooLarge);
+    }
+    let mut frames = Vec::with_capacity(chunks + 1);
+    frames.push(encode_frame(&ServerFrame::TerminalTransactionStart {
+        total_bytes: body.len(),
+        chunks,
+    })?);
+    for (index, chunk) in body
+        .chunks(MAX_TERMINAL_TRANSACTION_CHUNK_BYTES)
+        .enumerate()
+    {
+        frames.push(encode_frame(&ServerFrame::TerminalTransactionChunk {
+            index,
+            data: BASE64_STANDARD.encode(chunk),
+        })?);
+    }
+    Ok(frames)
+}
+
+#[derive(Debug, Default)]
+pub struct ServerFrameTransactionAssembler {
+    pending: Option<PendingServerFrameTransaction>,
+}
+
+#[derive(Debug)]
+struct PendingServerFrameTransaction {
+    total_bytes: usize,
+    chunks: usize,
+    next_index: usize,
+    body: Vec<u8>,
+}
+
+impl ServerFrameTransactionAssembler {
+    #[must_use]
+    pub const fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Accepts one ordered wire frame and publishes a logical server frame only
+    /// after a complete transaction has been validated and decoded.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` or `ResourceLimit` for nested, interrupted,
+    /// reordered, malformed, or oversized transactions. Any failure discards
+    /// the pending aggregate.
+    pub fn push(&mut self, frame: ServerFrame) -> Result<Option<ServerFrame>, ProtocolError> {
+        let result = self.push_inner(frame);
+        if result.is_err() {
+            self.pending = None;
+        }
+        result
+    }
+
+    fn push_inner(&mut self, frame: ServerFrame) -> Result<Option<ServerFrame>, ProtocolError> {
+        match frame {
+            ServerFrame::TerminalTransactionStart {
+                total_bytes,
+                chunks,
+            } => {
+                if self.pending.is_some()
+                    || !(MAX_FRAME_BYTES + 1..=MAX_TERMINAL_TRANSACTION_BYTES)
+                        .contains(&total_bytes)
+                    || !(2..=MAX_TERMINAL_TRANSACTION_CHUNKS).contains(&chunks)
+                    || total_bytes.div_ceil(MAX_TERMINAL_TRANSACTION_CHUNK_BYTES) != chunks
+                {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal frame transaction start is invalid",
+                    ));
+                }
+                self.pending = Some(PendingServerFrameTransaction {
+                    total_bytes,
+                    chunks,
+                    next_index: 0,
+                    body: Vec::with_capacity(total_bytes),
+                });
+                Ok(None)
+            }
+            ServerFrame::TerminalTransactionChunk { index, data } => {
+                let pending = self.pending.as_mut().ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal frame transaction chunk has no start",
+                    )
+                })?;
+                if index != pending.next_index || index >= pending.chunks {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal frame transaction chunks are out of order",
+                    ));
+                }
+                if data.len() > MAX_TERMINAL_TRANSACTION_CHUNK_BASE64_BYTES {
+                    return Err(ProtocolError::new(
+                        ErrorCode::ResourceLimit,
+                        "terminal frame transaction base64 chunk exceeds limits",
+                    ));
+                }
+                let decoded = BASE64_STANDARD.decode(data).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal frame transaction chunk is not valid base64",
+                    )
+                })?;
+                if decoded.is_empty()
+                    || decoded.len() > MAX_TERMINAL_TRANSACTION_CHUNK_BYTES
+                    || pending.body.len().saturating_add(decoded.len()) > pending.total_bytes
+                {
+                    return Err(ProtocolError::new(
+                        ErrorCode::ResourceLimit,
+                        "terminal frame transaction chunk exceeds limits",
+                    ));
+                }
+                pending.body.extend_from_slice(&decoded);
+                pending.next_index += 1;
+                if pending.next_index < pending.chunks {
+                    return Ok(None);
+                }
+                if pending.body.len() != pending.total_bytes {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal frame transaction length is inconsistent",
+                    ));
+                }
+                let completed = self.pending.take().expect("pending transaction exists");
+                let decoded =
+                    serde_json::from_slice::<ServerFrame>(&completed.body).map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "terminal frame transaction body is invalid",
+                        )
+                    })?;
+                if !terminal_frame_transaction_eligible(&decoded) {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal frame transaction body is not eligible",
+                    ));
+                }
+                Ok(Some(decoded))
+            }
+            _frame if self.pending.is_some() => Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal frame transaction was interrupted",
+            )),
+            frame => Ok(Some(frame)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2639,6 +2955,234 @@ mod tests {
                 .unwrap()
                 .contains("\"role\":\"remote_interactive\"")
         );
+    }
+
+    fn decode_test_server_frame(frame: &[u8]) -> ServerFrame {
+        let length = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+        assert_eq!(length, frame.len() - 4);
+        serde_json::from_slice(&frame[4..]).unwrap()
+    }
+
+    #[test]
+    fn oversized_terminal_frames_use_one_atomic_bounded_transaction() {
+        let mut large = snapshot();
+        large.columns = usize::from(MAX_COLUMNS);
+        large.rows = usize::from(MAX_ROWS);
+        large.visible_rows = (1..=u64::from(MAX_ROWS))
+            .map(|row_id| TerminalRow {
+                row_id: Some(row_id),
+                linebreak: false,
+                cells: vec![
+                    TerminalCell {
+                        content: "x".repeat(300),
+                        spacer_remaining: None,
+                        attributes: CellAttributes::default(),
+                    };
+                    usize::from(MAX_COLUMNS)
+                ],
+            })
+            .collect();
+        large.scrollback_rows.clear();
+        large.available_scrollback_rows = 0;
+        large.omitted_oldest_scrollback_rows = 0;
+        large.oldest_available_scrollback_row_id = None;
+        large.newest_available_scrollback_row_id = None;
+        let logical = ServerFrame::Event {
+            subscription_id: 7,
+            sequence: 9,
+            event: SubscriptionEvent::Snapshot { snapshot: large },
+        };
+        let frames = encode_server_frame_transaction(&logical).unwrap();
+        assert!(frames.len() >= 3);
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.len() - 4 <= MAX_FRAME_BYTES)
+        );
+
+        let mut assembler = ServerFrameTransactionAssembler::default();
+        let mut published = None;
+        for frame in frames {
+            let next = assembler.push(decode_test_server_frame(&frame)).unwrap();
+            assert!(published.is_none());
+            published = next;
+        }
+        assert_eq!(published, Some(logical));
+    }
+
+    #[test]
+    fn oversized_terminal_updates_use_the_same_atomic_transaction_boundary() {
+        let cell = TerminalCell {
+            content: "x".repeat(300),
+            spacer_remaining: None,
+            attributes: CellAttributes::default(),
+        };
+        let mut large = update();
+        large.columns = Some(usize::from(MAX_COLUMNS));
+        large.row_count = Some(usize::from(MAX_ROWS));
+        large.rows = (0..usize::from(MAX_ROWS))
+            .map(|index| TerminalRowPatch {
+                index,
+                row: TerminalRow {
+                    row_id: Some(u64::try_from(index + 1).unwrap()),
+                    linebreak: false,
+                    cells: vec![cell.clone(); usize::from(MAX_COLUMNS)],
+                },
+            })
+            .collect();
+        large
+            .validate_against(
+                large.base_revision,
+                1,
+                usize::from(MAX_COLUMNS),
+                usize::from(MAX_ROWS),
+            )
+            .unwrap();
+        let logical = ServerFrame::Event {
+            subscription_id: 7,
+            sequence: 10,
+            event: SubscriptionEvent::Update { update: large },
+        };
+        let frames = encode_server_frame_transaction(&logical).unwrap();
+        assert!(frames.len() >= 3);
+        let mut assembler = ServerFrameTransactionAssembler::default();
+        let mut published = None;
+        for frame in frames {
+            published = assembler.push(decode_test_server_frame(&frame)).unwrap();
+        }
+        assert_eq!(published, Some(logical));
+    }
+
+    #[test]
+    fn terminal_frame_transactions_fail_closed_on_order_and_interruption() {
+        let start = ServerFrame::TerminalTransactionStart {
+            total_bytes: MAX_FRAME_BYTES + 1,
+            chunks: 3,
+        };
+        let mut assembler = ServerFrameTransactionAssembler::default();
+        assert_eq!(assembler.push(start.clone()).unwrap(), None);
+        assert!(
+            assembler
+                .push(ServerFrame::Response {
+                    request_id: 1,
+                    result: Response::Pong,
+                })
+                .is_err()
+        );
+        assert_eq!(assembler.push(start).unwrap(), None);
+        assert!(
+            assembler
+                .push(ServerFrame::TerminalTransactionChunk {
+                    index: 1,
+                    data: BASE64_STANDARD.encode([1]),
+                })
+                .is_err()
+        );
+        assert_eq!(
+            assembler
+                .push(ServerFrame::Response {
+                    request_id: 1,
+                    result: Response::Pong,
+                })
+                .unwrap(),
+            Some(ServerFrame::Response {
+                request_id: 1,
+                result: Response::Pong,
+            })
+        );
+    }
+
+    #[test]
+    fn terminal_frame_transactions_reject_corrupt_duplicate_and_inconsistent_chunks() {
+        let start = ServerFrame::TerminalTransactionStart {
+            total_bytes: MAX_FRAME_BYTES + 1,
+            chunks: 3,
+        };
+        let chunk = |index, data: &str| ServerFrame::TerminalTransactionChunk {
+            index,
+            data: data.to_owned(),
+        };
+        let mut assembler = ServerFrameTransactionAssembler::default();
+
+        assert_eq!(assembler.push(start.clone()).unwrap(), None);
+        assert!(assembler.push(chunk(0, "not base64")).is_err());
+
+        assert_eq!(assembler.push(start.clone()).unwrap(), None);
+        assert!(
+            assembler
+                .push(chunk(
+                    0,
+                    &"A".repeat(MAX_TERMINAL_TRANSACTION_CHUNK_BASE64_BYTES + 1),
+                ))
+                .is_err()
+        );
+
+        assert_eq!(assembler.push(start.clone()).unwrap(), None);
+        assert_eq!(assembler.push(chunk(0, "AQ==")).unwrap(), None);
+        assert!(assembler.push(chunk(0, "AQ==")).is_err());
+
+        assert_eq!(assembler.push(start).unwrap(), None);
+        assert_eq!(assembler.push(chunk(0, "AQ==")).unwrap(), None);
+        assert_eq!(assembler.push(chunk(1, "AQ==")).unwrap(), None);
+        assert!(assembler.push(chunk(2, "AQ==")).is_err());
+
+        assert!(
+            assembler
+                .push(ServerFrame::TerminalTransactionStart {
+                    total_bytes: MAX_TERMINAL_TRANSACTION_BYTES + 1,
+                    chunks: MAX_TERMINAL_TRANSACTION_CHUNKS + 1,
+                })
+                .is_err()
+        );
+        assert!(!assembler.has_pending());
+    }
+
+    #[test]
+    fn transaction_wrapped_nonterminal_frames_are_rejected_after_reassembly() {
+        let logical = ServerFrame::Response {
+            request_id: 1,
+            result: Response::Pong,
+        };
+        let mut body = serde_json::to_vec(&logical).unwrap();
+        body.resize(MAX_FRAME_BYTES + 1, b' ');
+        let chunks = body.len().div_ceil(MAX_TERMINAL_TRANSACTION_CHUNK_BYTES);
+        let mut assembler = ServerFrameTransactionAssembler::default();
+        assert_eq!(
+            assembler
+                .push(ServerFrame::TerminalTransactionStart {
+                    total_bytes: body.len(),
+                    chunks,
+                })
+                .unwrap(),
+            None
+        );
+        for (index, bytes) in body
+            .chunks(MAX_TERMINAL_TRANSACTION_CHUNK_BYTES)
+            .enumerate()
+        {
+            let result = assembler.push(ServerFrame::TerminalTransactionChunk {
+                index,
+                data: BASE64_STANDARD.encode(bytes),
+            });
+            if index + 1 == chunks {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), None);
+            }
+        }
+        assert!(!assembler.has_pending());
+    }
+
+    #[test]
+    fn nonterminal_frames_cannot_expand_into_aggregate_transactions() {
+        let oversized = ServerFrame::Error {
+            request_id: None,
+            error: ProtocolError::new(ErrorCode::Internal, "x".repeat(MAX_FRAME_BYTES)),
+        };
+        assert!(matches!(
+            encode_server_frame_transaction(&oversized),
+            Err(FrameEncodeError::TooLarge)
+        ));
     }
 
     #[test]
@@ -2875,7 +3419,7 @@ mod tests {
     }
 
     #[test]
-    fn default_terminal_cells_use_compact_backward_readable_json() {
+    fn default_terminal_cells_use_compact_protocol_v35_json() {
         let empty = TerminalCell {
             content: String::new(),
             spacer_remaining: None,
@@ -2903,13 +3447,75 @@ mod tests {
         bold.attributes.bold = true;
         assert_eq!(
             serde_json::to_value(&bold).unwrap(),
-            serde_json::json!({"content": " ", "attributes": {"bold": true}})
+            serde_json::json!({"content": " ", "attributes": [1, 0, 0, 0, 0, 0, 0, 0]})
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalCell>(serde_json::json!({
+                "content": " ",
+                "attributes": [1, 0, 0, 0, 0, 0, 0, 0]
+            }))
+            .unwrap(),
+            bold
+        );
+        assert!(
+            serde_json::from_value::<TerminalCell>(serde_json::json!({
+                "attributes": [128, 0, 0, 0, 0, 0, 0, 0]
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalCell>(serde_json::json!({
+                "attributes": [0, 6, 0, 0, 0, 0, 0, 0]
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TerminalCell>(serde_json::json!({
+                "attributes": [0, 0, 4, 0, 0, 0, 0, 0]
+            }))
+            .is_err()
+        );
+
+        let styled = TerminalCell {
+            attributes: CellAttributes {
+                bold: true,
+                dim: true,
+                italic: true,
+                underline: UnderlineStyle::Curly,
+                underline_color_source: ColorSource::Rgb,
+                underline_color: 0x00ff_ffff,
+                strikethrough: true,
+                blink: true,
+                conceal: true,
+                reverse: true,
+                foreground_source: ColorSource::Rgb,
+                foreground: 0x00ff_ffff,
+                background_source: ColorSource::Rgb,
+                background: 0x00ff_ffff,
+            },
+            ..TerminalCell {
+                content: "x".into(),
+                spacer_remaining: None,
+                attributes: CellAttributes::default(),
+            }
+        };
+        let encoded = serde_json::to_value(&styled).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "content": "x",
+                "attributes": [127, 3, 3, 0x00ff_ffff, 3, 0x00ff_ffff, 3, 0x00ff_ffff]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalCell>(encoded).unwrap(),
+            styled
         );
     }
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 34);
+        assert_eq!(PROTOCOL_VERSION, 35);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -3028,6 +3634,48 @@ mod tests {
         assert!(limits.maximum_input_bytes < limits.maximum_frame_bytes);
         assert!(limits.maximum_outstanding_requests > 0);
         assert!(limits.maximum_subscriptions > 0);
+        assert_eq!(MAX_GRID_CELLS, 61_440);
+        limits.validate_terminal_transport().unwrap();
+
+        let valid_smaller_grid = ServerLimits {
+            maximum_columns: 240,
+            maximum_rows: 80,
+            ..limits
+        };
+        valid_smaller_grid.validate_terminal_transport().unwrap();
+
+        for invalid in [
+            ServerLimits {
+                maximum_frame_bytes: 0,
+                ..limits
+            },
+            ServerLimits {
+                maximum_frame_bytes: MAX_FRAME_BYTES - 1,
+                ..limits
+            },
+            ServerLimits {
+                maximum_frame_bytes: MAX_FRAME_BYTES + 1,
+                ..limits
+            },
+            ServerLimits {
+                maximum_columns: 1,
+                ..limits
+            },
+            ServerLimits {
+                maximum_columns: MAX_COLUMNS + 1,
+                ..limits
+            },
+            ServerLimits {
+                maximum_rows: 1,
+                ..limits
+            },
+            ServerLimits {
+                maximum_rows: MAX_ROWS + 1,
+                ..limits
+            },
+        ] {
+            assert!(invalid.validate_terminal_transport().is_err());
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
 pub use message::{
     AuthorityStatus, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,
 };
-pub use options::{TrustedConsentUi, WindowOptions, WindowPaneOptions};
+pub use options::{TerminalGridLimits, TrustedConsentUi, WindowOptions, WindowPaneOptions};
 pub(crate) use picker::PickerHitTarget;
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};
 pub(crate) use text_edit::BoundedTextEditor;

@@ -32,15 +32,16 @@ fn payload() -> serde_json::Value {
                     "cells": (0..80).map(|column| serde_json::json!({
                         "content": if column % 7 == 0 { "界" } else { "x" },
                         "spacer_remaining": serde_json::Value::Null,
-                        "attributes": {
-                            "bold": column % 11 == 0,
-                            "italic": false,
-                            "underline": "none",
-                            "foreground_source": "default",
-                            "foreground": 0x00ff_ffff,
-                            "background_source": "default",
-                            "background": 0
-                        }
+                        "attributes": [
+                            i32::from(column % 11 == 0),
+                            0,
+                            0,
+                            0,
+                            0,
+                            0x00ff_ffff,
+                            0,
+                            0
+                        ]
                     })).collect::<Vec<_>>()
                 }
             })
