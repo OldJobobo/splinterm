@@ -697,6 +697,31 @@ Because these fixes change production ownership/accounting after the accepted
 exact graphical commit, one newly approved graphical rerun remains required
 before merge.
 
+A follow-up review found one additional transient gap: producer snapshot and
+sparse-capture construction occurred before semantic admission. The producer now
+computes a clone-free conservative upper bound from borrowed terminal state,
+reserves it under the existing 64 MiB per-Splint and 256 MiB daemon authorities,
+constructs exact-capacity snapshot/capture values, verifies actual ownership,
+and drops the ephemeral snapshot before transferring only exact retained frame
+ownership into the subscriber lease. Denied admission therefore performs no
+snapshot construction. A production-socket reconstruction failure during this
+work identified a 192-byte underestimate from geometric damage/event-vector
+growth; `TerminalUpdate::coalesce_contiguous` now validates continuity first and
+allocates exact final capacities instead of relying on arbitrary slack.
+
+Ten consecutive mixed-clear production-socket reconstructions then passed with
+zero resync, as did the complete serialized workspace, fresh warnings-denied
+all-target Clippy, 63 benchmark tests, formatting, and diff checks. A final
+seed-4304 headless comparison completed 40 measured cases with zero resnapshot:
+candidate median RSS/PSS/private-anonymous growth was 6.15/6.15/6.10 MiB versus
+Plan 0042's 8.67/8.66/8.62 MiB; CPU was equal at 14 ticks and marker latency was
+2.44% higher, inside the declared 3% allowance. The legacy runner's
+`valid: false` remains its expected old-defect predicate, with `error: null`.
+Evidence and checksums are retained under
+`docs/benchmarks/artifacts/2026-08-16-plan0043-producer-preadmission/`.
+The already approved exact-commit graphical rerun remains the next acceptance
+boundary.
+
 ## Review and stop-loss
 
 Use one writer for the implementation worktree. Require one fresh read-only

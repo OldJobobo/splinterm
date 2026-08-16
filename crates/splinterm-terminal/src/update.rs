@@ -95,15 +95,31 @@ impl TerminalUpdate {
     /// revision in the sequence; callers retain the preceding base separately.
     #[must_use]
     pub fn coalesce_contiguous(updates: Vec<Self>) -> Option<Self> {
-        let mut updates = updates.into_iter();
-        let mut combined = updates.next()?;
-        for update in updates {
-            if combined.revision.value().checked_add(1) != Some(update.revision.value()) {
-                return None;
-            }
-            combined.append_publication_successor(update);
+        if updates.is_empty()
+            || !updates.windows(2).all(|pair| {
+                pair[0].revision.value().checked_add(1) == Some(pair[1].revision.value())
+            })
+        {
+            return None;
         }
-        Some(combined)
+        let damage_count = updates.iter().try_fold(0_usize, |total, update| {
+            total.checked_add(update.damage.len())
+        })?;
+        let event_count = updates.iter().try_fold(0_usize, |total, update| {
+            total.checked_add(update.events.len())
+        })?;
+        let revision = updates.last()?.revision;
+        let mut damage = Vec::with_capacity(damage_count);
+        let mut events = Vec::with_capacity(event_count);
+        for mut update in updates {
+            damage.append(&mut update.damage);
+            events.append(&mut update.events);
+        }
+        Some(Self {
+            revision,
+            damage,
+            events,
+        })
     }
 
     /// Appends an already continuity-validated publication successor. This is
@@ -371,6 +387,10 @@ mod tests {
         );
         let coalesced = TerminalUpdate::coalesce_contiguous(vec![first.clone(), second]).unwrap();
         assert_eq!(coalesced.revision(), TerminalRevision::new(5));
+        assert_eq!(coalesced.damage.len(), 2);
+        assert_eq!(coalesced.damage.capacity(), 2);
+        assert_eq!(coalesced.events.len(), 2);
+        assert_eq!(coalesced.events.capacity(), 2);
         assert_eq!(
             coalesced.damage().cloned().collect::<Vec<_>>(),
             vec![TerminalDamage::Modes, TerminalDamage::Title]

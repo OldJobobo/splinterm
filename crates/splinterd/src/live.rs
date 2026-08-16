@@ -724,13 +724,15 @@ fn sparse_damaged_rows(updates: &[TerminalUpdate], row_count: usize) -> Option<V
             | TerminalDamage::Palette { .. } => {}
         }
     }
-    Some(
+    let damaged_count = damaged.iter().filter(|changed| **changed).count();
+    let mut selected = Vec::with_capacity(damaged_count);
+    selected.extend(
         damaged
             .into_iter()
             .enumerate()
-            .filter_map(|(index, changed)| changed.then_some(index))
-            .collect(),
-    )
+            .filter_map(|(index, changed)| changed.then_some(index)),
+    );
+    Some(selected)
 }
 
 fn ensure_exact_vec_capacity<T>(values: &mut Vec<T>, required: usize) {
@@ -870,6 +872,39 @@ fn compact_row_nested_bytes(row: &CompactLiveRow) -> Option<usize> {
         total = total.checked_add(cell.content.owned_string_bytes())?;
     }
     Some(total)
+}
+
+fn compact_snapshot_semantic_bytes(snapshot: &CompactLiveSnapshot) -> Option<u64> {
+    let mut total = size_of::<CompactLiveSnapshot>().checked_add(size_of::<LiveSnapshot>())?;
+    checked_owned_bytes(
+        &mut total,
+        snapshot.visible_rows.capacity(),
+        size_of::<CompactLiveRow>(),
+    )?;
+    checked_owned_bytes(
+        &mut total,
+        snapshot.scrollback_rows.capacity(),
+        size_of::<CompactLiveRow>(),
+    )?;
+    for row in snapshot
+        .visible_rows
+        .iter()
+        .chain(&snapshot.scrollback_rows)
+    {
+        total = total.checked_add(compact_row_nested_bytes(row)?)?;
+    }
+    total = total.checked_add(snapshot.metadata.title.capacity())?;
+    checked_owned_bytes(
+        &mut total,
+        snapshot.metadata.image_contents.capacity(),
+        size_of::<ImageContentMetadata>(),
+    )?;
+    checked_owned_bytes(
+        &mut total,
+        snapshot.metadata.image_placements.capacity(),
+        size_of::<ImagePlacement>(),
+    )?;
+    u64::try_from(total).ok()
 }
 
 fn compact_materialization_semantic_bytes(
@@ -1449,6 +1484,26 @@ impl QueueAccounting {
             .is_ok()
     }
 
+    fn try_admit_producer_bytes(&self, amount: u64) -> Option<TerminalPublicationMemoryLease> {
+        if !Self::try_reserve_counter(
+            &self.metrics.sparse_semantic_bytes_current,
+            amount,
+            SPLINT_SPARSE_SEMANTIC_BYTES,
+        ) {
+            return None;
+        }
+        let Some(daemon) = usize::try_from(amount)
+            .ok()
+            .and_then(TerminalPublicationMemoryLease::try_new)
+        else {
+            self.metrics
+                .sparse_semantic_bytes_current
+                .fetch_sub(amount, Ordering::AcqRel);
+            return None;
+        };
+        Some(daemon)
+    }
+
     fn try_admit_semantic_bytes(&self, amount: u64) -> Option<TerminalPublicationMemoryLease> {
         if !Self::try_reserve_counter(
             &self.local_semantic_bytes,
@@ -1577,6 +1632,67 @@ impl Drop for QueueAdmissionWitness {
 impl Drop for QueueLease {
     fn drop(&mut self) {
         self.state.release();
+    }
+}
+
+/// Conservative transient producer ownership under Splint and daemon ceilings.
+/// It transfers into exact retained subscriber ownership without releasing the
+/// shared authorities in between.
+#[derive(Debug)]
+struct ProducerBuildLease {
+    accounting: Arc<QueueAccounting>,
+    daemon: TerminalPublicationMemoryLease,
+    bytes: u64,
+}
+
+impl ProducerBuildLease {
+    fn try_new(accounting: &Arc<QueueAccounting>, bytes: u64) -> Option<Self> {
+        let daemon = accounting.try_admit_producer_bytes(bytes)?;
+        Some(Self {
+            accounting: Arc::clone(accounting),
+            daemon,
+            bytes,
+        })
+    }
+
+    fn into_semantic(mut self, bytes: u64) -> Option<SemanticByteLease> {
+        if bytes > self.bytes
+            || !QueueAccounting::try_reserve_counter(
+                &self.accounting.local_semantic_bytes,
+                bytes,
+                self.accounting.local_semantic_byte_limit,
+            )
+        {
+            return None;
+        }
+        let released = self.bytes - bytes;
+        if released > 0 {
+            self.accounting
+                .metrics
+                .sparse_semantic_bytes_current
+                .fetch_sub(released, Ordering::AcqRel);
+            DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.fetch_sub(released, Ordering::AcqRel);
+        }
+        self.bytes = 0;
+        self.daemon.bytes = bytes;
+        let daemon = std::mem::replace(
+            &mut self.daemon,
+            TerminalPublicationMemoryLease { bytes: 0 },
+        );
+        Some(SemanticByteLease {
+            accounting: Arc::clone(&self.accounting),
+            daemon,
+            bytes,
+        })
+    }
+}
+
+impl Drop for ProducerBuildLease {
+    fn drop(&mut self) {
+        self.accounting
+            .metrics
+            .sparse_semantic_bytes_current
+            .fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
 
@@ -1763,6 +1879,7 @@ fn publish_compact_update(
     updates: Vec<TerminalUpdate>,
     end_revision: TerminalRevision,
     history_policy: CompactHistoryPolicy,
+    build_semantic_bound: u64,
     metrics: &Arc<RuntimeMetrics>,
     mut build_snapshot: impl FnMut(CompactHistoryPolicy) -> CompactLiveSnapshot,
 ) -> CompactPublishOutcome {
@@ -1780,10 +1897,22 @@ fn publish_compact_update(
         return CompactPublishOutcome::Full;
     }
 
+    // Cover the complete ephemeral snapshot and worst-case sparse capture under
+    // Splint and daemon authority before either allocates. After construction,
+    // transfer this lease into exact retained subscriber ownership.
+    let Some(build_admission) = ProducerBuildLease::try_new(accounting, build_semantic_bound)
+    else {
+        snapshot_slot.clear();
+        return CompactPublishOutcome::Full;
+    };
     let snapshot = build_snapshot(history_policy);
     if accounting.enabled {
         record_publication_snapshot(metrics, compact_snapshot_attribution(&snapshot));
     }
+    let Some(snapshot_semantic_bytes) = compact_snapshot_semantic_bytes(&snapshot) else {
+        snapshot_slot.clear();
+        return CompactPublishOutcome::Full;
+    };
     let Some(capture) = SparsePublicationCapture::prepare(
         incarnation,
         updates,
@@ -1796,6 +1925,12 @@ fn publish_compact_update(
         return CompactPublishOutcome::Full;
     };
     let capture_attribution = capture.attribution();
+    let actual_build_bytes =
+        snapshot_semantic_bytes.checked_add(capture_attribution.semantic_bytes);
+    if actual_build_bytes.is_none_or(|bytes| bytes > build_semantic_bound) {
+        snapshot_slot.clear();
+        return CompactPublishOutcome::Full;
+    }
 
     let mut mailbox = snapshot_slot.lock();
     if sender.is_closed() {
@@ -1820,12 +1955,6 @@ fn publish_compact_update(
     // existing 64-event and 16 MiB subscriber ceilings.
     let merge_into_tail = mailbox.pending.back().is_some();
     if merge_into_tail {
-        let Some(semantic_admission) =
-            SemanticByteLease::try_new(accounting, capture_attribution.semantic_bytes)
-        else {
-            mailbox.pending.clear();
-            return CompactPublishOutcome::Full;
-        };
         let count_admission = QueueLease::new(accounting);
         let tail = mailbox.pending.back_mut().expect("checked sparse tail");
         let Some(aggregate) = tail.frames.first_mut() else {
@@ -1848,6 +1977,13 @@ fn publish_compact_update(
             mailbox.pending.clear();
             return CompactPublishOutcome::Full;
         }
+        drop(snapshot);
+        let Some(semantic_admission) =
+            build_admission.into_semantic(capture_attribution.semantic_bytes)
+        else {
+            mailbox.pending.clear();
+            return CompactPublishOutcome::Full;
+        };
         tail.admissions.push(count_admission);
         tail.semantic_admissions.push(semantic_admission);
         if SemanticByteLease::consolidate(&mut tail.semantic_admissions, aggregate.semantic_bytes)
@@ -1867,13 +2003,14 @@ fn publish_compact_update(
         return CompactPublishOutcome::Published;
     }
 
+    let snapshot_history_policy = snapshot.history_policy;
     let Some(frame) = capture.into_frame(&snapshot) else {
         mailbox.pending.clear();
         return CompactPublishOutcome::Full;
     };
     let frame_attribution = frame.attribution();
-    let Some(semantic_admission) =
-        SemanticByteLease::try_new(accounting, frame_attribution.semantic_bytes)
+    drop(snapshot);
+    let Some(semantic_admission) = build_admission.into_semantic(frame_attribution.semantic_bytes)
     else {
         mailbox.pending.clear();
         return CompactPublishOutcome::Full;
@@ -1900,7 +2037,7 @@ fn publish_compact_update(
         incarnation,
         frames: vec![frame],
         end_revision,
-        history_policy: snapshot.history_policy,
+        history_policy: snapshot_history_policy,
         admissions: vec![QueueLease::new(accounting)],
         semantic_admissions: vec![semantic_admission],
         pending_attributions: PendingFrameLease::new(accounting, frame_attribution)
@@ -3929,6 +4066,20 @@ fn publish_updates(
         let history_policy =
             compact_history_policy(&updates, terminal_dimensions, terminal_active_screen);
         let previous_history_generation = subscriber.published_history_generation;
+        let snapshot_history_policy = if history_policy != CompactHistoryPolicy::FullHistory
+            && terminal_history_generation != previous_history_generation
+        {
+            CompactHistoryPolicy::FullHistory
+        } else {
+            history_policy
+        };
+        let compact_build_bound = compact_snapshot_capture_build_bound(
+            terminal,
+            snapshot_rows,
+            snapshot_history_policy,
+            &updates,
+        )
+        .unwrap_or(u64::MAX);
         let admitted = match &subscriber.events {
             SubscriberEvents::Legacy(sender) => {
                 // One internal slot is reserved for the terminal Exited event.
@@ -3969,32 +4120,18 @@ fn publish_updates(
                 incarnation,
                 updates,
                 terminal.revision(),
-                history_policy,
+                snapshot_history_policy,
+                compact_build_bound,
                 metrics,
                 |policy| {
-                    let snapshot = compact_snapshot_with_history(
+                    compact_snapshot_with_history(
                         splint_id,
                         incarnation,
                         terminal,
                         snapshot_rows,
                         child_exit,
                         policy,
-                    );
-                    if policy != CompactHistoryPolicy::FullHistory
-                        && snapshot.metadata.scrollback.history_generation
-                            != previous_history_generation
-                    {
-                        compact_snapshot_with_history(
-                            splint_id,
-                            incarnation,
-                            terminal,
-                            snapshot_rows,
-                            child_exit,
-                            CompactHistoryPolicy::FullHistory,
-                        )
-                    } else {
-                        snapshot
-                    }
+                    )
                 },
             ) {
                 CompactPublishOutcome::Published => true,
@@ -4345,6 +4482,104 @@ fn compact_snapshot(
     )
 }
 
+fn compact_snapshot_requested_rows(max_rows: usize, history_policy: CompactHistoryPolicy) -> usize {
+    match history_policy {
+        CompactHistoryPolicy::FullHistory => max_rows,
+        CompactHistoryPolicy::NoHistory => usize::from(max_rows > 0),
+        CompactHistoryPolicy::AppendTail(rows) => rows.min(max_rows),
+    }
+}
+
+fn compact_snapshot_capture_build_bound(
+    terminal: &Terminal,
+    max_rows: usize,
+    history_policy: CompactHistoryPolicy,
+    updates: &[TerminalUpdate],
+) -> Option<u64> {
+    let snapshot = terminal.snapshot(SnapshotRequest {
+        max_scrollback_rows: compact_snapshot_requested_rows(max_rows, history_policy),
+    });
+    let visible_rows = snapshot.dimensions().rows;
+    let history_rows = if history_policy == CompactHistoryPolicy::NoHistory {
+        0
+    } else {
+        snapshot.scrollback().returned_rows
+    };
+    let mut nested_rows = 0_usize;
+    for row in snapshot.visible_rows().chain(snapshot.scrollback_rows()) {
+        let cells = row.cells();
+        checked_owned_bytes(&mut nested_rows, cells.len(), size_of::<CompactLiveCell>())?;
+        for cell in cells {
+            if let CellSnapshotContent::Composed(characters) = cell.content() {
+                nested_rows = characters
+                    .iter()
+                    .try_fold(nested_rows, |total, character| {
+                        total.checked_add(character.len_utf8())
+                    })?;
+            }
+        }
+    }
+    let title_bytes = snapshot.title().len();
+    let image_contents = snapshot.image_contents().len();
+    let image_placements = snapshot.image_placements().len();
+
+    let mut snapshot_bytes =
+        size_of::<CompactLiveSnapshot>().checked_add(size_of::<LiveSnapshot>())?;
+    checked_owned_bytes(
+        &mut snapshot_bytes,
+        visible_rows.checked_add(history_rows)?,
+        size_of::<CompactLiveRow>(),
+    )?;
+    snapshot_bytes = snapshot_bytes
+        .checked_add(nested_rows)?
+        .checked_add(title_bytes)?;
+    checked_owned_bytes(
+        &mut snapshot_bytes,
+        image_contents,
+        size_of::<ImageContentMetadata>(),
+    )?;
+    checked_owned_bytes(
+        &mut snapshot_bytes,
+        image_placements,
+        size_of::<ImagePlacement>(),
+    )?;
+
+    let mut capture_bytes =
+        size_of::<SparsePublicationFrame>().checked_add(size_of::<LiveSnapshot>())?;
+    checked_owned_bytes(
+        &mut capture_bytes,
+        updates.len().max(1),
+        size_of::<TerminalUpdate>(),
+    )?;
+    for update in updates {
+        capture_bytes = capture_bytes.checked_add(update.owned_allocation_bytes()?)?;
+    }
+    checked_owned_bytes(
+        &mut capture_bytes,
+        visible_rows,
+        size_of::<usize>().checked_add(size_of::<SparseRowPatch>())?,
+    )?;
+    checked_owned_bytes(
+        &mut capture_bytes,
+        history_rows,
+        size_of::<CompactLiveRow>(),
+    )?;
+    capture_bytes = capture_bytes
+        .checked_add(nested_rows)?
+        .checked_add(title_bytes)?;
+    checked_owned_bytes(
+        &mut capture_bytes,
+        image_contents,
+        size_of::<ImageContentMetadata>(),
+    )?;
+    checked_owned_bytes(
+        &mut capture_bytes,
+        image_placements,
+        size_of::<ImagePlacement>(),
+    )?;
+    u64::try_from(snapshot_bytes.checked_add(capture_bytes)?).ok()
+}
+
 fn compact_snapshot_with_history(
     splint_id: SplintId,
     incarnation: ProcessIncarnation,
@@ -4354,23 +4589,20 @@ fn compact_snapshot_with_history(
     history_policy: CompactHistoryPolicy,
 ) -> CompactLiveSnapshot {
     let trace_started = perf_trace_enabled().then(Instant::now);
-    let requested_rows = match history_policy {
-        CompactHistoryPolicy::FullHistory => max_rows,
-        CompactHistoryPolicy::NoHistory => usize::from(max_rows > 0),
-        CompactHistoryPolicy::AppendTail(rows) => rows.min(max_rows),
-    };
+    let requested_rows = compact_snapshot_requested_rows(max_rows, history_policy);
     let snapshot = terminal.snapshot(SnapshotRequest {
         max_scrollback_rows: requested_rows,
     });
-    let visible_rows = snapshot.visible_rows().map(compact_row).collect::<Vec<_>>();
-    let scrollback_rows = if history_policy == CompactHistoryPolicy::NoHistory {
+    let mut visible_rows = Vec::with_capacity(snapshot.dimensions().rows);
+    visible_rows.extend(snapshot.visible_rows().map(compact_row));
+    let mut scrollback_rows = if history_policy == CompactHistoryPolicy::NoHistory {
         Vec::new()
     } else {
-        snapshot
-            .scrollback_rows()
-            .map(compact_row)
-            .collect::<Vec<_>>()
+        Vec::with_capacity(snapshot.scrollback().returned_rows)
     };
+    if history_policy != CompactHistoryPolicy::NoHistory {
+        scrollback_rows.extend(snapshot.scrollback_rows().map(compact_row));
+    }
     let rows = visible_rows.len() + scrollback_rows.len();
     let cells = visible_rows
         .iter()
@@ -4382,6 +4614,14 @@ fn compact_snapshot_with_history(
         scrollback.returned_rows = 0;
         scrollback.omitted_oldest_rows = scrollback.available_rows;
     }
+    let mut title = String::with_capacity(snapshot.title().len());
+    title.push_str(snapshot.title());
+    let mut image_contents_source = snapshot.image_contents();
+    let mut image_contents = Vec::with_capacity(image_contents_source.len());
+    image_contents.extend(image_contents_source.by_ref());
+    let mut image_placements_source = snapshot.image_placements();
+    let mut image_placements = Vec::with_capacity(image_placements_source.len());
+    image_placements.extend(image_placements_source.by_ref());
     let metadata = LiveSnapshot {
         splint_id,
         incarnation,
@@ -4392,11 +4632,11 @@ fn compact_snapshot_with_history(
         modes: snapshot.modes(),
         scroll_region: snapshot.scroll_region(),
         view_follows_live: snapshot.view_follows_live(),
-        title: snapshot.title().to_owned(),
+        title,
         palette: *snapshot.palette(),
         default_colors: *snapshot.default_colors(),
-        image_contents: snapshot.image_contents().collect(),
-        image_placements: snapshot.image_placements().collect(),
+        image_contents,
+        image_placements,
         visible_rows: Vec::new(),
         scrollback_rows: Vec::new(),
         scrollback,
@@ -4529,25 +4769,29 @@ fn owned_row(row: splinterm_terminal::RowSnapshot<'_>) -> LiveRow {
 }
 
 fn compact_row(row: splinterm_terminal::RowSnapshot<'_>) -> CompactLiveRow {
+    let mut source_cells = row.cells();
+    let mut cells = Vec::with_capacity(source_cells.len());
+    cells.extend(source_cells.by_ref().map(|cell| CompactLiveCell {
+        content: match cell.content() {
+            CellSnapshotContent::Empty => CompactCellContent::Empty,
+            CellSnapshotContent::Scalar(character) => CompactCellContent::Scalar(character),
+            CellSnapshotContent::Composed(characters) => {
+                let required = characters
+                    .iter()
+                    .map(|character| character.len_utf8())
+                    .sum();
+                let mut content = String::with_capacity(required);
+                content.extend(characters.iter());
+                CompactCellContent::Composed(content)
+            }
+            CellSnapshotContent::Spacer { remaining } => CompactCellContent::Spacer { remaining },
+        },
+        attributes: cell.attributes(),
+    }));
     CompactLiveRow {
         row_id: row.id(),
         linebreak: row.linebreak(),
-        cells: row
-            .cells()
-            .map(|cell| CompactLiveCell {
-                content: match cell.content() {
-                    CellSnapshotContent::Empty => CompactCellContent::Empty,
-                    CellSnapshotContent::Scalar(character) => CompactCellContent::Scalar(character),
-                    CellSnapshotContent::Composed(characters) => {
-                        CompactCellContent::Composed(characters.iter().collect())
-                    }
-                    CellSnapshotContent::Spacer { remaining } => {
-                        CompactCellContent::Spacer { remaining }
-                    }
-                },
-                attributes: cell.attributes(),
-            })
-            .collect(),
+        cells,
     }
 }
 
@@ -4979,6 +5223,88 @@ mod tests {
         assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 0);
     }
 
+    #[test]
+    fn compact_snapshot_build_is_admitted_before_capture_allocation() {
+        let incarnation = ProcessIncarnation::allocate();
+        let splint_id = SplintId::new();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let base_revision = terminal.revision();
+        terminal.advance(b"A");
+        let updates = terminal
+            .updates_since(base_revision)
+            .unwrap()
+            .into_updates();
+        let bound = compact_snapshot_capture_build_bound(
+            &terminal,
+            0,
+            CompactHistoryPolicy::FullHistory,
+            &updates,
+        )
+        .unwrap();
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let denied = Arc::new(QueueAccounting::with_semantic_byte_limit(
+            true,
+            Arc::clone(&metrics),
+            bound,
+        ));
+        let saturation =
+            ProducerBuildLease::try_new(&denied, SPLINT_SPARSE_SEMANTIC_BYTES - (bound - 1))
+                .unwrap();
+        let (sender, _receiver) = mpsc::channel(4);
+        let slot = Arc::new(CompactSnapshotSlot::default());
+        assert_eq!(
+            publish_compact_update(
+                &sender,
+                &denied,
+                &slot,
+                3,
+                0,
+                incarnation,
+                updates.clone(),
+                terminal.revision(),
+                CompactHistoryPolicy::FullHistory,
+                bound,
+                &metrics,
+                |_| panic!("snapshot construction ran before admission"),
+            ),
+            CompactPublishOutcome::Full
+        );
+        assert_eq!(denied.local_semantic_bytes.load(Ordering::Acquire), 0);
+        drop(saturation);
+        assert_eq!(
+            metrics
+                .sparse_semantic_bytes_current
+                .load(Ordering::Acquire),
+            0
+        );
+
+        let admitted = Arc::new(QueueAccounting::with_semantic_byte_limit(
+            true, metrics, bound,
+        ));
+        assert_eq!(
+            publish_compact_update(
+                &sender,
+                &admitted,
+                &slot,
+                3,
+                0,
+                incarnation,
+                updates,
+                terminal.revision(),
+                CompactHistoryPolicy::FullHistory,
+                bound,
+                &Arc::clone(&admitted.metrics),
+                |_| compact_snapshot(splint_id, incarnation, &terminal, 0, None),
+            ),
+            CompactPublishOutcome::Published
+        );
+        let retained = admitted.local_semantic_bytes.load(Ordering::Acquire);
+        assert!(retained > 0);
+        assert!(retained < bound);
+        slot.clear();
+        assert_eq!(admitted.local_semantic_bytes.load(Ordering::Acquire), 0);
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one concurrency regression covers paused construction, receiver progress, and resumed delivery"
@@ -5013,6 +5339,13 @@ mod tests {
             .updates_since(base_revision)
             .unwrap()
             .into_updates();
+        let first_build_bound = compact_snapshot_capture_build_bound(
+            &terminal,
+            0,
+            CompactHistoryPolicy::FullHistory,
+            &first_updates,
+        )
+        .unwrap();
         assert_eq!(
             publish_compact_update(
                 &sender,
@@ -5024,6 +5357,7 @@ mod tests {
                 first_updates,
                 first_revision,
                 CompactHistoryPolicy::FullHistory,
+                first_build_bound,
                 &metrics,
                 |_| compact_snapshot(splint_id, incarnation, &terminal, 0, None),
             ),
@@ -5036,6 +5370,13 @@ mod tests {
             .updates_since(first_revision)
             .unwrap()
             .into_updates();
+        let second_build_bound = compact_snapshot_capture_build_bound(
+            &terminal,
+            0,
+            CompactHistoryPolicy::FullHistory,
+            &second_updates,
+        )
+        .unwrap();
         let (build_started_tx, build_started_rx) = std::sync::mpsc::sync_channel(0);
         let (resume_build_tx, resume_build_rx) = std::sync::mpsc::sync_channel(0);
         let writer_sender = sender.clone();
@@ -5053,6 +5394,7 @@ mod tests {
                 second_updates,
                 second_revision,
                 CompactHistoryPolicy::FullHistory,
+                second_build_bound,
                 &writer_metrics,
                 |_| {
                     build_started_tx.send(()).unwrap();
