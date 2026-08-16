@@ -27,7 +27,7 @@ use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg}
 use splinterd::{
     CompactSubscription, LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot,
     LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, ProcessExit, ProcessIncarnation,
-    SubscriptionReceive, authorization, executable_identity,
+    SubscriptionReceive, TerminalPublicationMemoryLease, authorization, executable_identity,
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     policy,
 };
@@ -738,6 +738,7 @@ struct TerminalPublicationReservation {
     _subscriber: Option<tokio::sync::OwnedSemaphorePermit>,
     _splint: tokio::sync::OwnedSemaphorePermit,
     _daemon: tokio::sync::OwnedSemaphorePermit,
+    _semantic: TerminalPublicationMemoryLease,
 }
 
 struct QueuedServerFrame {
@@ -7213,8 +7214,10 @@ fn spawn_subscription(
         tokio::pin!(expiry);
         let subscriber_publication_memory = Arc::new(Semaphore::new(1));
         'subscription: loop {
-            let (received, trailing_exit) = tokio::select! {
-                value = subscription.recv_coalesced() => value,
+            let (received, trailing_exit, publication_admission) = tokio::select! {
+                value = subscription.recv_coalesced_with_publication_admission(
+                    TERMINAL_PUBLICATION_BYTES,
+                ) => value,
                 revoked = revocations.recv(), if access.grant_id.is_some() => {
                     match classify_revocation(&revoked, access.grant_id) {
                         RevocationDecision::Revoke(grant_id) => {
@@ -7330,6 +7333,7 @@ fn spawn_subscription(
                             handle.splint_id,
                             Some(&subscriber_publication_memory),
                             publication_bytes,
+                            publication_admission,
                         )
                         .await
                         else {
@@ -7408,11 +7412,16 @@ async fn try_reserve_terminal_publication(
     splint_id: SplintId,
     subscriber: Option<&Arc<Semaphore>>,
     publication_bytes: usize,
+    publication_admission: Option<TerminalPublicationMemoryLease>,
 ) -> Option<TerminalPublicationReservation> {
     if publication_bytes == 0 || publication_bytes > TERMINAL_PUBLICATION_BYTES {
         return None;
     }
     let permits = u32::try_from(publication_bytes).ok()?;
+    let semantic = match publication_admission {
+        Some(admission) => admission,
+        None => TerminalPublicationMemoryLease::try_new(publication_bytes)?,
+    };
     let subscriber = match subscriber {
         Some(budget) => Some(Arc::clone(budget).acquire_owned().await.ok()?),
         None => None,
@@ -7436,6 +7445,7 @@ async fn try_reserve_terminal_publication(
         _subscriber: subscriber,
         _splint: splint,
         _daemon: daemon,
+        _semantic: semantic,
     })
 }
 
@@ -7681,6 +7691,7 @@ async fn send_response(
                     snapshot.splint_id,
                     None,
                     publication_bytes,
+                    None,
                 )
                 .await
                 .context("terminal publication memory is exhausted")?,
@@ -10467,6 +10478,7 @@ mod tests {
             splint_id,
             Some(&first_subscriber),
             TERMINAL_PUBLICATION_BYTES,
+            None,
         )
         .await
         .unwrap();
@@ -10478,6 +10490,7 @@ mod tests {
                     splint_id,
                     Some(&first_subscriber),
                     TERMINAL_PUBLICATION_BYTES,
+                    None,
                 ),
             )
             .await
@@ -10489,6 +10502,7 @@ mod tests {
             splint_id,
             Some(&second_subscriber),
             TERMINAL_PUBLICATION_BYTES,
+            None,
         )
         .await
         .unwrap();
@@ -10499,6 +10513,7 @@ mod tests {
                 splint_id,
                 Some(&third_subscriber),
                 TERMINAL_PUBLICATION_BYTES,
+                None,
             )
             .await
             .is_none()
@@ -10517,6 +10532,7 @@ mod tests {
                     SplintId::new(),
                     None,
                     TERMINAL_PUBLICATION_BYTES,
+                    None,
                 )
                 .await
                 .unwrap(),
@@ -10528,6 +10544,7 @@ mod tests {
                 SplintId::new(),
                 None,
                 TERMINAL_PUBLICATION_BYTES,
+                None,
             )
             .await
             .is_none()

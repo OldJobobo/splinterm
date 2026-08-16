@@ -90,6 +90,30 @@ impl TerminalUpdate {
         self.events.iter()
     }
 
+    /// Coalesces a nonempty contiguous update sequence for publication while
+    /// preserving damage and event order. The resulting revision is the final
+    /// revision in the sequence; callers retain the preceding base separately.
+    #[must_use]
+    pub fn coalesce_contiguous(updates: Vec<Self>) -> Option<Self> {
+        let mut updates = updates.into_iter();
+        let mut combined = updates.next()?;
+        for update in updates {
+            if combined.revision.value().checked_add(1) != Some(update.revision.value()) {
+                return None;
+            }
+            combined.append_publication_successor(update);
+        }
+        Some(combined)
+    }
+
+    /// Appends an already continuity-validated publication successor. This is
+    /// used when each side may itself summarize multiple contiguous revisions.
+    pub fn append_publication_successor(&mut self, mut update: Self) {
+        self.revision = update.revision;
+        self.damage.append(&mut update.damage);
+        self.events.append(&mut update.events);
+    }
+
     /// Returns the bytes allocated by this update's owned semantic vectors and
     /// variable-length event bodies, excluding allocator bookkeeping.
     #[must_use]
@@ -306,6 +330,40 @@ mod tests {
         assert!(accumulated.is_full());
         assert_eq!(accumulated.damage, vec![TerminalDamage::FullSnapshot]);
         assert_eq!(accumulated.events, vec![TerminalEvent::Bell]);
+    }
+
+    #[test]
+    fn publication_coalescing_preserves_order_and_rejects_revision_gaps() {
+        let first = TerminalUpdate::new(
+            TerminalRevision::new(4),
+            vec![TerminalDamage::Modes],
+            vec![TerminalEvent::Bell],
+        );
+        let second = TerminalUpdate::new(
+            TerminalRevision::new(5),
+            vec![TerminalDamage::Title],
+            vec![TerminalEvent::TitleChanged("next".to_owned())],
+        );
+        let coalesced = TerminalUpdate::coalesce_contiguous(vec![first.clone(), second]).unwrap();
+        assert_eq!(coalesced.revision(), TerminalRevision::new(5));
+        assert_eq!(
+            coalesced.damage().cloned().collect::<Vec<_>>(),
+            vec![TerminalDamage::Modes, TerminalDamage::Title]
+        );
+        assert_eq!(
+            coalesced.events().cloned().collect::<Vec<_>>(),
+            vec![
+                TerminalEvent::Bell,
+                TerminalEvent::TitleChanged("next".to_owned())
+            ]
+        );
+        assert!(
+            TerminalUpdate::coalesce_contiguous(vec![
+                first,
+                TerminalUpdate::new(TerminalRevision::new(6), Vec::new(), Vec::new()),
+            ])
+            .is_none()
+        );
     }
 
     #[test]

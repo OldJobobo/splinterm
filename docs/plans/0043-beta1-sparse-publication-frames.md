@@ -1,6 +1,6 @@
 # Plan 0043: Beta1 sparse terminal publication frames
 
-- **Status:** Milestones 1-2 accepted; bounded sparse queues and sealing next
+- **Status:** Milestone 3 accepted headlessly; graphical and final release gates pending
 - **Date:** 2026-08-15
 - **Release decision:** Do not tag `0.1.0-beta.1` until this plan passes its
   non-graphical, graphical, review, integration, and release gates
@@ -318,6 +318,89 @@ Work:
 Focused tests cover one-under, exact, and one-over every count/byte limit; fast,
 delayed, capacity-one, multiple-subscriber, receiver-drop, writer-failure,
 cancellation, resync, trailing-exit, and closed-state behavior.
+
+### Milestone 3 implementation record — 2026-08-16
+
+- The compact mailbox is now a counted `VecDeque` of sealed sparse chunks rather
+  than one indefinitely growing tail. Adjacent contiguous producer frames merge
+  only while the chunk remains below eight frames and 4 MiB of checked semantic
+  ownership. The authoritative per-subscriber frame count remains independent
+  of chunk count.
+- One wake token still represents the complete nonempty mailbox. The receiver
+  atomically takes all sealed chunks covered by that token, validates continuity,
+  and materializes every sparse frame once in one writer-boundary state pass. A
+  producer that races an emptied mailbox emits a fresh token. The extra channel
+  slot remains reserved for process exit.
+- Sparse semantic ownership is admitted through RAII against fixed 16 MiB
+  per-subscriber and 64 MiB per-Splint limits. Sparse queues and materialized
+  outbound terminal transactions share one process-wide 256 MiB authority, so
+  the two stages cannot each consume an independent daemon ceiling.
+- Count, byte, continuity, and channel overflow clear all queued sparse ownership
+  before resync becomes authoritative. Receiver drop, cancellation, closed
+  channels, materialization failure, and successful delivery release the same
+  leases. Optional publication metrics do not control enforcement.
+- Focused coverage proves seal boundaries and one-wake behavior, exact local and
+  shared byte limits, overflow release and resync precedence, capacity-one exit
+  reservation, multiple subscribers, concurrent receiver drop, append-history
+  reconstruction, and fast-reader behavior. The production-socket 5,000-line
+  mixed/clear reconstruction gate passed ten consecutive runs without resync.
+- Validation passed: `cargo test --workspace --all-targets -- --test-threads=1`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, 63 benchmark harness
+  tests, `cargo fmt --all -- --check`, and `git diff --check`. Fresh read-only
+  review `3b3a8228` blocked acceptance pending explicit proof of the cross-drain
+  append-delta contract and admission before writer-side materialization and
+  encoding. Both findings are now addressed: a preexisting-history regression
+  proves separately delivered append tails reconstruct the exact bounded client
+  history, and compact receive acquires a conservative 32 MiB process-wide lease
+  after its wake but before sparse materialization, retaining it through wire
+  encoding and delivery. Saturation fails to resync before materialization and
+  releases queued sparse ownership. This test also exposed and fixed eager
+  `bool::then_some` construction that released a lease after failed admission;
+  lazy construction now preserves exact counter balance. Full serialized tests,
+  Clippy, formatting, benchmark tests, and ten production-socket reconstruction
+  runs pass after the fixes. Follow-up review and randomized candidate
+  memory/latency attribution remain pending. No graphical test, installation,
+  package replacement, oracle refresh, push, or release action was performed.
+
+### Candidate attribution stop-loss — 2026-08-16
+
+The same randomized two-warmup, ten-sample, seed-43 headless comparison was run
+against integrated Plan 0042 and two sparse candidates. The existing runner is a
+defect-reproduction gate, so it exits 1 and writes `valid: false` when the
+candidate successfully stops reproducing the old 64-batch predicate; all 20
+measured cases completed and the candidate interpretation below uses the exact
+recorded metrics rather than treating that expected predicate result as a
+runtime failure.
+
+| Sparse experiment | RSS/PSS growth | Private-anon growth | CPU ticks | Marker latency | Batch HWM | Update HWM | Resync |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Sealed sparse chunks | 23.33 MiB | 23.26 MiB | 14 | 119.88 ms | 8 | 1,949 | 0 |
+| Producer-frame update coalescing | 12.60 MiB | 12.54 MiB | 13 | 124.13 ms | 8 | 8 | 0 |
+
+The second experiment preserves all ordered damage and terminal events while
+owning one contiguous publication update per producer frame. It substantially
+improved the first sparse result, but its retained daemon growth remained about
+40% above the paired integrated baseline's 8.97 MiB. That triggered the plan's
+stop-loss. The approved bounded follow-up implemented true sealing: each
+up-to-eight-frame chunk now owns one composed final sparse representation while
+retaining every producer-frame count lease and exact consolidated byte
+admission.
+
+The true-sealing candidate passed the same randomized gate with 5.78 MiB
+RSS/PSS and 5.72 MiB private-anonymous growth versus the paired integrated
+baseline's 9.73 MiB and 9.67 MiB: about 40.6% lower retained growth. Sparse queue
+semantic high water fell from 9.22 MiB in the update-only experiment to 3.16 MiB.
+Batch high water was 8, materialized update high water was 1, CPU was 13 ticks
+versus 14, marker latency was 121.19 ms versus 132.48 ms, and all samples had
+zero resync. Full serialized workspace tests, warnings-denied workspace Clippy,
+63 benchmark tests, formatting, `git diff --check`, and ten consecutive
+production-socket reconstruction runs pass. The measurements and exact raw
+records are retained under
+`docs/benchmarks/artifacts/2026-08-16-plan0043-sparse-candidate*/`. Fresh
+true-sealing review `3e52e7c7` returned **CLEAN** with no blocker or fix worth
+doing now; it accepted sparse composition, per-frame count ownership,
+consolidated local/Splint/daemon byte accounting, exit/resync precedence, and
+the candidate evidence interpretation.
 
 ## Milestone 4 — client ownership follow-up, only if attributed
 

@@ -36,6 +36,40 @@ const READ_BUFFER: usize = 16 * 1024;
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
 const SYNCHRONIZED_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const MAX_SUBSCRIBER_QUEUE_CAPACITY: usize = 1_048_576;
+const SUBSCRIBER_SPARSE_SEMANTIC_BYTES: u64 = 16 * 1024 * 1024;
+const SPARSE_SEAL_FRAME_COUNT: usize = 8;
+const SPARSE_SEAL_SEMANTIC_BYTES: u64 = 4 * 1024 * 1024;
+const SPLINT_SPARSE_SEMANTIC_BYTES: u64 = 64 * 1024 * 1024;
+const DAEMON_TERMINAL_PUBLICATION_BYTES: u64 = 256 * 1024 * 1024;
+static DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT: AtomicU64 = AtomicU64::new(0);
+
+/// Process-wide terminal-publication admission shared by sparse runtime queues
+/// and materialized outbound transactions.
+#[derive(Debug)]
+pub struct TerminalPublicationMemoryLease {
+    bytes: u64,
+}
+
+impl TerminalPublicationMemoryLease {
+    /// Attempts to reserve bytes beneath the daemon's fixed Beta1 publication
+    /// ceiling. Dropping the returned lease releases the reservation.
+    #[must_use]
+    pub fn try_new(bytes: usize) -> Option<Self> {
+        let bytes = u64::try_from(bytes).ok()?;
+        QueueAccounting::try_reserve_counter(
+            &DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT,
+            bytes,
+            DAEMON_TERMINAL_PUBLICATION_BYTES,
+        )
+        .then(|| Self { bytes })
+    }
+}
+
+impl Drop for TerminalPublicationMemoryLease {
+    fn drop(&mut self) {
+        DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ProcessIncarnation(u64);
@@ -302,6 +336,10 @@ impl SparsePublicationFrame {
         {
             return None;
         }
+        // A sparse producer frame already carries the exact base/final pair.
+        // Flattening its contiguous updates preserves ordered damage/events while
+        // avoiding thousands of separately allocated tiny vectors in the queue.
+        let updates = vec![TerminalUpdate::coalesce_contiguous(updates)?];
 
         let mut damaged = vec![false; snapshot.visible_rows.len()];
         for damage in updates.iter().flat_map(TerminalUpdate::damage) {
@@ -384,6 +422,83 @@ impl SparsePublicationFrame {
 
     fn attribution(&self) -> PendingFrameAttribution {
         PendingFrameAttribution::one_frame(&self.updates, self.history_policy, self.semantic_bytes)
+    }
+
+    fn merge_sealed(&mut self, mut next: Self) -> Option<()> {
+        if self.incarnation != next.incarnation || self.final_revision != next.base_revision {
+            return None;
+        }
+        let final_row_count = next.metadata.dimensions.rows;
+        let mut patches: Vec<Option<CompactLiveRow>> = (0..final_row_count).map(|_| None).collect();
+        if self.metadata.dimensions.rows == final_row_count {
+            for patch in self.visible_rows.drain(..) {
+                *patches.get_mut(patch.index)? = Some(patch.row);
+            }
+        }
+        for patch in next.visible_rows.drain(..) {
+            *patches.get_mut(patch.index)? = Some(patch.row);
+        }
+        if self.metadata.dimensions.rows != final_row_count && patches.iter().any(Option::is_none) {
+            return None;
+        }
+        self.visible_rows = patches
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, row)| row.map(|row| SparseRowPatch { index, row }))
+            .collect();
+
+        self.history = match (
+            std::mem::replace(&mut self.history, SparseHistoryDelta::None),
+            next.history,
+        ) {
+            (_, SparseHistoryDelta::Replace(rows)) => SparseHistoryDelta::Replace(rows),
+            (current, SparseHistoryDelta::None) => current,
+            (SparseHistoryDelta::None, appended @ SparseHistoryDelta::Append { .. }) => appended,
+            (
+                SparseHistoryDelta::Append { mut rows, .. },
+                SparseHistoryDelta::Append {
+                    rows: mut next_rows,
+                    final_rows,
+                },
+            ) => {
+                rows.append(&mut next_rows);
+                if rows.len() > final_rows {
+                    rows.drain(..rows.len() - final_rows);
+                }
+                SparseHistoryDelta::Append { rows, final_rows }
+            }
+            (
+                SparseHistoryDelta::Replace(mut rows),
+                SparseHistoryDelta::Append {
+                    rows: mut next_rows,
+                    final_rows,
+                },
+            ) => {
+                rows.append(&mut next_rows);
+                if rows.len() > final_rows {
+                    rows.drain(..rows.len() - final_rows);
+                }
+                SparseHistoryDelta::Replace(rows)
+            }
+        };
+        let mut next_updates = next.updates.into_iter();
+        let next_update = next_updates.next()?;
+        if next_updates.next().is_some() || self.updates.len() != 1 {
+            return None;
+        }
+        self.updates[0].append_publication_successor(next_update);
+        self.final_revision = next.final_revision;
+        self.metadata = next.metadata;
+        self.history_policy = self.history_policy.merge(next.history_policy);
+        self.semantic_bytes = sparse_frame_semantic_bytes(
+            &self.updates,
+            self.updates.capacity(),
+            &self.visible_rows,
+            self.visible_rows.capacity(),
+            &self.history,
+            &self.metadata,
+        )?;
+        Some(())
     }
 
     #[cfg(test)]
@@ -531,6 +646,10 @@ struct CompactMaterializationState {
     incarnation: Option<ProcessIncarnation>,
     revision: TerminalRevision,
     visible_rows: Vec<CompactLiveRow>,
+    // History is intentionally event-local: AppendTail snapshots carry only the
+    // rows a client must append to its already retained history. FullHistory
+    // replaces that client state. Retaining old rows here would duplicate them
+    // across separately delivered mailbox drains.
     history_limit: usize,
 }
 
@@ -699,8 +818,9 @@ struct PendingCompactUpdates {
     frames: Vec<SparsePublicationFrame>,
     end_revision: TerminalRevision,
     history_policy: CompactHistoryPolicy,
-    admitted: Vec<Option<QueueLease>>,
-    pending_attribution: Option<PendingFrameLease>,
+    admissions: Vec<Option<QueueLease>>,
+    semantic_admissions: Vec<SemanticByteLease>,
+    pending_attributions: Vec<PendingFrameLease>,
 }
 
 impl PendingCompactUpdates {
@@ -768,7 +888,7 @@ impl PendingCompactUpdates {
             .scrollback
             .available_rows
             .saturating_sub(history_rows.len());
-        if let Some(attribution) = &self.pending_attribution {
+        for attribution in &self.pending_attributions {
             attribution.record_materialization();
         }
         state.incarnation = materialized_incarnation;
@@ -790,8 +910,7 @@ impl PendingCompactUpdates {
 
 #[derive(Debug, Default)]
 struct CompactMailboxState {
-    generation: u64,
-    pending: Option<PendingCompactUpdates>,
+    pending: VecDeque<PendingCompactUpdates>,
 }
 
 #[derive(Debug, Default)]
@@ -862,17 +981,37 @@ impl CompactSnapshotSlot {
     }
 
     fn clear(&self) {
-        let mut current = self.lock();
-        current.generation = current.generation.wrapping_add(1);
-        drop(current.pending.take());
+        self.lock().pending.clear();
     }
 
     fn take_pending(&self, state: &mut CompactMaterializationState) -> MailboxTake {
-        let mut current = self.lock();
-        let pending = current.pending.take();
-        current.generation = current.generation.wrapping_add(1);
-        let Some((incarnation, updates, end_revision, snapshot)) =
-            pending.and_then(|pending| pending.materialize(state))
+        let mut pending = std::mem::take(&mut self.lock().pending);
+        let Some(mut combined) = pending.pop_front() else {
+            return MailboxTake::MissingOrMismatched;
+        };
+        for mut sealed in pending {
+            if combined.incarnation != sealed.incarnation
+                || combined.end_revision
+                    != sealed
+                        .frames
+                        .first()
+                        .map(|frame| frame.base_revision)
+                        .unwrap_or_default()
+            {
+                return MailboxTake::MissingOrMismatched;
+            }
+            combined.frames.append(&mut sealed.frames);
+            combined.admissions.append(&mut sealed.admissions);
+            combined
+                .semantic_admissions
+                .append(&mut sealed.semantic_admissions);
+            combined
+                .pending_attributions
+                .append(&mut sealed.pending_attributions);
+            combined.end_revision = sealed.end_revision;
+            combined.history_policy = combined.history_policy.merge(sealed.history_policy);
+        }
+        let Some((incarnation, updates, end_revision, snapshot)) = combined.materialize(state)
         else {
             return MailboxTake::MissingOrMismatched;
         };
@@ -889,6 +1028,8 @@ impl CompactSnapshotSlot {
 struct QueueAccounting {
     enabled: bool,
     local_events: AtomicUsize,
+    local_semantic_bytes: AtomicU64,
+    local_semantic_byte_limit: u64,
     metrics: Arc<RuntimeMetrics>,
     #[cfg(test)]
     materializations: AtomicUsize,
@@ -896,13 +1037,70 @@ struct QueueAccounting {
 
 impl QueueAccounting {
     fn new(enabled: bool, metrics: Arc<RuntimeMetrics>) -> Self {
+        Self::with_semantic_byte_limit(enabled, metrics, SUBSCRIBER_SPARSE_SEMANTIC_BYTES)
+    }
+
+    fn with_semantic_byte_limit(
+        enabled: bool,
+        metrics: Arc<RuntimeMetrics>,
+        local_semantic_byte_limit: u64,
+    ) -> Self {
         Self {
             enabled,
             local_events: AtomicUsize::new(0),
+            local_semantic_bytes: AtomicU64::new(0),
+            local_semantic_byte_limit,
             metrics,
             #[cfg(test)]
             materializations: AtomicUsize::new(0),
         }
+    }
+
+    fn try_reserve_counter(counter: &AtomicU64, amount: u64, limit: u64) -> bool {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(amount).filter(|next| *next <= limit)
+            })
+            .is_ok()
+    }
+
+    fn try_admit_semantic_bytes(&self, amount: u64) -> Option<TerminalPublicationMemoryLease> {
+        if !Self::try_reserve_counter(
+            &self.local_semantic_bytes,
+            amount,
+            self.local_semantic_byte_limit,
+        ) {
+            return None;
+        }
+        if !Self::try_reserve_counter(
+            &self.metrics.sparse_semantic_bytes_current,
+            amount,
+            SPLINT_SPARSE_SEMANTIC_BYTES,
+        ) {
+            self.local_semantic_bytes
+                .fetch_sub(amount, Ordering::AcqRel);
+            return None;
+        }
+        let Some(daemon) = usize::try_from(amount)
+            .ok()
+            .and_then(TerminalPublicationMemoryLease::try_new)
+        else {
+            self.metrics
+                .sparse_semantic_bytes_current
+                .fetch_sub(amount, Ordering::AcqRel);
+            self.local_semantic_bytes
+                .fetch_sub(amount, Ordering::AcqRel);
+            return None;
+        };
+        Some(daemon)
+    }
+
+    fn release_semantic_bytes(&self, amount: u64) {
+        self.metrics
+            .sparse_semantic_bytes_current
+            .fetch_sub(amount, Ordering::AcqRel);
+        self.local_semantic_bytes
+            .fetch_sub(amount, Ordering::AcqRel);
     }
 
     fn admit_event(&self) {
@@ -997,6 +1195,69 @@ impl Drop for QueueLease {
     }
 }
 
+/// Checked ownership of sparse semantic bytes across subscriber, Splint, and
+/// daemon publication ceilings.
+#[derive(Debug)]
+struct SemanticByteLease {
+    accounting: Arc<QueueAccounting>,
+    daemon: TerminalPublicationMemoryLease,
+    bytes: u64,
+}
+
+impl SemanticByteLease {
+    fn try_new(accounting: &Arc<QueueAccounting>, bytes: u64) -> Option<Self> {
+        let daemon = accounting.try_admit_semantic_bytes(bytes)?;
+        Some(Self {
+            accounting: Arc::clone(accounting),
+            daemon,
+            bytes,
+        })
+    }
+
+    fn consolidate(leases: &mut Vec<Self>, bytes: u64) -> Option<()> {
+        let accounting = Arc::clone(&leases.first()?.accounting);
+        if !leases
+            .iter()
+            .all(|lease| Arc::ptr_eq(&lease.accounting, &accounting))
+        {
+            return None;
+        }
+        let admitted = leases
+            .iter()
+            .try_fold(0_u64, |total, lease| total.checked_add(lease.bytes))?;
+        let mut extra = if bytes > admitted {
+            Some(Self::try_new(&accounting, bytes - admitted)?)
+        } else {
+            None
+        };
+        if admitted > bytes {
+            accounting.release_semantic_bytes(admitted - bytes);
+            DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.fetch_sub(admitted - bytes, Ordering::AcqRel);
+        }
+        for lease in leases.iter_mut() {
+            lease.bytes = 0;
+            lease.daemon.bytes = 0;
+        }
+        if let Some(lease) = extra.as_mut() {
+            lease.bytes = 0;
+            lease.daemon.bytes = 0;
+        }
+        leases.clear();
+        leases.push(Self {
+            accounting,
+            daemon: TerminalPublicationMemoryLease { bytes },
+            bytes,
+        });
+        Some(())
+    }
+}
+
+impl Drop for SemanticByteLease {
+    fn drop(&mut self) {
+        self.accounting.release_semantic_bytes(self.bytes);
+    }
+}
+
 #[derive(Debug)]
 struct PendingFrameLease {
     accounting: Arc<QueueAccounting>,
@@ -1025,6 +1286,16 @@ impl PendingFrameLease {
             attribution.batches,
         );
         self.attribution.merge(attribution);
+    }
+
+    fn replace_after_seal(&mut self, attribution: PendingFrameAttribution) {
+        self.accounting
+            .metrics
+            .remove_queued_compact(self.attribution);
+        self.accounting
+            .metrics
+            .add_queued_compact_current(attribution);
+        self.attribution = attribution;
     }
 
     fn record_materialization(&self) {
@@ -1076,7 +1347,7 @@ enum CompactPublishOutcome {
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    reason = "compact publication validates and commits one mailbox transaction"
+    reason = "compact publication validates, merges, seals, and admits one producer frame"
 )]
 fn publish_compact_update(
     sender: &mpsc::Sender<CompactQueuedEvent>,
@@ -1091,172 +1362,135 @@ fn publish_compact_update(
     metrics: &Arc<RuntimeMetrics>,
     mut build_snapshot: impl FnMut(CompactHistoryPolicy) -> CompactLiveSnapshot,
 ) -> CompactPublishOutcome {
-    // Inspect the bounded semantic tail without holding the mailbox across the
-    // expensive full-snapshot build. The actor is the only producer, while the
-    // receiver may consume and advance `generation` during construction.
-    let (observed_generation, had_pending, combined_policy) = {
-        let mut current = snapshot_slot.lock();
+    let queued_frames = {
+        let mailbox = snapshot_slot.lock();
         if sender.is_closed() {
             return CompactPublishOutcome::Closed;
         }
-        match current.pending.as_ref() {
-            Some(pending) => {
-                if pending.frames.len() >= semantic_capacity {
-                    current.generation = current.generation.wrapping_add(1);
-                    drop(current.pending.take());
-                    return CompactPublishOutcome::Full;
-                }
-                (
-                    current.generation,
-                    true,
-                    pending.history_policy.merge(history_policy),
-                )
-            }
-            None => (current.generation, false, history_policy),
-        }
+        mailbox.pending.iter().try_fold(0_usize, |total, pending| {
+            total.checked_add(pending.admissions.len())
+        })
     };
-
-    // A previously empty mailbox needs a wake token. Reserve it before doing
-    // allocation work, but do not send it until the matching state is committed.
-    let mut reserved = if had_pending {
-        None
-    } else {
-        match sender.try_reserve() {
-            Ok(permit) => Some(permit),
-            Err(mpsc::error::TrySendError::Full(())) => return CompactPublishOutcome::Full,
-            Err(mpsc::error::TrySendError::Closed(())) => {
-                return CompactPublishOutcome::Closed;
-            }
-        }
-    };
-
-    let mut built_policy = combined_policy;
-    let mut snapshot = build_snapshot(built_policy);
-    if accounting.enabled {
-        record_publication_snapshot(metrics, compact_snapshot_attribution(&snapshot));
-    }
-
-    let mut current = snapshot_slot.lock();
-    if sender.is_closed() {
-        return CompactPublishOutcome::Closed;
-    }
-
-    if current.generation == observed_generation {
-        if let Some(pending) = current.pending.as_mut() {
-            if !had_pending || pending.frames.len() >= semantic_capacity {
-                current.generation = current.generation.wrapping_add(1);
-                drop(current.pending.take());
-                return CompactPublishOutcome::Full;
-            }
-            let frame_policy = if snapshot.history_policy == built_policy {
-                history_policy
-            } else {
-                snapshot.history_policy
-            };
-            let Some(frame) = SparsePublicationFrame::capture(
-                incarnation,
-                updates,
-                end_revision,
-                frame_policy,
-                history_limit,
-                &snapshot,
-            ) else {
-                current.generation = current.generation.wrapping_add(1);
-                drop(current.pending.take());
-                return CompactPublishOutcome::Full;
-            };
-            if pending.incarnation != incarnation || pending.end_revision != frame.base_revision {
-                current.generation = current.generation.wrapping_add(1);
-                drop(current.pending.take());
-                return CompactPublishOutcome::Full;
-            }
-            let frame_attribution = frame.attribution();
-            pending.frames.push(frame);
-            pending.admitted.push(QueueLease::new(accounting));
-            if let Some(lease) = pending.pending_attribution.as_mut() {
-                lease.merge(frame_attribution);
-            }
-            pending.end_revision = end_revision;
-            pending.history_policy = snapshot.history_policy;
-            return CompactPublishOutcome::Published;
-        }
-        if had_pending {
-            // The generation is unchanged, so a tail observed before the build
-            // cannot disappear without violating mailbox ownership.
-            return CompactPublishOutcome::Full;
-        }
-    } else if current.pending.is_some() {
-        // Only the receiver may advance the generation. It removes the complete
-        // tail, so finding a replacement tail here would make ordering unclear.
-        current.generation = current.generation.wrapping_add(1);
-        drop(current.pending.take());
+    if queued_frames.is_none_or(|frames| frames >= semantic_capacity) {
+        snapshot_slot.clear();
         return CompactPublishOutcome::Full;
     }
 
-    // If the receiver drained an observed tail during construction, rebuild
-    // against only this publication. Reusing a combined append-tail snapshot
-    // would attach extra history rows to a shorter semantic tail.
-    if had_pending && current.generation != observed_generation && combined_policy != history_policy
-    {
-        let fresh_generation = current.generation;
-        drop(current);
-        built_policy = history_policy;
-        snapshot = build_snapshot(built_policy);
-        if accounting.enabled {
-            record_publication_snapshot(metrics, compact_snapshot_attribution(&snapshot));
-        }
-        current = snapshot_slot.lock();
-        if sender.is_closed() {
-            return CompactPublishOutcome::Closed;
-        }
-        if current.generation != fresh_generation || current.pending.is_some() {
-            current.generation = current.generation.wrapping_add(1);
-            drop(current.pending.take());
-            return CompactPublishOutcome::Full;
-        }
+    let snapshot = build_snapshot(history_policy);
+    if accounting.enabled {
+        record_publication_snapshot(metrics, compact_snapshot_attribution(&snapshot));
     }
-
-    // The receiver drained the observed tail while this snapshot was built (or
-    // the mailbox was initially empty). Establish a fresh tail and notification.
-    let permit = match reserved.take() {
-        Some(permit) if current.generation == observed_generation => permit,
-        Some(_) | None => match sender.try_reserve() {
-            Ok(permit) => permit,
-            Err(mpsc::error::TrySendError::Full(())) => return CompactPublishOutcome::Full,
-            Err(mpsc::error::TrySendError::Closed(())) => {
-                return CompactPublishOutcome::Closed;
-            }
-        },
-    };
-    debug_assert!(current.pending.is_none());
-    let frame_policy = if snapshot.history_policy == built_policy {
-        history_policy
-    } else {
-        snapshot.history_policy
-    };
     let Some(frame) = SparsePublicationFrame::capture(
         incarnation,
         updates,
         end_revision,
-        frame_policy,
+        snapshot.history_policy,
         history_limit,
         &snapshot,
     ) else {
-        current.generation = current.generation.wrapping_add(1);
-        drop(current.pending.take());
+        snapshot_slot.clear();
         return CompactPublishOutcome::Full;
     };
     let frame_attribution = frame.attribution();
-    let effective_history_policy = snapshot.history_policy;
-    current.pending = Some(PendingCompactUpdates {
+    let Some(semantic_admission) =
+        SemanticByteLease::try_new(accounting, frame_attribution.semantic_bytes)
+    else {
+        snapshot_slot.clear();
+        return CompactPublishOutcome::Full;
+    };
+
+    let mut mailbox = snapshot_slot.lock();
+    if sender.is_closed() {
+        return CompactPublishOutcome::Closed;
+    }
+    let queued_frames = mailbox.pending.iter().try_fold(0_usize, |total, pending| {
+        total.checked_add(pending.admissions.len())
+    });
+    if queued_frames.is_none_or(|frames| frames >= semantic_capacity) {
+        mailbox.pending.clear();
+        return CompactPublishOutcome::Full;
+    }
+    if mailbox.pending.back().is_some_and(|previous| {
+        previous.incarnation != incarnation || previous.end_revision != frame.base_revision
+    }) {
+        mailbox.pending.clear();
+        return CompactPublishOutcome::Full;
+    }
+
+    let merge_into_tail = mailbox.pending.back().is_some_and(|tail| {
+        tail.admissions.len() < SPARSE_SEAL_FRAME_COUNT
+            && tail
+                .pending_attributions
+                .first()
+                .and_then(|lease| {
+                    lease
+                        .attribution
+                        .semantic_bytes
+                        .checked_add(frame_attribution.semantic_bytes)
+                })
+                .is_some_and(|bytes| bytes <= SPARSE_SEAL_SEMANTIC_BYTES)
+    });
+    if merge_into_tail {
+        let tail = mailbox.pending.back_mut().expect("checked sparse tail");
+        let Some(aggregate) = tail.frames.first_mut() else {
+            mailbox.pending.clear();
+            return CompactPublishOutcome::Full;
+        };
+        if aggregate.merge_sealed(frame).is_none() {
+            mailbox.pending.clear();
+            return CompactPublishOutcome::Full;
+        }
+        tail.admissions.push(QueueLease::new(accounting));
+        tail.semantic_admissions.push(semantic_admission);
+        if SemanticByteLease::consolidate(&mut tail.semantic_admissions, aggregate.semantic_bytes)
+            .is_none()
+        {
+            mailbox.pending.clear();
+            return CompactPublishOutcome::Full;
+        }
+        if let Some(lease) = tail.pending_attributions.first_mut() {
+            lease.merge(frame_attribution);
+            let mut sealed_attribution = aggregate.attribution();
+            sealed_attribution.batches = u64::try_from(tail.admissions.len()).unwrap_or(u64::MAX);
+            lease.replace_after_seal(sealed_attribution);
+        }
+        tail.end_revision = end_revision;
+        tail.history_policy = aggregate.history_policy;
+        return CompactPublishOutcome::Published;
+    }
+
+    // Preserve one wake token per nonempty mailbox. Sealed chunks remain
+    // distinct ownership units, but a receiver drains and materializes all
+    // chunks covered by the token before the next writer transaction.
+    let permit = if mailbox.pending.is_empty() {
+        match sender.try_reserve() {
+            Ok(permit) => Some(permit),
+            Err(mpsc::error::TrySendError::Full(())) => {
+                mailbox.pending.clear();
+                return CompactPublishOutcome::Full;
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return CompactPublishOutcome::Closed;
+            }
+        }
+    } else {
+        None
+    };
+    mailbox.pending.push_back(PendingCompactUpdates {
         incarnation,
         frames: vec![frame],
         end_revision,
-        history_policy: effective_history_policy,
-        admitted: vec![QueueLease::new(accounting)],
-        pending_attribution: PendingFrameLease::new(accounting, frame_attribution),
+        history_policy: snapshot.history_policy,
+        admissions: vec![QueueLease::new(accounting)],
+        semantic_admissions: vec![semantic_admission],
+        pending_attributions: PendingFrameLease::new(accounting, frame_attribution)
+            .into_iter()
+            .collect(),
     });
-    permit.send(CompactQueuedEvent::UpdateReady);
+    drop(mailbox);
+    if let Some(permit) = permit {
+        permit.send(CompactQueuedEvent::UpdateReady);
+    }
     CompactPublishOutcome::Published
 }
 
@@ -1392,9 +1626,25 @@ impl CompactSubscription {
     /// cannot be proven, resnapshot is required instead of pairing mismatched
     /// state.
     pub async fn recv_coalesced(&mut self) -> (SubscriptionReceive, Option<ProcessExit>) {
+        let (received, trailing_exit, _admission) =
+            self.recv_coalesced_with_publication_admission(0).await;
+        (received, trailing_exit)
+    }
+
+    /// Receives and materializes one coalesced event while holding a conservative
+    /// process-wide publication reservation acquired only after an update wake.
+    /// The returned lease must remain alive through wire encoding and delivery.
+    pub async fn recv_coalesced_with_publication_admission(
+        &mut self,
+        publication_bytes: usize,
+    ) -> (
+        SubscriptionReceive,
+        Option<ProcessExit>,
+        Option<TerminalPublicationMemoryLease>,
+    ) {
         if *self.resnapshot.borrow() {
             self.snapshot_slot.clear();
-            return (SubscriptionReceive::ResnapshotRequired, None);
+            return (SubscriptionReceive::ResnapshotRequired, None, None);
         }
         let events = &mut self.events;
         let resnapshot = &mut self.resnapshot;
@@ -1403,28 +1653,40 @@ impl CompactSubscription {
             changed = resnapshot.changed() => {
                 if changed.is_ok() && *resnapshot.borrow() {
                     self.snapshot_slot.clear();
-                    return (SubscriptionReceive::ResnapshotRequired, None);
+                    return (SubscriptionReceive::ResnapshotRequired, None, None);
                 }
                 match events.try_recv() {
                     Ok(event) => event,
-                    Err(_) => return (SubscriptionReceive::Closed, None),
+                    Err(_) => return (SubscriptionReceive::Closed, None, None),
                 }
             }
             event = events.recv() => match event {
                 Some(event) => event,
-                None => return (SubscriptionReceive::Closed, None),
+                None => return (SubscriptionReceive::Closed, None, None),
             },
         };
         first.release_admitted_ownership();
+        let publication_admission = if matches!(first, CompactQueuedEvent::UpdateReady)
+            && publication_bytes > 0
+        {
+            let Some(admission) = TerminalPublicationMemoryLease::try_new(publication_bytes) else {
+                self.snapshot_slot.clear();
+                return (SubscriptionReceive::ResnapshotRequired, None, None);
+            };
+            Some(admission)
+        } else {
+            None
+        };
         if self
             .snapshot_slot
             .wait_for_producer_batch(&mut self.resnapshot)
             .await
         {
             self.snapshot_slot.clear();
-            return (SubscriptionReceive::ResnapshotRequired, None);
+            return (SubscriptionReceive::ResnapshotRequired, None, None);
         }
-        self.coalesce_queued(&first)
+        let (received, trailing_exit) = self.coalesce_queued(&first);
+        (received, trailing_exit, publication_admission)
     }
 
     fn coalesce_queued(
@@ -1476,6 +1738,12 @@ impl CompactSubscription {
                         return (SubscriptionReceive::ResnapshotRequired, None);
                     };
                     debug_assert_eq!(incarnation, pending_incarnation);
+                    if self.accounting.enabled {
+                        RuntimeMetrics::add_saturating(
+                            &self.accounting.metrics.publication_compact_batch_merges,
+                            1,
+                        );
+                    }
                     updates.extend(pending_updates);
                     incarnation = pending_incarnation;
                     end_revision = pending_revision;
@@ -1747,6 +2015,8 @@ struct RuntimeMetrics {
     queued_compact_appended_rows_high_water: AtomicU64,
     queued_compact_semantic_bytes_current: AtomicU64,
     queued_compact_semantic_bytes_high_water: AtomicU64,
+    /// Authoritative per-Splint admission independent of optional metrics.
+    sparse_semantic_bytes_current: AtomicU64,
     queued_snapshot_events_current: AtomicUsize,
     queued_snapshot_events_high_water: AtomicUsize,
     queued_snapshot_rows_current: AtomicU64,
@@ -1802,6 +2072,10 @@ impl RuntimeMetrics {
 
     fn add_queued_compact(&self, attribution: PendingFrameAttribution) {
         RuntimeMetrics::add_saturating(&self.publication_compact_batches, attribution.batches);
+        self.add_queued_compact_current(attribution);
+    }
+
+    fn add_queued_compact_current(&self, attribution: PendingFrameAttribution) {
         let batches =
             Self::add_u64_saturating(&self.queued_compact_batches_current, attribution.batches);
         Self::observe_max_u64(&self.queued_compact_batches_high_water, batches);
@@ -2437,13 +2711,6 @@ impl SubscriberEvents {
         match self {
             Self::Legacy(sender) => sender.is_closed(),
             Self::Compact { sender, .. } => sender.is_closed(),
-        }
-    }
-
-    fn capacity(&self) -> usize {
-        match self {
-            Self::Legacy(sender) => sender.capacity(),
-            Self::Compact { sender, .. } => sender.capacity(),
         }
     }
 
@@ -3228,19 +3495,18 @@ fn publish_updates(
         if updates.is_empty() {
             return true;
         }
-        // One internal slot is reserved for the terminal Exited event.
-        if subscriber.events.capacity() <= 1 {
-            subscriber.require_resnapshot();
-            overflows = overflows.saturating_add(1);
-            return false;
-        }
-
         let snapshot_rows = subscriber.snapshot_rows;
         let history_policy =
             compact_history_policy(&updates, terminal_dimensions, terminal_active_screen);
         let previous_history_generation = subscriber.published_history_generation;
         let admitted = match &subscriber.events {
             SubscriberEvents::Legacy(sender) => {
+                // One internal slot is reserved for the terminal Exited event.
+                if sender.capacity() <= 1 {
+                    subscriber.resnapshot.send_replace(true);
+                    overflows = overflows.saturating_add(1);
+                    return false;
+                }
                 let permit = match sender.try_reserve() {
                     Ok(permit) => permit,
                     Err(mpsc::error::TrySendError::Full(())) => {
@@ -3903,8 +4169,30 @@ mod tests {
         metrics: Arc<RuntimeMetrics>,
         snapshot_rows: usize,
     ) -> (Subscriber, CompactSubscription, watch::Receiver<bool>) {
+        test_subscriber_with_limits(
+            terminal,
+            capacity,
+            enabled,
+            metrics,
+            snapshot_rows,
+            SUBSCRIBER_SPARSE_SEMANTIC_BYTES,
+        )
+    }
+
+    fn test_subscriber_with_limits(
+        terminal: &Terminal,
+        capacity: usize,
+        enabled: bool,
+        metrics: Arc<RuntimeMetrics>,
+        snapshot_rows: usize,
+        semantic_byte_limit: u64,
+    ) -> (Subscriber, CompactSubscription, watch::Receiver<bool>) {
         let (events, receiver) = mpsc::channel(capacity);
-        let accounting = Arc::new(QueueAccounting::new(enabled, metrics));
+        let accounting = Arc::new(QueueAccounting::with_semantic_byte_limit(
+            enabled,
+            metrics,
+            semantic_byte_limit,
+        ));
         let snapshot_slot = Arc::new(CompactSnapshotSlot::default());
         let mut materialization = CompactMaterializationState::from_snapshot(
             compact_snapshot(
@@ -5145,6 +5433,62 @@ mod tests {
     }
 
     #[test]
+    fn sealed_sparse_frame_composes_history_resize_and_final_metadata() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 3, TerminalConfig::default());
+        let base = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            16,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+
+        let base_revision = terminal.revision();
+        terminal.advance(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let (mut sealed, first_state) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &base,
+            base_revision,
+            16,
+        );
+        let first_revision = terminal.revision();
+        terminal.resize(10, 3);
+        terminal.advance(b"\x1b]2;sealed-title\x07");
+        let (second, second_state) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &first_state,
+            first_revision,
+            16,
+        );
+        let second_revision = terminal.revision();
+        terminal.advance(b"\r\nsix");
+        let (third, final_state) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &second_state,
+            second_revision,
+            16,
+        );
+
+        assert!(sealed.merge_sealed(second).is_some());
+        assert!(sealed.merge_sealed(third).is_some());
+        assert_eq!(sealed.base_revision, base_revision);
+        assert_eq!(sealed.final_revision, terminal.revision());
+        assert_eq!(sealed.updates.len(), 1);
+        let mut expected = final_state;
+        expected.history_policy = CompactHistoryPolicy::FullHistory;
+        assert_eq!(sealed.apply_to(&base), Some(expected));
+    }
+
+    #[test]
     fn sparse_tail_rejects_cross_frame_revision_without_advancing_materialized_state() {
         let splint_id = SplintId::new();
         let incarnation = ProcessIncarnation::allocate();
@@ -5179,13 +5523,18 @@ mod tests {
             0,
         );
         second.base_revision = base_revision;
+        let accounting = Arc::new(QueueAccounting::new(
+            false,
+            Arc::new(RuntimeMetrics::default()),
+        ));
         let pending = PendingCompactUpdates {
             incarnation,
             frames: vec![first, second],
             end_revision: terminal.revision(),
             history_policy: CompactHistoryPolicy::NoHistory,
-            admitted: Vec::new(),
-            pending_attribution: None,
+            admissions: Vec::new(),
+            semantic_admissions: vec![SemanticByteLease::try_new(&accounting, 0).unwrap()],
+            pending_attributions: Vec::new(),
         };
         let mut materialization = CompactMaterializationState::from_snapshot(base, 0);
         let original_revision = materialization.revision;
@@ -5415,8 +5764,8 @@ mod tests {
         assert_eq!(frame.visible_rows.len(), 3);
     }
 
-    #[test]
-    fn mailbox_local_append_frames_materialize_exact_history_metadata() {
+    #[tokio::test]
+    async fn mailbox_local_append_frames_materialize_exact_history_metadata() {
         let incarnation = ProcessIncarnation::allocate();
         let splint_id = SplintId::new();
         let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
@@ -5441,7 +5790,9 @@ mod tests {
             assert!(updates > 0);
             assert_eq!(overflows, 0);
         }
-        let LiveEvent::Update { snapshot, .. } = subscription.try_recv().unwrap() else {
+        let (received, trailing_exit) = subscription.recv_coalesced().await;
+        assert_eq!(trailing_exit, None);
+        let SubscriptionReceive::Event(LiveEvent::Update { snapshot, .. }) = received else {
             panic!("mailbox-local append tail did not materialize");
         };
         let authoritative = owned_snapshot(splint_id, incarnation, &terminal, 4, None);
@@ -5509,6 +5860,64 @@ mod tests {
                 .scrollback
                 .available_rows
                 .saturating_sub(merged.scrollback_rows.len())
+        );
+    }
+
+    #[test]
+    fn append_deltas_preserve_preexisting_client_history_across_drains() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        terminal.advance(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let initial = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+
+        terminal.advance(b"\r\nsix");
+        let first_drain = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::AppendTail(1),
+        );
+        terminal.advance(b"\r\nseven");
+        let second_drain = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::AppendTail(1),
+        );
+        let authoritative = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+
+        let mut retained = initial.scrollback_rows;
+        retained.extend(first_drain.scrollback_rows);
+        retained.extend(second_drain.scrollback_rows);
+        let excess = retained.len().saturating_sub(4);
+        retained.drain(..excess);
+        assert_eq!(retained, authoritative.scrollback_rows);
+        assert_eq!(
+            authoritative.metadata.scrollback.omitted_oldest_rows,
+            authoritative
+                .metadata
+                .scrollback
+                .available_rows
+                .saturating_sub(retained.len())
         );
     }
 
@@ -5630,15 +6039,20 @@ mod tests {
             CompactHistoryPolicy::NoHistory,
         );
         let slot = CompactSnapshotSlot::default();
+        let accounting = Arc::new(QueueAccounting::new(
+            false,
+            Arc::new(RuntimeMetrics::default()),
+        ));
         {
             let mut current = slot.lock();
-            current.pending = Some(PendingCompactUpdates {
+            current.pending.push_back(PendingCompactUpdates {
                 incarnation,
                 frames: Vec::new(),
                 end_revision: terminal.revision(),
                 history_policy: CompactHistoryPolicy::AppendTail(1),
-                admitted: Vec::new(),
-                pending_attribution: None,
+                admissions: Vec::new(),
+                semantic_admissions: vec![SemanticByteLease::try_new(&accounting, 0).unwrap()],
+                pending_attributions: Vec::new(),
             });
         }
         let mut materialization = CompactMaterializationState::from_snapshot(snapshot, 0);
@@ -5799,7 +6213,183 @@ mod tests {
     }
 
     #[test]
-    fn compact_batch_attribution_tracks_merge_materialize_and_release() {
+    fn semantic_byte_admission_enforces_exact_local_and_splint_boundaries() {
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let local = Arc::new(QueueAccounting::with_semantic_byte_limit(
+            false,
+            Arc::clone(&metrics),
+            10,
+        ));
+        let exact = SemanticByteLease::try_new(&local, 10).unwrap();
+        assert!(SemanticByteLease::try_new(&local, 1).is_none());
+        assert_eq!(local.local_semantic_bytes.load(Ordering::Acquire), 10);
+        drop(exact);
+        assert_eq!(local.local_semantic_bytes.load(Ordering::Acquire), 0);
+
+        let first = Arc::new(QueueAccounting::new(false, Arc::clone(&metrics)));
+        let second = Arc::new(QueueAccounting::with_semantic_byte_limit(
+            false,
+            Arc::clone(&metrics),
+            48 * 1024 * 1024,
+        ));
+        let first_lease = SemanticByteLease::try_new(&first, 16 * 1024 * 1024).unwrap();
+        let second_lease = SemanticByteLease::try_new(&second, 48 * 1024 * 1024).unwrap();
+        assert!(SemanticByteLease::try_new(&second, 1).is_none());
+        assert_eq!(
+            metrics
+                .sparse_semantic_bytes_current
+                .load(Ordering::Acquire),
+            SPLINT_SPARSE_SEMANTIC_BYTES
+        );
+        drop((first_lease, second_lease));
+        assert_eq!(
+            metrics
+                .sparse_semantic_bytes_current
+                .load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_materialization_admission_failure_clears_sparse_ownership() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let (subscriber, mut receiver, resnapshot) =
+            test_subscriber(&terminal, 4, true, Arc::clone(&metrics));
+        let accounting = Arc::clone(&receiver.accounting);
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+
+        terminal.advance(b"A");
+        assert_eq!(
+            publish_updates(
+                SplintId::new(),
+                &terminal,
+                &mut publication,
+                incarnation,
+                None,
+                &mut subscribers,
+                &metrics,
+            ),
+            (1, 0)
+        );
+        let already_admitted = DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.load(Ordering::Acquire);
+        let saturation = TerminalPublicationMemoryLease::try_new(
+            usize::try_from(DAEMON_TERMINAL_PUBLICATION_BYTES - already_admitted).unwrap(),
+        )
+        .unwrap();
+
+        let (delivery, trailing_exit, admission) = receiver
+            .recv_coalesced_with_publication_admission(32 * 1024 * 1024)
+            .await;
+        assert!(matches!(delivery, SubscriptionReceive::ResnapshotRequired));
+        assert_eq!(trailing_exit, None);
+        assert!(admission.is_none());
+        assert_eq!(accounting.local_semantic_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(metrics.snapshot().queued_compact_semantic_bytes_current, 0);
+        assert!(!*resnapshot.borrow());
+        drop(saturation);
+        assert_eq!(
+            DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn sparse_semantic_overflow_clears_sealed_tail_before_resync() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let (subscriber, mut receiver, resnapshot) =
+            test_subscriber_with_limits(&terminal, 4, true, Arc::clone(&metrics), 0, 1);
+        let accounting = Arc::clone(&receiver.accounting);
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+
+        terminal.advance(b"A");
+        assert_eq!(
+            publish_updates(
+                SplintId::new(),
+                &terminal,
+                &mut publication,
+                incarnation,
+                None,
+                &mut subscribers,
+                &metrics,
+            ),
+            (1, 1)
+        );
+        assert!(subscribers.is_empty());
+        assert!(*resnapshot.borrow());
+        assert_eq!(accounting.local_semantic_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(
+            metrics
+                .sparse_semantic_bytes_current
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(metrics.snapshot().queued_compact_semantic_bytes_current, 0);
+        assert!(matches!(
+            receiver.recv_coalesced().await.0,
+            SubscriptionReceive::ResnapshotRequired
+        ));
+    }
+
+    #[tokio::test]
+    async fn sparse_seal_threshold_keeps_one_wake_and_materializes_each_chunk_once() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(16, 2, TerminalConfig::default());
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let (subscriber, mut receiver, resnapshot) =
+            test_subscriber(&terminal, 17, true, Arc::clone(&metrics));
+        let slot = match &subscriber.events {
+            SubscriberEvents::Compact { snapshot_slot, .. } => Arc::clone(snapshot_slot),
+            SubscriberEvents::Legacy(_) => unreachable!(),
+        };
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+
+        for byte in *b"ABCDEFGHI" {
+            terminal.advance(&[byte]);
+            assert_eq!(
+                publish_updates(
+                    SplintId::new(),
+                    &terminal,
+                    &mut publication,
+                    incarnation,
+                    None,
+                    &mut subscribers,
+                    &metrics,
+                ),
+                (1, 0)
+            );
+        }
+
+        {
+            let mailbox = slot.lock();
+            assert_eq!(mailbox.pending.len(), 2);
+            assert_eq!(mailbox.pending[0].frames.len(), 1);
+            assert_eq!(mailbox.pending[0].admissions.len(), SPARSE_SEAL_FRAME_COUNT);
+            assert_eq!(mailbox.pending[1].frames.len(), 1);
+            assert_eq!(mailbox.pending[1].admissions.len(), 1);
+        }
+        assert_eq!(receiver.events.len(), 1);
+        assert!(!*resnapshot.borrow());
+
+        let (delivery, trailing_exit) = receiver.recv_coalesced().await;
+        assert_eq!(trailing_exit, None);
+        let SubscriptionReceive::Event(LiveEvent::Update { snapshot, .. }) = delivery else {
+            panic!("sealed sparse mailbox did not materialize");
+        };
+        assert_eq!(snapshot.revision, terminal.revision());
+        assert!(snapshot_text(&snapshot).contains("ABCDEFGHI"));
+        assert_eq!(metrics.snapshot().publication_compact_materializations, 2);
+        assert_eq!(metrics.snapshot().queued_compact_batches_current, 0);
+    }
+
+    #[tokio::test]
+    async fn compact_batch_attribution_tracks_merge_materialize_and_release() {
         let incarnation = ProcessIncarnation::allocate();
         let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
         let metrics = Arc::new(RuntimeMetrics::default());
@@ -5840,15 +6430,19 @@ mod tests {
         assert_eq!(queued.publication_compact_batch_merges, 1);
         assert_eq!(queued.queued_compact_batches_current, 2);
         assert_eq!(queued.queued_compact_batches_high_water, 2);
-        assert!(queued.queued_compact_terminal_updates_current >= 2);
+        assert_eq!(queued.queued_compact_terminal_updates_current, 1);
         assert!(queued.queued_compact_semantic_bytes_current > 0);
-        assert_eq!(
-            queued.queued_compact_semantic_bytes_high_water,
-            queued.queued_compact_semantic_bytes_current
+        assert!(
+            queued.queued_compact_semantic_bytes_high_water
+                >= queued.queued_compact_semantic_bytes_current
         );
 
-        assert!(matches!(receiver.try_recv(), Ok(LiveEvent::Update { .. })));
+        assert!(matches!(
+            receiver.recv_coalesced().await.0,
+            SubscriptionReceive::Event(LiveEvent::Update { .. })
+        ));
         let drained = metrics.snapshot();
+        assert_eq!(drained.publication_compact_batch_merges, 1);
         assert_eq!(drained.queued_compact_batches_current, 0);
         assert_eq!(drained.queued_compact_terminal_updates_current, 0);
         assert_eq!(drained.queued_compact_semantic_bytes_current, 0);
@@ -5858,17 +6452,14 @@ mod tests {
             drained.publication_compact_materialized_batches_high_water,
             2
         );
-        assert_eq!(
-            drained.publication_compact_materialized_terminal_updates,
-            queued.queued_compact_terminal_updates_high_water
-        );
+        assert_eq!(drained.publication_compact_materialized_terminal_updates, 1);
         assert_eq!(
             drained.publication_compact_materialized_semantic_bytes,
-            queued.queued_compact_semantic_bytes_high_water
+            queued.queued_compact_semantic_bytes_current
         );
         assert_eq!(
             drained.publication_compact_materialized_semantic_bytes_high_water,
-            queued.queued_compact_semantic_bytes_high_water
+            queued.queued_compact_semantic_bytes_current
         );
     }
 
