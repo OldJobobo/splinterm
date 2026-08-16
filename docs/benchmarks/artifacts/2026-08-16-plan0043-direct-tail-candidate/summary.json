@@ -1,0 +1,52 @@
+{
+  "base_commit": "d8259658101c6539044f12a6f95242df8672ac9a",
+  "candidate": {},
+  "completed_measured_cases": 20,
+  "control": "ba8f1cd28f1aca25d83f198c593832b829601a6c with matched Plan 0043 diagnostic harness",
+  "error": null,
+  "interpretation": "All measured cases completed without resync. Generic runner valid=false/exit 1 is expected because its historical success predicate requires both variants to reproduce the old defect.",
+  "medians": {
+    "direct_tail": {
+      "batch_hwm": 64.0,
+      "cpu_ticks": 13.0,
+      "events": 67.5,
+      "marker_latency_ms": 119.79419,
+      "private_anon_mib": 5.953125,
+      "resync": 0.0,
+      "rss_pss_mib": 6.046875,
+      "update_summary_hwm": 64.0
+    },
+    "plan0042": {
+      "batch_hwm": 64.0,
+      "cpu_ticks": 14.0,
+      "events": 69.0,
+      "marker_latency_ms": 125.2909865,
+      "private_anon_mib": 8.2734375,
+      "resync": 0.0,
+      "rss_pss_mib": 8.3984375,
+      "update_summary_hwm": 15553.5
+    }
+  },
+  "randomization_seed": 4304,
+  "rejected_intermediates": {
+    "eight_frame_direct_tail": "Heap peak remained 7.86 MiB because each 8-frame/4 MiB chunk still allocated a successor frame; SparsePublicationCapture::into_frame accounted for 5.87 MiB.",
+    "single_giant_exact_update": "RSS/PSS median 3.92 MiB but CPU 16 ticks and marker latency 152.38 ms versus Plan 0042 15 ticks/135.31 ms; rejected for O(n^2) accumulated-update copying."
+  },
+  "review": {
+    "residual": "separately approved graphical aggregate memory/responsiveness/isolation/cleanup rerun remains required",
+    "run": "42a73b1e",
+    "verdict": "CLEAN"
+  },
+  "samples_per_variant": 10,
+  "schema": "splinterm.plan0043.direct-tail-candidate.v1",
+  "validation": {
+    "benchmark_harness": "63 passed",
+    "clippy": "cargo clippy --workspace --all-targets -- -D warnings passed",
+    "diff_check": "git diff --check passed",
+    "exact_production_socket_reconstruction": "10/10 passed, zero resync",
+    "format": "cargo fmt --all -- --check passed",
+    "workspace": "cargo test --workspace --all-targets -- --test-threads=1 passed"
+  },
+  "warmups": 2,
+  "working_diff_sha256": "065f1d5c4b7c2d2da7a7bb5cd0e2e8cdb754c8e53742e56e7c58eee66f1de20f"
+}

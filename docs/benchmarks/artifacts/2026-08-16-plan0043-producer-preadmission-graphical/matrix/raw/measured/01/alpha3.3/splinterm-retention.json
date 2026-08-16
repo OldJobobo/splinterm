@@ -1,0 +1,174 @@
+{
+  "isolation": {
+    "cleanup_verified": true,
+    "monitor": "DP-2",
+    "no_initial_focus": true,
+    "workspace": 8
+  },
+  "launch_mode": "prestarted_daemon_client_launch",
+  "memory_timeline": {
+    "baseline": {
+      "aggregate": {
+        "private_anon_bytes": 18751488,
+        "private_file_bytes": 1392640,
+        "pss_bytes": 26027008,
+        "rss_bytes": 59691008,
+        "shared_bytes": 39546880,
+        "shmem_bytes": 0
+      },
+      "processes": [
+        {
+          "name": "splinterd",
+          "pid": 1488961,
+          "private_anon_bytes": 2170880,
+          "private_file_bytes": 1269760,
+          "pss_bytes": 4614144,
+          "rss_bytes": 8429568,
+          "shared_bytes": 4988928,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "splinterm",
+          "pid": 1488970,
+          "private_anon_bytes": 5173248,
+          "private_file_bytes": 122880,
+          "pss_bytes": 9578496,
+          "rss_bytes": 29921280,
+          "shared_bytes": 24625152,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "python",
+          "pid": 1488975,
+          "private_anon_bytes": 11407360,
+          "private_file_bytes": 0,
+          "pss_bytes": 11834368,
+          "rss_bytes": 21340160,
+          "shared_bytes": 9932800,
+          "shmem_bytes": 0
+        }
+      ]
+    },
+    "classification": {
+      "private_anon": "min(total private, Anonymous) from smaps_rollup",
+      "private_file": "total private minus classified private anonymous",
+      "shared": "Shared_Clean plus Shared_Dirty",
+      "shmem": "ShmemPmdMapped"
+    },
+    "marker_visible": {
+      "aggregate": {
+        "private_anon_bytes": 29659136,
+        "private_file_bytes": 5722112,
+        "pss_bytes": 42108928,
+        "rss_bytes": 93122560,
+        "shared_bytes": 57741312,
+        "shmem_bytes": 0
+      },
+      "processes": [
+        {
+          "name": "splinterd",
+          "pid": 1488961,
+          "private_anon_bytes": 9293824,
+          "private_file_bytes": 1269760,
+          "pss_bytes": 11737088,
+          "rss_bytes": 15552512,
+          "shared_bytes": 4988928,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "splinterm",
+          "pid": 1488970,
+          "private_anon_bytes": 8957952,
+          "private_file_bytes": 4452352,
+          "pss_bytes": 18537472,
+          "rss_bytes": 56229888,
+          "shared_bytes": 42819584,
+          "shmem_bytes": 0
+        },
+        {
+          "name": "python",
+          "pid": 1488975,
+          "private_anon_bytes": 11407360,
+          "private_file_bytes": 0,
+          "pss_bytes": 11834368,
+          "rss_bytes": 21340160,
+          "shared_bytes": 9932800,
+          "shmem_bytes": 0
+        }
+      ]
+    },
+    "peak_observed_rss_bytes": 93122560,
+    "settles": [
+      {
+        "memory": {
+          "aggregate": {
+            "private_anon_bytes": 29667328,
+            "private_file_bytes": 5722112,
+            "pss_bytes": 42117120,
+            "rss_bytes": 93130752,
+            "shared_bytes": 57741312,
+            "shmem_bytes": 0
+          },
+          "processes": [
+            {
+              "name": "splinterd",
+              "pid": 1488961,
+              "private_anon_bytes": 9302016,
+              "private_file_bytes": 1269760,
+              "pss_bytes": 11745280,
+              "rss_bytes": 15560704,
+              "shared_bytes": 4988928,
+              "shmem_bytes": 0
+            },
+            {
+              "name": "splinterm",
+              "pid": 1488970,
+              "private_anon_bytes": 8957952,
+              "private_file_bytes": 4452352,
+              "pss_bytes": 18537472,
+              "rss_bytes": 56229888,
+              "shared_bytes": 42819584,
+              "shmem_bytes": 0
+            },
+            {
+              "name": "python",
+              "pid": 1488975,
+              "private_anon_bytes": 11407360,
+              "private_file_bytes": 0,
+              "pss_bytes": 11834368,
+              "rss_bytes": 21340160,
+              "shared_bytes": 9932800,
+              "shmem_bytes": 0
+            }
+          ]
+        },
+        "seconds": 2.0
+      }
+    ]
+  },
+  "notes": [],
+  "processes": {
+    "child_included": true,
+    "child_pid": 1488975,
+    "count": 3,
+    "root_pids": [
+      1488961,
+      1488970
+    ]
+  },
+  "retention": {
+    "clear_cycles": 9,
+    "context_switches": 135,
+    "cpu_ticks": 22,
+    "lines": 5000,
+    "retained_growth_bytes": 33439744,
+    "rss_baseline_bytes": 59691008,
+    "rss_peak_observed_bytes": 93130752,
+    "rss_post_settle_bytes": 93130752,
+    "trigger_to_visible_marker_ns": 362021212
+  },
+  "schema": "splinterm.benchmark.graphical-retention.v2",
+  "terminal": "splinterm",
+  "valid": true,
+  "variant": "alpha3.3"
+}

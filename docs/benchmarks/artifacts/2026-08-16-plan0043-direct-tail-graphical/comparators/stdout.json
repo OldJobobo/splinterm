@@ -1,0 +1,287 @@
+{
+  "order": [
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "terminal": "ghostty"
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "terminal": "foot"
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "terminal": "kitty"
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "terminal": "kitty"
+    }
+  ],
+  "samples_per_terminal": 10,
+  "schema": "splinterm.plan0043.graphical-comparators.v1",
+  "seed": 4304,
+  "summary": {
+    "foot": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 4259840,
+        "median": 4098048.0,
+        "minimum": 3874816
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 5245952,
+        "median": 5059072.0,
+        "minimum": 4851712
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 16121856,
+        "median": 15910912.0,
+        "minimum": 15683584
+      },
+      "context_switches": {
+        "maximum": 99,
+        "median": 68.0,
+        "minimum": 48
+      },
+      "cpu_ticks": {
+        "maximum": 4,
+        "median": 2.0,
+        "minimum": 0
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 189473120,
+        "median": 177145948.0,
+        "minimum": 174926922
+      }
+    },
+    "ghostty": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 4526080,
+        "median": 3762176.0,
+        "minimum": 3141632
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 6543360,
+        "median": 5784576.0,
+        "minimum": 5109760
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 16977920,
+        "median": 16203776.0,
+        "minimum": 15544320
+      },
+      "context_switches": {
+        "maximum": 156,
+        "median": 148.5,
+        "minimum": 140
+      },
+      "cpu_ticks": {
+        "maximum": 5,
+        "median": 5.0,
+        "minimum": 3
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 189923827,
+        "median": 186521867.0,
+        "minimum": 178189034
+      }
+    },
+    "kitty": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 9494528,
+        "median": 8347648.0,
+        "minimum": 8310784
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 11095040,
+        "median": 9946112.0,
+        "minimum": 9841664
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 24793088,
+        "median": 23635968.0,
+        "minimum": 23547904
+      },
+      "context_switches": {
+        "maximum": 34,
+        "median": 27.5,
+        "minimum": 23
+      },
+      "cpu_ticks": {
+        "maximum": 4,
+        "median": 2.0,
+        "minimum": 2
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 202133615,
+        "median": 194054589.0,
+        "minimum": 188195941
+      }
+    }
+  },
+  "valid": true,
+  "warmups_per_terminal": 2
+}
