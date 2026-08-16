@@ -1,7 +1,7 @@
 # Plan 0012: bounded compact publication frames
 
-- **Status:** Blocked — first bounded checkpoint-frame experiment rejected before graphics; sparse frame ownership redesign required
-- **Release decision:** Do not tag `beta1` until this plan passes its non-graphical, graphical, and review gates
+- **Status:** Blocked — first bounded checkpoint-frame experiment rejected before graphics; its Alpha3 implementation assumptions are superseded by the fresh-baseline-gated [Plan 0043](0043-beta1-sparse-publication-frames.md)
+- **Release decision:** Do not tag `beta1`; Plan 0043 must pass its updated non-graphical, graphical, review, integration, and release gates
 - **Parent plans:** [Plan 0011](0011-burst-output-memory-retention.md) and [Plan 0010](0010-full-performance-optimization-pass.md)
 - **Behavioral authority:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 - **Primary evidence:** [Plan 0011 final no-go](../benchmarks/artifacts/2026-07-27-plan0011-scroll-bound-fix-3/summary.md)
