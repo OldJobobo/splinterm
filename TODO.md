@@ -247,6 +247,15 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
 - [ ] Prove registry, help, CLI inspection, command-palette shortcut projection,
   keyboard dispatch, and lifecycle behavior cannot drift.
 
+## Benchmark coverage follow-up
+
+- [ ] Add WezTerm as an optional comparison terminal throughout the benchmark
+  suite: provide an isolated deterministic profile and app ID, extend terminal
+  inventories and result schemas, include it in applicable retention, latency,
+  output, resize, lifecycle, idle, and scrollback matrices, preserve guarded
+  workspace/focus/cleanup checks, and report a clear skip when WezTerm is not
+  installed.
+
 ## Maintainability and architecture follow-up
 
 Track the findings from the
