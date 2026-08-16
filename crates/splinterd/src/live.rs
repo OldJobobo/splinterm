@@ -205,7 +205,13 @@ impl Clone for CompactCellContent {
 
     fn clone_from(&mut self, source: &Self) {
         if let (Self::Composed(current), Self::Composed(next)) = (&mut *self, source) {
-            current.clone_from(next);
+            if current.capacity() >= next.len() {
+                current.clone_from(next);
+            } else {
+                let mut replacement = String::with_capacity(next.len());
+                replacement.push_str(next);
+                *current = replacement;
+            }
         } else {
             *self = source.clone();
         }
@@ -291,7 +297,13 @@ impl Clone for CompactLiveRow {
     fn clone_from(&mut self, source: &Self) {
         self.row_id = source.row_id;
         self.linebreak = source.linebreak;
-        self.cells.clone_from(&source.cells);
+        if self.cells.capacity() >= source.cells.len() {
+            self.cells.clone_from(&source.cells);
+        } else {
+            let mut cells = Vec::with_capacity(source.cells.len());
+            cells.extend(source.cells.iter().cloned());
+            self.cells = cells;
+        }
     }
 }
 
@@ -527,6 +539,10 @@ impl SparsePublicationFrame {
         PendingFrameAttribution::one_frame(&self.updates, self.history_policy, self.semantic_bytes)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "direct sparse composition keeps prevalidation and exact-capacity mutation together"
+    )]
     fn merge_capture(
         &mut self,
         capture: SparsePublicationCapture,
@@ -564,6 +580,24 @@ impl SparsePublicationFrame {
             }
             SparseHistoryCapture::Replace => Some(snapshot.scrollback_rows.as_slice()),
         };
+        let required_visible_rows = if self.metadata.dimensions.rows == final_row_count {
+            self.visible_rows.len().checked_add(
+                capture
+                    .damaged_rows
+                    .iter()
+                    .filter(|&&index| {
+                        self.visible_rows
+                            .binary_search_by_key(&index, |patch| patch.index)
+                            .is_err()
+                    })
+                    .count(),
+            )?
+        } else {
+            final_row_count
+        };
+        ensure_exact_vec_capacity(&mut self.visible_rows, required_visible_rows);
+        let required_updates = self.updates.len().checked_add(1)?;
+        ensure_exact_vec_capacity(&mut self.updates, required_updates);
         if self.metadata.dimensions.rows == final_row_count {
             for index in capture.damaged_rows {
                 match self
@@ -699,7 +733,17 @@ fn sparse_damaged_rows(updates: &[TerminalUpdate], row_count: usize) -> Option<V
     )
 }
 
+fn ensure_exact_vec_capacity<T>(values: &mut Vec<T>, required: usize) {
+    if values.capacity() >= required {
+        return;
+    }
+    let mut replacement = Vec::with_capacity(required);
+    replacement.append(values);
+    *values = replacement;
+}
+
 fn clone_sparse_rows_from_snapshot(rows: &mut Vec<SparseRowPatch>, source: &[CompactLiveRow]) {
+    ensure_exact_vec_capacity(rows, source.len());
     for (index, source_row) in source.iter().enumerate() {
         if let Some(patch) = rows.get_mut(index) {
             patch.index = index;
@@ -715,6 +759,7 @@ fn clone_sparse_rows_from_snapshot(rows: &mut Vec<SparseRowPatch>, source: &[Com
 }
 
 fn clone_compact_rows_from_slice(rows: &mut Vec<CompactLiveRow>, source: &[CompactLiveRow]) {
+    ensure_exact_vec_capacity(rows, source.len());
     for (index, source_row) in source.iter().enumerate() {
         if let Some(row) = rows.get_mut(index) {
             row.clone_from(source_row);
@@ -738,6 +783,10 @@ fn append_bounded_sparse_rows(
         clone_compact_rows_from_slice(rows, &source[source.len() - final_rows..]);
         return;
     }
+    ensure_exact_vec_capacity(
+        rows,
+        rows.len().saturating_add(source.len()).min(final_rows),
+    );
     while rows.len() > final_rows {
         rows.remove(0);
     }
@@ -821,6 +870,53 @@ fn compact_row_nested_bytes(row: &CompactLiveRow) -> Option<usize> {
         total = total.checked_add(cell.content.owned_string_bytes())?;
     }
     Some(total)
+}
+
+fn compact_materialization_semantic_bytes(
+    rows: &[CompactLiveRow],
+    rows_capacity: usize,
+) -> Option<u64> {
+    let mut total = size_of::<CompactMaterializationState>();
+    checked_owned_bytes(&mut total, rows_capacity, size_of::<CompactLiveRow>())?;
+    for row in rows {
+        total = total.checked_add(compact_row_nested_bytes(row)?)?;
+    }
+    u64::try_from(total).ok()
+}
+
+fn compact_materialization_clone_bound(
+    current: &[CompactLiveRow],
+    current_capacity: usize,
+    source: &[CompactLiveRow],
+) -> Option<u64> {
+    let mut total = size_of::<CompactMaterializationState>();
+    checked_owned_bytes(
+        &mut total,
+        current_capacity.max(source.len()),
+        size_of::<CompactLiveRow>(),
+    )?;
+    for (index, source_row) in source.iter().enumerate() {
+        let current_row = current.get(index);
+        let cells_capacity = current_row.map_or(source_row.cells.len(), |row| {
+            row.cells.capacity().max(source_row.cells.len())
+        });
+        checked_owned_bytes(&mut total, cells_capacity, size_of::<CompactLiveCell>())?;
+        for (cell_index, source_cell) in source_row.cells.iter().enumerate() {
+            let source_bytes = source_cell.content.owned_string_bytes();
+            let retained_bytes = current_row
+                .and_then(|row| row.cells.get(cell_index))
+                .map_or(0, |cell| match (&cell.content, &source_cell.content) {
+                    (CompactCellContent::Composed(current), CompactCellContent::Composed(next))
+                        if current.capacity() >= next.len() =>
+                    {
+                        current.capacity()
+                    }
+                    _ => 0,
+                });
+            total = total.checked_add(retained_bytes.max(source_bytes))?;
+        }
+    }
+    u64::try_from(total).ok()
 }
 
 fn sparse_frame_semantic_bytes(
@@ -908,6 +1004,7 @@ struct CompactMaterializationState {
     incarnation: Option<ProcessIncarnation>,
     revision: TerminalRevision,
     visible_rows: Vec<CompactLiveRow>,
+    semantic_admission: SemanticByteLease,
     // History is intentionally event-local: AppendTail snapshots carry only the
     // rows a client must append to its already retained history. FullHistory
     // replaces that client state. Retaining old rows here would duplicate them
@@ -916,13 +1013,38 @@ struct CompactMaterializationState {
 }
 
 impl CompactMaterializationState {
-    fn from_snapshot(snapshot: CompactLiveSnapshot, history_limit: usize) -> Self {
-        Self {
+    fn from_snapshot(
+        snapshot: CompactLiveSnapshot,
+        history_limit: usize,
+        accounting: &Arc<QueueAccounting>,
+    ) -> Option<Self> {
+        let semantic_bytes = compact_materialization_semantic_bytes(
+            &snapshot.visible_rows,
+            snapshot.visible_rows.capacity(),
+        )?;
+        Some(Self {
             incarnation: Some(snapshot.metadata.incarnation),
             revision: snapshot.metadata.revision,
             visible_rows: snapshot.visible_rows,
+            semantic_admission: SemanticByteLease::try_new(accounting, semantic_bytes)?,
             history_limit,
-        }
+        })
+    }
+
+    fn replace_visible_rows(&mut self, source: &[CompactLiveRow]) -> Option<()> {
+        let bound = compact_materialization_clone_bound(
+            &self.visible_rows,
+            self.visible_rows.capacity(),
+            source,
+        )?;
+        self.semantic_admission.resize(bound)?;
+        clone_compact_rows_from_slice(&mut self.visible_rows, source);
+        let exact = compact_materialization_semantic_bytes(
+            &self.visible_rows,
+            self.visible_rows.capacity(),
+        )?;
+        debug_assert!(exact <= bound);
+        self.semantic_admission.resize(exact)
     }
 }
 
@@ -1154,9 +1276,9 @@ impl PendingCompactUpdates {
         for attribution in &self.pending_attributions {
             attribution.record_materialization();
         }
+        state.replace_visible_rows(&materialized_rows)?;
         state.incarnation = materialized_incarnation;
         state.revision = materialized_revision;
-        state.visible_rows.clone_from(&materialized_rows);
         Some((
             self.incarnation,
             updates,
@@ -1477,6 +1599,21 @@ impl SemanticByteLease {
         })
     }
 
+    fn resize(&mut self, bytes: u64) -> Option<()> {
+        if bytes > self.bytes {
+            let mut extra = Self::try_new(&self.accounting, bytes - self.bytes)?;
+            extra.bytes = 0;
+            extra.daemon.bytes = 0;
+        } else if bytes < self.bytes {
+            let released = self.bytes - bytes;
+            self.accounting.release_semantic_bytes(released);
+            DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.fetch_sub(released, Ordering::AcqRel);
+        }
+        self.bytes = bytes;
+        self.daemon.bytes = bytes;
+        Some(())
+    }
+
     fn consolidate(leases: &mut Vec<Self>, bytes: u64) -> Option<()> {
         let accounting = Arc::clone(&leases.first()?.accounting);
         if !leases
@@ -1691,7 +1828,19 @@ fn publish_compact_update(
             mailbox.pending.clear();
             return CompactPublishOutcome::Full;
         };
-        if aggregate.merge_capture(capture, &snapshot).is_none() {
+        // The existing aggregate and complete successor capture are both
+        // admitted before mutation. Exact-capacity growth helpers guarantee the
+        // merged tail cannot retain more than their combined semantic ownership.
+        let Some(admitted_merge_bound) = aggregate
+            .semantic_bytes
+            .checked_add(capture_attribution.semantic_bytes)
+        else {
+            mailbox.pending.clear();
+            return CompactPublishOutcome::Full;
+        };
+        if aggregate.merge_capture(capture, &snapshot).is_none()
+            || aggregate.semantic_bytes > admitted_merge_bound
+        {
             mailbox.pending.clear();
             return CompactPublishOutcome::Full;
         }
@@ -2116,6 +2265,8 @@ pub enum LiveError {
     RowIdentityExhausted,
     #[error("subscriber capacity must be non-zero")]
     InvalidSubscriberCapacity,
+    #[error("terminal publication memory limit exceeded")]
+    PublicationMemoryFull,
     #[error("PTY reply queue limit exceeded")]
     ReplyQueueFull,
     #[error("child process has already exited")]
@@ -3603,7 +3754,11 @@ fn handle_command(
                 return;
             }
             let snapshot_rows = max_rows.min(config.max_scrollback_snapshot_rows);
-            let materialization = CompactMaterializationState::from_snapshot(
+            let accounting = Arc::new(QueueAccounting::new(
+                publication_memory_metrics,
+                Arc::clone(metrics),
+            ));
+            let Some(materialization) = CompactMaterializationState::from_snapshot(
                 compact_snapshot_with_history(
                     splint_id,
                     incarnation,
@@ -3613,12 +3768,12 @@ fn handle_command(
                     CompactHistoryPolicy::FullHistory,
                 ),
                 snapshot_rows,
-            );
+                &accounting,
+            ) else {
+                let _ = reply.send(Err(LiveError::PublicationMemoryFull));
+                return;
+            };
             let (event_sender, events) = mpsc::channel(event_capacity);
-            let accounting = Arc::new(QueueAccounting::new(
-                publication_memory_metrics,
-                Arc::clone(metrics),
-            ));
             let snapshot_slot = Arc::new(CompactSnapshotSlot::default());
             let (resnapshot, resnapshot_receiver) = watch::channel(false);
             subscribers.push(Subscriber {
@@ -3663,7 +3818,11 @@ fn handle_command(
             let started = Instant::now();
             let snapshot =
                 owned_snapshot(splint_id, incarnation, terminal, snapshot_rows, child_exit);
-            let materialization = CompactMaterializationState::from_snapshot(
+            let accounting = Arc::new(QueueAccounting::new(
+                publication_memory_metrics,
+                Arc::clone(metrics),
+            ));
+            let Some(materialization) = CompactMaterializationState::from_snapshot(
                 compact_snapshot_with_history(
                     splint_id,
                     incarnation,
@@ -3673,17 +3832,17 @@ fn handle_command(
                     CompactHistoryPolicy::FullHistory,
                 ),
                 snapshot_rows,
-            );
+                &accounting,
+            ) else {
+                let _ = reply.send(Err(LiveError::PublicationMemoryFull));
+                return;
+            };
             metrics.snapshot_builds.fetch_add(1, Ordering::Relaxed);
             metrics.snapshot_build_ns.fetch_add(
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                 Ordering::Relaxed,
             );
             let (event_sender, events) = mpsc::channel(event_capacity);
-            let accounting = Arc::new(QueueAccounting::new(
-                publication_memory_metrics,
-                Arc::clone(metrics),
-            ));
             let snapshot_slot = Arc::new(CompactSnapshotSlot::default());
             let (resnapshot, resnapshot_receiver) = watch::channel(false);
             subscribers.push(Subscriber {
@@ -4455,22 +4614,30 @@ mod tests {
         semantic_byte_limit: u64,
     ) -> (Subscriber, CompactSubscription, watch::Receiver<bool>) {
         let (events, receiver) = mpsc::channel(capacity);
+        let materialization_snapshot = compact_snapshot(
+            SplintId::new(),
+            ProcessIncarnation::allocate(),
+            terminal,
+            snapshot_rows,
+            None,
+        );
+        let base_bytes = compact_materialization_semantic_bytes(
+            &materialization_snapshot.visible_rows,
+            materialization_snapshot.visible_rows.capacity(),
+        )
+        .unwrap();
         let accounting = Arc::new(QueueAccounting::with_semantic_byte_limit(
             enabled,
             metrics,
-            semantic_byte_limit,
+            base_bytes.checked_add(semantic_byte_limit).unwrap(),
         ));
         let snapshot_slot = Arc::new(CompactSnapshotSlot::default());
         let mut materialization = CompactMaterializationState::from_snapshot(
-            compact_snapshot(
-                SplintId::new(),
-                ProcessIncarnation::allocate(),
-                terminal,
-                snapshot_rows,
-                None,
-            ),
+            materialization_snapshot,
             snapshot_rows,
-        );
+            &accounting,
+        )
+        .unwrap();
         materialization.incarnation = None;
         let (resnapshot, resnapshot_receiver) = watch::channel(false);
         (
@@ -5852,7 +6019,14 @@ mod tests {
 
         let (capture, snapshot, mut expected) =
             prepare_sparse_test_transition(splint_id, incarnation, &terminal, first_revision, 1);
+        sealed.updates.shrink_to_fit();
+        sealed.visible_rows.shrink_to_fit();
+        let admitted_merge_bound = sealed
+            .semantic_bytes
+            .checked_add(capture.semantic_bytes)
+            .unwrap();
         assert!(sealed.merge_capture(capture, &snapshot).is_some());
+        assert!(sealed.semantic_bytes <= admitted_merge_bound);
         let rows = match &sealed.history {
             SparseHistoryDelta::Append { rows, .. } => rows,
             history => panic!("expected append history, got {history:?}"),
@@ -5911,7 +6085,8 @@ mod tests {
             semantic_admissions: vec![SemanticByteLease::try_new(&accounting, 0).unwrap()],
             pending_attributions: Vec::new(),
         };
-        let mut materialization = CompactMaterializationState::from_snapshot(base, 0);
+        let mut materialization =
+            CompactMaterializationState::from_snapshot(base, 0, &accounting).unwrap();
         let original_revision = materialization.revision;
         let original_rows = materialization.visible_rows.clone();
 
@@ -6430,7 +6605,8 @@ mod tests {
                 pending_attributions: Vec::new(),
             });
         }
-        let mut materialization = CompactMaterializationState::from_snapshot(snapshot, 0);
+        let mut materialization =
+            CompactMaterializationState::from_snapshot(snapshot, 0, &accounting).unwrap();
         assert!(matches!(
             slot.take_pending(&mut materialization),
             MailboxTake::MissingOrMismatched
@@ -6625,6 +6801,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn materialization_base_is_admitted_resized_and_released_exactly() {
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let (_subscriber, mut receiver, _) =
+            test_subscriber(&terminal, 4, true, Arc::clone(&metrics));
+        let accounting = Arc::clone(&receiver.accounting);
+        let initial = accounting.local_semantic_bytes.load(Ordering::Acquire);
+        assert!(initial > 0);
+        assert_eq!(
+            metrics
+                .sparse_semantic_bytes_current
+                .load(Ordering::Acquire),
+            initial
+        );
+
+        let mut wider = Terminal::new(64, 4, TerminalConfig::default());
+        wider.advance("wide e\u{301} state".as_bytes());
+        let snapshot = compact_snapshot(
+            SplintId::new(),
+            ProcessIncarnation::allocate(),
+            &wider,
+            0,
+            None,
+        );
+        receiver
+            .materialization
+            .replace_visible_rows(&snapshot.visible_rows)
+            .unwrap();
+        let exact = compact_materialization_semantic_bytes(
+            &receiver.materialization.visible_rows,
+            receiver.materialization.visible_rows.capacity(),
+        )
+        .unwrap();
+        assert_eq!(
+            accounting.local_semantic_bytes.load(Ordering::Acquire),
+            exact
+        );
+        assert_eq!(
+            metrics
+                .sparse_semantic_bytes_current
+                .load(Ordering::Acquire),
+            exact
+        );
+
+        drop(receiver);
+        assert_eq!(accounting.local_semantic_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(
+            metrics
+                .sparse_semantic_bytes_current
+                .load(Ordering::Acquire),
+            0
+        );
+
+        let denied_snapshot = compact_snapshot(
+            SplintId::new(),
+            ProcessIncarnation::allocate(),
+            &wider,
+            0,
+            None,
+        );
+        let required = compact_materialization_semantic_bytes(
+            &denied_snapshot.visible_rows,
+            denied_snapshot.visible_rows.capacity(),
+        )
+        .unwrap();
+        let denied = Arc::new(QueueAccounting::with_semantic_byte_limit(
+            false,
+            Arc::new(RuntimeMetrics::default()),
+            required - 1,
+        ));
+        assert!(CompactMaterializationState::from_snapshot(denied_snapshot, 0, &denied).is_none());
+        assert_eq!(denied.local_semantic_bytes.load(Ordering::Acquire), 0);
+    }
+
     #[tokio::test]
     async fn pre_materialization_admission_failure_clears_sparse_ownership() {
         let incarnation = ProcessIncarnation::allocate();
@@ -6633,6 +6884,8 @@ mod tests {
         let (subscriber, mut receiver, resnapshot) =
             test_subscriber(&terminal, 4, true, Arc::clone(&metrics));
         let accounting = Arc::clone(&receiver.accounting);
+        let materialization_bytes = accounting.local_semantic_bytes.load(Ordering::Acquire);
+        assert!(materialization_bytes > 0);
         let mut subscribers = vec![subscriber];
         let mut publication = SynchronizedPublication::new(terminal.revision());
 
@@ -6661,10 +6914,18 @@ mod tests {
         assert!(matches!(delivery, SubscriptionReceive::ResnapshotRequired));
         assert_eq!(trailing_exit, None);
         assert!(admission.is_none());
-        assert_eq!(accounting.local_semantic_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(
+            accounting.local_semantic_bytes.load(Ordering::Acquire),
+            materialization_bytes
+        );
         assert_eq!(metrics.snapshot().queued_compact_semantic_bytes_current, 0);
         assert!(!*resnapshot.borrow());
         drop(saturation);
+        assert_eq!(
+            DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.load(Ordering::Acquire),
+            materialization_bytes
+        );
+        drop(receiver);
         assert_eq!(
             DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.load(Ordering::Acquire),
             0
@@ -6679,6 +6940,8 @@ mod tests {
         let (subscriber, mut receiver, resnapshot) =
             test_subscriber_with_limits(&terminal, 4, true, Arc::clone(&metrics), 0, 1);
         let accounting = Arc::clone(&receiver.accounting);
+        let materialization_bytes = accounting.local_semantic_bytes.load(Ordering::Acquire);
+        assert!(materialization_bytes > 0);
         let mut subscribers = vec![subscriber];
         let mut publication = SynchronizedPublication::new(terminal.revision());
 
@@ -6697,18 +6960,28 @@ mod tests {
         );
         assert!(subscribers.is_empty());
         assert!(*resnapshot.borrow());
-        assert_eq!(accounting.local_semantic_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(
+            accounting.local_semantic_bytes.load(Ordering::Acquire),
+            materialization_bytes
+        );
         assert_eq!(
             metrics
                 .sparse_semantic_bytes_current
                 .load(Ordering::Acquire),
-            0
+            materialization_bytes
         );
         assert_eq!(metrics.snapshot().queued_compact_semantic_bytes_current, 0);
         assert!(matches!(
             receiver.recv_coalesced().await.0,
             SubscriptionReceive::ResnapshotRequired
         ));
+        drop(receiver);
+        assert_eq!(
+            metrics
+                .sparse_semantic_bytes_current
+                .load(Ordering::Acquire),
+            0
+        );
     }
 
     #[tokio::test]
@@ -6718,6 +6991,8 @@ mod tests {
         let metrics = Arc::new(RuntimeMetrics::default());
         let (subscriber, mut receiver, resnapshot) =
             test_subscriber(&terminal, 17, true, Arc::clone(&metrics));
+        let accounting = Arc::clone(&receiver.accounting);
+        let materialization_bytes = accounting.local_semantic_bytes.load(Ordering::Acquire);
         let slot = match &subscriber.events {
             SubscriberEvents::Compact { snapshot_slot, .. } => Arc::clone(snapshot_slot),
             SubscriberEvents::Legacy(_) => unreachable!(),
@@ -6746,6 +7021,11 @@ mod tests {
             assert_eq!(mailbox.pending.len(), 1);
             assert_eq!(mailbox.pending[0].frames.len(), 1);
             assert_eq!(mailbox.pending[0].admissions.len(), 9);
+            let aggregate = &mailbox.pending[0].frames[0];
+            assert_eq!(
+                accounting.local_semantic_bytes.load(Ordering::Acquire),
+                materialization_bytes + aggregate.semantic_bytes
+            );
         }
         assert_eq!(receiver.events.len(), 1);
         assert!(!*resnapshot.borrow());
@@ -6757,6 +7037,15 @@ mod tests {
         };
         assert_eq!(snapshot.revision, terminal.revision());
         assert!(snapshot_text(&snapshot).contains("ABCDEFGHI"));
+        let retained_base = compact_materialization_semantic_bytes(
+            &receiver.materialization.visible_rows,
+            receiver.materialization.visible_rows.capacity(),
+        )
+        .unwrap();
+        assert_eq!(
+            accounting.local_semantic_bytes.load(Ordering::Acquire),
+            retained_base
+        );
         assert_eq!(metrics.snapshot().publication_compact_materializations, 1);
         assert_eq!(metrics.snapshot().queued_compact_batches_current, 0);
     }
@@ -6938,6 +7227,11 @@ mod tests {
                 incarnation: None,
                 revision: TerminalRevision::default(),
                 visible_rows: Vec::new(),
+                semantic_admission: SemanticByteLease::try_new(
+                    &accounting,
+                    compact_materialization_semantic_bytes(&[], 0).unwrap(),
+                )
+                .unwrap(),
                 history_limit: 0,
             }),
         };
@@ -7074,12 +7368,17 @@ mod tests {
         let mut subscription = CompactSubscription {
             events,
             resnapshot,
-            accounting,
+            accounting: Arc::clone(&accounting),
             snapshot_slot: Arc::new(CompactSnapshotSlot::default()),
             materialization: Box::new(CompactMaterializationState {
                 incarnation: None,
                 revision: TerminalRevision::default(),
                 visible_rows: Vec::new(),
+                semantic_admission: SemanticByteLease::try_new(
+                    &accounting,
+                    compact_materialization_semantic_bytes(&[], 0).unwrap(),
+                )
+                .unwrap(),
                 history_limit: 0,
             }),
         };

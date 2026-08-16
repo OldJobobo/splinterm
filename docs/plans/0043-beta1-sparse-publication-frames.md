@@ -660,6 +660,43 @@ randomized order, exact binary hashes, summaries, comparator data, cleanup state
 and checksums are retained under
 `docs/benchmarks/artifacts/2026-08-16-plan0043-direct-tail-graphical/`.
 
+### PR admission review fixes — 2026-08-16
+
+PR #22 review found two valid gaps after initial CI. First, each compact
+subscriber retained its complete receiver materialization grid without a
+semantic lease. `CompactMaterializationState` now owns an exact lease under the
+same 16 MiB subscriber, 64 MiB Splint, and 256 MiB daemon authorities. Initial
+attach fails closed when that base cannot be admitted; row-capacity changes are
+admitted before retained mutation and consolidated to exact ownership; drop
+releases the base exactly.
+
+Second, reusable-tail vectors could geometrically allocate spare capacity before
+post-merge consolidation. Cell/string and row/history/update vectors now use
+deterministic exact-capacity growth. Because the existing frame and complete
+successor capture are both admitted before mutation, their checked semantic-byte
+sum is an upper bound on the merge; final ownership then consolidates to exact
+reported capacity. Focused tests cover initial denial, base growth/release,
+capacity-boundary tail merges, overflow cleanup, and exact daemon/Splint/local
+balances.
+
+The initial PR CI also exposed a scheduling-dependent Phase 8 test. The test now
+separates a short paced active-drain continuity proof from a later unpaced
+30,000-line pressure proof whose unread `MAX_SUBSCRIPTIONS` connection is created
+only after the fast client exits. Five isolated runs and the complete serialized
+end-to-end binary pass; production behavior is unchanged.
+
+The complete serialized workspace, warnings-denied Clippy, 58 focused live
+tests, ten consecutive production-socket reconstruction runs, formatting, and
+full diff checks pass. A repeated seed-4304 headless matrix completed all 20
+measured cases with zero resync: the review-fix candidate retained 7.50 MiB
+RSS/PSS versus integrated Plan 0042's 8.86 MiB, used 13 versus 14.5 CPU ticks,
+and delivered the marker in 126.75 ms versus 132.85 ms. Evidence and checksums
+are retained under
+`docs/benchmarks/artifacts/2026-08-16-plan0043-pr-review-fixes/`.
+Because these fixes change production ownership/accounting after the accepted
+exact graphical commit, one newly approved graphical rerun remains required
+before merge.
+
 ## Review and stop-loss
 
 Use one writer for the implementation worktree. Require one fresh read-only
