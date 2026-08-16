@@ -428,13 +428,29 @@ Mandatory correctness:
 
 Mandatory performance and memory:
 
-- daemon retention does not materially regress from the accepted Plan 0011 gain;
-- client retained growth is no worse than the exact release control;
-- aggregate retained growth is below the exact release control;
-- CPU, marker latency, input, resize, redraw, and idle work do not regress beyond
-  the accepted control allowance; and
+- compare candidate medians against both packaged Alpha3.3 and integrated Plan
+  0042 controls;
+- for daemon, client, and aggregate RSS/PSS/private-anonymous retained growth,
+  “no material regression” means the candidate may not exceed either control by
+  more than the greater of 3% of that control median or 1 MiB, evaluated per
+  metric;
+- randomized median CPU ticks and marker latency may not exceed either control
+  by more than 3%;
+- input, resize, redraw, and idle behavior retain their accepted Plan 0042
+  correctness and bounded-work contracts, proven by an unchanged graphical
+  client/renderer production diff, the complete serialized workspace, focused
+  daemon input/resize/publication-wake tests, and Plan 0042's accepted packaged
+  graphical evidence; and
 - retain Plan 0012's release preference of at least 40% lower aggregate retained
-  growth than control without converting it into a weaker completion threshold.
+  growth than control without converting that preference into a mandatory
+  completion threshold.
+
+The memory tolerance is an acceptance boundary for repeated randomized medians,
+not permission to ignore correctness failures, resync, leaks, unbounded growth,
+or a clearly attributed regression. It was explicitly approved after exact
+commit `2c5ac9f` eliminated the prior 26% daemon regression and the remaining
+0.80% aggregate difference was attributed to overlapping client measurements,
+with only a 2 KiB candidate daemon median difference from Alpha3.3.
 
 Run focused suites after each milestone, then the complete serialized workspace,
 Clippy with warnings denied, formatting, benchmark harness tests, package and
@@ -607,8 +623,35 @@ and individual samples do not show a stable candidate daemon excess. The prior
 sparse-capture peak source has already been removed. Changing materialization
 state, sparse capacities, or renderer/client ownership would therefore be
 speculative or outside the bounded authorization. No production correction was
-made; the remaining choice is an explicit acceptance-policy decision or stopping
-Plan 0043.
+made.
+
+The user then explicitly approved an acceptance-policy amendment: repeated
+randomized daemon, client, and aggregate RSS/PSS/private-anonymous medians are
+accepted when they remain within the greater of 3% or 1 MiB of both packaged
+Alpha3.3 and integrated Plan 0042. Under that declared tolerance, every candidate
+memory median passes both controls. The original 26% regression still fails by a
+wide margin, while the corrected 0.80% aggregate difference and client deltas
+are accepted as measurement-scale variance.
+
+The applicable responsiveness allowance is also explicit: randomized median CPU
+and marker latency may not exceed either control by more than 3%. Candidate CPU
+is below Alpha3.3 and 2.38% above Plan 0042; marker latency is 0.29% above
+Alpha3.3 and 0.98% above Plan 0042. Input, resize, redraw, and idle are inherited
+qualitative contracts rather than unmeasured quantitative claims: Plan 0043
+changes no `splinterm` client/renderer production file relative to integrated
+Plan 0042, whose packaged graphical input/resize/redraw evidence is accepted.
+The complete serialized candidate workspace additionally passes focused daemon
+input/resize/nonblocking and publication-wake tests. No periodic publisher,
+client redraw loop, renderer path, or idle timer was added.
+
+The comparator prerequisite is therefore satisfied and its valid,
+cleanup-verified records count as acceptance evidence. Review `2c5dc855` remains
+the correct verdict under the superseded unqualified wording. Initial amended
+review `03b1a7c3` requested this explicit allowance and evidence link. Follow-up
+final review `04deabf3` returned **CLEAN**, confirming the amended memory and
+responsiveness arithmetic, inherited qualitative evidence, and comparator
+eligibility. Plan 0043's implementation and evidence acceptance is complete;
+push and protected-branch integration remain separate approval boundaries.
 
 All test windows and isolated processes were removed, the original Vesktop focus
 on workspace 6 / DP-3 was preserved, workspace 8 is empty, temporary builds were

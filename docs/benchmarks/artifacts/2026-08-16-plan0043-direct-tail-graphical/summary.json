@@ -1,5 +1,163 @@
 {
-  "acceptance": "BLOCKED",
+  "acceptance": "ACCEPTED",
+  "acceptance_policy": {
+    "approved_by_user": true,
+    "controls": [
+      "alpha3.3",
+      "plan0042"
+    ],
+    "preference": "40% aggregate reduction remains non-mandatory",
+    "rule": "For repeated randomized daemon, client, and aggregate/application RSS, PSS, and private-anonymous medians, candidate must not exceed either packaged Alpha3.3 or integrated Plan 0042 by more than max(3% of control median, 1 MiB), per metric."
+  },
+  "amended_final_review": {
+    "basis": "All amended memory and responsiveness comparisons pass; inherited qualitative contracts are correctly bounded; comparator evidence is eligible.",
+    "followup": "04deabf3 CLEAN",
+    "initial": "03b1a7c3 BLOCKED on unspecified responsiveness allowance/evidence"
+  },
+  "amended_gate_evaluation": {
+    "alpha3.3": {
+      "application": {
+        "private_anon_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 11857920.0,
+          "control_median_bytes": 11653120.0,
+          "delta_bytes": 204800.0,
+          "passes": true
+        },
+        "pss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 13102080.0,
+          "control_median_bytes": 12892672.0,
+          "delta_bytes": 209408.0,
+          "passes": true
+        },
+        "rss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 30418944.0,
+          "control_median_bytes": 30177280.0,
+          "delta_bytes": 241664.0,
+          "passes": true
+        }
+      },
+      "client": {
+        "private_anon_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 4749312.0,
+          "control_median_bytes": 4612096.0,
+          "delta_bytes": 137216.0,
+          "passes": true
+        },
+        "pss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 6001664.0,
+          "control_median_bytes": 5853696.0,
+          "delta_bytes": 147968.0,
+          "passes": true
+        },
+        "rss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 23361536.0,
+          "control_median_bytes": 23138304.0,
+          "delta_bytes": 223232.0,
+          "passes": true
+        }
+      },
+      "daemon": {
+        "private_anon_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 7114752.0,
+          "control_median_bytes": 7112704.0,
+          "delta_bytes": 2048.0,
+          "passes": true
+        },
+        "pss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 7114240.0,
+          "control_median_bytes": 7113216.0,
+          "delta_bytes": 1024.0,
+          "passes": true
+        },
+        "rss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 7114752.0,
+          "control_median_bytes": 7112704.0,
+          "delta_bytes": 2048.0,
+          "passes": true
+        }
+      }
+    },
+    "plan0042": {
+      "application": {
+        "private_anon_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 11857920.0,
+          "control_median_bytes": 11741184.0,
+          "delta_bytes": 116736.0,
+          "passes": true
+        },
+        "pss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 13102080.0,
+          "control_median_bytes": 13061632.0,
+          "delta_bytes": 40448.0,
+          "passes": true
+        },
+        "rss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 30418944.0,
+          "control_median_bytes": 30435328.0,
+          "delta_bytes": -16384.0,
+          "passes": true
+        }
+      },
+      "client": {
+        "private_anon_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 4749312.0,
+          "control_median_bytes": 4626432.0,
+          "delta_bytes": 122880.0,
+          "passes": true
+        },
+        "pss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 6001664.0,
+          "control_median_bytes": 5900800.0,
+          "delta_bytes": 100864.0,
+          "passes": true
+        },
+        "rss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 23361536.0,
+          "control_median_bytes": 23300096.0,
+          "delta_bytes": 61440.0,
+          "passes": true
+        }
+      },
+      "daemon": {
+        "private_anon_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 7114752.0,
+          "control_median_bytes": 7090176.0,
+          "delta_bytes": 24576.0,
+          "passes": true
+        },
+        "pss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 7114240.0,
+          "control_median_bytes": 7090176.0,
+          "delta_bytes": 24064.0,
+          "passes": true
+        },
+        "rss_bytes": {
+          "allowance_bytes": 1048576,
+          "candidate_median_bytes": 7114752.0,
+          "control_median_bytes": 7090176.0,
+          "delta_bytes": 24576.0,
+          "passes": true
+        }
+      }
+    }
+  },
   "bounded_correction_scope_decision": {
     "action": "No speculative production change made; product acceptance decision required.",
     "attribution_scout": "7b2b615f",
@@ -119,7 +277,57 @@
     "candidate_daemon_rss_vs_plan0042": 0.3466204506065858
   },
   "execution_valid": true,
-  "gate_note": "The prior large daemon regression is corrected, but packaged Alpha3.3 is the exact release control. Candidate aggregate RSS is 0.80% above Alpha3.3, so the strict below-control gate fails. Comparator execution was valid but occurred before this baseline interpretation was corrected and cannot count as release acceptance evidence.",
+  "gate_note": "The user explicitly amended the policy to a max(3%, 1 MiB) no-material-regression tolerance against both Alpha3.3 and Plan 0042. All daemon, client, and application/aggregate RSS/PSS/private-anonymous medians pass. Prior review 2c5dc855 remains valid under the superseded absolute wording.",
+  "responsiveness_gate": {
+    "production_diff_vs_plan0042": [
+      "crates/splinterd/examples/plan11-daemon-retention.rs",
+      "crates/splinterd/src/lib.rs",
+      "crates/splinterd/src/live.rs",
+      "crates/splinterd/src/main.rs",
+      "crates/splinterd/tests/end_to_end.rs",
+      "crates/splinterm-terminal/src/update.rs"
+    ],
+    "qualitative": {
+      "idle": "No periodic publisher, client redraw loop, renderer path, or idle timer added; one-wake/one-materialization and complete workspace passed",
+      "input": "No splinterm client production diff; complete workspace and daemon input nonblocking tests passed",
+      "redraw": "No splinterm renderer production diff; Plan0042 packaged graphical redraw accepted",
+      "resize": "Plan0042 packaged graphical resize accepted; candidate daemon resize publication tests and complete workspace passed"
+    },
+    "quantitative": {
+      "alpha3.3": {
+        "cpu_ticks": {
+          "allowance_percent": 3.0,
+          "candidate_median": 21.5,
+          "control_median": 22.0,
+          "delta_percent": -2.272727272727273,
+          "passes": true
+        },
+        "marker_latency_ms": {
+          "allowance_percent": 3.0,
+          "candidate_median": 370.907937,
+          "control_median": 369.848002,
+          "delta_percent": 0.28658665026396324,
+          "passes": true
+        }
+      },
+      "plan0042": {
+        "cpu_ticks": {
+          "allowance_percent": 3.0,
+          "candidate_median": 21.5,
+          "control_median": 21.0,
+          "delta_percent": 2.380952380952381,
+          "passes": true
+        },
+        "marker_latency_ms": {
+          "allowance_percent": 3.0,
+          "candidate_median": 370.907937,
+          "control_median": 367.299538,
+          "delta_percent": 0.9824131605632512,
+          "passes": true
+        }
+      }
+    }
+  },
   "review": {
     "blocker": "Packaged Alpha3.3 is the exact release control. Candidate aggregate RSS is 0.80% above it, and client retained growth is also above it; unqualified below/no-worse gates fail.",
     "minimum_action": "One bounded attributed retention correction and a new three-variant graphical matrix before integration.",

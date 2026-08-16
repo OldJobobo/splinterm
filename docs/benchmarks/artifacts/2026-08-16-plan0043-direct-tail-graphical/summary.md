@@ -1,6 +1,6 @@
 # Plan 0043 reusable direct-tail graphical rerun
 
-**Execution valid; release acceptance blocked by the strict Alpha3.3 control gate.**
+**Accepted under the explicitly approved no-material-regression policy.**
 
 Candidate commit `2c5ac9f` completed one guarded smoke, then the seed-4304 randomized three-variant matrix with two warmups and ten measured cases per variant. Every record is valid and reports verified cleanup.
 
@@ -27,3 +27,12 @@ All windows were isolated to workspace 8 / DP-2 without initial focus. Raw smoke
 Final review verdict: **BLOCKED**. Minimum next action is one newly authorized, bounded, attributed retention correction followed by a fresh three-variant graphical matrix.
 
 A subsequently authorized bounded attribution scout (`7b2b615f`) returned **NO ATTRIBUTED CORRECTION**. Candidate daemon median differs from Alpha3.3 by only 2,048 bytes, while the client accounts for 223,232 bytes of the aggregate gap and sample ordering is unstable. No candidate-owned daemon class can support the required >0.25 MiB deterministic margin without speculative or unrelated changes. No production correction was made.
+
+## Approved acceptance-policy amendment
+
+The user explicitly approved evaluating repeated randomized daemon, client, and aggregate RSS/PSS/private-anonymous medians against both Alpha3.3 and integrated Plan 0042 with a per-metric tolerance equal to the greater of **3% or 1 MiB**. All candidate medians pass both controls under this rule. The 40% reduction remains a preference, not a completion threshold. The earlier BLOCKED review remains correct under the superseded absolute wording; acceptance is pending one fresh final review of the amended policy.
+
+The initial amended review `03b1a7c3` requested an explicit responsiveness allowance and evidence links. Median CPU ticks and marker latency are now bounded to 3% above both controls; candidate deltas pass (CPU: below Alpha3.3 and +2.38% vs Plan 0042; marker: +0.29% and +0.98%). Input, resize, redraw, and idle retain accepted Plan 0042 contracts: Plan 0043 changes no Splinterm client/renderer production file, the complete serialized workspace passes, and focused daemon input/resize/nonblocking/publication-wake tests pass.
+
+
+Follow-up final review `04deabf3` returned **CLEAN** after verifying the amended memory arithmetic, explicit responsiveness allowance, inherited qualitative evidence, and comparator eligibility. Plan 0043 graphical acceptance is complete.
