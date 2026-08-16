@@ -598,8 +598,17 @@ Alpha3.3, violating the unqualified “no worse” gate. Overlapping ranges cann
 supply a tolerance the plan does not define. The comparator block was
 operationally valid and cleanup-verified, but it ran before this baseline
 interpretation was corrected and cannot count as release acceptance evidence.
-The minimum next action is one newly authorized, bounded, attributed retention
-correction followed by a fresh three-variant graphical matrix.
+The minimum next action identified by review was one newly authorized, bounded,
+attributed retention correction followed by a fresh three-variant graphical
+matrix. That attribution was authorized, but read-only scout `7b2b615f` returned
+**NO ATTRIBUTED CORRECTION**: candidate daemon median exceeds Alpha3.3 by only
+2,048 bytes while the client accounts for 223,232 bytes of the aggregate gap,
+and individual samples do not show a stable candidate daemon excess. The prior
+sparse-capture peak source has already been removed. Changing materialization
+state, sparse capacities, or renderer/client ownership would therefore be
+speculative or outside the bounded authorization. No production correction was
+made; the remaining choice is an explicit acceptance-policy decision or stopping
+Plan 0043.
 
 All test windows and isolated processes were removed, the original Vesktop focus
 on workspace 6 / DP-3 was preserved, workspace 8 is empty, temporary builds were

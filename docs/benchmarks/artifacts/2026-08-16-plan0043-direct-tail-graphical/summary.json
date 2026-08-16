@@ -1,5 +1,12 @@
 {
   "acceptance": "BLOCKED",
+  "bounded_correction_scope_decision": {
+    "action": "No speculative production change made; product acceptance decision required.",
+    "attribution_scout": "7b2b615f",
+    "authorized": true,
+    "evidence": "Candidate daemon median exceeds Alpha3.3 by only 2,048 bytes while candidate client median accounts for 223,232 bytes of the aggregate gap. No stable daemon-retained ownership class can provide >0.25 MiB deterministic margin.",
+    "outcome": "NO ATTRIBUTED CORRECTION"
+  },
   "candidate_commit": "2c5ac9f87629287e1481afe436aab9f2c9650af1",
   "cleanup_verified": true,
   "comparators": {
