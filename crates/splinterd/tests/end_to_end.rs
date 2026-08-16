@@ -3851,24 +3851,15 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 }
             }
         });
-        let mut slow = daemon.connect().await;
-        nix::sys::socket::setsockopt(
-            &slow.stream,
-            nix::sys::socket::sockopt::RcvBuf,
-            &4096,
-        )
-        .unwrap();
-        for _ in 0..MAX_SUBSCRIPTIONS {
-            let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
-        }
         let mut producer = daemon.connect().await;
-        // Keep each paced publication below MAX_UPDATE_SCROLLS while emitting
-        // enough bounded frames to fill an unread connection's outbound path.
+        // First prove that an actively drained subscriber keeps up with paced
+        // producer frames. Slow-runner scheduling must not be conflated with the
+        // separate unread-connection overflow proof below.
         producer
             .input(
                 splint_id,
                 incarnation,
-                b"i=0; while [ $i -lt 30000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'overflow-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.005; done; printf 'overflow-finished\\n'\n",
+                b"i=0; while [ $i -lt 2000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'paced-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.01; done; printf 'overflow-finished\\n'\n",
             )
             .await;
         let _completion_snapshot = snapshot_until_with_timeout(
@@ -3883,6 +3874,35 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .await
             .expect("drained subscriber did not observe the overflow marker")
             .expect("drained subscriber task failed");
+
+        // The actively drained client has exited. Create a fresh unread
+        // MAX_SUBSCRIPTIONS connection so only the following unpaced pressure
+        // stream can force its resynchronization or disconnection.
+        let mut slow = daemon.connect().await;
+        nix::sys::socket::setsockopt(
+            &slow.stream,
+            nix::sys::socket::sockopt::RcvBuf,
+            &4096,
+        )
+        .unwrap();
+        for _ in 0..MAX_SUBSCRIPTIONS {
+            let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
+        }
+        producer
+            .input(
+                splint_id,
+                incarnation,
+                b"i=0; while [ $i -lt 30000 ]; do printf 'pressure-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; printf 'pressure-finished\\n'\n",
+            )
+            .await;
+        let _pressure_snapshot = snapshot_until_with_timeout(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "pressure-finished",
+            Duration::from_secs(60),
+        )
+        .await;
 
         let mut saw_resync = false;
         let mut disconnected = false;
@@ -3919,7 +3939,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             &mut reattached,
             splint_id,
             incarnation,
-            "overflow-finished",
+            "pressure-finished",
         )
         .await;
         assert!(final_snapshot.revision > detached.revision);
