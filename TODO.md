@@ -247,6 +247,28 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
 - [ ] Prove registry, help, CLI inspection, command-palette shortcut projection,
   keyboard dispatch, and lifecycle behavior cannot drift.
 
+## Benchmark coverage follow-up
+
+WezTerm separates its mux-owned PTY, terminal, scrollback, pane, tab, window, and
+workspace state from GUI presentation, but its default local mux may be embedded
+in the GUI while `wezterm-mux-server` makes detachment a separate optional mode.
+That differs from Splinterm's mandatory `splinterd` authority and disposable
+Wayland client. Comparisons must therefore report complete process-group totals
+and per-process attribution, distinguish embedded-local and detached Unix-domain
+modes, and disclose that WezTerm's cross-platform GPU renderer and Lua extension
+surface are not direct equivalents to Splinterm's Wayland-focused bounded
+protocol and daemon policy model. Architecture references:
+[Multiplexing](https://wezterm.org/multiplexing.html),
+[mux API](https://wezterm.org/config/lua/wezterm.mux/index.html), and
+[GUI API](https://wezterm.org/config/lua/wezterm.gui/index.html).
+
+- [ ] Add WezTerm as an optional comparison terminal throughout the benchmark
+  suite: provide isolated deterministic profiles and app IDs for applicable mux
+  modes, extend terminal inventories and result schemas, include it in retention,
+  latency, output, resize, lifecycle, idle, and scrollback matrices, preserve
+  guarded workspace/focus/cleanup checks, and report a clear skip when WezTerm is
+  not installed.
+
 ## Maintainability and architecture follow-up
 
 Track the findings from the

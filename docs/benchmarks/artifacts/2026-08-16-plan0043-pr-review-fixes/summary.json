@@ -1,0 +1,48 @@
+{
+  "base_commit": "7c22ad9d17a8128083e559e3ac1c3b37cce609d7",
+  "github_review_findings": [
+    {
+      "fix": "Compact materialization bases own exact semantic leases at attach, resize admission before retained mutation, and release on drop.",
+      "id": 3792947745,
+      "severity": "P1"
+    },
+    {
+      "fix": "Tail vectors use deterministic exact-capacity growth; admitted existing-frame plus successor-capture bytes bound mutation before exact consolidation.",
+      "id": 3792947748,
+      "severity": "P2"
+    }
+  ],
+  "graphical_status": "A new exact-candidate graphical rerun remains required before merge because production ownership/accounting code changed after accepted evidence.",
+  "headless": {
+    "candidate": {
+      "cpu_ticks": 13.0,
+      "marker_latency_ms": 126.753941,
+      "private_anon_mib": 7.46875,
+      "resync": 0.0,
+      "rss_pss_mib": 7.5
+    },
+    "completed": 20,
+    "error": null,
+    "plan0042": {
+      "cpu_ticks": 14.5,
+      "marker_latency_ms": 132.853263,
+      "private_anon_mib": 8.83203125,
+      "resync": 0.0,
+      "rss_pss_mib": 8.86328125
+    },
+    "samples_per_variant": 10,
+    "seed": 4304,
+    "warmups": 2
+  },
+  "schema": "splinterm.plan0043.pr-review-fixes.v1",
+  "validation": {
+    "clippy": "cargo clippy --workspace --all-targets -- -D warnings passed",
+    "diff_check": "passed",
+    "exact_reconstruction": "10/10 passed",
+    "focused_live_tests": "58 passed",
+    "format": "passed",
+    "phase8": "five isolated and full serialized end-to-end passed before review fixes; production behavior unchanged by accounting fixes",
+    "workspace": "cargo test --workspace -- --test-threads=1 passed"
+  },
+  "working_diff_sha256": "ac3d18df528b703bb62851577c86ffa8a278ce501ea4fd7a4e51b8f6865571f1"
+}

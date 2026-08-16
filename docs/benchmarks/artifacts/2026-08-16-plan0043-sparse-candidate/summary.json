@@ -1,0 +1,843 @@
+{
+  "attribution_gate_reproduced": false,
+  "completed_measured_cases": 20,
+  "error": null,
+  "expected_measured_cases": 20,
+  "harness_source": {
+    "path": "/home/oldjobobo/Projects/splinterm-worktrees/0043-beta1-sparse-publication-frames/crates/splinterd/examples/plan11-daemon-retention.rs",
+    "sha256": "b6b3525319f6eee0463fc8402605b05781f0ab294642fb14bdce251e9b75e4a0",
+    "size_bytes": 11166
+  },
+  "identities": {
+    "baseline": {
+      "probe": {
+        "path": "/tmp/splinterm-plan0043-build-candidate-measured/release/examples/plan11-daemon-retention",
+        "sha256": "079e57948f02c3b1e84e1ae90a7a80288780ed875fade18cc5824c6af9a5a9bf",
+        "size_bytes": 1987408
+      },
+      "pty_helper": {
+        "path": "/tmp/splinterm-plan0043-build-candidate-measured/release/splinterm-pty-child",
+        "sha256": "293b10d63a29e76c08d39bc9ddcdc2f90ce20851862967738f0d1c4051d10b01",
+        "size_bytes": 490200
+      },
+      "source": "e9dccec+working-diff-08abcb28c1c32f529aab97ac1a8bb582409c28d979d0c977058836b2dd189b3b"
+    },
+    "control": {
+      "probe": {
+        "path": "/tmp/splinterm-plan0043-build-plan0042-measured/release/examples/plan11-daemon-retention",
+        "sha256": "69e1165fe2c1e8b9589f5f91dccdcfc8b0f5b99779c63f9715ff80a6469bd6d9",
+        "size_bytes": 1963544
+      },
+      "pty_helper": {
+        "path": "/tmp/splinterm-plan0043-build-plan0042-measured/release/splinterm-pty-child",
+        "sha256": "e7491763799d8ef3ff70cf5160dfaaadf7009fa9d8bb21096bfd29706d384033",
+        "size_bytes": 490184
+      },
+      "source": "ba8f1cd28f1aca25d83f198c593832b829601a6c"
+    }
+  },
+  "measured": [
+    {
+      "iteration": 0,
+      "sample": {
+        "cpu_ticks": 12,
+        "drain_events": 73,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 111247478,
+        "memory_growth": {
+          "private_anon_bytes": 13242368,
+          "pss_bytes": 13373440,
+          "rss_bytes": 13373440
+        },
+        "metrics": {
+          "output_parse_batches": 1163,
+          "publication_compact_materializations": 157,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2125015462
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 0,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 73,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 128885393,
+        "memory_growth": {
+          "private_anon_bytes": 8552448,
+          "pss_bytes": 8617984,
+          "rss_bytes": 8617984
+        },
+        "metrics": {
+          "output_parse_batches": 1163,
+          "publication_compact_materializations": 73,
+          "publication_compact_materialized_appended_rows_high_water": 253,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 253,
+          "publication_compact_materialized_terminal_updates_high_water": 15551,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2144592765
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 1,
+      "sample": {
+        "cpu_ticks": 12,
+        "drain_events": 74,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 123207768,
+        "memory_growth": {
+          "private_anon_bytes": 7708672,
+          "pss_bytes": 7708672,
+          "rss_bytes": 7708672
+        },
+        "metrics": {
+          "output_parse_batches": 1164,
+          "publication_compact_materializations": 74,
+          "publication_compact_materialized_appended_rows_high_water": 274,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 274,
+          "publication_compact_materialized_terminal_updates_high_water": 15435,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2135239640
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 1,
+      "sample": {
+        "cpu_ticks": 16,
+        "drain_events": 59,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 136476729,
+        "memory_growth": {
+          "private_anon_bytes": 25194496,
+          "pss_bytes": 25260032,
+          "rss_bytes": 25260032
+        },
+        "metrics": {
+          "output_parse_batches": 1163,
+          "publication_compact_materializations": 184,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2146220024
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 2,
+      "sample": {
+        "cpu_ticks": 16,
+        "drain_events": 62,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 146895145,
+        "memory_growth": {
+          "private_anon_bytes": 10362880,
+          "pss_bytes": 10428416,
+          "rss_bytes": 10428416
+        },
+        "metrics": {
+          "output_parse_batches": 1164,
+          "publication_compact_materializations": 62,
+          "publication_compact_materialized_appended_rows_high_water": 276,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 276,
+          "publication_compact_materialized_terminal_updates_high_water": 15556,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2155223846
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 2,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 59,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 115768395,
+        "memory_growth": {
+          "private_anon_bytes": 25223168,
+          "pss_bytes": 25288704,
+          "rss_bytes": 25288704
+        },
+        "metrics": {
+          "output_parse_batches": 1162,
+          "publication_compact_materializations": 160,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2125890097
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 3,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 74,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 111191557,
+        "memory_growth": {
+          "private_anon_bytes": 8302592,
+          "pss_bytes": 8368128,
+          "rss_bytes": 8368128
+        },
+        "metrics": {
+          "output_parse_batches": 1162,
+          "publication_compact_materializations": 155,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2124413954
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 3,
+      "sample": {
+        "cpu_ticks": 13,
+        "drain_events": 70,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 118620284,
+        "memory_growth": {
+          "private_anon_bytes": 7950336,
+          "pss_bytes": 8081408,
+          "rss_bytes": 8081408
+        },
+        "metrics": {
+          "output_parse_batches": 1162,
+          "publication_compact_materializations": 70,
+          "publication_compact_materialized_appended_rows_high_water": 276,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 276,
+          "publication_compact_materialized_terminal_updates_high_water": 15556,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2124746321
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 4,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 68,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 131982493,
+        "memory_growth": {
+          "private_anon_bytes": 10162176,
+          "pss_bytes": 10162176,
+          "rss_bytes": 10162176
+        },
+        "metrics": {
+          "output_parse_batches": 1164,
+          "publication_compact_materializations": 68,
+          "publication_compact_materialized_appended_rows_high_water": 276,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 276,
+          "publication_compact_materialized_terminal_updates_high_water": 15556,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2145378159
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 4,
+      "sample": {
+        "cpu_ticks": 13,
+        "drain_events": 70,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 114641663,
+        "memory_growth": {
+          "private_anon_bytes": 16924672,
+          "pss_bytes": 17055744,
+          "rss_bytes": 17055744
+        },
+        "metrics": {
+          "output_parse_batches": 1161,
+          "publication_compact_materializations": 159,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2125063409
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 5,
+      "sample": {
+        "cpu_ticks": 17,
+        "drain_events": 67,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 144146581,
+        "memory_growth": {
+          "private_anon_bytes": 7618560,
+          "pss_bytes": 7749632,
+          "rss_bytes": 7749632
+        },
+        "metrics": {
+          "output_parse_batches": 1163,
+          "publication_compact_materializations": 67,
+          "publication_compact_materialized_appended_rows_high_water": 276,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 276,
+          "publication_compact_materialized_terminal_updates_high_water": 15556,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2154655526
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 5,
+      "sample": {
+        "cpu_ticks": 16,
+        "drain_events": 61,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 140203374,
+        "memory_growth": {
+          "private_anon_bytes": 25137152,
+          "pss_bytes": 25269248,
+          "rss_bytes": 25268224
+        },
+        "metrics": {
+          "output_parse_batches": 1161,
+          "publication_compact_materializations": 164,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2155665189
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 6,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 62,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 116389599,
+        "memory_growth": {
+          "private_anon_bytes": 24973312,
+          "pss_bytes": 25038848,
+          "rss_bytes": 25038848
+        },
+        "metrics": {
+          "output_parse_batches": 1163,
+          "publication_compact_materializations": 158,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2125155382
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 6,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 61,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 135630465,
+        "memory_growth": {
+          "private_anon_bytes": 11726848,
+          "pss_bytes": 11726848,
+          "rss_bytes": 11726848
+        },
+        "metrics": {
+          "output_parse_batches": 1163,
+          "publication_compact_materializations": 61,
+          "publication_compact_materialized_appended_rows_high_water": 253,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 253,
+          "publication_compact_materialized_terminal_updates_high_water": 15551,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2144949371
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 7,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 72,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 133458679,
+        "memory_growth": {
+          "private_anon_bytes": 8577024,
+          "pss_bytes": 8577024,
+          "rss_bytes": 8577024
+        },
+        "metrics": {
+          "output_parse_batches": 1162,
+          "publication_compact_materializations": 72,
+          "publication_compact_materialized_appended_rows_high_water": 273,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 273,
+          "publication_compact_materialized_terminal_updates_high_water": 15556,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2144589658
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 7,
+      "sample": {
+        "cpu_ticks": 15,
+        "drain_events": 63,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 123912247,
+        "memory_growth": {
+          "private_anon_bytes": 25288704,
+          "pss_bytes": 25354240,
+          "rss_bytes": 25354240
+        },
+        "metrics": {
+          "output_parse_batches": 1162,
+          "publication_compact_materializations": 159,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2135846957
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 8,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 76,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 126208202,
+        "memory_growth": {
+          "private_anon_bytes": 4759552,
+          "pss_bytes": 4890624,
+          "rss_bytes": 4890624
+        },
+        "metrics": {
+          "output_parse_batches": 1162,
+          "publication_compact_materializations": 76,
+          "publication_compact_materialized_appended_rows_high_water": 69,
+          "publication_compact_materialized_batches_high_water": 16,
+          "publication_compact_materialized_scrolls_high_water": 69,
+          "publication_compact_materialized_terminal_updates_high_water": 3888,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2134291582
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 8,
+      "sample": {
+        "cpu_ticks": 16,
+        "drain_events": 70,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 139095962,
+        "memory_growth": {
+          "private_anon_bytes": 15966208,
+          "pss_bytes": 16030720,
+          "rss_bytes": 16031744
+        },
+        "metrics": {
+          "output_parse_batches": 1161,
+          "publication_compact_materializations": 199,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2155218062
+      },
+      "variant": "baseline"
+    },
+    {
+      "iteration": 9,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 69,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 128215630,
+        "memory_growth": {
+          "private_anon_bytes": 7831552,
+          "pss_bytes": 7897088,
+          "rss_bytes": 7897088
+        },
+        "metrics": {
+          "output_parse_batches": 1163,
+          "publication_compact_materializations": 69,
+          "publication_compact_materialized_appended_rows_high_water": 276,
+          "publication_compact_materialized_batches_high_water": 64,
+          "publication_compact_materialized_scrolls_high_water": 276,
+          "publication_compact_materialized_terminal_updates_high_water": 15556,
+          "queued_snapshot_events_high_water": 1
+        },
+        "wall_ns": 2144361323
+      },
+      "variant": "control"
+    },
+    {
+      "iteration": 9,
+      "sample": {
+        "cpu_ticks": 14,
+        "drain_events": 65,
+        "drain_resnapshots": 0,
+        "marker_latency_ns": 123366045,
+        "memory_growth": {
+          "private_anon_bytes": 23814144,
+          "pss_bytes": 23879680,
+          "rss_bytes": 23879680
+        },
+        "metrics": {
+          "output_parse_batches": 1163,
+          "publication_compact_materializations": 168,
+          "publication_compact_materialized_appended_rows_high_water": 35,
+          "publication_compact_materialized_batches_high_water": 8,
+          "publication_compact_materialized_scrolls_high_water": 35,
+          "publication_compact_materialized_terminal_updates_high_water": 1949,
+          "queued_snapshot_events_high_water": 0
+        },
+        "wall_ns": 2135635052
+      },
+      "variant": "baseline"
+    }
+  ],
+  "orders": [
+    {
+      "iteration": 0,
+      "order": [
+        "baseline",
+        "control"
+      ],
+      "phase": "warmup"
+    },
+    {
+      "iteration": 1,
+      "order": [
+        "control",
+        "baseline"
+      ],
+      "phase": "warmup"
+    },
+    {
+      "iteration": 0,
+      "order": [
+        "baseline",
+        "control"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 1,
+      "order": [
+        "control",
+        "baseline"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 2,
+      "order": [
+        "control",
+        "baseline"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 3,
+      "order": [
+        "baseline",
+        "control"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 4,
+      "order": [
+        "control",
+        "baseline"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 5,
+      "order": [
+        "control",
+        "baseline"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 6,
+      "order": [
+        "baseline",
+        "control"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 7,
+      "order": [
+        "control",
+        "baseline"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 8,
+      "order": [
+        "control",
+        "baseline"
+      ],
+      "phase": "measured"
+    },
+    {
+      "iteration": 9,
+      "order": [
+        "control",
+        "baseline"
+      ],
+      "phase": "measured"
+    }
+  ],
+  "samples_per_variant": 10,
+  "schema": "splinterm.plan0043.fresh-baseline.v1",
+  "seed": 43,
+  "summaries": {
+    "baseline": {
+      "cpu_ticks": {
+        "count": 10,
+        "max": 16,
+        "median": 14.0,
+        "min": 12
+      },
+      "drain_events": {
+        "count": 10,
+        "max": 74,
+        "median": 64.0,
+        "min": 59
+      },
+      "drain_resnapshots": {
+        "count": 10,
+        "max": 0,
+        "median": 0.0,
+        "min": 0
+      },
+      "marker_latency_ns": {
+        "count": 10,
+        "max": 140203374,
+        "median": 119877822.0,
+        "min": 111191557
+      },
+      "memory_growth": {
+        "private_anon_bytes": {
+          "count": 10,
+          "max": 25288704,
+          "median": 24393728.0,
+          "min": 8302592
+        },
+        "pss_bytes": {
+          "count": 10,
+          "max": 25354240,
+          "median": 24459264.0,
+          "min": 8368128
+        },
+        "rss_bytes": {
+          "count": 10,
+          "max": 25354240,
+          "median": 24459264.0,
+          "min": 8368128
+        }
+      },
+      "metrics": {
+        "output_parse_batches": {
+          "count": 10,
+          "max": 1163,
+          "median": 1162.0,
+          "min": 1161
+        },
+        "publication_compact_materializations": {
+          "count": 10,
+          "max": 199,
+          "median": 159.5,
+          "min": 155
+        },
+        "publication_compact_materialized_appended_rows_high_water": {
+          "count": 10,
+          "max": 35,
+          "median": 35.0,
+          "min": 35
+        },
+        "publication_compact_materialized_batches_high_water": {
+          "count": 10,
+          "max": 8,
+          "median": 8.0,
+          "min": 8
+        },
+        "publication_compact_materialized_scrolls_high_water": {
+          "count": 10,
+          "max": 35,
+          "median": 35.0,
+          "min": 35
+        },
+        "publication_compact_materialized_terminal_updates_high_water": {
+          "count": 10,
+          "max": 1949,
+          "median": 1949.0,
+          "min": 1949
+        },
+        "queued_snapshot_events_high_water": {
+          "count": 10,
+          "max": 0,
+          "median": 0.0,
+          "min": 0
+        }
+      },
+      "wall_ns": {
+        "count": 10,
+        "max": 2155665189,
+        "median": 2130762574.5,
+        "min": 2124413954
+      }
+    },
+    "control": {
+      "cpu_ticks": {
+        "count": 10,
+        "max": 17,
+        "median": 14.0,
+        "min": 12
+      },
+      "drain_events": {
+        "count": 10,
+        "max": 76,
+        "median": 69.5,
+        "min": 61
+      },
+      "drain_resnapshots": {
+        "count": 10,
+        "max": 0,
+        "median": 0.0,
+        "min": 0
+      },
+      "marker_latency_ns": {
+        "count": 10,
+        "max": 146895145,
+        "median": 130433943.0,
+        "min": 118620284
+      },
+      "memory_growth": {
+        "private_anon_bytes": {
+          "count": 10,
+          "max": 11726848,
+          "median": 8251392.0,
+          "min": 4759552
+        },
+        "pss_bytes": {
+          "count": 10,
+          "max": 11726848,
+          "median": 8329216.0,
+          "min": 4890624
+        },
+        "rss_bytes": {
+          "count": 10,
+          "max": 11726848,
+          "median": 8329216.0,
+          "min": 4890624
+        }
+      },
+      "metrics": {
+        "output_parse_batches": {
+          "count": 10,
+          "max": 1164,
+          "median": 1163.0,
+          "min": 1162
+        },
+        "publication_compact_materializations": {
+          "count": 10,
+          "max": 76,
+          "median": 69.5,
+          "min": 61
+        },
+        "publication_compact_materialized_appended_rows_high_water": {
+          "count": 10,
+          "max": 276,
+          "median": 275.0,
+          "min": 69
+        },
+        "publication_compact_materialized_batches_high_water": {
+          "count": 10,
+          "max": 64,
+          "median": 64.0,
+          "min": 16
+        },
+        "publication_compact_materialized_scrolls_high_water": {
+          "count": 10,
+          "max": 276,
+          "median": 275.0,
+          "min": 69
+        },
+        "publication_compact_materialized_terminal_updates_high_water": {
+          "count": 10,
+          "max": 15556,
+          "median": 15556.0,
+          "min": 3888
+        },
+        "queued_snapshot_events_high_water": {
+          "count": 10,
+          "max": 1,
+          "median": 1.0,
+          "min": 1
+        }
+      },
+      "wall_ns": {
+        "count": 10,
+        "max": 2155223846,
+        "median": 2144591211.5,
+        "min": 2124746321
+      }
+    }
+  },
+  "valid": false,
+  "warmups": 2,
+  "workload": {
+    "clear_interval_lines": 500,
+    "cycles": 1,
+    "lines": 5000
+  }
+}

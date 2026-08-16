@@ -1,5 +1,7 @@
 //! Semantic terminal revisions, damage, bounded replay, and resnapshot gaps.
 
+use std::mem::size_of;
+
 use crate::{ActiveScreen, Cursor, ScrollDirection, ScrollRegion, TerminalEvent};
 
 /// Monotonic semantic terminal revision.
@@ -86,6 +88,100 @@ impl TerminalUpdate {
     #[must_use]
     pub fn events(&self) -> impl ExactSizeIterator<Item = &TerminalEvent> {
         self.events.iter()
+    }
+
+    /// Coalesces a nonempty contiguous update sequence for publication while
+    /// preserving damage and event order. The resulting revision is the final
+    /// revision in the sequence; callers retain the preceding base separately.
+    #[must_use]
+    pub fn coalesce_contiguous(updates: Vec<Self>) -> Option<Self> {
+        if updates.is_empty()
+            || !updates.windows(2).all(|pair| {
+                pair[0].revision.value().checked_add(1) == Some(pair[1].revision.value())
+            })
+        {
+            return None;
+        }
+        let damage_count = updates.iter().try_fold(0_usize, |total, update| {
+            total.checked_add(update.damage.len())
+        })?;
+        let event_count = updates.iter().try_fold(0_usize, |total, update| {
+            total.checked_add(update.events.len())
+        })?;
+        let revision = updates.last()?.revision;
+        let mut damage = Vec::with_capacity(damage_count);
+        let mut events = Vec::with_capacity(event_count);
+        for mut update in updates {
+            damage.append(&mut update.damage);
+            events.append(&mut update.events);
+        }
+        Some(Self {
+            revision,
+            damage,
+            events,
+        })
+    }
+
+    /// Appends an already continuity-validated publication successor. This is
+    /// used when each side may itself summarize multiple contiguous revisions.
+    pub fn append_publication_successor(&mut self, mut update: Self) {
+        self.revision = update.revision;
+        self.damage.append(&mut update.damage);
+        self.events.append(&mut update.events);
+    }
+
+    /// Coalesces externally continuity-validated publication summaries once at
+    /// materialization, using exact final vector capacities. Individual
+    /// summaries may each cover more than one semantic revision.
+    #[must_use]
+    pub fn coalesce_publication_summaries(updates: Vec<Self>) -> Option<Self> {
+        let damage_count = updates.iter().try_fold(0_usize, |total, update| {
+            total.checked_add(update.damage.len())
+        })?;
+        let event_count = updates.iter().try_fold(0_usize, |total, update| {
+            total.checked_add(update.events.len())
+        })?;
+        let revision = updates.last()?.revision;
+        let mut damage = Vec::with_capacity(damage_count);
+        let mut events = Vec::with_capacity(event_count);
+        for mut update in updates {
+            damage.append(&mut update.damage);
+            events.append(&mut update.events);
+        }
+        Some(Self {
+            revision,
+            damage,
+            events,
+        })
+    }
+
+    /// Returns the bytes allocated by this update's owned semantic vectors and
+    /// variable-length event bodies, excluding allocator bookkeeping.
+    #[must_use]
+    pub fn owned_allocation_bytes(&self) -> Option<usize> {
+        let mut total = self
+            .damage
+            .capacity()
+            .checked_mul(size_of::<TerminalDamage>())?
+            .checked_add(
+                self.events
+                    .capacity()
+                    .checked_mul(size_of::<TerminalEvent>())?,
+            )?;
+        for event in &self.events {
+            let body = match event {
+                TerminalEvent::PtyWrite(bytes) => bytes.capacity(),
+                TerminalEvent::TitleChanged(title) => title.capacity(),
+                TerminalEvent::Bell
+                | TerminalEvent::PaletteChanged { .. }
+                | TerminalEvent::UnsupportedSequence(_)
+                | TerminalEvent::ImageRejected(_)
+                | TerminalEvent::StringTruncated(_)
+                | TerminalEvent::EventQueueOverflow => 0,
+            };
+            total = total.checked_add(body)?;
+        }
+        Some(total)
     }
 }
 
@@ -275,6 +371,83 @@ mod tests {
         assert!(accumulated.is_full());
         assert_eq!(accumulated.damage, vec![TerminalDamage::FullSnapshot]);
         assert_eq!(accumulated.events, vec![TerminalEvent::Bell]);
+    }
+
+    #[test]
+    fn publication_coalescing_preserves_order_and_rejects_revision_gaps() {
+        let first = TerminalUpdate::new(
+            TerminalRevision::new(4),
+            vec![TerminalDamage::Modes],
+            vec![TerminalEvent::Bell],
+        );
+        let second = TerminalUpdate::new(
+            TerminalRevision::new(5),
+            vec![TerminalDamage::Title],
+            vec![TerminalEvent::TitleChanged("next".to_owned())],
+        );
+        let coalesced = TerminalUpdate::coalesce_contiguous(vec![first.clone(), second]).unwrap();
+        assert_eq!(coalesced.revision(), TerminalRevision::new(5));
+        assert_eq!(coalesced.damage.len(), 2);
+        assert_eq!(coalesced.damage.capacity(), 2);
+        assert_eq!(coalesced.events.len(), 2);
+        assert_eq!(coalesced.events.capacity(), 2);
+        assert_eq!(
+            coalesced.damage().cloned().collect::<Vec<_>>(),
+            vec![TerminalDamage::Modes, TerminalDamage::Title]
+        );
+        assert_eq!(
+            coalesced.events().cloned().collect::<Vec<_>>(),
+            vec![
+                TerminalEvent::Bell,
+                TerminalEvent::TitleChanged("next".to_owned())
+            ]
+        );
+        assert!(
+            TerminalUpdate::coalesce_contiguous(vec![
+                first,
+                TerminalUpdate::new(TerminalRevision::new(6), Vec::new(), Vec::new()),
+            ])
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn publication_summaries_coalesce_once_with_exact_capacity_and_order() {
+        let first = TerminalUpdate::new(
+            TerminalRevision::new(4),
+            vec![TerminalDamage::Modes],
+            vec![TerminalEvent::Bell],
+        );
+        let second = TerminalUpdate::new(
+            TerminalRevision::new(10),
+            vec![TerminalDamage::Title, scroll_damage()],
+            vec![TerminalEvent::TitleChanged("summary".to_owned())],
+        );
+
+        let coalesced = TerminalUpdate::coalesce_publication_summaries(vec![first, second])
+            .expect("nonempty publication summaries");
+
+        assert_eq!(coalesced.revision(), TerminalRevision::new(10));
+        assert_eq!(coalesced.damage.len(), 3);
+        assert_eq!(coalesced.damage.capacity(), 3);
+        assert_eq!(coalesced.events.len(), 2);
+        assert_eq!(coalesced.events.capacity(), 2);
+        assert_eq!(
+            coalesced.damage,
+            vec![
+                TerminalDamage::Modes,
+                TerminalDamage::Title,
+                scroll_damage()
+            ]
+        );
+        assert_eq!(
+            coalesced.events,
+            vec![
+                TerminalEvent::Bell,
+                TerminalEvent::TitleChanged("summary".to_owned())
+            ]
+        );
+        assert!(TerminalUpdate::coalesce_publication_summaries(Vec::new()).is_none());
     }
 
     #[test]

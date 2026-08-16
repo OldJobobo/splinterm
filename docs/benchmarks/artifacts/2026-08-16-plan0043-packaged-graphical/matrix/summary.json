@@ -1,0 +1,424 @@
+{
+  "candidate_application_rss_reduction_vs_alpha_percent": -26.545355414707284,
+  "candidate_application_rss_reduction_vs_plan0042_percent": -26.089909004481868,
+  "order": [
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 1,
+      "phase": "warmup",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 0,
+      "phase": "warmup",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 5,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 3,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 4,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 6,
+      "phase": "measured",
+      "variant": "plan0043"
+    },
+    {
+      "iteration": 9,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 7,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "variant": "alpha3.3"
+    },
+    {
+      "iteration": 0,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 2,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 1,
+      "phase": "measured",
+      "variant": "plan0042"
+    },
+    {
+      "iteration": 8,
+      "phase": "measured",
+      "variant": "plan0042"
+    }
+  ],
+  "samples_per_variant": 10,
+  "schema": "splinterm.plan0043.graphical-three-variant.v1",
+  "seed": 4304,
+  "summary": {
+    "alpha3.3": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 11718656,
+        "median": 11395072.0,
+        "minimum": 10661888
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 13056000,
+        "median": 12687872.0,
+        "minimum": 11945984
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 30339072,
+        "median": 30050304.0,
+        "minimum": 29347840
+      },
+      "application_growth_private_anon_bytes": {
+        "maximum": 11718656,
+        "median": 11395072.0,
+        "minimum": 10661888
+      },
+      "application_growth_pss_bytes": {
+        "maximum": 13037568,
+        "median": 12701696.0,
+        "minimum": 11971584
+      },
+      "application_growth_rss_bytes": {
+        "maximum": 30339072,
+        "median": 30050304.0,
+        "minimum": 29347840
+      },
+      "client_growth_private_anon_bytes": {
+        "maximum": 4706304,
+        "median": 4360192.0,
+        "minimum": 3960832
+      },
+      "client_growth_pss_bytes": {
+        "maximum": 6024192,
+        "median": 5663232.0,
+        "minimum": 5275648
+      },
+      "client_growth_rss_bytes": {
+        "maximum": 23302144,
+        "median": 23011328.0,
+        "minimum": 22568960
+      },
+      "context_switches": {
+        "maximum": 142,
+        "median": 138.5,
+        "minimum": 135
+      },
+      "cpu_ticks": {
+        "maximum": 25,
+        "median": 22.5,
+        "minimum": 20
+      },
+      "daemon_growth_private_anon_bytes": {
+        "maximum": 7196672,
+        "median": 7026688.0,
+        "minimum": 6516736
+      },
+      "daemon_growth_pss_bytes": {
+        "maximum": 7196672,
+        "median": 7027200.0,
+        "minimum": 6515712
+      },
+      "daemon_growth_rss_bytes": {
+        "maximum": 7196672,
+        "median": 7026688.0,
+        "minimum": 6516736
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 379087875,
+        "median": 373657676.5,
+        "minimum": 362277295
+      }
+    },
+    "plan0042": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 12288000,
+        "median": 11679744.0,
+        "minimum": 10977280
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 13624320,
+        "median": 12962304.0,
+        "minimum": 12266496
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 30892032,
+        "median": 30158848.0,
+        "minimum": 29691904
+      },
+      "application_growth_private_anon_bytes": {
+        "maximum": 12288000,
+        "median": 11679744.0,
+        "minimum": 10977280
+      },
+      "application_growth_pss_bytes": {
+        "maximum": 13607936,
+        "median": 12962304.0,
+        "minimum": 12291072
+      },
+      "application_growth_rss_bytes": {
+        "maximum": 30892032,
+        "median": 30158848.0,
+        "minimum": 29691904
+      },
+      "client_growth_private_anon_bytes": {
+        "maximum": 4853760,
+        "median": 4579328.0,
+        "minimum": 3915776
+      },
+      "client_growth_pss_bytes": {
+        "maximum": 6165504,
+        "median": 5861888.0,
+        "minimum": 5229568
+      },
+      "client_growth_rss_bytes": {
+        "maximum": 23535616,
+        "median": 23058432.0,
+        "minimum": 22626304
+      },
+      "context_switches": {
+        "maximum": 144,
+        "median": 137.5,
+        "minimum": 135
+      },
+      "cpu_ticks": {
+        "maximum": 24,
+        "median": 21.5,
+        "minimum": 20
+      },
+      "daemon_growth_private_anon_bytes": {
+        "maximum": 7458816,
+        "median": 7077888.0,
+        "minimum": 6991872
+      },
+      "daemon_growth_pss_bytes": {
+        "maximum": 7458816,
+        "median": 7077888.0,
+        "minimum": 6991872
+      },
+      "daemon_growth_rss_bytes": {
+        "maximum": 7458816,
+        "median": 7077888.0,
+        "minimum": 6991872
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 377704564,
+        "median": 369124893.0,
+        "minimum": 362779855
+      }
+    },
+    "plan0043": {
+      "aggregate_growth_private_anon_bytes": {
+        "maximum": 20561920,
+        "median": 19324928.0,
+        "minimum": 18690048
+      },
+      "aggregate_growth_pss_bytes": {
+        "maximum": 21825536,
+        "median": 20656640.0,
+        "minimum": 20008960
+      },
+      "aggregate_growth_rss_bytes": {
+        "maximum": 38969344,
+        "median": 38027264.0,
+        "minimum": 37384192
+      },
+      "application_growth_private_anon_bytes": {
+        "maximum": 20561920,
+        "median": 19324928.0,
+        "minimum": 18690048
+      },
+      "application_growth_pss_bytes": {
+        "maximum": 21825536,
+        "median": 20643328.0,
+        "minimum": 20008960
+      },
+      "application_growth_rss_bytes": {
+        "maximum": 38969344,
+        "median": 38027264.0,
+        "minimum": 37384192
+      },
+      "client_growth_private_anon_bytes": {
+        "maximum": 4792320,
+        "median": 3995648.0,
+        "minimum": 3682304
+      },
+      "client_growth_pss_bytes": {
+        "maximum": 6109184,
+        "median": 5344768.0,
+        "minimum": 4978688
+      },
+      "client_growth_rss_bytes": {
+        "maximum": 23486464,
+        "median": 22736896.0,
+        "minimum": 22315008
+      },
+      "context_switches": {
+        "maximum": 368,
+        "median": 137.0,
+        "minimum": 136
+      },
+      "cpu_ticks": {
+        "maximum": 27,
+        "median": 23.0,
+        "minimum": 21
+      },
+      "daemon_growth_private_anon_bytes": {
+        "maximum": 15794176,
+        "median": 15278080.0,
+        "minimum": 14934016
+      },
+      "daemon_growth_pss_bytes": {
+        "maximum": 15794176,
+        "median": 15278080.0,
+        "minimum": 14934016
+      },
+      "daemon_growth_rss_bytes": {
+        "maximum": 15794176,
+        "median": 15278080.0,
+        "minimum": 14934016
+      },
+      "trigger_to_visible_marker_ns": {
+        "maximum": 414163516,
+        "median": 379634226.5,
+        "minimum": 369968960
+      }
+    }
+  },
+  "valid": true,
+  "warmups_per_variant": 2
+}
