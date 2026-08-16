@@ -2,6 +2,7 @@ use std::{
     collections::VecDeque,
     ffi::OsString,
     io::{self, Read, Write},
+    mem::size_of,
     os::unix::process::ExitStatusExt,
     sync::{
         Arc, Mutex,
@@ -249,6 +250,251 @@ impl CompactLiveSnapshot {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SparseRowPatch {
+    index: usize,
+    row: CompactLiveRow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SparseHistoryDelta {
+    None,
+    Append {
+        rows: Vec<CompactLiveRow>,
+        final_rows: usize,
+    },
+    Replace(Vec<CompactLiveRow>),
+}
+
+/// One producer-boundary publication frame. Ordinary frames own only final rows
+/// selected by semantic damage and the exact bounded history delta. The
+/// metadata snapshot deliberately has no visible or history row bodies.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+struct SparsePublicationFrame {
+    incarnation: ProcessIncarnation,
+    base_revision: TerminalRevision,
+    final_revision: TerminalRevision,
+    updates: Vec<TerminalUpdate>,
+    metadata: Box<LiveSnapshot>,
+    visible_rows: Vec<SparseRowPatch>,
+    history: SparseHistoryDelta,
+    history_policy: CompactHistoryPolicy,
+    semantic_bytes: u64,
+}
+
+impl SparsePublicationFrame {
+    fn capture(
+        incarnation: ProcessIncarnation,
+        updates: Vec<TerminalUpdate>,
+        final_revision: TerminalRevision,
+        history_policy: CompactHistoryPolicy,
+        history_limit: usize,
+        snapshot: &CompactLiveSnapshot,
+    ) -> Option<Self> {
+        let first_revision = updates.first()?.revision().value();
+        let base_revision = TerminalRevision::new(first_revision.checked_sub(1)?);
+        if updates.last()?.revision() != final_revision
+            || snapshot.metadata.revision != final_revision
+            || !updates.windows(2).all(|pair| {
+                pair[0].revision().value().checked_add(1) == Some(pair[1].revision().value())
+            })
+        {
+            return None;
+        }
+
+        let mut damaged = vec![false; snapshot.visible_rows.len()];
+        for damage in updates.iter().flat_map(TerminalUpdate::damage) {
+            match damage {
+                TerminalDamage::FullSnapshot
+                | TerminalDamage::Viewport
+                | TerminalDamage::Dimensions
+                | TerminalDamage::Images { .. } => damaged.fill(true),
+                TerminalDamage::Rows { start, end } => {
+                    if start > end || *end > damaged.len() {
+                        return None;
+                    }
+                    damaged[*start..*end].fill(true);
+                }
+                TerminalDamage::Scroll { region, .. } => {
+                    let start = usize::try_from(region.start()).ok()?;
+                    let end = usize::try_from(region.end()).ok()?;
+                    if start >= end || end > damaged.len() {
+                        return None;
+                    }
+                    damaged[start..end].fill(true);
+                }
+                TerminalDamage::Cursor { .. }
+                | TerminalDamage::Modes
+                | TerminalDamage::Scrollback
+                | TerminalDamage::Title
+                | TerminalDamage::Palette { .. } => {}
+            }
+        }
+        let visible_rows: Vec<SparseRowPatch> = damaged
+            .into_iter()
+            .enumerate()
+            .filter(|(_, changed)| *changed)
+            .map(|(index, _)| SparseRowPatch {
+                index,
+                row: snapshot.visible_rows[index].clone(),
+            })
+            .collect();
+        let history = match history_policy {
+            CompactHistoryPolicy::NoHistory => SparseHistoryDelta::None,
+            CompactHistoryPolicy::AppendTail(rows) => {
+                let first = snapshot.scrollback_rows.len().saturating_sub(rows);
+                SparseHistoryDelta::Append {
+                    rows: snapshot.scrollback_rows[first..].to_vec(),
+                    final_rows: snapshot
+                        .metadata
+                        .scrollback
+                        .available_rows
+                        .min(history_limit),
+                }
+            }
+            CompactHistoryPolicy::FullHistory => {
+                SparseHistoryDelta::Replace(snapshot.scrollback_rows.clone())
+            }
+        };
+        let metadata = Box::new(snapshot.metadata.clone());
+        if !metadata.visible_rows.is_empty() || !metadata.scrollback_rows.is_empty() {
+            return None;
+        }
+        let semantic_bytes = sparse_frame_semantic_bytes(
+            &updates,
+            updates.capacity(),
+            &visible_rows,
+            visible_rows.capacity(),
+            &history,
+            &metadata,
+        )?;
+        Some(Self {
+            incarnation,
+            base_revision,
+            final_revision,
+            updates,
+            metadata,
+            visible_rows,
+            history,
+            history_policy,
+            semantic_bytes,
+        })
+    }
+
+    fn attribution(&self) -> PendingFrameAttribution {
+        PendingFrameAttribution::one_frame(&self.updates, self.history_policy, self.semantic_bytes)
+    }
+
+    #[cfg(test)]
+    fn apply_to(&self, base: &CompactLiveSnapshot) -> Option<CompactLiveSnapshot> {
+        if base.metadata.incarnation != self.incarnation
+            || base.metadata.revision != self.base_revision
+            || self.metadata.revision != self.final_revision
+        {
+            return None;
+        }
+        let final_rows = self.metadata.dimensions.rows;
+        let mut rows: Vec<Option<CompactLiveRow>> = if base.visible_rows.len() == final_rows {
+            base.visible_rows.iter().cloned().map(Some).collect()
+        } else {
+            (0..final_rows).map(|_| None).collect()
+        };
+        for patch in &self.visible_rows {
+            *rows.get_mut(patch.index)? = Some(patch.row.clone());
+        }
+        let visible_rows = rows.into_iter().collect::<Option<Vec<_>>>()?;
+        let scrollback_rows = match &self.history {
+            SparseHistoryDelta::None => base.scrollback_rows.clone(),
+            SparseHistoryDelta::Append { rows, final_rows } => {
+                let mut result = base.scrollback_rows.clone();
+                result.extend(rows.iter().cloned());
+                if result.len() > *final_rows {
+                    result.drain(..result.len() - *final_rows);
+                }
+                result
+            }
+            SparseHistoryDelta::Replace(rows) => rows.clone(),
+        };
+        let mut metadata = (*self.metadata).clone();
+        metadata.visible_rows.clear();
+        metadata.scrollback_rows.clear();
+        Some(CompactLiveSnapshot {
+            metadata,
+            visible_rows,
+            scrollback_rows,
+            history_policy: self.history_policy,
+        })
+    }
+}
+
+fn checked_owned_bytes(total: &mut usize, count: usize, item_size: usize) -> Option<()> {
+    *total = total.checked_add(count.checked_mul(item_size)?)?;
+    Some(())
+}
+
+fn compact_row_nested_bytes(row: &CompactLiveRow) -> Option<usize> {
+    let mut total = 0;
+    checked_owned_bytes(
+        &mut total,
+        row.cells.capacity(),
+        size_of::<CompactLiveCell>(),
+    )?;
+    for cell in &row.cells {
+        total = total.checked_add(cell.content.owned_string_bytes())?;
+    }
+    Some(total)
+}
+
+fn sparse_frame_semantic_bytes(
+    updates: &[TerminalUpdate],
+    updates_capacity: usize,
+    visible_rows: &[SparseRowPatch],
+    visible_rows_capacity: usize,
+    history: &SparseHistoryDelta,
+    metadata: &LiveSnapshot,
+) -> Option<u64> {
+    let mut total = size_of::<SparsePublicationFrame>().checked_add(size_of::<LiveSnapshot>())?;
+    checked_owned_bytes(&mut total, updates_capacity, size_of::<TerminalUpdate>())?;
+    for update in updates {
+        total = total.checked_add(update.owned_allocation_bytes()?)?;
+    }
+    checked_owned_bytes(
+        &mut total,
+        visible_rows_capacity,
+        size_of::<SparseRowPatch>(),
+    )?;
+    for patch in visible_rows {
+        total = total.checked_add(compact_row_nested_bytes(&patch.row)?)?;
+    }
+    let history_rows = match history {
+        SparseHistoryDelta::None => None,
+        SparseHistoryDelta::Append { rows, .. } | SparseHistoryDelta::Replace(rows) => Some(rows),
+    };
+    if let Some(history_rows) = history_rows {
+        checked_owned_bytes(
+            &mut total,
+            history_rows.capacity(),
+            size_of::<CompactLiveRow>(),
+        )?;
+        for row in history_rows {
+            total = total.checked_add(compact_row_nested_bytes(row)?)?;
+        }
+    }
+    total = total.checked_add(metadata.title.capacity())?;
+    checked_owned_bytes(
+        &mut total,
+        metadata.image_contents.capacity(),
+        size_of::<ImageContentMetadata>(),
+    )?;
+    checked_owned_bytes(
+        &mut total,
+        metadata.image_placements.capacity(),
+        size_of::<ImagePlacement>(),
+    )?;
+    u64::try_from(total).ok()
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SnapshotAttribution {
     rows: u64,
@@ -281,10 +527,53 @@ impl CompactQueuedEvent {
 }
 
 #[derive(Debug)]
-struct SnapshotEnvelope {
+struct CompactMaterializationState {
+    incarnation: Option<ProcessIncarnation>,
     revision: TerminalRevision,
-    snapshot: Box<CompactLiveSnapshot>,
-    _admitted: Option<SnapshotLease>,
+    visible_rows: Vec<CompactLiveRow>,
+    history_limit: usize,
+}
+
+impl CompactMaterializationState {
+    fn from_snapshot(snapshot: CompactLiveSnapshot, history_limit: usize) -> Self {
+        Self {
+            incarnation: Some(snapshot.metadata.incarnation),
+            revision: snapshot.metadata.revision,
+            visible_rows: snapshot.visible_rows,
+            history_limit,
+        }
+    }
+}
+
+fn merge_materialized_snapshots(
+    current: &mut Box<CompactLiveSnapshot>,
+    mut next: Box<CompactLiveSnapshot>,
+    history_limit: usize,
+) {
+    let history_policy = current.history_policy.merge(next.history_policy);
+    let mut history_rows = std::mem::take(&mut current.scrollback_rows);
+    match next.history_policy {
+        CompactHistoryPolicy::FullHistory => {
+            history_rows = std::mem::take(&mut next.scrollback_rows);
+        }
+        CompactHistoryPolicy::AppendTail(_) => {
+            history_rows.append(&mut next.scrollback_rows);
+            let final_rows = next.metadata.scrollback.available_rows.min(history_limit);
+            if history_rows.len() > final_rows {
+                history_rows.drain(..history_rows.len() - final_rows);
+            }
+        }
+        CompactHistoryPolicy::NoHistory => {}
+    }
+    next.metadata.scrollback.returned_rows = history_rows.len();
+    next.metadata.scrollback.omitted_oldest_rows = next
+        .metadata
+        .scrollback
+        .available_rows
+        .saturating_sub(history_rows.len());
+    next.scrollback_rows = history_rows;
+    next.history_policy = history_policy;
+    *current = next;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -367,10 +656,15 @@ struct PendingFrameAttribution {
     terminal_updates: u64,
     scrolls: u64,
     appended_rows: u64,
+    semantic_bytes: u64,
 }
 
 impl PendingFrameAttribution {
-    fn one_batch(updates: &[TerminalUpdate], history_policy: CompactHistoryPolicy) -> Self {
+    fn one_frame(
+        updates: &[TerminalUpdate],
+        history_policy: CompactHistoryPolicy,
+        semantic_bytes: u64,
+    ) -> Self {
         Self {
             batches: 1,
             terminal_updates: u64::try_from(updates.len()).unwrap_or(u64::MAX),
@@ -386,6 +680,7 @@ impl PendingFrameAttribution {
                 CompactHistoryPolicy::AppendTail(rows) => u64::try_from(rows).unwrap_or(u64::MAX),
                 CompactHistoryPolicy::FullHistory | CompactHistoryPolicy::NoHistory => 0,
             },
+            semantic_bytes,
         }
     }
 
@@ -394,13 +689,14 @@ impl PendingFrameAttribution {
         self.terminal_updates = self.terminal_updates.saturating_add(next.terminal_updates);
         self.scrolls = self.scrolls.saturating_add(next.scrolls);
         self.appended_rows = self.appended_rows.saturating_add(next.appended_rows);
+        self.semantic_bytes = self.semantic_bytes.saturating_add(next.semantic_bytes);
     }
 }
 
 #[derive(Debug)]
 struct PendingCompactUpdates {
     incarnation: ProcessIncarnation,
-    batches: Vec<Vec<TerminalUpdate>>,
+    frames: Vec<SparsePublicationFrame>,
     end_revision: TerminalRevision,
     history_policy: CompactHistoryPolicy,
     admitted: Vec<Option<QueueLease>>,
@@ -408,16 +704,87 @@ struct PendingCompactUpdates {
 }
 
 impl PendingCompactUpdates {
-    fn into_updates(self) -> Vec<TerminalUpdate> {
+    fn materialize(
+        self,
+        state: &mut CompactMaterializationState,
+    ) -> Option<(
+        ProcessIncarnation,
+        Vec<TerminalUpdate>,
+        TerminalRevision,
+        CompactLiveSnapshot,
+    )> {
+        let total_updates = self.frames.iter().try_fold(0_usize, |total, frame| {
+            total.checked_add(frame.updates.len())
+        })?;
+        let mut updates = Vec::with_capacity(total_updates);
+        let mut history_rows = Vec::new();
+        let mut final_metadata = None;
+        let mut materialized_incarnation = state.incarnation;
+        let mut materialized_revision = state.revision;
+        let mut materialized_rows = state.visible_rows.clone();
+        for frame in self.frames {
+            if frame.incarnation != self.incarnation
+                || materialized_incarnation.is_some_and(|current| current != frame.incarnation)
+                || frame.base_revision != materialized_revision
+                || frame.metadata.incarnation != frame.incarnation
+                || frame.metadata.revision != frame.final_revision
+            {
+                return None;
+            }
+            materialized_incarnation = Some(frame.incarnation);
+            let final_row_count = frame.metadata.dimensions.rows;
+            let mut visible_rows: Vec<Option<CompactLiveRow>> =
+                if materialized_rows.len() == final_row_count {
+                    materialized_rows.drain(..).map(Some).collect()
+                } else {
+                    (0..final_row_count).map(|_| None).collect()
+                };
+            for patch in frame.visible_rows {
+                *visible_rows.get_mut(patch.index)? = Some(patch.row);
+            }
+            materialized_rows = visible_rows.into_iter().collect::<Option<Vec<_>>>()?;
+            materialized_revision = frame.final_revision;
+            match frame.history {
+                SparseHistoryDelta::None => {}
+                SparseHistoryDelta::Append { rows, final_rows } => {
+                    history_rows.extend(rows);
+                    if history_rows.len() > final_rows {
+                        history_rows.drain(..history_rows.len() - final_rows);
+                    }
+                }
+                SparseHistoryDelta::Replace(rows) => history_rows = rows,
+            }
+            updates.extend(frame.updates);
+            final_metadata = Some(frame.metadata);
+        }
+        if materialized_revision != self.end_revision {
+            return None;
+        }
+        let mut metadata = *final_metadata?;
+        metadata.visible_rows.clear();
+        metadata.scrollback_rows.clear();
+        metadata.scrollback.returned_rows = history_rows.len();
+        metadata.scrollback.omitted_oldest_rows = metadata
+            .scrollback
+            .available_rows
+            .saturating_sub(history_rows.len());
         if let Some(attribution) = &self.pending_attribution {
             attribution.record_materialization();
         }
-        let total = self.batches.iter().map(Vec::len).sum();
-        let mut updates = Vec::with_capacity(total);
-        for batch in self.batches {
-            updates.extend(batch);
-        }
-        updates
+        state.incarnation = materialized_incarnation;
+        state.revision = materialized_revision;
+        state.visible_rows.clone_from(&materialized_rows);
+        Some((
+            self.incarnation,
+            updates,
+            self.end_revision,
+            CompactLiveSnapshot {
+                metadata,
+                visible_rows: materialized_rows,
+                scrollback_rows: history_rows,
+                history_policy: self.history_policy,
+            },
+        ))
     }
 }
 
@@ -425,7 +792,6 @@ impl PendingCompactUpdates {
 struct CompactMailboxState {
     generation: u64,
     pending: Option<PendingCompactUpdates>,
-    snapshot: Option<SnapshotEnvelope>,
 }
 
 #[derive(Debug, Default)]
@@ -499,33 +865,22 @@ impl CompactSnapshotSlot {
         let mut current = self.lock();
         current.generation = current.generation.wrapping_add(1);
         drop(current.pending.take());
-        drop(current.snapshot.take());
     }
 
-    fn take_pending(&self) -> MailboxTake {
+    fn take_pending(&self, state: &mut CompactMaterializationState) -> MailboxTake {
         let mut current = self.lock();
         let pending = current.pending.take();
-        let snapshot = current.snapshot.take();
         current.generation = current.generation.wrapping_add(1);
-        let Some(pending) = pending else {
+        let Some((incarnation, updates, end_revision, snapshot)) =
+            pending.and_then(|pending| pending.materialize(state))
+        else {
             return MailboxTake::MissingOrMismatched;
         };
-        let Some(snapshot) = snapshot else {
-            return MailboxTake::MissingOrMismatched;
-        };
-        if pending.end_revision != snapshot.revision
-            || pending.history_policy != snapshot.snapshot.history_policy
-        {
-            return MailboxTake::MissingOrMismatched;
-        }
-        let incarnation = pending.incarnation;
-        let end_revision = pending.end_revision;
-        let updates = pending.into_updates();
         MailboxTake::Exact {
             incarnation,
             updates,
             end_revision,
-            snapshot: snapshot.snapshot,
+            snapshot: Box::new(snapshot),
         }
     }
 }
@@ -566,35 +921,6 @@ impl QueueAccounting {
         debug_assert!(self.enabled);
         RuntimeMetrics::sub_usize_saturating(&self.local_events, 1);
         RuntimeMetrics::sub_usize_saturating(&self.metrics.subscriber_queue_events_current, 1);
-    }
-
-    fn admit_snapshot(&self, attribution: SnapshotAttribution) {
-        debug_assert!(self.enabled);
-        let snapshots =
-            RuntimeMetrics::add_usize_saturating(&self.metrics.queued_snapshot_events_current, 1);
-        RuntimeMetrics::observe_max(&self.metrics.queued_snapshot_events_high_water, snapshots);
-        self.metrics.add_queued_snapshot(attribution);
-        RuntimeMetrics::add_saturating(&self.metrics.publication_snapshot_enqueues, 1);
-        RuntimeMetrics::add_saturating(
-            &self.metrics.publication_snapshot_enqueued_rows,
-            attribution.rows,
-        );
-        RuntimeMetrics::add_saturating(
-            &self.metrics.publication_snapshot_enqueued_cells,
-            attribution.cells,
-        );
-        RuntimeMetrics::add_saturating(
-            &self
-                .metrics
-                .publication_snapshot_enqueued_owned_string_bytes,
-            attribution.owned_string_bytes,
-        );
-    }
-
-    fn release_snapshot(&self, attribution: SnapshotAttribution) {
-        debug_assert!(self.enabled);
-        RuntimeMetrics::sub_usize_saturating(&self.metrics.queued_snapshot_events_current, 1);
-        self.metrics.remove_queued_snapshot(attribution);
     }
 }
 
@@ -668,32 +994,6 @@ impl Drop for QueueAdmissionWitness {
 impl Drop for QueueLease {
     fn drop(&mut self) {
         self.state.release();
-    }
-}
-
-#[derive(Debug)]
-struct SnapshotLease {
-    accounting: Arc<QueueAccounting>,
-    attribution: SnapshotAttribution,
-}
-
-impl SnapshotLease {
-    fn new(
-        accounting: &Arc<QueueAccounting>,
-        attribution: Option<SnapshotAttribution>,
-    ) -> Option<Self> {
-        let attribution = attribution?;
-        accounting.admit_snapshot(attribution);
-        Some(Self {
-            accounting: Arc::clone(accounting),
-            attribution,
-        })
-    }
-}
-
-impl Drop for SnapshotLease {
-    fn drop(&mut self) {
-        self.accounting.release_snapshot(self.attribution);
     }
 }
 
@@ -783,6 +1083,7 @@ fn publish_compact_update(
     accounting: &Arc<QueueAccounting>,
     snapshot_slot: &Arc<CompactSnapshotSlot>,
     semantic_capacity: usize,
+    history_limit: usize,
     incarnation: ProcessIncarnation,
     updates: Vec<TerminalUpdate>,
     end_revision: TerminalRevision,
@@ -800,10 +1101,9 @@ fn publish_compact_update(
         }
         match current.pending.as_ref() {
             Some(pending) => {
-                if pending.batches.len() >= semantic_capacity {
+                if pending.frames.len() >= semantic_capacity {
                     current.generation = current.generation.wrapping_add(1);
                     drop(current.pending.take());
-                    drop(current.snapshot.take());
                     return CompactPublishOutcome::Full;
                 }
                 (
@@ -830,12 +1130,10 @@ fn publish_compact_update(
         }
     };
 
-    let mut snapshot = build_snapshot(combined_policy);
-    let mut attribution = accounting
-        .enabled
-        .then(|| compact_snapshot_attribution(&snapshot));
-    if let Some(attribution) = attribution {
-        record_publication_snapshot(metrics, attribution);
+    let mut built_policy = combined_policy;
+    let mut snapshot = build_snapshot(built_policy);
+    if accounting.enabled {
+        record_publication_snapshot(metrics, compact_snapshot_attribution(&snapshot));
     }
 
     let mut current = snapshot_slot.lock();
@@ -845,27 +1143,41 @@ fn publish_compact_update(
 
     if current.generation == observed_generation {
         if let Some(pending) = current.pending.as_mut() {
-            if !had_pending || pending.batches.len() >= semantic_capacity {
+            if !had_pending || pending.frames.len() >= semantic_capacity {
                 current.generation = current.generation.wrapping_add(1);
                 drop(current.pending.take());
-                drop(current.snapshot.take());
                 return CompactPublishOutcome::Full;
             }
-            let batch_attribution = PendingFrameAttribution::one_batch(&updates, history_policy);
-            let snapshot = Box::new(snapshot);
-            pending.batches.push(updates);
+            let frame_policy = if snapshot.history_policy == built_policy {
+                history_policy
+            } else {
+                snapshot.history_policy
+            };
+            let Some(frame) = SparsePublicationFrame::capture(
+                incarnation,
+                updates,
+                end_revision,
+                frame_policy,
+                history_limit,
+                &snapshot,
+            ) else {
+                current.generation = current.generation.wrapping_add(1);
+                drop(current.pending.take());
+                return CompactPublishOutcome::Full;
+            };
+            if pending.incarnation != incarnation || pending.end_revision != frame.base_revision {
+                current.generation = current.generation.wrapping_add(1);
+                drop(current.pending.take());
+                return CompactPublishOutcome::Full;
+            }
+            let frame_attribution = frame.attribution();
+            pending.frames.push(frame);
             pending.admitted.push(QueueLease::new(accounting));
             if let Some(lease) = pending.pending_attribution.as_mut() {
-                lease.merge(batch_attribution);
+                lease.merge(frame_attribution);
             }
             pending.end_revision = end_revision;
             pending.history_policy = snapshot.history_policy;
-            drop(current.snapshot.take());
-            current.snapshot = Some(SnapshotEnvelope {
-                revision: end_revision,
-                snapshot,
-                _admitted: SnapshotLease::new(accounting, attribution),
-            });
             return CompactPublishOutcome::Published;
         }
         if had_pending {
@@ -878,7 +1190,6 @@ fn publish_compact_update(
         // tail, so finding a replacement tail here would make ordering unclear.
         current.generation = current.generation.wrapping_add(1);
         drop(current.pending.take());
-        drop(current.snapshot.take());
         return CompactPublishOutcome::Full;
     }
 
@@ -889,12 +1200,10 @@ fn publish_compact_update(
     {
         let fresh_generation = current.generation;
         drop(current);
-        snapshot = build_snapshot(history_policy);
-        attribution = accounting
-            .enabled
-            .then(|| compact_snapshot_attribution(&snapshot));
-        if let Some(attribution) = attribution {
-            record_publication_snapshot(metrics, attribution);
+        built_policy = history_policy;
+        snapshot = build_snapshot(built_policy);
+        if accounting.enabled {
+            record_publication_snapshot(metrics, compact_snapshot_attribution(&snapshot));
         }
         current = snapshot_slot.lock();
         if sender.is_closed() {
@@ -903,7 +1212,6 @@ fn publish_compact_update(
         if current.generation != fresh_generation || current.pending.is_some() {
             current.generation = current.generation.wrapping_add(1);
             drop(current.pending.take());
-            drop(current.snapshot.take());
             return CompactPublishOutcome::Full;
         }
     }
@@ -921,21 +1229,32 @@ fn publish_compact_update(
         },
     };
     debug_assert!(current.pending.is_none());
-    drop(current.snapshot.take());
-    let batch_attribution = PendingFrameAttribution::one_batch(&updates, history_policy);
-    let snapshot = Box::new(snapshot);
+    let frame_policy = if snapshot.history_policy == built_policy {
+        history_policy
+    } else {
+        snapshot.history_policy
+    };
+    let Some(frame) = SparsePublicationFrame::capture(
+        incarnation,
+        updates,
+        end_revision,
+        frame_policy,
+        history_limit,
+        &snapshot,
+    ) else {
+        current.generation = current.generation.wrapping_add(1);
+        drop(current.pending.take());
+        return CompactPublishOutcome::Full;
+    };
+    let frame_attribution = frame.attribution();
+    let effective_history_policy = snapshot.history_policy;
     current.pending = Some(PendingCompactUpdates {
         incarnation,
-        batches: vec![updates],
+        frames: vec![frame],
         end_revision,
-        history_policy: snapshot.history_policy,
+        history_policy: effective_history_policy,
         admitted: vec![QueueLease::new(accounting)],
-        pending_attribution: PendingFrameLease::new(accounting, batch_attribution),
-    });
-    current.snapshot = Some(SnapshotEnvelope {
-        revision: end_revision,
-        snapshot,
-        _admitted: SnapshotLease::new(accounting, attribution),
+        pending_attribution: PendingFrameLease::new(accounting, frame_attribution),
     });
     permit.send(CompactQueuedEvent::UpdateReady);
     CompactPublishOutcome::Published
@@ -1003,6 +1322,7 @@ pub struct CompactSubscription {
     #[cfg_attr(not(test), allow(dead_code))]
     accounting: Arc<QueueAccounting>,
     snapshot_slot: Arc<CompactSnapshotSlot>,
+    materialization: Box<CompactMaterializationState>,
 }
 
 impl CompactSubscription {
@@ -1032,24 +1352,26 @@ impl CompactSubscription {
     fn try_recv(&mut self) -> Result<LiveEvent, mpsc::error::TryRecvError> {
         let event = self.try_recv_queued()?;
         match event {
-            CompactQueuedEvent::UpdateReady => match self.snapshot_slot.take_pending() {
-                MailboxTake::Exact {
-                    incarnation,
-                    updates,
-                    snapshot,
-                    ..
-                } => {
-                    self.accounting
-                        .materializations
-                        .fetch_add(1, Ordering::Relaxed);
-                    Ok(LiveEvent::Update {
+            CompactQueuedEvent::UpdateReady => {
+                match self.snapshot_slot.take_pending(&mut self.materialization) {
+                    MailboxTake::Exact {
                         incarnation,
                         updates,
-                        snapshot: Box::new(snapshot.into_live()),
-                    })
+                        snapshot,
+                        ..
+                    } => {
+                        self.accounting
+                            .materializations
+                            .fetch_add(1, Ordering::Relaxed);
+                        Ok(LiveEvent::Update {
+                            incarnation,
+                            updates,
+                            snapshot: Box::new(snapshot.into_live()),
+                        })
+                    }
+                    MailboxTake::MissingOrMismatched => Err(mpsc::error::TryRecvError::Empty),
                 }
-                MailboxTake::MissingOrMismatched => Err(mpsc::error::TryRecvError::Empty),
-            },
+            }
             CompactQueuedEvent::Exited {
                 incarnation,
                 status,
@@ -1129,7 +1451,7 @@ impl CompactSubscription {
             mut updates,
             mut end_revision,
             mut snapshot,
-        } = self.snapshot_slot.take_pending()
+        } = self.snapshot_slot.take_pending(&mut self.materialization)
         else {
             self.snapshot_slot.clear();
             return (SubscriptionReceive::ResnapshotRequired, None);
@@ -1148,7 +1470,7 @@ impl CompactSubscription {
                         updates: pending_updates,
                         end_revision: pending_revision,
                         snapshot: pending_snapshot,
-                    } = self.snapshot_slot.take_pending()
+                    } = self.snapshot_slot.take_pending(&mut self.materialization)
                     else {
                         self.snapshot_slot.clear();
                         return (SubscriptionReceive::ResnapshotRequired, None);
@@ -1157,7 +1479,11 @@ impl CompactSubscription {
                     updates.extend(pending_updates);
                     incarnation = pending_incarnation;
                     end_revision = pending_revision;
-                    snapshot = pending_snapshot;
+                    merge_materialized_snapshots(
+                        &mut snapshot,
+                        pending_snapshot,
+                        self.materialization.history_limit,
+                    );
                 }
                 Ok(CompactQueuedEvent::Exited { status, .. }) => {
                     trailing_exit = Some(status);
@@ -1334,10 +1660,13 @@ pub struct LiveRuntimeMetrics {
     pub publication_compact_materialized_terminal_updates: u64,
     pub publication_compact_materialized_scrolls: u64,
     pub publication_compact_materialized_appended_rows: u64,
+    /// Checked semantic bytes released by compact-frame materialization.
+    pub publication_compact_materialized_semantic_bytes: u64,
     pub publication_compact_materialized_batches_high_water: u64,
     pub publication_compact_materialized_terminal_updates_high_water: u64,
     pub publication_compact_materialized_scrolls_high_water: u64,
     pub publication_compact_materialized_appended_rows_high_water: u64,
+    pub publication_compact_materialized_semantic_bytes_high_water: u64,
     /// Current and high-water semantic ownership before wire materialization.
     pub queued_compact_batches_current: u64,
     pub queued_compact_batches_high_water: u64,
@@ -1347,6 +1676,8 @@ pub struct LiveRuntimeMetrics {
     pub queued_compact_scrolls_high_water: u64,
     pub queued_compact_appended_rows_current: u64,
     pub queued_compact_appended_rows_high_water: u64,
+    pub queued_compact_semantic_bytes_current: u64,
+    pub queued_compact_semantic_bytes_high_water: u64,
     /// Compact snapshots currently installed in subscriber latest-state slots.
     pub queued_snapshot_events_current: usize,
     /// Maximum aggregate installed snapshot ownership. This is at most one per
@@ -1400,10 +1731,12 @@ struct RuntimeMetrics {
     publication_compact_materialized_terminal_updates: AtomicU64,
     publication_compact_materialized_scrolls: AtomicU64,
     publication_compact_materialized_appended_rows: AtomicU64,
+    publication_compact_materialized_semantic_bytes: AtomicU64,
     publication_compact_materialized_batches_high_water: AtomicU64,
     publication_compact_materialized_terminal_updates_high_water: AtomicU64,
     publication_compact_materialized_scrolls_high_water: AtomicU64,
     publication_compact_materialized_appended_rows_high_water: AtomicU64,
+    publication_compact_materialized_semantic_bytes_high_water: AtomicU64,
     queued_compact_batches_current: AtomicU64,
     queued_compact_batches_high_water: AtomicU64,
     queued_compact_terminal_updates_current: AtomicU64,
@@ -1412,6 +1745,8 @@ struct RuntimeMetrics {
     queued_compact_scrolls_high_water: AtomicU64,
     queued_compact_appended_rows_current: AtomicU64,
     queued_compact_appended_rows_high_water: AtomicU64,
+    queued_compact_semantic_bytes_current: AtomicU64,
+    queued_compact_semantic_bytes_high_water: AtomicU64,
     queued_snapshot_events_current: AtomicUsize,
     queued_snapshot_events_high_water: AtomicUsize,
     queued_snapshot_rows_current: AtomicU64,
@@ -1465,28 +1800,6 @@ impl RuntimeMetrics {
         let _ = Self::add_u64_saturating(value, amount);
     }
 
-    fn add_queued_snapshot(&self, attribution: SnapshotAttribution) {
-        let rows = Self::add_u64_saturating(&self.queued_snapshot_rows_current, attribution.rows);
-        Self::observe_max_u64(&self.queued_snapshot_rows_high_water, rows);
-        let cells =
-            Self::add_u64_saturating(&self.queued_snapshot_cells_current, attribution.cells);
-        Self::observe_max_u64(&self.queued_snapshot_cells_high_water, cells);
-        let strings = Self::add_u64_saturating(
-            &self.queued_snapshot_owned_string_bytes_current,
-            attribution.owned_string_bytes,
-        );
-        Self::observe_max_u64(&self.queued_snapshot_owned_string_bytes_high_water, strings);
-    }
-
-    fn remove_queued_snapshot(&self, attribution: SnapshotAttribution) {
-        Self::sub_u64_saturating(&self.queued_snapshot_rows_current, attribution.rows);
-        Self::sub_u64_saturating(&self.queued_snapshot_cells_current, attribution.cells);
-        Self::sub_u64_saturating(
-            &self.queued_snapshot_owned_string_bytes_current,
-            attribution.owned_string_bytes,
-        );
-    }
-
     fn add_queued_compact(&self, attribution: PendingFrameAttribution) {
         RuntimeMetrics::add_saturating(&self.publication_compact_batches, attribution.batches);
         let batches =
@@ -1505,6 +1818,14 @@ impl RuntimeMetrics {
             attribution.appended_rows,
         );
         Self::observe_max_u64(&self.queued_compact_appended_rows_high_water, appended);
+        let semantic_bytes = Self::add_u64_saturating(
+            &self.queued_compact_semantic_bytes_current,
+            attribution.semantic_bytes,
+        );
+        Self::observe_max_u64(
+            &self.queued_compact_semantic_bytes_high_water,
+            semantic_bytes,
+        );
     }
 
     fn remove_queued_compact(&self, attribution: PendingFrameAttribution) {
@@ -1517,6 +1838,10 @@ impl RuntimeMetrics {
         Self::sub_u64_saturating(
             &self.queued_compact_appended_rows_current,
             attribution.appended_rows,
+        );
+        Self::sub_u64_saturating(
+            &self.queued_compact_semantic_bytes_current,
+            attribution.semantic_bytes,
         );
     }
 
@@ -1538,6 +1863,10 @@ impl RuntimeMetrics {
             &self.publication_compact_materialized_appended_rows,
             attribution.appended_rows,
         );
+        Self::add_saturating(
+            &self.publication_compact_materialized_semantic_bytes,
+            attribution.semantic_bytes,
+        );
         Self::observe_max_u64(
             &self.publication_compact_materialized_batches_high_water,
             attribution.batches,
@@ -1553,6 +1882,10 @@ impl RuntimeMetrics {
         Self::observe_max_u64(
             &self.publication_compact_materialized_appended_rows_high_water,
             attribution.appended_rows,
+        );
+        Self::observe_max_u64(
+            &self.publication_compact_materialized_semantic_bytes_high_water,
+            attribution.semantic_bytes,
         );
     }
 
@@ -1637,6 +1970,9 @@ impl RuntimeMetrics {
             publication_compact_materialized_appended_rows: self
                 .publication_compact_materialized_appended_rows
                 .load(Ordering::Relaxed),
+            publication_compact_materialized_semantic_bytes: self
+                .publication_compact_materialized_semantic_bytes
+                .load(Ordering::Relaxed),
             publication_compact_materialized_batches_high_water: self
                 .publication_compact_materialized_batches_high_water
                 .load(Ordering::Relaxed),
@@ -1648,6 +1984,9 @@ impl RuntimeMetrics {
                 .load(Ordering::Relaxed),
             publication_compact_materialized_appended_rows_high_water: self
                 .publication_compact_materialized_appended_rows_high_water
+                .load(Ordering::Relaxed),
+            publication_compact_materialized_semantic_bytes_high_water: self
+                .publication_compact_materialized_semantic_bytes_high_water
                 .load(Ordering::Relaxed),
             queued_compact_batches_current: self
                 .queued_compact_batches_current
@@ -1672,6 +2011,12 @@ impl RuntimeMetrics {
                 .load(Ordering::Relaxed),
             queued_compact_appended_rows_high_water: self
                 .queued_compact_appended_rows_high_water
+                .load(Ordering::Relaxed),
+            queued_compact_semantic_bytes_current: self
+                .queued_compact_semantic_bytes_current
+                .load(Ordering::Relaxed),
+            queued_compact_semantic_bytes_high_water: self
+                .queued_compact_semantic_bytes_high_water
                 .load(Ordering::Relaxed),
             queued_snapshot_events_current: self
                 .queued_snapshot_events_current
@@ -2723,6 +3068,18 @@ fn handle_command(
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
             }
+            let snapshot_rows = max_rows.min(config.max_scrollback_snapshot_rows);
+            let materialization = CompactMaterializationState::from_snapshot(
+                compact_snapshot_with_history(
+                    splint_id,
+                    incarnation,
+                    terminal,
+                    snapshot_rows,
+                    child_exit,
+                    CompactHistoryPolicy::FullHistory,
+                ),
+                snapshot_rows,
+            );
             let (event_sender, events) = mpsc::channel(event_capacity);
             let accounting = Arc::new(QueueAccounting::new(
                 publication_memory_metrics,
@@ -2740,7 +3097,7 @@ fn handle_command(
                 resnapshot,
                 published_revision: terminal.revision(),
                 published_history_generation: terminal_history_generation(terminal),
-                snapshot_rows: max_rows.min(config.max_scrollback_snapshot_rows),
+                snapshot_rows,
             });
             if publication_memory_metrics {
                 RuntimeMetrics::observe_max(
@@ -2753,6 +3110,7 @@ fn handle_command(
                 resnapshot: resnapshot_receiver,
                 accounting,
                 snapshot_slot,
+                materialization: Box::new(materialization),
             }));
         }
         Command::AttachCompact(max_rows, capacity, reply) => {
@@ -2767,13 +3125,20 @@ fn handle_command(
                 let _ = reply.send(Err(LiveError::InvalidSubscriberCapacity));
                 return;
             }
+            let snapshot_rows = max_rows.min(config.max_scrollback_snapshot_rows);
             let started = Instant::now();
-            let snapshot = owned_snapshot(
-                splint_id,
-                incarnation,
-                terminal,
-                max_rows.min(config.max_scrollback_snapshot_rows),
-                child_exit,
+            let snapshot =
+                owned_snapshot(splint_id, incarnation, terminal, snapshot_rows, child_exit);
+            let materialization = CompactMaterializationState::from_snapshot(
+                compact_snapshot_with_history(
+                    splint_id,
+                    incarnation,
+                    terminal,
+                    snapshot_rows,
+                    child_exit,
+                    CompactHistoryPolicy::FullHistory,
+                ),
+                snapshot_rows,
             );
             metrics.snapshot_builds.fetch_add(1, Ordering::Relaxed);
             metrics.snapshot_build_ns.fetch_add(
@@ -2797,7 +3162,7 @@ fn handle_command(
                 resnapshot,
                 published_revision: terminal.revision(),
                 published_history_generation: terminal_history_generation(terminal),
-                snapshot_rows: max_rows.min(config.max_scrollback_snapshot_rows),
+                snapshot_rows,
             });
             if publication_memory_metrics {
                 RuntimeMetrics::observe_max(
@@ -2810,6 +3175,7 @@ fn handle_command(
                 resnapshot: resnapshot_receiver,
                 accounting,
                 snapshot_slot,
+                materialization: Box::new(materialization),
             };
             let _ = reply.send(Ok((snapshot, subscription)));
         }
@@ -2903,6 +3269,7 @@ fn publish_updates(
                 accounting,
                 snapshot_slot,
                 *semantic_capacity,
+                snapshot_rows,
                 incarnation,
                 updates,
                 terminal.revision(),
@@ -3539,6 +3906,17 @@ mod tests {
         let (events, receiver) = mpsc::channel(capacity);
         let accounting = Arc::new(QueueAccounting::new(enabled, metrics));
         let snapshot_slot = Arc::new(CompactSnapshotSlot::default());
+        let mut materialization = CompactMaterializationState::from_snapshot(
+            compact_snapshot(
+                SplintId::new(),
+                ProcessIncarnation::allocate(),
+                terminal,
+                snapshot_rows,
+                None,
+            ),
+            snapshot_rows,
+        );
+        materialization.incarnation = None;
         let (resnapshot, resnapshot_receiver) = watch::channel(false);
         (
             Subscriber {
@@ -3558,6 +3936,7 @@ mod tests {
                 resnapshot: resnapshot_receiver.clone(),
                 accounting,
                 snapshot_slot,
+                materialization: Box::new(materialization),
             },
             resnapshot_receiver,
         )
@@ -3867,11 +4246,11 @@ mod tests {
         assert_eq!(
             materializations.materializations.load(Ordering::Relaxed),
             1,
-            "only the retained latest compact snapshot may materialize"
+            "the sparse tail must materialize exactly once"
         );
         assert_eq!(metrics.snapshot().subscriber_queue_events_current, 0);
         assert_eq!(metrics.snapshot().queued_snapshot_events_current, 0);
-        assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 1);
+        assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 0);
     }
 
     #[allow(
@@ -3914,6 +4293,7 @@ mod tests {
                 &accounting,
                 &snapshot_slot,
                 semantic_capacity,
+                0,
                 incarnation,
                 first_updates,
                 first_revision,
@@ -3942,6 +4322,7 @@ mod tests {
                 &writer_accounting,
                 &writer_slot,
                 semantic_capacity,
+                0,
                 incarnation,
                 second_updates,
                 second_revision,
@@ -3966,7 +4347,7 @@ mod tests {
             end_revision,
             snapshot,
             ..
-        } = snapshot_slot.take_pending()
+        } = snapshot_slot.take_pending(&mut subscription.materialization)
         else {
             panic!("receiver could not drain while snapshot construction was paused");
         };
@@ -3992,7 +4373,7 @@ mod tests {
         };
         assert_eq!(updates.last().unwrap().revision(), second_revision);
         assert_eq!(snapshot.revision, second_revision);
-        assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 1);
+        assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 0);
         assert_eq!(metrics.snapshot().subscriber_queue_events_current, 0);
         drop(subscriber);
     }
@@ -4057,7 +4438,7 @@ mod tests {
         assert_eq!(revisions.last().copied(), Some(terminal.revision()));
         assert!(!*resnapshot.borrow());
         assert_eq!(metrics.snapshot().output_subscriber_overflows, 0);
-        assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 1);
+        assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 0);
         assert_eq!(
             subscribers[0]
                 .events
@@ -4079,7 +4460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delayed_compact_subscriber_retains_one_latest_snapshot() {
+    async fn delayed_compact_subscriber_retains_sparse_frames_without_snapshot_slot() {
         let incarnation = ProcessIncarnation::allocate();
         let mut terminal = Terminal::new(80, 24, TerminalConfig::default());
         let metrics = Arc::new(RuntimeMetrics::default());
@@ -4107,8 +4488,9 @@ mod tests {
 
         let retained = metrics.snapshot();
         assert_eq!(retained.subscriber_queue_events_current, 64);
-        assert_eq!(retained.queued_snapshot_events_current, 1);
-        assert_eq!(retained.queued_snapshot_events_high_water, 1);
+        assert_eq!(retained.queued_snapshot_events_current, 0);
+        assert_eq!(retained.queued_snapshot_events_high_water, 0);
+        assert!(retained.queued_compact_semantic_bytes_current > 0);
         assert!(!*resnapshot.borrow());
 
         let (received, trailing_exit) = subscription.recv_coalesced().await;
@@ -4202,11 +4584,11 @@ mod tests {
         assert_eq!(snapshot.dimensions.rows, 3);
         assert!(snapshot.scrollback_rows.len() <= 1_000);
         assert!(snapshot_text(&snapshot).contains("after-clear"));
-        assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 1);
+        assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 0);
     }
 
     #[test]
-    fn snapshot_slot_replacement_and_receiver_drop_release_exact_ownership() {
+    fn sparse_tail_merge_and_receiver_drop_release_exact_ownership() {
         let incarnation = ProcessIncarnation::allocate();
         let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
         let metrics = Arc::new(RuntimeMetrics::default());
@@ -4229,9 +4611,10 @@ mod tests {
                 (1, 0)
             );
             let retained = metrics.snapshot();
-            assert_eq!(retained.queued_snapshot_events_current, 1);
-            assert_eq!(retained.queued_snapshot_events_high_water, 1);
-            assert_eq!(retained.queued_snapshot_cells_current, 16);
+            assert_eq!(retained.queued_snapshot_events_current, 0);
+            assert_eq!(retained.queued_snapshot_events_high_water, 0);
+            assert_eq!(retained.queued_snapshot_cells_current, 0);
+            assert!(retained.queued_compact_semantic_bytes_current > 0);
         }
 
         drop(receiver);
@@ -4396,9 +4779,9 @@ mod tests {
         );
         let observed = metrics.snapshot();
         assert_eq!(observed.publication_snapshot_builds, 1);
-        assert_eq!(observed.publication_snapshot_enqueues, 1);
+        assert_eq!(observed.publication_snapshot_enqueues, 0);
         assert_eq!(observed.subscriber_queue_events_high_water, 1);
-        assert_eq!(observed.queued_snapshot_events_high_water, 1);
+        assert_eq!(observed.queued_snapshot_events_high_water, 0);
         assert!(*resnapshot.borrow());
     }
 
@@ -4644,8 +5027,598 @@ mod tests {
         );
     }
 
+    fn sparse_test_history_policy(
+        terminal: &Terminal,
+        updates: &[TerminalUpdate],
+    ) -> CompactHistoryPolicy {
+        let snapshot = terminal.snapshot(SnapshotRequest {
+            max_scrollback_rows: 0,
+        });
+        compact_history_policy(updates, snapshot.dimensions(), snapshot.active_screen())
+    }
+
+    fn expected_materialized_sparse_state(
+        mut delta: CompactLiveSnapshot,
+        full: &CompactLiveSnapshot,
+    ) -> CompactLiveSnapshot {
+        delta.visible_rows.clone_from(&full.visible_rows);
+        delta.scrollback_rows.clone_from(&full.scrollback_rows);
+        delta
+    }
+
+    fn capture_sparse_test_transition(
+        splint_id: SplintId,
+        incarnation: ProcessIncarnation,
+        terminal: &Terminal,
+        base: &CompactLiveSnapshot,
+        base_revision: TerminalRevision,
+        history_limit: usize,
+    ) -> (SparsePublicationFrame, CompactLiveSnapshot) {
+        let updates = terminal
+            .updates_since(base_revision)
+            .unwrap()
+            .into_updates();
+        let policy = sparse_test_history_policy(terminal, &updates);
+        let delta = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            terminal,
+            history_limit,
+            None,
+            policy,
+        );
+        let full = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            terminal,
+            history_limit,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let frame = SparsePublicationFrame::capture(
+            incarnation,
+            updates,
+            terminal.revision(),
+            policy,
+            history_limit,
+            &delta,
+        )
+        .expect("valid sparse test transition");
+        let reconstructed = frame.apply_to(base).expect("contiguous sparse transition");
+        assert_eq!(
+            reconstructed,
+            expected_materialized_sparse_state(delta, &full)
+        );
+        (frame, reconstructed)
+    }
+
     #[test]
-    fn partial_compact_snapshot_policy_mismatch_requires_resnapshot() {
+    fn sparse_frame_reconstructs_damage_selected_rows_without_a_grid_checkpoint() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 3, TerminalConfig::default());
+        let base = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            16,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let base_revision = terminal.revision();
+
+        terminal.advance(b"ABC");
+        let updates = terminal
+            .updates_since(base_revision)
+            .unwrap()
+            .into_updates();
+        let policy = sparse_test_history_policy(&terminal, &updates);
+        let delta =
+            compact_snapshot_with_history(splint_id, incarnation, &terminal, 16, None, policy);
+        let full = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            16,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let frame = SparsePublicationFrame::capture(
+            incarnation,
+            updates,
+            terminal.revision(),
+            policy,
+            16,
+            &delta,
+        )
+        .expect("valid sparse frame");
+
+        assert_eq!(frame.visible_rows.len(), 1);
+        assert!(frame.visible_rows.len() < full.metadata.dimensions.rows);
+        assert!(frame.metadata.visible_rows.is_empty());
+        assert!(frame.metadata.scrollback_rows.is_empty());
+        assert!(frame.semantic_bytes > 0);
+        assert_eq!(
+            frame.apply_to(&base).expect("contiguous reconstruction"),
+            expected_materialized_sparse_state(delta, &full)
+        );
+    }
+
+    #[test]
+    fn sparse_tail_rejects_cross_frame_revision_without_advancing_materialized_state() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let base = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            0,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+
+        let base_revision = terminal.revision();
+        terminal.advance(b"A");
+        let (first, first_state) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &base,
+            base_revision,
+            0,
+        );
+        let first_revision = terminal.revision();
+        terminal.advance(b"B");
+        let (mut second, _) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &first_state,
+            first_revision,
+            0,
+        );
+        second.base_revision = base_revision;
+        let pending = PendingCompactUpdates {
+            incarnation,
+            frames: vec![first, second],
+            end_revision: terminal.revision(),
+            history_policy: CompactHistoryPolicy::NoHistory,
+            admitted: Vec::new(),
+            pending_attribution: None,
+        };
+        let mut materialization = CompactMaterializationState::from_snapshot(base, 0);
+        let original_revision = materialization.revision;
+        let original_rows = materialization.visible_rows.clone();
+
+        assert!(pending.materialize(&mut materialization).is_none());
+        assert_eq!(materialization.revision, original_revision);
+        assert_eq!(materialization.visible_rows, original_rows);
+    }
+
+    #[test]
+    fn sparse_frame_semantic_bytes_charge_reserved_update_capacity() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let base_revision = terminal.revision();
+        terminal.advance(b"A");
+        let update = terminal
+            .updates_since(base_revision)
+            .unwrap()
+            .into_updates()
+            .pop()
+            .unwrap();
+        let mut updates = Vec::with_capacity(32);
+        updates.push(update);
+        let snapshot = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            0,
+            None,
+            CompactHistoryPolicy::NoHistory,
+        );
+        let frame = SparsePublicationFrame::capture(
+            incarnation,
+            updates,
+            terminal.revision(),
+            CompactHistoryPolicy::NoHistory,
+            0,
+            &snapshot,
+        )
+        .expect("reserved-capacity frame");
+        let reserved_update_bytes = 32_usize
+            .checked_mul(size_of::<TerminalUpdate>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .unwrap();
+
+        assert!(frame.semantic_bytes >= reserved_update_bytes);
+    }
+
+    #[test]
+    fn sparse_frame_reconstructs_ordered_scrolls_and_bounded_history_tail() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 3, TerminalConfig::default());
+        terminal.advance(b"one\r\ntwo\r\nthree");
+        let base = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let base_revision = terminal.revision();
+
+        terminal.advance(b"\r\nfour\r\nfive\r\nsix");
+        let updates = terminal
+            .updates_since(base_revision)
+            .unwrap()
+            .into_updates();
+        let policy = sparse_test_history_policy(&terminal, &updates);
+        assert!(matches!(policy, CompactHistoryPolicy::AppendTail(rows) if rows > 0));
+        let expected_scrolls: Vec<_> = updates
+            .iter()
+            .flat_map(TerminalUpdate::damage)
+            .filter(|damage| matches!(damage, TerminalDamage::Scroll { .. }))
+            .cloned()
+            .collect();
+        assert!(expected_scrolls.len() >= 2);
+        let delta =
+            compact_snapshot_with_history(splint_id, incarnation, &terminal, 4, None, policy);
+        let full = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let frame = SparsePublicationFrame::capture(
+            incarnation,
+            updates,
+            terminal.revision(),
+            policy,
+            4,
+            &delta,
+        )
+        .expect("valid sparse history frame");
+
+        let retained_scrolls: Vec<_> = frame
+            .updates
+            .iter()
+            .flat_map(TerminalUpdate::damage)
+            .filter(|damage| matches!(damage, TerminalDamage::Scroll { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(retained_scrolls, expected_scrolls);
+        assert_eq!(
+            frame.apply_to(&base).expect("history reconstruction"),
+            expected_materialized_sparse_state(delta, &full)
+        );
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one reconstruction test covers independent metadata and screen transitions"
+    )]
+    #[test]
+    fn sparse_frames_reconstruct_dimensions_screen_palette_and_images() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        terminal.set_cell_pixel_size(8, 16);
+        let mut reconstructed = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            8,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let default_palette_entry = reconstructed.metadata.palette[1];
+        let default_modes = reconstructed.metadata.modes;
+        let default_cursor = reconstructed.metadata.cursor;
+
+        for (transition_index, transition) in [
+            b"\x1bPq#1;2;100;0;0#1~\x1b\\".as_slice(),
+            b"\x1b]2;sparse\x07\x1b]4;1;#abc\x07\x1b[?25l\x1b[2;3H".as_slice(),
+            b"\x1b[?1049h".as_slice(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let base_revision = terminal.revision();
+            terminal.advance(transition);
+            let updates = terminal
+                .updates_since(base_revision)
+                .unwrap()
+                .into_updates();
+            let policy = sparse_test_history_policy(&terminal, &updates);
+            let delta =
+                compact_snapshot_with_history(splint_id, incarnation, &terminal, 8, None, policy);
+            let full = compact_snapshot_with_history(
+                splint_id,
+                incarnation,
+                &terminal,
+                8,
+                None,
+                CompactHistoryPolicy::FullHistory,
+            );
+            let frame = SparsePublicationFrame::capture(
+                incarnation,
+                updates.clone(),
+                terminal.revision(),
+                policy,
+                8,
+                &delta,
+            )
+            .unwrap_or_else(|| panic!("invalid metadata frame: {updates:?}, policy={policy:?}"));
+            reconstructed = frame
+                .apply_to(&reconstructed)
+                .expect("metadata reconstruction");
+            assert_eq!(
+                reconstructed,
+                expected_materialized_sparse_state(delta, &full)
+            );
+            if transition_index == 0 {
+                assert_eq!(reconstructed.metadata.image_contents.len(), 1);
+                assert_eq!(reconstructed.metadata.image_placements.len(), 1);
+            } else if transition_index == 1 {
+                assert_eq!(reconstructed.metadata.title, "sparse");
+                assert_ne!(reconstructed.metadata.palette[1], default_palette_entry);
+                assert_ne!(reconstructed.metadata.modes, default_modes);
+                assert_ne!(reconstructed.metadata.cursor, default_cursor);
+            }
+        }
+        assert_eq!(
+            reconstructed.metadata.active_screen,
+            ActiveScreen::Alternate
+        );
+
+        let base_revision = terminal.revision();
+        terminal.resize(10, 3);
+        let updates = terminal
+            .updates_since(base_revision)
+            .unwrap()
+            .into_updates();
+        let policy = sparse_test_history_policy(&terminal, &updates);
+        let delta =
+            compact_snapshot_with_history(splint_id, incarnation, &terminal, 8, None, policy);
+        let full = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            8,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let frame = SparsePublicationFrame::capture(
+            incarnation,
+            updates,
+            terminal.revision(),
+            policy,
+            8,
+            &delta,
+        )
+        .expect("valid dimensions frame");
+        reconstructed = frame
+            .apply_to(&reconstructed)
+            .expect("dimension reconstruction");
+        assert_eq!(
+            reconstructed,
+            expected_materialized_sparse_state(delta, &full)
+        );
+        assert_eq!(reconstructed.visible_rows.len(), 3);
+        assert_eq!(frame.visible_rows.len(), 3);
+    }
+
+    #[test]
+    fn mailbox_local_append_frames_materialize_exact_history_metadata() {
+        let incarnation = ProcessIncarnation::allocate();
+        let splint_id = SplintId::new();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        terminal.advance(b"one\r\ntwo");
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let (subscriber, mut subscription, _) =
+            test_subscriber_with_rows(&terminal, 8, true, Arc::clone(&metrics), 4);
+        let mut subscribers = vec![subscriber];
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+
+        for line in [b"\r\nthree".as_slice(), b"\r\nfour".as_slice()] {
+            terminal.advance(line);
+            let (updates, overflows) = publish_updates(
+                splint_id,
+                &terminal,
+                &mut publication,
+                incarnation,
+                None,
+                &mut subscribers,
+                &metrics,
+            );
+            assert!(updates > 0);
+            assert_eq!(overflows, 0);
+        }
+        let LiveEvent::Update { snapshot, .. } = subscription.try_recv().unwrap() else {
+            panic!("mailbox-local append tail did not materialize");
+        };
+        let authoritative = owned_snapshot(splint_id, incarnation, &terminal, 4, None);
+
+        assert_eq!(snapshot.scrollback_rows, authoritative.scrollback_rows);
+        assert_eq!(
+            snapshot.scrollback.returned_rows,
+            snapshot.scrollback_rows.len()
+        );
+        assert_eq!(
+            snapshot.scrollback.omitted_oldest_rows,
+            snapshot
+                .scrollback
+                .available_rows
+                .saturating_sub(snapshot.scrollback_rows.len())
+        );
+    }
+
+    #[test]
+    fn separately_materialized_append_tails_merge_into_one_exact_wire_history() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        terminal.advance(b"one\r\ntwo");
+
+        terminal.advance(b"\r\nthree");
+        let first = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::AppendTail(1),
+        );
+        terminal.advance(b"\r\nfour");
+        let second = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::AppendTail(1),
+        );
+        let full = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let mut merged = Box::new(first);
+        merge_materialized_snapshots(&mut merged, Box::new(second), 4);
+
+        assert_eq!(merged.history_policy, CompactHistoryPolicy::AppendTail(2));
+        assert_eq!(merged.scrollback_rows, full.scrollback_rows);
+        assert_eq!(
+            merged.metadata.scrollback.returned_rows,
+            merged.scrollback_rows.len()
+        );
+        assert_eq!(
+            merged.metadata.scrollback.omitted_oldest_rows,
+            merged
+                .metadata
+                .scrollback
+                .available_rows
+                .saturating_sub(merged.scrollback_rows.len())
+        );
+    }
+
+    #[test]
+    fn sparse_frames_reconstruct_history_trim_reflow_clear_and_reset() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 3, TerminalConfig::default());
+        terminal.advance(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        let mut reconstructed = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            4,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+
+        let base_revision = terminal.revision();
+        terminal.advance(b"\r\nseven\r\neight\r\nnine");
+        let (append, next) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &reconstructed,
+            base_revision,
+            4,
+        );
+        assert!(matches!(
+            append.history,
+            SparseHistoryDelta::Append { final_rows: 4, .. }
+        ));
+        assert_eq!(next.scrollback_rows.len(), 4);
+        reconstructed = next;
+
+        let base_revision = terminal.revision();
+        terminal.resize(10, 4);
+        let (reflow, next) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &reconstructed,
+            base_revision,
+            4,
+        );
+        assert!(matches!(reflow.history, SparseHistoryDelta::Replace(_)));
+        assert_eq!(reflow.visible_rows.len(), 4);
+        reconstructed = next;
+
+        let base_revision = terminal.revision();
+        terminal.advance(b"\x1b[2J\x1b[H\x1b[3J");
+        let (clear, next) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &reconstructed,
+            base_revision,
+            4,
+        );
+        assert!(matches!(clear.history, SparseHistoryDelta::Replace(_)));
+        assert!(next.scrollback_rows.is_empty());
+        assert_eq!(clear.visible_rows.len(), next.visible_rows.len());
+    }
+
+    #[test]
+    fn oversized_sparse_producer_batch_is_checked_and_reconstructable() {
+        let splint_id = SplintId::new();
+        let incarnation = ProcessIncarnation::allocate();
+        let config = TerminalConfig {
+            update_history_limit: 100_000,
+            ..TerminalConfig::default()
+        };
+        let mut terminal = Terminal::new(480, 128, config);
+        let base = compact_snapshot_with_history(
+            splint_id,
+            incarnation,
+            &terminal,
+            256,
+            None,
+            CompactHistoryPolicy::FullHistory,
+        );
+        let base_revision = terminal.revision();
+        let mut output = Vec::with_capacity(192 * 482);
+        for _ in 0..192 {
+            output.extend(std::iter::repeat_n(b'X', 480));
+            output.extend_from_slice(b"\r\n");
+        }
+        terminal.advance(&output);
+        let (frame, reconstructed) = capture_sparse_test_transition(
+            splint_id,
+            incarnation,
+            &terminal,
+            &base,
+            base_revision,
+            256,
+        );
+
+        assert!(frame.semantic_bytes > 256 * 1024);
+        assert_eq!(frame.visible_rows.len(), 128);
+        assert!(!reconstructed.scrollback_rows.is_empty());
+        assert_eq!(
+            reconstructed.scrollback_rows.len(),
+            reconstructed.metadata.scrollback.available_rows.min(256)
+        );
+        assert!(frame.metadata.visible_rows.is_empty());
+        assert!(frame.metadata.scrollback_rows.is_empty());
+    }
+
+    #[test]
+    fn empty_sparse_tail_requires_resnapshot() {
         let terminal = Terminal::new(8, 2, TerminalConfig::default());
         let incarnation = ProcessIncarnation::allocate();
         let snapshot = compact_snapshot_with_history(
@@ -4661,20 +5634,16 @@ mod tests {
             let mut current = slot.lock();
             current.pending = Some(PendingCompactUpdates {
                 incarnation,
-                batches: vec![Vec::new()],
+                frames: Vec::new(),
                 end_revision: terminal.revision(),
                 history_policy: CompactHistoryPolicy::AppendTail(1),
                 admitted: Vec::new(),
                 pending_attribution: None,
             });
-            current.snapshot = Some(SnapshotEnvelope {
-                revision: terminal.revision(),
-                snapshot: Box::new(snapshot),
-                _admitted: None,
-            });
         }
+        let mut materialization = CompactMaterializationState::from_snapshot(snapshot, 0);
         assert!(matches!(
-            slot.take_pending(),
+            slot.take_pending(&mut materialization),
             MailboxTake::MissingOrMismatched
         ));
     }
@@ -4754,7 +5723,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_attribution_distinguishes_build_enqueue_and_dequeue() {
+    fn publication_attribution_distinguishes_ephemeral_build_sparse_queue_and_materialization() {
         let incarnation = ProcessIncarnation::allocate();
         let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
         let metrics = Arc::new(RuntimeMetrics::default());
@@ -4777,17 +5746,17 @@ mod tests {
         assert_eq!(overflows, 0);
         let queued = metrics.snapshot();
         assert_eq!(queued.publication_snapshot_builds, 1);
-        assert_eq!(queued.publication_snapshot_enqueues, 1);
+        assert_eq!(queued.publication_snapshot_enqueues, 0);
         assert_eq!(queued.publication_snapshot_rows, 2);
         assert_eq!(queued.publication_snapshot_cells, 16);
-        assert_eq!(queued.publication_snapshot_enqueued_rows, 2);
-        assert_eq!(queued.publication_snapshot_enqueued_cells, 16);
+        assert_eq!(queued.publication_snapshot_enqueued_rows, 0);
+        assert_eq!(queued.publication_snapshot_enqueued_cells, 0);
         assert_eq!(queued.subscriber_queue_events_current, 1);
         assert_eq!(queued.subscriber_queue_events_high_water, 1);
         assert_eq!(queued.subscriber_queue_per_subscriber_high_water, 1);
-        assert_eq!(queued.queued_snapshot_events_current, 1);
-        assert_eq!(queued.queued_snapshot_cells_current, 16);
-        assert_eq!(queued.queued_snapshot_cells_high_water, 16);
+        assert_eq!(queued.queued_snapshot_events_current, 0);
+        assert_eq!(queued.queued_snapshot_cells_current, 0);
+        assert_eq!(queued.queued_snapshot_cells_high_water, 0);
         assert_eq!(queued.publication_compact_batches, 1);
         assert_eq!(queued.publication_compact_batch_merges, 0);
         assert_eq!(queued.queued_compact_batches_current, 1);
@@ -4806,11 +5775,12 @@ mod tests {
         assert_eq!(drained.queued_snapshot_events_current, 0);
         assert_eq!(drained.queued_snapshot_rows_current, 0);
         assert_eq!(drained.queued_snapshot_cells_current, 0);
-        assert_eq!(drained.publication_snapshot_enqueues, 1);
+        assert_eq!(drained.publication_snapshot_enqueues, 0);
         assert_eq!(drained.queued_compact_batches_current, 0);
         assert_eq!(drained.queued_compact_terminal_updates_current, 0);
         assert_eq!(drained.queued_compact_scrolls_current, 0);
         assert_eq!(drained.queued_compact_appended_rows_current, 0);
+        assert_eq!(drained.queued_compact_semantic_bytes_current, 0);
         assert_eq!(drained.publication_compact_materializations, 1);
         assert_eq!(drained.publication_compact_materialized_batches, 1);
         assert_eq!(
@@ -4871,11 +5841,17 @@ mod tests {
         assert_eq!(queued.queued_compact_batches_current, 2);
         assert_eq!(queued.queued_compact_batches_high_water, 2);
         assert!(queued.queued_compact_terminal_updates_current >= 2);
+        assert!(queued.queued_compact_semantic_bytes_current > 0);
+        assert_eq!(
+            queued.queued_compact_semantic_bytes_high_water,
+            queued.queued_compact_semantic_bytes_current
+        );
 
         assert!(matches!(receiver.try_recv(), Ok(LiveEvent::Update { .. })));
         let drained = metrics.snapshot();
         assert_eq!(drained.queued_compact_batches_current, 0);
         assert_eq!(drained.queued_compact_terminal_updates_current, 0);
+        assert_eq!(drained.queued_compact_semantic_bytes_current, 0);
         assert_eq!(drained.publication_compact_materializations, 1);
         assert_eq!(drained.publication_compact_materialized_batches, 2);
         assert_eq!(
@@ -4885,6 +5861,14 @@ mod tests {
         assert_eq!(
             drained.publication_compact_materialized_terminal_updates,
             queued.queued_compact_terminal_updates_high_water
+        );
+        assert_eq!(
+            drained.publication_compact_materialized_semantic_bytes,
+            queued.queued_compact_semantic_bytes_high_water
+        );
+        assert_eq!(
+            drained.publication_compact_materialized_semantic_bytes_high_water,
+            queued.queued_compact_semantic_bytes_high_water
         );
     }
 
@@ -4915,11 +5899,11 @@ mod tests {
         );
         let queued = metrics.snapshot();
         assert_eq!(queued.publication_snapshot_builds, 2);
-        assert_eq!(queued.publication_snapshot_enqueues, 2);
+        assert_eq!(queued.publication_snapshot_enqueues, 0);
         assert_eq!(queued.subscriber_queue_events_current, 2);
         assert_eq!(queued.subscriber_queue_events_high_water, 2);
         assert_eq!(queued.subscriber_queue_per_subscriber_high_water, 1);
-        assert_eq!(queued.queued_snapshot_events_current, 2);
+        assert_eq!(queued.queued_snapshot_events_current, 0);
         assert_eq!(queued.publication_compact_batches, 2);
         assert_eq!(queued.queued_compact_batches_current, 2);
         assert_eq!(queued.queued_compact_batches_high_water, 2);
@@ -4966,7 +5950,7 @@ mod tests {
         assert!(subscribers.is_empty());
         assert!(*resnapshot.borrow());
         assert_eq!(metrics.snapshot().publication_snapshot_builds, 1);
-        assert_eq!(metrics.snapshot().publication_snapshot_enqueues, 1);
+        assert_eq!(metrics.snapshot().publication_snapshot_enqueues, 0);
         assert_eq!(metrics.snapshot().queued_snapshot_events_current, 0);
         assert_eq!(metrics.snapshot().queued_compact_batches_current, 0);
         drop(receiver);
@@ -4984,6 +5968,12 @@ mod tests {
             resnapshot,
             accounting: Arc::clone(&accounting),
             snapshot_slot: Arc::new(CompactSnapshotSlot::default()),
+            materialization: Box::new(CompactMaterializationState {
+                incarnation: None,
+                revision: TerminalRevision::default(),
+                visible_rows: Vec::new(),
+                history_limit: 0,
+            }),
         };
         let consumer = tokio::spawn(async move {
             let mut count = 0;
@@ -5120,6 +6110,12 @@ mod tests {
             resnapshot,
             accounting,
             snapshot_slot: Arc::new(CompactSnapshotSlot::default()),
+            materialization: Box::new(CompactMaterializationState {
+                incarnation: None,
+                revision: TerminalRevision::default(),
+                visible_rows: Vec::new(),
+                history_limit: 0,
+            }),
         };
 
         assert!(matches!(

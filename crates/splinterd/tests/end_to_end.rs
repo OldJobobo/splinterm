@@ -498,6 +498,7 @@ fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate
         snapshot.visible_rows[patch.index] = patch.row;
     }
     if let Some(scrollback) = update.scrollback {
+        let append = matches!(scrollback.transition, HistoryTransition::Append { .. });
         match scrollback.transition {
             HistoryTransition::Append { trimmed_rows, .. } => {
                 snapshot
@@ -514,7 +515,13 @@ fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate
         snapshot.oldest_available_scrollback_row_id = scrollback.oldest_available_row_id;
         snapshot.newest_available_scrollback_row_id = scrollback.newest_available_row_id;
         snapshot.available_scrollback_rows = scrollback.available_rows;
-        snapshot.omitted_oldest_scrollback_rows = scrollback.omitted_oldest_rows;
+        snapshot.omitted_oldest_scrollback_rows = if append {
+            scrollback
+                .available_rows
+                .saturating_sub(snapshot.scrollback_rows.len())
+        } else {
+            scrollback.omitted_oldest_rows
+        };
     }
     if let Some(cursor) = update.cursor {
         snapshot.cursor_column = cursor.column;
@@ -540,9 +547,17 @@ fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate
         snapshot.images = Some(images);
     }
     snapshot.revision = update.revision;
-    snapshot
-        .validate()
-        .expect("reconstructed subscription snapshot remains valid");
+    snapshot.validate().unwrap_or_else(|error| {
+        panic!(
+            "reconstructed subscription snapshot remains valid: {error:?}; rows={} available={} omitted={} oldest={:?} newest={:?} revision={}",
+            snapshot.scrollback_rows.len(),
+            snapshot.available_scrollback_rows,
+            snapshot.omitted_oldest_scrollback_rows,
+            snapshot.oldest_available_scrollback_row_id,
+            snapshot.newest_available_scrollback_row_id,
+            snapshot.revision,
+        )
+    });
 }
 
 #[allow(

@@ -1,6 +1,6 @@
 # Plan 0043: Beta1 sparse terminal publication frames
 
-- **Status:** Fresh integrated baseline and Milestone 1 accepted; sparse producer frames next
+- **Status:** Milestones 1-2 accepted; bounded sparse queues and sealing next
 - **Date:** 2026-08-15
 - **Release decision:** Do not tag `0.1.0-beta.1` until this plan passes its
   non-graphical, graphical, review, integration, and release gates
@@ -266,6 +266,44 @@ Work:
 Focused tests cover one-row damage, complete-grid damage, clear, reflow,
 dimensions, normal/alternate screen transitions, palette/mode/title/cursor,
 images, history append/trim/reset, and a single oversized producer batch.
+
+### Milestone 2 implementation record — 2026-08-16
+
+- Each compact producer boundary now owns a private `SparsePublicationFrame`:
+  ordered terminal updates, damage-selected final rows, a bounded append or
+  replacement history delta, and row-free final metadata. Producer snapshots are
+  ephemeral capture inputs and are not installed in the mailbox. The receiver
+  owns only its current visible-grid materialization base; ordinary queued frames
+  do not own a visible-grid or history checkpoint, while full damage owns only
+  the complete state it actually changed.
+- Checked semantic-byte attribution charges owned vector capacities, nested
+  update/event bodies, compact rows and composed strings, history deltas, title,
+  and image metadata. The existing `PendingFrameLease` now admits, merges,
+  materializes, and releases those bytes through the same RAII paths as
+  batch/count attribution.
+- Standalone reconstruction tests cover one-row damage, ordered multi-scroll
+  updates, bounded append/trim, clear/reset, normal-screen reflow, `480×128`
+  complete-grid damage, dimensions, normal/alternate screen transitions,
+  palette/mode/title/cursor metadata, image metadata, and one 92,544-revision
+  oversized producer batch.
+- Independent review found the first staged implementation still retained one
+  latest compact snapshot and did not enforce cross-frame continuity or charge
+  spare vector capacity. The reviewed fixes remove ordinary snapshot-slot
+  ownership, materialize and merge sparse tails transactionally at the receive
+  boundary, fail closed on incarnation/revision mismatches, and charge owned
+  capacities plus nested update event bodies.
+- The production-socket mixed/clear test exposed a test-model error under a newly
+  observed append boundary: wire `omitted_oldest_rows` describes the delta rows,
+  while the reconstructed snapshot must recompute omission from its retained
+  bounded history. The bounded client model now does so; ten consecutive focused
+  repetitions passed without resync or invalid state.
+- Validation passed: `cargo test --workspace --all-targets -- --test-threads=1`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, 63 benchmark harness
+  tests, formatting, and `git diff --check`. The fresh read-only review chain
+  `1cca02fc` → `dd64a6ef` → `b34efcf6` found the staged snapshot retention,
+  continuity/accounting, and append-metadata defects, verified each bounded fix,
+  and returned **CLEAN** with no residual risk. No graphical test, installation,
+  package replacement, oracle refresh, or release action was performed.
 
 ## Milestone 3 — bounded queue, sealing, and resync
 

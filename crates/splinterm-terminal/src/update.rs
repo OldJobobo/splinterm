@@ -1,5 +1,7 @@
 //! Semantic terminal revisions, damage, bounded replay, and resnapshot gaps.
 
+use std::mem::size_of;
+
 use crate::{ActiveScreen, Cursor, ScrollDirection, ScrollRegion, TerminalEvent};
 
 /// Monotonic semantic terminal revision.
@@ -86,6 +88,35 @@ impl TerminalUpdate {
     #[must_use]
     pub fn events(&self) -> impl ExactSizeIterator<Item = &TerminalEvent> {
         self.events.iter()
+    }
+
+    /// Returns the bytes allocated by this update's owned semantic vectors and
+    /// variable-length event bodies, excluding allocator bookkeeping.
+    #[must_use]
+    pub fn owned_allocation_bytes(&self) -> Option<usize> {
+        let mut total = self
+            .damage
+            .capacity()
+            .checked_mul(size_of::<TerminalDamage>())?
+            .checked_add(
+                self.events
+                    .capacity()
+                    .checked_mul(size_of::<TerminalEvent>())?,
+            )?;
+        for event in &self.events {
+            let body = match event {
+                TerminalEvent::PtyWrite(bytes) => bytes.capacity(),
+                TerminalEvent::TitleChanged(title) => title.capacity(),
+                TerminalEvent::Bell
+                | TerminalEvent::PaletteChanged { .. }
+                | TerminalEvent::UnsupportedSequence(_)
+                | TerminalEvent::ImageRejected(_)
+                | TerminalEvent::StringTruncated(_)
+                | TerminalEvent::EventQueueOverflow => 0,
+            };
+            total = total.checked_add(body)?;
+        }
+        Some(total)
     }
 }
 
