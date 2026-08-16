@@ -1600,14 +1600,18 @@ impl SemanticByteLease {
     }
 
     fn resize(&mut self, bytes: u64) -> Option<()> {
-        if bytes > self.bytes {
-            let mut extra = Self::try_new(&self.accounting, bytes - self.bytes)?;
-            extra.bytes = 0;
-            extra.daemon.bytes = 0;
-        } else if bytes < self.bytes {
-            let released = self.bytes - bytes;
-            self.accounting.release_semantic_bytes(released);
-            DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.fetch_sub(released, Ordering::AcqRel);
+        match bytes.cmp(&self.bytes) {
+            std::cmp::Ordering::Greater => {
+                let mut extra = Self::try_new(&self.accounting, bytes - self.bytes)?;
+                extra.bytes = 0;
+                extra.daemon.bytes = 0;
+            }
+            std::cmp::Ordering::Less => {
+                let released = self.bytes - bytes;
+                self.accounting.release_semantic_bytes(released);
+                DAEMON_TERMINAL_PUBLICATION_BYTES_CURRENT.fetch_sub(released, Ordering::AcqRel);
+            }
+            std::cmp::Ordering::Equal => {}
         }
         self.bytes = bytes;
         self.daemon.bytes = bytes;
