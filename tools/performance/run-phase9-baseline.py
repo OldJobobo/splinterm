@@ -133,6 +133,22 @@ def validate_renderer(
     if report.get("profile") != "release":
         failures.append("renderer benchmark was not a release build")
     grids = {(grid["columns"], grid["rows"]): grid for grid in report.get("grids", [])}
+    maximum_grid = grids.get((480, 128))
+    if maximum_grid is None:
+        failures.append("renderer grid missing: 480x128")
+    else:
+        required_large_values = {
+            "canvas.bytes": maximum_grid.get("canvas", {}).get("bytes"),
+            "rss_bytes_after_grid": maximum_grid.get("rss_bytes_after_grid"),
+            "cold_frame_ns": maximum_grid.get("cold_frame_ns"),
+            "warm_full_prepare_ns.p95": maximum_grid.get("warm_full_prepare_ns", {}).get("p95"),
+            "full_paint_ns.p95": maximum_grid.get("full_paint_ns", {}).get("p95"),
+            "one_row_prepare_ns.p95": maximum_grid.get("one_row_prepare_ns", {}).get("p95"),
+            "one_row_paint_ns.p95": maximum_grid.get("one_row_paint_ns", {}).get("p95"),
+        }
+        for label, value in required_large_values.items():
+            if not isinstance(value, int) or value <= 0:
+                failures.append(f"480x128.{label}: missing or nonpositive")
     for dimensions, key in (((80, 24), "80x24"), ((240, 80), "240x80")):
         grid = grids.get(dimensions)
         if grid is None:

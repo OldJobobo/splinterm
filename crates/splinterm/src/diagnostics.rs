@@ -107,6 +107,7 @@ pub enum DiagnosticEventCode {
     WaylandFailure,
     TopologyFailure,
     PaneStreamFailure,
+    GridCapped,
     Panic,
     TerminationSignal,
     DiagnosticRecordOmitted,
@@ -824,7 +825,9 @@ const fn module_for_event(event: DiagnosticEventCode) -> DiagnosticModule {
     match event {
         DiagnosticEventCode::WaylandFailure => DiagnosticModule::Wayland,
         DiagnosticEventCode::TopologyFailure => DiagnosticModule::Topology,
-        DiagnosticEventCode::PaneStreamFailure => DiagnosticModule::Pane,
+        DiagnosticEventCode::PaneStreamFailure | DiagnosticEventCode::GridCapped => {
+            DiagnosticModule::Pane
+        }
         DiagnosticEventCode::ClientStarted
         | DiagnosticEventCode::ConfigWarning
         | DiagnosticEventCode::ClientExit

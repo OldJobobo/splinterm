@@ -15,7 +15,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` (no auto mode) | output-scale |
 | `main.padding-left`, `padding-right`, `padding-top`, `padding-bottom` | independent logical padding edges | 0–10000; 12 each |
-| `main.initial-columns`, `initial-rows` | requested initial grid | 2–240, 2–80; 80×24 |
+| `main.initial-columns`, `initial-rows` | requested initial grid | 2–480, 2–128; 80×24 |
 | `main.shell` | shell executable used for an empty launch | login shell from the account |
 | `main.login-shell` | use login-style argv[0] for the shell | yes |
 | `main.title` | fixed window title; otherwise OSC title | unset |
@@ -30,6 +30,13 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `cursor.blink` | permit cursor blink | yes |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
+
+The protocol grid is bounded at 480×128. The shipped 14 px output-scale profile
+uses the complete natural grid on validated 2560×1440 and 3840×2160 surfaces.
+A smaller font or larger surface can exceed that envelope; Splinterm then keeps
+the actual terminal top-left anchored, leaves remaining right/bottom pixels
+outside terminal hit-testing, and emits one bounded `grid_capped` diagnostic for
+the pane instead of silently treating the residual as terminal cells.
 
 Malformed supported values fail startup. Unknown sections and keys print
 line-numbered diagnostics. By default, palette roles come directly from the
