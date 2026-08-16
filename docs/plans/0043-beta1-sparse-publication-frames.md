@@ -1,6 +1,6 @@
 # Plan 0043: Beta1 sparse terminal publication frames
 
-- **Status:** Approved successor design to Plan 0012; fresh integrated baseline gate pending
+- **Status:** Fresh integrated baseline and Milestone 1 accepted; sparse producer frames next
 - **Date:** 2026-08-15
 - **Release decision:** Do not tag `0.1.0-beta.1` until this plan passes its
   non-graphical, graphical, review, integration, and release gates
@@ -119,6 +119,18 @@ the current release-line behavior no longer reproduces the defect.
 
 No graphical comparison is permitted at this gate. The first reproduction must
 be headless or use retained historical graphical evidence only.
+
+### Fresh gate result
+
+The 2026-08-16 headless matrix compared exact Alpha3.3 commit `0c42767` with
+integrated Plan 0042 commit `ba8f1cd` using identical harness source, two
+warmups, ten randomized measured samples per variant, and the unchanged
+5,000-line mixed/clear workload. Every integrated-baseline sample retained one
+latest snapshot, emitted zero resyncs, and materialized up to 64 producer batches
+and approximately 15,554 terminal updates into one subscriber event. Median
+baseline marker latency was 127.23 ms and private-anonymous growth was 8.28 MiB.
+The attribution gate therefore reproduces and sparse-frame implementation may
+proceed. Evidence: [fresh headless baseline](../benchmarks/artifacts/2026-08-16-plan0043-fresh-baseline/summary.md).
 
 ## Sparse frame contract
 

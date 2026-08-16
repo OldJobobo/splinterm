@@ -105,6 +105,58 @@ def test_publication_metrics_overhead_bootstrap_is_deterministic() -> None:
     assert first["point_percent"] == 0.0
 
 
+def test_plan0043_baseline_extracts_attribution_and_resource_growth() -> None:
+    module = load_module(
+        ROOT / "tools/performance/run-plan0043-baseline.py", "plan0043_baseline"
+    )
+    metrics = {key: index + 1 for index, key in enumerate(module.METRIC_KEYS)}
+    result = {
+        "schema": "splinterm.plan0011.daemon-retention.v1",
+        "case": "fast",
+        "cycles": 1,
+        "baseline": {
+            "aggregate": {
+                "rss_bytes": 10,
+                "pss_bytes": 20,
+                "private_anon_bytes": 30,
+                "cpu_ticks": 40,
+            }
+        },
+        "final": {
+            "aggregate": {
+                "rss_bytes": 15,
+                "pss_bytes": 27,
+                "private_anon_bytes": 39,
+                "cpu_ticks": 51,
+            }
+        },
+        "endpoints": [{"marker_latency_ns": 123}],
+        "runtime_metrics": metrics,
+        "drain_events": 7,
+        "drain_resnapshots": 0,
+    }
+
+    assert module.extract_sample(result, 456) == {
+        "memory_growth": {
+            "rss_bytes": 5,
+            "pss_bytes": 7,
+            "private_anon_bytes": 9,
+        },
+        "cpu_ticks": 11,
+        "marker_latency_ns": 123,
+        "wall_ns": 456,
+        "drain_events": 7,
+        "drain_resnapshots": 0,
+        "metrics": metrics,
+    }
+    assert module.summarize([3, 1, 2, 4]) == {
+        "count": 4,
+        "min": 1,
+        "median": 2.5,
+        "max": 4,
+    }
+
+
 def test_phase9_binary_identity_records_exact_release_artifact(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
