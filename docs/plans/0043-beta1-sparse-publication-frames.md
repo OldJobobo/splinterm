@@ -719,8 +719,19 @@ Plan 0042's 8.67/8.66/8.62 MiB; CPU was equal at 14 ticks and marker latency was
 `valid: false` remains its expected old-defect predicate, with `error: null`.
 Evidence and checksums are retained under
 `docs/benchmarks/artifacts/2026-08-16-plan0043-producer-preadmission/`.
-The already approved exact-commit graphical rerun remains the next acceptance
-boundary.
+
+Exact candidate commit `9a8d355` then passed the separately approved guarded
+graphical smoke and seed-4304 three-variant rerun (two warmups and ten measured
+samples per variant). Candidate application RSS/PSS/private-anonymous medians
+were 31.98/15.40/10.48 MiB versus Alpha3.3's 32.14/15.57/10.66 MiB and Plan
+0042's 32.39/15.85/10.94 MiB. Candidate daemon RSS was 6.54 MiB, client RSS was
+25.40 MiB, marker latency was 366.26 ms, and CPU was 22 ticks. All 18
+per-daemon/client/aggregate memory comparisons pass the approved
+`max(3%, 1 MiB)` tolerance against both controls, and all CPU/marker comparisons
+pass the 3% limit. Every record was valid and cleanup-verified. Workspace 8 was
+empty afterward, focus was preserved, and Pacman reported 56 package files with
+0 alterations. Evidence is retained under
+`docs/benchmarks/artifacts/2026-08-16-plan0043-producer-preadmission-graphical/`.
 
 ## Review and stop-loss
 
