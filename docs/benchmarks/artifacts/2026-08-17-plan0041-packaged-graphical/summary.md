@@ -36,6 +36,12 @@ live. It records:
 - private socket device/inode and mode; and
 - the shared staged config and state roots.
 
+The Python runtime record expresses executable device `56` in decimal. The raw
+GNU `stat %D` capture expresses the same device as hexadecimal `38`; normalized
+stat records retain both forms (`device_hex=38`, `device_decimal=56`). Client
+inode `830226` and daemon inode `830225` match across the staged-file and live
+`/proc` records.
+
 The raw `daemon.*`, `client.*`, `candidate.*`, and `process-sockets.json` files
 retain `/proc` executable, environment, FD, inode, and hash evidence.
 `sockets-selection-live.txt` ties both private listeners directly to
