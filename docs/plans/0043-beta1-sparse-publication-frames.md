@@ -1,9 +1,9 @@
 # Plan 0043: Beta1 sparse terminal publication frames
 
-- **Status:** Graphical aggregate retention gate failed; daemon follow-up required
+- **Status:** Accepted, integrated into maintenance and `main`, and released
 - **Date:** 2026-08-15
-- **Release decision:** Do not tag `0.1.0-beta.1` until this plan passes its
-  non-graphical, graphical, review, integration, and release gates
+- **Release decision:** All non-graphical, graphical, review, integration, and
+  release gates passed; published as `v0.1.0-beta1`
 - **Release line:** `maint/0.1`
 - **Depends on:** accepted and integrated [Plan 0042](0042-beta1-wide-splint-grid.md)
   at maintenance commit `ba8f1cd28f1aca25d83f198c593832b829601a6c`, the retained
@@ -767,3 +767,12 @@ Candidate construction, promotion, package replacement, pushing, AUR
 publication, and release publication remain separate approval boundaries. A
 daemon-only memory win, a client regression, an unaccounted queue, or a failed
 comparative gate remains a Beta1 no-go.
+
+The accepted implementation merged into `maint/0.1` as `41241288c3fbd5b1f5d2471a97b5b071cb565a5f` and
+was forward-ported to `main` as part of
+`ca1e358359d4f6083e5f5f5768950728b79ec096`. Corrected candidate run
+`32004316406` built release commit
+`8d95e75704104750f8e8e4585e629010855963c8`; protected promotion run
+`32004973522` published `v0.1.0-beta1`, and both AUR package bases published
+`0.1.0beta1-1`. Exact release hashes and package-base commits are recorded in
+[Current product status](../status.md#beta-1-release).

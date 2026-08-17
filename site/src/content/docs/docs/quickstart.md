@@ -5,7 +5,7 @@ description: Open a new Splinterm terminal, detach from work, and return to the 
 
 This first workflow demonstrates Splinterm's central behavior: the graphical window can close while the daemon-owned terminal session continues running.
 
-## 1. Install the public alpha
+## 1. Install the public beta
 
 Follow [Installation](/docs/install/) from an x86_64 Omarchy/Arch system.
 

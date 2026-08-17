@@ -84,7 +84,7 @@ hero:
 </nav>
 
 <div class="docs-home-footer">
-  <p><span>Public alpha</span> The source is open; the validated environment and compatibility promise remain intentionally narrow.</p>
+  <p><span>Public beta</span> The source is open; the validated environment and compatibility promise remain intentionally narrow.</p>
   <div>
     <a href="/docs/status/">Read current status</a>
     <a href="/docs/roadmap/">Product roadmap</a>

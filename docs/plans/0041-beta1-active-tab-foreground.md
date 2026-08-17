@@ -1,8 +1,8 @@
 # Plan 0041: Beta 1 active-tab foreground contrast
 
 - **Status:** Implementation, complete non-graphical validation, fresh review,
-  package validation, and packaged graphical acceptance accepted for
-  `0.1.0-beta.1`
+  package validation, and packaged graphical acceptance accepted and released
+  in `0.1.0-beta1`
 - **Date:** 2026-08-14
 - **Product authority:** Active Dojo-tab chrome derives from standard Omarchy
   and Foot roles without requiring app-specific additions to `colors.toml`; its
@@ -153,7 +153,7 @@ Work:
   Foot selection colors;
 - record focused and serial non-graphical validation;
 - inspect the actual diff and obtain one fresh read-only correctness review;
-- prepare the `0.1.0-beta.1` version/package/provenance changes only after the
+- prepare the `0.1.0-beta1` version/package/provenance changes only after the
   implementation branch is accepted; and
 - keep candidate construction, publication, and AUR distribution behind their
   existing separate approval boundaries.
@@ -226,6 +226,26 @@ temporary file, restored the recorded focus, window geometry, and pointer
 exactly, and ended with `pacman -Qkk splinterm` reporting 56 files and zero
 alterations. Evidence is recorded under
 `docs/benchmarks/artifacts/2026-08-17-plan0041-packaged-graphical/`.
+
+## Beta 1 release evidence
+
+Release-state PR #29 and candidate-metadata correction PR #30 merged into
+`main` as `40ac9d7bb803fc71495e36eb760174de7fcdfff0` and
+`8d95e75704104750f8e8e4585e629010855963c8`. Candidate run `32004316406`
+built the corrected commit once; candidate manifest SHA-256 is
+`a09bef84812c2da3cfe729099d5bcdec2c4a809b234c8a6dc8d1c7f2ccbf018e`.
+Protected promotion run `32004973522` published `v0.1.0-beta1`, redownloaded
+and verified the exact five public assets, and retained publication receipt
+artifact `9279942672`.
+
+The source archive, main package, and MCP package SHA-256 values are
+`72bd626474f2f660cf5cf595f4e9dd040dafacd2f3087d58a81f01a32d39f5ef`,
+`fb25323ca2edbb61243c942c84de4d1f4cb52280fbc7dbd4369243f603288eda`,
+and `ededfa71a10b1bb3f199e78d56c4bfc32c5633f5188c3e89790980bf3803fecc`.
+The source and prebuilt AUR package bases published `0.1.0beta1-1` as commits
+`2052214554e25218f7329e299a3fc0f076d76756` and
+`d902f0bf49f7b454480724612613dd2f35d13bd4` after both recipes passed
+`makepkg --verifysource` against the immutable release assets.
 
 ## Beta 1 acceptance
 
