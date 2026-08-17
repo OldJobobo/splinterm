@@ -16,10 +16,11 @@ Wayland compositor access. `/usr/bin` and the live Omarchy theme were not
 modified.
 
 `source-package-provenance.txt` records the exact source archive hash and its
-embedded Git archive commit ID `450f6cbb`; that package-build source commit and
-its squash-merged maintenance commit `d3cbbc6b` have the identical tree
-`48d6418c`. The retained `.BUILDINFO` PKGBUILD hash matches the PKGBUILD from
-that tree. `package-member-sha256.txt` hashes the three tested executables
+embedded historical Git archive commit ID `450f6cbb`. The replayable verifier
+does not require that pre-squash object: it checks the archive SHA, extracts it,
+and recursively compares it with a fresh archive of reachable maintenance
+commit `d3cbbc6b` / tree `48d6418c`. The retained `.BUILDINFO` PKGBUILD hash
+matches the PKGBUILD from that reachable tree. `package-member-sha256.txt` hashes the three tested executables
 directly from the package archive and matches both the staged-file and
 live-process hashes. Retained package metadata, archive manifest, PKGBUILD,
 canonical build-script Git blob identity, and the replayable
