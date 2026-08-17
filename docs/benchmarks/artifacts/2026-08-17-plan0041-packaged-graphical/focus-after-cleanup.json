@@ -1,0 +1,46 @@
+{
+  "address": "0x55d2cdf21a40",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+    2593,
+    522
+  ],
+  "size": [
+    1374,
+    1187
+  ],
+  "workspace": {
+    "id": 6,
+    "name": "6"
+  },
+  "floating": false,
+  "monitor": 2,
+  "class": "foot",
+  "title": "π - thpm",
+  "initialClass": "foot",
+  "initialTitle": "Foot",
+  "pid": 2239935,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "scrolling",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [
+    "default-opacity*",
+    "terminal*"
+  ],
+  "swallowing": "0x0",
+  "focusHistoryID": 0,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "1800021d"
+}
