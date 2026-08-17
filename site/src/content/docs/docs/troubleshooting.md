@@ -3,7 +3,7 @@ title: Troubleshooting
 description: Diagnose common local Splinterm installation, daemon, session, and configuration problems.
 ---
 
-This page covers the first local checks. Splinterm is a public alpha with a narrow validated Omarchy/Arch environment, so failures outside that target may not have a supported resolution.
+This page covers the first local checks. Splinterm is a public beta with a narrow validated Omarchy/Arch environment, so failures outside that target may not have a supported resolution.
 
 ## Check the installed command
 

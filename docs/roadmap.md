@@ -1,7 +1,7 @@
 # Engineering roadmap
 
 > This roadmap records completed implementation phases and the dependency-ordered
-> delivery path from public alpha to a supported stable release. It is an
+> delivery path from public beta to a supported stable release. It is an
 > engineering completion ledger and forward plan, not a product strategy,
 > compatibility promise, or release date. Product direction is authoritative in
 > the [`product roadmap`](product-roadmap.md); current maturity and validated
@@ -223,7 +223,7 @@ Part 8.1 parity, scrollback, performance, and Hyprland/Omarchy sign-off are
 complete with durable evidence. Phase 9 produced and isolated-validated a
 initial private Arch prerelease package with coherent binaries, service,
 desktop/theme integration, upgrade handling, documentation, and licenses. The
-repository and immutable versioned GitHub/AUR packages are now public alpha
+repository and immutable versioned GitHub/AUR packages are now public beta
 surfaces; the early rolling edge channel has been retired, and stable-support
 commitments remain post-milestone work.
 
