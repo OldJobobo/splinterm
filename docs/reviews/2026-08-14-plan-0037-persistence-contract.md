@@ -70,6 +70,19 @@ The first pass returned two blockers and four fixes worth doing immediately:
 The same reviewer performed a bounded follow-up against those fixes and returned
 **APPROVE** with no unresolved blocker or fix worth doing now.
 
+## Pull-request review follow-up
+
+A later pull-request review identified that retaining an open regular-file
+executable descriptor does not freeze its bytes against a privileged in-place
+rewrite. The contract now rejects ordinary writable package-file descriptors as
+execution authority. Forward and rollback daemon/client images must be copied
+into independently rehashed executable memfds with the complete
+`F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL` set before preflight
+or quiescence. Only those immutable snapshots may be executed or establish
+trusted-client identity. The implementation gates now require source-copy race,
+source rewrite/truncation, seal, writable-mapping, exact-exec, rollback, and
+trusted-authority evidence.
+
 ## Validation evidence
 
 The parent validation after the fix pass recorded:

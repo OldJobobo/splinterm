@@ -331,7 +331,7 @@ Priority meanings:
 | `SEC-08` | P0 | Messages, queues, subscriptions, history, searches, images, transfers, and caches must have explicit bounds and deadlines. |
 | `SEC-09` | P0 | Stale identities, revisions, cursors, tokens, and incarnations must fail explicitly without fallback selection. |
 | `SEC-10` | P0 | Public claims must say “security-conscious” and describe concrete controls; they must not claim absolute security. |
-| `SEC-11` | P0 | Daemon handoff must fence stale clients and expire old connection authority. Any smooth local controller resumption must bind the same surviving client process, exact old connection set, pinned executable, bounded Window-local resume record, full resnapshot, and single-use generation claim through monitored pidfd identity and kernel-supplied message credentials; transfer, replay, mismatch, or conflict fails closed. |
+| `SEC-11` | P0 | Daemon handoff must fence stale clients and expire old connection authority. Any smooth local controller resumption must bind the same surviving client process, exact old connection set, immutable sealed executable snapshot, bounded Window-local resume record, full resnapshot, and single-use generation claim through monitored pidfd identity and kernel-supplied message credentials; transfer, replay, mismatch, or conflict fails closed. |
 
 Detailed scope and policy behavior remain authoritative in [automation.md](automation.md), [ADR 0005](adr/0005-trusted-consent-broker.md), and [ADR 0007](adr/0007-supported-automation-policy.md).
 

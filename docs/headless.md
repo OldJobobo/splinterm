@@ -182,8 +182,8 @@ confirmation, including when that count is zero. Package scriptlets only install
 files and report the boundary; they do not restart or hand off a user's service.
 
 During a compatible handoff, trusted graphical chrome reports **input paused**.
-The exact pinned replacement client restores the Window's bounded ordered-tab,
-active-tab, and focused-pane record, recreates its per-Dojo connections, and
+The exact sealed replacement-client snapshot restores the Window's bounded
+ordered-tab, active-tab, and focused-pane record, recreates its per-Dojo connections, and
 fully resnapshots before the previously active pane accepts typing again without
 a click or tab switch. A transferred, stale, invalid, or conflicting controller-
 resume claim remains view-only and uses the ordinary Request Control flow. Remote and automation clients must

@@ -40,11 +40,26 @@ a protocol retroactively.
 ### Process and descriptor ownership
 
 The running daemon preserves its PID and child-parent relationship by replacing
-itself with the exact validated candidate through descriptor-based
-`execveat(..., AT_EMPTY_PATH)`. Path lookup is not repeated after preflight.
-The old generation pins mutually compatible forward and rollback daemon/client
-pairs by open descriptor and records their device, inode, digest, owner, mode,
-and package adjacency.
+itself through descriptor-based `execveat(..., AT_EMPTY_PATH)`. Path lookup is
+not repeated after preflight, but an open regular-file descriptor is not treated
+as immutable: a privileged in-place write could change the bytes behind it.
+
+After no-follow, owner, mode, package-adjacency, source device/inode, and digest
+validation, the old generation copies each forward daemon/client image into a
+separate memfd created with `MFD_ALLOW_SEALING | MFD_EXEC`, rehashes the complete
+copy, and applies
+`F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL`. It verifies the
+complete seal set before compatibility preflight or quiescence and executes only
+those sealed snapshots. Source metadata and the sealed snapshot's device, inode,
+digest, size, and seal set are recorded distinctly. Source mutation, truncation,
+replacement, or deletion after sealing cannot change the executed bytes.
+
+At startup, the running generation similarly creates and retains a mutually
+compatible sealed rollback snapshot pair from `/proc/self/exe` and its validated
+adjacent client, before package paths can change. If either
+forward or rollback image cannot be copied, rehashed, sealed, or executed from
+its immutable snapshot, handoff is blocked. An ordinary writable package-file
+descriptor is never a forward, rollback, or trusted-client execution authority.
 
 `splinterm-pty` must expose an adoptable Linux session representation based on
 validated child PID, process group, session identity, and an explicit owned PTY
@@ -71,7 +86,8 @@ Unknown or unclaimed inherited descriptors are closed before admission reopens.
 
 The old generation remains authoritative while it:
 
-1. validates the exact forward and rollback executable pairs;
+1. validates the exact forward and rollback source pairs and materializes their
+   complete sealed executable snapshots;
 2. fences structural mutation, controller transfer, resize, and new input;
 3. linearizes each terminal actor's PTY reads, writes, replies, resize, parser,
    publication, and child-exit observation;
@@ -81,7 +97,7 @@ The old generation remains authoritative while it:
 The candidate validates and stages every terminal, PTY, listener, policy, and
 publication object before reading a post-checkpoint PTY byte. The irreversible
 adoption commit occurs immediately before that first read. Before the commit, a
-handled adoption failure may execute the pinned rollback image with the
+handled adoption failure may execute the sealed rollback snapshot with the
 unchanged descriptors and rollback manifest. After the commit, restoring the
 older checkpoint is forbidden because doing so could duplicate or reorder PTY
 bytes. A candidate crash, kill, or hang outside the cooperative pre-read
@@ -93,9 +109,9 @@ During handoff, existing Windows show trusted application chrome stating that
 Splinterm is upgrading and input is paused. Input is not queued into the PTY or
 silently redirected while authority is fenced.
 
-Before exec, each eligible trusted local Window receives the already-pinned
-forward client descriptor and its client end of the bounded continuation channel
-through its authenticated old connection. The Window also creates one anonymous
+Before exec, each eligible trusted local Window receives the sealed forward
+client snapshot descriptor and its client end of the bounded continuation
+channel through its authenticated old connection. The Window also creates one anonymous
 sealed, bounded resume record for its client-local state: its ordered set of at
 most 32 open Dojo IDs, active tab, focused Splint per open Dojo, and the mapping
 from those Dojos to the exact old connections. The record contains no terminal,
@@ -104,17 +120,17 @@ or credential body and grants no authority; every ID remains a hint that the new
 client must validate against its authoritative resnapshot. Selection, search,
 IME composition, and open transient overlays cancel rather than cross exec.
 
-The Window holds the pinned descriptor, continuation endpoint, and resume-record
-FD close-on-exec, displays the input-paused state, and performs no path lookup.
-Cooperative rollback tells it to close all three artifacts and resume or
+The Window holds the sealed executable snapshot descriptor, continuation
+endpoint, and resume-record FD close-on-exec, displays the input-paused state,
+and performs no path lookup. Cooperative rollback tells it to close all three artifacts and resume or
 reconnect to the old generation.
 
 Successful adoption tells the Window to close the stale UI connection and
-relaunch through the pinned descriptor. Immediately before that client exec, it
-clears `FD_CLOEXEC` only on fixed continuation-channel and resume-record slots;
-the pinned executable descriptor remains close-on-exec after serving as the
-`execveat` target. The replacement client validates and closes the resume record,
-recreates the ordered tabs and per-Dojo connections, and performs full
+relaunch through the sealed snapshot descriptor. Immediately before that client
+exec, it clears `FD_CLOEXEC` only on fixed continuation-channel and resume-record
+slots; the sealed executable descriptor remains close-on-exec after serving as
+the `execveat` target. The replacement client validates and closes the resume
+record, recreates the ordered tabs and per-Dojo connections, and performs full
 resnapshots before restoring the active tab and focused pane. It closes every
 inherited artifact on an unexpected slot, schema, bound, ID, message, peer,
 timeout, or reconnect failure.
@@ -125,15 +141,15 @@ single-use, generation-bound resume ticket. Every continuation message carries
 kernel-supplied sender credentials. The adopted daemon requires the sender PID
 to be the same still-live process tracked by the inherited pidfd, requires the
 replacement ordinary connections to come from that process, and revalidates that
-`/proc/<pid>/exe` identifies the exact pinned forward client before issuing or
-accepting a claim. Passing the endpoint to another process therefore cannot
-transfer the claim.
+`/proc/<pid>/exe` has the exact device/inode and digest identity of the sealed
+forward client snapshot before issuing or accepting a claim. Passing the
+endpoint to another process therefore cannot transfer the claim.
 
 The ticket is bound to that process identity, exact old connection set, new
-daemon generation, pinned client executable, and pre-fence controlled Splint
-incarnations. It expires after a short fixed deadline, cannot be persisted, and
-cannot restore control until the replacement client's ordinary trusted
-connections, validated Window resume record, and completed resnapshots are
+daemon generation, immutable client-snapshot identity, and pre-fence controlled
+Splint incarnations. It expires after a short fixed deadline, cannot be
+persisted, and cannot restore control until the replacement client's ordinary
+trusted connections, validated Window resume record, and completed resnapshots are
 correlated.
 
 A successful claim restores only the prior local human controller disposition;
@@ -158,9 +174,9 @@ not part of this ADR.
   boundary.
 - The local interactive path resumes smoothly, but stale connection authority
   still fails closed.
-- The checkpoint, continuation channel, client pidfd, pinned client descriptor,
-  Window resume record, and resume ticket are internal, bounded, generation-
-  specific contracts rather than public automation APIs.
+- The checkpoint, continuation channel, client pidfd, sealed client-snapshot
+  descriptor, Window resume record, and resume ticket are internal, bounded,
+  generation-specific contracts rather than public automation APIs.
 - In-place re-exec narrows but cannot eliminate the post-exec crash interval.
   Crash continuity would require a separately approved persistent PTY broker or
   subreaper architecture.
@@ -174,8 +190,10 @@ minimum, retained evidence must prove:
   one-reader ownership, and byte ordering survive forward adoption and rollback;
 - unsupported, truncated, duplicate, mismatched, or oversized manifests fail
   before publication;
-- replacing either candidate pathname after preflight cannot change the exact
-  executable pair used for handoff or trusted local relaunch;
+- replacing, deleting, truncating, or rewriting either source pathname after
+  snapshot sealing cannot change the exact executable pair used for handoff or
+  trusted local relaunch, while every write/grow/shrink/seal-change attempt
+  against an executable snapshot fails;
 - every pre-exec failure returns to the unchanged old generation;
 - every handled post-exec failure before the first new PTY read rolls back
   without duplicated or lost bytes;

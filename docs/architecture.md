@@ -284,13 +284,13 @@ when the old daemon is idle.
 Handoff preserves the validated listening socket descriptor but disconnects
 accepted clients and expires connection-owned authority. Each eligible local
 Window carries only a bounded anonymous resume record for ordered Dojo tabs,
-active tab, focused panes, and exact old connections across the exact pinned
-adjacent-client exec. After recreating its connections and fully resnapshotting,
-it may reclaim only its prior controller disposition through the single-use
+active tab, focused panes, and exact old connections across the exact sealed
+adjacent-client snapshot exec. After recreating its connections and fully
+resnapshotting, it may reclaim only its prior controller disposition through the single-use
 resume claim defined by ADR 0011. The claim binds the same surviving process by
-monitored pidfd and kernel-supplied message credentials, the pinned executable,
-and the new daemon generation. The normal active pane resumes input without a
-click after the trusted **input paused** handoff state clears; transfer, replay,
+monitored pidfd and kernel-supplied message credentials, the immutable sealed
+client-snapshot identity, and the new daemon generation. The normal active pane
+resumes input without a click after the trusted **input paused** handoff state clears; transfer, replay,
 mismatch, or conflict remains visibly view-only. Remote graphical clients
 reconnect and reauthenticate, and automation authority never crosses the
 generation boundary.
