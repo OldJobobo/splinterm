@@ -349,20 +349,28 @@ impl Retained {
     }
 }
 
-async fn retained_control_modes(retained: &Retained, modes: &ControlModes) -> Vec<String> {
+fn retained_control_modes_from(
+    retained: &Retained,
+    modes: &HashMap<(SplintId, u64), Vec<String>>,
+) -> Vec<String> {
     match retained {
         Retained::Control {
             incarnation,
             status,
             ..
         } => modes
-            .lock()
-            .await
             .get(&(status.splint_id, *incarnation))
             .cloned()
             .unwrap_or_default(),
         _ => Vec::new(),
     }
+}
+
+async fn retained_control_modes(retained: &Retained, modes: &ControlModes) -> Vec<String> {
+    if !matches!(retained, Retained::Control { .. }) {
+        return Vec::new();
+    }
+    retained_control_modes_from(retained, &*modes.lock().await)
 }
 
 struct Started {
@@ -607,13 +615,46 @@ fn apply_explicit_resync(
     }
 }
 
-async fn publish(
+async fn store_retained_projection(
+    state: &Arc<Mutex<PublishedState>>,
+    uri: ResourceUri,
+    retained: &Retained,
+    control_modes: &ControlModes,
+    sequence: u64,
+) -> Result<(), ()> {
+    if matches!(retained, Retained::Control { .. }) {
+        // Keep the mode snapshot ordered with the published-state write. Without
+        // this guard, set_control_modes could publish new ownership between a
+        // stale mode read and this write, only for the subscription to overwrite
+        // it permanently with an empty local-mode projection.
+        let modes = control_modes.lock().await;
+        let value = retained
+            .document(
+                uri,
+                &retained_control_modes_from(retained, &modes),
+                sequence,
+                false,
+            )
+            .map_err(|_| ())?;
+        state.lock().await.value = value;
+    } else {
+        let value = retained
+            .document(uri, &[], sequence, false)
+            .map_err(|_| ())?;
+        state.lock().await.value = value;
+    }
+    Ok(())
+}
+
+async fn publish_retained(
     state: &Arc<Mutex<PublishedState>>,
     peer: &Peer<RoleServer>,
     uri: ResourceUri,
-    value: Value,
+    retained: &Retained,
+    control_modes: &ControlModes,
+    sequence: u64,
 ) -> Result<(), ()> {
-    state.lock().await.value = value;
+    store_retained_projection(state, uri, retained, control_modes, sequence).await?;
     peer.notify_resource_updated(ResourceUpdatedNotificationParam::new(uri.as_string()))
         .await
         .map_err(|_| ())
@@ -669,15 +710,17 @@ async fn subscription_task(
             break;
         }
         let next_public_sequence = public_sequence.saturating_add(1);
-        let modes = retained_control_modes(&started.retained, &control_modes).await;
-        let Ok(value) = started
-            .retained
-            .document(uri, &modes, next_public_sequence, false)
-        else {
-            failed = true;
-            break;
-        };
-        if publish(&state, &peer, uri, value).await.is_err() {
+        if publish_retained(
+            &state,
+            &peer,
+            uri,
+            &started.retained,
+            &control_modes,
+            next_public_sequence,
+        )
+        .await
+        .is_err()
+        {
             failed = true;
             break;
         }
@@ -937,6 +980,65 @@ mod tests {
         .unwrap();
         assert_eq!(controlled["data"]["locally_owned"], true);
         assert_eq!(controlled["data"]["modes"], json!(["input"]));
+    }
+
+    #[tokio::test]
+    async fn control_projection_holds_mode_order_until_state_commit() {
+        let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
+        let uri = ResourceUri::Control(splint_id);
+        let retained = Retained::Control {
+            lair_id,
+            dojo_id,
+            incarnation: 2,
+            status: ControlStatus {
+                splint_id,
+                incarnation: 2,
+                controlled: true,
+                locally_owned: false,
+            },
+        };
+        let state = Arc::new(Mutex::new(PublishedState {
+            value: control_document(
+                uri,
+                lair_id,
+                dojo_id,
+                2,
+                ControlStatus {
+                    splint_id,
+                    incarnation: 2,
+                    controlled: false,
+                    locally_owned: false,
+                },
+                &[],
+                1,
+                false,
+            )
+            .unwrap(),
+            active: true,
+        }));
+        let control_modes = Arc::new(Mutex::new(HashMap::new()));
+        let published = state.lock().await;
+        let task = tokio::spawn({
+            let state = Arc::clone(&state);
+            let control_modes = Arc::clone(&control_modes);
+            async move { store_retained_projection(&state, uri, &retained, &control_modes, 2).await }
+        });
+        let mut ordered = false;
+        for _ in 0..100 {
+            if control_modes.try_lock().is_err() {
+                ordered = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            ordered,
+            "control projection released its mode ordering before the state commit"
+        );
+        drop(published);
+        assert_eq!(task.await.unwrap(), Ok(()));
     }
 
     #[test]
