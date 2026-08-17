@@ -161,3 +161,39 @@ upgrade run `systemctl --user daemon-reload` and start the service. If startup
 fails, inspect the user journal, verify `XDG_RUNTIME_DIR`/`HOME`, validate the
 policy, and ensure no unsafe stale object occupies the socket path. Do not remove
 unknown files or weaken ownership checks to force startup.
+
+## Accepted 0.2 upgrade contract (not implemented)
+
+The preceding restart procedure remains authoritative until Plan 0037 is
+implemented and released. The accepted `0.2.0` target distinguishes four paths:
+
+- **matching** — the installed and running build identities match;
+- **compatible** — explicit handoff and checkpoint ranges overlap, so the next
+  human launcher invocation performs a guarded in-place handoff automatically;
+- **idle incompatible** — no live Splint can be lost, so a bounded restart is
+  allowed; and
+- **active incompatible** — launch blocks until the user explicitly confirms a
+  destructive restart showing the exact affected Splint count.
+
+The first upgrade from `0.1.x` to a handoff-capable `0.2.0` daemon is a separate
+one-time bootstrap path because the running old daemon cannot gain handoff
+support retroactively. It always reports the exact live Splint count and requires
+confirmation, including when that count is zero. Package scriptlets only install
+files and report the boundary; they do not restart or hand off a user's service.
+
+During a compatible handoff, trusted graphical chrome reports **input paused**.
+The exact sealed replacement-client snapshot restores the Window's bounded
+ordered-tab, active-tab, and focused-pane record, recreates its per-Dojo connections, and
+fully resnapshots before the previously active pane accepts typing again without
+a click or tab switch. A transferred, stale, invalid, or conflicting controller-
+resume claim remains view-only and uses the ordinary Request Control flow. Remote and automation clients must
+reconnect and reauthenticate without inheriting old-generation authority.
+
+This planned-upgrade continuity does not cover daemon crash, logout without
+lingering, reboot, or host loss. Under ADR 0012, body-bearing handoff checkpoints
+use only anonymous sealed memory-backed descriptors, and `0.2.0` durable recovery
+remains recipe-only and stores no terminal grids, scrollback bodies, image
+bodies, parser state, replies, or input. See
+[Plan 0037](plans/0037-0.2-persistence-and-upgrade-handoff.md),
+[ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md), and
+[ADR 0012](adr/0012-defer-durable-terminal-archives.md).

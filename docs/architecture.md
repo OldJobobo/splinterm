@@ -263,6 +263,45 @@ Omarchy-owned directories; see [headless.md](headless.md),
 [integrations.md](integrations.md), [mcp.md](mcp.md), and
 [packaging.md](packaging.md).
 
+## Accepted 0.2 upgrade target (not implemented)
+
+[Plan 0037](plans/0037-0.2-persistence-and-upgrade-handoff.md) and
+[ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md) replace the current
+stale-protocol restart behavior only after their implementation gates pass. A
+fully negotiated compatible upgrade uses guarded descriptor-based in-place
+re-exec so the daemon PID, child parenthood, PTYs, terminal incarnations, and
+one-reader ownership can survive. Compatibility is negotiated by explicit
+protocol and schema ranges; `0.2.x` membership alone is insufficient.
+
+The next human launcher invocation automatically performs a compatible handoff
+after bounded preflight. After the bootstrap boundary, an idle daemon may restart
+automatically, while an incompatible daemon with live Splints blocks until the
+user confirms an exact-count destructive fallback. Package scriptlets never
+initiate a user-service handoff or restart. The first `0.1.x` to handoff-capable
+`0.2.0` transition is a one-time confirmed destructive bootstrap boundary even
+when the old daemon is idle.
+
+Handoff preserves the validated listening socket descriptor but disconnects
+accepted clients and expires connection-owned authority. Each eligible local
+Window carries only a bounded anonymous resume record for ordered Dojo tabs,
+active tab, focused panes, and exact old connections across the exact sealed
+adjacent-client snapshot exec. After recreating its connections and fully
+resnapshotting, it may reclaim only its prior controller disposition through the single-use
+resume claim defined by ADR 0011. The claim binds the same surviving process by
+monitored pidfd and kernel-supplied message credentials, the immutable sealed
+client-snapshot identity, and the new daemon generation. The normal active pane
+resumes input without a click after the trusted **input paused** handoff state clears; transfer, replay,
+mismatch, or conflict remains visibly view-only. Remote graphical clients
+reconnect and reauthenticate, and automation authority never crosses the
+generation boundary.
+
+[ADR 0012](adr/0012-defer-durable-terminal-archives.md) keeps every body-bearing
+handoff checkpoint in an anonymous sealed memory-backed descriptor so even
+abrupt failure leaves no named artifact. `0.2.0` daemon-loss and reboot recovery
+remains recipe-only and persists no terminal grids, scrollback bodies, image
+bodies, parser state, replies, or input. Crash continuity and durable terminal archives remain
+separately gated post-`0.2.0` work.
+
 ## Foot reference map
 
 The local Foot source at `~/Playground/foot` suggests useful subsystem seams:

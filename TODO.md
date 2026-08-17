@@ -232,20 +232,40 @@ This milestone is not an alpha3 blocker, but it is planned before `1.0`.
 ## 0.2.0 persistence expansion and upgrade handoff
 
 - [ ] Complete [Plan 0037](docs/plans/0037-0.2-persistence-and-upgrade-handoff.md).
-- [ ] Approve precise persistence lifetime vocabulary, the in-place re-exec ADR,
-  and a separate privacy decision before any durable terminal archive work.
+- [x] Approve precise persistence lifetime vocabulary, guarded in-place re-exec
+  through [ADR 0011](docs/adr/0011-guarded-in-place-daemon-reexec.md), and archive
+  deferral through [ADR 0012](docs/adr/0012-defer-durable-terminal-archives.md).
 - [ ] Prove an adoptable Linux PTY session preserves PID, process group, session,
   one-reader ownership, reaping, signaling, ordered I/O, and bounded rollback.
 - [ ] Define bounded terminal checkpoint, descriptor, handoff, and rollback ABIs
   with exact parser continuation, corruption rejection, and migration tests.
 - [ ] Add a daemon handoff coordinator that fences authority, adopts atomically,
-  reconnects clients by full resnapshot, and fault-injects every rollback edge.
+  restores bounded Window-local tab/focus records through pidfd-bound pinned
+  client relaunch and full resnapshot, and fault-injects every rollback edge.
 - [ ] Make launcher and packaging UX distinguish matching, compatible, blocked,
   bootstrap, destructive-fallback, downgrade, and interrupted upgrade states.
-- [ ] Keep recipe-only reboot restore as the default; gate optional archives on
-  reviewed retention, deletion, export, trusted-read, and privacy policy.
+- [ ] Keep recipe-only reboot restore as the complete `0.2.0` contract and prove
+  body-bearing handoff checkpoints use only anonymous sealed memory-backed
+  descriptors and never enter durable, observation, audit, diagnostic, backup,
+  crash-report, or named runtime-file paths.
 - [ ] Record serial workspace, package, identity, rollback, architecture,
   security/privacy, release, and separately approved graphical evidence.
+
+## Possible 0.3.0 durable terminal archives
+
+- [ ] Write a separate product plan and privacy ADR before persisting terminal
+  grids, scrollback, image bodies, parser state, terminal replies, or input.
+- [ ] Decide explicit opt-in scope, storage bounds, retention, deletion, export,
+  trusted-read authority, image handling, corruption, migration, and any
+  encryption/key-management claim.
+- [ ] Keep archived content non-executable and structurally distinct from live
+  terminal generations; never infer commands, authority, or process continuity
+  from terminal bodies.
+- [ ] Amend FR-PERSIST-05, ADR 0006, and Plan 0034 only after that separate
+  product/privacy review is accepted.
+
+This is a possible `0.3.0` program, not a release commitment. `0.2.0` retains
+recipe-only reboot restoration.
 
 ## 0.2.0 live Omarchy system-font synchronization
 
