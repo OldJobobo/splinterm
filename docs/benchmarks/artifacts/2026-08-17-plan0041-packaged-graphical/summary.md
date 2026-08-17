@@ -25,7 +25,11 @@ directly from the package archive and matches both the staged-file and
 live-process hashes. Retained package metadata, archive manifest, PKGBUILD,
 canonical build-script Git blob identity, and the replayable
 `verify-source-package-provenance.sh` complete the upstream package/source
-link.
+metadata link. `rebuild-source-package-members.sh` then performs the missing
+causal check: after verifying the source-archive SHA, it runs a fresh clean
+`makepkg --nocheck` build and requires all three rebuilt executable member
+hashes to equal the original package and live tested process hashes. The
+successful environment and build transcript are retained.
 
 ## Live packaged-runtime provenance
 
@@ -118,8 +122,9 @@ pointer assertions.
   `03-theme-a-live-reload.png`, `04-theme-a-selection.png`
 - exact staged config and native Theme A/B inputs under `inputs/`
 - package/source provenance, package metadata and archive manifest, retained
-  PKGBUILD, canonical build-script blob identity, replayable verifier, and
-  direct package-member hashes
+  PKGBUILD/install file, canonical build-script blob identity, replayable
+  source/package verifier, reproducible member-rebuild script/environment/log,
+  and direct package-member hashes
 - live runtime identity: `runtime-identity.json`, raw client/daemon `/proc`
   records, candidate hashes/stats, per-process socket maps, and `ss` captures
 - stable theme/reload/selection window identity JSON

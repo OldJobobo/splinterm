@@ -19,6 +19,8 @@ canonical_build_script_path=tools/package/build-local-package.sh
 canonical_build_script_blob=336c1882942eb99fe31b28be81964f8f889cc221
 canonical_build_script_sha256=438fc64542109ad7a829fb91b4b15cb9f145f3875b55472283af9d2355468809
 provenance_verifier=verify-source-package-provenance.sh
+source_rebuild_verifier=rebuild-source-package-members.sh
+source_rebuild_log=rebuild-source-package-members.log
 
 The canonical build script at reachable merged_maintenance_commit rejects tracked source changes, creates the source archive from clean HEAD with git archive, then invokes makepkg --cleanbuild.
 git get-tar-commit-id reads the historical pre-squash ID 450f6cbb directly from the exact checksummed source archive left beside the package; the verifier does not require that Git object.
@@ -26,3 +28,4 @@ The verifier extracts that source archive and recursively compares it with a fre
 The package .BUILDINFO PKGBUILD hash matches the PKGBUILD retained from that reachable source tree.
 package-member-sha256.txt hashes each tested executable directly from the package archive; those hashes match candidate.sha256 and runtime-identity.json.
 verify-source-package-provenance.sh replays the source tree, embedded archive commit, PKGBUILD, package hash, and direct member assertions from explicit REPO, PACKAGE, and SOURCE_ARCHIVE arguments.
+rebuild-source-package-members.sh verifies the source archive hash before a clean makepkg --nocheck rebuild and requires all three rebuilt executable members to match the tested package and live-process hashes; the retained environment and log record the successful replay.

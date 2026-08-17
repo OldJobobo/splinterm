@@ -38,6 +38,9 @@ for member in usr/bin/splinterm usr/bin/splinterd usr/bin/splinterm-pty-child; d
     "$artifact_dir/package-member-sha256.txt")
   actual=$(bsdtar -xOf "$package" "$member" | sha256sum | cut -d' ' -f1)
   [[ -n $expected && $actual == "$expected" ]]
+  grep -Fx "$member $expected" "$artifact_dir/rebuild-source-package-members.log"
 done
+grep -Fx 'Plan 0041 source rebuild matches tested package members' \
+  "$artifact_dir/rebuild-source-package-members.log"
 
 printf '%s\n' 'Plan 0041 source/package provenance verified'

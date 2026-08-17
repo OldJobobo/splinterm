@@ -210,8 +210,9 @@ Acceptance completed at maintenance commit `d3cbbc6` with package SHA-256
 The accepted follow-up used the real Wayland runtime only for compositor access
 and an explicit private Splinterm socket, config, state, theme, and process
 hierarchy. The retained package metadata, direct archive-member hashes,
-PKGBUILD, canonical build-script blob identity, and replayable verification of
-the checksummed source archive against the reachable merge tree tie that
+PKGBUILD, canonical build-script blob identity, replayable verification of the
+checksummed source archive against the reachable merge tree, and a clean source
+rebuild whose executable member hashes match the tested package tie that
 package to the merged source. Contemporaneous evidence then ties the graphical
 client PID, adjacent staged client and daemon executable paths, hashes,
 device/inode identities, environments, and daemon-owned private sockets
