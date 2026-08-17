@@ -58,8 +58,10 @@ selection evidence in `04-theme-a-selection.png`.
   stopped.
 - Private socket, extracted package root, config, state, theme, and logs removed.
 - Workspace 8 contained zero windows.
-- Original Foot focus restored on workspace 6 / monitor 2.
-- Pointer restored within one pixel of its recorded location.
+- Original Foot address `0x55d2cdf21a40` restored on workspace 6 / monitor 2,
+  matching `focus-before.json` and `focus-after-cleanup.json`.
+- Pointer changed only from recorded `(3280, 1119)` to `(3280, 1118)`, within
+  one pixel, as recorded in the before/after cursor files.
 - `pacman -Qkk splinterm`: `56 total files, 0 altered files` before and after.
 
 ## Evidence
@@ -70,4 +72,5 @@ selection evidence in `04-theme-a-selection.png`.
 - `candidate.sha256`
 - window identity JSON for the focusable target, both reload states, and
   selection capture
-- post-cleanup clients, focus, cursor, and Pacman integrity records
+- pre-test and post-cleanup focus and cursor records
+- post-cleanup clients and before/after Pacman integrity records
