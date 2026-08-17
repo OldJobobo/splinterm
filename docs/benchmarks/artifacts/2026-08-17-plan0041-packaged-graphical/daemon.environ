@@ -1,0 +1,9 @@
+HOME=/tmp/splinterm-plan0041-provenance-v3/home
+HYPRLAND_INSTANCE_SIGNATURE=efb50993780079460b0cbed1363e2166a2de1d9f_1786588329_771014523
+PATH=/tmp/splinterm-plan0041-provenance-v3/pkgroot/usr/bin:/usr/bin
+SPLINTERM_CONFIG=/tmp/splinterm-plan0041-provenance-v3/config/splinterm/config.ini
+SPLINTERM_SOCKET=/tmp/splinterm-plan0041-provenance-v3/splinterd.sock
+WAYLAND_DISPLAY=wayland-1
+XDG_CONFIG_HOME=/tmp/splinterm-plan0041-provenance-v3/config
+XDG_RUNTIME_DIR=/run/user/1000
+XDG_STATE_HOME=/tmp/splinterm-plan0041-provenance-v3/state
