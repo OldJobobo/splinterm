@@ -48,7 +48,7 @@ package_splinterm-bin() {
   )
   optdepends=(
     'fcitx5: Wayland text-input support'
-    'splinterm-mcp: explicitly configured MCP stdio adapter'
+    'splinterm-mcp-bin: explicitly configured MCP stdio adapter'
   )
   provides=("splinterm=$pkgver-$pkgrel")
   conflicts=('splinterm')
