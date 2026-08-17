@@ -8,13 +8,13 @@ sequence, and this page owns what the product is today.
 
 ## Maturity
 
-**Splinterm is a public alpha.**
+**Splinterm is a public beta.**
 
 Source, documentation, and immutable versioned GitHub and AUR packages are
 publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
 native Wayland presentation, Arch packaging, and bounded automation workflows
 are implemented and validated in the scopes named below. Public availability is
-not a stable-support promise: alpha interfaces may change, the validated target
+not a stable-support promise: beta interfaces may change, the validated target
 remains narrow, and broader compatibility guarantees have not been released.
 
 Splinterm is **security-conscious**, not absolutely secure. Automation is
@@ -31,19 +31,53 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle;
-- public Alpha3.3 `0.1.0alpha3.3-1` Arch packages built from clean committed
+- public Beta 1 `0.1.0beta1-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
-  saved-Lair, Wayland file-drop, and Omarchy screensaver workflows, isolated
-  exact-package acceptance for the Alpha3.1 transient-tab hotfixes,
-  non-graphical release/package validation for Alpha3.2, and isolated
-  development-build graphical smoke plus release/package validation for the
-  Alpha3.3 numbered-name patch.
+  saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
+  exact-package acceptance for the Alpha3.1 transient-tab hotfixes; and accepted
+  Beta 1 graphical, package, provenance, wide-grid, sparse-publication, and
+  active-tab contrast evidence.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
-graphical environment, but its packaged and remote workflows remain alpha
+graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
+
+## Beta 1 release
+
+[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1)
+was published as a GitHub prerelease on 2026-08-17 and distributed through both
+AUR package bases as `0.1.0beta1-1`. Beta 1 accepts wide terminal grids through
+`480×128`, bounds sparse terminal publication ownership and accounting, and
+separates active-tab contrast from terminal selection colors while retaining the
+accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
+
+- Release-state PR #29 merged as
+  `40ac9d7bb803fc71495e36eb760174de7fcdfff0`; candidate-metadata correction
+  PR #30 merged as `8d95e75704104750f8e8e4585e629010855963c8`.
+- Candidate run `32004316406` built corrected commit `8d95e75` once. Candidate
+  manifest SHA-256:
+  `a09bef84812c2da3cfe729099d5bcdec2c4a809b234c8a6dc8d1c7f2ccbf018e`.
+- Protected promotion run `32004973522` created the immutable tag, published and
+  redownloaded the exact five public assets, verified every hash, and retained
+  publication receipt artifact `9279942672`.
+- Source archive SHA-256:
+  `72bd626474f2f660cf5cf595f4e9dd040dafacd2f3087d58a81f01a32d39f5ef`.
+  Main package SHA-256:
+  `fb25323ca2edbb61243c942c84de4d1f4cb52280fbc7dbd4369243f603288eda`.
+  MCP package SHA-256:
+  `ededfa71a10b1bb3f199e78d56c4bfc32c5633f5188c3e89790980bf3803fecc`.
+- AUR source package commit: `2052214554e25218f7329e299a3fc0f076d76756`.
+  AUR prebuilt package commit: `d902f0bf49f7b454480724612613dd2f35d13bd4`.
+  Both public recipes passed `makepkg --verifysource` against the immutable
+  GitHub assets before publication.
+- Complete serialized workspace tests, warnings-denied Clippy, release/package
+  automation, portable Foot provenance, package-content/runtime validation, and
+  accepted Plans 0041–0043 evidence passed. Independent candidate review found
+  alpha-specific install wording and a binary split-package recommendation;
+  both were corrected and regression-covered before the replacement candidate
+  was built or promoted.
 
 ## Alpha3.3 release
 
@@ -182,8 +216,8 @@ post-alpha3, pre-1.0 roadmap milestone.
 | Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Plan 0028](plans/0028-remote-graphical-client.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
-| Arch/Omarchy packaging | Public alpha packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha3.3-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0alpha3.3-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| Arch/Omarchy packaging | Public beta packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0beta1-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0beta1-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
@@ -218,7 +252,7 @@ behavior; deferred means intentionally outside the present product.
 
 ## Stable-release gates
 
-Before Splinterm can graduate from public alpha to a supported stable release,
+Before Splinterm can graduate from public beta to a supported stable release,
 maintainers must make and validate explicit decisions about:
 
 - release channels, signed/immutable source publication, upgrades, and rollback;
@@ -247,7 +281,7 @@ capabilities above; none may be inferred as a stable-support promise.
 | MCP integration | [MCP](mcp.md) |
 | Image compatibility | [Images](images.md) |
 | Service, persistence, policy, backup, and reset | [Headless operation](headless.md) |
-| Public alpha package installation and upgrades | [Packaging](packaging.md) |
+| Public beta package installation and upgrades | [Packaging](packaging.md) |
 | Product direction, audiences, and outcome horizons | [Product roadmap](product-roadmap.md) |
 | Engineering phases, dependencies, and future delivery work | [Engineering roadmap](roadmap.md) |
 | Development workflow and test guardrails | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |

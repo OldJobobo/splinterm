@@ -14,7 +14,7 @@ Splinterm combines a native Wayland terminal with a headless daemon that keeps s
 Humans use that persistent topology through native windows, tabs, and panes. Authorized tools can reach the same sessions through bounded JSON/NDJSON, SSH relay, and MCP interfaces. Splinterm is built in Rust from [Foot](https://codeberg.org/dnkl/foot)'s terminal behavior and designed first for Omarchy and Arch Linux.
 
 > [!IMPORTANT]
-> **Status: public alpha.** Source, immutable versioned GitHub and AUR packages, and documentation are public. Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated for the current x86_64 Omarchy/Arch Linux target. The alpha may make breaking changes; broader compatibility guarantees and stable support have not been released.
+> **Status: public beta.** Source, immutable versioned GitHub and AUR packages, and documentation are public. Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated for the current x86_64 Omarchy/Arch Linux target. The beta may make breaking changes; broader compatibility guarantees and stable support have not been released.
 >
 > See the repository-authoritative [current status](docs/status.md) for the exact capability and availability boundaries.
 
@@ -53,7 +53,7 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Sixel, practical Kitty static images, and inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`, both `0.1.0alpha3.3-1` |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`, both `0.1.0beta1-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 
@@ -69,7 +69,7 @@ yay -S splinterm-bin
 yay -S splinterm-mcp-bin
 ```
 
-The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. All packages remain alpha software with no stable compatibility or support-duration guarantee.
+The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. All packages remain beta software with no stable compatibility or support-duration guarantee.
 
 For the newest published versioned release package, clone the public repository and run:
 

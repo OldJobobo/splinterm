@@ -1,7 +1,7 @@
 # Splinterm Product Requirements Document
 
 - **Status:** Draft
-- **Product maturity:** Public alpha
+- **Product maturity:** Public beta
 - **As of:** 2026-08-11
 - **Strategic direction authority:** [Product roadmap](product-roadmap.md)
 - **Normative requirements authority:** This PRD after review and acceptance
@@ -151,13 +151,13 @@ The following table summarizes the current repository state. “Validated” mea
 | Sixel | Supported Foot-compatible bounded implementation. |
 | Kitty graphics | Supported practical static-image subset; not full Kitty compatibility. |
 | iTerm2 inline images | Supported bounded inline-PNG subset. |
-| JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; alpha compatibility remains versioned and may change between releases. |
+| JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; beta compatibility remains versioned and may change between releases. |
 | SSH stdio relay | Implemented and validated; no daemon network listener. |
 | Native remote graphical transport | Implemented and validated through Plan 0028: strict profiles, one-authentication multiplexer, endpoint-bound human-interactive workflow, remote-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, authentication, failure handling, persistence, and reviewed real-host graphical evidence. |
 | MCP adapter | Implemented and validated as an optional separately identified package. |
 | Arch/Omarchy package and release installer | Immutable versioned GitHub/AUR packages and installation paths implemented and validated. |
 | Public source and documentation | Available. |
-| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available as `0.1.0alpha3.3-1`; stable support remains unreleased. |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available as `0.1.0beta1-1`; stable support remains unreleased. |
 | Stable support policy | Not released. |
 | Nix and broader distribution | Planned. |
 | Public product/documentation website | Implemented and build/link validated; repository `docs/status.md` remains the maturity authority. |
@@ -174,8 +174,8 @@ The following table summarizes the current repository state. “Validated” mea
 - Keep human consent, trusted UI, automation policy, and control ownership visibly distinct.
 - Preserve Foot-derived behavior with reproducible differential evidence.
 - Keep ordinary text-only terminal use efficient and ensure optional image support has bounded resource cost.
-- Package and upgrade the public alpha without silently changing user-owned desktop configuration.
-- Keep current-status, usage, CLI, security, and release documentation explicit throughout the alpha.
+- Package and upgrade the public beta without silently changing user-owned desktop configuration.
+- Keep current-status, usage, CLI, security, and release documentation explicit throughout the beta.
 
 ### 8.2 Stable-release goals
 
@@ -307,7 +307,7 @@ Priority meanings:
 | `FR-PKG-02` | P0 | Installation and upgrade must verify exact artifacts, warn before ending daemon-owned shells, and report the lack of cross-version process continuity. | Implemented |
 | `FR-PKG-03` | P0 | Packaging must not edit user homes, default terminal preference, Omarchy-owned files, SSH policy, or service lingering without an explicit separate action. | Implemented |
 | `FR-PKG-04` | P1 | The MCP adapter must remain an optional exact-version split package and installation alone must grant no authority. | Implemented |
-| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public alpha GitHub and AUR artifacts are immutable, versioned, and checksummed; a stable support policy remains pending |
+| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public beta GitHub and AUR artifacts are immutable, versioned, and checksummed; a stable support policy remains pending |
 
 ## 11. Security and privacy requirements
 
@@ -403,7 +403,7 @@ Splinterm meets its defining product promise when:
 
 ### 14.2 Stable-release readiness
 
-Graduation from public alpha to a supported stable release is blocked until all
+Graduation from public beta to a supported stable release is blocked until all
 of the following are true:
 
 1. a current status document defines supported environments, validated capabilities, known limitations, deferred work, and open gates;
@@ -425,7 +425,7 @@ A new evaluator should be able to answer within one minute:
 - Why does daemon-owned persistence matter?
 - How do humans and bounded automation share one topology?
 - Which environment and capabilities are validated?
-- Why is it a public alpha rather than a stable release?
+- Why is it a public beta rather than a stable release?
 - What is the first safe workflow?
 
 ## 15. Risks and mitigations
@@ -439,7 +439,7 @@ A new evaluator should be able to answer within one minute:
 | Multiplexer concepts become harder than tmux | Primary workflow becomes inaccessible | Lead with user outcomes, native controls, clear vocabulary, and discoverable trusted menus. |
 | Optional images or history regress ordinary use | Core terminal responsiveness and memory suffer | Preserve explicit budgets, no-image gates, event-driven expiry, and benchmark matrices. |
 | Trusted UI and terminal content blur together | Spoofing or accidental authority | Keep trusted chrome visually distinct and input-isolated; never derive authority from terminal content. |
-| Public alpha packaging is mistaken for stable support | Users depend on compatibility the alpha does not promise | Keep public-alpha labeling and upgrade/lifetime warnings prominent until stable-release gates are met. |
+| Public beta packaging is mistaken for stable support | Users depend on compatibility the beta does not promise | Keep public-beta labeling and upgrade/lifetime warnings prominent until stable-release gates are met. |
 | Platform expansion dilutes the validated Omarchy path | More environments than the project can test | Require separate evidence and support decisions for each platform. |
 
 ## 16. Open product decisions
@@ -508,7 +508,7 @@ This draft synthesizes the current implementation and, principally:
 - [Plan 0036: alpha3 Wayland file-drop path insertion](plans/0036-alpha3-wayland-file-drop-path-insertion.md)
 - [Supported automation contracts](automation.md)
 - [Configuration and Foot migration](configuration.md)
-- [Public alpha packaging](packaging.md)
+- [Public beta packaging](packaging.md)
 - [Terminal image compatibility](images.md)
 
 ## 19. Draft review questions

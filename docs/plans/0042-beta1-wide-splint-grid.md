@@ -487,6 +487,15 @@ Abort on input reaching the wrong Window, unrelated output reconfiguration,
 partial terminal state, protocol loop, lost history, incorrect PTY dimensions,
 stale pixels, or incomplete cleanup.
 
+## Beta1 release record
+
+The accepted maintenance implementation and corrective Dojo-picker coverage were
+forward-ported to `main` before release. Corrected candidate run `32004316406`
+built commit `8d95e75704104750f8e8e4585e629010855963c8`; protected promotion run
+`32004973522` published `v0.1.0-beta1`, and both AUR package bases published
+`0.1.0beta1-1`. Exact release hashes and package-base commits are recorded in
+[Current product status](../status.md#beta-1-release).
+
 ## Beta1 acceptance
 
 Plan 0042 is complete only when:
