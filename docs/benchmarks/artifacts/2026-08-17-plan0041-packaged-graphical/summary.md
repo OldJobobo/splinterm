@@ -13,6 +13,10 @@ The package was extracted to a temporary root. The staged adjacent client and
 daemon used an explicit private `SPLINTERM_SOCKET`, HOME, config, state, and
 theme tree. The real `XDG_RUNTIME_DIR` was retained only for Wayland compositor
 access. No packaged executable or live Omarchy theme was modified.
+`runtime-identity.json` transparently transcribes the session-time `/proc` path
+assertions after cleanup and ties graphical PID `3615295`, its window address,
+the adjacent daemon/client paths and hashes, and the private socket to this
+candidate.
 
 ## Bounded graphical sequence
 
@@ -76,4 +80,6 @@ selection evidence in `04-theme-a-selection.png`.
 - window identity JSON for the focusable target, both reload states, and
   selection capture
 - pre-test and post-cleanup focus and cursor records
+- staged runtime identity assertion record with client PID, executable paths,
+  hashes, adjacency, and private socket
 - post-cleanup clients and before/after Pacman integrity records

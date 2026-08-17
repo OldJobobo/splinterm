@@ -1,0 +1,25 @@
+{
+  "record_kind": "post-cleanup transcription of session validation assertions",
+  "candidate_commit": "d3cbbc6b013ff4cab28a8ec6ef6aaa267603ff35",
+  "package_sha256": "22f21317c17bbcfc510d99f6fdb9f3a593e7ab08736bcb8180527c8e2cac3c0b",
+  "package_root": "/tmp/splinterm-plan0041-package-root-v2",
+  "private_socket": "/tmp/splinterm-plan0041-graphical-v2/splinterd.sock",
+  "client": {
+    "pid": 3615295,
+    "window_address": "0x55d2cbf6a280",
+    "proc_exe_target": "/tmp/splinterm-plan0041-package-root-v2/usr/bin/splinterm",
+    "sha256": "afb65d3c0598d13939933789075ed24f7f44b912e6b052e926113738b14d93c8",
+    "selection_method": "the test accepted the PID only when readlink -f /proc/<pid>/exe equaled proc_exe_target"
+  },
+  "daemon": {
+    "proc_exe_target": "/tmp/splinterm-plan0041-package-root-v2/usr/bin/splinterd",
+    "sha256": "62e68414de51d5ce0e4f75412d93d581557eb430fe850607c3bb9966c52ea416",
+    "validation_method": "the test asserted readlink -f /proc/<daemon-pid>/exe equaled proc_exe_target and the private socket existed before client launch"
+  },
+  "pty_child": {
+    "path": "/tmp/splinterm-plan0041-package-root-v2/usr/bin/splinterm-pty-child",
+    "sha256": "e43de0a260dc37f2ba4680d525c3cdd3bf29ce72d694eb025ff4f42a2de3d7ca"
+  },
+  "adjacency": "client, daemon, and PTY child paths share the same staged /usr/bin directory",
+  "cleanup": "the private socket, package root, and owned processes were removed after evidence capture"
+}

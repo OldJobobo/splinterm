@@ -209,7 +209,9 @@ Acceptance completed at maintenance commit `d3cbbc6` with package SHA-256
 `22f21317c17bbcfc510d99f6fdb9f3a593e7ab08736bcb8180527c8e2cac3c0b`.
 The isolated test used the real Wayland runtime only for compositor access and
 an explicit private Splinterm socket, config, state, theme, and process
-hierarchy. Exact rendered pixels proved native `lighter_bg`, Foot `bright0`
+hierarchy. The evidence ties the graphical PID and adjacent staged client and
+daemon executable paths and hashes to that private socket. Exact rendered
+pixels proved native `lighter_bg`, Foot `bright0`
 fallback, higher-contrast text, accent underline, independent Foot selection
 colors, and same-process live reload. The selected terminal row was created by
 the user on the uniquely identified staged window after the automated drag
