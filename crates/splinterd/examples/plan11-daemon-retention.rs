@@ -8,7 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -30,6 +30,7 @@ struct Memory {
     private_file_bytes: u64,
     shared_bytes: u64,
     shmem_bytes: u64,
+    cpu_ticks: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +47,16 @@ fn field(values: &std::collections::BTreeMap<String, u64>, name: &str) -> u64 {
 fn process_memory(pid: u32) -> Option<ProcessMemory> {
     let root = PathBuf::from(format!("/proc/{pid}"));
     let text = fs::read_to_string(root.join("smaps_rollup")).ok()?;
+    let stat = fs::read_to_string(root.join("stat")).ok()?;
+    let stat_fields: Vec<_> = stat
+        .get(stat.rfind(')')?.saturating_add(2)..)?
+        .split_whitespace()
+        .collect();
+    let cpu_ticks = stat_fields
+        .get(11)?
+        .parse::<u64>()
+        .ok()?
+        .saturating_add(stat_fields.get(12)?.parse::<u64>().ok()?);
     let mut values = std::collections::BTreeMap::new();
     for line in text.lines() {
         let Some((key, raw)) = line.split_once(':') else {
@@ -76,6 +87,7 @@ fn process_memory(pid: u32) -> Option<ProcessMemory> {
             shared_bytes: field(&values, "Shared_Clean")
                 .saturating_add(field(&values, "Shared_Dirty")),
             shmem_bytes: field(&values, "ShmemPmdMapped"),
+            cpu_ticks,
         },
     })
 }
@@ -106,6 +118,7 @@ fn sample() -> serde_json::Value {
         sum.private_file_bytes += item.memory.private_file_bytes;
         sum.shared_bytes += item.memory.shared_bytes;
         sum.shmem_bytes += item.memory.shmem_bytes;
+        sum.cpu_ticks += item.memory.cpu_ticks;
         sum
     });
     serde_json::json!({"aggregate": total, "processes": processes})
@@ -239,6 +252,7 @@ async fn main() -> Result<()> {
     let baseline = sample();
     let mut endpoints = Vec::new();
     for cycle in 0..cycles {
+        let marker_started = Instant::now();
         handle.input(b"start\n".to_vec()).await?;
         let marker = format!("PLAN11_CYCLE_{cycle:02}");
         timeout(Duration::from_secs(30), async {
@@ -252,11 +266,16 @@ async fn main() -> Result<()> {
         })
         .await
         .context("cycle output timeout")??;
+        let marker_latency_ns =
+            u64::try_from(marker_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let marker_sample = sample();
         sleep(Duration::from_secs(2)).await;
-        endpoints.push(
-            serde_json::json!({"cycle": cycle, "marker": marker_sample, "settle_2s": sample()}),
-        );
+        endpoints.push(serde_json::json!({
+            "cycle": cycle,
+            "marker_latency_ns": marker_latency_ns,
+            "marker": marker_sample,
+            "settle_2s": sample()
+        }));
     }
     if final_settle > 2 {
         sleep(Duration::from_secs(final_settle - 2)).await;

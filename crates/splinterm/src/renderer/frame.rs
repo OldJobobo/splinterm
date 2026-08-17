@@ -75,6 +75,12 @@ pub(crate) struct SnapshotFrame {
     pub(super) scale_120: u16,
 }
 
+pub(crate) struct TerminalSizeWithLimitStatus {
+    pub size: (u16, u16, u16, u16),
+    pub column_capped: bool,
+    pub row_capped: bool,
+}
+
 impl SnapshotFrame {
     pub(crate) const fn cell_width(&self) -> u32 {
         self.cell_width
@@ -114,11 +120,29 @@ impl SnapshotFrame {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn window_geometry(
         &self,
         logical_width: u32,
         logical_height: u32,
         scale_120: u32,
+    ) -> Result<WindowGeometry> {
+        self.window_geometry_with_limits(
+            logical_width,
+            logical_height,
+            scale_120,
+            MAX_COLUMNS,
+            MAX_ROWS,
+        )
+    }
+
+    pub(crate) fn window_geometry_with_limits(
+        &self,
+        logical_width: u32,
+        logical_height: u32,
+        scale_120: u32,
+        maximum_columns: u16,
+        maximum_rows: u16,
     ) -> Result<WindowGeometry> {
         WindowGeometry::fit_window(
             logical_width,
@@ -127,9 +151,9 @@ impl SnapshotFrame {
             self.padding,
             scale_120,
             2,
-            u32::from(MAX_COLUMNS),
+            u32::from(maximum_columns),
             2,
-            u32::from(MAX_ROWS),
+            u32::from(maximum_rows),
         )
     }
 
@@ -191,20 +215,67 @@ impl SnapshotFrame {
         Some((rect.x, rect.y, rect.width, rect.height))
     }
 
+    #[cfg(test)]
     pub(crate) fn terminal_size(
         &self,
         logical_width: u32,
         logical_height: u32,
         scale_120: u32,
     ) -> Result<(u16, u16, u16, u16)> {
-        let geometry = self.window_geometry(logical_width, logical_height, scale_120)?;
+        self.terminal_size_with_limits(
+            logical_width,
+            logical_height,
+            scale_120,
+            MAX_COLUMNS,
+            MAX_ROWS,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_size_with_limits(
+        &self,
+        logical_width: u32,
+        logical_height: u32,
+        scale_120: u32,
+        maximum_columns: u16,
+        maximum_rows: u16,
+    ) -> Result<(u16, u16, u16, u16)> {
+        self.terminal_size_with_limit_status(
+            logical_width,
+            logical_height,
+            scale_120,
+            maximum_columns,
+            maximum_rows,
+        )
+        .map(|status| status.size)
+    }
+
+    pub(crate) fn terminal_size_with_limit_status(
+        &self,
+        logical_width: u32,
+        logical_height: u32,
+        scale_120: u32,
+        maximum_columns: u16,
+        maximum_rows: u16,
+    ) -> Result<TerminalSizeWithLimitStatus> {
+        let geometry = self.window_geometry_with_limits(
+            logical_width,
+            logical_height,
+            scale_120,
+            maximum_columns,
+            maximum_rows,
+        )?;
         let (pixel_width, pixel_height) = geometry.terminal_pixels()?;
-        Ok((
-            u16::try_from(geometry.columns).context("terminal columns fit u16")?,
-            u16::try_from(geometry.rows).context("terminal rows fit u16")?,
-            pixel_width,
-            pixel_height,
-        ))
+        Ok(TerminalSizeWithLimitStatus {
+            size: (
+                u16::try_from(geometry.columns).context("terminal columns fit u16")?,
+                u16::try_from(geometry.rows).context("terminal rows fit u16")?,
+                pixel_width,
+                pixel_height,
+            ),
+            column_capped: geometry.column_capped,
+            row_capped: geometry.row_capped,
+        })
     }
 
     #[allow(

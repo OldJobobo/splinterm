@@ -1,0 +1,62 @@
+{
+  "alpha_version": "0.1.0-alpha3.3",
+  "binaries": {
+    "alpha3.3": {
+      "splinterd": {
+        "path": "/usr/bin/splinterd",
+        "sha256": "fbcd7e4152ee36c8ec4706aac36bb107c2d6bf3fa0506e774c0284c28717e5b9"
+      },
+      "splinterm": {
+        "path": "/usr/bin/splinterm",
+        "sha256": "419c296ed3d0c48e7a74b6d7d12bac53e9bd26d09baff46c27095d7bcc119850"
+      },
+      "splinterm-pty-child": {
+        "path": "/usr/bin/splinterm-pty-child",
+        "sha256": "a4a6e5d0639f4d4c420a1fb1fbff26258df95828fcbdcd38be4738bd7296f117"
+      }
+    },
+    "plan0042": {
+      "splinterd": {
+        "path": "/tmp/splinterm-plan0043-plan0042-graphical-target/release/splinterd",
+        "sha256": "dca708794da6d0201f129ea5c9e5437669a627f1a82dd01bc9bb71980218263c"
+      },
+      "splinterm": {
+        "path": "/tmp/splinterm-plan0043-plan0042-graphical-target/release/splinterm",
+        "sha256": "7217c0eed79e0d93533cc3571fe72b94a66ad08de16690c0cda6a863a8d6e25f"
+      },
+      "splinterm-pty-child": {
+        "path": "/tmp/splinterm-plan0043-plan0042-graphical-target/release/splinterm-pty-child",
+        "sha256": "24f3856236cf11c9564d58a2a8fad511028da584386041b06b73f57f9e0110ce"
+      }
+    },
+    "plan0043": {
+      "splinterd": {
+        "path": "/tmp/splinterm-plan0043-candidate-graphical-target/release/splinterd",
+        "sha256": "9507ade2986827a008bb17861b3391e2b20cc29a9cff82555b71d8f7b887e95a"
+      },
+      "splinterm": {
+        "path": "/tmp/splinterm-plan0043-candidate-graphical-target/release/splinterm",
+        "sha256": "b507b04ef48f93465eaf77ba1fa5761d3b87c4d31cf8de5ff68d5ecb9f85ba9a"
+      },
+      "splinterm-pty-child": {
+        "path": "/tmp/splinterm-plan0043-candidate-graphical-target/release/splinterm-pty-child",
+        "sha256": "24f3856236cf11c9564d58a2a8fad511028da584386041b06b73f57f9e0110ce"
+      }
+    }
+  },
+  "candidate_commit": "2c5ac9f87629287e1481afe436aab9f2c9650af1",
+  "monitor": "DP-2",
+  "original_focus": {
+    "address": "0x55d2ce51b5d0",
+    "class": "vesktop",
+    "monitor": 2,
+    "pid": 1367564,
+    "workspace": 6
+  },
+  "package_integrity": "splinterm: 56 total files, 0 altered files",
+  "plan0042_commit": "ba8f1cd28f1aca25d83f198c593832b829601a6c",
+  "schema": "splinterm.plan0043.direct-tail-graphical-preflight.v1",
+  "seed": 4304,
+  "workspace": 8,
+  "workspace_8_initial_clients": []
+}

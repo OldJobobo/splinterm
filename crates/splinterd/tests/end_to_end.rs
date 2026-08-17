@@ -16,10 +16,11 @@ use splinterm_core::{
 };
 use splinterm_protocol::{
     AccessScope, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
-    ControlTransferDecision, ControlTransferOutcome, ErrorCode, LaunchParameters, MAX_FRAME_BYTES,
-    MAX_SUBSCRIPTIONS, MutationPreflight, MutationTarget, PROTOCOL_VERSION, ProtocolError, Request,
-    Response, ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalProvenance,
-    TerminalSnapshot, TerminalUpdate, TopologyChangeKind, encode_frame,
+    ControlTransferDecision, ControlTransferOutcome, ErrorCode, HistoryTransition,
+    LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS, MutationPreflight, MutationTarget,
+    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SplintLifecycle,
+    SubscriptionEvent, TerminalProvenance, TerminalSnapshot, TerminalUpdate, TopologyChangeKind,
+    encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -480,6 +481,83 @@ fn update_text(update: &TerminalUpdate) -> String {
         .flat_map(|row| row.cells.iter())
         .map(|cell| cell.content.as_str())
         .collect()
+}
+
+fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate) {
+    update
+        .validate_against(
+            snapshot.revision,
+            snapshot.history_generation,
+            snapshot.columns,
+            snapshot.rows,
+        )
+        .expect("subscription update validates against reconstructed state");
+    assert_eq!(update.columns.unwrap_or(snapshot.columns), snapshot.columns);
+    assert_eq!(update.row_count.unwrap_or(snapshot.rows), snapshot.rows);
+    for patch in update.rows {
+        snapshot.visible_rows[patch.index] = patch.row;
+    }
+    if let Some(scrollback) = update.scrollback {
+        let append = matches!(scrollback.transition, HistoryTransition::Append { .. });
+        match scrollback.transition {
+            HistoryTransition::Append { trimmed_rows, .. } => {
+                snapshot
+                    .scrollback_rows
+                    .drain(..trimmed_rows.min(snapshot.scrollback_rows.len()));
+                snapshot.scrollback_rows.extend(scrollback.rows.clone());
+            }
+            HistoryTransition::Clear => snapshot.scrollback_rows.clear(),
+            HistoryTransition::Reflow | HistoryTransition::Replace => {
+                snapshot.scrollback_rows.clone_from(&scrollback.rows);
+            }
+        }
+        snapshot.history_generation = scrollback.history_generation;
+        snapshot.oldest_available_scrollback_row_id = scrollback.oldest_available_row_id;
+        snapshot.newest_available_scrollback_row_id = scrollback.newest_available_row_id;
+        snapshot.available_scrollback_rows = scrollback.available_rows;
+        snapshot.omitted_oldest_scrollback_rows = if append {
+            scrollback
+                .available_rows
+                .saturating_sub(snapshot.scrollback_rows.len())
+        } else {
+            scrollback.omitted_oldest_rows
+        };
+    }
+    if let Some(cursor) = update.cursor {
+        snapshot.cursor_column = cursor.column;
+        snapshot.cursor_row = cursor.row;
+        snapshot.cursor_deferred_wrap = cursor.deferred_wrap;
+    }
+    if let Some(title) = update.title {
+        snapshot.title = title;
+    }
+    if let Some(modes) = update.input_modes {
+        snapshot.input_modes = modes;
+    }
+    if let Some(screen) = update.active_screen {
+        snapshot.active_screen = screen;
+    }
+    if let Some(palette) = update.palette {
+        snapshot.palette = palette;
+    }
+    if let Some(colors) = update.default_colors {
+        snapshot.default_colors = colors;
+    }
+    if let Some(images) = update.images {
+        snapshot.images = Some(images);
+    }
+    snapshot.revision = update.revision;
+    snapshot.validate().unwrap_or_else(|error| {
+        panic!(
+            "reconstructed subscription snapshot remains valid: {error:?}; rows={} available={} omitted={} oldest={:?} newest={:?} revision={}",
+            snapshot.scrollback_rows.len(),
+            snapshot.available_scrollback_rows,
+            snapshot.omitted_oldest_scrollback_rows,
+            snapshot.oldest_available_scrollback_row_id,
+            snapshot.newest_available_scrollback_row_id,
+            snapshot.revision,
+        )
+    });
 }
 
 #[allow(
@@ -3537,6 +3615,93 @@ async fn two_splints_spawn_and_preserve_independent_output() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mixed_clear_subscription_reconstructs_exact_final_snapshot_without_resync() {
+    time::timeout(Duration::from_secs(60), async {
+        let daemon = Daemon::start().await;
+        let mut creator = daemon.connect().await;
+        let script = r"i=0; while [ $i -lt 5000 ]; do if [ $i -gt 0 ] && [ $((i % 500)) -eq 0 ]; then printf '\033[2J\033[H'; fi; case $((i % 3)) in 0) printf 'plan0043-%08d plain xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n' $i;; 1) printf '\033[3%dmplan0043-%08d ansi xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\033[0m\n' $((i % 8)) $i;; 2) printf 'plan0043-%08d unicode-naive-cafe-lambda-emoji\n' $i;; esac; i=$((i+1)); done; printf 'PLAN0043_%s\n' FINAL; sleep 30";
+        let lair = match creator
+            .request(Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "plan0043-reconstruction".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        {
+            Response::LairCreated { lair, .. } => lair,
+            response => panic!("unexpected create response: {response:?}"),
+        };
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            unreachable!()
+        };
+        let splint_id = splint.id;
+        let incarnation = creator.live_incarnation(splint_id).await;
+        let mut subscriber = daemon.connect().await;
+        let (subscription_id, mut reconstructed) = subscriber
+            .attach_with_scrollback(splint_id, incarnation, 100)
+            .await;
+
+        let mut workload = script.as_bytes().to_vec();
+        workload.push(b'\n');
+        creator.input(splint_id, incarnation, &workload).await;
+        let mut expected_sequence = 1_u64;
+        let mut updates = 0_usize;
+        loop {
+            let (sequence, event) = subscriber.next_event(subscription_id).await;
+            assert_eq!(sequence, expected_sequence);
+            expected_sequence += 1;
+            match event {
+                SubscriptionEvent::Update { update } => {
+                    apply_terminal_update(&mut reconstructed, update);
+                    updates += 1;
+                    if snapshot_text(&reconstructed).contains("PLAN0043_FINAL") {
+                        break;
+                    }
+                }
+                SubscriptionEvent::Snapshot { snapshot } => reconstructed = snapshot,
+                SubscriptionEvent::ResyncRequired { current_revision } => {
+                    panic!("fast subscriber required resync at revision {current_revision}")
+                }
+                SubscriptionEvent::Exited { .. } => {
+                    panic!("terminal exited before final reconstruction")
+                }
+                event => panic!("unexpected terminal event: {event:?}"),
+            }
+        }
+        assert!(updates > 1, "workload must cross publication boundaries");
+
+        let mut observer = daemon.connect().await;
+        let (observer_subscription, authoritative) = observer
+            .attach_with_scrollback(splint_id, incarnation, 100)
+            .await;
+        assert_eq!(
+            observer
+                .request(Request::Detach {
+                    subscription_id: observer_subscription,
+                })
+                .await,
+            Response::Acknowledged
+        );
+        assert_eq!(reconstructed, authoritative);
+        assert_eq!(
+            subscriber
+                .request(Request::Detach { subscription_id })
+                .await,
+            Response::Acknowledged
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("Plan 0043 reconstruction scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
     reason = "the single scenario intentionally records the complete Phase 8 lifecycle"
@@ -3686,24 +3851,15 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 }
             }
         });
-        let mut slow = daemon.connect().await;
-        nix::sys::socket::setsockopt(
-            &slow.stream,
-            nix::sys::socket::sockopt::RcvBuf,
-            &4096,
-        )
-        .unwrap();
-        for _ in 0..MAX_SUBSCRIPTIONS {
-            let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
-        }
         let mut producer = daemon.connect().await;
-        // Keep each paced publication below MAX_UPDATE_SCROLLS while emitting
-        // enough bounded frames to fill an unread connection's outbound path.
+        // First prove that an actively drained subscriber keeps up with paced
+        // producer frames. Slow-runner scheduling must not be conflated with the
+        // separate unread-connection overflow proof below.
         producer
             .input(
                 splint_id,
                 incarnation,
-                b"i=0; while [ $i -lt 30000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'overflow-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.005; done; printf 'overflow-finished\\n'\n",
+                b"i=0; while [ $i -lt 2000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'paced-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.01; done; printf 'overflow-finished\\n'\n",
             )
             .await;
         let _completion_snapshot = snapshot_until_with_timeout(
@@ -3718,6 +3874,35 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .await
             .expect("drained subscriber did not observe the overflow marker")
             .expect("drained subscriber task failed");
+
+        // The actively drained client has exited. Create a fresh unread
+        // MAX_SUBSCRIPTIONS connection so only the following unpaced pressure
+        // stream can force its resynchronization or disconnection.
+        let mut slow = daemon.connect().await;
+        nix::sys::socket::setsockopt(
+            &slow.stream,
+            nix::sys::socket::sockopt::RcvBuf,
+            &4096,
+        )
+        .unwrap();
+        for _ in 0..MAX_SUBSCRIPTIONS {
+            let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
+        }
+        producer
+            .input(
+                splint_id,
+                incarnation,
+                b"i=0; while [ $i -lt 30000 ]; do printf 'pressure-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; printf 'pressure-finished\\n'\n",
+            )
+            .await;
+        let _pressure_snapshot = snapshot_until_with_timeout(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "pressure-finished",
+            Duration::from_secs(60),
+        )
+        .await;
 
         let mut saw_resync = false;
         let mut disconnected = false;
@@ -3754,7 +3939,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             &mut reattached,
             splint_id,
             incarnation,
-            "overflow-finished",
+            "pressure-finished",
         )
         .await;
         assert!(final_snapshot.revision > detached.revision);

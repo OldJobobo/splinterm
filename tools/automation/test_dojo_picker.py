@@ -107,7 +107,9 @@ if "window" in args and "--output" not in args:
     raise SystemExit(0)
 if "subscribe" in args:
     snapshot_data = ({
-        "content_encoding":"unicode_scalars", "columns":80, "rows":24,
+        "content_encoding":"unicode_scalars",
+        "columns":480 if mode == "wide_snapshot" else 80,
+        "rows":128 if mode == "wide_snapshot" else 24,
         "title":"shell", "visible_rows":[]
     } if mode != "malformed_snapshot" else {})
     print(json.dumps({
@@ -289,6 +291,13 @@ class DojoPickerTests(unittest.TestCase):
             if "subscribe" in call or "snapshot" in call:
                 expected = call.index("--expected-incarnation")
                 self.assertEqual(call[expected + 1], str(INCARNATION))
+
+    def test_wide_grid_subscription_snapshot_is_accepted(self) -> None:
+        wide = self.environment.copy()
+        wide["FAKE_MODE"] = "wide_snapshot"
+        completed = self.run_picker("watch-context", environment=wide)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["status"], "reconciled_after_resync")
 
     def test_subscription_failure_is_not_reported_as_success(self) -> None:
         failed = self.environment.copy()

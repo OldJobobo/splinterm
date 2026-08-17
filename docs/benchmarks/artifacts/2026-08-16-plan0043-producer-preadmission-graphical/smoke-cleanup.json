@@ -1,0 +1,98 @@
+{
+  "active_before": {
+    "address": "0x55d2ce76a760",
+    "mapped": true,
+    "hidden": false,
+    "visible": true,
+    "acceptsInput": true,
+    "at": [
+      38,
+      56
+    ],
+    "size": [
+      1201,
+      1346
+    ],
+    "workspace": {
+      "id": 1,
+      "name": "1"
+    },
+    "floating": false,
+    "monitor": 0,
+    "class": "com.oldjobobo.splinterm",
+    "title": "π - waffle-cat — local controller",
+    "initialClass": "com.oldjobobo.splinterm",
+    "initialTitle": "Splinterm — local controller",
+    "pid": 2343510,
+    "xwayland": false,
+    "pinned": false,
+    "pinFullscreened": false,
+    "fullscreen": 0,
+    "fullscreenClient": 0,
+    "fullscreenHandler": "scrolling",
+    "allowedOverFullscreen": true,
+    "grouped": [],
+    "tags": [
+      "default-opacity*",
+      "terminal*"
+    ],
+    "swallowing": "0x0",
+    "focusHistoryID": 0,
+    "inhibitingIdle": false,
+    "xdgTag": "",
+    "xdgDescription": "",
+    "contentType": "none",
+    "tearingHint": false,
+    "stableId": "1800021f"
+  },
+  "active_after": {
+    "address": "0x55d2ce76a760",
+    "mapped": true,
+    "hidden": false,
+    "visible": true,
+    "acceptsInput": true,
+    "at": [
+      38,
+      56
+    ],
+    "size": [
+      1201,
+      1346
+    ],
+    "workspace": {
+      "id": 1,
+      "name": "1"
+    },
+    "floating": false,
+    "monitor": 0,
+    "class": "com.oldjobobo.splinterm",
+    "title": "π - waffle-cat — local controller",
+    "initialClass": "com.oldjobobo.splinterm",
+    "initialTitle": "Splinterm — local controller",
+    "pid": 2343510,
+    "xwayland": false,
+    "pinned": false,
+    "pinFullscreened": false,
+    "fullscreen": 0,
+    "fullscreenClient": 0,
+    "fullscreenHandler": "scrolling",
+    "allowedOverFullscreen": true,
+    "grouped": [],
+    "tags": [
+      "default-opacity*",
+      "terminal*"
+    ],
+    "swallowing": "0x0",
+    "focusHistoryID": 0,
+    "inhibitingIdle": false,
+    "xdgTag": "",
+    "xdgDescription": "",
+    "contentType": "none",
+    "tearingHint": false,
+    "stableId": "1800021f"
+  },
+  "workspace8_before": [],
+  "workspace8_after": [],
+  "focus_preserved": true,
+  "workspace8_clean": true
+}

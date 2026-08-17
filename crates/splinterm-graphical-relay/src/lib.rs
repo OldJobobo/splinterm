@@ -39,7 +39,7 @@ pub const MAX_CHANNEL_QUEUED_BYTES: usize = 64 * 1024;
 ///
 /// This matches the supported private-frame ceiling without parsing the opaque
 /// payload, allowing one fragmented logical record to survive a delayed consumer.
-pub const MAX_INCOMING_CHANNEL_QUEUED_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_INCOMING_CHANNEL_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum queued data across a complete graphical relay session.
 pub const MAX_SESSION_QUEUED_BYTES: usize = MAX_LOGICAL_CHANNELS * MAX_CHANNEL_QUEUED_BYTES;
 
