@@ -1,0 +1,125 @@
+{
+  "schema": "splinterm.pr7.divider-matrix.v1",
+  "result": "pass",
+  "error": null,
+  "commit": "7813220e757535d8a3bad18717d8122a4c1fd5e6",
+  "workspace": 8,
+  "monitor": "DP-2",
+  "expected_records": 16,
+  "desktop_unchanged": true,
+  "cleanup_clean": true,
+  "captures": [
+    {
+      "label": "two-lr-1",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 304,
+      "inactive_pixels": 304
+    },
+    {
+      "label": "two-lr-2",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 304,
+      "inactive_pixels": 304
+    },
+    {
+      "label": "two-tb-1",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 444,
+      "inactive_pixels": 444
+    },
+    {
+      "label": "two-tb-2",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 444,
+      "inactive_pixels": 444
+    },
+    {
+      "label": "tee-left-1",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 608,
+      "inactive_pixels": 444
+    },
+    {
+      "label": "tee-left-2",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 748,
+      "inactive_pixels": 304
+    },
+    {
+      "label": "tee-left-3",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 749,
+      "inactive_pixels": 303
+    },
+    {
+      "label": "tee-right-1",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 747,
+      "inactive_pixels": 304
+    },
+    {
+      "label": "tee-right-2",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 748,
+      "inactive_pixels": 303
+    },
+    {
+      "label": "tee-right-3",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 608,
+      "inactive_pixels": 443
+    },
+    {
+      "label": "tee-top-1",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 888,
+      "inactive_pixels": 304
+    },
+    {
+      "label": "tee-top-2",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 748,
+      "inactive_pixels": 444
+    },
+    {
+      "label": "tee-top-3",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 749,
+      "inactive_pixels": 443
+    },
+    {
+      "label": "tee-bottom-1",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 747,
+      "inactive_pixels": 444
+    },
+    {
+      "label": "tee-bottom-2",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 748,
+      "inactive_pixels": 443
+    },
+    {
+      "label": "tee-bottom-3",
+      "width": 888,
+      "height": 642,
+      "active_pixels": 888,
+      "inactive_pixels": 303
+    }
+  ]
+}
