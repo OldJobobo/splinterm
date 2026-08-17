@@ -59,9 +59,12 @@ committed.
 
 ## Bounded graphical sequence
 
-The client mapped on workspace 8 / DP-2 with no initial focus. Launch-time
-opaque/no-blur window properties made configured source RGB values directly
-measurable. The exact staged address was focused once to activate rendering and
+The client mapped on workspace 8 / DP-2 with no initial focus. Every window
+capture records workspace 8 on compositor monitor ID `1`.
+`monitor-topology-after-cleanup.json`, captured read-only from the same
+compositor session, maps ID `1` to `DP-2` and still records active workspace 8
+there. Launch-time opaque/no-blur window properties made configured source RGB
+values directly measurable. The exact staged address was focused once to activate rendering and
 the recorded original focus was immediately restored. No automated pointer or
 keyboard input was used during the follow-up acceptance sequence.
 
@@ -117,5 +120,7 @@ pointer assertions.
   records, candidate hashes/stats, per-process socket maps, and `ss` captures
 - stable theme/reload/selection window identity JSON
 - pre-test and post-cleanup focus, cursor, client inventory, and comparison JSON
+- post-cleanup same-session monitor topology mapping ID `1` / workspace 8 to
+  `DP-2`
 - before/after Pacman integrity records
 - `SHA256SUMS` covering the complete retained evidence bundle
