@@ -21,8 +21,10 @@ its squash-merged maintenance commit `d3cbbc6b` have the identical tree
 `48d6418c`. The retained `.BUILDINFO` PKGBUILD hash matches the PKGBUILD from
 that tree. `package-member-sha256.txt` hashes the three tested executables
 directly from the package archive and matches both the staged-file and
-live-process hashes. Retained package metadata, archive manifest, PKGBUILD, and
-build script complete the upstream package/source link.
+live-process hashes. Retained package metadata, archive manifest, PKGBUILD,
+canonical build-script Git blob identity, and the replayable
+`verify-source-package-provenance.sh` complete the upstream package/source
+link.
 
 ## Live packaged-runtime provenance
 
@@ -115,7 +117,8 @@ pointer assertions.
   `03-theme-a-live-reload.png`, `04-theme-a-selection.png`
 - exact staged config and native Theme A/B inputs under `inputs/`
 - package/source provenance, package metadata and archive manifest, retained
-  PKGBUILD/build script, and direct package-member hashes
+  PKGBUILD, canonical build-script blob identity, replayable verifier, and
+  direct package-member hashes
 - live runtime identity: `runtime-identity.json`, raw client/daemon `/proc`
   records, candidate hashes/stats, per-process socket maps, and `ss` captures
 - stable theme/reload/selection window identity JSON

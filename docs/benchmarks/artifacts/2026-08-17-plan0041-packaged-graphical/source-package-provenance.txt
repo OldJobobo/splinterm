@@ -16,10 +16,14 @@ package_file=splinterm-0.1.0alpha3.3-1-x86_64.pkg.tar.zst
 package_sha256=22f21317c17bbcfc510d99f6fdb9f3a593e7ab08736bcb8180527c8e2cac3c0b
 package_pkgbuild_sha256=3e42eb28c6606b694a51ffe3e7591057cff92ffc1d5f7570ce4a6f7d7f25b14f
 retained_pkgbuild_sha256=3e42eb28c6606b694a51ffe3e7591057cff92ffc1d5f7570ce4a6f7d7f25b14f
-retained_build_script_sha256=438fc64542109ad7a829fb91b4b15cb9f145f3875b55472283af9d2355468809
+canonical_build_script_path=tools/package/build-local-package.sh
+canonical_build_script_blob=336c1882942eb99fe31b28be81964f8f889cc221
+canonical_build_script_sha256=438fc64542109ad7a829fb91b4b15cb9f145f3875b55472283af9d2355468809
+provenance_verifier=verify-source-package-provenance.sh
 
-The retained build script rejects tracked source changes, creates the source archive from clean HEAD with git archive, then invokes makepkg --cleanbuild.
+The canonical build script at package_build_source_commit rejects tracked source changes, creates the source archive from clean HEAD with git archive, then invokes makepkg --cleanbuild.
 git get-tar-commit-id reads 450f6cbb directly from the exact source archive left beside the package.
 That source commit and its squash-merged maintenance commit d3cbbc6b have identical Git tree IDs.
 The package .BUILDINFO PKGBUILD hash matches the PKGBUILD retained from that exact source tree.
 package-member-sha256.txt hashes each tested executable directly from the package archive; those hashes match candidate.sha256 and runtime-identity.json.
+verify-source-package-provenance.sh replays the source tree, embedded archive commit, PKGBUILD, package hash, and direct member assertions from explicit REPO, PACKAGE, and SOURCE_ARCHIVE arguments.
