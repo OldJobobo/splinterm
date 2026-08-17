@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "splinterd"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "anyhow",
  "nix",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-automation-client"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "anyhow",
  "rustix",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-core"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-filemap"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "memmap2",
  "rustix",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-freetype"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "freetype-rs",
  "splinterm-pixman",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-graphical-relay"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "anyhow",
  "tokio",
@@ -1247,7 +1247,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-mcp"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "anyhow",
  "rmcp",
@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-pixman"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "libc",
  "pixman-sys",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-protocol"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "base64",
  "rustix",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-pty"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "rustix",
  "thiserror",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-relay"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "anyhow",
  "nix",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "splinterm-terminal"
-version = "0.1.0-alpha3.3"
+version = "0.1.0-beta1"
 dependencies = [
  "base64",
  "flate2",
