@@ -217,7 +217,10 @@ calibration missed the row; the agent then captured and verified the exact
 selection pixels without further input. Cleanup restored the recorded focus and
 pointer, left workspace 8 empty, removed every owned process and temporary
 file, and ended with `pacman -Qkk splinterm` reporting 56 files and zero
-alterations. Evidence is recorded under
+alterations. The unrelated restored Foot window retained its address, PID,
+size, workspace, and monitor, but Hyprland reported its y position 4 px lower;
+it was not repositioned outside the bounded authorization. Evidence is recorded
+under
 `docs/benchmarks/artifacts/2026-08-17-plan0041-packaged-graphical/`.
 
 ## Beta 1 acceptance

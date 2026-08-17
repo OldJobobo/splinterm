@@ -58,8 +58,11 @@ selection evidence in `04-theme-a-selection.png`.
   stopped.
 - Private socket, extracted package root, config, state, theme, and logs removed.
 - Workspace 8 contained zero windows.
-- Original Foot address `0x55d2cdf21a40` restored on workspace 6 / monitor 2,
-  matching `focus-before.json` and `focus-after-cleanup.json`.
+- Original Foot address `0x55d2cdf21a40`, PID, size, workspace 6, and monitor
+  2 were restored. Hyprland reported its y position as `522` after cleanup
+  versus `518` before, a disclosed 4 px residual. The test did not intentionally
+  move this unrelated tiled/scrolling window, and it was not repositioned after
+  the bounded authorization ended.
 - Pointer changed only from recorded `(3280, 1119)` to `(3280, 1118)`, within
   one pixel, as recorded in the before/after cursor files.
 - `pacman -Qkk splinterm`: `56 total files, 0 altered files` before and after.
