@@ -1,7 +1,7 @@
 # Plan 0041: Beta 1 active-tab foreground contrast
 
-- **Status:** Implementation revised and focused validation complete; fresh review
-  and packaged graphical acceptance pending for `0.1.0-beta.1`
+- **Status:** Implementation, complete non-graphical validation, and fresh review
+  accepted; packaged graphical acceptance pending for `0.1.0-beta.1`
 - **Date:** 2026-08-14
 - **Product authority:** Active Dojo-tab chrome derives from standard Omarchy
   and Foot roles without requiring app-specific additions to `colors.toml`; its
@@ -174,6 +174,12 @@ Before release integration, run the repository's complete serialized workspace,
 release-tooling, package, portable Foot-provenance, and documentation boundaries.
 Record any known unrelated flaky failure plus its exact isolated rerun rather
 than weakening or silently skipping the boundary.
+
+The reviewed implementation boundary at `9316a5f` passed the focused config,
+tab-renderer, and exporter tests; the complete serialized workspace; all-target
+warnings-denied Clippy; all 63 benchmark tests; release/package/automation
+unittests; portable Foot provenance; automation contract fixtures; formatting;
+and `git diff --check`. Fresh read-only review `4c6bdf91` returned **CLEAN**.
 
 ## Packaged graphical acceptance
 

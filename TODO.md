@@ -9,7 +9,7 @@
 - [x] Support explicit strict-JSON active-tab roles and deterministic
   higher-contrast endpoint fallbacks when they are absent.
 - [x] Pass focused non-graphical validation.
-- [ ] Pass the complete serialized boundary and fresh read-only review.
+- [x] Pass the complete serialized boundary and fresh read-only review.
 - [ ] Complete separately approved packaged graphical acceptance before release.
 
 Version integration, candidate construction, publication, and AUR distribution
