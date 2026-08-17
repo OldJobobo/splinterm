@@ -1342,9 +1342,27 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
     assert generated["blur"] is True
     assert generated["background"] == legacy["background"]
     assert generated["selection_foreground"] == legacy["foreground"]
-    assert generated["active_tab_background"] == legacy["selection_background"]
-    explicit = module.generate({**legacy, "active_tab_background": "#303132"})
-    assert explicit["active_tab_background"] == "#303132"
+    assert generated["active_tab_background"] == legacy["color8"]
+    assert generated["active_tab_foreground"] == legacy["foreground"]
+    assert generated["active_tab_background"] != legacy["selection_background"]
+    semantic_ramp = module.generate({**legacy, "lighter_bg": "#f8f9fa"})
+    assert semantic_ramp["active_tab_background"] == "#f8f9fa"
+    assert semantic_ramp["active_tab_foreground"] == legacy["background"]
+    assert semantic_ramp["selection"] == legacy["selection_background"]
+    ignored_extensions = module.generate(
+        {
+            **legacy,
+            "active_tab_background": "#303132",
+            "active_tab_foreground": "#a0b0c0",
+        }
+    )
+    assert ignored_extensions["active_tab_background"] == legacy["color8"]
+    assert ignored_extensions["active_tab_foreground"] == legacy["foreground"]
+    light_tab = module.generate({**legacy, "lighter_bg": "#f0f1f2"})
+    assert light_tab["active_tab_foreground"] == legacy["background"]
+    assert module.active_tab_foreground_fallback(
+        "#123456", "#123456", "#789abc"
+    ) == "#123456"
     assert generated["ansi"][0] == legacy["color0"]
     assert generated["ansi"][15] == legacy["color15"]
 
