@@ -868,7 +868,8 @@ def validate_relay_runtime(daemon: Path, client: Path, relay: Path) -> None:
 def validate_theme_generator(root: Path) -> None:
     colors = {
         "accent": "#010203", "bg": "#101112", "darker_bg": "#000000",
-        "selection": "#202122", "muted": "#303132", "fg": "#d0d1d2",
+        "selection": "#202122", "muted": "#303132", "color8": "#404142",
+        "fg": "#d0d1d2",
         "bright_fg": "#ffffff", "red": "#800000", "yellow": "#808000",
         "green": "#008000", "cyan": "#008080", "blue": "#000080",
         "magenta": "#800080", "bright_red": "#ff0000",
@@ -886,6 +887,9 @@ def validate_theme_generator(root: Path) -> None:
         generated = json.loads(output.read_text(encoding="utf-8"))
         assert generated["background"] == colors["bg"]
         assert generated["cursor"] == colors["accent"]
+        assert generated["selection"] == colors["selection"]
+        assert generated["active_tab_background"] == colors["color8"]
+        assert generated["active_tab_foreground"] == colors["fg"]
         assert generated["alpha"] == 0.85
         assert len(generated["ansi"]) == 16
 
