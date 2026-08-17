@@ -10,6 +10,7 @@ fn main() {
         "inspect" => inspect(),
         "resize" => resize(),
         "echo" => echo(),
+        "handoff" => handoff(),
         "argv" => argv(),
         "wait" => wait(),
         _ => process::exit(64),
@@ -94,6 +95,36 @@ fn echo() {
     io::stdout().flush().unwrap();
     let line = io::stdin().lock().lines().next().unwrap().unwrap();
     println!("ECHO:{line}");
+}
+
+fn handoff() {
+    println!("READY");
+    io::stdout().flush().unwrap();
+    for line in io::stdin().lock().lines() {
+        let line = line.unwrap();
+        match line.as_str() {
+            "exit" => break,
+            "size" => {
+                let size = rustix::termios::tcgetwinsize(io::stdin()).unwrap();
+                println!(
+                    "SIZE={}x{}+{}x{}",
+                    size.ws_col, size.ws_row, size.ws_xpixel, size.ws_ypixel
+                );
+            }
+            _ if line.starts_with("burst ") => {
+                let mut fields = line.split_whitespace();
+                assert_eq!(fields.next(), Some("burst"));
+                let label = fields.next().unwrap();
+                let count = fields.next().unwrap().parse::<usize>().unwrap();
+                assert!(fields.next().is_none());
+                for index in 0..count {
+                    println!("BURST:{label}:{index:04}");
+                }
+            }
+            _ => println!("ECHO:{line}"),
+        }
+        io::stdout().flush().unwrap();
+    }
 }
 
 fn argv() {
