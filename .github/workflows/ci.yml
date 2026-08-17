@@ -46,6 +46,7 @@ jobs:
       - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh
       - run: |
           python -m unittest \
+            tools/automation/test_dojo_picker.py \
             tools/package/test_release_manifest.py \
             tools/package/test_installer_safety.py \
             tools/release/test_prepare_candidate.py \
