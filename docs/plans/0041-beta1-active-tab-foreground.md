@@ -1,7 +1,8 @@
 # Plan 0041: Beta 1 active-tab foreground contrast
 
-- **Status:** Implementation, complete non-graphical validation, and fresh review
-  accepted; packaged graphical acceptance pending for `0.1.0-beta.1`
+- **Status:** Implementation, complete non-graphical validation, fresh review,
+  package validation, and packaged graphical acceptance accepted for
+  `0.1.0-beta.1`
 - **Date:** 2026-08-14
 - **Product authority:** Active Dojo-tab chrome derives from standard Omarchy
   and Foot roles without requiring app-specific additions to `colors.toml`; its
@@ -183,8 +184,9 @@ and `git diff --check`. Fresh read-only review `4c6bdf91` returned **CLEAN**.
 
 ## Packaged graphical acceptance
 
-After separate approval under the repository graphical-testing rules and after
-an approved adjacent packaged client installation:
+After separate approval under the repository graphical-testing rules, use an
+adjacent staged packaged client and daemon on an explicit private
+`SPLINTERM_SOCKET`; do not replace the Pacman-owned installation:
 
 1. select an Omarchy theme in one isolated Splinterm test Window;
 2. prove the active tab body uses that theme's standard `lighter_bg` and the
@@ -202,6 +204,28 @@ an approved adjacent packaged client installation:
 Abort on wrong-window input, unrelated theme/config mutation, loss of exact
 selected-tab background behavior, selection-color regression, or incomplete
 cleanup.
+
+Acceptance completed at maintenance commit `d3cbbc6` with package SHA-256
+`22f21317c17bbcfc510d99f6fdb9f3a593e7ab08736bcb8180527c8e2cac3c0b`.
+The accepted follow-up used the real Wayland runtime only for compositor access
+and an explicit private Splinterm socket, config, state, theme, and process
+hierarchy. The retained package metadata, direct archive-member hashes,
+PKGBUILD, canonical build-script blob identity, replayable verification of the
+checksummed source archive against the reachable merge tree, and a clean source
+rebuild whose executable member hashes match the tested package tie that
+package to the merged source. Contemporaneous evidence then ties the graphical
+client PID, adjacent staged client and daemon executable paths, hashes,
+device/inode identities, environments, and daemon-owned private sockets
+together while live. Retained staged theme inputs and exact rendered pixels
+proved native `lighter_bg`, Foot `bright0` fallback,
+higher-contrast text, accent underline, independent Foot selection colors, and
+same-process live reload. The user selected the terminal row on the uniquely
+identified staged window; the agent captured it without automated pointer or
+keyboard input. Cleanup left workspace 8 empty, removed every owned process and
+temporary file, restored the recorded focus, window geometry, and pointer
+exactly, and ended with `pacman -Qkk splinterm` reporting 56 files and zero
+alterations. Evidence is recorded under
+`docs/benchmarks/artifacts/2026-08-17-plan0041-packaged-graphical/`.
 
 ## Beta 1 acceptance
 

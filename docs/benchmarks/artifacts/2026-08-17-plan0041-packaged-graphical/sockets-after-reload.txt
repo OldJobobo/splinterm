@@ -1,0 +1,2 @@
+u_str LISTEN 0      4096                                              /tmp/splinterm-plan0041-provenance-v3/splinterd.sock 79967628            * 0    users:(("splinterd",pid=3939236,fd=9))
+u_str LISTEN 0      4096                                      /tmp/splinterm-plan0041-provenance-v3/splinterd.sock.content 79967630            * 0    users:(("splinterd",pid=3939236,fd=10))
