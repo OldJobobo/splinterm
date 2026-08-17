@@ -1,5 +1,20 @@
 # TODO
 
+## Beta 1 active-tab foreground contrast patch
+
+- [ ] Complete [Plan 0041](docs/plans/0041-beta1-active-tab-foreground.md).
+- [x] Derive native active-tab bodies from standard Omarchy `lighter_bg`, then
+  effective Foot `bright0`, without app-specific theme roles.
+- [x] Keep terminal selection colors independent from active Dojo-tab chrome.
+- [x] Support explicit strict-JSON active-tab roles and deterministic
+  higher-contrast endpoint fallbacks when they are absent.
+- [x] Pass focused non-graphical validation.
+- [x] Pass the complete serialized boundary and fresh read-only review.
+- [ ] Complete separately approved packaged graphical acceptance before release.
+
+Version integration, candidate construction, publication, and AUR distribution
+remain separate release-boundary work.
+
 ## Alpha3.3 numbered default Dojo names
 
 - [x] Complete [Plan 0040](docs/plans/0040-numbered-default-dojo-names.md).
