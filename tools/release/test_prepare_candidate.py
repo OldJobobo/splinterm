@@ -20,6 +20,34 @@ class PrepareCandidateTests(unittest.TestCase):
         version = MODULE.workspace_version()
         self.assertEqual(MODULE.validate_versions(version), version.replace("-", ""))
 
+    def test_candidate_packaging_uses_version_neutral_install_copy_and_matching_split_names(self) -> None:
+        canonical_install = (ROOT / "packaging/splinterm.install").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "Splinterm installed for the documented Arch/Omarchy target.",
+            canonical_install,
+        )
+        self.assertNotIn("public alpha", canonical_install)
+        for path in (
+            ROOT / "packaging/aur/splinterm.install",
+            ROOT / "packaging/aur-bin/splinterm.install",
+        ):
+            self.assertEqual(path.read_text(encoding="utf-8"), canonical_install)
+
+        source_recipe = (ROOT / "packaging/aur/PKGBUILD").read_text(encoding="utf-8")
+        binary_recipe = (ROOT / "packaging/aur-bin/PKGBUILD").read_text(encoding="utf-8")
+        self.assertIn(
+            "'splinterm-mcp: explicitly configured MCP stdio adapter'", source_recipe
+        )
+        self.assertIn(
+            "'splinterm-mcp-bin: explicitly configured MCP stdio adapter'",
+            binary_recipe,
+        )
+        self.assertNotIn(
+            "'splinterm-mcp: explicitly configured MCP stdio adapter'", binary_recipe
+        )
+
     def test_website_only_archive_exclusions_are_declared(self) -> None:
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
         self.assertIn("/site/ export-ignore", attributes)
