@@ -21,6 +21,8 @@ EVENT_SCHEMA = "splinterm.cli.event.v2"
 MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 READ_CHUNK_BYTES = 16 * 1024
+MAX_GRID_COLUMNS = 480
+MAX_GRID_ROWS = 128
 ERROR_CODES = {
     "authentication_failed", "handshake_required", "incompatible_version",
     "invalid_request", "unsupported_schema", "consent_unavailable", "consent_denied",
@@ -298,9 +300,9 @@ def validate_terminal_event(
         if not (
             data.get("content_encoding") == "unicode_scalars"
             and isinstance(data.get("columns"), int)
-            and 1 <= data["columns"] <= 240
+            and 1 <= data["columns"] <= MAX_GRID_COLUMNS
             and isinstance(data.get("rows"), int)
-            and 1 <= data["rows"] <= 80
+            and 1 <= data["rows"] <= MAX_GRID_ROWS
             and isinstance(data.get("title"), str)
             and isinstance(data.get("visible_rows"), list)
         ):
