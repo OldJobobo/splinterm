@@ -1,4 +1,4 @@
 22f21317c17bbcfc510d99f6fdb9f3a593e7ab08736bcb8180527c8e2cac3c0b  /home/oldjobobo/Projects/splinterm-worktrees/0041-packaged-acceptance/packaging/splinterm-0.1.0alpha3.3-1-x86_64.pkg.tar.zst
-afb65d3c0598d13939933789075ed24f7f44b912e6b052e926113738b14d93c8  /tmp/splinterm-plan0041-package-root-v2/usr/bin/splinterm
-62e68414de51d5ce0e4f75412d93d581557eb430fe850607c3bb9966c52ea416  /tmp/splinterm-plan0041-package-root-v2/usr/bin/splinterd
-e43de0a260dc37f2ba4680d525c3cdd3bf29ce72d694eb025ff4f42a2de3d7ca  /tmp/splinterm-plan0041-package-root-v2/usr/bin/splinterm-pty-child
+afb65d3c0598d13939933789075ed24f7f44b912e6b052e926113738b14d93c8  /tmp/splinterm-plan0041-provenance-v3/pkgroot/usr/bin/splinterm
+62e68414de51d5ce0e4f75412d93d581557eb430fe850607c3bb9966c52ea416  /tmp/splinterm-plan0041-provenance-v3/pkgroot/usr/bin/splinterd
+e43de0a260dc37f2ba4680d525c3cdd3bf29ce72d694eb025ff4f42a2de3d7ca  /tmp/splinterm-plan0041-provenance-v3/pkgroot/usr/bin/splinterm-pty-child

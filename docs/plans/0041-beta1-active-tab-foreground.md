@@ -207,22 +207,19 @@ cleanup.
 
 Acceptance completed at maintenance commit `d3cbbc6` with package SHA-256
 `22f21317c17bbcfc510d99f6fdb9f3a593e7ab08736bcb8180527c8e2cac3c0b`.
-The isolated test used the real Wayland runtime only for compositor access and
-an explicit private Splinterm socket, config, state, theme, and process
-hierarchy. The evidence ties the graphical PID and adjacent staged client and
-daemon executable paths and hashes to that private socket. Exact rendered
-pixels proved native `lighter_bg`, Foot `bright0`
-fallback, higher-contrast text, accent underline, independent Foot selection
-colors, and same-process live reload. The selected terminal row was created by
-the user on the uniquely identified staged window after the automated drag
-calibration missed the row; the agent then captured and verified the exact
-selection pixels without further input. Cleanup restored the recorded focus and
-pointer, left workspace 8 empty, removed every owned process and temporary
-file, and ended with `pacman -Qkk splinterm` reporting 56 files and zero
-alterations. The unrelated restored Foot window retained its address, PID,
-size, workspace, and monitor, but Hyprland reported its y position 4 px lower;
-it was not repositioned outside the bounded authorization. Evidence is recorded
-under
+The accepted follow-up used the real Wayland runtime only for compositor access
+and an explicit private Splinterm socket, config, state, theme, and process
+hierarchy. Contemporaneous evidence ties the graphical client PID, adjacent
+staged client and daemon executable paths, hashes, device/inode identities,
+environments, and daemon-owned private sockets together while live. Exact
+rendered pixels proved native `lighter_bg`, Foot `bright0` fallback,
+higher-contrast text, accent underline, independent Foot selection colors, and
+same-process live reload. The user selected the terminal row on the uniquely
+identified staged window; the agent captured it without automated pointer or
+keyboard input. Cleanup left workspace 8 empty, removed every owned process and
+temporary file, restored the recorded focus, window geometry, and pointer
+exactly, and ended with `pacman -Qkk splinterm` reporting 56 files and zero
+alterations. Evidence is recorded under
 `docs/benchmarks/artifacts/2026-08-17-plan0041-packaged-graphical/`.
 
 ## Beta 1 acceptance

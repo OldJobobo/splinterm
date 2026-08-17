@@ -1,5 +1,5 @@
 {
-  "address": "0x55d2cbf6a280",
+  "address": "0x55d2ce8b9ff0",
   "mapped": true,
   "hidden": false,
   "visible": true,
@@ -22,7 +22,7 @@
   "title": "Splinterm — local controller",
   "initialClass": "com.oldjobobo.splinterm",
   "initialTitle": "Splinterm — local controller",
-  "pid": 3615295,
+  "pid": 3939254,
   "xwayland": false,
   "pinned": false,
   "pinFullscreened": false,
@@ -36,11 +36,11 @@
     "terminal*"
   ],
   "swallowing": "0x0",
-  "focusHistoryID": 10,
+  "focusHistoryID": 0,
   "inhibitingIdle": false,
   "xdgTag": "",
   "xdgDescription": "",
   "contentType": "none",
   "tearingHint": false,
-  "stableId": "180002e0"
+  "stableId": "180002ed"
 }

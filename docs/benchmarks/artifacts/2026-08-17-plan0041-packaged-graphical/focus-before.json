@@ -1,28 +1,28 @@
 {
-  "address": "0x55d2cdf21a40",
+  "address": "0x55d2ce9c2ea0",
   "mapped": true,
   "hidden": false,
   "visible": true,
   "acceptsInput": true,
   "at": [
-    2593,
-    518
+    33,
+    53
   ],
   "size": [
-    1374,
-    1187
+    1207,
+    1354
   ],
   "workspace": {
-    "id": 6,
-    "name": "6"
+    "id": 1,
+    "name": "1"
   },
   "floating": false,
-  "monitor": 2,
+  "monitor": 0,
   "class": "foot",
-  "title": "π - thpm",
+  "title": "π - splinterm",
   "initialClass": "foot",
   "initialTitle": "Foot",
-  "pid": 2239935,
+  "pid": 3298740,
   "xwayland": false,
   "pinned": false,
   "pinFullscreened": false,
@@ -42,5 +42,5 @@
   "xdgDescription": "",
   "contentType": "none",
   "tearingHint": false,
-  "stableId": "1800021d"
+  "stableId": "180001e7"
 }
