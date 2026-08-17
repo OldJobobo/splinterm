@@ -3,9 +3,9 @@ title: Current status
 description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
 ---
 
-Splinterm is a **public alpha**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
+Splinterm is a **public beta**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
-[`v0.1.0-alpha3.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.3) is the current public prerelease. It retains the Alpha3 command/keymap, scrollback, saved-Lair, Wayland file-drop, Omarchy integration, and bounded-input fixes while starting new Lairs at `Dojo 1` and giving later implicitly created Dojos predictable per-Lair names such as `Dojo 2`. Explicit names remain unchanged.
+[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1) is the current public prerelease. It adds wide-grid support through `480×128`, bounded sparse terminal publication frames, and active-tab contrast that remains independent from terminal selection colors, while retaining the accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
 
 ## What that means
 
@@ -35,7 +35,7 @@ Splinterm is a **public alpha**. Source, documentation, and immutable versioned 
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0alpha3.3-1` |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0beta1-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 
@@ -47,4 +47,4 @@ Persistent topology is also separate from graphical presentation. Creating or mu
 
 ## Before depending on it
 
-Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Public alpha availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.
+Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Public beta availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.

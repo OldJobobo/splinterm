@@ -2,7 +2,7 @@
 
 - **Status:** Active strategic direction
 - **Horizon model:** Now / Next / Later / Explore; no date promise
-- **Product maturity:** Public alpha
+- **Product maturity:** Public beta
 - **Current-state authority:** [Current product status](status.md)
 - **Delivery authority:** [Engineering roadmap](roadmap.md) and accepted [plans](plans/)
 
@@ -56,9 +56,9 @@ product; it does not redefine Splinterm as an “AI terminal.”
 
 The labels in this document have deliberate meanings:
 
-- **Now** — product outcomes required to turn the public alpha into a confident
+- **Now** — product outcomes required to turn the public beta into a confident
   daily driver on the validated Omarchy/Arch target.
-- **Next** — outcomes required for a supported 1.0 after the alpha/beta gates are
+- **Next** — outcomes required for a supported 1.0 after the beta gates are
   satisfied.
 - **Later** — strategic expansion that follows a trustworthy primary product.
 - **Explore** — options worth researching, not commitments.
@@ -67,7 +67,7 @@ Moving an item between horizons is a product decision. Implementation plans may
 change without changing the product outcome, but they may not silently promote
 an Explore option into a promise.
 
-## Horizon 1 — Public alpha: prove the foundation (Now)
+## Horizon 1 — Public beta: earn daily-driver confidence (Now)
 
 ### Product promise
 

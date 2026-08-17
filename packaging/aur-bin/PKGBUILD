@@ -1,7 +1,7 @@
 # Maintainer: OldJobobo
 pkgbase=splinterm-bin
 pkgname=('splinterm-bin' 'splinterm-mcp-bin')
-pkgver=0.1.0alpha3.3
+pkgver=0.1.0beta1
 pkgrel=1
 _commit=11742b60cb5b502cdadb60a582b9c3c838120d2b
 arch=('x86_64')
@@ -9,8 +9,8 @@ url='https://github.com/oldjobobo/splinterm'
 license=('MIT')
 options=('!strip' '!debug')
 source=(
-  "splinterm-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.0-alpha3.3/splinterm-$_commit-$CARCH.pkg.tar.zst"
-  "splinterm-mcp-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.0-alpha3.3/splinterm-mcp-$_commit-$CARCH.pkg.tar.zst"
+  "splinterm-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.0-beta1/splinterm-$_commit-$CARCH.pkg.tar.zst"
+  "splinterm-mcp-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.0-beta1/splinterm-mcp-$_commit-$CARCH.pkg.tar.zst"
 )
 noextract=(
   "splinterm-$pkgver-$CARCH.pkg.tar.zst"
@@ -48,7 +48,7 @@ package_splinterm-bin() {
   )
   optdepends=(
     'fcitx5: Wayland text-input support'
-    'splinterm-mcp: explicitly configured MCP stdio adapter'
+    'splinterm-mcp-bin: explicitly configured MCP stdio adapter'
   )
   provides=("splinterm=$pkgver-$pkgrel")
   conflicts=('splinterm')

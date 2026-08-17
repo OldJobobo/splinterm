@@ -1,0 +1,46 @@
+{
+  "address": "0x55d2ce8b9ff0",
+  "mapped": true,
+  "hidden": false,
+  "visible": true,
+  "acceptsInput": true,
+  "at": [
+    1050,
+    -880
+  ],
+  "size": [
+    1100,
+    700
+  ],
+  "workspace": {
+    "id": 8,
+    "name": "8"
+  },
+  "floating": true,
+  "monitor": 1,
+  "class": "com.oldjobobo.splinterm",
+  "title": "Splinterm — local controller",
+  "initialClass": "com.oldjobobo.splinterm",
+  "initialTitle": "Splinterm — local controller",
+  "pid": 3939254,
+  "xwayland": false,
+  "pinned": false,
+  "pinFullscreened": false,
+  "fullscreen": 0,
+  "fullscreenClient": 0,
+  "fullscreenHandler": "default",
+  "allowedOverFullscreen": true,
+  "grouped": [],
+  "tags": [
+    "default-opacity*",
+    "terminal*"
+  ],
+  "swallowing": "0x0",
+  "focusHistoryID": 1,
+  "inhibitingIdle": false,
+  "xdgTag": "",
+  "xdgDescription": "",
+  "contentType": "none",
+  "tearingHint": false,
+  "stableId": "180002ed"
+}

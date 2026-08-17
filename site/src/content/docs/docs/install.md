@@ -1,9 +1,9 @@
 ---
 title: Installation
-description: Install or update the current Splinterm public alpha on Arch Linux and Omarchy.
+description: Install or update the current Splinterm public beta on Arch Linux and Omarchy.
 ---
 
-The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is a public alpha, not a supported stable release; upgrades may change interfaces and end daemon-owned shells.
+The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is a public beta, not a supported stable release; upgrades may change interfaces and end daemon-owned shells.
 
 ## Install the prebuilt AUR package
 

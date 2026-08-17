@@ -61,8 +61,9 @@ The first pass returned two blockers and four fixes worth doing immediately:
    requiring anonymous sealed memory-backed descriptors with no named fallback
    and crash, kill, hang, and service-cleanup evidence.
 5. **The PRD could imply current conditional upgrade continuity.** Resolved by
-   stating explicitly that no currently released-alpha package upgrade preserves
-   processes and that negotiated continuity is an unimplemented `0.2.0` target.
+   stating explicitly that no then-currently released alpha package upgrade
+   preserved processes and that negotiated continuity is an unimplemented
+   `0.2.0` target.
 6. **Listener recreation contradicted listener preservation.** Resolved by using
    listener descriptor adoption/re-registration consistently.
 
