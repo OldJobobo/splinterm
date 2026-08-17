@@ -14,6 +14,7 @@ ROLE_ALIASES = {
     "accent": ("accent", "cursor"),
     "bg": ("bg", "background"),
     "darker_bg": ("darker_bg", "color0"),
+    "lighter_bg": ("lighter_bg", "color8"),
     "selection": ("selection", "selection_background"),
     "muted": ("muted", "color8"),
     "fg": ("fg", "foreground"),
@@ -127,20 +128,15 @@ def generate(
     roles["selection_foreground"] = colors.get(
         "selection_foreground", roles["fg"]
     )
-    roles["active_tab_background"] = colors.get(
-        "active_tab_background", roles["selection"]
-    )
+    roles["active_tab_background"] = roles["lighter_bg"]
     missing = [name for name, value in roles.items() if value is None]
     if missing:
         raise ValueError("missing Omarchy roles: " + ", ".join(missing))
     for name, value in roles.items():
         validate_role(name, value)
-    active_tab_foreground = colors.get("active_tab_foreground")
-    if active_tab_foreground is None:
-        active_tab_foreground = active_tab_foreground_fallback(
-            roles["bg"], roles["fg"], roles["active_tab_background"]
-        )
-    validate_role("active_tab_foreground", active_tab_foreground)
+    active_tab_foreground = active_tab_foreground_fallback(
+        roles["bg"], roles["fg"], roles["active_tab_background"]
+    )
     roles["active_tab_foreground"] = active_tab_foreground
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha must be between 0.0 and 1.0")

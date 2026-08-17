@@ -569,8 +569,8 @@ impl Default for ResolvedTheme {
             cursor: 0xebebeb,
             selection: 0x354a60,
             selection_foreground: 0xebebeb,
-            active_tab_background: 0x354a60,
-            active_tab_foreground: 0xebebeb,
+            active_tab_background: 0x928374,
+            active_tab_foreground: 0x0e1216,
             url: 0x78beff,
             ui_accent: 0x78d2ff,
             pane_border: 0x7c7e80,
@@ -658,7 +658,7 @@ impl ThemePalette {
             .as_deref()
             .map(parse_color)
             .transpose()?
-            .unwrap_or(selection);
+            .unwrap_or(ansi[8]);
         let active_tab_foreground = self
             .active_tab_foreground
             .as_deref()
@@ -805,19 +805,13 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         .context("active Omarchy foot.ini has invalid cursor")?
         .unwrap_or(foreground);
     let active_tab_background = colors
-        .get("active_tab_background")
+        .get("lighter_bg")
         .map(|value| parse_color(value))
         .transpose()
-        .context("active Omarchy colors.toml has invalid active_tab_background")?
-        .unwrap_or(selection);
-    let active_tab_foreground = colors
-        .get("active_tab_foreground")
-        .map(|value| parse_color(value))
-        .transpose()
-        .context("active Omarchy colors.toml has invalid active_tab_foreground")?
-        .unwrap_or_else(|| {
-            active_tab_foreground_fallback(background, foreground, active_tab_background)
-        });
+        .context("active Omarchy colors.toml has invalid lighter_bg")?
+        .unwrap_or(ansi[8]);
+    let active_tab_foreground =
+        active_tab_foreground_fallback(background, foreground, active_tab_background);
     let ui_accent = ["accent", "cursor", "color4", "blue"]
         .iter()
         .find_map(|key| colors.get(*key))
@@ -1276,7 +1270,7 @@ mod tests {
 
     #[test]
     fn native_omarchy_theme_uses_effective_foot_palette_and_semantic_accent() {
-        let colors = "accent = \"0x010203\" # inline comment\nactive_tab_background = \"#070809\"\nactive_tab_foreground = \"#0a0b0c\"\n";
+        let colors = "accent = \"0x010203\" # inline comment\nlighter_bg = \"#070809\"\n";
         let foot = "[colors]\nforeground=000003\nbackground=000001\nselection-foreground=000002\nselection-background=000004\ncursor=000001 000006\nalpha=0.75\nblur=yes\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n";
         let theme = resolve_omarchy_theme(colors, foot).unwrap();
         assert_eq!(theme.background, 1);
@@ -1285,7 +1279,7 @@ mod tests {
         assert_eq!(theme.selection, 4);
         assert_eq!(theme.selection_foreground, 2);
         assert_eq!(theme.active_tab_background, 0x07_08_09);
-        assert_eq!(theme.active_tab_foreground, 0x0a_0b_0c);
+        assert_eq!(theme.active_tab_foreground, theme.background);
         assert_eq!(theme.url, 4);
         assert_eq!(theme.ui_accent, 0x01_02_03);
         assert_eq!(theme.pane_border, 8);
@@ -1313,7 +1307,7 @@ mod tests {
         let resolved = resolve_omarchy_theme("cursor=\"#000006\"", &foot).unwrap();
         assert_eq!(resolved.background, 2);
         assert_eq!(resolved.selection_foreground, resolved.foreground);
-        assert_eq!(resolved.active_tab_background, resolved.selection);
+        assert_eq!(resolved.active_tab_background, resolved.ansi[8]);
         assert!(
             resolve_omarchy_theme("accent=\"#000006\"", "[colors-dark]\nbackground=000001")
                 .unwrap_err()
@@ -1327,6 +1321,28 @@ mod tests {
                 .to_string()
                 .contains("no [colors-dark] or [colors] palette")
         );
+    }
+
+    #[test]
+    fn missing_active_tab_background_uses_the_normal_background_ramp() {
+        let foot = complete_foot_palette("101112", "d0d1d2", "f0e0d0", "c0b0a0");
+
+        let semantic = resolve_omarchy_theme("lighter_bg=\"#f8f9fa\"\n", &foot).unwrap();
+        assert_eq!(semantic.selection, 0xf0_e0_d0);
+        assert_eq!(semantic.active_tab_background, 0xf8_f9_fa);
+        assert_eq!(semantic.active_tab_foreground, semantic.background);
+
+        let ignored_extensions = resolve_omarchy_theme(
+            "lighter_bg=\"#f8f9fa\"\nactive_tab_background=\"#010203\"\nactive_tab_foreground=\"#ffffff\"\n",
+            &foot,
+        )
+        .unwrap();
+        assert_eq!(ignored_extensions, semantic);
+
+        let legacy = resolve_omarchy_theme("", &foot).unwrap();
+        assert_eq!(legacy.selection, 0xf0_e0_d0);
+        assert_eq!(legacy.active_tab_background, legacy.ansi[8]);
+        assert_ne!(legacy.active_tab_background, legacy.selection);
     }
 
     #[test]
@@ -1403,8 +1419,9 @@ mod tests {
         let resolved = theme.resolve().unwrap();
         assert_eq!(resolved.background, 1);
         assert_eq!(resolved.selection_foreground, 3);
-        assert_eq!(resolved.active_tab_background, resolved.selection);
+        assert_eq!(resolved.active_tab_background, resolved.ansi[8]);
         assert_eq!(resolved.active_tab_foreground, resolved.background);
+        assert_ne!(resolved.active_tab_background, resolved.selection);
         assert_eq!(resolved.ui_accent, 6);
         assert_eq!(resolved.pane_border, 2);
         assert_eq!(resolved.pane_border_active, 6);
@@ -1475,43 +1492,28 @@ mod tests {
             .unwrap()
             .resolve()
             .unwrap();
-        assert_eq!(resolved.active_tab_background, resolved.selection);
-        assert_eq!(resolved.active_tab_foreground, resolved.background);
+        assert_eq!(resolved.active_tab_background, resolved.ansi[8]);
+        assert_eq!(resolved.active_tab_foreground, resolved.foreground);
 
-        let dark_tab = json.replace("\"selection\":\"#ffffff\"", "\"selection\":\"#000000\"");
-        let resolved = serde_json::from_str::<ThemePalette>(&dark_tab)
+        let different_selection =
+            json.replace("\"selection\":\"#ffffff\"", "\"selection\":\"#000000\"");
+        let resolved = serde_json::from_str::<ThemePalette>(&different_selection)
             .unwrap()
             .resolve()
             .unwrap();
+        assert_eq!(resolved.active_tab_background, resolved.ansi[8]);
         assert_eq!(resolved.active_tab_foreground, resolved.foreground);
     }
 
     #[test]
-    fn native_active_tab_foreground_is_independent_and_invalid_values_fail_closed() {
+    fn native_active_tab_foreground_is_derived_from_standard_omarchy_roles() {
         let foot = complete_foot_palette("141d23", "f2e8d5", "e6c93a", "b69f80");
-        let dispatch = resolve_omarchy_theme(
-            "active_tab_background=\"#e6c93a\"\nactive_tab_foreground=\"#141d23\"\naccent=\"#00aaff\"\n",
-            &foot,
-        )
-        .unwrap();
+        let dispatch =
+            resolve_omarchy_theme("lighter_bg=\"#e6c93a\"\naccent=\"#00aaff\"\n", &foot).unwrap();
         assert_eq!(dispatch.active_tab_background, 0xe6_c9_3a);
         assert_eq!(dispatch.active_tab_foreground, 0x14_1d_23);
         assert!((contrast_ratio(0x14_1d_23, 0xe6_c9_3a) - 10.39).abs() < 0.01);
         assert_eq!(dispatch.selection_foreground, 0xb6_9f_80);
-
-        let fallback = resolve_omarchy_theme(
-            "active_tab_background=\"#e6c93a\"\naccent=\"#00aaff\"\n",
-            &foot,
-        )
-        .unwrap();
-        assert_eq!(fallback.active_tab_foreground, fallback.background);
-
-        assert!(
-            resolve_omarchy_theme("active_tab_foreground=\"invalid\"\n", &foot)
-                .unwrap_err()
-                .to_string()
-                .contains("invalid active_tab_foreground")
-        );
 
         let json = r##"{"background":"#000000","foreground":"#ffffff","cursor":"#ffffff","selection":"#ffffff","active_tab_foreground":"#141d23","url":"#0000ff","ui_accent":"#00ffff","ansi":["#000000","#000001","#000002","#000003","#000004","#000005","#000006","#000007","#000008","#000009","#00000a","#00000b","#00000c","#00000d","#00000e","#00000f"]}"##;
         for invalid in ["invalid", "141d23", "0x141d23"] {

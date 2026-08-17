@@ -3,15 +3,13 @@
 ## Beta 1 active-tab foreground contrast patch
 
 - [ ] Complete [Plan 0041](docs/plans/0041-beta1-active-tab-foreground.md).
-- [x] Add optional `active_tab_foreground` roles to native Omarchy and strict
-  JSON theme resolution.
-- [x] Keep terminal `selection_foreground` independent from active Dojo-tab text.
-- [x] Fall back deterministically to the theme background or foreground with
-  higher contrast against the resolved active-tab background.
-- [x] Prove Dispatch resolves `#141d23` text on `#e6c93a` without changing its
-  terminal selection colors.
-- [x] Pass focused and serial non-graphical validation plus fresh read-only
-  review.
+- [x] Derive native active-tab bodies from standard Omarchy `lighter_bg`, then
+  effective Foot `bright0`, without app-specific theme roles.
+- [x] Keep terminal selection colors independent from active Dojo-tab chrome.
+- [x] Support explicit strict-JSON active-tab roles and deterministic
+  higher-contrast endpoint fallbacks when they are absent.
+- [x] Pass focused non-graphical validation.
+- [ ] Pass the complete serialized boundary and fresh read-only review.
 - [ ] Complete separately approved packaged graphical acceptance before release.
 
 Version integration, candidate construction, publication, and AUR distribution

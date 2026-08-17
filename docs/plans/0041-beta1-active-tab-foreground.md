@@ -1,47 +1,38 @@
 # Plan 0041: Beta 1 active-tab foreground contrast
 
-- **Status:** Implementation, non-graphical validation, and review complete; packaged graphical acceptance pending for `0.1.0-beta.1`
+- **Status:** Implementation revised and focused validation complete; fresh review
+  and packaged graphical acceptance pending for `0.1.0-beta.1`
 - **Date:** 2026-08-14
-- **Product authority:** Active Dojo-tab text has its own optional theme role and
-  never borrows terminal selection text color implicitly
+- **Product authority:** Active Dojo-tab chrome derives from standard Omarchy
+  and Foot roles without requiring app-specific additions to `colors.toml`; its
+  body and text never borrow terminal selection colors implicitly
 - **Depends on:** native Omarchy theme discovery, strict JSON theme resolution,
   and the accepted exact-color selected-tab rendering path
 
 ## Decision
 
-Add an optional `active_tab_foreground` role to Splinterm's native Omarchy and
-JSON theme inputs. Active Dojo-tab labels and close affordances use the resolved
-role. Terminal selection keeps using `selection_foreground`; changing tab text
-must not change selected terminal glyphs.
+Active Dojo-tab labels and close affordances use a resolved foreground that is
+independent from terminal `selection_foreground`; changing tab text must not
+change selected terminal glyphs.
 
-When `active_tab_foreground` is absent, choose whichever of the resolved theme
-`background` or `foreground` has the higher WCAG contrast ratio against the
-resolved `active_tab_background`. Prefer `foreground` on an exact tie. This is a
-deterministic compatibility fallback, not a promise to synthesize a new color
-or force every legacy palette above a minimum ratio.
+Native Omarchy discovery derives the tab body only from standard theme roles:
+`lighter_bg`, then effective Foot `bright0`. It derives tab text by choosing
+whichever effective Foot `background` or `foreground` has the higher WCAG
+contrast ratio against that resolved body, preferring `foreground` on an exact
+tie. Native themes require no Splinterm-specific `colors.toml` keys.
 
-An explicit `active_tab_foreground` remains an exact theme-owned RGB value. It is
-validated but not contrast-corrected, blended, or replaced. An invalid explicit
-value rejects the candidate theme atomically instead of silently using the
-fallback.
-
-For Dispatch, the intended native Omarchy roles are:
-
-```toml
-active_tab_background = "#e6c93a"
-active_tab_foreground = "#141d23"
-```
-
-The active tab therefore uses dark `#141d23` text on yellow `#e6c93a` at
-approximately 10.39:1 contrast, while Foot's tan `selection-foreground` remains
-unchanged for terminal selection.
+Strict JSON themes remain a Splinterm-owned portable format. They may explicitly
+set `active_tab_background` and `active_tab_foreground`; absent values use ANSI
+color 8 and the same deterministic contrast chooser. Explicit JSON values remain
+exact and malformed values reject the candidate palette atomically.
 
 ## Confirmed baseline defect
 
-Before this patch, the native path resolved `active_tab_background` from
-`colors.toml` but resolved `selection_foreground` from Foot. `tab_foreground()`
-then used `selection_foreground` for active tabs. Dispatch consequently renders
-`#b69f80` text on `#e6c93a`, approximately 1.55:1 contrast.
+Before this patch, the native path accepted a Splinterm-specific
+`active_tab_background` from `colors.toml` and otherwise borrowed Foot selection
+background. `tab_foreground()` then used Foot `selection_foreground` for active
+tabs. This coupled application chrome to terminal selection roles and encouraged
+app-specific additions to Omarchy themes.
 
 An explicit `~/.config/splinterm/theme.json` does not affect the running client
 unless `main.theme` selects it. With `main.theme` unset, native Omarchy discovery
@@ -54,15 +45,16 @@ selection and application-chrome semantics and is outside this patch.
 1. Extend `ResolvedTheme` with a complete `active_tab_foreground` value and give
    the bundled default theme an explicit readable value.
 2. Extend strict JSON `ThemePalette` with optional `active_tab_foreground`.
-   Resolve an explicit valid `#RRGGBB` exactly; otherwise compute the fallback
+   Resolve explicit valid JSON overrides exactly; otherwise compute the fallback
    only after `background` and `active_tab_background` are resolved.
-3. In native Omarchy discovery, read optional `active_tab_foreground` only from
-   `colors.toml`. Keep `selection-foreground` sourced from effective Foot
-   `[colors-dark]` or legacy `[colors]` exactly as before.
-4. Resolve `active_tab_background` first, retaining its existing fallback to the
-   terminal selection background. Then resolve the missing foreground from the
-   theme background/foreground endpoint with higher contrast against that final
-   active-tab background.
+3. In native Omarchy discovery, keep `selection-foreground` sourced from
+   effective Foot `[colors-dark]` or legacy `[colors]` exactly as before. Do not
+   read Splinterm-specific active-tab roles from `colors.toml`.
+4. Resolve native `active_tab_background` from standard `lighter_bg`, then
+   effective Foot `bright0`. Resolve strict JSON from an explicit override, then
+   ANSI color 8. Never borrow terminal selection. Derive the native foreground,
+   or a missing JSON foreground, from the higher-contrast background/foreground
+   endpoint against that final active-tab body.
 5. Use the WCAG sRGB relative-luminance and contrast-ratio calculation. Compare
    ratios without rounding; documentation-only displayed ratios may be rounded.
 6. Prefer normal theme `foreground` on an exact contrast tie. Do not use
@@ -76,13 +68,12 @@ selection and application-chrome semantics and is outside this patch.
    the compositor background behind translucent tabs.
 9. Live theme reload remains atomic: a malformed new role retains the last valid
    complete `ResolvedTheme` through the existing watcher boundary.
-10. The optional Omarchy exporter emits `active_tab_foreground`. It preserves an
-    explicit source role and applies the same contrast algorithm to the
-    `background` and `foreground` roles in the JSON palette it emits. Native
-    discovery instead compares its effective Foot background and foreground.
-    Exact cross-path color equality is required only when those resolved
-    endpoints and the active-tab background are equal; this patch does not
-    redefine the exporter's existing color-source ownership.
+10. The optional Omarchy exporter derives both active-tab JSON roles from
+    standard Omarchy roles and ignores app-specific source keys. It applies the
+    same contrast algorithm to the `background` and `foreground` roles in the
+    JSON palette it emits. Native discovery instead compares its effective Foot
+    background and foreground. Exact cross-path color equality is required only
+    when those resolved endpoints and the active-tab background are equal.
 
 ## Implementation milestones
 
@@ -103,15 +94,15 @@ Work:
 
 Focused tests must prove:
 
-- explicit native and JSON roles survive exactly;
-- missing roles choose dark background against a bright selected-tab body and
-  light foreground against a dark selected-tab body;
+- explicit strict JSON roles survive exactly;
+- native themes use `lighter_bg`, then Foot `bright0`, without app-specific keys;
+- missing JSON roles choose dark background against a bright selected-tab body
+  and light foreground against a dark selected-tab body;
 - an exact tie chooses foreground;
-- fallback uses the final selection-derived tab background when
-  `active_tab_background` is absent;
-- malformed explicit roles fail rather than falling back;
-- Dispatch resolves active tab foreground to `0x141d23` while preserving its
-  independent Foot selection foreground; and
+- foreground fallback uses the final background-ramp-derived tab body;
+- malformed explicit JSON roles fail rather than falling back;
+- native active-tab text is derived independently from Foot selection
+  foreground; and
 - default/live-reload paths still carry one complete atomic theme.
 
 ### Milestone 2 — renderer separation and exporter parity
@@ -133,9 +124,11 @@ Focused tests must prove:
 
 - active tabs use `active_tab_foreground` even when
   `selection_foreground` is deliberately different;
+- missing active-tab backgrounds use the normal background ramp even when the
+  terminal selection background is deliberately different;
 - inactive tabs still use normal foreground;
 - active-tab background alpha and accent underline bytes remain unchanged;
-- exporter output preserves an explicit role;
+- exporter output ignores app-specific Omarchy source keys;
 - exporter output derives both dark-on-light and light-on-dark fallbacks from
   the background and foreground roles emitted into that JSON;
 - native discovery derives from deliberately different effective Foot endpoints
@@ -187,14 +180,14 @@ than weakening or silently skipping the boundary.
 After separate approval under the repository graphical-testing rules and after
 an approved adjacent packaged client installation:
 
-1. select the Dispatch Omarchy theme in one isolated Splinterm test Window;
-2. prove the active tab label and close affordance use dark `#141d23` while the
-   active tab body remains exact `#e6c93a` and the underline remains the UI
-   accent;
-3. create a terminal selection and prove its foreground remains Dispatch's Foot
-   selection foreground rather than the tab foreground;
-4. switch to a theme without `active_tab_foreground` and prove the active tab
-   remains readable through the deterministic fallback;
+1. select an Omarchy theme in one isolated Splinterm test Window;
+2. prove the active tab body uses that theme's standard `lighter_bg` and the
+   label and close affordance use the derived higher-contrast endpoint while the
+   underline remains the UI accent;
+3. create a terminal selection and prove its foreground remains Foot's selection
+   foreground rather than the tab foreground;
+4. switch to a theme without `lighter_bg` and prove Foot `bright0` supplies the
+   body fallback;
 5. switch back and prove live native discovery updates the complete palette
    without restart; and
 6. restore the original theme, focus, workspace, monitor, Window geometry,
@@ -208,12 +201,13 @@ cleanup.
 
 The patch is complete only when:
 
-- native Omarchy and strict JSON themes accept optional
-  `active_tab_foreground`;
-- absent roles use the documented deterministic higher-contrast endpoint;
+- native Omarchy uses no Splinterm-specific `colors.toml` roles;
+- strict JSON themes accept optional active-tab overrides;
+- absent JSON roles and native inputs use the documented deterministic
+  fallbacks;
 - active tab chrome no longer consumes `selection_foreground`;
-- Dispatch's exact tab pair resolves to `#141d23` on `#e6c93a` without changing
-  terminal selection colors;
+- missing active-tab backgrounds no longer consume terminal selection color;
+- native active-tab chrome remains independent from terminal selection colors;
 - focused and serial validation plus fresh read-only review are recorded;
 - separately approved packaged graphical acceptance is recorded; and
 - the Beta 1 candidate, promotion, publication, and AUR states are recorded
