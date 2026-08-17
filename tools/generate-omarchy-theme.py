@@ -14,6 +14,7 @@ ROLE_ALIASES = {
     "accent": ("accent", "cursor"),
     "bg": ("bg", "background"),
     "darker_bg": ("darker_bg", "color0"),
+    "lighter_bg": ("lighter_bg", "color8"),
     "selection": ("selection", "selection_background"),
     "muted": ("muted", "color8"),
     "fg": ("fg", "foreground"),
@@ -79,6 +80,44 @@ def theme_settings(theme_dir: Path) -> tuple[float, bool]:
     return alpha, blur
 
 
+def relative_luminance(color: str) -> float:
+    channels = [int(color[index : index + 2], 16) / 255.0 for index in (1, 3, 5)]
+    linear = [
+        channel / 12.92
+        if channel <= 0.04045
+        else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def contrast_ratio(first: str, second: str) -> float:
+    first_luminance = relative_luminance(first)
+    second_luminance = relative_luminance(second)
+    lighter = max(first_luminance, second_luminance)
+    darker = min(first_luminance, second_luminance)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def active_tab_foreground_fallback(
+    background: str, foreground: str, active_tab_background: str
+) -> str:
+    if contrast_ratio(background, active_tab_background) > contrast_ratio(
+        foreground, active_tab_background
+    ):
+        return background
+    return foreground
+
+
+def validate_role(name: str, value: object) -> None:
+    if not isinstance(value, str) or len(value) != 7 or not value.startswith("#"):
+        raise ValueError(f"{name} must be #RRGGBB")
+    try:
+        int(value[1:], 16)
+    except ValueError as error:
+        raise ValueError(f"{name} must be #RRGGBB") from error
+
+
 def generate(
     colors: dict[str, object], alpha: float = 1.0, blur: bool = False
 ) -> dict[str, object]:
@@ -89,16 +128,16 @@ def generate(
     roles["selection_foreground"] = colors.get(
         "selection_foreground", roles["fg"]
     )
-    roles["active_tab_background"] = colors.get(
-        "active_tab_background", roles["selection"]
-    )
+    roles["active_tab_background"] = roles["lighter_bg"]
     missing = [name for name, value in roles.items() if value is None]
     if missing:
         raise ValueError("missing Omarchy roles: " + ", ".join(missing))
     for name, value in roles.items():
-        if not isinstance(value, str) or len(value) != 7 or not value.startswith("#"):
-            raise ValueError(f"{name} must be #RRGGBB")
-        int(value[1:], 16)
+        validate_role(name, value)
+    active_tab_foreground = active_tab_foreground_fallback(
+        roles["bg"], roles["fg"], roles["active_tab_background"]
+    )
+    roles["active_tab_foreground"] = active_tab_foreground
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha must be between 0.0 and 1.0")
     if not isinstance(blur, bool):
@@ -112,6 +151,7 @@ def generate(
         "selection": roles["selection"],
         "selection_foreground": roles["selection_foreground"],
         "active_tab_background": roles["active_tab_background"],
+        "active_tab_foreground": roles["active_tab_foreground"],
         "url": roles["blue"],
         "ui_accent": roles["accent"],
         "pane_border": roles["muted"],

@@ -6,6 +6,7 @@
   "selection": "#354a60",
   "selection_foreground": "#ebebeb",
   "active_tab_background": "#354a60",
+  "active_tab_foreground": "#ebebeb",
   "url": "#78beff",
   "ui_accent": "#78d2ff",
   "pane_border": "#928374",
