@@ -13,7 +13,7 @@ use splinterm_protocol::{
     TerminalSnapshot, TopologySnapshot,
 };
 use tokio::{
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -373,6 +373,23 @@ async fn retained_control_modes(retained: &Retained, modes: &ControlModes) -> Ve
     retained_control_modes_from(retained, &*modes.lock().await)
 }
 
+struct OrderedControlModes<'a> {
+    _guard: MutexGuard<'a, HashMap<(SplintId, u64), Vec<String>>>,
+    values: Vec<String>,
+}
+
+async fn ordered_control_modes<'a>(
+    retained: &Retained,
+    modes: &'a ControlModes,
+) -> OrderedControlModes<'a> {
+    let guard = modes.lock().await;
+    let values = retained_control_modes_from(retained, &guard);
+    OrderedControlModes {
+        _guard: guard,
+        values,
+    }
+}
+
 struct Started {
     connection: Connection,
     subscription_id: u64,
@@ -622,6 +639,43 @@ fn next_public_sequence(published: &PublishedState) -> Result<u64, ()> {
         .ok_or(())
 }
 
+fn apply_control_modes_projection(
+    published: &mut PublishedState,
+    uri: ResourceUri,
+    incarnation: u64,
+    modes: &[String],
+) -> Result<(), ()> {
+    if !published.active || published.value["resource"]["incarnation"].as_u64() != Some(incarnation)
+    {
+        return Err(());
+    }
+    let sequence = next_public_sequence(published)?;
+    let mut next = published.value.clone();
+    next["sequence"] = serde_json::Value::from(sequence);
+    next["resource"]["control_revision"] = serde_json::Value::from(sequence);
+    let controlled = next["data"]["controlled"].as_bool() == Some(true);
+    let locally_owned = controlled && !modes.is_empty();
+    let public_modes = if locally_owned { modes } else { &[] };
+    next["data"]["locally_owned"] = serde_json::Value::Bool(locally_owned);
+    next["data"]["modes"] = serde_json::to_value(public_modes).unwrap_or_default();
+    published.value = validate_document(uri, next).map_err(|_| ())?;
+    Ok(())
+}
+
+async fn commit_retained_projection(
+    state: &Arc<Mutex<PublishedState>>,
+    uri: ResourceUri,
+    retained: &Retained,
+    modes: &[String],
+) -> Result<(), ()> {
+    let mut published = state.lock().await;
+    let value = retained
+        .document(uri, modes, next_public_sequence(&published)?, false)
+        .map_err(|_| ())?;
+    published.value = value;
+    Ok(())
+}
+
 async fn store_retained_projection(
     state: &Arc<Mutex<PublishedState>>,
     uri: ResourceUri,
@@ -633,25 +687,11 @@ async fn store_retained_projection(
         // this guard, set_control_modes could publish new ownership between a
         // stale mode read and this write, only for the subscription to overwrite
         // it permanently with an empty local-mode projection.
-        let modes = control_modes.lock().await;
-        let mut published = state.lock().await;
-        let value = retained
-            .document(
-                uri,
-                &retained_control_modes_from(retained, &modes),
-                next_public_sequence(&published)?,
-                false,
-            )
-            .map_err(|_| ())?;
-        published.value = value;
+        let modes = ordered_control_modes(retained, control_modes).await;
+        commit_retained_projection(state, uri, retained, &modes.values).await
     } else {
-        let mut published = state.lock().await;
-        let value = retained
-            .document(uri, &[], next_public_sequence(&published)?, false)
-            .map_err(|_| ())?;
-        published.value = value;
+        commit_retained_projection(state, uri, retained, &[]).await
     }
-    Ok(())
 }
 
 async fn publish_retained(
@@ -876,29 +916,9 @@ impl ResourceRegistry {
             return;
         };
         let mut published = state.lock().await;
-        if !published.active
-            || published.value["resource"]["incarnation"].as_u64() != Some(incarnation)
-        {
+        if apply_control_modes_projection(&mut published, uri, incarnation, &modes).is_err() {
             return;
         }
-        let Some(sequence) = published.value["sequence"]
-            .as_u64()
-            .and_then(|value| value.checked_add(1))
-        else {
-            return;
-        };
-        let mut next = published.value.clone();
-        next["sequence"] = serde_json::Value::from(sequence);
-        next["resource"]["control_revision"] = serde_json::Value::from(sequence);
-        let controlled = next["data"]["controlled"].as_bool() == Some(true);
-        let locally_owned = controlled && !modes.is_empty();
-        let public_modes = if locally_owned { modes.as_slice() } else { &[] };
-        next["data"]["locally_owned"] = serde_json::Value::Bool(locally_owned);
-        next["data"]["modes"] = serde_json::to_value(public_modes).unwrap_or_default();
-        let Ok(next) = validate_document(uri, next) else {
-            return;
-        };
-        published.value = next;
         drop(published);
         drop(setup);
         let _ = peer
@@ -984,7 +1004,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_projection_advances_from_the_committed_public_sequence() {
+    async fn control_projection_orders_a_competing_mode_commit() {
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
         let dojo_id: DojoId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap();
@@ -1019,17 +1039,37 @@ mod tests {
             .unwrap(),
             active: true,
         }));
-        let control_modes = Arc::new(Mutex::new(HashMap::from([(
-            (splint_id, 2),
-            vec!["input".to_owned()],
-        )])));
+        let control_modes = Arc::new(Mutex::new(HashMap::new()));
+        let ordered = ordered_control_modes(&retained, &control_modes).await;
+        assert!(ordered.values.is_empty());
+
+        let (attempting, attempted) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn({
+            let state = Arc::clone(&state);
+            let control_modes = Arc::clone(&control_modes);
+            async move {
+                let _ = attempting.send(());
+                let modes = vec!["input".to_owned()];
+                control_modes
+                    .lock()
+                    .await
+                    .insert((splint_id, 2), modes.clone());
+                let mut published = state.lock().await;
+                apply_control_modes_projection(&mut published, uri, 2, &modes)
+            }
+        });
+        attempted.await.unwrap();
+
         assert_eq!(
-            store_retained_projection(&state, uri, &retained, &control_modes).await,
+            commit_retained_projection(&state, uri, &retained, &ordered.values).await,
             Ok(())
         );
+        drop(ordered);
+        assert_eq!(writer.await.unwrap(), Ok(()));
+
         let published = state.lock().await;
-        assert_eq!(published.value["sequence"], 6);
-        assert_eq!(published.value["resource"]["control_revision"], 6);
+        assert_eq!(published.value["sequence"], 7);
+        assert_eq!(published.value["resource"]["control_revision"], 7);
         assert_eq!(published.value["data"]["locally_owned"], true);
         assert_eq!(published.value["data"]["modes"], json!(["input"]));
     }
