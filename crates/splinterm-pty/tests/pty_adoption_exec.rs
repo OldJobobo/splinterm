@@ -178,7 +178,12 @@ fn adopt_inherited() -> LinuxPtySession {
     session
 }
 
-fn exec_snapshot(snapshot: &OwnedFd, identity: LinuxPtyIdentity, stage: &str) -> ! {
+fn exec_snapshot(
+    snapshot: &OwnedFd,
+    identity: LinuxPtyIdentity,
+    stage: &str,
+    pause_started: u128,
+) -> ! {
     let arguments = [
         CString::new("pty-adoption-exec").unwrap(),
         CString::new(TEST_NAME).unwrap(),
@@ -193,7 +198,7 @@ fn exec_snapshot(snapshot: &OwnedFd, identity: LinuxPtyIdentity, stage: &str) ->
         (PROCESS_GROUP, identity.process_group().to_string()),
         (SESSION, identity.session_id().to_string()),
         (DAEMON, std::process::id().to_string()),
-        (PAUSE_STARTED, now_ns().to_string()),
+        (PAUSE_STARTED, pause_started.to_string()),
     ] {
         environment.insert(OsString::from(name), OsString::from(value));
     }
@@ -225,8 +230,7 @@ fn session_into_stdin(session: LinuxPtySession) -> LinuxPtyIdentity {
     identity
 }
 
-fn exec_forward(session: LinuxPtySession) -> ! {
-    let identity = session_into_stdin(session);
+fn sealed_forward_and_rollback() -> (OwnedFd, OwnedFd) {
     let executable = env::current_exe().unwrap();
     let source = temporary_source();
     std::fs::copy(&executable, &source).unwrap();
@@ -234,20 +238,30 @@ fn exec_forward(session: LinuxPtySession) -> ! {
     let rollback = sealed_snapshot(Path::new("/proc/self/exe"), "splinterm-rollback");
     std::fs::write(&source, b"replaced after sealing").unwrap();
     std::fs::remove_file(&source).unwrap();
-    nix::unistd::dup2_stderr(&rollback).unwrap();
-    exec_snapshot(&forward, identity, "forward")
+    (forward, rollback)
 }
 
-fn exec_rollback(session: LinuxPtySession, rollback: &OwnedFd) -> ! {
+fn exec_forward(
+    session: LinuxPtySession,
+    forward: &OwnedFd,
+    rollback: &OwnedFd,
+    pause_started: u128,
+) -> ! {
     let identity = session_into_stdin(session);
-    exec_snapshot(rollback, identity, "rollback")
+    nix::unistd::dup2_stderr(rollback).unwrap();
+    exec_snapshot(forward, identity, "forward", pause_started)
+}
+
+fn exec_rollback(session: LinuxPtySession, rollback: &OwnedFd, pause_started: u128) -> ! {
+    let identity = session_into_stdin(session);
+    exec_snapshot(rollback, identity, "rollback", pause_started)
 }
 
 fn forward_generation() -> ! {
     let rollback = take_inherited_rollback();
     let mut session = adopt_inherited();
-    let pause_ns = now_ns() - env::var(PAUSE_STARTED).unwrap().parse::<u128>().unwrap();
     let mut reader = session.try_clone_reader().unwrap();
+    let pause_ns = now_ns() - env::var(PAUSE_STARTED).unwrap().parse::<u128>().unwrap();
     let output = read_until(
         &mut reader,
         &format!("BURST:forward:{:04}", BURST_LINES - 1),
@@ -275,7 +289,8 @@ fn forward_generation() -> ! {
         .write(format!("burst rollback {BURST_LINES}\n").as_bytes())
         .unwrap();
     drop(reader);
-    exec_rollback(session, &rollback)
+    let pause_started = now_ns();
+    exec_rollback(session, &rollback, pause_started)
 }
 
 fn descriptor_targets() -> Vec<PathBuf> {
@@ -288,8 +303,8 @@ fn descriptor_targets() -> Vec<PathBuf> {
 
 fn rollback_generation() {
     let mut session = adopt_inherited();
-    let pause_ns = now_ns() - env::var(PAUSE_STARTED).unwrap().parse::<u128>().unwrap();
     let mut reader = session.try_clone_reader().unwrap();
+    let pause_ns = now_ns() - env::var(PAUSE_STARTED).unwrap().parse::<u128>().unwrap();
     let output = read_until(
         &mut reader,
         &format!("BURST:rollback:{:04}", BURST_LINES - 1),
@@ -348,11 +363,13 @@ fn exec_adoption_preserves_identity_io_resize_signaling_and_reaping() {
             session.write(b"old\n").unwrap();
             let output = read_until(&mut reader, "ECHO:old");
             assert!(output.contains("ECHO:old"));
+            let (forward, rollback) = sealed_forward_and_rollback();
             session
                 .write(format!("burst forward {BURST_LINES}\n").as_bytes())
                 .unwrap();
             drop(reader);
-            exec_forward(session);
+            let pause_started = now_ns();
+            exec_forward(session, &forward, &rollback, pause_started);
         }
         Err(error) => panic!("invalid adoption stage: {error}"),
     }
