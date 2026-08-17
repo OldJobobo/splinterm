@@ -15,6 +15,15 @@ and `SPLINTERM_SOCKET` paths. The real `XDG_RUNTIME_DIR` was retained only for
 Wayland compositor access. `/usr/bin` and the live Omarchy theme were not
 modified.
 
+`source-package-provenance.txt` records the exact source archive hash and its
+embedded Git archive commit ID `450f6cbb`; that package-build source commit and
+its squash-merged maintenance commit `d3cbbc6b` have the identical tree
+`48d6418c`. The retained `.BUILDINFO` PKGBUILD hash matches the PKGBUILD from
+that tree. `package-member-sha256.txt` hashes the three tested executables
+directly from the package archive and matches both the staged-file and
+live-process hashes. Retained package metadata, archive manifest, PKGBUILD, and
+build script complete the upstream package/source link.
+
 ## Live packaged-runtime provenance
 
 `runtime-identity.json` was captured while both processes and the socket were
@@ -55,7 +64,9 @@ Theme A defined standard `lighter_bg = "#f4c95d"`, Foot background
 background `#335577`, and accent `#ff4fd8`.
 
 Theme B omitted `lighter_bg` and defined Foot background `#111111`, foreground
-`#fafafa`, bright0 `#e8e8e8`, and accent `#00c8ff`.
+`#fafafa`, bright0 `#e8e8e8`, and accent `#00c8ff`. The exact staged config,
+Theme A, and Theme B inputs are retained under `inputs/` and covered by
+`SHA256SUMS`.
 
 ## Results
 
@@ -93,6 +104,9 @@ pointer assertions.
 
 - exact-pixel screenshots: `01-theme-a.png`, `02-theme-b-bright0.png`,
   `03-theme-a-live-reload.png`, `04-theme-a-selection.png`
+- exact staged config and native Theme A/B inputs under `inputs/`
+- package/source provenance, package metadata and archive manifest, retained
+  PKGBUILD/build script, and direct package-member hashes
 - live runtime identity: `runtime-identity.json`, raw client/daemon `/proc`
   records, candidate hashes/stats, per-process socket maps, and `ss` captures
 - stable theme/reload/selection window identity JSON

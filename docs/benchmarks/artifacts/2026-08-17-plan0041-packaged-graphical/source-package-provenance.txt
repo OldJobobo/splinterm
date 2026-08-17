@@ -1,0 +1,25 @@
+Plan 0041 package/source provenance
+
+source_archive=splinterm-0.1.0alpha3.3.tar.gz
+source_archive_sha256=93dec79b89096d7c64fc25151ee4a428d2ff4e37faad0e7a1d1975a1dc0d9f02
+source_archive_git_commit=450f6cbbdd17d01b8ee4d3b89b70e084e474aa4d
+package_build_source_commit=450f6cbbdd17d01b8ee4d3b89b70e084e474aa4d
+package_build_source_tree=48d6418ce85bd19d3519396f2542ad04e4421d86
+merged_maintenance_commit=d3cbbc6b013ff4cab28a8ec6ef6aaa267603ff35
+merged_maintenance_tree=48d6418ce85bd19d3519396f2542ad04e4421d86
+tree_equality=identical
+
+build_commit_record=450f6cbbdd17d01b8ee4d3b89b70e084e474aa4d 48d6418ce85bd19d3519396f2542ad04e4421d86 Validate standard active-tab package roles
+merged_commit_record=d3cbbc6b013ff4cab28a8ec6ef6aaa267603ff35 48d6418ce85bd19d3519396f2542ad04e4421d86 Validate standard active-tab package roles (#26)
+
+package_file=splinterm-0.1.0alpha3.3-1-x86_64.pkg.tar.zst
+package_sha256=22f21317c17bbcfc510d99f6fdb9f3a593e7ab08736bcb8180527c8e2cac3c0b
+package_pkgbuild_sha256=3e42eb28c6606b694a51ffe3e7591057cff92ffc1d5f7570ce4a6f7d7f25b14f
+retained_pkgbuild_sha256=3e42eb28c6606b694a51ffe3e7591057cff92ffc1d5f7570ce4a6f7d7f25b14f
+retained_build_script_sha256=438fc64542109ad7a829fb91b4b15cb9f145f3875b55472283af9d2355468809
+
+The retained build script rejects tracked source changes, creates the source archive from clean HEAD with git archive, then invokes makepkg --cleanbuild.
+git get-tar-commit-id reads 450f6cbb directly from the exact source archive left beside the package.
+That source commit and its squash-merged maintenance commit d3cbbc6b have identical Git tree IDs.
+The package .BUILDINFO PKGBUILD hash matches the PKGBUILD retained from that exact source tree.
+package-member-sha256.txt hashes each tested executable directly from the package archive; those hashes match candidate.sha256 and runtime-identity.json.

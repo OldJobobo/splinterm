@@ -209,10 +209,13 @@ Acceptance completed at maintenance commit `d3cbbc6` with package SHA-256
 `22f21317c17bbcfc510d99f6fdb9f3a593e7ab08736bcb8180527c8e2cac3c0b`.
 The accepted follow-up used the real Wayland runtime only for compositor access
 and an explicit private Splinterm socket, config, state, theme, and process
-hierarchy. Contemporaneous evidence ties the graphical client PID, adjacent
-staged client and daemon executable paths, hashes, device/inode identities,
-environments, and daemon-owned private sockets together while live. Exact
-rendered pixels proved native `lighter_bg`, Foot `bright0` fallback,
+hierarchy. The retained package metadata, direct archive-member hashes,
+PKGBUILD/build script, and identical build/merge Git tree record tie that
+package to the merged source. Contemporaneous evidence then ties the graphical
+client PID, adjacent staged client and daemon executable paths, hashes,
+device/inode identities, environments, and daemon-owned private sockets
+together while live. Retained staged theme inputs and exact rendered pixels
+proved native `lighter_bg`, Foot `bright0` fallback,
 higher-contrast text, accent underline, independent Foot selection colors, and
 same-process live reload. The user selected the terminal row on the uniquely
 identified staged window; the agent captured it without automated pointer or
