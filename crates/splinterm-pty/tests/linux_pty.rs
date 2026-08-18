@@ -58,6 +58,33 @@ fn read_until(session: &mut LinuxPtySession, needle: &str) -> String {
     }
 }
 
+fn read_file_until(reader: &mut fs::File, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => {}
+            Ok(count) => {
+                output.extend_from_slice(&buffer[..count]);
+                let text = String::from_utf8_lossy(&output);
+                if text.contains(needle) {
+                    return text.into_owned();
+                }
+            }
+            Err(error)
+                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+            Err(error) => panic!("failed reading adopted PTY: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out; output={}",
+            String::from_utf8_lossy(&output)
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn command(mode: &str, cwd: &Path) -> PtyCommand {
     PtyCommand::new(PROBE, cwd).arg(mode)
 }
@@ -157,6 +184,81 @@ fn process_group_signals_and_wait_status_are_observable() {
     session.signal_process_group(PtySignal::Hangup).unwrap();
     let status = session.wait().unwrap();
     assert_eq!(status.signal(), Some(1));
+    assert_eq!(session.wait().unwrap(), status);
+    assert_eq!(session.try_wait().unwrap(), Some(status));
+}
+
+#[test]
+fn live_session_identity_and_single_master_adoption_round_trip() {
+    let cwd = std::env::current_dir().unwrap();
+    let mut session = backend()
+        .spawn(
+            &command("resize", &cwd),
+            PtySize {
+                columns: 80,
+                rows: 24,
+                pixel_width: 640,
+                pixel_height: 384,
+            },
+        )
+        .unwrap();
+    let initial = read_until(&mut session, "READY");
+    assert!(initial.contains("INITIAL=80x24+640x384"));
+
+    let identity = session.identity();
+    assert_eq!(identity.child_pid(), session.child_id());
+    assert_eq!(identity.process_group(), identity.child_pid());
+    assert_eq!(identity.session_id(), identity.child_pid());
+    let master_fd = session.master_raw_fd();
+    let adoptable = session.try_into_adoptable().unwrap();
+    assert_eq!(adoptable.identity(), identity);
+    let (manifest_identity, master) = adoptable.into_parts();
+    let mut adopted =
+        splinterm_pty::AdoptableLinuxPtySession::from_parts(manifest_identity, master)
+            .adopt()
+            .unwrap();
+    assert_eq!(adopted.identity(), identity);
+    assert_eq!(adopted.master_raw_fd(), master_fd);
+
+    let mut reader = adopted.try_clone_reader().unwrap();
+    adopted
+        .resize(PtySize {
+            columns: 100,
+            rows: 40,
+            pixel_width: 900,
+            pixel_height: 720,
+        })
+        .unwrap();
+    adopted.write(b"\n").unwrap();
+    let resized = read_file_until(&mut reader, "RESIZED=");
+    assert!(resized.contains("RESIZED=100x40+900x720"));
+    drop(reader);
+
+    let status = adopted.wait().unwrap();
+    assert!(status.success());
+    assert_eq!(adopted.try_wait().unwrap(), Some(status));
+}
+
+#[test]
+fn adoption_manifest_rejects_invalid_pid_values() {
+    assert!(matches!(
+        splinterm_pty::LinuxPtyIdentity::from_raw(0, 1, 1),
+        Err(PtyError::InvalidChildId)
+    ));
+}
+
+#[test]
+fn failed_adoption_returns_the_original_session() {
+    let cwd = std::env::current_dir().unwrap();
+    let mut session = backend()
+        .spawn(&command("argv", &cwd), PtySize::cells(40, 10))
+        .unwrap();
+    let output = read_until(&mut session, "ARGV0=");
+    assert!(output.contains("ARGV0="));
+    let status = session.wait().unwrap();
+    let (error, mut recovered) = session.try_into_adoptable().unwrap_err();
+    assert!(matches!(error, PtyError::ProcessExited));
+    assert_eq!(recovered.wait().unwrap(), status);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

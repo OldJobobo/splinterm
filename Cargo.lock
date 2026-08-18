@@ -1286,7 +1286,9 @@ dependencies = [
 name = "splinterm-pty"
 version = "0.1.0-beta1"
 dependencies = [
+ "nix",
  "rustix",
+ "sha2",
  "thiserror",
  "tokio",
 ]

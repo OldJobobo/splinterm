@@ -22,10 +22,13 @@ use std::{
     os::{
         fd::{AsRawFd, OwnedFd},
         linux::net::SocketAddrExt,
-        unix::net::{SocketAddr, UnixListener, UnixStream},
+        unix::{
+            net::{SocketAddr, UnixListener, UnixStream},
+            process::ExitStatusExt,
+        },
     },
     path::PathBuf,
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -40,6 +43,8 @@ use thiserror::Error;
 
 #[doc(hidden)]
 pub const CHILD_READY_MARKER: &[u8] = b"\0splinterm-pty-ready\0";
+#[doc(hidden)]
+pub const CHILD_READY_ACK: u8 = 0xa5;
 
 const FOREIGN_TERMINAL_ENV: &[&str] = &[
     "ALACRITTY_LOG",
@@ -205,6 +210,10 @@ pub enum PtyError {
     HelperHandshake,
     #[error("target command could not be executed")]
     TargetExec,
+    #[error("PTY process identity is invalid or changed")]
+    IdentityMismatch,
+    #[error("PTY child has already exited and cannot be adopted")]
+    ProcessExited,
 }
 
 impl PtyError {
@@ -319,11 +328,6 @@ impl LinuxPtyBackend {
         let mut child = child_command
             .spawn()
             .map_err(|error| PtyError::io("spawn PTY helper", error))?;
-        let Some(process_group) = i32::try_from(child.id()).ok().and_then(Pid::from_raw) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(PtyError::InvalidChildId);
-        };
         let Ok(mut exec_status) = accept_exec_status(&status_listener) else {
             let _ = child.kill();
             let _ = child.wait();
@@ -335,16 +339,151 @@ impl LinuxPtyBackend {
             let _ = child.wait();
             return Err(PtyError::HelperHandshake);
         }
+        let identity = match LinuxPtyIdentity::observe(child.id(), &master) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if !acknowledge_child_ready(&mut exec_status) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PtyError::HelperHandshake);
+        }
         if !target_exec_succeeded(&mut exec_status) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(PtyError::TargetExec);
         }
+        drop(child);
 
         Ok(LinuxPtySession {
             master,
+            identity,
+            exit_status: None,
+        })
+    }
+}
+
+/// Kernel process identity required to reconstruct a live PTY session after exec.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxPtyIdentity {
+    child: Pid,
+    process_group: Pid,
+    session: Pid,
+}
+
+impl LinuxPtyIdentity {
+    fn observe(child_id: u32, master: &File) -> Result<Self> {
+        let child = pid_from_u32(child_id)?;
+        let process_group = process::getpgid(Some(child))
+            .map_err(|error| PtyError::io("read child process group", error))?;
+        let session = process::getsid(Some(child))
+            .map_err(|error| PtyError::io("read child session", error))?;
+        let identity = Self {
             child,
             process_group,
+            session,
+        };
+        identity.validate(master)?;
+        Ok(identity)
+    }
+
+    /// Reconstructs a bounded identity value from a handoff manifest.
+    ///
+    /// # Errors
+    /// Returns an error unless every identifier is a supported positive PID.
+    pub fn from_raw(child: u32, process_group: u32, session: u32) -> Result<Self> {
+        Ok(Self {
+            child: pid_from_u32(child)?,
+            process_group: pid_from_u32(process_group)?,
+            session: pid_from_u32(session)?,
+        })
+    }
+
+    #[must_use]
+    pub fn child_pid(self) -> u32 {
+        pid_to_u32(self.child)
+    }
+
+    #[must_use]
+    pub fn process_group(self) -> u32 {
+        pid_to_u32(self.process_group)
+    }
+
+    #[must_use]
+    pub fn session_id(self) -> u32 {
+        pid_to_u32(self.session)
+    }
+
+    fn validate(self, master: &File) -> Result<()> {
+        if self.child != self.process_group || self.child != self.session {
+            return Err(PtyError::IdentityMismatch);
+        }
+        let observed_group = process::getpgid(Some(self.child))
+            .map_err(|error| PtyError::io("validate child process group", error))?;
+        let observed_session = process::getsid(Some(self.child))
+            .map_err(|error| PtyError::io("validate child session", error))?;
+        let terminal_session = termios::tcgetsid(master)
+            .map_err(|error| PtyError::io("validate controlling terminal session", error))?;
+        if observed_group != self.process_group
+            || observed_session != self.session
+            || terminal_session != self.session
+        {
+            return Err(PtyError::IdentityMismatch);
+        }
+        process::waitid(
+            process::WaitId::Pid(self.child),
+            process::WaitIdOptions::EXITED
+                | process::WaitIdOptions::NOHANG
+                | process::WaitIdOptions::NOWAIT,
+        )
+        .map_err(|error| PtyError::io("validate direct child authority", error))?;
+        Ok(())
+    }
+}
+
+/// The one descriptor and validated identity transferred across a daemon exec.
+///
+/// The actor must drop its cloned async reader before creating this value. The
+/// adopting generation reconstructs exactly one new reader from `master`.
+#[derive(Debug)]
+pub struct AdoptableLinuxPtySession {
+    identity: LinuxPtyIdentity,
+    master: OwnedFd,
+}
+
+impl AdoptableLinuxPtySession {
+    #[must_use]
+    pub const fn identity(&self) -> LinuxPtyIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (LinuxPtyIdentity, OwnedFd) {
+        (self.identity, self.master)
+    }
+
+    #[must_use]
+    pub const fn from_parts(identity: LinuxPtyIdentity, master: OwnedFd) -> Self {
+        Self { identity, master }
+    }
+
+    /// Validates and reconstructs runtime PTY authority in the current daemon.
+    ///
+    /// # Errors
+    /// Returns an error when process, parent/reaping, session, process-group, or
+    /// controlling-terminal identity no longer matches the manifest.
+    pub fn adopt(self) -> Result<LinuxPtySession> {
+        let master = File::from(self.master);
+        self.identity.validate(&master)?;
+        ensure_close_on_exec(&master)?;
+        Ok(LinuxPtySession {
+            master,
+            identity: self.identity,
+            exit_status: None,
         })
     }
 }
@@ -352,8 +491,8 @@ impl LinuxPtyBackend {
 #[derive(Debug)]
 pub struct LinuxPtySession {
     master: File,
-    child: Child,
-    process_group: Pid,
+    identity: LinuxPtyIdentity,
+    exit_status: Option<ExitStatus>,
 }
 
 impl LinuxPtySession {
@@ -369,7 +508,12 @@ impl LinuxPtySession {
 
     #[must_use]
     pub fn child_id(&self) -> u32 {
-        self.child.id()
+        self.identity.child_pid()
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> LinuxPtyIdentity {
+        self.identity
     }
 
     #[must_use]
@@ -377,12 +521,39 @@ impl LinuxPtySession {
         self.master.as_raw_fd()
     }
 
+    /// Validates and consumes this live session into its single inherited
+    /// descriptor. Callers must first stop and drop every cloned reader.
+    ///
+    /// On failure, returns both the error and the unchanged session so the old
+    /// daemon generation can resume without losing PTY authority.
+    ///
+    /// # Errors
+    /// Returns the original session when the child exited, direct-child wait
+    /// authority is absent, or process-group, session, or terminal identity
+    /// changed.
+    pub fn try_into_adoptable(
+        mut self,
+    ) -> std::result::Result<AdoptableLinuxPtySession, (PtyError, Self)> {
+        match self.try_wait() {
+            Ok(Some(_)) => return Err((PtyError::ProcessExited, self)),
+            Err(error) => return Err((error, self)),
+            Ok(None) => {}
+        }
+        if let Err(error) = self.identity.validate(&self.master) {
+            return Err((error, self));
+        }
+        Ok(AdoptableLinuxPtySession {
+            identity: self.identity,
+            master: self.master.into(),
+        })
+    }
+
     /// Sends a lifecycle signal to the original child process group.
     ///
     /// # Errors
     /// Returns an error when the process group does not exist or cannot be signaled.
     pub fn signal_process_group(&self, signal: PtySignal) -> Result<()> {
-        process::kill_process_group(self.process_group, signal.rustix())
+        process::kill_process_group(self.identity.process_group, signal.rustix())
             .map_err(|error| PtyError::io("signal process group", error))
     }
 
@@ -391,9 +562,16 @@ impl LinuxPtySession {
     /// # Errors
     /// Returns an error when waiting for the child fails.
     pub fn wait(&mut self) -> Result<ExitStatus> {
-        self.child
-            .wait()
-            .map_err(|error| PtyError::io("wait for child", error))
+        if let Some(status) = self.exit_status {
+            return Ok(status);
+        }
+        let (_, status) =
+            process::waitpid(Some(self.identity.child), process::WaitOptions::empty())
+                .map_err(|error| PtyError::io("wait for child", error))?
+                .ok_or(PtyError::IdentityMismatch)?;
+        let status = ExitStatus::from_raw(status.as_raw());
+        self.exit_status = Some(status);
+        Ok(status)
     }
 
     /// Reads bytes from the nonblocking PTY master.
@@ -420,10 +598,37 @@ impl PtySession for LinuxPtySession {
     }
 
     fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-        self.child
-            .try_wait()
-            .map_err(|error| PtyError::io("poll child", error))
+        if let Some(status) = self.exit_status {
+            return Ok(Some(status));
+        }
+        let Some((_, status)) =
+            process::waitpid(Some(self.identity.child), process::WaitOptions::NOHANG)
+                .map_err(|error| PtyError::io("poll child", error))?
+        else {
+            return Ok(None);
+        };
+        let status = ExitStatus::from_raw(status.as_raw());
+        self.exit_status = Some(status);
+        Ok(Some(status))
     }
+}
+
+fn pid_from_u32(raw: u32) -> Result<Pid> {
+    i32::try_from(raw)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or(PtyError::InvalidChildId)
+}
+
+fn pid_to_u32(pid: Pid) -> u32 {
+    u32::try_from(pid.as_raw_pid()).expect("positive Linux PID fits u32")
+}
+
+fn ensure_close_on_exec(fd: &impl std::os::fd::AsFd) -> Result<()> {
+    let flags = rustix::io::fcntl_getfd(fd)
+        .map_err(|error| PtyError::io("read PTY descriptor flags", error))?;
+    rustix::io::fcntl_setfd(fd, flags | rustix::io::FdFlags::CLOEXEC)
+        .map_err(|error| PtyError::io("restore PTY close-on-exec", error))
 }
 
 fn exec_status_listener() -> Result<(UnixListener, String)> {
@@ -464,6 +669,10 @@ fn accept_exec_status(listener: &UnixListener) -> io::Result<UnixStream> {
             Err(error) => return Err(error),
         }
     }
+}
+
+fn acknowledge_child_ready(status: &mut UnixStream) -> bool {
+    status.write_all(&[CHILD_READY_ACK]).is_ok() && status.flush().is_ok()
 }
 
 fn target_exec_succeeded(status: &mut UnixStream) -> bool {
