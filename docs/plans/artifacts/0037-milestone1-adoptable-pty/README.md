@@ -1,7 +1,8 @@
 # Plan 0037 Milestone 1 — adoptable PTY slice
 
-This evidence covers implementation commit
-`886c3de4ec661c4207f8345e6873b678b4b6e496`. It is the first Milestone 1
+This evidence covers implementation commits
+`886c3de4ec661c4207f8345e6873b678b4b6e496` and
+`26b334cb913c297b17767ec32a772795b24836fe`. It is the first Milestone 1
 implementation slice, not completion of Plan 0037 or the complete milestone.
 
 ## Implemented boundary
@@ -56,11 +57,16 @@ unlinked after sealing; execution still uses the sealed descriptor.
 ## Repetition result
 
 Fifty consecutive runs completed 100 exec boundaries. Each boundary preserved
-512 ordered lines. Measured no-reader intervals:
+512 ordered lines. Forward and rollback executable snapshots were fully copied,
+rehashed, sealed, and mutation-tested before the reader was dropped. Timing
+started immediately after reader teardown and ended only after the adopting
+generation created its replacement reader.
 
-- minimum: 1,123,531 ns;
-- maximum: 2,211,354 ns;
-- mean: 1,412,631 ns.
+Measured no-reader intervals:
+
+- forward: 1,089,377–1,829,271 ns; 1,312,181 ns mean;
+- rollback: 1,330,664–2,461,159 ns; 1,676,193 ns mean;
+- combined: 1,089,377–2,461,159 ns; 1,494,187 ns mean.
 
 Machine-readable results are in `summary.json`.
 
