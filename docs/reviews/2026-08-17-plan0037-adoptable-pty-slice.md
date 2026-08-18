@@ -56,7 +56,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features -- --test-threads=1
 cargo fmt --all --check
 git diff --check origin/main...HEAD
-sha256sum -c docs/plans/artifacts/0037-milestone1-adoptable-pty/SHA256SUMS
+(cd docs/plans/artifacts/0037-milestone1-adoptable-pty && sha256sum -c SHA256SUMS)
 ```
 
 ## Residual scope
