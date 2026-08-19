@@ -245,10 +245,12 @@ behavior; deferred means intentionally outside the present product.
 - Image compatibility is deliberately narrower than full Kitty graphics; external
   file and shared-memory media are rejected.
 - Configuration is focused rather than arbitrary `foot.ini` compatibility.
-- Current benchmark gates document remaining performance work. In particular,
-  [Plan 0011](plans/0011-burst-output-memory-retention.md) retains its final
-  client-performance no-go and [Plan 0012](plans/0012-bounded-compact-publication-frames.md)
-  remains blocked on a sparse bounded-frame ownership redesign.
+- Plans [0011](plans/0011-burst-output-memory-retention.md) and
+  [0012](plans/0012-bounded-compact-publication-frames.md) retain the historical
+  client-performance no-go and rejected compact-frame experiment. Beta 1
+  [Plan 0043](plans/0043-beta1-sparse-publication-frames.md) superseded that
+  design with accepted bounded sparse publication; stable-release performance
+  and support gates remain separate.
 
 ## Stable-release gates
 

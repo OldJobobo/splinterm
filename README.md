@@ -71,7 +71,8 @@ yay -S splinterm-mcp-bin
 
 The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. All packages remain beta software with no stable compatibility or support-duration guarantee.
 
-For the newest published versioned release package, clone the public repository and run:
+For the newest published versioned release package, use Foot or another terminal
+not owned by `splinterd`, then clone the public repository and run:
 
 ```bash
 git clone https://github.com/OldJobobo/splinterm.git
@@ -81,8 +82,7 @@ cd splinterm
 
 The release installer selects the newest published SemVer `v…` release, verifies its GitHub-recorded manifest digest and package checksums, preserves an emergency binary snapshot, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback. GitHub CLI authentication is optional, and anonymous public downloads are supported.
 
-To build and package the current committed checkout locally, run the installer
-from Foot or another terminal not owned by `splinterd`:
+To build and package the current committed checkout locally, run:
 
 ```bash
 ./install.sh --source

@@ -16,9 +16,9 @@ Planned outcomes include:
 - recognizable named, pinned, disposable, restorable, and expired Lair states;
 - clear save, restore, pin, delete, and bounded-retention controls without persisting terminal contents or secrets;
 - exact theme fidelity and supported Omarchy desktop integration;
-- bounded local-file drop path insertion in Alpha3, with clipboard-image saving retained as later work;
+- build on delivered bounded local-file drop path insertion, with clipboard-image saving retained as later work;
 - stronger installation, upgrade, recovery, diagnostics, and automation-consent journeys; and
-- a passing beta performance and memory gate, or an explicit product disposition.
+- keep accepted Beta 1 performance and memory gates passing, with explicit dispositions for new blockers.
 
 This horizon succeeds when a new user can install Splinterm, organize work, close its Window, return safely, and predict destructive actions without maintainer assistance.
 

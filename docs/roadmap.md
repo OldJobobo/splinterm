@@ -9,13 +9,16 @@
 > [`pre-planning-research.md`](pre-planning-research.md) preserves historical
 > pre-implementation reasoning.
 
-## Current post-alpha roadmap
+## Alpha3 and Beta 1 delivery record
 
-This is the dependency order for work after the `v0.1.0-alpha2` release. Items
-listed as proposed or deferred remain options rather than commitments until a
-product decision promotes them.
+Sections 0–2 and 5 below preserve the dependency order used to advance from
+`v0.1.0-alpha2` through `v0.1.0-beta1`. Plans 0032–0036 and the Beta 1
+performance gate are complete; their imperative wording records the accepted
+plan rather than pending work. Sections 3–4 retain scoped post-alpha proposals
+and remain subject to product decisions. Current release state remains
+authoritative in [`status.md`](status.md).
 
-### 0 — alpha3 release and planning hygiene
+### 0 — alpha3 release and planning hygiene (complete)
 
 - Keep release claims aligned across the repository, website, AUR recipes, and
   immutable tags.
@@ -44,7 +47,7 @@ product decision promotes them.
   separately approved preview or production deployment.
 - Keep completed-plan closure facts separate from later release follow-ups.
 
-### 1 — near-term correctness and Omarchy integration
+### 1 — near-term correctness and Omarchy integration (complete)
 
 1. Preserve exact theme-provided selection roles with an opaque selection
    background and separately repainted glyph and decoration foregrounds; do not
@@ -70,7 +73,7 @@ accepted [Plan 0025](plans/0025-command-palette-and-tab-context-menus.md) and
 non-graphical milestones and guarded acceptance cases explicit prevents either
 slice from becoming an unbounded UI redesign.
 
-### 2 — lifecycle and desktop workflow
+### 2 — lifecycle and desktop workflow (complete)
 
 1. Execute [Plan 0034](plans/0034-alpha3-saved-lair-layouts.md) as the alpha3
    lifecycle slice: define Live, Detached, Saved, Restorable, Pinned, and
@@ -149,11 +152,13 @@ focused implementation plan before work begins.
 - Keep proposed first-class Herdr and live-appearance IPC work outside the
   committed near-term path until their product decisions are made.
 
-### 5 — beta performance gate
+### 5 — beta performance gate (complete)
 
-[Plan 0011](plans/0011-burst-output-memory-retention.md) remains a recorded
-no-go, and [Plan 0012](plans/0012-bounded-compact-publication-frames.md) remains
-blocked on a sparse bounded-frame ownership redesign. Before a beta claim:
+[Plan 0011](plans/0011-burst-output-memory-retention.md) recorded the original
+no-go, and [Plan 0012](plans/0012-bounded-compact-publication-frames.md) retained
+the rejected compact-frame experiment. [Plan 0043](plans/0043-beta1-sparse-publication-frames.md)
+superseded that design and satisfied the gate. Before the Beta 1 claim, the
+accepted replacement had to:
 
 1. reproduce attribution against the current alpha baseline;
 2. prove bounded exact reconstruction and client allocation non-graphically;
@@ -165,10 +170,13 @@ blocked on a sparse bounded-frame ownership redesign. Before a beta claim:
 Do not convert a daemon-only memory win or a client/latency regression into a
 beta success claim.
 
-### 6 — supported stable release
+## Current forward path
 
-After the beta performance gate has an explicit passing result or product-level
-disposition:
+### Supported stable release
+
+Beta 1 satisfied its sparse-publication performance gate through
+[Plan 0043](plans/0043-beta1-sparse-publication-frames.md). A supported stable
+release still requires the project to:
 
 1. define release channels, compatibility duration, supported environments,
    upgrade/rollback policy, and support/security-reporting processes;
@@ -178,7 +186,7 @@ disposition:
    reviews; and
 4. reconcile every stable-release gate in [`status.md`](status.md).
 
-### 7 — broader distribution
+### Broader distribution
 
 Nix, Home Manager, tertiary artifacts, additional compositors, and sandboxed
 packages follow explicit support boundaries. They must not broaden compatibility

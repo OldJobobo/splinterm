@@ -89,8 +89,8 @@ work only through explicit bounded authority.
   trustworthy outside the maintainer's own machine.
 - Bounded automation is demonstrable through a calm consent-to-revocation
   journey, not only through protocol tests.
-- Known client memory and responsiveness limits have a passing result or an
-  explicit product disposition before beta is claimed.
+- Known client memory and responsiveness limits retain a current passing result
+  or receive an explicit product disposition before a release claim advances.
 
 ### Current product bets
 
@@ -98,8 +98,9 @@ work only through explicit bounded authority.
   restorable, and expired work should be recognizable and manageable.
 - Finish the fit-and-finish gaps that make the terminal feel native to Omarchy,
   including exact theme fidelity and supported desktop integration.
-- Improve ordinary desktop workflows such as inserting local file and saved
-  image paths without weakening terminal input or privacy boundaries.
+- Build on delivered bounded local-file path insertion with separately designed
+  saved-image paths and other desktop workflows that preserve terminal input
+  and privacy boundaries.
 - Turn the existing CLI, SSH, and MCP capability into understandable user and
   integration-author journeys.
 - Keep release, website, package, and support language synchronized with actual
@@ -114,9 +115,9 @@ Horizon 1 is successful when:
 - users can distinguish detached, exited, restorable, and destructive states;
 - packaged upgrade and recovery behavior is tested and understood;
 - daily-driver blockers on the validated target have explicit dispositions;
-- the beta performance gate passes without moving cost from daemon to client or
-  regressing responsiveness; and
-- alpha feedback identifies workflow problems rather than basic uncertainty
+- accepted performance and memory gates remain passing without moving cost from
+  daemon to client or regressing responsiveness; and
+- beta feedback identifies workflow problems rather than basic uncertainty
   about what the product is.
 
 This horizon does **not** promise broad compositor support, reboot-transparent
