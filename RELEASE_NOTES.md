@@ -1,126 +1,111 @@
-# Splinterm 0.1.0 Beta 1 — The Foundation Holds
+# Splinterm 0.1.0 Beta 2 — Persistence With an Exit
 
-Splinterm has reached public beta.
+> **Release state:** candidate preparation. Beta 1 remains the current public
+> release until the reviewed Beta 2 candidate passes graphical acceptance and
+> protected promotion.
 
-That is more than a version-label change. The alpha releases proved that the
-core idea could work: a native terminal whose shells, layouts, and state belong
-to a persistent daemon instead of a window. Beta 1 is the point where that idea
-has become a coherent product we are comfortable asking people to use, test,
-and build workflows around.
+Splinterm remains persistent by default. Beta 2 adds a deliberate alternative:
+an ordinary unnamed graphical terminal can belong to its Window and disappear
+when that Window closes. The moment you organize that terminal into a named or
+multi-tab workspace, Splinterm can make the complete Lair durable automatically.
 
-Close a window attached to a persistent Splinterm session and your work keeps
-running. Come back through the session picker (the Dojo picker) or
-`splinterm reopen`, and it is still there. Tabs and panes are views into
-persistent sessions rather than fragile containers for them. Command-hosting
-XDG launches are deliberately transient and end with their owner window. The
-same topology is available to people, remote clients, scripts, and the optional
-MCP adapter—without giving automation the authority of a human at the keyboard.
+Beta 2 also includes the startup font-family correction for newly opened
+Windows. Selecting CaskaydiaMono, another Omarchy terminal family, or an
+explicit Fontconfig family no longer leaves bold and italic resolution tied to
+JetBrains Mono.
 
-## What is ready in Beta 1
+## Configurable terminal lifetime
 
-- **Persistent terminal sessions.** Shells and processes in persistent sessions
-  survive graphical client disconnects, with explicit restore behavior when a
-  process has exited. Command-hosting XDG launches remain intentionally
-  transient.
-- **A native Wayland workflow.** Splinterm provides windows, panes, window-local
-  Dojo tabs, search, copy mode, clipboard integration, IME support, and
-  multi-client control on the validated Omarchy/Arch Linux target.
-- **First-class Omarchy integration.** Splinterm follows the active Omarchy
-  palette, can reload valid theme changes without restarting your shell, and
-  offers an explicit, reversible default-terminal integration.
-- **One terminal world for humans and tools.** The human CLI, structured
-  JSON/NDJSON clients, SSH relay, native remote client, and optional MCP adapter
-  all work with the same persistent sessions.
-- **Bounded automation.** Machine access uses explicit policy, scopes, resource
-  limits, controller ownership, consent, and revocation. Terminal output remains
-  untrusted data; it cannot grant itself authority.
-- **Real packages.** Immutable GitHub release assets and both prebuilt and
-  source-built AUR packages are now public and versioned.
+The new settings are:
 
-## What changed for Beta 1
-
-### Large terminals no longer hit the old grid ceiling
-
-Splinterm now supports terminal grids up to `480×128`, replacing the earlier
-`240×80` ceiling. Maximized terminals on validated 1440p and non-graphically
-verified 4K profiles can use their available cell area instead of silently
-stopping at an inherited protocol limit. Negotiated limits, oversized terminal
-transactions, renderer state, and publication memory all remain bounded.
-
-### Heavy output is steadier and more predictable
-
-Terminal updates now travel through sparse publication frames that own the rows
-and metadata that actually changed rather than repeatedly retaining complete
-terminal checkpoints. This reduces unnecessary retained state and large
-cross-batch materialization while preserving exact ordering, resynchronization,
-exit delivery, and hard memory ceilings.
-
-In practical terms: sustained and bursty terminal output has a much healthier
-path through the daemon and graphical client, without weakening correctness to
-win a benchmark.
-
-### Active tabs are readable without corrupting selection colors
-
-On native Omarchy themes, the active tab now derives its background from
-standard theme roles and chooses a high-contrast foreground independently from
-terminal selection colors. Theme authors do not need Splinterm-specific keys,
-terminal text selection keeps its intended palette, and valid live theme
-changes remain atomic.
-
-### Wide-grid and automation edge cases were hardened
-
-The session picker now accepts the full Beta 1 grid envelope, constrained
-endpoints retain their negotiated dimensions, and a control-subscription
-ordering race found by repeated CI was fixed before release. Release review also
-caught user-facing package metadata defects, so the candidate was corrected and
-rebuilt before promotion.
-
-That matters. Beta does not mean “finished.” It means the release boundary is
-strong enough to catch problems before users inherit them.
-
-## Install
-
-Splinterm Beta 1 currently targets **x86_64 Omarchy/Arch Linux on native
-Wayland**. The recommended prebuilt packages are:
-
-```bash
-yay -S splinterm-bin
-# Optional policy-scoped MCP adapter:
-yay -S splinterm-mcp-bin
+```ini
+[multiplexer]
+persistent-by-default=yes
+persist-on-tab-organization=yes
 ```
 
-Source-built packages are available as `splinterm` and `splinterm-mcp`. See the
-[installation guide](https://splinterm.com/docs/install/) for trusted-client
-identity, upgrades, integration, and troubleshooting.
+Both default to `yes`, preserving Beta 1 behavior for existing configurations.
 
-## What “beta” means here
+Set `persistent-by-default=no` when normal terminals should behave like
+Window-owned terminals rather than detached multiplexer sessions. It applies to:
 
-The persistent-session model, terminal core, native presentation, multiplexing,
-packaging, and bounded automation workflows are implemented and validated for
-the documented target. This is the first Splinterm release intended for serious
-public evaluation rather than early architectural proof.
+- the commandless desktop/XDG launch used by Omarchy's terminal icon and
+  `SUPER+ENTER`;
+- bare `splinterm launch`;
+- **New** in the Recent Dojos picker; and
+- in-Window **New Terminal**.
 
-It is still beta software. Interfaces may change. The supported environment is
-narrow. Broader compositor, distribution, architecture, and package support is
-not promised yet, and stable compatibility or support windows have not been
-announced. The renderer is currently CPU-composed Wayland shared memory, remote
-image transfer is not supported, and full Kitty graphics compatibility is not
-claimed.
+Closing the owning Window terminates the processes and removes the complete
+unpromoted Lair. It is not saved, restored, placed in Recent Dojos, or selected
+by `reopen`.
 
-Those boundaries are deliberate. Splinterm would rather make a small promise it
-can defend than a large one it cannot.
+Explicit durable intent still wins. Named Lairs, `splinterm new NAME`,
+`splinterm launch --name NAME`, native command-bearing launches, presets,
+restore/relaunch, remote creation, automation, and MCP creation remain
+persistent. Generated collision-resistant Lair names and the initial `Dojo 1`
+label are implementation identities, not explicit naming.
 
-## From here
+## Organize first, keep it afterward
 
-Beta 1 gives Splinterm a solid public floor: persistent by design, native where
-it matters, useful to humans, accessible to tools, and explicit about authority.
-The next phase is refinement—better everyday ergonomics, broader compatibility,
-and a careful path toward stable interfaces—without sacrificing the ownership
-and safety model that made Splinterm worth building in the first place.
+With `persist-on-tab-organization=yes`, either of these actions atomically
+promotes a Window-owned Lair to persistent:
 
-Thank you to everyone willing to install it, stress it, report what feels wrong,
-and help shape what comes next.
+- creating another Dojo tab; or
+- explicitly naming or renaming a Dojo tab.
 
-- **Release:** [`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1)
-- **Current status:** [`docs/status.md`](https://raw.githubusercontent.com/OldJobobo/splinterm/main/docs/status.md)
-- **Documentation:** [splinterm.com/docs](https://splinterm.com/docs/)
+Promotion includes every Dojo, Splint, and running process in the Lair. It is
+permanent for that Lair. Once promoted, closing the Window detaches normally and
+the Lair can appear in Recent Dojos.
+
+Set the option to `no` when even organized or multi-tab terminals should remain
+Window-owned. In that mode, all tabs in the transient Lair are removed together
+when its Window closes.
+
+Promotion is an owner-only topology transaction. Lifetime, tab creation or
+rename, persistence, lease removal, revision advancement, and publication
+commit together. A stale revision, wrong owner, invalid name, runtime admission
+failure, or persistence failure leaves the original transient Lair unchanged.
+
+Command-bearing `splinterm-xdg-terminal-exec -- COMMAND...` retains its existing
+client-bound contract regardless of these settings.
+
+## Startup font-family correction
+
+New clients now resolve regular, bold, italic, and bold-italic from the family
+selected by the configured regular Fontconfig pattern. The application default
+is now:
+
+```ini
+[main]
+font=monospace:style=Regular
+```
+
+That follows the active Omarchy Fontconfig terminal-family selection. An
+explicit `main.font` remains authoritative.
+
+A styled face is accepted only when it belongs to the selected regular family,
+represents the requested weight and slant, and has compatible terminal-cell
+metrics. When no compatible style exists, Splinterm warns and deliberately
+reuses the regular face instead of refusing to open a Window.
+
+This corrects startup for families such as CaskaydiaMono and for regular-only
+families. Already-open Windows still retain immutable renderer resources; live
+font-family replacement remains planned for the 0.2 line.
+
+## Compatibility and boundaries
+
+- Existing configuration omission remains persistent.
+- Persistent topology, restore, history, remote, automation, MCP, and preset
+  contracts are unchanged.
+- Transient authority is restricted to the trusted local graphical owner.
+- Terminal output cannot select lifetime, trigger promotion, or retain a Lair.
+- Beta 1 tags and packages remain immutable.
+- Beta 2 still targets x86_64 Omarchy/Arch Linux with native Wayland.
+
+## Before publication
+
+The Beta 2 implementation has passed serialized workspace, package,
+release-tooling, portable Foot-provenance, documentation, independent review,
+and guarded staged-package graphical boundaries. Candidate construction,
+protected GitHub promotion, AUR distribution, and local system installation
+remain separate approval-gated operations.

@@ -59,7 +59,7 @@
   "rust": {
     "rustc": "1.91.0",
     "cargo": "1.91.0",
-    "cargo_lock_sha256": "355f0fce0bd86e2ce88f83408786b5c88e54b668ca5d1bd57a3415e7a64cc52a",
+    "cargo_lock_sha256": "2511d1c90b576181e82c4c85303963b7c40c53638ad24de263642b54cc13e5e3",
     "dependencies": {
       "fontdb": "0.23.0",
       "freetype-rs": "0.38.0",
@@ -112,7 +112,7 @@
     },
     "foreground": "ebebeb",
     "background": "0e1216",
-    "cargo_lock_sha256": "355f0fce0bd86e2ce88f83408786b5c88e54b668ca5d1bd57a3415e7a64cc52a"
+    "cargo_lock_sha256": "2511d1c90b576181e82c4c85303963b7c40c53638ad24de263642b54cc13e5e3"
   },
   "semantic_fixture_schema": "fixtures/terminal/v1/schema.md",
   "final_buffer_schema": "tools/foot-oracle/final-buffer-schema.md",

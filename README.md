@@ -5,7 +5,7 @@
 
 **A persistent, security-conscious terminal substrate for humans and bounded automation.**
 
-[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Beta 1 release notes](RELEASE_NOTES.md) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Product roadmap](docs/product-roadmap.md) · [Current status](docs/status.md)
+[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Beta 2 release notes draft](RELEASE_NOTES.md) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Product roadmap](docs/product-roadmap.md) · [Current status](docs/status.md)
 
 </div>
 
@@ -102,7 +102,9 @@ Open a fresh terminal from the installed desktop entry or the XDG terminal launc
 splinterm-xdg-terminal-exec
 ```
 
-A commandless desktop/XDG launch creates a persistent Lair with one Dojo and one Splint. Closing its window detaches the graphical client while `splinterd` keeps the session running. When another application asks the XDG terminal to host a command, Splinterm instead creates a transient client-bound Lair: command exit or owner-window disconnect terminates its processes and removes it from topology. Native `splinterm launch -- COMMAND...` remains persistent.
+Ordinary unnamed graphical terminals are persistent by default. Set `multiplexer.persistent-by-default=no` to make commandless desktop/SUPER+ENTER, bare `splinterm launch`, picker **New**, and in-Window **New Terminal** belong to their Window instead; closing it then terminates and removes the unpromoted Lair. Explicit names, command-bearing native launches, presets, remote creation, restore/relaunch, automation, and MCP remain persistent.
+
+`multiplexer.persist-on-tab-organization=yes` is also the default. Creating another Dojo or explicitly naming/renaming a Dojo atomically promotes the complete transient Lair, after which Window close detaches normally. Command-bearing XDG launches retain their existing client-bound behavior regardless of configuration.
 
 Return through the native Dojo picker:
 

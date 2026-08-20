@@ -2801,6 +2801,37 @@ enum TransientRetirementTrigger {
     },
 }
 
+fn authorize_transient_promotion(
+    state: &DaemonState,
+    topology: &Topology,
+    connection_id: u64,
+    lair_id: LairId,
+    requested: bool,
+) -> std::result::Result<bool, ProtocolError> {
+    if !requested {
+        return Ok(false);
+    }
+    let lair = topology
+        .find_lair(lair_id)
+        .ok_or_else(|| model_error(TopologyError::LairNotFound(lair_id)))?;
+    if lair.lifetime == LairLifetime::Persistent {
+        return Ok(false);
+    }
+    let lease = state
+        .transient_leases
+        .lock()
+        .unwrap()
+        .for_lair(lair_id)
+        .ok_or_else(internal)?;
+    if lease.owner_connection_id != connection_id {
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "transient Lair promotion requires its owning graphical client",
+        ));
+    }
+    Ok(true)
+}
+
 fn transient_trigger_matches(
     lease: TransientLairLease,
     trigger: TransientRetirementTrigger,
@@ -4673,6 +4704,7 @@ async fn resolve_automation_mutation(
                 lair_id,
                 name,
                 launch: resolved_automation_launch(launch, cwd)?,
+                promote_transient_lair: false,
             }
         }
         request => request,
@@ -5151,9 +5183,6 @@ async fn handle_authorized_request(
                 .await
                 .map_err(|_| internal())?;
             launch.validate()?;
-            if launch.command.is_empty() {
-                return Err(invalid("transient Lair requires a direct command"));
-            }
             let current = state.topology.read().await.revision();
             if current != expected_topology_revision {
                 return Err(model_error(TopologyError::StaleTopology {
@@ -5616,6 +5645,7 @@ async fn handle_authorized_request(
             lair_id,
             name,
             launch,
+            promote_transient_lair,
         } => {
             let _transaction = state
                 .topology_transactions
@@ -5630,6 +5660,13 @@ async fn handle_authorized_request(
                     current,
                 }));
             }
+            let promote_transient_lair = authorize_transient_promotion(
+                state,
+                &*state.topology.read().await,
+                connection_id,
+                lair_id,
+                promote_transient_lair,
+            )?;
             let mut dojo = Dojo::with_shell(name, launch.cwd.clone());
             let LayoutNode::Leaf(splint) = &mut dojo.root else {
                 unreachable!()
@@ -5650,10 +5687,15 @@ async fn handle_authorized_request(
             splint.state = SplintState::Running;
             let previous = state.topology.read().await.clone();
             let prepared = durable_topology_candidate(state, |lair| {
-                lair.new_dojo_at(expected_topology_revision, lair_id, dojo)
+                lair.new_dojo_with_promotion_at(
+                    expected_topology_revision,
+                    lair_id,
+                    dojo,
+                    promote_transient_lair,
+                )
             })
             .await;
-            let (candidate, topology_revision) = match prepared {
+            let (candidate, (topology_revision, promoted)) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     let _ = runtime.shutdown().await;
@@ -5680,6 +5722,14 @@ async fn handle_authorized_request(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
                 ));
+            }
+            if promoted {
+                state
+                    .transient_leases
+                    .lock()
+                    .unwrap()
+                    .remove_lair(lair_id)
+                    .expect("authorized transient promotion retains its lease");
             }
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::DojoCreated).await;
@@ -5980,17 +6030,48 @@ async fn handle_authorized_request(
             expected_topology_revision,
             dojo_id,
             name,
+            promote_transient_lair,
         } => {
             let _transaction = state
                 .topology_transactions
                 .acquire()
                 .await
                 .map_err(|_| internal())?;
-            let (candidate, topology_revision) = durable_topology_candidate(state, |lair| {
-                lair.rename_dojo_at(expected_topology_revision, dojo_id, name)
-            })
-            .await?;
+            let (lair_id, promote_transient_lair) = {
+                let topology = state.topology.read().await;
+                let lair_id = topology
+                    .lairs()
+                    .find(|lair| lair.dojos.iter().any(|dojo| dojo.id == dojo_id))
+                    .map(|lair| lair.id)
+                    .ok_or_else(|| model_error(TopologyError::DojoNotFound(dojo_id)))?;
+                let promote = authorize_transient_promotion(
+                    state,
+                    &topology,
+                    connection_id,
+                    lair_id,
+                    promote_transient_lair,
+                )?;
+                (lair_id, promote)
+            };
+            let (candidate, (topology_revision, promoted)) =
+                durable_topology_candidate(state, |lair| {
+                    lair.rename_dojo_with_promotion_at(
+                        expected_topology_revision,
+                        dojo_id,
+                        name,
+                        promote_transient_lair,
+                    )
+                })
+                .await?;
             install_topology(state, candidate).await;
+            if promoted {
+                state
+                    .transient_leases
+                    .lock()
+                    .unwrap()
+                    .remove_lair(lair_id)
+                    .expect("authorized transient promotion retains its lease");
+            }
             publish_topology(state, topology_revision, TopologyChangeKind::DojoRenamed).await;
             Response::TopologyCommitted { topology_revision }
         }
@@ -9472,6 +9553,252 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    #[test]
+    fn transient_leases_keep_one_independent_owner_per_lair() {
+        let first_lair = LairId::new();
+        let second_lair = LairId::new();
+        let third_lair = LairId::new();
+        let mut leases = TransientLeaseRegistry::default();
+        assert!(leases.reserve(10, first_lair, SplintId::new()));
+        assert!(leases.reserve(11, second_lair, SplintId::new()));
+        assert!(!leases.reserve(10, third_lair, SplintId::new()));
+        assert_eq!(leases.for_connection(10).unwrap().lair_id, first_lair);
+        assert_eq!(leases.for_connection(11).unwrap().lair_id, second_lair);
+
+        assert_eq!(
+            leases.remove_lair(first_lair).unwrap().owner_connection_id,
+            10
+        );
+        assert!(leases.reserve(10, third_lair, SplintId::new()));
+        assert_eq!(leases.for_connection(10).unwrap().lair_id, third_lair);
+        assert_eq!(leases.for_connection(11).unwrap().lair_id, second_lair);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commandless_transient_uses_configured_shell_and_owner_lifetime() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let connection_id = 40;
+        let mut launch = test_launch(&[]);
+        launch.shell = Some("/bin/sh".to_owned());
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            connection_id,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "commandless-transient".into(),
+                launch,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let splint_id = lair.dojos[0].default_focus;
+        let splint = state
+            .topology
+            .read()
+            .await
+            .find_splint(splint_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(lair.lifetime, LairLifetime::Transient);
+        assert!(splint.command.is_empty());
+        assert_eq!(splint.launch.shell.as_deref(), Some("/bin/sh"));
+        assert!(state.runtimes.lock().await.handle(splint_id).is_some());
+
+        cleanup_connection(&state, connection_id).await;
+        assert!(state.topology.read().await.lairs().next().is_none());
+        assert!(state.runtimes.lock().await.handle(splint_id).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_tab_creation_promotion_is_owner_only_and_survives_disconnect() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let owner_id = 140;
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            owner_id,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "promoted-by-tab".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let before = state.topology.read().await.clone();
+        let rejected = trusted_request(
+            &state,
+            owner_id + 1,
+            Request::NewDojo {
+                expected_topology_revision: before.revision(),
+                lair_id: lair.id,
+                name: "unowned".into(),
+                launch: test_launch(&["/bin/true"]),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.code, ErrorCode::Unauthorized);
+        assert_eq!(*state.topology.read().await, before);
+
+        let Response::DojoStarted { dojo_id, .. } = trusted_request(
+            &state,
+            owner_id,
+            Request::NewDojo {
+                expected_topology_revision: before.revision(),
+                lair_id: lair.id,
+                name: "organized".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("promoting Dojo response was not returned");
+        };
+        let promoted = state
+            .topology
+            .read()
+            .await
+            .find_lair(lair.id)
+            .unwrap()
+            .clone();
+        assert_eq!(promoted.lifetime, LairLifetime::Persistent);
+        assert!(promoted.dojos.iter().any(|dojo| dojo.id == dojo_id));
+        assert!(
+            state
+                .transient_leases
+                .lock()
+                .unwrap()
+                .for_lair(lair.id)
+                .is_none()
+        );
+
+        cleanup_connection(&state, owner_id).await;
+        assert!(state.topology.read().await.find_lair(lair.id).is_some());
+        let runtimes = state.runtimes.lock().await.drain();
+        for runtime in runtimes {
+            let _ = runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded test proves wrong-owner, persistence failure, retry, and disconnect invariants"
+    )]
+    async fn rename_promotion_is_atomic_on_persistence_failure() {
+        let base = temp_dir();
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = test_state_with_backend_and_metadata(
+            false,
+            test_pty_backend(),
+            Some(MetadataStore::from_base(&base)),
+        );
+        let owner_id = 141;
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            owner_id,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "promoted-by-name".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let dojo_id = lair.dojos[0].id;
+        let before = state.topology.read().await.clone();
+        let unauthorized = trusted_request(
+            &state,
+            owner_id + 1,
+            Request::RenameDojo {
+                expected_topology_revision: before.revision(),
+                dojo_id,
+                name: "unowned".into(),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unauthorized.code, ErrorCode::Unauthorized);
+        assert_eq!(*state.topology.read().await, before);
+
+        state
+            .topology_save_failure_countdown
+            .store(0, Ordering::SeqCst);
+        let error = trusted_request(
+            &state,
+            owner_id,
+            Request::RenameDojo {
+                expected_topology_revision: before.revision(),
+                dojo_id,
+                name: "work".into(),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(*state.topology.read().await, before);
+        assert!(
+            state
+                .transient_leases
+                .lock()
+                .unwrap()
+                .for_lair(lair.id)
+                .is_some()
+        );
+
+        state
+            .topology_save_failure_countdown
+            .store(u64::MAX, Ordering::SeqCst);
+        let response = trusted_request(
+            &state,
+            owner_id,
+            Request::RenameDojo {
+                expected_topology_revision: before.revision(),
+                dojo_id,
+                name: "work".into(),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(response, Response::TopologyCommitted { .. }));
+        let promoted = state
+            .topology
+            .read()
+            .await
+            .find_lair(lair.id)
+            .unwrap()
+            .clone();
+        assert_eq!(promoted.lifetime, LairLifetime::Persistent);
+        assert_eq!(promoted.dojos[0].name, "work");
+        assert!(
+            state
+                .transient_leases
+                .lock()
+                .unwrap()
+                .for_lair(lair.id)
+                .is_none()
+        );
+        cleanup_connection(&state, owner_id).await;
+        assert!(state.topology.read().await.find_lair(lair.id).is_some());
+        let runtimes = state.runtimes.lock().await.drain();
+        for runtime in runtimes {
+            let _ = runtime.shutdown().await;
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transient_owner_disconnect_reaps_runtime_and_removes_complete_lair() {
         let state = test_state_with_backend(false, test_pty_backend());
@@ -9553,6 +9880,7 @@ mod tests {
                     lair_id: lair.id,
                     name: "secondary".into(),
                     launch: test_launch(&["/bin/true"]),
+                    promote_transient_lair: false,
                 },
             ),
         )
@@ -9791,6 +10119,7 @@ mod tests {
                 expected_topology_revision: revision,
                 dojo_id: first_dojo_id,
                 name: "renamed".to_owned(),
+                promote_transient_lair: false,
             },
             &state,
             &peer,
@@ -9807,6 +10136,7 @@ mod tests {
                 expected_topology_revision: revision,
                 dojo_id: second_dojo_id,
                 name: "denied".to_owned(),
+                promote_transient_lair: false,
             },
             &state,
             &peer,

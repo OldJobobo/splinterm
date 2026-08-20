@@ -518,6 +518,9 @@ pub enum Request {
         lair_id: LairId,
         name: String,
         launch: LaunchParameters,
+        /// Trusted owner request to atomically make a transient Lair durable.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        promote_transient_lair: bool,
     },
     MaterializePreset {
         expected_topology_revision: TopologyRevision,
@@ -544,6 +547,9 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         dojo_id: DojoId,
         name: String,
+        /// Trusted owner request to atomically make a transient Lair durable.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        promote_transient_lair: bool,
     },
     SetDojoDefaultFocus {
         expected_topology_revision: TopologyRevision,
@@ -3746,6 +3752,39 @@ mod tests {
             value["launch"]["command"],
             serde_json::json!(["printf", "%s"])
         );
+
+        let promotion = Request::NewDojo {
+            expected_topology_revision: TopologyRevision::new(8),
+            lair_id: LairId::new(),
+            name: "work".into(),
+            launch: launch.clone(),
+            promote_transient_lair: true,
+        };
+        let mut promotion_value = serde_json::to_value(&promotion).unwrap();
+        assert_eq!(promotion_value["promote_transient_lair"], true);
+        assert_eq!(
+            serde_json::from_value::<Request>(promotion_value.clone()).unwrap(),
+            promotion
+        );
+        promotion_value
+            .as_object_mut()
+            .unwrap()
+            .remove("promote_transient_lair");
+        assert!(matches!(
+            serde_json::from_value::<Request>(promotion_value).unwrap(),
+            Request::NewDojo {
+                promote_transient_lair: false,
+                ..
+            }
+        ));
+        let ordinary_rename = serde_json::to_value(Request::RenameDojo {
+            expected_topology_revision: TopologyRevision::new(9),
+            dojo_id: DojoId::new(),
+            name: "ordinary".into(),
+            promote_transient_lair: false,
+        })
+        .unwrap();
+        assert!(ordinary_rename.get("promote_transient_lair").is_none());
 
         let mut invalid = launch.clone();
         invalid.command = vec!["x".into(); MAX_LAUNCH_ARGUMENTS + 1];

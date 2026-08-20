@@ -5,7 +5,7 @@ use std::{collections::HashMap, env, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use splinterm::{
     PerfTraceCorrelation, WindowOptions, WindowUpdate,
-    automation::{MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
+    automation::{Connection, MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
     config::AppConfig,
     endpoint::{
         ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication, LaunchSemantics,
@@ -112,17 +112,55 @@ pub(super) async fn run_live_multipane_window(
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
 ) -> Result<()> {
-    run_live_multipane_window_with_app_id(config, dojo_model, factory, None, true).await
+    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true).await
+}
+
+pub(super) async fn run_live_multipane_window_with_app_id(
+    config: AppConfig,
+    dojo_model: splinterm_core::Dojo,
+    factory: ConnectionFactory,
+    app_id: Option<String>,
+    initial_tab_strip_visible: bool,
+) -> Result<()> {
+    run_live_multipane_window_inner(
+        config,
+        dojo_model,
+        factory,
+        None,
+        app_id,
+        initial_tab_strip_visible,
+    )
+    .await
+}
+
+pub(super) async fn run_owned_live_multipane_window_with_app_id(
+    config: AppConfig,
+    dojo_model: splinterm_core::Dojo,
+    factory: ConnectionFactory,
+    owner: Connection,
+    app_id: Option<String>,
+    initial_tab_strip_visible: bool,
+) -> Result<()> {
+    run_live_multipane_window_inner(
+        config,
+        dojo_model,
+        factory,
+        Some(owner),
+        app_id,
+        initial_tab_strip_visible,
+    )
+    .await
 }
 
 #[allow(
     clippy::too_many_lines,
     reason = "multi-pane startup keeps renderer, topology, theme, and input authorities in one lifecycle"
 )]
-pub(super) async fn run_live_multipane_window_with_app_id(
+async fn run_live_multipane_window_inner(
     config: AppConfig,
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
+    initial_transient_owner: Option<Connection>,
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
 ) -> Result<()> {
@@ -194,6 +232,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
         topology_command_receiver,
         topology_update_sender,
         tasks,
+        initial_transient_owner,
     ));
     let result = tokio::task::spawn_blocking(move || {
         run_window(WindowOptions {

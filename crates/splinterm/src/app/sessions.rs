@@ -1,6 +1,5 @@
 use std::{
     env,
-    future::Future,
     io::{self, IsTerminal, Write},
     path::PathBuf,
     sync::mpsc as std_mpsc,
@@ -21,10 +20,13 @@ use splinterm_protocol::{Request, Response};
 
 use super::{
     session_catalog::{
-        create_request, launch_parameters, recent_dojo_ids, remember_dojo, select_dojo_from,
-        session_picker_item,
+        GraphicalLairLifetime, graphical_create_request, launch_parameters, recent_dojo_ids,
+        remember_dojo, select_dojo_from, session_picker_item,
     },
-    window::{run_live_multipane_window, run_live_multipane_window_with_app_id, run_live_window},
+    window::{
+        run_live_multipane_window, run_live_multipane_window_with_app_id, run_live_window,
+        run_owned_live_multipane_window_with_app_id,
+    },
 };
 
 use super::theme_watch::load_startup_theme;
@@ -210,13 +212,12 @@ pub(in crate::app) async fn run_dojos(config: AppConfig, factory: ConnectionFact
             if let Some(diagnostics) = splinterm::diagnostics::global() {
                 diagnostics.begin_window(None, None);
             }
-            let name = fresh_lair_name(SystemTime::now(), std::process::id());
             let cwd = if factory.is_local() {
                 Some(env::current_dir().context("failed to read current directory")?)
             } else {
                 None
             };
-            launch(Some(name), cwd, None, true, Vec::new(), config, factory).await
+            launch(None, cwd, None, true, Vec::new(), config, factory).await
         }
         Some(SessionPickerDecision::Open(index)) => {
             if let Some(diagnostics) = splinterm::diagnostics::global() {
@@ -260,20 +261,11 @@ pub(in crate::app) async fn reopen_recent(
 }
 
 fn fresh_lair_name(now: SystemTime, process_id: u32) -> String {
-    let stamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let stamp = now
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     format!("terminal-{stamp}-{process_id}")
-}
-
-async fn keep_owner_until_complete<Owner, WindowFuture>(
-    owner: Owner,
-    window: WindowFuture,
-) -> WindowFuture::Output
-where
-    WindowFuture: Future,
-{
-    let result = window.await;
-    drop(owner);
-    result
 }
 
 pub(in crate::app) async fn xdg_launch(
@@ -323,11 +315,7 @@ pub(in crate::app) async fn xdg_launch(
     if !matches!(&dojo.root, splinterm_core::LayoutNode::Leaf(_)) {
         bail!("new transient Dojo did not contain exactly one Splint");
     }
-    keep_owner_until_complete(
-        owner,
-        run_live_multipane_window_with_app_id(config, dojo, factory, app_id, false),
-    )
-    .await
+    run_owned_live_multipane_window_with_app_id(config, dojo, factory, owner, app_id, false).await
 }
 
 pub(in crate::app) async fn launch(
@@ -377,14 +365,19 @@ async fn launch_with_app_id(
         return run_live_window(config, splint_id, factory).await;
     }
 
+    let explicit_name = name.is_some();
     let name = name.unwrap_or_else(|| fresh_lair_name(SystemTime::now(), std::process::id()));
     let expected = connection.topology_revision().await?;
-    let Response::LairCreated { lair: dojo, .. } = connection
-        .request(create_request(
-            &factory, expected, name, cwd, command, &config,
-        )?)
-        .await?
-    else {
+    let (request, lifetime) = graphical_create_request(
+        &factory,
+        expected,
+        name,
+        explicit_name,
+        cwd,
+        command,
+        &config,
+    )?;
+    let Response::LairCreated { lair: dojo, .. } = connection.request(request).await? else {
         bail!("splinterd did not create the requested terminal");
     };
     let dojo = dojo
@@ -395,50 +388,24 @@ async fn launch_with_app_id(
         bail!("new dojo did not contain exactly one Splint");
     }
     let dojo = dojo.clone();
-    remember_dojo(&factory, dojo.id);
-    drop(connection);
-    run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true).await
+    match lifetime {
+        GraphicalLairLifetime::Persistent => {
+            remember_dojo(&factory, dojo.id);
+            drop(connection);
+            run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true).await
+        }
+        GraphicalLairLifetime::ClientBound => {
+            run_owned_live_multipane_window_with_app_id(
+                config, dojo, factory, connection, app_id, true,
+            )
+            .await
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
     use super::*;
-
-    struct DropMarker(Arc<AtomicBool>);
-
-    impl Drop for DropMarker {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-
-    #[tokio::test]
-    async fn owner_is_kept_until_window_future_completes() {
-        for succeeds in [true, false] {
-            let dropped = Arc::new(AtomicBool::new(false));
-            let (send, receive) = tokio::sync::oneshot::channel::<Result<(), &'static str>>();
-            let task = tokio::spawn(keep_owner_until_complete(
-                DropMarker(Arc::clone(&dropped)),
-                async move { receive.await.unwrap() },
-            ));
-            tokio::task::yield_now().await;
-            assert!(!dropped.load(Ordering::SeqCst));
-            let expected = if succeeds {
-                Ok(())
-            } else {
-                Err("window failed")
-            };
-            send.send(expected).unwrap();
-            let actual = task.await.unwrap();
-            assert_eq!(actual.is_ok(), succeeds);
-            assert!(dropped.load(Ordering::SeqCst));
-        }
-    }
 
     #[test]
     fn dojo_selection_uses_only_its_local_hint() {
@@ -483,7 +450,7 @@ mod tests {
                 SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_234),
                 56
             ),
-            "terminal-1234-56"
+            "terminal-1234000000000-56"
         );
     }
 }

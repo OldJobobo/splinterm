@@ -7,6 +7,8 @@ Splinterm is a **public beta**. Source, documentation, and immutable versioned G
 
 [`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1) is the current public prerelease. It adds wide-grid support through `480×128`, bounded sparse terminal publication frames, and active-tab contrast that remains independent from terminal selection colors, while retaining the accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
 
+Beta 2 candidate preparation is in progress. Its source tree adds configurable ordinary graphical lifetime, owner-only promotion when users organize tabs, and corrected startup font-family resolution. Complete non-graphical, clean-package, and isolated staged-package graphical validation has passed. Fresh review approved the complete implementation and bounded post-graphical naming fix with no blocker or fix worth doing now. No Beta 2 tag, package publication, AUR update, or installed-package acceptance is claimed yet.
+
 ## What that means
 
 - The product runs and has a normal graphical daily-use path.
@@ -21,7 +23,7 @@ Splinterm is a **public beta**. Source, documentation, and immutable versioned G
 | --- | --- |
 | Native Wayland presentation | Keyboard, pointer, clipboard, IME, scaling, and damage-driven rendering validated on the documented Hyprland target |
 | Persistent sessions and explicit restore | Implemented and validated |
-| XDG command lifecycle | Commandless launches remain persistent; command-bearing launches use trusted client-bound transient Lairs |
+| Graphical terminal lifecycle | Ordinary unnamed commandless launches are configurable persistent or Window-owned; command-bearing XDG launches remain client-bound |
 | Pane layouts and multiple Dojos | Implemented and validated |
 | Window-local Dojo tabs, tab strip, and context menus | Implemented and validated |
 | Configurable keymaps and Omarchy controls | Implemented and validated |

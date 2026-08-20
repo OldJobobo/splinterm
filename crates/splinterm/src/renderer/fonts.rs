@@ -26,9 +26,6 @@ use super::{BASE_FONT_SIZE, PRIMARY_FONT, effective_font_size, renderer_options}
 
 pub(super) const BASE_ROW_X: i32 = 32;
 pub(super) const BASE_ROW_Y: i32 = 96;
-pub(super) const PRIMARY_BOLD_FONT: &str = "JetBrains Mono Nerd Font:style=Bold";
-pub(super) const PRIMARY_ITALIC_FONT: &str = "JetBrains Mono Nerd Font:style=Italic";
-pub(super) const PRIMARY_BOLD_ITALIC_FONT: &str = "JetBrains Mono Nerd Font:style=Bold Italic";
 pub(super) const CJK_FONT: &str = "Noto Sans CJK JP:style=Regular";
 pub(super) const EMOJI_FONT: &str = "Noto Color Emoji";
 pub(super) const SNAPSHOT_GLYPH_CACHE_BUDGET: usize = 2_048;
@@ -158,8 +155,30 @@ pub(super) struct FontFace {
     pub(super) style: String,
     pub(super) path: PathBuf,
     pub(super) index: usize,
+    pub(super) weight: i32,
+    pub(super) slant: i32,
     pub(super) selected_pixel_size_26_6: isize,
     pub(super) data: OnceLock<Result<ReadOnlyFileMap, String>>,
+}
+
+impl FontFace {
+    fn fallback_for(&self, label: &'static str) -> Self {
+        Self {
+            label,
+            family: self.family.clone(),
+            style: self.style.clone(),
+            path: self.path.clone(),
+            index: self.index,
+            weight: self.weight,
+            slant: self.slant,
+            selected_pixel_size_26_6: self.selected_pixel_size_26_6,
+            data: OnceLock::new(),
+        }
+    }
+
+    fn identity(&self) -> (&std::path::Path, usize) {
+        (&self.path, self.index)
+    }
 }
 
 pub(super) struct CachedGlyph {
@@ -255,8 +274,9 @@ impl TextRow {
             .checked_mul(i32::try_from(integer_scale).context("integer scale fits i32")?)
             .context("scaled row y overflow")?;
         let started = Instant::now();
+        let [primary, _, _, _] = resolve_primary_faces(PRIMARY_FONT)?;
         let faces = [
-            resolve_face("primary", PRIMARY_FONT, "jetbrains mono")?,
+            primary,
             resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")?,
             resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")?,
         ];
@@ -276,8 +296,6 @@ impl TextRow {
         eprintln!(
             "Text row metrics: scale={integer_scale} size={font_size:.1}px cell={cell_width}x{cell_height}px baseline={baseline}px primary-M-advance={mono_advance:.3}px"
         );
-        verify_style_advances(&faces[0], mono_advance, font_size)?;
-
         let mut scale_context = ScaleContext::new();
         let mut shape_context = ShapeContext::new();
         let mut cache = HashMap::new();
@@ -483,19 +501,14 @@ pub(super) fn cache_glyph(
 pub(super) fn snapshot_faces() -> Result<&'static [FontFace; 6]> {
     SNAPSHOT_FACES
         .get_or_init(|| {
+            let [regular, bold, italic, bold_italic] =
+                resolve_primary_faces(&renderer_options().font)
+                    .map_err(|error| error.to_string())?;
             Ok([
-                resolve_face("primary", &renderer_options().font, "")
-                    .map_err(|error| error.to_string())?,
-                resolve_face("primary bold", PRIMARY_BOLD_FONT, "jetbrains mono")
-                    .map_err(|error| error.to_string())?,
-                resolve_face("primary italic", PRIMARY_ITALIC_FONT, "jetbrains mono")
-                    .map_err(|error| error.to_string())?,
-                resolve_face(
-                    "primary bold italic",
-                    PRIMARY_BOLD_ITALIC_FONT,
-                    "jetbrains mono",
-                )
-                .map_err(|error| error.to_string())?,
+                regular,
+                bold,
+                italic,
+                bold_italic,
                 resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")
                     .map_err(|error| error.to_string())?,
                 resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")
@@ -1104,7 +1117,7 @@ pub(super) fn resolve_face(
     let output = Command::new("fc-match")
         .args([
             "-f",
-            "%{file}\\n%{index}\\n%{family}\\n%{style}\\n%{pixelsize}\\n",
+            "%{file}\\n%{index}\\n%{family[0]}\\n%{style}\\n%{weight}\\n%{slant}\\n%{pixelsize}\\n",
             pattern,
         ])
         .output()
@@ -1129,28 +1142,30 @@ pub(super) fn resolve_face(
         .with_context(|| format!("fc-match returned a non-numeric face index for {label}"))?;
     let family = lines
         .next()
-        .with_context(|| format!("fc-match returned no family for {label}"))?
+        .with_context(|| format!("fc-match returned no font family for {label}"))?
         .to_owned();
     let style = lines
         .next()
         .with_context(|| format!("fc-match returned no style for {label}"))?
         .to_owned();
+    let weight = lines
+        .next()
+        .with_context(|| format!("fc-match returned no weight for {label}"))?
+        .parse::<i32>()
+        .with_context(|| format!("fc-match returned a non-numeric weight for {label}"))?;
+    let slant = lines
+        .next()
+        .with_context(|| format!("fc-match returned no slant for {label}"))?
+        .parse::<i32>()
+        .with_context(|| format!("fc-match returned a non-numeric slant for {label}"))?;
     let selected_pixel_size = lines
         .next()
         .with_context(|| format!("fc-match returned no pixel size for {label}"))?
         .parse::<f32>()
         .with_context(|| format!("fc-match returned an invalid pixel size for {label}"))?;
     let selected_pixel_size_26_6 = pixel_size_26_6(selected_pixel_size)?;
-    let normalized_family: String = family
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
-    let normalized_expected: String = expected_family_fragment
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
+    let normalized_family = normalize_family(&family);
+    let normalized_expected = normalize_family(expected_family_fragment);
     if !normalized_expected.is_empty() && !normalized_family.contains(&normalized_expected) {
         bail!("explicit {label} pattern {pattern:?} resolved unexpectedly to {family:?}");
     }
@@ -1160,11 +1175,13 @@ pub(super) fn resolve_face(
         style,
         path,
         index,
+        weight,
+        slant,
         selected_pixel_size_26_6,
         data: OnceLock::new(),
     };
     eprintln!(
-        "Selected {label}: {} {} (face {}, {})",
+        "Resolved {label}: {} {} (face {}, {})",
         face.family,
         face.style,
         face.index,
@@ -1173,45 +1190,137 @@ pub(super) fn resolve_face(
     Ok(face)
 }
 
-pub(super) fn verify_style_advances(
-    regular: &FontFace,
-    regular_advance: f32,
-    font_size: f32,
-) -> Result<()> {
-    let mut identities = vec![(regular.path.clone(), regular.index)];
-    for (label, pattern, expected_style) in [
-        ("primary bold", PRIMARY_BOLD_FONT, "bold"),
-        ("primary italic", PRIMARY_ITALIC_FONT, "italic"),
-        (
-            "primary bold italic",
-            PRIMARY_BOLD_ITALIC_FONT,
-            "bold italic",
-        ),
-    ] {
-        let face = resolve_face(label, pattern, "jetbrains mono")?;
-        let identity = (face.path.clone(), face.index);
-        if identities.contains(&identity) {
-            bail!("{label} silently resolved to an already selected face");
+#[derive(Clone, Copy)]
+struct PrimaryStyleRequest {
+    label: &'static str,
+    style: &'static str,
+    bold: bool,
+    italic: bool,
+}
+
+const PRIMARY_STYLE_REQUESTS: [PrimaryStyleRequest; 3] = [
+    PrimaryStyleRequest {
+        label: "primary bold",
+        style: "Bold",
+        bold: true,
+        italic: false,
+    },
+    PrimaryStyleRequest {
+        label: "primary italic",
+        style: "Italic",
+        bold: false,
+        italic: true,
+    },
+    PrimaryStyleRequest {
+        label: "primary bold italic",
+        style: "Bold Italic",
+        bold: true,
+        italic: true,
+    },
+];
+
+fn normalize_family(family: &str) -> String {
+    family
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn escape_fontconfig_pattern_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '\\' | '-' | ',' | ':') {
+            escaped.push('\\');
         }
-        if !face.style.eq_ignore_ascii_case(expected_style) {
-            bail!("{label} resolved to unexpected style {:?}", face.style);
-        }
-        identities.push(identity);
-        let font = font_ref(&face)?;
-        let advance = font
-            .glyph_metrics(&[])
-            .scale(font_size)
-            .advance_width(font.charmap().map('M'));
-        if !advance.is_finite() || (advance - regular_advance).abs() > 0.01 {
-            bail!("{label} advance {advance:.3}px differs from regular {regular_advance:.3}px");
-        }
-        eprintln!(
-            "Style evidence: {} path={} M-advance={advance:.3}px",
-            face.style,
-            face.path.display()
-        );
+        escaped.push(character);
     }
-    Ok(())
+    escaped
+}
+
+fn primary_style_pattern(family: &str, style: &str) -> String {
+    format!(
+        "{}:style={}",
+        escape_fontconfig_pattern_value(family),
+        escape_fontconfig_pattern_value(style)
+    )
+}
+
+fn face_advance(face: &FontFace, font_size: f32) -> Result<f32> {
+    let font = font_ref(face)?;
+    let advance = font
+        .glyph_metrics(&[])
+        .scale(font_size)
+        .advance_width(font.charmap().map('M'));
+    anyhow::ensure!(advance.is_finite() && advance > 0.0, "invalid M advance");
+    Ok(advance)
+}
+
+fn style_candidate_rejection(
+    regular: &FontFace,
+    candidate: &FontFace,
+    request: PrimaryStyleRequest,
+    regular_advance: f32,
+    candidate_advance: f32,
+) -> Option<&'static str> {
+    if normalize_family(&candidate.family) != normalize_family(&regular.family) {
+        return Some("resolved to another family");
+    }
+    if candidate.identity() == regular.identity() {
+        return Some("resolved to the regular face");
+    }
+    if request.bold != (candidate.weight > regular.weight) {
+        return Some("did not resolve the requested weight");
+    }
+    if request.italic != (candidate.slant != regular.slant) {
+        return Some("did not resolve the requested slant");
+    }
+    if !candidate_advance.is_finite() || (candidate_advance - regular_advance).abs() > 0.01 {
+        return Some("has incompatible terminal-cell metrics");
+    }
+    None
+}
+
+fn resolve_primary_style(
+    regular: &FontFace,
+    request: PrimaryStyleRequest,
+    regular_advance: f32,
+) -> FontFace {
+    let pattern = primary_style_pattern(&regular.family, request.style);
+    let resolved = resolve_face(request.label, &pattern, &regular.family).and_then(|candidate| {
+        let candidate_advance = face_advance(&candidate, BASE_FONT_SIZE)?;
+        if let Some(reason) = style_candidate_rejection(
+            regular,
+            &candidate,
+            request,
+            regular_advance,
+            candidate_advance,
+        ) {
+            bail!("{reason}");
+        }
+        Ok(candidate)
+    });
+    match resolved {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            eprintln!(
+                "splinterm font warning: {} for family {:?} is unavailable ({error}); using the regular face",
+                request.style, regular.family
+            );
+            regular.fallback_for(request.label)
+        }
+    }
+}
+
+fn resolve_primary_faces(pattern: &str) -> Result<[FontFace; 4]> {
+    let regular = resolve_face("primary regular", pattern, "")?;
+    let regular_advance = face_advance(&regular, BASE_FONT_SIZE)
+        .context("selected primary regular face is unusable")?;
+    let [bold_request, italic_request, bold_italic_request] = PRIMARY_STYLE_REQUESTS;
+    let bold = resolve_primary_style(&regular, bold_request, regular_advance);
+    let italic = resolve_primary_style(&regular, italic_request, regular_advance);
+    let bold_italic = resolve_primary_style(&regular, bold_italic_request, regular_advance);
+    Ok([regular, bold, italic, bold_italic])
 }
 
 pub(super) fn font_data(face: &FontFace) -> Result<&[u8]> {
@@ -1326,6 +1435,102 @@ pub(super) fn round_to_i32(value: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_face(
+        label: &'static str,
+        family: &str,
+        path: &str,
+        weight: i32,
+        slant: i32,
+    ) -> FontFace {
+        FontFace {
+            label,
+            family: family.to_owned(),
+            style: label.to_owned(),
+            path: PathBuf::from(path),
+            index: 0,
+            weight,
+            slant,
+            selected_pixel_size_26_6: 12 * 64,
+            data: OnceLock::new(),
+        }
+    }
+
+    #[test]
+    fn style_patterns_are_derived_from_and_escape_the_selected_family() {
+        assert_eq!(
+            primary_style_pattern("Chosen-Family, Mono: Propo", "Bold Italic"),
+            "Chosen\\-Family\\, Mono\\: Propo:style=Bold Italic"
+        );
+        assert!(!primary_style_pattern("Chosen", "Bold").contains("JetBrains"));
+    }
+
+    #[test]
+    fn style_policy_accepts_only_compatible_faces_from_the_selected_family() {
+        let regular = synthetic_face("regular", "Chosen Mono", "/fonts/regular.ttf", 80, 0);
+        let request = PrimaryStyleRequest {
+            label: "primary bold italic",
+            style: "Bold Italic",
+            bold: true,
+            italic: true,
+        };
+        let compatible = synthetic_face(
+            "bold italic",
+            "Chosen Mono",
+            "/fonts/bold-italic.ttf",
+            200,
+            100,
+        );
+        assert_eq!(
+            style_candidate_rejection(&regular, &compatible, request, 8.0, 8.0),
+            None
+        );
+
+        let foreign = synthetic_face("bold italic", "Other Mono", "/fonts/other.ttf", 200, 100);
+        assert_eq!(
+            style_candidate_rejection(&regular, &foreign, request, 8.0, 8.0),
+            Some("resolved to another family")
+        );
+
+        let duplicate =
+            synthetic_face("bold italic", "Chosen Mono", "/fonts/regular.ttf", 200, 100);
+        assert_eq!(
+            style_candidate_rejection(&regular, &duplicate, request, 8.0, 8.0),
+            Some("resolved to the regular face")
+        );
+
+        let wrong_style =
+            synthetic_face("bold italic", "Chosen Mono", "/fonts/italic.ttf", 80, 100);
+        assert_eq!(
+            style_candidate_rejection(&regular, &wrong_style, request, 8.0, 8.0),
+            Some("did not resolve the requested weight")
+        );
+
+        assert_eq!(
+            style_candidate_rejection(&regular, &compatible, request, 8.0, 8.5),
+            Some("has incompatible terminal-cell metrics")
+        );
+    }
+
+    #[test]
+    fn unavailable_style_fallback_preserves_the_selected_regular_identity() {
+        let regular = synthetic_face("regular", "Chosen Mono", "/fonts/regular.ttf", 80, 0);
+        let fallback = regular.fallback_for("primary bold");
+        assert_eq!(fallback.family, "Chosen Mono");
+        assert_eq!(fallback.identity(), regular.identity());
+        assert_eq!(fallback.weight, regular.weight);
+        assert_eq!(fallback.slant, regular.slant);
+    }
+
+    #[test]
+    fn effective_system_monospace_resolves_one_coherent_primary_family() {
+        let faces = resolve_primary_faces("monospace:style=Regular").unwrap();
+        let regular_family = normalize_family(&faces[0].family);
+        assert!(!regular_family.is_empty());
+        for face in &faces[1..] {
+            assert_eq!(normalize_family(&face.family), regular_family);
+        }
+    }
 
     #[test]
     fn persistent_glyph_cache_evicts_fifo_and_removes_color_advance() {

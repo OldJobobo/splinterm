@@ -2584,6 +2584,7 @@ async fn new_dojo_and_restore_inject_exact_current_context() {
                 lair_id,
                 name: "context-dojo".into(),
                 launch: context_launch(&dojo_marker),
+                promote_transient_lair: false,
             })
             .await
         else {
@@ -2763,6 +2764,7 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
                 lair_id,
                 name: "second".into(),
                 launch,
+                promote_transient_lair: false,
             })
             .await
         else {
@@ -2970,6 +2972,7 @@ async fn topology_cas_stream_and_complete_edits() {
                     expected_topology_revision: splinterm_core::TopologyRevision::new(4),
                     dojo_id,
                     name: "main-dojo".into(),
+                    promote_transient_lair: false,
                 })
                 .await,
             Response::TopologyCommitted { topology_revision } if topology_revision.get() == 5
@@ -2995,6 +2998,7 @@ async fn topology_cas_stream_and_complete_edits() {
                 lair_id,
                 name: "extra-dojo".into(),
                 launch,
+                promote_transient_lair: false,
             })
             .await
         else {

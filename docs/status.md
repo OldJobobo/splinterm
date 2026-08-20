@@ -44,6 +44,18 @@ not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
+## Beta 2 candidate preparation
+
+The `0.1.0-beta2` source and package metadata are under review. The candidate
+adds backward-compatible graphical lifetime settings, owner-only atomic
+promotion through Dojo creation or explicit Dojo naming, and the reviewed
+startup font-family correction for newly opened Windows. Complete non-graphical workspace, package, release-tooling, portable-provenance,
+documentation, and isolated staged-package graphical validation has passed.
+Fresh review approved the complete implementation and bounded post-graphical
+naming fix with no blocker or fix worth doing now. No Beta 2 tag, public release, AUR
+update, installed-package acceptance, or publication claim exists yet; Beta 1
+remains the current public release.
+
 ## Beta 1 release
 
 [`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1)

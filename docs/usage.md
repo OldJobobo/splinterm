@@ -14,8 +14,10 @@ work. See [CLI reference](cli.md) for the complete command inventory and
   client-local tabs, including Dojos from different Lairs.
 
 `splinterd` owns Lairs, Dojos, Splints, shells, layouts, terminal state, and
-scrollback. `splinterm` displays and controls that state. Closing a Window or tab
-detaches a view; it does not terminate the corresponding daemon resources.
+scrollback. `splinterm` normally displays and controls that durable state. A
+Window may instead own an ordinary unnamed transient Lair when
+`multiplexer.persistent-by-default=no`; closing that Window terminates and
+removes the unpromoted Lair. Closing a tab alone remains a view operation.
 
 ## Start, detach, and return
 
@@ -25,8 +27,17 @@ Open a fresh terminal through the installed desktop entry or XDG launcher:
 splinterm-xdg-terminal-exec
 ```
 
-The normal launch creates a fresh Lair with one Dojo and one live Splint. Closing
-the Window leaves the work running in `splinterd`.
+The normal launch creates a fresh Lair with one Dojo and one live Splint. The
+compatibility default is persistent, so closing the Window leaves the work
+running in `splinterd`. Set `multiplexer.persistent-by-default=no` to make
+ordinary unnamed desktop, bare launch, picker New, and in-Window New Terminal
+Lairs end with their owning Window.
+
+Explicitly named or command-bearing native launches, presets, remote creation,
+restore/relaunch, automation, and MCP stay persistent. With
+`multiplexer.persist-on-tab-organization=yes`, creating another Dojo or
+explicitly naming/renaming a Dojo permanently promotes its transient Lair before
+the tab mutation commits.
 
 Return through the native recent-Dojo workflow:
 

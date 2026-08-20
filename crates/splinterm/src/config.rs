@@ -27,7 +27,7 @@ use crate::{
 };
 
 pub const APP_ID: &str = "com.oldjobobo.splinterm";
-pub const DEFAULT_FONT: &str = "JetBrains Mono Nerd Font:style=Regular";
+pub const DEFAULT_FONT: &str = "monospace:style=Regular";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
@@ -55,6 +55,7 @@ pub struct AppConfig {
     pub theme_path: Option<PathBuf>,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
+    pub multiplexer_lifetime: MultiplexerLifetimeConfig,
     /// Effective, fully validated client-local keymap.
     pub keymap: ResolvedKeymap,
     pub keymap_profile: KeymapProfile,
@@ -89,6 +90,23 @@ pub enum FrameTitleMode {
     Splint,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MultiplexerLifetimeConfig {
+    /// Whether ordinary unnamed local graphical terminals create durable Lairs.
+    pub persistent_by_default: bool,
+    /// Whether creating or explicitly naming a Dojo promotes its transient Lair.
+    pub persist_on_tab_organization: bool,
+}
+
+impl Default for MultiplexerLifetimeConfig {
+    fn default() -> Self {
+        Self {
+            persistent_by_default: true,
+            persist_on_tab_organization: true,
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -110,6 +128,7 @@ impl Default for AppConfig {
             theme_path: None,
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
+            multiplexer_lifetime: MultiplexerLifetimeConfig::default(),
             keymap: ResolvedKeymap::default(),
             keymap_profile: KeymapProfile::Splinterm,
             keymap_path: None,
@@ -388,6 +407,14 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                     "splint" => FrameTitleMode::Splint,
                     _ => bail!("line {}: frame-title must be none or splint", index + 1),
                 };
+                false
+            }
+            "multiplexer.persistent-by-default" => {
+                config.multiplexer_lifetime.persistent_by_default = parse_bool(value, index)?;
+                false
+            }
+            "multiplexer.persist-on-tab-organization" => {
+                config.multiplexer_lifetime.persist_on_tab_organization = parse_bool(value, index)?;
                 false
             }
             "cursor.style" => {
@@ -1025,6 +1052,7 @@ mod tests {
     #[test]
     fn defaults_match_foot_font_and_resize_behavior() {
         let defaults = AppConfig::default();
+        assert_eq!(defaults.font, "monospace:style=Regular");
         assert_eq!(defaults.font_size, FontSize::Pixels(14.0));
         assert_eq!(defaults.resize_delay_ms, 100);
         assert_eq!(defaults.keymap_profile, KeymapProfile::Splinterm);
@@ -1049,6 +1077,50 @@ mod tests {
                 .is_some_and(|catalog| catalog.contains("omarchy.tdl"))
         );
         assert!(!defaults.allow_unrestricted_commands);
+        assert!(defaults.multiplexer_lifetime.persistent_by_default);
+        assert!(defaults.multiplexer_lifetime.persist_on_tab_organization);
+    }
+
+    #[test]
+    fn multiplexer_lifetime_defaults_are_backward_compatible_and_strict() {
+        let configured =
+            parse("[multiplexer]\npersistent-by-default=no\npersist-on-tab-organization=off\n")
+                .unwrap();
+        assert!(!configured.config.multiplexer_lifetime.persistent_by_default);
+        assert!(
+            !configured
+                .config
+                .multiplexer_lifetime
+                .persist_on_tab_organization
+        );
+        assert!(configured.diagnostics.is_empty());
+
+        for enabled in ["yes", "true", "on", "1"] {
+            let loaded =
+                parse(&format!("[multiplexer]\npersistent-by-default={enabled}\n")).unwrap();
+            assert!(loaded.config.multiplexer_lifetime.persistent_by_default);
+        }
+        for disabled in ["no", "false", "off", "0"] {
+            let loaded = parse(&format!(
+                "[multiplexer]\npersist-on-tab-organization={disabled}\n"
+            ))
+            .unwrap();
+            assert!(
+                !loaded
+                    .config
+                    .multiplexer_lifetime
+                    .persist_on_tab_organization
+            );
+        }
+        assert!(
+            parse("[multiplexer]\npersistent-by-default=sometimes\n")
+                .unwrap_err()
+                .to_string()
+                .contains("line 2: expected boolean")
+        );
+        let unknown = parse("[multiplexer]\npersistence-by-default=no\n").unwrap();
+        assert_eq!(unknown.diagnostics.len(), 1);
+        assert!(unknown.diagnostics[0].contains("multiplexer.persistence-by-default"));
     }
 
     #[test]
