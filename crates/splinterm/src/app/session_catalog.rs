@@ -175,6 +175,27 @@ pub(in crate::app) fn session_picker_item(entry: &SessionEntry) -> SessionPicker
     }
 }
 
+pub(in crate::app) fn dojo_picker_item(entry: &SessionEntry) -> SessionPickerItem {
+    SessionPickerItem {
+        display_title: entry.dojo_display_title(),
+        working_directory: entry.working_directory(),
+        pane_count: entry.pane_count,
+        running_pane_count: entry.running_panes,
+    }
+}
+
+pub(in crate::app) fn lair_picker_item(
+    representative: &SessionEntry,
+    entries: &[&SessionEntry],
+) -> SessionPickerItem {
+    SessionPickerItem {
+        display_title: representative.lair_display_title(),
+        working_directory: representative.working_directory(),
+        pane_count: entries.iter().map(|entry| entry.pane_count).sum(),
+        running_pane_count: entries.iter().map(|entry| entry.running_panes).sum(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
