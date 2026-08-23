@@ -14,6 +14,11 @@ Windows. Selecting CaskaydiaMono, another Omarchy terminal family, or an
 explicit Fontconfig family no longer leaves bold and italic resolution tied to
 JetBrains Mono.
 
+This release also separates terminal workloads from the daemon's resource
+failure boundary. Packaged Splints now run inside nested systemd user units:
+the aggregate Splinterm workload slice contains one slice per Dojo and one scope
+per Splint. The daemon keeps its own independent task and memory-pressure guard.
+
 ## Configurable terminal lifetime
 
 The new settings are:
@@ -91,6 +96,31 @@ reuses the regular face instead of refusing to open a Window.
 This corrects startup for families such as CaskaydiaMono and for regular-only
 families. Already-open Windows still retain immutable renderer resources; live
 font-family replacement remains planned for the 0.2 line.
+
+## Workload isolation and daemon protection
+
+The packaged daemon starts only after it proves that the user systemd manager
+can create, verify, and remove the transient units required for workload
+placement. Each terminal command remains blocked in the PTY helper until its
+process has been moved into and verified inside the exact Splint scope.
+Placement failure prevents the target command from executing.
+
+The packaged boundaries are:
+
+- `splinterd.service`: `TasksMax=2048`, `MemoryHigh=75%`;
+- aggregate `app-splinterm.slice`: `TasksMax=2048`, `MemoryHigh=75%`;
+- each Dojo slice: `TasksMax=1024`, `MemoryHigh=50%`; and
+- each Splint scope: `TasksMax=512`, `MemoryHigh=25%`.
+
+`MemoryHigh` applies reclaim pressure rather than terminating the unit at a hard
+byte ceiling. Beta 2 deliberately sets no `MemoryMax`; a hard-memory limit
+requires measured follow-up evidence. These boundaries limit a runaway terminal
+workload's impact on the daemon and neighboring Dojos, but they do not claim to
+fix unrelated client-side panics.
+
+Upgrading from Beta 1 still restarts the 0.1 daemon and ends its active Dojos.
+Perform the upgrade from Foot or another terminal not owned by `splinterd`, then
+reopen Splinterm windows after the package replacement.
 
 ## Compatibility and boundaries
 
