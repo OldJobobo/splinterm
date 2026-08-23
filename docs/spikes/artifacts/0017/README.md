@@ -1,7 +1,7 @@
 # Phase 8.1 closure evidence archive
 
-Durable copies of the machine-readable evidence for
-[Plan 0003](../../../plans/0003-phase8.1-closure-execution.md) slice gates.
+Durable copies of the machine-readable Phase 8.1 closure evidence and slice
+gates.
 Each run's `summary.json` plus per-case capture metadata
 (`foot.json`, `splinterm.json`, `cells.json`, `comparison.json`) are archived;
 raw ARGB buffers and heatmaps are reproducible from one command per slice and

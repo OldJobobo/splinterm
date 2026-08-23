@@ -21,7 +21,7 @@ __pycache__/
 # Maintainer-local coordination files.
 /.pi/worklist.json
 /TODO.md
-/docs/plans/*.md
+/docs/plans/
 /docs/spikes/*.md
 /docs/handoffs/
 /docs/reviews/

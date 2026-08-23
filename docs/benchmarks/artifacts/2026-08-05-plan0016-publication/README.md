@@ -1,8 +1,7 @@
 # Plan 0016 multiplexer benchmark publication
 
-This is the compact, tracked publication artifact for
-[Plan 0016](../../../plans/0016-multiplexer-benchmark-suite.md). The final
-independent review approved publication on 2026-08-05.
+This is the compact, tracked multiplexer-benchmark publication artifact. The
+final independent review approved publication on 2026-08-05.
 
 ## Contents
 

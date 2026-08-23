@@ -74,7 +74,7 @@ accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
   GitHub assets before publication.
 - Complete serialized workspace tests, warnings-denied Clippy, release/package
   automation, portable Foot provenance, package-content/runtime validation, and
-  accepted Plans 0041–0043 evidence passed. Independent candidate review found
+  accepted active-tab, wide-grid, and sparse-publication evidence passed. Independent candidate review found
   alpha-specific install wording and a binary split-package recommendation;
   both were corrected and regression-covered before the replacement candidate
   was built or promoted.
@@ -210,7 +210,7 @@ post-alpha3, pre-1.0 roadmap milestone.
 | Native blur | Implemented and validated | Optional, compositor-capability-gated blur for translucent themes; unsupported protocol capability falls back to ordinary transparency. See [Configuration](configuration.md) and [ADR 0004](adr/0004-font-and-cpu-renderer.md). |
 | Persistent sessions and explicit restore | Implemented and validated | `splinterd` owns shells, terminal state, layouts, and metadata. Client detachment does not end them; exited processes restart only through explicit restore. See [Architecture](architecture.md) and [Headless operation](headless.md). |
 | Panes and multiple Dojos | Implemented and validated | Persistent split trees, focus, ratios, lifecycle operations, search, and multiple simultaneous clients are accepted. See [Usage](usage.md). |
-| Window-local Dojo tabs | Implemented and validated | Up to 32 client-local tabs may span Lairs; closing a tab detaches the view and does not close daemon topology. See [retained closure evidence](plans/artifacts/0019-dojo-tabs/closure-2026-08-09/EVIDENCE.md). |
+| Window-local Dojo tabs | Implemented and validated | Up to 32 client-local tabs may span Lairs; closing a tab detaches the view and does not close daemon topology. See [retained closure evidence](evidence/artifacts/0019-dojo-tabs/closure-2026-08-09/EVIDENCE.md). |
 | Multi-client control | Implemented and validated | Exclusive controller ownership, transfer, denial, trusted forced takeover, disconnect cleanup, and observer fallback are bounded. See [Automation](automation.md). |
 | JSON/NDJSON automation | Implemented and validated | Versioned schema-major-2 one-shot and subscription contracts with stable exit categories and checked-in schemas. See [Automation](automation.md) and [CLI reference](cli.md). |
 | SSH relay | Implemented and validated | Policy-scoped stdio automation relay and private human graphical relay; no daemon network listener. See [Remote access](remote.md). |

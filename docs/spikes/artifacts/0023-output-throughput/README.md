@@ -1,8 +1,8 @@
 # Plan 0009 non-graphical output-throughput evidence
 
-This directory records the first implementation checkpoint for
-[Plan 0009](../../../plans/0009-output-throughput-optimization.md). It is
-non-graphical development evidence, not closure evidence and not a replacement
+This directory records the first output-throughput optimization implementation
+checkpoint. It is non-graphical development evidence, not closure evidence and
+not a replacement
 for the guarded five-terminal matrix.
 
 ## Root cause

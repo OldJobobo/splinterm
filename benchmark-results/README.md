@@ -4,10 +4,10 @@ This directory contains generated benchmark evidence and is intentionally kept
 out of Git except for this retention guide. Do not use `git clean` here without
 reviewing the paths below.
 
-Current size at Plan 0016 publication: approximately 70 MiB across 44 run
-directories.
+Current size at multiplexer-benchmark publication: approximately 70 MiB across
+44 run directories.
 
-## Canonical Plan 0016 sources — retain
+## Canonical multiplexer publication sources — retain
 
 These directories are the immutable local sources for the tracked compact
 publication artifact in
@@ -24,7 +24,7 @@ Keep these until the complete raw evidence has a separately verified durable
 archive or release attachment. The tracked compact artifact is not a replacement
 for the raw reports when re-aggregation or forensic review is required.
 
-## Selected diagnostic evidence — retain while Plan 0022 is active
+## Selected diagnostic evidence — retain for catch-up analysis
 
 - `20260805T165030Z-native-single-2000-line-ansi-diagnostic/` — original native
   ANSI graphical catch-up failure.
@@ -41,14 +41,14 @@ for the raw reports when re-aggregation or forensic review is required.
 - `20260805T164352Z-milestone3-development-matrix-smoke-complete-final/` — final
   complete one-sample safety smoke.
 
-Plan 0022 may cite the ANSI before/after diagnostics for workload design, but
-must establish fresh exact-binary stage traces rather than treating these runs as
-current performance baselines.
+Future catch-up work may cite the ANSI before/after diagnostics for workload
+design, but must establish fresh exact-binary stage traces rather than treating
+these runs as current performance baselines.
 
 ## Superseded working runs
 
-All other Plan 0016 directories are intermediate smokes, interrupted matrices,
-or attempts superseded by a later source/build state. They must not be included
+All other multiplexer-publication directories are intermediate smokes,
+interrupted matrices, or attempts superseded by a later source/build state. They must not be included
 in rankings or aggregated with the canonical matrix. They may be compressed or
 removed only after the canonical sources and selected diagnostics above are
 verified and a cleanup action is explicitly approved.

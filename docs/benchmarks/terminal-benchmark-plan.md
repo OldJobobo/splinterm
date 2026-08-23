@@ -187,8 +187,8 @@ A benchmark command must not make graphical execution the default.
    The nine-case native/tmux/Zellij headless topology matrix passes with explicit
    process roles and verified cleanup. The gated two-column graphical smoke also
    passes for Splinterm native, Foot+tmux, and Foot+Zellij on workspace 8 / DP-2
-   with preserved host state and exact cleanup. The measured multiplexer matrix
-   remains under Plan 0016.
+   with preserved host state and exact cleanup. The measured matrix and its
+   limits are retained in the [multiplexer benchmark publication](artifacts/2026-08-05-plan0016-publication/README.md).
 
 ## Current commands
 
