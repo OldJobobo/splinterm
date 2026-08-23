@@ -138,12 +138,43 @@ class PrepareCandidateTests(unittest.TestCase):
             self.skipTest(f"repository does not contain historical tag {tag}")
         commit = MODULE.run(["git", "rev-parse", "HEAD"])
         with self.assertRaisesRegex(ValueError, "release tag already exists"):
-            MODULE.validate_candidate("OldJobobo/splinterm", commit, version)
+            MODULE.validate_candidate(
+                "OldJobobo/splinterm", commit, version, "v0.1.0-beta1"
+            )
 
     def test_mismatched_version_fails_before_build(self) -> None:
         commit = MODULE.run(["git", "rev-parse", "HEAD"])
         with self.assertRaisesRegex(ValueError, "does not match Cargo.toml"):
-            MODULE.validate_candidate("OldJobobo/splinterm", commit, "9.9.9-alpha9")
+            MODULE.validate_candidate(
+                "OldJobobo/splinterm",
+                commit,
+                "9.9.9-alpha9",
+                "v0.1.0-beta1",
+            )
+
+    def test_previous_release_is_explicit_existing_and_distinct(self) -> None:
+        release_tag = "v9.9.9-beta2"
+        self.assertEqual(
+            MODULE.validate_previous_version_tag("v0.1.0-beta1", release_tag),
+            "v0.1.0-beta1",
+        )
+        with self.assertRaisesRegex(ValueError, "v-prefixed SemVer"):
+            MODULE.validate_previous_version_tag("0.1.0-beta1", release_tag)
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            MODULE.validate_previous_version_tag(release_tag, release_tag)
+        with self.assertRaisesRegex(ValueError, "command failed"):
+            MODULE.validate_previous_version_tag("v9.9.9-beta1", release_tag)
+
+    def test_release_notes_are_read_from_the_exact_candidate_commit(self) -> None:
+        commit = MODULE.run(["git", "rev-parse", "HEAD"])
+        with tempfile.TemporaryDirectory(prefix="splinterm-release-notes-") as value:
+            output = Path(value) / "RELEASE-NOTES.md"
+            MODULE.create_notes(commit, output)
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                MODULE.run(["git", "show", f"{commit}:RELEASE_NOTES.md"]) + "\n",
+            )
+            self.assertIn("Workload isolation", output.read_text(encoding="utf-8"))
 
     def test_manifest_example_is_json_serializable(self) -> None:
         manifest = {

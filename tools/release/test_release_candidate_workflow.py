@@ -15,6 +15,8 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
         self.assertNotIn("\n  pull_request:", workflow)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("refs/heads/main|refs/heads/maint/0.1", workflow)
+        self.assertIn("previous_version_tag:", workflow)
+        self.assertEqual(workflow.count("--previous-version-tag"), 2)
         self.assertNotIn("contents: write", workflow)
         self.assertNotIn("environment:", workflow)
         self.assertNotIn("secrets.", workflow)
