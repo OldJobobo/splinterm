@@ -2467,6 +2467,7 @@ def test_correctness_report_is_evidence_bounded_and_schema_valid(
     jsonschema = pytest.importorskip("jsonschema")
     report = build_report(_successful_correctness_run)
 
+    assert report["schema"] == "splinterm.benchmark.correctness.v2"
     assert report["valid"] is True
     assert report["oracle"]["commit"] == "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
     assert report["semantic_fixtures"]["fixture_count"] == 5

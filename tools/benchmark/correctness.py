@@ -147,7 +147,7 @@ def build_report(run: Run = default_run) -> dict[str, Any]:
     semantic = collect_semantic_fixtures()
     checks = run_checks(run)
     report = {
-        "schema": "splinterm.benchmark.correctness.v1",
+        "schema": "splinterm.benchmark.correctness.v2",
         "valid": all(
             check["status"] == "passed" for check in checks if check["required"]
         ),

@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://splinterm.invalid/schema/benchmark-correctness-v1.json",
-  "title": "Splinterbench correctness report v1",
+  "$id": "https://splinterm.invalid/schema/benchmark-correctness-v2.json",
+  "title": "Splinterbench correctness report v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "valid", "repository", "oracle", "semantic_fixtures", "checks", "feature_coverage", "fuzzing", "capability_matrix", "claim_policy"],
   "properties": {
-    "schema": {"const": "splinterm.benchmark.correctness.v1"},
+    "schema": {"const": "splinterm.benchmark.correctness.v2"},
     "valid": {"type": "boolean"},
     "repository": {
       "type": "object", "additionalProperties": false, "required": ["revision", "dirty"],
