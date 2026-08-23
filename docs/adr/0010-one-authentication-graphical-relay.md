@@ -1,9 +1,7 @@
 # ADR 0010: Multiplex native remote channels over one authenticated SSH process
 
-- **Status:** Accepted and validated — transport, native human-interactive routing, and reviewed real-host graphical closure are complete under Plan 0028
+- **Status:** Accepted and validated — transport, native human-interactive routing, and reviewed real-host graphical closure are complete
 - **Date:** 2026-08-07
-- **Plan:** [Plan 0028](../plans/0028-remote-graphical-client.md)
-- **Input:** [Remote graphical client handoff](../remote-graphical-client-handoff.md)
 
 ## Context
 

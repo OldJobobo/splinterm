@@ -206,9 +206,9 @@ def feature_coverage() -> list[dict[str, Any]]:
 def capability_matrix() -> list[dict[str, Any]]:
     rows = []
     for capability, splinterm_status, evidence, note in (
-        ("sixel", "partial", ["docs/roadmap.md", "crates/splinterm-terminal/src/image/sixel.rs"], "Streaming decode, placement modes, and queries exist; overlap/reflow/configuration/fuzz/full differential closure remains in progress."),
-        ("kitty-graphics", "unsupported", ["docs/roadmap.md", "crates/splinterm-terminal/src/vt/mod.rs"], "No Kitty APC protocol handler is implemented."),
-        ("iterm2-images", "unsupported", ["docs/roadmap.md"], "Explicitly deferred."),
+        ("sixel", "partial", ["docs/images.md", "crates/splinterm-terminal/src/image/sixel.rs"], "Streaming decode, placement modes, and queries exist; overlap/reflow/configuration/fuzz/full differential closure remains in progress."),
+        ("kitty-graphics", "unsupported", ["docs/images.md", "crates/splinterm-terminal/src/vt/mod.rs"], "No Kitty APC protocol handler is implemented."),
+        ("iterm2-images", "unsupported", ["docs/images.md"], "Explicitly deferred."),
     ):
         statuses = {terminal: "unknown" for terminal in TERMINALS}
         statuses["splinterm"] = splinterm_status

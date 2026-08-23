@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-14
-- **Plan:** [0.2.0 persistence expansion and PTY upgrade handoff](../plans/0037-0.2-persistence-and-upgrade-handoff.md)
 
 ## Context
 
@@ -53,7 +52,7 @@ that decide, before implementation:
 - truncation, generation labeling, corruption, and schema migration behavior;
 - archive behavior before and after explicit relaunch;
 - encryption claims and key ownership, if encryption is proposed; and
-- amendments to `FR-PERSIST-05`, ADR 0006, and Plan 0034.
+- amendments to `FR-PERSIST-05`, ADR 0006, and the public saved-Lair contract.
 
 No future implementation may infer commands, authority, process identity, or
 relaunch intent from archived terminal content.

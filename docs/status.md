@@ -1,9 +1,9 @@
 # Current product status
 
 This document is the repository authority for Splinterm's current maturity,
-validated product scope, availability, and release gates. Historical plans and
-evidence explain how a capability was accepted; the [product roadmap](product-roadmap.md)
-owns strategic direction, the [engineering roadmap](roadmap.md) owns delivery
+validated product scope, availability, and release gates. Retained public
+evidence explains how a capability was accepted; the [product roadmap](product-roadmap.md)
+owns strategic direction, maintainer-controlled coordination owns delivery
 sequence, and this page owns what the product is today.
 
 ## Maturity
@@ -195,8 +195,9 @@ AUR package bases as `0.1.0alpha3-1`.
 - AUR source package commit: `ca1f80f40c94e3e469973cbee81b3a210419ffce`.
   AUR prebuilt package commit: `fbe9878af3938e5df87df79ecae05d4ec39b9667`.
 - Before candidate construction, the adjacent installed package matrix passed
-  Plans 0032–0036 against the final runtime implementation, including package
-  integrity, daemon health, exact trusted-client identity, and complete cleanup.
+  the final screensaver, command-palette, saved-layout, scrollback-safety, and
+  file-drop runtime implementation, including package integrity, daemon health,
+  exact trusted-client identity, and complete cleanup.
 
 Full user-defined tab identity, behavior, and appearance remain a separate
 post-alpha3, pre-1.0 roadmap milestone.
@@ -205,15 +206,15 @@ post-alpha3, pre-1.0 roadmap milestone.
 
 | Area | Classification | Current boundary and evidence |
 | --- | --- | --- |
-| Native Wayland presentation | Implemented and validated | Keyboard, pointer, selection, clipboard, IME, scaling, damage-driven SHM rendering, and guarded Hyprland matrices are accepted within the documented target. See [Architecture](architecture.md) and [Plan 0002](plans/0002-omarchy-terminal-mvp.md). |
-| Native blur | Implemented and validated | Optional, compositor-capability-gated blur for translucent themes; unsupported protocol capability falls back to ordinary transparency. See [Plan 0013](plans/0013-native-background-blur.md). |
+| Native Wayland presentation | Implemented and validated | Keyboard, pointer, selection, clipboard, IME, scaling, damage-driven SHM rendering, and guarded Hyprland matrices are accepted within the documented target. See [Architecture](architecture.md). |
+| Native blur | Implemented and validated | Optional, compositor-capability-gated blur for translucent themes; unsupported protocol capability falls back to ordinary transparency. See [Configuration](configuration.md) and [ADR 0004](adr/0004-font-and-cpu-renderer.md). |
 | Persistent sessions and explicit restore | Implemented and validated | `splinterd` owns shells, terminal state, layouts, and metadata. Client detachment does not end them; exited processes restart only through explicit restore. See [Architecture](architecture.md) and [Headless operation](headless.md). |
-| Panes and multiple Dojos | Implemented and validated | Persistent split trees, focus, ratios, lifecycle operations, search, and multiple simultaneous clients are accepted. See [Roadmap](roadmap.md). |
-| Window-local Dojo tabs | Implemented and validated | Up to 32 client-local tabs may span Lairs; closing a tab detaches the view and does not close daemon topology. See [Plan 0019 closure evidence](plans/artifacts/0019-dojo-tabs/closure-2026-08-09/EVIDENCE.md). |
+| Panes and multiple Dojos | Implemented and validated | Persistent split trees, focus, ratios, lifecycle operations, search, and multiple simultaneous clients are accepted. See [Usage](usage.md). |
+| Window-local Dojo tabs | Implemented and validated | Up to 32 client-local tabs may span Lairs; closing a tab detaches the view and does not close daemon topology. See [retained closure evidence](plans/artifacts/0019-dojo-tabs/closure-2026-08-09/EVIDENCE.md). |
 | Multi-client control | Implemented and validated | Exclusive controller ownership, transfer, denial, trusted forced takeover, disconnect cleanup, and observer fallback are bounded. See [Automation](automation.md). |
 | JSON/NDJSON automation | Implemented and validated | Versioned schema-major-2 one-shot and subscription contracts with stable exit categories and checked-in schemas. See [Automation](automation.md) and [CLI reference](cli.md). |
 | SSH relay | Implemented and validated | Policy-scoped stdio automation relay and private human graphical relay; no daemon network listener. See [Remote access](remote.md). |
-| Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Plan 0028](plans/0028-remote-graphical-client.md). |
+| Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Remote access](remote.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
 | Arch/Omarchy packaging | Public beta packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
@@ -245,10 +246,8 @@ behavior; deferred means intentionally outside the present product.
 - Image compatibility is deliberately narrower than full Kitty graphics; external
   file and shared-memory media are rejected.
 - Configuration is focused rather than arbitrary `foot.ini` compatibility.
-- Current benchmark gates document remaining performance work. In particular,
-  [Plan 0011](plans/0011-burst-output-memory-retention.md) retains its final
-  client-performance no-go and [Plan 0012](plans/0012-bounded-compact-publication-frames.md)
-  remains blocked on a sparse bounded-frame ownership redesign.
+- Current benchmark gates document remaining performance work, including the
+  retained burst-output client-performance no-go.
 
 ## Stable-release gates
 
@@ -283,7 +282,6 @@ capabilities above; none may be inferred as a stable-support promise.
 | Service, persistence, policy, backup, and reset | [Headless operation](headless.md) |
 | Public beta package installation and upgrades | [Packaging](packaging.md) |
 | Product direction, audiences, and outcome horizons | [Product roadmap](product-roadmap.md) |
-| Engineering phases, dependencies, and future delivery work | [Engineering roadmap](roadmap.md) |
 | Development workflow and test guardrails | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 
 The public website may summarize these sources for readers, but it does not

@@ -2,8 +2,7 @@
 
 - **Status:** Accepted — Slice 0 evidence and independent review complete
 - **Date:** 2026-07-23
-- **Plan:** [Plan 0008](../plans/0008-terminal-image-protocols.md)
-- **Evidence:** [Spike 0025](../spikes/0025-terminal-image-contracts.md)
+- **Evidence:** Retained public terminal-image fixtures and validation artifacts
 - **Reference:** Foot 1.27.0 commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 

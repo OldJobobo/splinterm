@@ -182,11 +182,8 @@ input.
 
 ## Validation
 
-[Spike 0003](../spikes/0003-font-stack-inventory.md) records discovery evidence.
-[Spike 0004](../spikes/0004-deterministic-text-row-comparison.md) records the
-initial visual, direct fcft-mask, style, ink-bound, and release timing evidence.
-[Spike 0016](../spikes/0016-phase8.1-ascii-raster-baseline.md) records the strict
-95-character correction and supersedes Spike 0004 for grayscale-mask parity.
-Unit tests cover
+Retained validation artifacts record font discovery, initial visual,
+direct fcft-mask, style, ink-bound, release timing, and strict 95-character
+grayscale-mask parity evidence. Unit tests cover
 deterministic blending, clipping, shaped placement, mask/color ink bounds,
 Foot-derived box geometry, cache reuse, and capture encoding.
