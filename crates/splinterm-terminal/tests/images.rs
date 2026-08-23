@@ -114,7 +114,7 @@ fn expand_fixture_rows(expected: &serde_json::Value) -> Vec<u8> {
 #[test]
 fn streamed_sixel_matches_every_pinned_foot_fixture_at_every_chunk_boundary() {
     let fixtures: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../docs/spikes/artifacts/0025-terminal-images/fixtures/sixel-v1.json"
+        "../../../fixtures/terminal-images/v1/protocol-fixtures/sixel-v1.json"
     ))
     .unwrap();
     assert_eq!(

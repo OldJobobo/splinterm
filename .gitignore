@@ -22,7 +22,10 @@ __pycache__/
 /.pi/worklist.json
 /TODO.md
 /docs/plans/
-/docs/spikes/*.md
+/docs/spikes/
+/docs/benchmarks/
+/docs/evidence/
+/benchmark-results/
 /docs/handoffs/
 /docs/reviews/
 /docs/pre-planning-research.md
