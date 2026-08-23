@@ -1238,11 +1238,12 @@ fn escape_fontconfig_pattern_value(value: &str) -> String {
     escaped
 }
 
-fn primary_style_pattern(family: &str, style: &str) -> String {
+fn primary_style_pattern(family: &str, request: PrimaryStyleRequest) -> String {
+    let weight = if request.bold { "bold" } else { "regular" };
+    let slant = if request.italic { "italic" } else { "roman" };
     format!(
-        "{}:style={}",
-        escape_fontconfig_pattern_value(family),
-        escape_fontconfig_pattern_value(style)
+        "{}:weight={weight}:slant={slant}",
+        escape_fontconfig_pattern_value(family)
     )
 }
 
@@ -1286,7 +1287,7 @@ fn resolve_primary_style(
     request: PrimaryStyleRequest,
     regular_advance: f32,
 ) -> FontFace {
-    let pattern = primary_style_pattern(&regular.family, request.style);
+    let pattern = primary_style_pattern(&regular.family, request);
     let resolved = resolve_face(request.label, &pattern, &regular.family).and_then(|candidate| {
         let candidate_advance = face_advance(&candidate, BASE_FONT_SIZE)?;
         if let Some(reason) = style_candidate_rejection(
@@ -1457,12 +1458,21 @@ mod tests {
     }
 
     #[test]
-    fn style_patterns_are_derived_from_and_escape_the_selected_family() {
+    fn style_patterns_use_fontconfig_weight_and_slant_for_the_selected_family() {
+        let bold_italic = PRIMARY_STYLE_REQUESTS[2];
         assert_eq!(
-            primary_style_pattern("Chosen-Family, Mono: Propo", "Bold Italic"),
-            "Chosen\\-Family\\, Mono\\: Propo:style=Bold Italic"
+            primary_style_pattern("Chosen-Family, Mono: Propo", bold_italic),
+            "Chosen\\-Family\\, Mono\\: Propo:weight=bold:slant=italic"
         );
-        assert!(!primary_style_pattern("Chosen", "Bold").contains("JetBrains"));
+        assert_eq!(
+            primary_style_pattern("Chosen", PRIMARY_STYLE_REQUESTS[0]),
+            "Chosen:weight=bold:slant=roman"
+        );
+        assert_eq!(
+            primary_style_pattern("Chosen", PRIMARY_STYLE_REQUESTS[1]),
+            "Chosen:weight=regular:slant=italic"
+        );
+        assert!(!primary_style_pattern("Chosen", bold_italic).contains("JetBrains"));
     }
 
     #[test]
@@ -1484,6 +1494,18 @@ mod tests {
         assert_eq!(
             style_candidate_rejection(&regular, &compatible, request, 8.0, 8.0),
             None
+        );
+        let compatible_oblique = synthetic_face(
+            "bold oblique",
+            "Chosen Mono",
+            "/fonts/bold-oblique.ttf",
+            200,
+            110,
+        );
+        assert_eq!(
+            style_candidate_rejection(&regular, &compatible_oblique, request, 8.0, 8.0),
+            None,
+            "Fontconfig oblique faces satisfy an italic slant request"
         );
 
         let foreign = synthetic_face("bold italic", "Other Mono", "/fonts/other.ttf", 200, 100);
