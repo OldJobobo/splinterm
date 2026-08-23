@@ -57,7 +57,7 @@ fn rejected(terminal: &mut Terminal) -> bool {
 #[test]
 fn recorded_spec_fixture_executes_every_advertised_case() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../docs/spikes/artifacts/0025-terminal-images/fixtures/iterm2-inline-v1.json"
+        "../../../fixtures/terminal-images/v1/protocol-fixtures/iterm2-inline-v1.json"
     ))
     .unwrap();
     assert_eq!(

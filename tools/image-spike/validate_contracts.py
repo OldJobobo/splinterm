@@ -12,14 +12,14 @@ import sys
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-ARTIFACT = ROOT / "docs/spikes/artifacts/0025-terminal-images"
-CONTRACTS = ARTIFACT / "contracts.json"
-SIXEL = ARTIFACT / "fixtures/sixel-v1.json"
-KITTY = ARTIFACT / "fixtures/kitty-static-v1.json"
-ITERM2 = ARTIFACT / "fixtures/iterm2-inline-v1.json"
-BUDGET = ARTIFACT / "budget-probe.json"
-CLIENTS = ARTIFACT / "representative-clients.json"
-CAPTURES = ARTIFACT / "foot-sixel-captures"
+FIXTURE_ROOT = ROOT / "fixtures/terminal-images/v1"
+CONTRACTS = FIXTURE_ROOT / "contracts.json"
+SIXEL = FIXTURE_ROOT / "protocol-fixtures/sixel-v1.json"
+KITTY = FIXTURE_ROOT / "protocol-fixtures/kitty-static-v1.json"
+ITERM2 = FIXTURE_ROOT / "protocol-fixtures/iterm2-inline-v1.json"
+BUDGET = FIXTURE_ROOT / "budget-probe.json"
+CLIENTS = FIXTURE_ROOT / "representative-clients.json"
+CAPTURES = FIXTURE_ROOT / "foot-sixel-oracle"
 CAPTURE_SCRIPT = ROOT / "tools/image-spike/capture_foot_sixel.py"
 STATE_PATCH = ROOT / "tools/image-spike/foot-sixel-state-dump.patch"
 ORACLE_PATCHES = ROOT / "tools/foot-oracle/patches"

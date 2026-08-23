@@ -16,16 +16,17 @@ TERMINALS = ("splinterm", "foot", "kitty", "ghostty", "alacritty")
 
 SEMANTIC_FIXTURES = ROOT / "fixtures/terminal/v1"
 ORACLE = ROOT / "tools/foot-oracle"
+CORRECTNESS_FIXTURES = ROOT / "tools/benchmark/fixtures/correctness/v1"
 FINAL_BUFFER_EVIDENCE = (
-    ("base-final-buffer", ROOT / "docs/spikes/artifacts/0017/slice1-final-buffer/summary.json"),
-    ("decoration-cursor", ROOT / "docs/spikes/artifacts/0017/slice3-decoration-cursor/summary.json"),
-    ("font-matrix", ROOT / "docs/spikes/artifacts/0017/slice4-font-matrix-final/summary.json"),
-    ("scale-fallback-integration", ROOT / "docs/spikes/artifacts/0017/slice4-graphical-final/summary.json"),
+    ("base-final-buffer", CORRECTNESS_FIXTURES / "base-final-buffer.json"),
+    ("decoration-cursor", CORRECTNESS_FIXTURES / "decoration-cursor.json"),
+    ("font-matrix", CORRECTNESS_FIXTURES / "font-matrix.json"),
+    ("scale-fallback-integration", CORRECTNESS_FIXTURES / "scale-fallback-integration.json"),
 )
 EXTERNAL_EVIDENCE = {
-    "output-marker": ROOT / "docs/benchmarks/artifacts/2026-07-23-five-terminal-output/matrix.json",
-    "settled-resize": ROOT / "docs/benchmarks/artifacts/2026-07-23-five-terminal-resize/matrix.json",
-    "child-exit": ROOT / "docs/benchmarks/artifacts/2026-07-23-five-terminal-lifecycle/matrix.json",
+    "output-marker": CORRECTNESS_FIXTURES / "output-marker.json",
+    "settled-resize": CORRECTNESS_FIXTURES / "settled-resize.json",
+    "child-exit": CORRECTNESS_FIXTURES / "child-exit.json",
 }
 
 Run = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -191,7 +192,7 @@ def feature_coverage() -> list[dict[str, Any]]:
     terminal_tests = "crates/splinterm-terminal/src/terminal.rs"
     snapshot_tests = "crates/splinterm-terminal/tests/snapshot.rs"
     return [
-        {"feature": "unicode-width-combining-emoji", "status": "covered", "evidence": [terminal_tests, "docs/spikes/artifacts/0017/slice4-font-matrix-final/summary.json"]},
+        {"feature": "unicode-width-combining-emoji", "status": "covered", "evidence": [terminal_tests, "tools/benchmark/fixtures/correctness/v1/font-matrix.json"]},
         {"feature": "sgr", "status": "covered", "evidence": [terminal_tests, "fixtures/terminal/v1/sgr-basic.json"]},
         {"feature": "alternate-screen", "status": "covered", "evidence": [terminal_tests, snapshot_tests]},
         {"feature": "cursor-and-erase", "status": "covered", "evidence": [terminal_tests, "fixtures/terminal/v1/cursor-position.json", "fixtures/terminal/v1/erase-line.json"]},

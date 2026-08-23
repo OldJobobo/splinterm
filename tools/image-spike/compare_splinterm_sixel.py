@@ -19,8 +19,8 @@ import time
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURES = ROOT / "docs/spikes/artifacts/0025-terminal-images/fixtures/sixel-v1.json"
-FOOT_CAPTURES = ROOT / "docs/spikes/artifacts/0025-terminal-images/foot-sixel-captures"
+FIXTURES = ROOT / "fixtures/terminal-images/v1/protocol-fixtures/sixel-v1.json"
+FOOT_CAPTURES = ROOT / "fixtures/terminal-images/v1/foot-sixel-oracle"
 GUARD_PATH = ROOT / "tools/foot-oracle/run-final-buffer-comparison.py"
 APP_ID = "com.oldjobobo.splinterm"
 WORKSPACE = 8

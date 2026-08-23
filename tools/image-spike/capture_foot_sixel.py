@@ -15,7 +15,7 @@ import sys
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-FIXTURES = ROOT / "docs/spikes/artifacts/0025-terminal-images/fixtures/sixel-v1.json"
+FIXTURES = ROOT / "fixtures/terminal-images/v1/protocol-fixtures/sixel-v1.json"
 ORACLE_PATH = ROOT / "tools/foot-oracle/run-final-buffer-comparison.py"
 BUILD = pathlib.Path("/tmp/splinterm-foot-oracle-build")
 

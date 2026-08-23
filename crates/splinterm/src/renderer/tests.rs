@@ -1554,11 +1554,11 @@ fn expand_sixel_fixture_pixels(expected: &serde_json::Value) -> Vec<u8> {
 #[test]
 fn sixel_identity_pixels_match_every_retained_foot_final_buffer() {
     let fixtures: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../docs/spikes/artifacts/0025-terminal-images/fixtures/sixel-v1.json"
+        "../../../../fixtures/terminal-images/v1/protocol-fixtures/sixel-v1.json"
     ))
     .unwrap();
     let artifact_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/spikes/artifacts/0025-terminal-images/foot-sixel-captures");
+        .join("../../fixtures/terminal-images/v1/foot-sixel-oracle");
 
     for case in fixtures["cases"].as_array().unwrap() {
         let id = case["id"].as_str().unwrap();

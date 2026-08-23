@@ -10,8 +10,8 @@ recipes, working directories, proportional layout, and bounded geometry hints.
 It deliberately excludes terminal grids, scrollback bodies, image bodies,
 clipboard data, input, process memory, and shell state.
 
-Plan 0037 considered adding an owner-only, default-off terminal archive so a
-saved Lair could display historical terminal content after reboot. Such an
+The persistence design considered an owner-only, default-off terminal archive
+so a saved Lair could display historical terminal content after reboot. Such an
 archive would persist sensitive output that may contain credentials, private
 messages, paths, source code, logs, and command results. It would require
 separate decisions for retention, deletion, export, trusted-human and machine

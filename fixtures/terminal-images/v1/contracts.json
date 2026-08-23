@@ -1,0 +1,165 @@
+{
+  "schema": "splinterm.phase5.image-contracts.v1",
+  "date": "2026-07-23",
+  "foot": {
+    "checkout": "/home/oldjobobo/Playground/foot",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+    "dirty": false,
+    "oracle_binary_sha256": "c27f2e3248077f424d2a879a0cade241b3e653bc6771b6d4b3d3901d19270297",
+    "oracle_provenance": "tools/foot-oracle/provenance.json",
+    "oracle_provenance_sha256": "f7920529079ace585fc96b81595337395bc7a0264536ab7eb5e3c90808f55f86",
+    "sources": {
+      "dcs.c": "4110904e6a7bac8faa8db6d7b9bb76fcd927a6cf2490dd95ad66478b2ecc3ef2",
+      "grid.c": "de9524a512779457f8a690b6e025b6a4bb13323ee0eaed3f27c3ff2151afac20",
+      "render.c": "1c99c4e86c809d6696213dd97bc3dd324799fabc8b5ae6d3b8080dfdf9622c59",
+      "sixel.c": "756a6fcae368e839e02b4987cdc067b9ae1aa41dd0cff8bb301724c2bbc80ea6",
+      "sixel.h": "83c70f40d8da88d00bfe3850925eeaf74800e3f1b8c9151a10df8fd8e60d3681",
+      "terminal.c": "82ba3a04e14b93df5afbe98b73892507b83d021f85c7fb67fcb3696c820947d9"
+    }
+  },
+  "kitty": {
+    "version": "0.48.0",
+    "local_document": "/usr/share/doc/kitty/html/graphics-protocol.html",
+    "local_document_sha256": "f3653415b86e8bba5696a242b941304e22517c4d789363d7412e6dfbef95315f",
+    "upstream_url": "https://sw.kovidgoyal.net/kitty/graphics-protocol/",
+    "upstream_http_status": 200,
+    "retrieved_document_sha256": "d93054846e332ac61c9d28fc3db118ab9ea6c6bdcadd1fd73bba6ed55375c141"
+  },
+  "iterm2": {
+    "upstream_url": "https://iterm2.com/documentation-images.html",
+    "upstream_http_status": 200,
+    "retrieved_date": "2026-07-24",
+    "retrieved_bytes": 11284,
+    "retrieved_document_sha256": "d339ce31f07475130bf0b73178d71291b5606ea1102ab8fd217b7f5ce6599961",
+    "fixture": "protocol-fixtures/iterm2-inline-v1.json"
+  },
+  "canonical_pixels": {
+    "format": "premultiplied-bgra8",
+    "color_space": "srgb-components",
+    "stride": "width * 4",
+    "premultiply": "(component * alpha + 127) / 255"
+  },
+  "decoder_dependencies": [
+    {
+      "name": "png",
+      "version": "0.18",
+      "license": "MIT OR Apache-2.0",
+      "native_default": false
+    },
+    {
+      "name": "base64",
+      "version": "0.22",
+      "license": "MIT OR Apache-2.0",
+      "native_default": false
+    },
+    {
+      "name": "flate2",
+      "version": "1.1",
+      "license": "MIT OR Apache-2.0",
+      "native_default": false,
+      "features": ["rust_backend"]
+    }
+  ],
+  "transport": {
+    "control": "bounded-json",
+    "content": "dedicated-authenticated-unix-socket",
+    "preferred": "sealed-memfd-scm-rights",
+    "fallback": "windowed-binary-chunks",
+    "chunk_bytes": 65536,
+    "receive_window_chunks": 4,
+    "integrity": "sha256",
+    "socket_mode": "0600",
+    "peer_identity": "ADR-0007 SO_PEERCRED + SO_PEERPIDFD + executable snapshot",
+    "token": "256-bit CSPRNG, atomic single-use, incarnation-and-content-bound",
+    "memfd_flags": ["MFD_CLOEXEC", "MFD_ALLOW_SEALING"],
+    "required_seals": ["F_SEAL_WRITE", "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_SEAL"]
+  },
+  "limits": {
+    "encoded_bytes_per_transmission": 8388608,
+    "decoded_bytes_per_content": 16777216,
+    "decoded_pixels_per_content": 4194304,
+    "maximum_width": 4096,
+    "maximum_height": 4096,
+    "decoded_bytes_per_splint": 33554432,
+    "decoded_bytes_per_daemon": 67108864,
+    "contents_per_splint": 64,
+    "placements_per_splint": 256,
+    "inbound_kitty_uploads_per_pty": 1,
+    "outbound_content_transfers_per_splint": 2,
+    "outbound_content_transfers_per_daemon": 4,
+    "encoded_bytes_in_flight_per_daemon": 16777216,
+    "client_source_cache_bytes": 33554432,
+    "client_scaled_cache_bytes": 33554432,
+    "client_total_image_cache_bytes": 67108864,
+    "kitty_control_bytes": 1024,
+    "kitty_encoded_payload_bytes_per_chunk": 4096,
+    "kitty_decoded_bytes_per_full_chunk": 3072,
+    "kitty_unchunked_compatibility_bytes": 8388608,
+    "reply_text_bytes": 512,
+    "sixel_colors": 1024,
+    "decoder_expansion_ratio": 64,
+    "decoded_pixel_writes_per_command": 16777216,
+    "token_bytes": 32,
+    "token_ttl_milliseconds": 5000,
+    "pending_tokens_per_peer": 4,
+    "pending_tokens_per_daemon": 32,
+    "unauthenticated_content_connections": 8,
+    "content_socket_handshake_bytes": 512,
+    "content_connection_deadline_milliseconds": 5000,
+    "content_handshake_deadline_milliseconds": 5000
+  },
+  "no_image_baseline": {
+    "source": "private benchmark archive",
+    "samples": 10,
+    "rss_median_bytes": 49262592,
+    "rss_maximum_bytes": 49418240,
+    "idle_cpu_median_ticks": 0,
+    "idle_cpu_p95_ticks": 1,
+    "allowed_rss_growth_bytes": 2463129,
+    "allowed_idle_cpu_p95_ticks": 1
+  },
+  "practical_iterm2": {
+    "commands": ["inline-file"],
+    "formats": ["png"],
+    "terminators": ["bel", "st", "c1-st"],
+    "extent_units": ["cells", "pixels", "percent", "auto"],
+    "metadata_bytes": 1024,
+    "encoded_bytes": 8388608,
+    "download_enabled": false,
+    "multipart_enabled": false,
+    "failure_reply": null
+  },
+  "kitty_external_inputs": {
+    "decision": "rejected-pending-capability-design",
+    "design_record": "private maintainer coordination",
+    "media": {
+      "file": "ENOTSUP",
+      "temporary_file": "ENOTSUP",
+      "posix_shm": "ENOTSUP"
+    }
+  },
+  "practical_kitty": {
+    "media": ["direct"],
+    "formats": [24, 32, 100],
+    "compression": ["none", "zlib"],
+    "actions": ["transmit", "transmit-and-display", "put", "query", "delete"],
+    "delete_selectors": ["visible-all", "exact-image-or-placement"],
+    "query_ordering": "reply-before-later-PTY-input",
+    "z_tiers": [
+      "below-nondefault-background: z < -1073741824",
+      "above-background-below-text: -1073741824 <= z < 0",
+      "above-text-below-trusted-chrome: z >= 0"
+    ],
+    "equal_z_tie": "lower application image ID first",
+    "deferred": [
+      "file-input",
+      "temporary-file-input",
+      "posix-shm-input",
+      "unicode-placeholders",
+      "relative-placements",
+      "animation",
+      "frame-composition",
+      "advanced-delete-selectors"
+    ]
+  }
+}
