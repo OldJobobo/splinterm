@@ -29,6 +29,21 @@ systemctl --user start splinterd.service
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. A development instance may use another path through `SPLINTERM_SOCKET`.
 
+## The daemon restarted after a heavy workload
+
+Check whether systemd recorded an out-of-memory result and inspect the effective aggregate limits:
+
+```bash
+systemctl --user show splinterd.service \
+  -p Result -p NRestarts -p TasksCurrent -p TasksMax \
+  -p MemoryCurrent -p MemoryHigh -p MemoryMax
+journalctl --user-unit splinterd.service -n 50 --no-pager
+```
+
+The packaged task ceiling protects the service from unbounded recursive process creation, while `MemoryHigh` causes reclaim and throttling rather than imposing a hard memory ceiling. Both settings apply to the daemon and all PTY descendants together; they are not per-Dojo isolation. `MemoryCurrent` also includes charged page cache, some of which may be reclaimable under pressure.
+
+After a daemon restart, inspect exited topology with `splinterm list --all`. Restoration is explicit because Splinterm never reruns saved commands automatically.
+
 ## A window exits as unauthorized
 
 Check all of the following:

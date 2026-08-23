@@ -37,6 +37,31 @@ service account, or enable the unit. For a dedicated service account, the
 administrator must provision the account, its home/runtime ownership, login or
 lingering policy, and the exact automation executable policy independently.
 
+## Aggregate resource guard
+
+The packaged unit limits the complete daemon cgroup to 2,048 tasks and sets its
+memory-high boundary to 75%. The task ceiling makes a recursive process spawn
+fail before it approaches the user manager's much larger inherited ceiling.
+`MemoryHigh` asks the kernel to reclaim and throttle under sustained pressure;
+it is not a hard memory limit.
+
+These settings cover `splinterd` and every process launched through its PTYs.
+They reduce the blast radius of a runaway command, but they do not isolate one
+Dojo from another. Per-Dojo or per-Splint cgroups require a separate process
+ownership design.
+
+Inspect the effective settings and current use without changing the service:
+
+```bash
+systemctl --user show splinterd.service \
+  -p TasksCurrent -p TasksMax -p MemoryCurrent -p MemoryHigh -p MemoryMax
+```
+
+`MemoryCurrent` includes page cache charged to the service cgroup. Inactive file
+cache is normally reclaimable under pressure, but it is neither immediately
+free nor excluded from cgroup accounting. Do not use `drop_caches` as routine
+Splinterm recovery.
+
 ## Install an owner-only policy
 
 The unit optionally reads `%h/.config/splinterm/daemon.env`. `EnvironmentFile`
