@@ -14,8 +14,8 @@ modify, or regenerate that reference evidence.
 Terminal multiplexers occupy a separate stack axis. tmux and Zellij are never
 added to terminal-emulator rankings as though they were bare terminals. The
 initial multiplexer matrix compares Splinterm native multiplexing, Foot bare,
-Foot plus tmux, and Foot plus Zellij as specified by
-[Plan 0016](../plans/0016-multiplexer-benchmark-suite.md).
+Foot plus tmux, and Foot plus Zellij under the measurement lanes and validity
+gates recorded below.
 
 ## Measurement lanes
 

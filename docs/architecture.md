@@ -265,8 +265,7 @@ Omarchy-owned directories; see [headless.md](headless.md),
 
 ## Accepted 0.2 upgrade target (not implemented)
 
-[Plan 0037](plans/0037-0.2-persistence-and-upgrade-handoff.md) and
-[ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md) replace the current
+[ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md) replaces the current
 stale-protocol restart behavior only after their implementation gates pass. A
 fully negotiated compatible upgrade uses guarded descriptor-based in-place
 re-exec so the daemon PID, child parenthood, PTYs, terminal incarnations, and
