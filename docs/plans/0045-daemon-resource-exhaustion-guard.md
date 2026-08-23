@@ -1,6 +1,7 @@
 # Plan 0045: Daemon resource-exhaustion guard
 
-- **Status:** Implemented and independently reviewed; awaiting integration
+- **Status:** Implemented and independently reviewed in
+  [PR #34](https://github.com/OldJobobo/splinterm/pull/34); awaiting integration
 - **Date:** 2026-08-22
 - **Scope:** Immediate aggregate service guard and packaged defaults
 - **Follow-up:** Per-Dojo or per-Splint cgroup isolation
