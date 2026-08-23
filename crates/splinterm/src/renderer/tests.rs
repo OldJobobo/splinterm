@@ -1572,6 +1572,11 @@ fn sixel_identity_pixels_match_every_retained_foot_final_buffer() {
                 .unwrap();
         let foot = fs::read(artifact_root.join(id).join("foot.argb")).unwrap();
         assert_eq!(
+            foot_metadata["provenance"]["commit"].as_str().unwrap(),
+            "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+            "{id} Foot oracle commit"
+        );
+        assert_eq!(
             format!("{:x}", Sha256::digest(&foot)),
             foot_metadata["framebuffer_sha256"].as_str().unwrap(),
             "{id} framebuffer checksum"
