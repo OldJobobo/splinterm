@@ -1553,6 +1553,8 @@ fn expand_sixel_fixture_pixels(expected: &serde_json::Value) -> Vec<u8> {
 
 #[test]
 fn sixel_identity_pixels_match_every_retained_foot_final_buffer() {
+    use sha2::{Digest as _, Sha256};
+
     let fixtures: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../fixtures/terminal-images/v1/protocol-fixtures/sixel-v1.json"
     ))
@@ -1569,6 +1571,11 @@ fn sixel_identity_pixels_match_every_retained_foot_final_buffer() {
             serde_json::from_slice(&fs::read(artifact_root.join(id).join("foot.json")).unwrap())
                 .unwrap();
         let foot = fs::read(artifact_root.join(id).join("foot.argb")).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&foot)),
+            foot_metadata["framebuffer_sha256"].as_str().unwrap(),
+            "{id} framebuffer checksum"
+        );
         let foot_stride = usize::try_from(foot_metadata["stride"].as_u64().unwrap()).unwrap();
         let foot_origin_x =
             usize::try_from(foot_metadata["origin"]["x"].as_u64().unwrap()).unwrap();

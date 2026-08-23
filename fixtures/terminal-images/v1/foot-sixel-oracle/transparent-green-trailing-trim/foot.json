@@ -1,15 +1,15 @@
 {
-  "schema": "splinterm.final-buffer.v1",
-  "width": 560, "height": 408, "stride": 2304,
-  "format": "argb8888", "byte_order": "bgra", "endianness": "little",
-  "scale_120": 120,
-  "grid": {"columns": 76, "rows": 22},
-  "cell": {"width": 7, "height": 17, "baseline": 13},
-  "padding": {"left": 12, "right": 16, "top": 12, "bottom": 22},
+  "schema": "splinterm.foot-framebuffer-fixture.v1",
+  "width": 560,
+  "height": 408,
+  "stride": 2304,
+  "format": "argb8888",
+  "byte_order": "bgra",
+  "cell": {"width": 7, "height": 17},
   "origin": {"x": 12, "y": 12},
-  "cursor": null,
-  "fixture": "transparent-green-trailing-trim", "frame_id": "transparent-green-trailing-trim",
-  "background_bgra": [22, 18, 14, 255],
-  "composition": ["terminal-backgrounds", "glyphs", "decorations", "cursor"],
-  "provenance": {"implementation": "foot", "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e", "fcft_version": "3.3.3", "font_file": "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf", "font_index": 0, "font_sha256": "0ec29a68b539ece7078fc714cebff0c0accb2f4948f8f7963d9f5e86633b12d9"}
+  "framebuffer_sha256": "9bd2bb0f46903fb337639f7f1c35a077bc8b0641363d753d06f1cec998a309b2",
+  "provenance": {
+    "implementation": "foot",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+  }
 }

@@ -73,7 +73,12 @@ def foot_cell_rgb(case_id: str) -> tuple[int, int, bytes, dict[str, Any]]:
     metadata = json.loads((directory / "foot.json").read_text(encoding="utf-8"))
     if metadata.get("provenance", {}).get("commit") != PINNED_FOOT:
         raise RuntimeError("Foot Sixel oracle fixture is not pinned")
-    source = (directory / "foot.argb").read_bytes()
+    source_path = directory / "foot.argb"
+    if sha256(source_path) != metadata.get("framebuffer_sha256"):
+        raise RuntimeError("Foot Sixel oracle framebuffer checksum differs")
+    source = source_path.read_bytes()
+    if len(source) != int(metadata["height"]) * int(metadata["stride"]):
+        raise RuntimeError("Foot Sixel oracle framebuffer size differs")
     cell_width = int(metadata["cell"]["width"])
     cell_height = int(metadata["cell"]["height"])
     origin_x = int(metadata["origin"]["x"])
