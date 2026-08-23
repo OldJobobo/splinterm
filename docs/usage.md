@@ -72,6 +72,12 @@ A Window holds an ordered, client-local set of distinct Dojo tabs:
 - choosing another running Dojo adds it without changing daemon topology; and
 - choosing New Terminal creates a fresh Lair and opens its initial Dojo.
 
+The command palette keeps topology levels separate: **Choose Lair** lists one
+row per available Lair and switches through that Lair's most recently used Dojo,
+while **Choose Dojo** lists only Dojos from the active Lair. **Recent Dojos**
+remains the global cross-Lair workflow. Their New actions create a Lair, a Dojo
+in the active Lair, and a fresh terminal Lair respectively.
+
 The trusted tab strip provides activation, a close target, and a `+` picker
 action. It is visible by default; hiding it is local to the current Window,
 reclaims its height for the pane grid, and does not persist or reappear when a
