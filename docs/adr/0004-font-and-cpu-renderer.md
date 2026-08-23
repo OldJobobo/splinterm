@@ -179,8 +179,8 @@ focus-safe history, and application-keypad text input.
 
 ## Validation
 
-Retained validation artifacts record font discovery, initial visual,
+Maintainer-private validation records cover font discovery, initial visual,
 direct fcft-mask, style, ink-bound, release timing, and strict 95-character
-grayscale-mask parity evidence. Unit tests cover
-deterministic blending, clipping, shaped placement, mask/color ink bounds,
-Foot-derived box geometry, cache reuse, and capture encoding.
+grayscale-mask parity. Public unit and oracle tests enforce deterministic
+blending, clipping, shaped placement, mask/color ink bounds, Foot-derived box
+geometry, cache reuse, and capture encoding.

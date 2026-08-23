@@ -70,10 +70,9 @@ def sha256(path: Path) -> str:
 
 def foot_cell_rgb(case_id: str) -> tuple[int, int, bytes, dict[str, Any]]:
     directory = FOOT_CAPTURES / case_id
-    report = json.loads((directory / "report.json").read_text(encoding="utf-8"))
-    if not report.get("exact") or report.get("foot_commit") != PINNED_FOOT:
-        raise RuntimeError("retained Foot Sixel evidence is not exact and pinned")
     metadata = json.loads((directory / "foot.json").read_text(encoding="utf-8"))
+    if metadata.get("provenance", {}).get("commit") != PINNED_FOOT:
+        raise RuntimeError("Foot Sixel oracle fixture is not pinned")
     source = (directory / "foot.argb").read_bytes()
     cell_width = int(metadata["cell"]["width"])
     cell_height = int(metadata["cell"]["height"])

@@ -1,11 +1,6 @@
 {
   "schema": "splinterm.phase5.kitty-static-fixtures.v1",
-  "evidence_status": "spec-and-representative-client-seeds",
-  "authority": {
-    "version": "0.48.0",
-    "document": "/usr/share/doc/kitty/html/graphics-protocol.html",
-    "sha256": "f3653415b86e8bba5696a242b941304e22517c4d789363d7412e6dfbef95315f"
-  },
+  "protocol_version": "0.48.0",
   "cases": [
     {
       "id": "query-direct-rgb-supported",

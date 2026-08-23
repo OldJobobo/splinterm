@@ -1,11 +1,5 @@
 {
   "schema": "splinterm.phase5.iterm2-inline-fixtures.v1",
-  "source": {
-    "url": "https://iterm2.com/documentation-images.html",
-    "retrieved_sha256": "d339ce31f07475130bf0b73178d71291b5606ea1102ab8fd217b7f5ce6599961",
-    "retrieved_bytes": 11284,
-    "retrieved_date": "2026-07-24"
-  },
   "wire_context": {
     "prefix": "\u001b]1337;File=",
     "screen_columns": 8,

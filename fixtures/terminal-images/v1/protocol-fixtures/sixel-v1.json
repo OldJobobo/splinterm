@@ -1,10 +1,8 @@
 {
   "schema": "splinterm.phase5.sixel-fixtures.v1",
-  "evidence_status": "exact-pinned-foot-semantic-and-final-buffer-match",
   "authority": {
     "project": "foot",
-    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
-    "sources": ["dcs.c", "sixel.c", "sixel.h", "grid.c", "render.c", "terminal.c"]
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
   },
   "pixel_format": "premultiplied-bgra8",
   "cases": [

@@ -55,7 +55,7 @@ fn rejected(terminal: &mut Terminal) -> bool {
 }
 
 #[test]
-fn recorded_spec_fixture_executes_every_advertised_case() {
+fn protocol_fixture_executes_every_advertised_case() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../fixtures/terminal-images/v1/protocol-fixtures/iterm2-inline-v1.json"
     ))
@@ -63,10 +63,6 @@ fn recorded_spec_fixture_executes_every_advertised_case() {
     assert_eq!(
         fixture["schema"],
         "splinterm.phase5.iterm2-inline-fixtures.v1"
-    );
-    assert_eq!(
-        fixture["source"]["retrieved_sha256"],
-        "d339ce31f07475130bf0b73178d71291b5606ea1102ab8fd217b7f5ce6599961"
     );
     let context = &fixture["wire_context"];
     assert_eq!(context["screen_columns"], 8);
