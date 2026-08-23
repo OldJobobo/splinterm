@@ -113,7 +113,7 @@ same review as the stdio relay.
 
 ## Native graphical client
 
-Plan 0028 uses a distinct transport for the native remote Window:
+The native remote Window uses a distinct transport:
 
 ```text
 /usr/bin/splinterm relay --graphical-stdio

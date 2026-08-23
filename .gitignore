@@ -17,3 +17,19 @@ __pycache__/
 /packaging/src/
 /packaging/*.pkg.tar.*
 /packaging/*.tar.gz
+
+# Maintainer-local coordination files.
+/.pi/worklist.json
+/TODO.md
+/docs/plans/
+/docs/spikes/
+/docs/benchmarks/
+/docs/evidence/
+/benchmark-results/
+/docs/handoffs/
+/docs/reviews/
+/docs/pre-planning-research.md
+/docs/herdr-integration-research.md
+/docs/remote-graphical-client-handoff.md
+/docs/roadmap.md
+/subagent-output/

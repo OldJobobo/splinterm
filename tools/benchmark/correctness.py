@@ -1,4 +1,4 @@
-"""Non-graphical correctness evidence collection for Splinterbench."""
+"""Build a non-graphical source and test correctness report for Splinterbench."""
 
 from __future__ import annotations
 
@@ -16,18 +16,6 @@ TERMINALS = ("splinterm", "foot", "kitty", "ghostty", "alacritty")
 
 SEMANTIC_FIXTURES = ROOT / "fixtures/terminal/v1"
 ORACLE = ROOT / "tools/foot-oracle"
-FINAL_BUFFER_EVIDENCE = (
-    ("base-final-buffer", ROOT / "docs/spikes/artifacts/0017/slice1-final-buffer/summary.json"),
-    ("decoration-cursor", ROOT / "docs/spikes/artifacts/0017/slice3-decoration-cursor/summary.json"),
-    ("font-matrix", ROOT / "docs/spikes/artifacts/0017/slice4-font-matrix-final/summary.json"),
-    ("scale-fallback-integration", ROOT / "docs/spikes/artifacts/0017/slice4-graphical-final/summary.json"),
-)
-EXTERNAL_EVIDENCE = {
-    "output-marker": ROOT / "docs/benchmarks/artifacts/2026-07-23-five-terminal-output/matrix.json",
-    "settled-resize": ROOT / "docs/benchmarks/artifacts/2026-07-23-five-terminal-resize/matrix.json",
-    "child-exit": ROOT / "docs/benchmarks/artifacts/2026-07-23-five-terminal-lifecycle/matrix.json",
-}
-
 Run = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 
@@ -80,67 +68,6 @@ def collect_semantic_fixtures() -> dict[str, Any]:
     }
 
 
-def collect_final_buffer_evidence() -> list[dict[str, Any]]:
-    evidence = []
-    for lane, path in FINAL_BUFFER_EVIDENCE:
-        value = load_json(path)
-        cases = value.get("cases")
-        exact = value.get("exact") is True
-        if not isinstance(cases, list) or not cases or not exact:
-            raise ValueError(f"{relative(path)} is not complete exact evidence")
-        if any(case.get("exact") is not True for case in cases):
-            raise ValueError(f"{relative(path)} contains a non-exact case")
-        evidence.append(
-            {
-                "lane": lane,
-                "path": relative(path),
-                "sha256": sha256(path),
-                "schema": value.get("schema"),
-                "case_count": len(cases),
-                "exact": True,
-            }
-        )
-    return evidence
-
-
-def collect_external_observations() -> list[dict[str, Any]]:
-    observations = []
-    for observation, path in EXTERNAL_EVIDENCE.items():
-        value = load_json(path)
-        if value.get("valid") is not True:
-            raise ValueError(f"{relative(path)} is not valid benchmark evidence")
-        expected = value.get("expected_measured_cases")
-        completed = value.get("completed_measured_cases")
-        if not isinstance(expected, int) or completed != expected:
-            raise ValueError(f"{relative(path)} is incomplete")
-        summary = value.get("summary")
-        if not isinstance(summary, dict):
-            raise ValueError(f"{relative(path)} has no summary")
-        observed_terminals = set(summary)
-        if observation == "output-marker":
-            observed_terminals = set.intersection(
-                *(set(case) for case in summary.values() if isinstance(case, dict))
-            )
-        if observed_terminals != set(TERMINALS):
-            raise ValueError(f"{relative(path)} does not cover all terminals")
-        observations.append(
-            {
-                "observation": observation,
-                "path": relative(path),
-                "sha256": sha256(path),
-                "terminals": list(TERMINALS),
-                "measured_cases": completed,
-                "status": "observed",
-                "claim_limit": {
-                    "output-marker": "A high-contrast completion marker became externally visible; screenshot polling does not prove intervening cell content.",
-                    "settled-resize": "The compositor reported every requested settled geometry; private grid/reflow state was not inspected.",
-                    "child-exit": "Child exit and window/process lifecycle were externally observed; retained private terminal state was not inspected.",
-                }[observation],
-            }
-        )
-    return observations
-
-
 def default_run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command), cwd=ROOT, text=True, capture_output=True, check=False, timeout=300
@@ -191,7 +118,7 @@ def feature_coverage() -> list[dict[str, Any]]:
     terminal_tests = "crates/splinterm-terminal/src/terminal.rs"
     snapshot_tests = "crates/splinterm-terminal/tests/snapshot.rs"
     return [
-        {"feature": "unicode-width-combining-emoji", "status": "covered", "evidence": [terminal_tests, "docs/spikes/artifacts/0017/slice4-font-matrix-final/summary.json"]},
+        {"feature": "unicode-width-combining-emoji", "status": "covered", "evidence": [terminal_tests]},
         {"feature": "sgr", "status": "covered", "evidence": [terminal_tests, "fixtures/terminal/v1/sgr-basic.json"]},
         {"feature": "alternate-screen", "status": "covered", "evidence": [terminal_tests, snapshot_tests]},
         {"feature": "cursor-and-erase", "status": "covered", "evidence": [terminal_tests, "fixtures/terminal/v1/cursor-position.json", "fixtures/terminal/v1/erase-line.json"]},
@@ -206,9 +133,9 @@ def feature_coverage() -> list[dict[str, Any]]:
 def capability_matrix() -> list[dict[str, Any]]:
     rows = []
     for capability, splinterm_status, evidence, note in (
-        ("sixel", "partial", ["docs/roadmap.md", "crates/splinterm-terminal/src/image/sixel.rs"], "Streaming decode, placement modes, and queries exist; overlap/reflow/configuration/fuzz/full differential closure remains in progress."),
-        ("kitty-graphics", "unsupported", ["docs/roadmap.md", "crates/splinterm-terminal/src/vt/mod.rs"], "No Kitty APC protocol handler is implemented."),
-        ("iterm2-images", "unsupported", ["docs/roadmap.md"], "Explicitly deferred."),
+        ("sixel", "partial", ["docs/images.md", "crates/splinterm-terminal/src/image/sixel.rs"], "Streaming decode, placement modes, and queries exist; overlap/reflow/configuration/fuzz/full differential closure remains in progress."),
+        ("kitty-graphics", "unsupported", ["docs/images.md", "crates/splinterm-terminal/src/vt/mod.rs"], "No Kitty APC protocol handler is implemented."),
+        ("iterm2-images", "unsupported", ["docs/images.md"], "Explicitly deferred."),
     ):
         statuses = {terminal: "unknown" for terminal in TERMINALS}
         statuses["splinterm"] = splinterm_status
@@ -218,24 +145,20 @@ def capability_matrix() -> list[dict[str, Any]]:
 
 def build_report(run: Run = default_run) -> dict[str, Any]:
     semantic = collect_semantic_fixtures()
-    final_buffer = collect_final_buffer_evidence()
-    external = collect_external_observations()
     checks = run_checks(run)
     report = {
-        "schema": "splinterm.benchmark.correctness.v1",
+        "schema": "splinterm.benchmark.correctness.v2",
         "valid": all(
             check["status"] == "passed" for check in checks if check["required"]
         ),
         "repository": repository_state(run),
         "oracle": {"name": "foot", "version": "1.27.0", "commit": PINNED_FOOT, "authority": "behavioral-reference"},
         "semantic_fixtures": semantic,
-        "final_buffer_evidence": final_buffer,
         "checks": checks,
         "feature_coverage": feature_coverage(),
         "fuzzing": {"target": "fuzz/fuzz_targets/terminal_advance.rs", "status": "available-not-run", "recorded_duration_seconds": None},
         "capability_matrix": capability_matrix(),
-        "external_observations": external,
-        "claim_policy": "Correctness is independent from speed. Exact Splinterm/Foot evidence is reported only where semantic or pixel comparison exists. Five-terminal private state is not inferred from portable external observations.",
+        "claim_policy": "Correctness is independent from speed. This report runs public tests and checks source-owned semantic fixtures; benchmark observations and graphical acceptance records remain maintainer-private.",
     }
     return report
 
@@ -255,8 +178,6 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         f"- Semantic fixtures: **{semantic['fixture_count']}/{semantic['fixture_count']} covered** by the Rust fixture consumer, including chunking invariance.",
     ]
-    for lane in report["final_buffer_evidence"]:
-        lines.append(f"- {lane['lane']}: **{lane['case_count']}/{lane['case_count']} exact** (`{lane['path']}`)")
     lines.extend(["", "## Non-graphical checks", "", "| Check | Status |", "|---|---|"])
     lines.extend(
         f"| {check['check']}{'' if check['required'] else ' (informational)'} | {check['status']} |"
@@ -268,10 +189,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     for row in report["capability_matrix"]:
         statuses = row["statuses"]
         lines.append(f"| {row['capability']} | {statuses['splinterm']} | {statuses['foot']} | {statuses['kitty']} | {statuses['ghostty']} | {statuses['alacritty']} |")
-    lines.extend(["", "## Portable external observations", "", "| Observation | Terminals | Cases | Claim boundary |", "|---|---:|---:|---|"])
-    for item in report["external_observations"]:
-        lines.append(f"| {item['observation']} | {len(item['terminals'])} | {item['measured_cases']} | {item['claim_limit']} |")
-    lines.extend(["", "## Explicit limits", "", "- The checked-in parser fuzz target was not executed by this report and is not claimed as a fuzz pass.", "- Hyperlink handling and unsupported graphics protocols are not scored as failed performance runs.", "- Graphical Foot reference captures were not regenerated.", ""])
+    lines.extend(["", "## Explicit limits", "", "- The checked-in parser fuzz target was not executed by this report and is not claimed as a fuzz pass.", "- Hyperlink handling and unsupported graphics protocols are not scored as failed performance runs.", "- Benchmark observations and graphical acceptance records are outside this public source report.", ""])
     return "\n".join(lines)
 
 

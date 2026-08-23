@@ -1,8 +1,0 @@
-    Finished `test` profile [unoptimized] target(s) in 0.05s
-     Running tests/end_to_end.rs (/tmp/splinterm-plan0043-prod-paced-debug-target/debug/deps/end_to_end-38c807b68a10497d)
-
-running 1 test
-test diagnostic_paced_retention_profile ... PLAN0043_DAEMON_PRIVATE_ANON before=4468736 after=18993152 growth=14524416
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 4.96s

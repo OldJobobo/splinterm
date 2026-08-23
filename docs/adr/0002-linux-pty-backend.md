@@ -76,8 +76,8 @@ The spike deliberately differs in these areas:
   not yet implement Foot's complete advertised keyboard contract; claiming the
   Foot terminfo entry causes applications such as Neovim to select input modes
   that Splinterm cannot encode. A project-owned `TERM=splinterm` remains blocked
-  on an accurate installed terminfo entry and the compatibility matrix in
-  `pre-planning-research.md`;
+  on an accurate installed terminfo entry and a reviewed compatibility
+  matrix;
 
 - shutdown escalation timing and detached reaping belong to the Phase 6 daemon
   actor rather than `Drop` in the PTY crate;
