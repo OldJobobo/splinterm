@@ -7,7 +7,8 @@
 //! The daemon never installs a Rust `pre_exec` callback. It starts the
 //! `splinterm-pty-child` helper with the PTY slave on standard input, output,
 //! and error. That freshly executed single-threaded helper creates the session,
-//! claims the controlling terminal, and immediately executes the target.
+//! claims the controlling terminal, waits for a parent acknowledgement, and
+//! then executes the target.
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
@@ -281,6 +282,25 @@ impl LinuxPtyBackend {
     /// # Errors
     /// Returns an error when PTY setup, slave configuration, or helper spawn fails.
     pub fn spawn(&self, command: &PtyCommand, size: PtySize) -> Result<LinuxPtySession> {
+        self.spawn_with_placement(command, size, |_| Ok(()))
+            .map(|(session, ())| session)
+    }
+
+    /// Starts a command only after `place` accepts the helper's validated identity.
+    ///
+    /// The helper has established its session and controlling terminal when
+    /// `place` runs, but remains blocked before target execution. The returned
+    /// placement value stays owned by the caller alongside the live session.
+    ///
+    /// # Errors
+    /// Returns an error and kills and reaps the helper when PTY setup, placement,
+    /// acknowledgement, or target execution fails.
+    pub fn spawn_with_placement<T>(
+        &self,
+        command: &PtyCommand,
+        size: PtySize,
+        place: impl FnOnce(LinuxPtyIdentity) -> io::Result<T>,
+    ) -> Result<(LinuxPtySession, T)> {
         let master = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)
             .map_err(|error| PtyError::io("open master", error))?;
         pty::grantpt(&master).map_err(|error| PtyError::io("grant slave", error))?;
@@ -347,6 +367,14 @@ impl LinuxPtyBackend {
                 return Err(error);
             }
         };
+        let placement = match place(identity) {
+            Ok(placement) => placement,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PtyError::io("place PTY child", error));
+            }
+        };
         if !acknowledge_child_ready(&mut exec_status) {
             let _ = child.kill();
             let _ = child.wait();
@@ -359,11 +387,14 @@ impl LinuxPtyBackend {
         }
         drop(child);
 
-        Ok(LinuxPtySession {
-            master,
-            identity,
-            exit_status: None,
-        })
+        Ok((
+            LinuxPtySession {
+                master,
+                identity,
+                exit_status: None,
+            },
+            placement,
+        ))
     }
 }
 
