@@ -8,12 +8,13 @@
 use std::{
     env,
     ffi::{OsStr, OsString},
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal, Read, Write},
     os::{
         linux::net::SocketAddrExt,
         unix::{ffi::OsStrExt, net::SocketAddr, net::UnixStream, process::CommandExt},
     },
     process::{self, Command},
+    time::Duration,
 };
 
 fn main() {
@@ -25,7 +26,7 @@ fn main() {
             process::exit(126);
         }
     };
-    if let Err(error) = run(arguments) {
+    if let Err(error) = run(arguments, &mut exec_status) {
         let _ = exec_status.write_all(&[1]);
         let _ = exec_status.flush();
         eprintln!("splinterm-pty-child: {error}");
@@ -55,7 +56,10 @@ fn connect_exec_status(
     clippy::unnecessary_debug_formatting,
     reason = "Debug formatting escapes an untrusted executable path in diagnostics"
 )]
-fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
+fn run(
+    mut arguments: impl Iterator<Item = OsString>,
+    exec_status: &mut UnixStream,
+) -> Result<(), String> {
     let login = match arguments.next().as_deref() {
         Some(value) if value == OsStr::new("--login") => true,
         Some(value) if value == OsStr::new("--no-login") => false,
@@ -81,6 +85,16 @@ fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
     io::stdout()
         .flush()
         .map_err(|error| format!("flushing readiness marker failed: {error}"))?;
+    exec_status
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("setting readiness timeout failed: {error}"))?;
+    let mut acknowledgement = [0_u8; 1];
+    exec_status
+        .read_exact(&mut acknowledgement)
+        .map_err(|error| format!("reading readiness acknowledgement failed: {error}"))?;
+    if acknowledgement != [splinterm_pty::CHILD_READY_ACK] {
+        return Err("invalid readiness acknowledgement".into());
+    }
 
     let mut command = Command::new(&program);
     command.args(target_arguments);

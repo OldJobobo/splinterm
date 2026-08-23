@@ -14,7 +14,8 @@ use std::{
 use splinterm_core::SplintId;
 use splinterm_protocol::perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled};
 use splinterm_pty::{
-    LinuxPtyBackend, LinuxPtySession, PtyCommand, PtyError, PtySession, PtySignal, PtySize,
+    LinuxPtyBackend, LinuxPtyIdentity, LinuxPtySession, PtyCommand, PtyError, PtySession,
+    PtySignal, PtySize,
 };
 use splinterm_terminal::{
     ActiveScreen, CellAttributesSnapshot, CellSnapshotContent, CursorSnapshot, Dimensions,
@@ -85,7 +86,13 @@ impl ProcessIncarnation {
         NEXT_INCARNATION.fetch_max(next, Ordering::Relaxed);
     }
 
-    fn allocate() -> Self {
+    /// Allocates the next process-wide incarnation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process has exhausted the `u64` incarnation space.
+    #[must_use]
+    pub fn allocate() -> Self {
         let value = NEXT_INCARNATION
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
@@ -3082,25 +3089,39 @@ impl LiveSplintHandle {
     }
 }
 
-struct SpawnOutcome(Option<Result<LinuxPtySession, PtyError>>);
+pub trait ProcessPlacement: Send + 'static {
+    fn release(self);
+}
 
-impl SpawnOutcome {
-    fn new(result: Result<LinuxPtySession, PtyError>) -> Self {
+impl ProcessPlacement for () {
+    fn release(self) {}
+}
+
+struct SpawnOutcome<P: ProcessPlacement>(Option<Result<(LinuxPtySession, P), PtyError>>);
+
+impl<P: ProcessPlacement> SpawnOutcome<P> {
+    fn new(result: Result<(LinuxPtySession, P), PtyError>) -> Self {
         Self(Some(result))
     }
 
-    fn take(&mut self) -> Result<LinuxPtySession, PtyError> {
+    fn take(&mut self) -> Result<(LinuxPtySession, P), PtyError> {
         self.0.take().expect("spawn outcome consumed exactly once")
     }
 }
 
-impl Drop for SpawnOutcome {
+impl<P: ProcessPlacement> Drop for SpawnOutcome<P> {
     fn drop(&mut self) {
-        if let Some(Ok(mut session)) = self.0.take() {
+        if let Some(Ok((mut session, placement))) = self.0.take() {
             let _ = session.signal_process_group(PtySignal::Kill);
             let _ = session.wait();
+            placement.release();
         }
     }
+}
+
+async fn release_placement<P: ProcessPlacement>(placement: P) -> Result<(), LiveError> {
+    tokio::task::spawn_blocking(move || placement.release()).await?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -3120,7 +3141,16 @@ impl LiveSplintRuntime {
         command: PtyCommand,
         config: LiveSplintConfig,
     ) -> Result<Self, LiveError> {
-        Self::spawn_inner(splint_id, backend, command, config, false).await
+        Self::spawn_inner(
+            splint_id,
+            ProcessIncarnation::allocate(),
+            backend,
+            command,
+            config,
+            false,
+            |_| Ok(()),
+        )
+        .await
     }
 
     /// Spawns a runtime with default-off compact-publication ownership metrics
@@ -3131,17 +3161,53 @@ impl LiveSplintRuntime {
         command: PtyCommand,
         config: LiveSplintConfig,
     ) -> Result<Self, LiveError> {
-        Self::spawn_inner(splint_id, backend, command, config, true).await
+        Self::spawn_inner(
+            splint_id,
+            ProcessIncarnation::allocate(),
+            backend,
+            command,
+            config,
+            true,
+            |_| Ok(()),
+        )
+        .await
     }
 
-    async fn spawn_inner(
+    pub async fn spawn_with_placement<P>(
         splint_id: SplintId,
+        incarnation: ProcessIncarnation,
+        backend: LinuxPtyBackend,
+        command: PtyCommand,
+        config: LiveSplintConfig,
+        place: impl FnOnce(LinuxPtyIdentity) -> io::Result<P> + Send + 'static,
+    ) -> Result<Self, LiveError>
+    where
+        P: ProcessPlacement,
+    {
+        Self::spawn_inner(
+            splint_id,
+            incarnation,
+            backend,
+            command,
+            config,
+            false,
+            place,
+        )
+        .await
+    }
+
+    async fn spawn_inner<P>(
+        splint_id: SplintId,
+        incarnation: ProcessIncarnation,
         backend: LinuxPtyBackend,
         command: PtyCommand,
         config: LiveSplintConfig,
         publication_memory_metrics: bool,
-    ) -> Result<Self, LiveError> {
-        let incarnation = ProcessIncarnation::allocate();
+        place: impl FnOnce(LinuxPtyIdentity) -> io::Result<P> + Send + 'static,
+    ) -> Result<Self, LiveError>
+    where
+        P: ProcessPlacement,
+    {
         let command = if let Some(name) = &config.incarnation_environment {
             command.env(name, incarnation.value().to_string())
         } else {
@@ -3157,14 +3223,16 @@ impl LiveSplintRuntime {
             pixel_width: config.pixel_width,
             pixel_height: config.pixel_height,
         };
-        let mut spawned =
-            tokio::task::spawn_blocking(move || SpawnOutcome::new(backend.spawn(&command, size)))
-                .await?;
-        let session = spawned.take()?;
+        let mut spawned = tokio::task::spawn_blocking(move || {
+            SpawnOutcome::new(backend.spawn_with_placement(&command, size, place))
+        })
+        .await?;
+        let (session, placement) = spawned.take()?;
         let reader = match session.try_clone_reader() {
             Ok(reader) => reader,
             Err(error) => {
                 cleanup_failed_spawn(session).await;
+                release_placement(placement).await?;
                 return Err(error.into());
             }
         };
@@ -3172,6 +3240,7 @@ impl LiveSplintRuntime {
             Ok(io) => io,
             Err(error) => {
                 cleanup_failed_spawn(session).await;
+                release_placement(placement).await?;
                 return Err(error.into());
             }
         };
@@ -3182,16 +3251,18 @@ impl LiveSplintRuntime {
             io,
             config,
             publication_memory_metrics,
+            placement,
         ))
     }
 
-    fn from_session(
+    fn from_session<P: ProcessPlacement>(
         splint_id: SplintId,
         incarnation: ProcessIncarnation,
         session: LinuxPtySession,
         io: AsyncFd<std::fs::File>,
         config: LiveSplintConfig,
         publication_memory_metrics: bool,
+        placement: P,
     ) -> Self {
         let mut terminal = Terminal::new(
             usize::from(config.columns),
@@ -3220,18 +3291,23 @@ impl LiveSplintRuntime {
             metrics: Arc::clone(&metrics),
             exit,
         };
-        let task = tokio::spawn(run_actor(
-            splint_id,
-            incarnation,
-            session,
-            io,
-            terminal,
-            receiver,
-            config,
-            publication_memory_metrics,
-            metrics,
-            exit_sender,
-        ));
+        let task = tokio::spawn(async move {
+            let result = Box::pin(run_actor(
+                splint_id,
+                incarnation,
+                session,
+                io,
+                terminal,
+                receiver,
+                config,
+                publication_memory_metrics,
+                metrics,
+                exit_sender,
+            ))
+            .await;
+            release_placement(placement).await?;
+            result
+        });
         Self { handle, task }
     }
 
@@ -7785,8 +7861,16 @@ mod tests {
         }
     }
 
+    struct TestPlacement(Arc<AtomicBool>);
+
+    impl ProcessPlacement for TestPlacement {
+        fn release(self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
     #[test]
-    fn dropped_spawn_outcome_kills_and_reaps_created_child() {
+    fn dropped_spawn_outcome_kills_reaps_and_releases_placement() {
         let session = backend()
             .spawn(
                 &shell("trap '' HUP TERM; sleep 30"),
@@ -7799,8 +7883,32 @@ mod tests {
             )
             .unwrap();
         let child_pid = session.child_id();
-        drop(SpawnOutcome::new(Ok(session)));
+        let released = Arc::new(AtomicBool::new(false));
+        drop(SpawnOutcome::new(Ok((
+            session,
+            TestPlacement(Arc::clone(&released)),
+        ))));
         assert!(!std::path::Path::new(&format!("/proc/{child_pid}")).exists());
+        assert!(released.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_exit_releases_process_placement() {
+        let released = Arc::new(AtomicBool::new(false));
+        let placement_released = Arc::clone(&released);
+        let runtime = LiveSplintRuntime::spawn_with_placement(
+            SplintId::new(),
+            ProcessIncarnation::allocate(),
+            backend(),
+            shell("exit 0"),
+            fast_config(),
+            move |_| Ok(TestPlacement(placement_released)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+        assert!(released.load(Ordering::SeqCst));
     }
 
     fn snapshot_text(snapshot: &LiveSnapshot) -> String {

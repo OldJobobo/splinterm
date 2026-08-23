@@ -23,6 +23,7 @@ tokio = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 splinterm-automation-client = { path = "../splinterm-automation-client" }

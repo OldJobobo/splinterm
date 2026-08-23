@@ -82,6 +82,17 @@ owned-file-descriptor operations in `splinterm-pty`.
 - Version: 1.1.4
 - License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 
+## zbus
+
+The daemon uses the safe Rust `zbus` client to create and verify transient
+systemd user-manager slices and scopes before terminal commands execute.
+
+- Source: <https://github.com/z-galaxy/zbus>
+- Resolved version: 5.19.0
+- License: MIT
+- Transport: the existing per-user D-Bus session bus only
+- No first-party unsafe block or direct cgroup-filesystem mutation is used
+
 ## fontdb
 
 Splinterm's Roadmap Phase 2 font discovery spike uses `fontdb` to inventory and

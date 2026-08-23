@@ -1,4 +1,5 @@
 mod audit;
+mod cgroup;
 mod consent;
 mod persistence;
 
@@ -21,6 +22,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use cgroup::{WorkloadResourcePolicy, WorkloadUnitManager};
 use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
@@ -784,6 +786,7 @@ struct DaemonState {
     shared_image_budget: SharedImageBudget,
     shared_kitty_upload_budget: SharedKittyUploadBudget,
     pty_backend: LinuxPtyBackend,
+    workload_units: Option<WorkloadUnitManager>,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
 }
@@ -799,6 +802,23 @@ async fn image_transfer_expiry_deadline(state: &DaemonState, expire: bool) -> ti
     )
 }
 
+fn parse_daemon_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<bool> {
+    let mut arguments = arguments.into_iter();
+    match arguments.next() {
+        None => Ok(false),
+        Some(argument)
+            if argument == "--require-workload-cgroups" && arguments.next().is_none() =>
+        {
+            Ok(true)
+        }
+        Some(_) => bail!("unsupported splinterd argument"),
+    }
+}
+
+fn require_workload_cgroups() -> Result<bool> {
+    parse_daemon_arguments(env::args_os().skip(1))
+}
+
 // Local PTY and Unix-socket work is asynchronous; bounding workers also bounds
 // glibc per-thread allocator arenas after sustained terminal output.
 #[allow(
@@ -807,6 +827,7 @@ async fn image_transfer_expiry_deadline(state: &DaemonState, expire: bool) -> ti
 )]
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
+    let require_workload_cgroups = require_workload_cgroups()?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -872,6 +893,19 @@ async fn main() -> Result<()> {
         device: Some(daemon_identity.device),
         inode: Some(daemon_identity.inode),
     };
+    let workload_units = match WorkloadUnitManager::connect(
+        WorkloadResourcePolicy::default(),
+        require_workload_cgroups.then_some("splinterd.service"),
+    ) {
+        Ok(manager) => Some(manager),
+        Err(error) if require_workload_cgroups => {
+            return Err(error).context("required workload cgroup manager is unavailable");
+        }
+        Err(error) => {
+            warn!(%error, "workload cgroup manager unavailable; development launch is uncontained");
+            None
+        }
+    };
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
     let (connection_revocations, _) = broadcast::channel(CONNECTION_LIMIT);
@@ -914,6 +948,7 @@ async fn main() -> Result<()> {
             DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
         ),
         pty_backend: LinuxPtyBackend::installed()?,
+        workload_units,
         owner_home: env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && !path.as_os_str().is_empty()),
@@ -2466,14 +2501,39 @@ async fn spawn_runtime_with_size(
     config.terminal.shared_image_budget = Some(state.shared_image_budget.clone());
     config.terminal.shared_kitty_upload_budget = Some(state.shared_kitty_upload_budget.clone());
     config.incarnation_environment = Some(OsString::from("SPLINTERM_SPLINT_INCARNATION"));
-    LiveSplintRuntime::spawn(
-        context.splint,
-        state.pty_backend.clone(),
-        pty_command,
-        config,
-    )
-    .await
-    .map_err(|error| {
+    let runtime = if let Some(manager) = state.workload_units.clone() {
+        let incarnation = ProcessIncarnation::allocate();
+        let prepared = tokio::task::spawn_blocking(move || {
+            manager.prepare(context.dojo, context.splint, incarnation.value())
+        })
+        .await
+        .map_err(|error| {
+            error!(%error, splint_id = ?context.splint, "workload scope preparation task failed");
+            internal()
+        })?
+        .map_err(|error| {
+            error!(%error, splint_id = ?context.splint, "failed to prepare workload scope");
+            internal()
+        })?;
+        LiveSplintRuntime::spawn_with_placement(
+            context.splint,
+            incarnation,
+            state.pty_backend.clone(),
+            pty_command,
+            config,
+            move |identity| prepared.place(identity),
+        )
+        .await
+    } else {
+        LiveSplintRuntime::spawn(
+            context.splint,
+            state.pty_backend.clone(),
+            pty_command,
+            config,
+        )
+        .await
+    };
+    runtime.map_err(|error| {
         error!(%error, splint_id = ?context.splint, "failed to spawn live Splint");
         internal()
     })
@@ -8316,6 +8376,21 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn packaged_workload_cgroup_argument_is_exact() {
+        assert!(!parse_daemon_arguments(Vec::new()).unwrap());
+        assert!(parse_daemon_arguments([OsString::from("--require-workload-cgroups")]).unwrap());
+        for invalid in [
+            vec![OsString::from("--unknown")],
+            vec![
+                OsString::from("--require-workload-cgroups"),
+                OsString::from("extra"),
+            ],
+        ] {
+            assert!(parse_daemon_arguments(invalid).is_err());
+        }
+    }
+
+    #[test]
     fn production_shutdown_grace_is_stable_and_test_override_is_strict() {
         let defaults = LiveSplintConfig::default();
         assert_eq!(defaults.hangup_grace, Duration::from_secs(30));
@@ -9059,6 +9134,7 @@ mod tests {
                 DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
             ),
             pty_backend,
+            workload_units: None,
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
         })
